@@ -15,6 +15,9 @@
     <dependencies>
       <group targetFramework="net8.0" />
       <group targetFramework="netstandard2.0" />
+      <group targetFramework="net8.0-android31.0" />
+      <group targetFramework="net8.0-ios15.4" />
+      <group targetFramework="net8.0-maccatalyst14.0" />
     </dependencies>
   </metadata>
   <files>
@@ -26,6 +29,16 @@
     <file src="..\src\csharp\bin\$configuration$\netstandard2.0\Microsoft.ML.OnnxRuntimeGenAI.pdb" target="lib\netstandard2.0" />
     <file src="..\src\csharp\bin\$configuration$\net8.0\Microsoft.ML.OnnxRuntimeGenAI.dll" target="lib\net8.0" />
     <file src="..\src\csharp\bin\$configuration$\net8.0\Microsoft.ML.OnnxRuntimeGenAI.pdb" target="lib\net8.0" />
+
+    <file src="..\src\csharp\bin\$configuration$\net8.0-android\Microsoft.ML.OnnxRuntimeGenAI.dll" target="lib\net8.0-android31.0" />
+    <file src="..\src\csharp\bin\$configuration$\net8.0-android\Microsoft.ML.OnnxRuntimeGenAI.pdb" target="lib\net8.0-android31.0" />
+    <file src="..\src\csharp\bin\$configuration$\net8.0-android\Microsoft.ML.OnnxRuntimeGenAI.xml" target="lib\net8.0-android31.0" />
+
+    <file src="..\src\csharp\bin\$configuration$\net8.0-ios\Microsoft.ML.OnnxRuntimeGenAI.dll" target="lib\net8.0-ios15.4" />
+    <file src="..\src\csharp\bin\$configuration$\net8.0-ios\Microsoft.ML.OnnxRuntimeGenAI.pdb" target="lib\net8.0-ios15.4" />
+
+    <file src="..\src\csharp\bin\$configuration$\net8.0-maccatalyst\Microsoft.ML.OnnxRuntimeGenAI.dll" target="lib\net8.0-maccatalyst14.0" />
+    <file src="..\src\csharp\bin\$configuration$\net8.0-maccatalyst\Microsoft.ML.OnnxRuntimeGenAI.pdb" target="lib\net8.0-maccatalyst14.0" />
 
     <!-- Targets -->
     <file src="targets\Microsoft.ML.OnnxRuntimeGenAI.Managed.targets" target="build\netstandard2.0" />

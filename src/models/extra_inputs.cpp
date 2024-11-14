@@ -5,9 +5,8 @@
 
 namespace Generators {
 
-ExtraInputs::ExtraInputs(const Model& model, State& state)
-    : model_{model},
-      state_{state} {
+ExtraInputs::ExtraInputs(State& state)
+    : state_{state} {
   extra_inputs_.reserve(state_.params_->extra_inputs.size());
 
   if (state_.GetCapturedGraphInfo()) {

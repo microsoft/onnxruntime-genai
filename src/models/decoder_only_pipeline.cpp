@@ -34,7 +34,7 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
   }
 }
 
-std::unique_ptr<State> DecoderOnlyPipelineModel::CreateState(RoamingArray<int32_t> sequence_lengths,
+std::unique_ptr<State> DecoderOnlyPipelineModel::CreateState(DeviceSpan<int32_t> sequence_lengths,
                                                              const GeneratorParams& params) const {
   return std::make_unique<DecoderOnlyPipelineState>(*this, sequence_lengths, params);
 }
@@ -79,15 +79,15 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
   return false;
 }
 
-RoamingArray<float> IntermediatePipelineState::Run(int current_length, RoamingArray<int32_t> next_tokens,
-                                                   RoamingArray<int32_t> next_indices) {
-  State::Run(*model_.sessions_[id_], *model_.run_options_, params_->BatchBeamSize());
+DeviceSpan<float> IntermediatePipelineState::Run(int current_length, DeviceSpan<int32_t> next_tokens,
+                                                 DeviceSpan<int32_t> next_indices) {
+  State::Run(*model_.sessions_[id_], params_->BatchBeamSize());
 
-  return RoamingArray<float>();
+  return {};
 }
 
 DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineModel& model,
-                                                   RoamingArray<int32_t> sequence_lengths,
+                                                   DeviceSpan<int32_t> sequence_lengths,
                                                    const GeneratorParams& params)
     : State{params, model},
       model_{model},
@@ -96,7 +96,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   position_inputs_.Add();
   logits_.Add();
   if (KV_Cache::IsCacheNeeded(model)) {
-    kv_cache_ = std::make_unique<KV_Cache>(model, *this);
+    kv_cache_ = std::make_unique<KV_Cache>(*this);
     kv_cache_->Add();
   }
   extra_inputs_.Add();
@@ -106,8 +106,8 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   }
 }
 
-RoamingArray<float> DecoderOnlyPipelineState::Run(int current_length, RoamingArray<int32_t> next_tokens,
-                                                  RoamingArray<int32_t> next_indices) {
+DeviceSpan<float> DecoderOnlyPipelineState::Run(int current_length, DeviceSpan<int32_t> next_tokens,
+                                                DeviceSpan<int32_t> next_indices) {
   if (!first_run_) {
     UpdateInputsOutputs(next_tokens, next_indices, current_length);
   }
@@ -119,7 +119,13 @@ RoamingArray<float> DecoderOnlyPipelineState::Run(int current_length, RoamingArr
       continue;
     }
 
-    // Clear the intermediate pipeline state from previous runs.
+    // Clear the intermediate pipeline state outputs from the previous runs.
+    // These outputs will be replaced by the outputs from the current run.
+    for (const auto& output_name : pipeline_state->output_names_) {
+      if (auto iter = ortvalue_store_.find(output_name); iter != ortvalue_store_.end()) {
+        ortvalue_store_.erase(iter);
+      }
+    }
     pipeline_state->ClearIO();
 
     // Managed inputs and outputs are those inputs and outputs that the
@@ -143,10 +149,10 @@ RoamingArray<float> DecoderOnlyPipelineState::Run(int current_length, RoamingArr
     }
 
     // Add outputs from the previous pipeline states to the current pipeline state
-    for (auto& [name, ortvalue] : ortvalue_pool_) {
+    for (auto& [name, ortvalue] : ortvalue_store_) {
       if (pipeline_state->HasInput(name)) {
         pipeline_state->input_names_.push_back(name.c_str());
-        pipeline_state->inputs_.push_back(ortvalue);
+        pipeline_state->inputs_.push_back(ortvalue.get());
       }
     }
 
@@ -167,6 +173,25 @@ RoamingArray<float> DecoderOnlyPipelineState::Run(int current_length, RoamingArr
       }
     }
 
+    // Output of pipeline models could also be managed inputs.
+    // For example, the output of a pipeline model could be the key-value cache.
+    // In such cases, use the managed output buffers and register them with the pipeline model as outputs.
+    for (const auto& input_name : input_names_) {
+      if (pipeline_state->HasOutput(input_name)) {
+        if (!pipeline_state->SupportsPrimaryDevice()) {
+          std::ostringstream oss;
+          oss << "Managed input " << input_name << " resides on the primary device type ("
+              << to_string(model_.device_type_) << "). "
+              << "But the pipeline model "
+              << model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id
+              << " is expecting it to reside elsewhere.";
+          throw std::runtime_error(oss.str());
+        }
+        pipeline_state->output_names_.push_back(input_name);
+        pipeline_state->outputs_.push_back(State::GetInput(input_name));
+      }
+    }
+
     // Add all the remaining outputs for the intermediate pipeline state
     for (const auto& output_name : model_.config_->model.decoder.pipeline[pipeline_state->id_].outputs) {
       if (std::none_of(pipeline_state->output_names_.begin(), pipeline_state->output_names_.end(),
@@ -179,16 +204,31 @@ RoamingArray<float> DecoderOnlyPipelineState::Run(int current_length, RoamingArr
     // Run the intermediate pipeline state
     pipeline_state->Run(current_length, next_tokens, next_indices);
 
-    // Store the non-managed outputs from the current pipeline state in the ortvalue pool.
+    // Transfer ownership of all the non-managed outputs from the current pipeline state to the ortvalue store.
     // All non managed outputs are assumed to be on CPU
     for (size_t i = 0; i < pipeline_state->output_names_.size(); ++i) {
       if (std::none_of(output_names_.begin(), output_names_.end(),
+                       [&](const std::string& elem) { return elem == pipeline_state->output_names_[i]; }) &&
+          std::none_of(input_names_.begin(), input_names_.end(),
                        [&](const std::string& elem) { return elem == pipeline_state->output_names_[i]; })) {
         auto forwarded_output = model_.config_->model.decoder.pipeline[pipeline_state->id_].output_names_forwarder.find(pipeline_state->output_names_[i]);
         if (forwarded_output != model_.config_->model.decoder.pipeline[pipeline_state->id_].output_names_forwarder.end()) {
-          ortvalue_pool_[forwarded_output->second] = pipeline_state->outputs_[i];
+          ortvalue_store_[forwarded_output->second] = std::unique_ptr<OrtValue>(pipeline_state->outputs_[i]);
         } else {
-          ortvalue_pool_[pipeline_state->output_names_[i]] = pipeline_state->outputs_[i];
+          ortvalue_store_[pipeline_state->output_names_[i]] = std::unique_ptr<OrtValue>(pipeline_state->outputs_[i]);
+        }
+      }
+    }
+  }
+
+  // Clear the outputs of the pipeline models that are only run on prompt since this cannot happen earlier.
+  if (!first_run_) {
+    for (auto& pipeline_state : pipeline_states_) {
+      if (!model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
+        for (const auto& output_name : pipeline_state->output_names_) {
+          if (auto iter = ortvalue_store_.find(output_name); iter != ortvalue_store_.end()) {
+            ortvalue_store_.erase(iter);
+          }
         }
       }
     }
@@ -199,19 +239,19 @@ RoamingArray<float> DecoderOnlyPipelineState::Run(int current_length, RoamingArr
   return logits_.Get();
 }
 
-void DecoderOnlyPipelineState::UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens_unk,
-                                                   RoamingArray<int32_t> beam_indices, int current_length) {
+void DecoderOnlyPipelineState::UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens_unk,
+                                                   DeviceSpan<int32_t> beam_indices, int current_length) {
   input_ids_.Update(next_tokens_unk);
   position_inputs_.Update(current_length);
-  if (kv_cache_) kv_cache_->Update(beam_indices.GetCPU(), current_length);
+  if (kv_cache_) kv_cache_->Update(beam_indices, current_length);
   logits_.Update();
 }
 
 OrtValue* DecoderOnlyPipelineState::GetOutput(const char* name) {
-  // Check the ortvalue pool to search if name is one of the non-managed output.
-  auto it = ortvalue_pool_.find(name);
-  if (it != ortvalue_pool_.end()) {
-    return it->second;
+  // Check the ortvalue store to search if name is one of the non-managed output.
+  auto it = ortvalue_store_.find(name);
+  if (it != ortvalue_store_.end()) {
+    return it->second.get();
   }
 
   // Search managed outputs saved in this State.

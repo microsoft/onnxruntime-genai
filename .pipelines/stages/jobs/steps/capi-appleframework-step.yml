@@ -1,0 +1,39 @@
+parameters:
+- name: build_config
+  type: string
+  default: 'release'
+
+steps:
+
+- checkout: self
+  clean: true
+  path: onnxruntime-genai
+  submodules: recursive
+
+- template: utils/set-genai-version.yml
+
+- template: utils/set-nightly-build-option-variable.yml
+
+- script: |
+    set -e
+    python3 -m pip install requests
+    python3 tools/ci_build/github/apple/build_apple_framework.py \
+          --build_dir "$(Build.BinariesDirectory)/apple_framework" \
+          tools/ci_build/github/apple/default_full_ios_framework_build_settings.json
+
+    mkdir $(Build.BinariesDirectory)/artifacts
+    mkdir -p $(Build.BinariesDirectory)/artifacts_staging/onnxruntime-genai.xcframework
+    cp -R $(Build.BinariesDirectory)/apple_framework/framework_out/onnxruntime-genai.xcframework \
+          $(Build.BinariesDirectory)/artifacts_staging/
+    pushd $(Build.BinariesDirectory)/artifacts_staging
+    zip -vr $(Build.BinariesDirectory)/artifacts/onnxruntime-genai-ios-$(genai_version).zip \
+          onnxruntime-genai.xcframework
+    popd
+  displayName: 'Build Apple XCFramework'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Artifact: ONNXRuntime GenAI XCFramework'
+  inputs:
+    ArtifactName: onnxruntime-genai-ios-xcframework
+    PathtoPublish: '$(Build.BinariesDirectory)/artifacts'

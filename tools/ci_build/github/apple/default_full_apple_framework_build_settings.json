@@ -1,0 +1,36 @@
+{
+    "build_osx_archs": {
+        "iphoneos": [
+            "arm64"
+        ],
+        "iphonesimulator": [
+            "arm64",
+            "x86_64"
+        ],
+        "macosx": [
+            "arm64",
+            "x86_64"
+        ]
+    },
+    "build_params": {
+        "base": [
+            "--parallel",
+            "--cmake_generator",
+            "Xcode",
+            "--build_apple_framework",
+            "--skip_tests"
+        ],
+        "macosx": [
+            "--macos=MacOSX",
+            "--apple_deploy_target=11.0"
+        ],
+        "iphoneos": [
+            "--ios",
+            "--apple_deploy_target=13.0"
+        ],
+        "iphonesimulator": [
+            "--ios",
+            "--apple_deploy_target=13.0"
+        ]
+    }
+}

@@ -39,18 +39,18 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
 
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcudafe --diag_suppress=2803 --expt-relaxed-constexpr")
 
-  file(GLOB generator_cuda_srcs CONFIGURE_DEPENDS
-    "${GENERATORS_ROOT}/*.cu"
-    "${GENERATORS_ROOT}/*.cuh"
-    "${MODELS_ROOT}/*.cu"
-    "${MODELS_ROOT}/*.cuh"
+  file(GLOB generator_cudalib_srcs CONFIGURE_DEPENDS
+    "${GENERATORS_ROOT}/cuda/*.cpp"
+    "${GENERATORS_ROOT}/cuda/*.h"
+    "${GENERATORS_ROOT}/cuda/*.cu"
+    "${GENERATORS_ROOT}/cuda/*.cuh"
   )
+
   file(GLOB test_cuda_srcs CONFIGURE_DEPENDS
     "${TESTS_ROOT}/*.cu"
     "${TESTS_ROOT}/*.cuh"
   )
   list(APPEND test_srcs ${test_cuda_srcs})
-  list(APPEND generator_srcs ${generator_cuda_srcs})
   add_compile_definitions(USE_CUDA=1)
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 elseif(USE_CUDA)

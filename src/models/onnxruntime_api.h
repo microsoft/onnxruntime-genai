@@ -516,6 +516,8 @@ struct OrtRunOptions {
    */
   OrtRunOptions& UnsetTerminate();
 
+  OrtRunOptions& AddActiveLoraAdapter(const OrtLoraAdapter& adapter);  ///< Wraps OrtApi::RunOptionsSetActiveLoraAdapter
+
   static void operator delete(void* p) { Ort::api->ReleaseRunOptions(reinterpret_cast<OrtRunOptions*>(p)); }
   Ort::Abstract make_abstract;
 };
@@ -1305,6 +1307,16 @@ struct OrtOp {
               size_t input_count,
               OrtValue* const* output_values,
               size_t output_count);
+};
+
+/** \brief LoraAdapter
+ *
+ */
+struct OrtLoraAdapter {
+  static std::unique_ptr<OrtLoraAdapter> Create(const ORTCHAR_T* adapter_file_path, OrtAllocator& allocator);  ///< Wraps OrtApi::CreateOrtLoraAdapter
+
+  static void operator delete(void* p) { Ort::api->ReleaseLoraAdapter(reinterpret_cast<OrtLoraAdapter*>(p)); }
+  Ort::Abstract make_abstract;
 };
 
 #include "onnxruntime_inline.h"

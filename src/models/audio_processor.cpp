@@ -17,7 +17,7 @@ std::unique_ptr<OrtValue> ProcessMel(ort_extensions::OrtxObjectPtr<OrtxTensor>& 
   const float* mel_data{};
   const int64_t* shape{};
   size_t num_dims;
-  CheckResult(OrtxGetTensorDataFloat(mel.get(), &mel_data, &shape, &num_dims));
+  CheckResult(OrtxGetTensorData(mel.get(), reinterpret_cast<const void**>(&mel_data), &shape, &num_dims));
   std::span<const int64_t> shape_span(shape, num_dims);
   auto input_features_value = expected_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
                                   ? OrtValue::CreateTensor<float>(allocator, shape_span)

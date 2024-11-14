@@ -13,6 +13,10 @@ parameters:
   type: boolean
 - name: enable_macos_cpu
   type: boolean
+- name: enable_android
+  type: boolean
+- name: enable_apple_framework
+  type: boolean
 - name: ort_version
   type: string
 - name: ort_cuda_version
@@ -110,4 +114,19 @@ stages:
         ep: 'cpu'
         ort_version: ${{ parameters.ort_version }}
         os: 'osx'
+        build_config: ${{ parameters.build_config }}
+
+  - ${{ if eq(parameters.enable_android, true) }}:
+    - template: jobs/android-java-api-aar.yml
+      parameters:
+        ort_version: ${{ parameters.ort_version }}
+        build_config: ${{ parameters.build_config }}
+
+  - ${{ if eq(parameters.enable_apple_framework, true) }}:
+    - template: jobs/capi-packaging-job.yml
+      parameters:
+        os: 'ios'
+        ep: 'cpu'
+        arch: 'arm64'
+        ort_version: ${{ parameters.ort_version }}
         build_config: ${{ parameters.build_config }}

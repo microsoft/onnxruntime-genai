@@ -37,6 +37,12 @@ def parse_args():
         help="Target execution provider to apply quantization (e.g. dml, cuda)",
     )
 
+    parser.add_argument(
+        "--use_qdq",
+        action="store_true",
+        help="Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator",
+    )
+
     args = parser.parse_args()
     return args
 
@@ -118,11 +124,17 @@ def main():
     execution_provider = args.execution_provider
     cache_dir = os.path.join(".", "cache_dir")
 
-    create_model(model_name, input_folder, output_folder, precision, execution_provider, cache_dir)
+    extra_options = {
+        "use_qdq": args.use_qdq,
+    }
 
+    create_model(model_name, input_folder, output_folder, precision, execution_provider, cache_dir, **extra_options)
+
+    if args.execution_provider == "dml":
+        if og.__id__ != "onnxruntime-genai-directml":
+            raise ValueError(f"onnxruntime-genai-directml is required to be installed. Please uninstall all ORT GenAI packages with `pip uninstall -y onnxruntime-genai onnxruntime-genai-cuda onnxruntime-genai-directml` and only install the DML version with `pip install onnxruntime-genai-directml`.")
     # Run ONNX model
-    if args.execution_provider != "dml":
-        run_model(args)
+    run_model(args)
 
 if __name__ == "__main__":
     main()

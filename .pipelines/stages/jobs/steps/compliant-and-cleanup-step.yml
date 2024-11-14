@@ -4,14 +4,13 @@ steps:
   inputs:
     debugMode: false
   continueOnError: true
-  condition: ne(variables['os'], 'osx')  # Not available on macOS. See https://eng.ms/docs/products/credential-risk-exposure-defense/solutions/credscan_client/overview
+  condition: and(ne(variables['os'], 'osx'), ne(variables['os'], 'ios'))  # Not available on macOS. See https://eng.ms/docs/products/credential-risk-exposure-defense/solutions/credscan_client/overview
 
 - task: TSAUpload@2
   displayName: 'TSA upload'
-  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['os'], 'osx'), ne(variables['os'], 'ios')) # Not available on macOS.
   inputs:
     GdnPublishTsaOnboard: false
-    GdnPublishTsaConfigFile: '$(Build.Repository.LocalPath)\.config\tsaoptions.json'
   continueOnError: true
 
 - template: compliant/component-governance-component-detection-step.yml

@@ -25,7 +25,6 @@
 #include <vector>
 #if USE_CUDA
 #include <cuda_runtime.h>
-#include "cuda_common.h"
 #else
 // If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
 using cudaStream_t = void*;
@@ -37,13 +36,21 @@ using cudaStream_t = void*;
 #include "models/debugging.h"
 #include "config.h"
 #include "logging.h"
+#include "runtime_settings.h"
 #include "tensor.h"
+
+void ThrowErrorIfSessionTerminated(bool is_session_terminated);
 
 namespace Generators {
 struct Model;
 struct State;
 struct Search;
 struct Tokenizer;
+
+template <typename T>
+DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
+  return device.WrapMemory(std::span<T>{value.GetTensorMutableData<T>(), value.GetTensorTypeAndShapeInfo()->GetElementCount()});
+}
 
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
@@ -52,48 +59,28 @@ enum struct DeviceType {
   CPU,
   CUDA,
   DML,
+  WEBGPU,
 };
 
 std::string to_string(DeviceType device_type);
+DeviceInterface* GetDeviceInterface(DeviceType type);
 
 struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams> {
-  GeneratorParams() = default;  // This constructor is only used if doing a custom model handler vs built-in
+  GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
   GeneratorParams(const Model& model);
 
-  Config::Search search;
-
-  // Read only values copied from model
-  int pad_token_id{};
-  int eos_token_id{};
-  int vocab_size{};
-  int context_length{};
+  const Config& config;                  // The model outlives the GeneratorParams
+  Config::Search search{config.search};  // Copy of the search parameters from the config
 
   int batch_size{1};
   int max_batch_size{0};
   bool use_cuda_graph{};
   int sequence_length{};
-  int hidden_size{};
   int BatchBeamSize() const { return search.num_beams * batch_size; }
 
+  DeviceInterface* p_device{};
   DeviceType device_type{DeviceType::CPU};
   cudaStream_t cuda_stream{};
-
-#if 0
-  struct Bert {
-    std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
-  };
-
-  struct Gpt {
-    using Gpt=Bert;
-  };
-
-  struct T5 {
-    std::span<const int32_t> encoder_input_ids;  // Array of [batchsize][sequence_length]
-    std::span<const int32_t> decoder_input_ids;  // Array of [batchsize][sequence_length]
-  };
-  using Bart=T5;
-
-#endif
 
   // TODO: Move this to a separate GPT struct
   std::span<const int32_t> input_ids;  // Array of [batchsize][sequence_length]
@@ -123,18 +110,18 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
  private:
   bool is_cuda_graph_enabled_{};
-  const Config* config_{nullptr};  // Non owning pointer to the config.
-                                   // The model outlives the GeneratorParams
 };
 
 struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
+  void SetRuntimeOption(const char* key, const char* value);
   void ComputeLogits();
+  bool IsSessionTerminated() const;
   void GenerateNextToken();
 
-  RoamingArray<int32_t> GetSequence(size_t index) const;
+  DeviceSpan<int32_t> GetSequence(size_t index) const;
 
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
@@ -159,9 +146,9 @@ std::unique_ptr<OrtGlobals>& GetOrtGlobals();
 void Shutdown();  // Do this once at exit, Ort code will fail after this call
 OrtEnv& GetOrtEnv();
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path);
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
-std::shared_ptr<GeneratorParams> CreateGeneratorParams();  // For benchmarking purposes only
+std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
 std::vector<std::vector<int32_t>> Generate(const Model& model, const GeneratorParams& params);  // Uses CreateGenerator and a simple loop to return the entire sequence
 
