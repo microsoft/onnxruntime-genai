@@ -144,8 +144,9 @@ TEST_P(SamplingBenchmarkTest, RunBenchmark) {
 auto benchmark_values = ::testing::Values(
     BenchmarkParams{Generators::DeviceType::CPU, 1, BenchmarkFunction::TopP},
     BenchmarkParams{Generators::DeviceType::CPU, 1, BenchmarkFunction::TopK},
-    BenchmarkParams{Generators::DeviceType::CPU, 1, BenchmarkFunction::TopKTopP},
+    BenchmarkParams{Generators::DeviceType::CPU, 1, BenchmarkFunction::TopKTopP}
 #if USE_CUDA
+    ,
     BenchmarkParams{Generators::DeviceType::CUDA, 1, BenchmarkFunction::TopP},
     BenchmarkParams{Generators::DeviceType::CUDA, 1, BenchmarkFunction::TopK},
     BenchmarkParams{Generators::DeviceType::CUDA, 1, BenchmarkFunction::TopKTopP},
