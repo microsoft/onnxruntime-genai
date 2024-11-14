@@ -5,34 +5,69 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    ///<summary>
+    /// <summary>
     /// The Generator class generates output using a model and generator parameters.
-    ///</summary>
+    /// </summary>
     public class Generator : IDisposable
     {
         private IntPtr _generatorHandle;
         private bool _disposed = false;
 
+        /// <summary>
+        /// Constructs a Generator object with the given model and generator parameters.
+        /// <param name="model">The model to use.</param>
+        /// <param name="generatorParams">The generator parameters.</param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public Generator(Model model, GeneratorParams generatorParams)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateGenerator(model.Handle, generatorParams.Handle, out _generatorHandle));
         }
 
+        /// <summary>
+        /// Checks if the generation process is done.
+        /// </summary>
+        /// <returns>
+        /// True if the generation process is done, false otherwise.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public bool IsDone()
         {
             return NativeMethods.OgaGenerator_IsDone(_generatorHandle);
         }
 
+        /// <summary>
+        /// Computes the logits for the next token in the sequence.
+        /// </summary>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public void ComputeLogits()
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_ComputeLogits(_generatorHandle));
         }
 
+        /// <summary>
+        /// Generates the next token in the sequence.
+        /// </summary>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public void GenerateNextToken()
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken(_generatorHandle));
         }
 
+        /// <summary>
+        /// Retrieves a sequence of token ids for the specified sequence index.
+        /// </summary>
+        /// <param name="index">The index of the sequence.</param>
+        /// <returns>
+        /// A ReadOnlySpan of integers with the sequence token ids.
+        /// </returns>
         public ReadOnlySpan<int> GetSequence(ulong index)
         {
             ulong sequenceLength = NativeMethods.OgaGenerator_GetSequenceCount(_generatorHandle, (UIntPtr)index).ToUInt64();
@@ -45,10 +80,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         /// <summary>
         /// Fetches and returns the output tensor with the given name.
-        /// Throw on error
         /// </summary>
         /// <param name="outputName"></param>
-        /// <returns>a disposable instance of Tensor</returns>
+        /// <returns>A disposable instance of Tensor</returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public Tensor GetOutput(string outputName)
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_GetOutput(_generatorHandle,
@@ -59,10 +96,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         /// <summary>
         /// Activates one of the loaded adapters.
-        /// Throws on error.
         /// </summary>
         /// <param name="adapters">Adapters container</param>
         /// <param name="adapterName">adapter name that was previously loaded</param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public void SetActiveAdapter(Adapters adapters, string adapterName)
         {
             Result.VerifySuccess(NativeMethods.OgaSetActiveAdapter(_generatorHandle,

@@ -17,6 +17,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// Throws on error.
         /// </summary>
         /// <param name="model">Reference to a loaded model</param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public Adapters(Model model) : base(IntPtr.Zero, true)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateAdapters(model.Handle, out handle));
@@ -28,6 +31,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// </summary>
         /// <param name="adapterPath">file path to load</param>
         /// <param name="adapterName">adapter name</param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public void LoadAdapter(string adapterPath, string adapterName)
         {
             Result.VerifySuccess(NativeMethods.OgaLoadAdapter(handle,
@@ -39,6 +45,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// Throws on error.
         /// </summary>
         /// <param name="adapterName"></param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public void UnloadAdapter(string adapterName)
         {
             Result.VerifySuccess(NativeMethods.OgaUnloadAdapter(handle, StringUtils.ToUtf8(adapterName)));

@@ -19,6 +19,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// Throws on error.
         /// </summary>
         /// <param name="modelPath">Path to a GenAI model</param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public Config(string modelPath)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateConfig(StringUtils.ToUtf8(modelPath), out _configHandle));
@@ -29,6 +32,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// <summary>
         /// Clear all providers.
         /// </summary>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public void ClearProviders()
         {
             Result.VerifySuccess(NativeMethods.OgaConfigClearProviders(_configHandle));
@@ -38,6 +44,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// Append a provider with the given name
         /// </summary>
         /// <param name="provider">Name of the provider</param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public void AppendProvider(string provider)
         {
             Result.VerifySuccess(NativeMethods.OgaConfigAppendProvider(_configHandle, StringUtils.ToUtf8(provider)));
@@ -49,6 +58,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// <param name="provider">Name of the provider</param>
         /// <param name="option">Name of the option</param>
         /// <param name="value">Value of the option</param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public void SetProviderOption(string provider, string option, string value)
         {
             Result.VerifySuccess(NativeMethods.OgaConfigSetProviderOption(_configHandle, StringUtils.ToUtf8(provider), StringUtils.ToUtf8(option), StringUtils.ToUtf8(value)));

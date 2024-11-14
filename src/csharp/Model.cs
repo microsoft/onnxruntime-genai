@@ -14,11 +14,23 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         private IntPtr _modelHandle;
         private bool _disposed = false;
 
+        /// <summary>
+        /// Construct a Model from the given path.
+        /// <param name="modelPath">The path of the model.</param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public Model(string modelPath)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateModel(StringUtils.ToUtf8(modelPath), out _modelHandle));
         }
 
+        /// <summary>
+        /// Construct a Model from Config.
+        /// <param name="config">The config to use.</param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public Model(Config config)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateModelFromConfig(config.Handle, out _modelHandle));
@@ -26,6 +38,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _modelHandle; } }
 
+        /// <summary>
+        /// Run the model to generate output sequences.
+        /// <param name="generatorParams">The generator parameters.</param>
+        /// <returns>
+        /// The generated sequences.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public Sequences Generate(GeneratorParams generatorParams)
         {
             IntPtr nativeSequences = IntPtr.Zero;

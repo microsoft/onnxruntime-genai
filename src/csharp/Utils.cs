@@ -42,7 +42,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
     /// <summary>
     /// Wraps some utility functions that are available globally
     /// <summary>
-    public class Utils
+    internal class Utils
     {
         public static void SetCurrentGpuDeviceId(int device_id)
         {

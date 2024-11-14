@@ -10,6 +10,11 @@ package ai.onnxruntime.genai;
 public class NamedTensors implements AutoCloseable{
     private long nativeHandle;
 
+    /**
+     * Construct a NamedTensor from native handle.
+     *
+     * @param handle The native handle.
+     */
     public NamedTensors(long handle) {
         nativeHandle = handle;
     }

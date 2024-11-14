@@ -25,6 +25,7 @@ public final class GeneratorParams implements AutoCloseable {
 
   /**
    * Set seach option with double value.
+   *
    * @param optionName The option name.
    * @param value The option value.
    * @throws GenAIException
@@ -39,6 +40,7 @@ public final class GeneratorParams implements AutoCloseable {
 
   /**
    * Set search option with boolean value.
+   *
    * @param optionName The option name.
    * @param value The option value.
    * @throws GenAIException
