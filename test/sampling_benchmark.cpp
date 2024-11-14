@@ -42,7 +42,7 @@ struct SamplingBenchmark {
     double total_time = 0.0;
     int num_iter = 1000;
 
-    auto logits = params->p_device->Allocate<float>(config.model.vocab_size * batch_size_);
+    auto logits = params->p_device->Allocate<float>(static_cast<size_t>(config.model.vocab_size) * batch_size_);
 
     for (int i = 0; i < num_iter; i++) {
       auto generator = Generators::CreateGenerator(*model, *params);
@@ -67,64 +67,89 @@ struct SamplingBenchmark {
   Generators::DeviceType device_type_{Generators::DeviceType::CPU};
 };
 
-TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCpu) {
-  SamplingBenchmark benchmark;
-  benchmark.benchmark_function_ = [](Generators::Generator& generator) {
-    generator.search_->SampleTopP(0.95f, 1.0f);
-  };
-  benchmark.Run();
+static const char* DeviceTypeToString(Generators::DeviceType device_type) {
+  switch (device_type) {
+    case Generators::DeviceType::CPU:
+      return "CPU";
+    case Generators::DeviceType::CUDA:
+      return "CUDA";
+    case Generators::DeviceType::DML:
+      return "DML";
+    case Generators::DeviceType::WEBGPU:
+      return "WEBGPU";
+    default:
+      return "Unknown";
+  }
 }
-TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCpu) {
-  SamplingBenchmark benchmark;
-  benchmark.benchmark_function_ = [](Generators::Generator& generator) {
-    generator.search_->SampleTopK(5, 1.0f);
-  };
-  benchmark.Run();
+
+enum struct BenchmarkFunction {
+  TopP,
+  TopK,
+  TopKTopP,
+  SelectTop
+};
+
+static const char* BenchmarkFunctionToString(BenchmarkFunction function) {
+  switch (function) {
+    case BenchmarkFunction::TopP:
+      return "TopP";
+    case BenchmarkFunction::TopK:
+      return "TopK";
+    case BenchmarkFunction::TopKTopP:
+      return "TopKTopP";
+    case BenchmarkFunction::SelectTop:
+      return "SelectTop";
+    default:
+      return "Unknown";
+  }
 }
-TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCpu) {
+
+std::function<void(Generators::Generator&)> GetBenchmarkFunction(BenchmarkFunction function) {
+  switch (function) {
+    case BenchmarkFunction::TopP:
+      return [](Generators::Generator& generator) { generator.search_->SampleTopP(0.95f, 1.0f); };
+    case BenchmarkFunction::TopK:
+      return [](Generators::Generator& generator) { generator.search_->SampleTopK(5, 1.0f); };
+    case BenchmarkFunction::TopKTopP:
+      return [](Generators::Generator& generator) { generator.search_->SampleTopKTopP(5, 0.95f, 1.0f); };
+    case BenchmarkFunction::SelectTop:
+      return [](Generators::Generator& generator) { generator.search_->SelectTop(); };
+    default:
+      assert(false);
+      return nullptr;
+  }
+}
+
+struct BenchmarkParams {
+  Generators::DeviceType device_type;
+  BenchmarkFunction benchmark_function;
+
+  std::string Name() const {
+    return std::string() + DeviceTypeToString(device_type) + "_" + BenchmarkFunctionToString(benchmark_function);
+  }
+};
+
+class SamplingBenchmarkTest : public ::testing::TestWithParam<BenchmarkParams> {};
+
+TEST_P(SamplingBenchmarkTest, RunBenchmark) {
   SamplingBenchmark benchmark;
-  benchmark.benchmark_function_ = [](Generators::Generator& generator) {
-    generator.search_->SampleTopKTopP(5, 0.95f, 1.0f);
-  };
+  auto params = GetParam();
+  benchmark.device_type_ = params.device_type;
+  benchmark.benchmark_function_ = GetBenchmarkFunction(params.benchmark_function);
   benchmark.Run();
 }
 
+auto benchmark_values=::testing::Values(
+    BenchmarkParams{Generators::DeviceType::CPU, BenchmarkFunction::TopP},
+    BenchmarkParams{Generators::DeviceType::CPU, BenchmarkFunction::TopK},
+    BenchmarkParams{Generators::DeviceType::CPU, BenchmarkFunction::TopKTopP},
 #if USE_CUDA
-TEST(Benchmarks, BenchmarkRandomizedSamplingTopPCuda) {
-  SamplingBenchmark benchmark;
-  benchmark.device_type_ = Generators::DeviceType::CUDA;
-  benchmark.benchmark_function_ = [](Generators::Generator& generator) {
-    generator.search_->SampleTopP(0.95f, 1.0f);
-  };
-  benchmark.Run();
-}
-
-TEST(Benchmarks, BenchmarkRandomizedSamplingTopKCuda) {
-  SamplingBenchmark benchmark;
-  benchmark.device_type_ = Generators::DeviceType::CUDA;
-  benchmark.benchmark_function_ = [](Generators::Generator& generator) {
-    generator.search_->SampleTopK(5, 1.0f);
-  };
-  benchmark.Run();
-}
-
-TEST(Benchmarks, BenchmarkRandomizedSamplingTopPAndKCuda) {
-  SamplingBenchmark benchmark;
-  benchmark.device_type_ = Generators::DeviceType::CUDA;
-  benchmark.benchmark_function_ = [](Generators::Generator& generator) {
-    generator.search_->SampleTopKTopP(5, 0.95f, 1.0f);
-  };
-  benchmark.Run();
-}
-
-TEST(Benchmarks, BenchmarkRandomizedSelectTopCuda) {
-  SamplingBenchmark benchmark;
-  benchmark.batch_size_ = 12;
-  benchmark.device_type_ = Generators::DeviceType::CUDA;
-  benchmark.benchmark_function_ = [](Generators::Generator& generator) {
-    generator.search_->SelectTop();
-  };
-  benchmark.Run();
-}
-
+    BenchmarkParams{Generators::DeviceType::CUDA, BenchmarkFunction::TopP},
+    BenchmarkParams{Generators::DeviceType::CUDA, BenchmarkFunction::TopK},
+    BenchmarkParams{Generators::DeviceType::CUDA, BenchmarkFunction::TopKTopP},
+    BenchmarkParams{Generators::DeviceType::CUDA, BenchmarkFunction::SelectTop}
 #endif
+);
+
+INSTANTIATE_TEST_SUITE_P(Benchmarks, SamplingBenchmarkTest, benchmark_values,
+  [](const ::testing::TestParamInfo<BenchmarkParams>& info) { return info.param.Name(); });
