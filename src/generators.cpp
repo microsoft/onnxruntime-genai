@@ -172,6 +172,8 @@ std::string to_string(DeviceType device_type) {
       return "DirectML";
     case DeviceType::WEBGPU:
       return "WebGpu";
+    case DeviceType::QNN_WITH_SHARED_MEMORY:
+      return "QnnWithSharedMemory";
   }
   throw std::runtime_error("Unknown device type");
 }

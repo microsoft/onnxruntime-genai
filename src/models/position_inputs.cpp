@@ -183,7 +183,8 @@ void PositionInputs::UpdatePositionIDs(int current_length) {
         break;
 #endif
       case DeviceType::CPU:
-      case DeviceType::WEBGPU: {
+      case DeviceType::WEBGPU:
+      case DeviceType::QNN_WITH_SHARED_MEMORY: {
         if (type_ == Ort::TypeToTensorType<int32_t>)
           UpdatePositionIDsImpl<int32_t>();
         else
@@ -297,7 +298,8 @@ void PositionInputs::UpdateAttentionMask(int current_length) {
     }
 #endif
     case DeviceType::WEBGPU:
-    case DeviceType::CPU: {
+    case DeviceType::CPU:
+    case DeviceType::QNN_WITH_SHARED_MEMORY: {
       if (type_ == Ort::TypeToTensorType<int32_t>)
         UpdateAttentionMaskImpl(attention_mask_next_->GetTensorMutableData<int32_t>(),
                                 attention_mask_->GetTensorData<int32_t>(),
