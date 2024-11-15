@@ -23,6 +23,7 @@ steps:
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: and(eq(variables['os'], 'win'), eq(variables['ep'], 'cuda'))
   - powershell: |
+      python -m pip install readline
       python -m pip install -r test/python/requirements.txt
       if ("$(ep)" -eq "cuda") {
         $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
@@ -42,7 +43,7 @@ steps:
       cd ${{ parameters.PythonScriptFolder }}
       python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
 
-      if ("$(ep)" -eq "cuda") {
+      if ("$(ep)" -eq "directml") {
         python ${{ parameters.PythonScriptName }} -m .\${{ parameters.LocalFolder }}\${{ parameters.ModelFolder }} --provider dml
       } else {
         python ${{ parameters.PythonScriptName }} -m .\${{ parameters.LocalFolder }}\${{ parameters.ModelFolder }} --provider $(ep)
@@ -67,6 +68,7 @@ steps:
         -w /ort_genai_src/ $(cuda_docker_image) \
         bash -c " \
             export ORTGENAI_LOG_ORT_LIB=1 && \
+            $python_exe -m pip install readline && \
             $python_exe -m pip install -r /ort_genai_src/test/python/requirements.txt && \
             $python_exe -m pip install -r /ort_genai_src/test/python/cuda/torch/requirements.txt && \
             $python_exe -m pip install -r /ort_genai_src/test/python/cuda/ort/requirements.txt && \
@@ -80,6 +82,7 @@ steps:
 
   - bash: |
       export ORTGENAI_LOG_ORT_LIB=1
+      python -m pip install readline
       python -m pip install -r test/python/requirements.txt
       if [[ "$(os)" == "linux" ]]; then
         python -m pip install -r test/python/cpu/torch/requirements.txt
