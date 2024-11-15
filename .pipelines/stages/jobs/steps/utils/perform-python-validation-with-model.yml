@@ -68,7 +68,7 @@ steps:
             $python_exe -m pip install -r /ort_genai_src/test/python/cuda/ort/requirements.txt && \
             cd /ort_genai_src/${{ parameters.PythonScriptFolder }} && \
             $python_exe -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) && \
-            $python_exe ${{ parameters.PythonScriptName }} -m ./{{ $parameters.LocalFolder }}/${{ parameters.ModelFolder }}  --min_length 25 --max_length 50 --verbose"
+            $python_exe ${{ parameters.PythonScriptName }} -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }}  --min_length 25 --max_length 50 --verbose"
 
     displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact on Linux CUDA'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -87,7 +87,7 @@ steps:
       fi
       cd ${{ parameters.PythonScriptFolder }}
       python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
-      python ${{ parameters.PythonScriptName }} -m ./{{ $parameters.LocalFolder }}/${{ parameters.ModelFolder }} --min_length 25 --max_length 50 --verbose
+      python ${{ parameters.PythonScriptName }} -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} --min_length 25 --max_length 50 --verbose
     displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact on Linux/macOS CPU'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: and(or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx')), eq(variables['ep'], 'cpu'))
