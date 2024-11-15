@@ -74,8 +74,6 @@ RoamingArray<float> Logits::Get() {
       }
 
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
-        // std::cout << "Token index = " << token_index << std::endl;
-        // std::cout << "Vocab index = " << vocab_index << std::endl;
         switch (model_.device_type_) {
           case DeviceType::DML: {
 #if USE_DML
