@@ -27,7 +27,6 @@ struct LogitsProcessor {
   LogitsProcessor() = default;
   virtual std::vector<uint32_t> ComputeMask() = 0;
   virtual void CommitTokens(uint32_t token) = 0;
-
 };
 
 #if USE_GUIDANCE
