@@ -26,7 +26,7 @@ if (args.Length < 1)
 
 bool interactive = false;
 string modelPath = string.Empty;
-string[] imagePaths = new string[0];
+List<string> imagePaths = new List<string>();
 
 uint i_arg = 0;
 while (i_arg < args.Length)
@@ -78,13 +78,13 @@ do
         imagePaths = Console.ReadLine().Split(',').ToList<string>().Select(i => i.ToString().Trim()).ToArray();
     }
 
-    if (imagePaths.Length == 0)
+    if (imagePaths.Count == 0)
     {
         Console.WriteLine("No image provided. Using default image.");
-        imagePaths.Append(Path.GetFullPath(Path.Combine(
+        imagePaths.Add(Path.GetFullPath(Path.Combine(
             GetThisFilePath(), "../../..", "test_models", "images", "australia.jpg")));
     }
-    for (int i = 0; i < imagePaths.Length; i++)
+    for (int i = 0; i < imagePaths.Count; i++)
     {
         string imagePath = Path.GetFullPath(imagePaths[i].Trim());
         if (!File.Exists(imagePath))

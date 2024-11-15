@@ -54,10 +54,10 @@ def run(args: argparse.Namespace):
         if len(image_paths) == 0:
             print("No image provided")
         else:
-            print(f"Loading images: {image_paths}")
             for i, image_path in enumerate(image_paths):
                 if not os.path.exists(image_path):
                     raise FileNotFoundError(f"Image file not found: {image_path}")
+                print(f"Using image: {image_path}")
                 prompt += f"<|image_{i+1}|>\n"
 
             images = og.Images.open(*image_paths)

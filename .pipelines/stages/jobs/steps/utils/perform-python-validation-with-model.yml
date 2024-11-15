@@ -43,9 +43,9 @@ steps:
       python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
 
       if ("$(ep)" -eq "cuda") {
-        python ${{ parameters.PythonScriptName }} -m .\models\${{ parameters.ModelFolder }} --provider dml
+        python ${{ parameters.PythonScriptName }} -m .\${{ parameters.LocalFolder }}\${{ parameters.ModelFolder }} --provider dml
       } else {
-        python ${{ parameters.PythonScriptName }} -m .\models\${{ parameters.ModelFolder }} --provider $(ep)
+        python ${{ parameters.PythonScriptName }} -m .\${{ parameters.LocalFolder }}\${{ parameters.ModelFolder }} --provider $(ep)
       }
     displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact on Windows'
     workingDirectory: '$(Build.Repository.LocalPath)'
