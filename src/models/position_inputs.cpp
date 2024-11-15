@@ -243,7 +243,8 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
 
   switch (model_.device_type_) {
     case DeviceType::WEBGPU:
-    case DeviceType::CPU: {
+    case DeviceType::CPU:
+    case DeviceType::QNN_WITH_SHARED_MEMORY: {
       type_ == Ort::TypeToTensorType<int32_t> ? UpdateAttentionMaskImpl<int32_t>(total_length)
                                               : UpdateAttentionMaskImpl<int64_t>(total_length);
       break;
