@@ -47,7 +47,6 @@ def run(args: argparse.Namespace):
                 image_paths = [str(REPO_ROOT / "test" / "test_models" / "images" / "australia.jpg")]
 
         image_paths = [image_path for image_path in image_paths]
-        print(image_paths)
 
         images = None
         prompt = "<|user|>\n"
