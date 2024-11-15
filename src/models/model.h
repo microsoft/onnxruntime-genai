@@ -31,7 +31,7 @@ struct State {
 
   virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
-  virtual void Finalize() {}
+  virtual void Finalize(int current_length) {}
 
   OrtValue* GetInput(const char* name);
 

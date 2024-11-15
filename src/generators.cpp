@@ -177,7 +177,7 @@ bool Generator::IsDone() const {
 
   bool is_done = search_->IsDone();
   if (is_done) {
-    state_->Finalize();
+    state_->Finalize(search_->GetSequenceLength());
   }
 
   return is_done;

@@ -263,8 +263,8 @@ __global__ void CopyCrossQKSingleDecodeStepKernel(T* target,  // shape [batch_be
   const int head = *(alignment_heads + 1);
 
   target += ((int64_t)bbm * num_alignment_heads + pair) * max_length * frames + ((int64_t)token_index * frames);
-  T* src = reinterpret_cast<T*>(qk_layer_pointers[layer]) + ((int64_t)bbm * num_heads + head) * frames;
-  // T* src = qk_layer_pointers[layer] + ((int64_t)bbm * num_heads + head) * frames;
+  // T* src = reinterpret_cast<T*>(qk_layer_pointers[layer]) + ((int64_t)bbm * num_heads + head) * frames;
+  T* src = qk_layer_pointers[layer] + ((int64_t)bbm * num_heads + head) * frames;
 
   for (int tid = threadIdx.x; tid < frames; tid += blockDim.x) {
     target[tid] = src[tid];  // use vectorized read write in future if needed
@@ -342,11 +342,13 @@ __global__ void CopyDecoderCrossQKAllStepsKernel(int context_decoding_len,
 
   T* target = cross_qk_output + (((int64_t)br * num_alignment_heads + (int64_t)pair) * total_decoding_length + token_decoding_index) * frames_of_k;
   const T* src = cross_qk_buffer_data + (((int64_t)bi_src * num_alignment_heads + (int64_t)pair) * max_length + token_decoding_index) * frames_of_k;
-  // for (int tid = threadIdx.x; tid < frames_of_k; tid += blockDim.x) {
-  //   target[tid] = src[tid];  // use vectorized read write in future if needed
-  // }
-  printf("target is null = %d\n", (target == nullptr));
-  printf("source is null = %d\n", (src == nullptr));
+  for (int tid = threadIdx.x; tid < frames_of_k; tid += blockDim.x) {
+    // printf("target before is %f\n", __half2float(target[tid]));
+    // printf("source before is %f\n", __half2float(src[tid]));    
+    target[tid] = src[tid];  // use vectorized read write in future if needed
+    // printf("target after is %f\n", __half2float(target[tid]));
+    // printf("source after is %f\n", __half2float(src[tid]));    
+  }
 }
 
 template <typename T>

@@ -372,22 +372,22 @@ template void WhisperState::UpdateCrossQKSearchBuffer<half>(int current_length);
 template void WhisperState::UpdateCrossQKSearchBuffer<float>(int current_length);
 
 template <typename T>
-void WhisperState::FinalizeCrossQK() {
+void WhisperState::FinalizeCrossQK(int current_length) {
   if (decoder_state_->output_cross_qk_.size() && alignment_heads_) {
 #if USE_CUDA
     // Instantiate final output for cross QKs
     auto num_alignment_heads = alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0];
-    auto decoded_length = *(decoder_state_->past_sequence_length_->GetTensorMutableData<int32_t>()) + 1;
-    auto cross_qk_shape = std::array<int64_t, 5>{params_->batch_size, params_->search.num_return_sequences, num_alignment_heads, decoded_length, encoder_state_->GetNumFrames() / 2};
+    // auto decoded_length = *(decoder_state_->past_sequence_length_->GetTensorMutableData<int32_t>()) + 1;
+    auto cross_qk_shape = std::array<int64_t, 5>{params_->batch_size, params_->search.num_return_sequences, num_alignment_heads, current_length, encoder_state_->GetNumFrames() / 2};
     cross_qk_final_ = OrtValue::CreateTensor(*model_.allocator_device_, cross_qk_shape, decoder_state_->output_cross_qk_type_);
 
     std::cout << "Finalizing cross QK" << std::endl;
     std::cout << "Initial sequence length = " << params_->sequence_length << std::endl;
-    std::cout << "Decoded length = " << decoded_length << std::endl;
-    std::cout << "Iteration counter = " << (decoded_length - params_->sequence_length) << std::endl;
+    std::cout << "Current length = " << current_length << std::endl;
+    std::cout << "Iteration counter = " << (current_length - params_->sequence_length) << std::endl;
     cuda::LaunchFinalizeCrossQK(model_.cuda_stream_,
-                                decoded_length - params_->sequence_length,
-                                decoded_length,
+                                current_length - params_->sequence_length,
+                                params_->sequence_length,
                                 static_cast<int32_t>(decoder_state_->output_cross_qk_shape_[0]),
                                 params_->search.num_beams,
                                 params_->search.max_length,
@@ -402,9 +402,9 @@ void WhisperState::FinalizeCrossQK() {
   }
 }
 #if USE_CUDA
-template void WhisperState::FinalizeCrossQK<half>();
+template void WhisperState::FinalizeCrossQK<half>(int current_length);
 #endif
-template void WhisperState::FinalizeCrossQK<float>();
+template void WhisperState::FinalizeCrossQK<float>(int current_length);
 
 // RoamingArray<float> WhisperState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
 //   if (encoder_state_->first_run_) {
@@ -758,14 +758,14 @@ RoamingArray<float> WhisperState::Run(int current_length, RoamingArray<int32_t> 
 //   }
 // }
 
-void WhisperState::Finalize() {
+void WhisperState::Finalize(int current_length) {
   if (decoder_state_->output_cross_qk_.size() && alignment_heads_) {
     if (decoder_state_->output_cross_qk_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
 #if USE_CUDA
-      FinalizeCrossQK<half>();
+      FinalizeCrossQK<half>(current_length);
 #endif
     } else {
-      FinalizeCrossQK<float>();
+      FinalizeCrossQK<float>(current_length);
     }
   }
 }

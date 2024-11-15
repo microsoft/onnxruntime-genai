@@ -81,9 +81,9 @@ struct WhisperState : State {
 private:
   void TransposeKCaches(std::vector<std::unique_ptr<OrtValue>>& kv_caches);
   template <typename T> void UpdateCrossQKSearchBuffer(int current_length);
-  template <typename T> void FinalizeCrossQK();
+  template <typename T> void FinalizeCrossQK(int current_length);
   void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
-  void Finalize() override;
+  void Finalize(int current_length) override;
 
   const WhisperModel& model_;
 
