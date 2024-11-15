@@ -151,6 +151,44 @@ OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_pat
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out) {
+  OGA_TRY
+  *out = reinterpret_cast<OgaConfig*>(std::make_unique<Generators::Config>(fs::path(config_path), std::string_view{}).release());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigClearProviders(OgaConfig* config) {
+  OGA_TRY
+  Generators::ClearProviders(*reinterpret_cast<Generators::Config*>(config));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigAppendProvider(OgaConfig* config, const char* provider) {
+  OGA_TRY
+  Generators::SetProviderOption(*reinterpret_cast<Generators::Config*>(config), provider, {}, {});
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config, const char* provider, const char* key, const char* value) {
+  OGA_TRY
+  Generators::SetProviderOption(*reinterpret_cast<Generators::Config*>(config), provider, key, value);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
+  OGA_TRY
+  auto config_copy = std::make_unique<Generators::Config>(*reinterpret_cast<const Generators::Config*>(config));
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), std::move(config_copy));
+  model->external_owner_ = model;
+  *out = reinterpret_cast<OgaModel*>(model.get());
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) {
   return OgaCreateModelWithRuntimeSettings(config_path, nullptr, out);
 }
@@ -271,6 +309,10 @@ bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator) {
   return reinterpret_cast<const Generators::Generator*>(generator)->IsDone();
 }
 
+bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator) {
+  return reinterpret_cast<const Generators::Generator*>(generator)->IsSessionTerminated();
+}
+
 OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator) {
   OGA_TRY
   reinterpret_cast<Generators::Generator*>(generator)->ComputeLogits();
@@ -281,6 +323,13 @@ OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator) {
 OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) {
   OGA_TRY
   reinterpret_cast<Generators::Generator*>(generator)->GenerateNextToken();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, const char* key, const char* value) {
+  OGA_TRY
+  reinterpret_cast<Generators::Generator*>(generator)->SetRuntimeOption(key, value);
   return nullptr;
   OGA_CATCH
 }
@@ -331,12 +380,12 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
 
 size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
-  return generator.GetSequence(static_cast<int>(index)).CpuSpan().size();
+  return generator.GetSequence(static_cast<int>(index)).size();
 }
 
 const int32_t* OGA_API_CALL OgaGenerator_GetSequenceData(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
-  return generator.GetSequence(static_cast<int>(index)).CpuSpan().data();
+  return generator.GetSequence(static_cast<int>(index)).CopyDeviceToCpu().data();
 }
 
 OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer** out) {
@@ -590,6 +639,10 @@ void OGA_API_CALL OgaDestroySequences(OgaSequences* p) {
   delete reinterpret_cast<Generators::TokenSequences*>(p);
 }
 
+void OGA_API_CALL OgaDestroyConfig(OgaConfig* p) {
+  delete reinterpret_cast<Generators::Config*>(p);
+}
+
 void OGA_API_CALL OgaDestroyModel(OgaModel* p) {
   reinterpret_cast<Generators::Model*>(p)->external_owner_ = nullptr;
 }
@@ -637,4 +690,5 @@ void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) {
 void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) {
   delete reinterpret_cast<Generators::RuntimeSettings*>(p);
 }
-}
+
+}  // extern "C"

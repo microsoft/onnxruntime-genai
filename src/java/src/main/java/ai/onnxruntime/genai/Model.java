@@ -10,6 +10,10 @@ public final class Model implements AutoCloseable {
     nativeHandle = createModel(modelPath);
   }
 
+  public Model(Config config) throws GenAIException {
+    nativeHandle = createModelFromConfig(config.nativeHandle());
+  }
+
   /**
    * Creates a Tokenizer instance for this model. The model contains the configuration information
    * that determines the tokenizer to use.
@@ -85,6 +89,7 @@ public final class Model implements AutoCloseable {
   }
 
   private native long createModel(String modelPath) throws GenAIException;
+  private native long createModelFromConfig(long configHandle) throws GenAIException;
 
   private native void destroyModel(long modelHandle);
 

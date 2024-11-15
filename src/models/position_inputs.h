@@ -10,7 +10,7 @@
 namespace Generators {
 
 struct PositionInputs {
-  PositionInputs(const Model& model, State& state, RoamingArray<int32_t>& sequence_lengths);
+  PositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths);
 
   void Add();
   void Update(int current_length);
@@ -38,8 +38,8 @@ struct PositionInputs {
 
   ONNXTensorElementDataType type_;  // Common type for position_ids and attention_mask
 
-  bool has_mask_input_{false};
-  bool has_posid_input_{false};
+  bool has_mask_input_{};
+  bool has_posid_input_{};
 
   std::array<int64_t, 2> position_ids_shape_{};  // {params.batch_size*params.beam_size, params.sequence_length}
   std::unique_ptr<OrtValue> position_ids_;

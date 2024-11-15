@@ -20,9 +20,9 @@ class MultiModal_ONNXModel():
         self.enable_history_max = 2
         self.template_header = "<s>"
         self.history_template = "[INST] {input} [/INST]{response}</s>"
-        self.chat_template = "<|user|>\n<|image_1|>\n{input}<|end|>\n<|assistant|>\n"
+        self.chat_template = "<|user|>\n{tags}\n{input}<|end|>\n<|assistant|>\n"
 
-    def generate_prompt_with_history(self, image, history, text=default_prompt, max_length=3072):
+    def generate_prompt_with_history(self, images, history, text=default_prompt, max_length=3072):
 
         prompt = ""
 
@@ -31,16 +31,19 @@ class MultiModal_ONNXModel():
 
         prompt = self.template_header + prompt
 
-        prompt += f'{self.chat_template.format(input=text)}'
+        image_tags = ""
+        for i in range(len(images)):
+            image_tags += f"<|image_{i+1}|>\n"
+
+        prompt += f'{self.chat_template.format(input=text, tags=image_tags)}'
         if len(prompt) > max_length:
             history.clear()
-            prompt = f'{self.chat_template.format(input=text)}'
+            prompt = f'{self.chat_template.format(input=text, tags=image_tags)}'
 
-        logging.info("Loading image ...")
-        self.image = og.Images.open(image)
+        self.images = og.Images.open(*images)
 
-        logging.info("Preprocessing image and prompt ...")
-        input_ids = self.processor(prompt, images=self.image)
+        logging.info("Preprocessing images and prompt ...")
+        input_ids = self.processor(prompt, images=self.images)
 
         return input_ids
 
@@ -74,7 +77,7 @@ class MultiModal_ONNXModel():
         input_ids = self.generate_prompt_with_history(
                 text=text,
                 history=history,
-                image=args[0],
+                images=args[0],
                 max_length=max_context_length_tokens
         )
 

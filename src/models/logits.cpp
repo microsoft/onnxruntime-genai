@@ -4,6 +4,7 @@
 #include "model.h"
 #include "logits.h"
 #if USE_CUDA
+#include "../cuda/cuda_common.h"
 #include "kernels.h"
 #endif
 
@@ -27,8 +28,9 @@ Logits::Logits(State& state)
 #if USE_CUDA
   if (model_.device_type_ == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
     auto& cpu_ids = model_.config_->model.eos_token_ids;
-    cuda_eos_token_ids_ptr_ = CudaMallocArray<int32_t>(cpu_ids.size(), &cuda_eos_token_ids_);
-    cudaMemcpyAsync(cuda_eos_token_ids_.data(), cpu_ids.data(), cpu_ids.size() * sizeof(int32_t), ::cudaMemcpyHostToDevice, model_.cuda_stream_);
+    cuda_eos_token_ids_ = state_.params_->p_device->Allocate<int32_t>(cpu_ids.size());
+    copy(std::span<const int32_t>{cpu_ids}, cuda_eos_token_ids_.CpuSpan());
+    cuda_eos_token_ids_.CopyCpuToDevice();
   }
 #endif
 }
@@ -36,7 +38,7 @@ Logits::Logits(State& state)
 #pragma warning(push)
 #pragma warning(disable : 4189)  // local variable is initialized but not referenced
 
-RoamingArray<float> Logits::Get() {
+DeviceSpan<float> Logits::Get() {
   size_t element_count = shape_[0] * shape_[1] * shape_[2];
 
   // First iteration? Then copy the logits over to a {batch_beams, 1, vocab_size} tensor
@@ -53,11 +55,8 @@ RoamingArray<float> Logits::Get() {
     // create new OrtValue for logits_of_last_token and use output_last_tokens_ to hold it
     output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
-#if USE_DML
-    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
-      logits_of_last_token_fp32_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
-    }
-#endif
+    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>)
+      logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(*model_.allocator_device_, shape_);
 
     logits_of_last_token = output_last_tokens_.get();
 
@@ -141,12 +140,12 @@ RoamingArray<float> Logits::Get() {
     } else
 #endif
     {
-      std::unique_ptr<OrtValue> logits_of_last_token_fp32;
-      ConvertFp16ToFp32(*model_.allocator_device_, *logits_of_last_token, logits_of_last_token_fp32, model_.device_type_, model_.cuda_stream_);
-      output_last_tokens_ = std::move(logits_of_last_token_fp32);  // use output_last_tokens_ to hold the fp32 logits
-      logits_of_last_token = output_last_tokens_.get();
+      ConvertFp16ToFp32(*model_.allocator_device_, *logits_of_last_token, logits_of_last_token_fp32_, model_.device_type_, model_.cuda_stream_);
+      logits_of_last_token = logits_of_last_token_fp32_.get();
     }
   }
+
+  assert(shape_[1] == 1);
 
 #if USE_DML
   // DML doesn't support on-device scoring yet, so we need to download some data to the CPU
@@ -155,22 +154,23 @@ RoamingArray<float> Logits::Get() {
   }
 #endif
 
-  assert(shape_[1] == 1);
+  if (logits_.empty() || logits_of_last_token->GetTensorMutableRawData() != logits_.Span().data())
+    logits_ = WrapTensor<float>(*state_.params_->p_device, *logits_of_last_token);
 
 #if USE_CUDA
   if (model_.device_type_ == DeviceType::CUDA) {
-    auto batched_logits_gpu = gpu_span<float>{logits_of_last_token->GetTensorMutableData<float>(), element_count};
-    if (cuda_eos_token_ids_ptr_)
+    if (!cuda_eos_token_ids_.empty())
       cuda::LaunchHandleEOSArray(
-          batched_logits_gpu.data(),
+          logits_.Span().data(),
           static_cast<int>(shape_[0]) /* batch_beam_size*/,
           static_cast<int>(shape_[2]) /* vocab_size */,
-          cuda_eos_token_ids_.data(),
+          cuda_eos_token_ids_.Span().data(),
           static_cast<int>(cuda_eos_token_ids_.size()),
           model_.cuda_stream_);
-    return batched_logits_gpu;
+    return logits_;
   }
-#elif USE_DML
+#endif
+#if USE_DML
   if (model_.device_type_ == DeviceType::DML) {
     // DML doesn't support on-device scoring yet, so we transfer the data to the CPU
     ComPtr<ID3D12Resource> gpu_resource;
@@ -188,13 +188,14 @@ RoamingArray<float> Logits::Get() {
 
     auto batched_logits_cpu = cpu_span<float>{cpu_tensor, element_count};
     HandleEOSArray(batched_logits_cpu);
-    return batched_logits_cpu;
+
+    logits_ = WrapTensor<float>(*state_.params_->p_device, *value32_cpu_);
+    return logits_;
   }
 #endif
 
-  auto batched_logits_cpu = cpu_span<float>{logits_of_last_token->GetTensorMutableData<float>(), element_count};
-  HandleEOSArray(batched_logits_cpu);
-  return batched_logits_cpu;
+  HandleEOSArray(logits_.Span());
+  return logits_;
 }
 
 #pragma warning(pop)
@@ -210,7 +211,7 @@ void Logits::Update() {
   state_.outputs_[output_index_] = output_raw_.get();
 }
 
-void Logits::HandleEOSArray(cpu_span<float> batched_logits) {
+void Logits::HandleEOSArray(std::span<float> batched_logits) {
   if (model_.config_->model.eos_token_ids.empty())
     return;
 

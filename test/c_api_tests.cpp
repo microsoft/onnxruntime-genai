@@ -5,6 +5,8 @@
 #include <iostream>
 #include <ort_genai.h>
 #include "../src/span.h"
+#include <thread>
+#include <vector>
 
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
@@ -16,9 +18,24 @@
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
 #endif
 #endif
+TEST(CAPITests, Config) {
+#if TEST_PHI2
+  // Test modifying config settings
+  auto config = OgaConfig::Create(PHI2_PATH);
+  config->AppendProvider("brainium");
+  config->SetProviderOption("super_ai", "custom_field", "hello");
+  config->AppendProvider("human");
+  config->SetProviderOption("brainium", "custom_field1", "hello1");
+  config->SetProviderOption("brainium", "custom_field2", "hello2");
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+#endif
+}
+
 TEST(CAPITests, TokenizerCAPI) {
 #if TEST_PHI2
-  auto model = OgaModel::Create(PHI2_PATH);
+  auto config = OgaConfig::Create(PHI2_PATH);
+  auto model = OgaModel::Create(*config);
   auto tokenizer = OgaTokenizer::Create(*model);
 
   // Encode single decode single
@@ -283,6 +300,54 @@ TEST(CAPITests, GetOutputCAPI) {
   generator->GenerateNextToken();
 }
 
+TEST(CAPITests, SetTerminate) {
+#if TEST_PHI2
+
+  auto GeneratorSetTerminateCall = [](OgaGenerator* generator) {
+    // Set Terminate
+    generator->SetRuntimeOption("terminate_session", "1");
+  };
+
+  auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
+    try {
+      while (!generator->IsDone()) {
+        generator->ComputeLogits();
+        generator->GenerateNextToken();
+      }
+    } catch (const std::exception& e) {
+      EXPECT_EQ(generator->IsSessionTerminated(), true);
+      std::cout << "Session Terminated: " << e.what() << std::endl;
+    }
+  };
+
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+
+  const char* input_string = "She sells sea shells by the sea shore.";
+  auto input_sequences = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequences);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetInputSequences(*input_sequences);
+  params->SetSearchOption("max_length", 40);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  EXPECT_EQ(generator->IsSessionTerminated(), false);
+  std::vector<std::thread> threads;
+  threads.push_back(std::thread(GenerateOutput, generator.get(), std::move(tokenizer_stream)));
+  threads.push_back(std::thread(GeneratorSetTerminateCall, generator.get()));
+
+  for (auto& th : threads) {
+    std::cout << "Waiting for threads completion" << std::endl;
+    th.join();  // Wait for each thread to finish
+  }
+  EXPECT_EQ(generator->IsSessionTerminated(), true);
+  // Unset terminate
+  generator->SetRuntimeOption("terminate_session", "0");
+  EXPECT_EQ(generator->IsSessionTerminated(), false);
+#endif
+}
+
 #if TEST_PHI2
 
 struct Phi2Test {
@@ -376,13 +441,11 @@ TEST(CAPITests, TopKTopPCAPI) {
 
 #if TEST_PHI2
 TEST(CAPITests, AdaptersTest) {
-
 #ifdef USE_CUDA
-using OutputType = Ort::Float16_t;
+  using OutputType = Ort::Float16_t;
 #else
-using OutputType = float;
+  using OutputType = float;
 #endif
-
 
   // The python unit tests create the adapter model.
   // In order to run this test, the python unit test must have been run first.
@@ -447,7 +510,7 @@ using OutputType = float;
     ASSERT_TRUE(std::equal(output_shape.begin(), output_shape.end(), shape.begin(), shape.end()));
 
     const auto size = static_cast<size_t>(std::accumulate(shape.begin(), shape.end(), 1LL,
-                                                    std::multiplies<int64_t>()));
+                                                          std::multiplies<int64_t>()));
     ASSERT_EQ(output_size, size);
     std::span<const OutputType> src(reinterpret_cast<const OutputType*>(logits->Data()), size);
     ASSERT_FALSE(std::equal(base_output.begin(), base_output.end(), src.begin(), src.end()));

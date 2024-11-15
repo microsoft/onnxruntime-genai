@@ -7,6 +7,13 @@ parameters:
   type: string
 
 steps:
+  - task: Docker@2
+    inputs:
+      containerRegistry: onnxruntimebuildcache
+      command: "login"
+      addPipelineData: false
+    displayName: "Log in to container registry"
+
   - powershell: |
       $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
       azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
