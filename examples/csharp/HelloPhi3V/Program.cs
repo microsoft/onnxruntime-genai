@@ -3,6 +3,7 @@
 
 using Microsoft.ML.OnnxRuntimeGenAI;
 using System.Linq;
+using System.Runtime.CompilerServices;
 
 void PrintUsage()
 {
@@ -52,6 +53,12 @@ while (i_arg < args.Length)
     i_arg++;
 }
 
+// From https://stackoverflow.com/a/47841442
+static string GetThisFilePath([CallerFilePath] string path = null)
+{
+    return path;
+}
+
 Console.WriteLine("--------------------");
 Console.WriteLine("Hello, Phi-3-Vision!");
 Console.WriteLine("--------------------");
@@ -74,7 +81,9 @@ do
     Images images = null;
     if (imagePaths.Length == 0)
     {
-        Console.WriteLine("No image provided");
+        Console.WriteLine("No image provided. Using default image.");
+        imagePaths.Append(Path.GetFullPath(Path.Combine(
+            GetThisFilePath(), "../../..", "test_models", "images", "australia.jpg")));
     }
     else
     {
@@ -85,6 +94,7 @@ do
             {
                 throw new Exception("Image file not found: " +  imagePath);
             }
+            Console.WriteLine("Using image: " + imagePath);
         }
         images = Images.Load(imagePaths);
     }
@@ -121,5 +131,8 @@ do
         Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
     }
 
-    images.Dispose();
+    if (images != null)
+    {
+        images.Dispose();
+    }
 } while (interactive);
