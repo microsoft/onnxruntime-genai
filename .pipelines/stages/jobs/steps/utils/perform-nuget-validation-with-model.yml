@@ -43,11 +43,12 @@ steps:
       NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
 
   - bash: |
+      set -e -x
       dotnet --info
       cp $(Build.BinariesDirectory)/nuget/* ${{ parameters.CsprojFolder }}
       cd ${{ parameters.CsprojFolder }}
       dotnet restore -r $(os)-$(arch) /property:Configuration=${{ parameters.CsprojConfiguration }} --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
-      dotnet build ./${{ parameters.CsprojName }}.csproj -r $(os)-$(arch) /property:Configuration=${{ parameters.CsprojConfiguration }} --no-restore --self-contained
+      dotnet build ./${{ parameters.CsprojName }}.csproj -r $(os)-$(arch) /property:Configuration=${{ parameters.CsprojConfiguration }} --no-restore --self-contained --verbosity normal
       ls -l ./bin/${{ parameters.CsprojConfiguration }}/net6.0/$(os)-$(arch)/
     displayName: 'Perform dotnet restore & build'
     workingDirectory: '$(Build.Repository.LocalPath)'

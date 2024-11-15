@@ -47,7 +47,7 @@ while (i_arg < args.Length)
     {
         if (i_arg + 1 < args.Length)
         {
-            imagePaths = args[i_arg+1].Split(',').ToList<string>().Select(i => i.ToString().Trim()).ToArray();
+            imagePaths = args[i_arg + 1].Split(',').ToList<string>().Select(i => i.ToString().Trim()).ToList();
         }
     }
     i_arg++;
@@ -75,7 +75,7 @@ do
     if (interactive)
     {
         Console.WriteLine("Image Path (comma separated; leave empty if no image):");
-        imagePaths = Console.ReadLine().Split(',').ToList<string>().Select(i => i.ToString().Trim()).ToArray();
+        imagePaths = Console.ReadLine().Split(',').ToList<string>().Select(i => i.ToString().Trim()).ToList();
     }
 
     if (imagePaths.Count == 0)
@@ -94,7 +94,7 @@ do
         Console.WriteLine("Using image: " + imagePath);
     }
 
-    Images images = imagePaths.Length > 0 ? Images.Load(imagePaths) : null;
+    Images images = imagePaths.Count > 0 ? Images.Load(imagePaths.ToArray()) : null;
 
     string text = "What is shown in this image?";
     if (interactive) {
@@ -105,7 +105,7 @@ do
     string prompt = "<|user|>\n";
     if (images != null)
     {
-        for (int i = 0; i < imagePaths.Length; i++)
+        for (int i = 0; i < imagePaths.Count; i++)
         {
             prompt += "<|image_" + (i + 1) + "|>\n";
         }
