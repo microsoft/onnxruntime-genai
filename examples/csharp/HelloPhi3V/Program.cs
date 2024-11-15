@@ -5,6 +5,12 @@ using Microsoft.ML.OnnxRuntimeGenAI;
 using System.Linq;
 using System.Runtime.CompilerServices;
 
+// From https://stackoverflow.com/a/47841442
+static string GetThisFilePath([CallerFilePath] string path = null)
+{
+    return path;
+}
+
 void PrintUsage()
 {
     Console.WriteLine("Usage:");
@@ -53,12 +59,6 @@ while (i_arg < args.Length)
     i_arg++;
 }
 
-// From https://stackoverflow.com/a/47841442
-static string GetThisFilePath([CallerFilePath] string path = null)
-{
-    return path;
-}
-
 Console.WriteLine("--------------------");
 Console.WriteLine("Hello, Phi-3-Vision!");
 Console.WriteLine("--------------------");
@@ -82,7 +82,7 @@ do
     {
         Console.WriteLine("No image provided. Using default image.");
         imagePaths.Add(Path.GetFullPath(Path.Combine(
-            GetThisFilePath(), "../../..", "test_models", "images", "australia.jpg")));
+            GetThisFilePath(), "../../../..", "test", "test_models", "images", "australia.jpg")));
     }
     for (int i = 0; i < imagePaths.Count; i++)
     {
