@@ -12,9 +12,10 @@
 
 namespace Generators {
 
-ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t eos_token,
-                                                       const std::string& guidance_type, const std::string& guidance_data,
-                                                       std::shared_ptr<Tokenizer> tokenizer, const std::string& tokenizer_path)
+#if USE_GUIDANCE
+GuidanceLogitsProcessor::GuidanceLogitsProcessor(int vocab_size, uint32_t eos_token,
+                                                 const std::string& guidance_type, const std::string& guidance_data,
+                                                 std::shared_ptr<Tokenizer> tokenizer, const std::string& tokenizer_path)
     : vocab_size_(vocab_size), tokenizer_(std::move(tokenizer)) {
   if (guidance_type.empty() || guidance_data.empty()) {
     throw std::runtime_error("Guidance type and data must be provided");
@@ -81,7 +82,7 @@ ConstrainedLogitsProcessor::ConstrainedLogitsProcessor(int vocab_size, uint32_t 
   llg_constraint_ = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
 }
 
-std::vector<uint32_t> ConstrainedLogitsProcessor::ComputeMask() {
+std::vector<uint32_t> GuidanceLogitsProcessor::ComputeMask() {
   LlgMaskResult mask_result;
   auto error = llg_compute_mask(llg_constraint_.get(), &mask_result);
   if (error != 0) {
@@ -97,7 +98,7 @@ std::vector<uint32_t> ConstrainedLogitsProcessor::ComputeMask() {
   return mask;
 }
 
-void ConstrainedLogitsProcessor::CommitTokens(uint32_t token) {
+void GuidanceLogitsProcessor::CommitTokens(uint32_t token) {
   LlgCommitResult commit_result;
   auto error = llg_commit_token(llg_constraint_.get(), token, &commit_result);
   if (error != 0) {
@@ -106,8 +107,9 @@ void ConstrainedLogitsProcessor::CommitTokens(uint32_t token) {
   }
 }
 
-std::vector<int32_t> ConstrainedLogitsProcessor::tokenize_partial(const Tokenizer* tokenizer, const size_t prefix_len,
-                                                                  const uint8_t* bytes, size_t bytes_len) {
+std::vector<int32_t> GuidanceLogitsProcessor::tokenize_partial(const Tokenizer* tokenizer, const size_t prefix_len,
+                                                               const uint8_t* bytes, size_t bytes_len) {
+  // add prefix to tokenize for partial tokenization, it will produce ids more stable
   std::string input_string = kTokenizePrefixStr;
   input_string.reserve(bytes_len + 2);
   for (size_t i = 0; i < bytes_len; i++) {
@@ -116,5 +118,17 @@ std::vector<int32_t> ConstrainedLogitsProcessor::tokenize_partial(const Tokenize
   std::vector<int32_t> output_ids = tokenizer->Encode(input_string.c_str());
   return std::vector<int32_t>(output_ids.begin() + prefix_len, output_ids.end());
 }
+#endif
 
+std::unique_ptr<LogitsProcessor> CreateLogitsProcessor(const LogitsProcessorConfig& config) {
+#if USE_GUIDANCE
+  if (!config.guidance_type.empty() && !config.guidance_data.empty()) {
+    return std::make_unique<GuidanceLogitsProcessor>(config.vocab_size, config.eos_token, config.guidance_type, config.guidance_data, config.tokenizer, config.tokenizer_path);
+  }
+
+#endif
+
+  Log("warning", "No supported LogitsProcessor found. e.g. to use guidance, build with USE_GUIDANCE=1");
+  return nullptr;
+}
 }  // namespace Generators

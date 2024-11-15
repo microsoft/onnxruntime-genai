@@ -45,7 +45,7 @@ struct Logits {
   StaticBuffer* sb_logits32_{};
   StaticBuffer* sb_logits16_{};
 
-  std::vector<std::unique_ptr<ConstrainedLogitsProcessor>> constrained_logits_processors_;
+  std::vector<std::unique_ptr<LogitsProcessor>> logits_processors_;
   std::future<std::vector<std::vector<uint32_t>>> mask_future_;
   std::vector<std::vector<uint32_t>> logits_masks_;
 

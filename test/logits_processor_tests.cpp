@@ -10,6 +10,7 @@
 #include <iostream>
 #include <random>
 #include <fstream>
+#include <regex>
 
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
@@ -31,17 +32,17 @@ std::string read_file(const char* filePath) {
   buffer << file.rdbuf();
   return buffer.str();
 }
-
+#if USE_GUIDANCE
 TEST(LogitsProcessorTests, TestRegex) {
   std::string regex = "answer: .*";
   std::string text = "answer: I am a robot";
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   auto tokenizer = model->CreateTokenizer();
-  auto processor = std::make_unique<Generators::ConstrainedLogitsProcessor>(model->config_->model.vocab_size,
-                                                                            model->config_->model.eos_token_id, "regex",
-                                                                            regex, tokenizer, model->config_->config_path.string().c_str());
-  auto target_ids = Generators::ConstrainedLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(Generators::ConstrainedLogitsProcessor::kTokenizePrefixStr).size(),
-                                                                             reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
+  auto processor = std::make_unique<Generators::GuidanceLogitsProcessor>(model->config_->model.vocab_size,
+                                                                         model->config_->model.eos_token_id, "regex",
+                                                                         regex, tokenizer, model->config_->config_path.string().c_str());
+  auto target_ids = Generators::GuidanceLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(Generators::GuidanceLogitsProcessor::kTokenizePrefixStr).size(),
+                                                                          reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
   for (auto id : target_ids) {
     auto mask = processor->ComputeMask();
     processor->CommitTokens(id);
@@ -54,13 +55,35 @@ TEST(LogitsProcessorTests, TestJsonSchema) {
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   auto tokenizer = model->CreateTokenizer();
-  auto processor = std::make_unique<Generators::ConstrainedLogitsProcessor>(model->config_->model.vocab_size,
-                                                                            model->config_->model.eos_token_id, "json_schema",
-                                                                            json_schema, tokenizer, model->config_->config_path.string().c_str());
-  auto target_ids = Generators::ConstrainedLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(Generators::ConstrainedLogitsProcessor::kTokenizePrefixStr).size(),
-                                                                             reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
+  auto processor = std::make_unique<Generators::GuidanceLogitsProcessor>(model->config_->model.vocab_size,
+                                                                         model->config_->model.eos_token_id, "json_schema",
+                                                                         json_schema, tokenizer, model->config_->config_path.string().c_str());
+  auto target_ids = Generators::GuidanceLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(Generators::GuidanceLogitsProcessor::kTokenizePrefixStr).size(),
+                                                                          reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
   for (auto id : target_ids) {
     auto mask = processor->ComputeMask();
     processor->CommitTokens(id);
   }
 }
+
+TEST(LogitsProcessorTests, TestModel) {
+#if TEST_PHI2
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
+  auto tokenizer = model->CreateTokenizer();
+  auto test_input = "who are you?";
+  std::string regex = "answer: .*";
+  auto input_ids = tokenizer->Encode(test_input);
+
+  auto params = Generators::CreateGeneratorParams(*model);
+  params->SetGuidance("regex", regex);
+  params->search.max_length = 10;
+  params->search.do_sample = true;
+  params->input_ids = input_ids;
+  // Verify outputs match expected outputs
+  // High level version
+  auto result = Generators::Generate(*model, *params);
+  auto output = tokenizer->Decode(result[0]);
+  EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
+#endif
+}
+#endif

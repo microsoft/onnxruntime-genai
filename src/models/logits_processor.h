@@ -6,17 +6,31 @@
 #include <string>
 #include <vector>
 
+#if USE_GUIDANCE
 #include <llguidance.h>
+#endif
 
 #include "model.h"
 
 namespace Generators {
 
-struct LogitsProcessor {
-  virtual std::vector<uint32_t> ComputeMask() = 0;
-  virtual void CommitTokens(uint32_t token) = 0;
+struct LogitsProcessorConfig {
+  int vocab_size;
+  uint32_t eos_token;
+  std::string guidance_type;
+  std::string guidance_data;
+  std::shared_ptr<Tokenizer> tokenizer;
+  std::string tokenizer_path;
 };
 
+struct LogitsProcessor {
+  LogitsProcessor() = default;
+  virtual std::vector<uint32_t> ComputeMask() = 0;
+  virtual void CommitTokens(uint32_t token) = 0;
+
+};
+
+#if USE_GUIDANCE
 struct LlgConstraintDeleter {
   void operator()(LlgConstraint* lc) const {
     llg_free_constraint(lc);
@@ -29,11 +43,13 @@ struct LlgTokenizerDeleter {
   }
 };
 
-struct ConstrainedLogitsProcessor : public LogitsProcessor {
+struct GuidanceLogitsProcessor : public LogitsProcessor {
   static constexpr const char* kDefaultVocabFile = "tokenizer.json";
   static constexpr const char* kTokenizePrefixStr = "\x02";
 
-  ConstrainedLogitsProcessor(int vocab_size, uint32_t eos_token, const std::string& guidance_type, const std::string& guidance_data, std::shared_ptr<Tokenizer> tokenizer, const std::string& tokenizer_path);
+  GuidanceLogitsProcessor(int vocab_size, uint32_t eos_token, const std::string& guidance_type,
+                          const std::string& guidance_data, std::shared_ptr<Tokenizer> tokenizer,
+                          const std::string& tokenizer_path);
   std::vector<uint32_t> ComputeMask() override;
   void CommitTokens(uint32_t token) override;
 
@@ -51,4 +67,8 @@ struct ConstrainedLogitsProcessor : public LogitsProcessor {
   };
   TokenizeData tokenize_data_;
 };
+#endif
+
+std::unique_ptr<LogitsProcessor> CreateLogitsProcessor(const LogitsProcessorConfig& config);
+
 }  // namespace Generators

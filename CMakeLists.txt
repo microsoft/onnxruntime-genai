@@ -47,6 +47,13 @@ include(cmake/check_webgpu.cmake)
 include(cmake/cxx_standard.cmake)
 
 add_compile_definitions(BUILDING_ORT_GENAI_C)
+
+if(USE_GUIDANCE)
+  add_compile_definitions(USE_GUIDANCE=1)
+else()
+  add_compile_definitions(USE_GUIDANCE=0)
+endif()
+
 if(MSVC)
   # set updated value for __cplusplus macro instead of 199711L
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
@@ -105,7 +112,7 @@ target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 target_include_directories(onnxruntime-genai PUBLIC ${llguidance_SOURCE_DIR}/parser/)
 target_include_directories(onnxruntime-genai-static PUBLIC ${llguidance_SOURCE_DIR}/parser/)
-target_link_libraries(onnxruntime-genai PRIVATE llguidance_parser-shared)
+target_link_libraries(onnxruntime-genai PRIVATE llguidance_parser)
 target_link_libraries(onnxruntime-genai-static PUBLIC llguidance_parser)
 if (WIN32)
   target_link_libraries(onnxruntime-genai PRIVATE bcrypt)
