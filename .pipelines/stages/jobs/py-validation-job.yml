@@ -97,6 +97,16 @@ jobs:
     ${{ else }}:
       value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
 
+  - name: prebuild_phi3_5_vision_model_folder
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
+      value: 'gpu/gpu-int4-rtn-block-32'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: 'gpu/gpu-int4-rtn-block-32'
+    ${{ else }}:
+      value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
+
   - name: cuda_docker_image
     ${{ if eq(parameters.cuda_version, '11.8') }}:
       value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20240531.1
@@ -150,7 +160,7 @@ jobs:
       StepName: 'Download Phi3-mini from HuggingFace'
       HuggingFaceRepo: 'microsoft/Phi-3-mini-4k-instruct-onnx'
       RepoFolder: $(prebuild_phi3_mini_model_folder)
-      LocalFolder: 'models'
+      LocalFolder: 'phi3-mini'
       WorkingDirectory: '$(Build.Repository.LocalPath)/examples/python'
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
@@ -159,6 +169,24 @@ jobs:
     parameters:
       PythonScriptFolder: "examples/python"
       PythonScriptName: "model-generate.py"
+      LocalFolder: 'phi3-mini'
       ModelFolder: $(prebuild_phi3_mini_model_folder)
+
+  - template: steps/utils/download-huggingface-model.yml
+    parameters:
+      StepName: 'Download Phi-3.5-vision-instruct-onnx Model from HuggingFace'
+      HuggingFaceRepo: 'microsoft/Phi-3.5-vision-instruct-onnx'
+      RepoFolder: $(prebuild_phi3_5_vision_model_folder)
+      LocalFolder: 'phi3.5-vision'
+      WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/HelloPhi'
+      HuggingFaceToken: $(HF_TOKEN)
+      os: ${{ parameters.os }}
+
+  - template: steps/utils/perform-python-validation-with-model.yml
+    parameters:
+      PythonScriptFolder: "examples/python"
+      PythonScriptName: "phi3v.py"
+      LocalFolder: 'phi3.5-vision'
+      ModelFolder: $(prebuild_phi3_5_vision_model_folder)
 
   - template: steps/compliant-and-cleanup-step.yml
