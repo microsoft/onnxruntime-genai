@@ -140,10 +140,9 @@ jobs:
 
   - template: steps/utils/download-huggingface-model.yml
     parameters:
-      StepName: 'Download Phi3-mini Model from HuggingFace'
       HuggingFaceRepo: 'microsoft/Phi-3-mini-4k-instruct-onnx'
-      RepoFolder: $(prebuild_phi3_mini_model_folder)
       LocalFolder: 'phi3-mini'
+      RepoFolder: $(prebuild_phi3_mini_model_folder)
       WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/HelloPhi'
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
@@ -158,11 +157,10 @@ jobs:
 
   - template: steps/utils/download-huggingface-model.yml
     parameters:
-      StepName: 'Download Phi-3.5-vision-instruct-onnx Model from HuggingFace'
       HuggingFaceRepo: 'microsoft/Phi-3.5-vision-instruct-onnx'
-      RepoFolder: $(prebuild_phi3_5_vision_model_folder)
       LocalFolder: 'phi3.5-vision'
-      WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/HelloPhi'
+      RepoFolder: $(prebuild_phi3_5_vision_model_folder)
+      WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/HelloPhi3V'
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
