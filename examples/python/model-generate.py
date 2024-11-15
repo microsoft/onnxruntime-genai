@@ -4,7 +4,14 @@ import time
 
 def main(args):
     if args.verbose: print("Loading model...")
-    model = og.Model(f'{args.model}')
+    config = og.Config(args.model_path)
+    config.clear_providers()
+    if args.provider != "cpu":
+        if args.verbose:
+            print(f"Setting model to {args.provider}...")
+        config.append_provider(args.provider)
+    model = og.Model(config)
+
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
     if args.verbose: print("Tokenizer created")
@@ -15,19 +22,19 @@ def main(args):
         prompts = ["I like walking my cute dog",
                    "What is the best restaurant in town?",
                    "Hello, how are you today?"]
-    
+
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
             print("Error, chat template must have exactly one pair of curly braces, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
             exit(1)
         prompts[:] = [f'{args.chat_template.format(input=text)}' for text in prompts]
-        
+
     input_tokens = tokenizer.encode_batch(prompts)
     if args.verbose: print(f'Prompt(s) encoded: {prompts}')
 
     params = og.GeneratorParams(model)
 
-    search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args} 
+    search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
 
     if (args.verbose): print(f'Args: {args}')
     if (args.verbose): print(f'Search options: {search_options}')
@@ -59,11 +66,12 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end token generation loop example for gen-ai")
     parser.add_argument('-m', '--model', type=str, required=True, help='Onnx model folder path (must contain config.json and model.onnx)')
+    parser.add_argument("-p", "--provider", type=str, required=True, help="Provider to run model")
     parser.add_argument('-pr', '--prompts', nargs='*', required=False, help='Input prompts to generate tokens from. Provide this parameter multiple times to batch multiple prompts')
-    parser.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
-    parser.add_argument('-l', '--max_length', type=int, help='Max number of tokens to generate including the prompt')
+    parser.add_argument('-i', '--min_length', type=int, default=25, help='Min number of tokens to generate including the prompt')
+    parser.add_argument('-l', '--max_length', type=int, default=50, help='Max number of tokens to generate including the prompt')
     parser.add_argument('-ds', '--do_random_sampling', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
-    parser.add_argument('-p', '--top_p', type=float, help='Top p probability to sample with')
+    parser.add_argument('--top_p', type=float, help='Top p probability to sample with')
     parser.add_argument('-k', '--top_k', type=int, help='Top k tokens to sample from')
     parser.add_argument('-t', '--temperature', type=float, help='Temperature to sample with')
     parser.add_argument('-r', '--repetition_penalty', type=float, help='Repetition penalty to sample with')

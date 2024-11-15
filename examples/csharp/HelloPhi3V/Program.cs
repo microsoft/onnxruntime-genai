@@ -78,26 +78,23 @@ do
         imagePaths = Console.ReadLine().Split(',').ToList<string>().Select(i => i.ToString().Trim()).ToArray();
     }
 
-    Images images = null;
     if (imagePaths.Length == 0)
     {
         Console.WriteLine("No image provided. Using default image.");
         imagePaths.Append(Path.GetFullPath(Path.Combine(
             GetThisFilePath(), "../../..", "test_models", "images", "australia.jpg")));
     }
-    else
+    for (int i = 0; i < imagePaths.Length; i++)
     {
-        for (int i = 0; i < imagePaths.Length; i++)
+        string imagePath = Path.GetFullPath(imagePaths[i].Trim());
+        if (!File.Exists(imagePath))
         {
-            string imagePath = imagePaths[i].Trim();
-            if (!File.Exists(imagePath))
-            {
-                throw new Exception("Image file not found: " +  imagePath);
-            }
-            Console.WriteLine("Using image: " + imagePath);
+            throw new Exception("Image file not found: " + imagePath);
         }
-        images = Images.Load(imagePaths);
+        Console.WriteLine("Using image: " + imagePath);
     }
+
+    Images images = imagePaths.Length > 0 ? Images.Load(imagePaths) : null;
 
     string text = "What is shown in this image?";
     if (interactive) {
