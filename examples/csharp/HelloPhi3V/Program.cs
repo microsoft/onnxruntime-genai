@@ -106,7 +106,7 @@ do
     prompt += text + "<|end|>\n<|assistant|>\n";
 
     Console.WriteLine("Processing image and prompt...");
-    var inputTensors = processor.ProcessImages(prompt, images);
+    using var inputTensors = processor.ProcessImages(prompt, images);
 
     Console.WriteLine("Generating response...");
     using GeneratorParams generatorParams = new GeneratorParams(model);
@@ -120,4 +120,6 @@ do
         generator.GenerateNextToken();
         Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
     }
+
+    images.Dispose();
 } while (interactive);
