@@ -3,7 +3,6 @@
 
 import argparse
 import os
-import readline
 import glob
 from pathlib import Path
 
@@ -30,10 +29,14 @@ def run(args: argparse.Namespace):
     interactive = args.interactive
 
     while True:
-        readline.set_completer_delims(" \t\n;")
-        readline.parse_and_bind("tab: complete")
-        readline.set_completer(_complete)
         if interactive:
+            try:
+                import readline
+                readline.set_completer_delims(" \t\n;")
+                readline.parse_and_bind("tab: complete")
+                readline.set_completer(_complete)
+            except ImportError:
+                pass
             image_paths = [
                 image_path.strip()
                 for image_path in input(
