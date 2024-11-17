@@ -141,7 +141,6 @@ struct Config {
         std::string present_key_names{"present.%d.key"}, present_value_names{"present.%d.value"};
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{"output_cross_qk_%d"};
-        // std::string cross_present_key_names{"present_key_cross_%d"}, cross_present_value_names{"present_value_cross_%d"};
       } outputs;
 
       struct PipelineModel {

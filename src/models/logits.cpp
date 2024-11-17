@@ -107,9 +107,6 @@ RoamingArray<float> Logits::Get() {
             if (model_.device_type_ == DeviceType::CUDA) {
 #if USE_CUDA
               CudaCheck() == cudaMemcpyAsync(target.data(), source.data(), source.size_bytes(), cudaMemcpyDeviceToDevice, state_.params_->cuda_stream);
-              auto& stream = Log("After cudaMemcpyAsync inside logits");
-              stream << std::endl;
-              DumpTensor(model_, stream, logits_of_last_token, true);
 #else
               throw std::runtime_error("Unexpected CUDA device usage");
 #endif
@@ -149,10 +146,6 @@ RoamingArray<float> Logits::Get() {
       ConvertFp16ToFp32(*model_.allocator_device_, *logits_of_last_token, logits_of_last_token_fp32, model_.device_type_, model_.cuda_stream_);
       output_last_tokens_ = std::move(logits_of_last_token_fp32);  // use output_last_tokens_ to hold the fp32 logits
       logits_of_last_token = output_last_tokens_.get();
-
-      auto& stream = Log("After ConvertFp16ToFp32 inside logits");
-      stream << std::endl;
-      DumpTensor(model_, stream, logits_of_last_token, true);
     }
   }
 
@@ -176,10 +169,6 @@ RoamingArray<float> Logits::Get() {
           cuda_eos_token_ids_.data(),
           static_cast<int>(cuda_eos_token_ids_.size()),
           model_.cuda_stream_);
-
-    auto& stream = Log("After LaunchHandleEOSArray inside logits");
-    stream << std::endl;
-    DumpCudaSpan(stream, std::span<const float>(batched_logits_gpu));
     return batched_logits_gpu;
   }
 #elif USE_DML

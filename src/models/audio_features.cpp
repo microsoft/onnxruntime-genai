@@ -19,7 +19,6 @@ AudioFeatures::AudioFeatures(State& state, const std::string& name)
   if (audio_features_ == nullptr) {
     auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(state_.params_->inputs));
     audio_features_ = model_.ExpandInputs(inputs.audio_features->ort_tensor_, state_.params_->search.num_beams);
-    // audio_features_ = model_.ExpandInputs(state_.params_->inputs.audio_features->ort_tensor_, state_.params_->search.num_beams);
   }
   if (audio_features_ == nullptr) {
     throw std::runtime_error("audio_features must be provided in the extra inputs");

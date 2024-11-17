@@ -279,7 +279,7 @@ struct PyGeneratorParams {
 
   pybind11::array_t<int32_t> py_input_ids_;
   pybind11::array py_audio_features_;
-  pybind11::array py_alignment_heads_;
+  pybind11::array_t<int32_t> py_alignment_heads_;
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };

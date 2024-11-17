@@ -174,26 +174,6 @@ KV_Cache::KV_Cache(State& state)
   }
 }
 
-// void KV_Cache::AddInputs() {
-//   // We don't set the input_index_ & output_index_ because the encoder step only runs once, there's no update
-//   input_index_ = state_.inputs_.size();
-
-//   for (int i = 0; i < layer_count_ * 2; ++i) {
-//     state_.outputs_.push_back(presents_[i].get());
-//     state_.output_names_.push_back(output_name_strings_[i].c_str());
-//   }
-// }
-
-// void KV_Cache::AddOutputs() {
-//   // We don't set the input_index_ & output_index_ because the encoder step only runs once, there's no update
-//   output_index_ = state_.outputs_.size();
-  
-//   for (int i = 0; i < layer_count_ * 2; ++i) {
-//     state_.outputs_.push_back(presents_[i].get());
-//     state_.output_names_.push_back(output_name_strings_[i].c_str());
-//   }
-// }
-
 void KV_Cache::Add() {
   input_index_ = state_.inputs_.size();
   output_index_ = state_.outputs_.size();

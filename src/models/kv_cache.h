@@ -38,8 +38,6 @@ struct KV_Cache {
 
   static bool IsCacheNeeded(const Model& model);
 
-  // void AddInputs();
-  // void AddOutputs();
   void Add();
   auto& GetShape() const { return shape_; }
   auto& GetType() const { return type_; }
@@ -68,8 +66,6 @@ struct KV_Cache {
 
 struct Cross_Cache {
   Cross_Cache(State& state, int sequence_length = 0);
-  // Cross_Cache(const Cross_Cache&) = delete;
-  // Cross_Cache& operator=(const Cross_Cache&) = delete;
 
   void AddOutputs(State& state);
   void AddInputs(State& state);
