@@ -256,7 +256,7 @@ DeviceSpan<float> Logits::Get() {
 
 void Logits::Update(DeviceSpan<int32_t> next_tokens_unk) {
   if (!logits_processors_.empty() && logits_processors_.at(0)) {
-    auto next_tokens = next_tokens_unk.CpuSpan();
+    auto next_tokens = next_tokens_unk.CopyDeviceToCpu();
     for (int i = 0; i < next_tokens.size(); i++) {
       logits_processors_[i]->CommitTokens(static_cast<uint32_t>(next_tokens[i]));
     }

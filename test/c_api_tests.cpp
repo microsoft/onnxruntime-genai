@@ -7,6 +7,7 @@
 #include "../src/span.h"
 #include <thread>
 #include <vector>
+#include <regex>
 
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
@@ -299,8 +300,7 @@ TEST(CAPITests, SetTerminate) {
         generator->ComputeLogits();
         generator->GenerateNextToken();
       }
-    }
-    catch (const std::exception& e) {
+    } catch (const std::exception& e) {
       EXPECT_EQ(generator->IsSessionTerminated(), true);
       std::cout << "Session Terminated: " << e.what() << std::endl;
     }
@@ -427,13 +427,11 @@ TEST(CAPITests, TopKTopPCAPI) {
 
 #if TEST_PHI2
 TEST(CAPITests, AdaptersTest) {
-
 #ifdef USE_CUDA
-using OutputType = Ort::Float16_t;
+  using OutputType = Ort::Float16_t;
 #else
-using OutputType = float;
+  using OutputType = float;
 #endif
-
 
   // The python unit tests create the adapter model.
   // In order to run this test, the python unit test must have been run first.
@@ -498,7 +496,7 @@ using OutputType = float;
     ASSERT_TRUE(std::equal(output_shape.begin(), output_shape.end(), shape.begin(), shape.end()));
 
     const auto size = static_cast<size_t>(std::accumulate(shape.begin(), shape.end(), 1LL,
-                                                    std::multiplies<int64_t>()));
+                                                          std::multiplies<int64_t>()));
     ASSERT_EQ(output_size, size);
     std::span<const OutputType> src(reinterpret_cast<const OutputType*>(logits->Data()), size);
     ASSERT_FALSE(std::equal(base_output.begin(), base_output.end(), src.begin(), src.end()));
@@ -559,4 +557,27 @@ void CheckResult(OgaResult* result) {
     OgaDestroyResult(result);
     throw std::runtime_error(string);
   }
+}
+
+TEST(CAPITests, SetGuidance) {
+#if TEST_PHI2
+
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+
+  const char* input_string = "who are you?";
+  auto input_sequences = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequences);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetInputSequences(*input_sequences);
+  params->SetSearchOption("max_length", 32);
+  params->SetGuidance("regex", "answer: .*");
+
+  auto sequences = model->Generate(*params);
+  auto out_string = tokenizer->Decode(sequences->SequenceData(0), sequences->SequenceCount(0));
+  auto output = std::string(out_string).substr(std::string(input_string).size());
+  EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
+
+#endif
 }

@@ -66,24 +66,4 @@ TEST(LogitsProcessorTests, TestJsonSchema) {
   }
 }
 
-TEST(LogitsProcessorTests, TestModel) {
-#if TEST_PHI2
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
-  auto tokenizer = model->CreateTokenizer();
-  auto test_input = "who are you?";
-  std::string regex = "answer: .*";
-  auto input_ids = tokenizer->Encode(test_input);
-
-  auto params = Generators::CreateGeneratorParams(*model);
-  params->SetGuidance("regex", regex);
-  params->search.max_length = 10;
-  params->search.do_sample = true;
-  params->input_ids = input_ids;
-  // Verify outputs match expected outputs
-  // High level version
-  auto result = Generators::Generate(*model, *params);
-  auto output = tokenizer->Decode(result[0]);
-  EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
-#endif
-}
 #endif
