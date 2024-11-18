@@ -112,6 +112,10 @@ struct CudaInterfaceImpl : CudaInterface {
     return std::make_unique<BeamSearch_Cuda>(params);
   }
 
+  void Synchronize() override {
+    ::cudaStreamSynchronize(cuda_stream_.get());
+  }
+
   cudaStream_t GetCudaStream() override {
     return cuda_stream_.get();
   }
