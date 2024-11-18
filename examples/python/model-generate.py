@@ -19,9 +19,13 @@ def main(args):
     if hasattr(args, 'prompts'):
         prompts = args.prompts
     else:
-        prompts = ["I like walking my cute dog",
+        if args.non_interactive:
+            prompts = ["I like walking my cute dog",
                    "What is the best restaurant in town?",
                    "Hello, how are you today?"]
+        else:
+            text = input("Input: ")
+            prompts = [text]
 
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
@@ -78,6 +82,7 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-b', '--batch_size_for_cuda_graph', type=int, default=1, help='Max batch size for CUDA graph')
     parser.add_argument('-c', '--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}. If not set, the prompt is used as is.')
+    parser.add_argument('--non-interactive', action=argparse.BooleanOptionalAction, required=False, help='Non-interactive mode, mainly for CI usage')
 
     args = parser.parse_args()
     main(args)
