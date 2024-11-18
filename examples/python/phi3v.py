@@ -11,7 +11,7 @@ import onnxruntime_genai as og
 
 def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
     curr_path = Path(current_dir).absolute()
-    target_dir = glob.glob(str(curr_path / target_dir_name))
+    target_dir = glob.glob(target_dir_name, root_dir=curr_path)
     if target_dir:
         return Path(target_dir[0]).absolute()
     else:
@@ -59,7 +59,7 @@ def run(args: argparse.Namespace):
             if args.image_paths:
                 image_paths = args.image_paths
             else:
-                image_paths = [str(_find_dir_contains_sub_dir(Path(__file__), "test") / "test_models" / "images" / "australia.jpg")]
+                image_paths = [str(_find_dir_contains_sub_dir(Path(__file__).parent, "test") / "test_models" / "images" / "australia.jpg")]
 
         image_paths = [image_path for image_path in image_paths]
 
