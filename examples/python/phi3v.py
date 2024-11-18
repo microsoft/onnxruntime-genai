@@ -15,6 +15,9 @@ def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
     if target_dir:
         return Path(target_dir[0]).absolute()
     else:
+        if curr_path.parent == curr_path:
+            # Root dir
+            return None
         return _find_dir_contains_sub_dir(curr_path / '..', target_dir_name)
 
 
@@ -44,6 +47,7 @@ def run(args: argparse.Namespace):
                 readline.parse_and_bind("tab: complete")
                 readline.set_completer(_complete)
             except ImportError:
+                # Not available on some platforms. Ignore it.
                 pass
             image_paths = [
                 image_path.strip()
