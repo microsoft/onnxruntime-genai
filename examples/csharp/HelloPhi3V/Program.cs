@@ -5,10 +5,27 @@ using Microsoft.ML.OnnxRuntimeGenAI;
 using System.Linq;
 using System.Runtime.CompilerServices;
 
-// From https://stackoverflow.com/a/47841442
-static string GetThisFilePath([CallerFilePath] string path = null)
+static string GetDirectoryInTreeThatContains(string currentDirectory, string targetDirectoryName)
 {
-    return path;
+    bool found = false;
+    foreach (string d in Directory.GetDirectories(currentDirectory, searchPattern: targetDirectoryName))
+    {
+        found = true;
+        return Path.Combine(currentDirectory, targetDirectoryName);
+    }
+    if (!found)
+    {
+        DirectoryInfo dirInfo = new DirectoryInfo(currentDirectory);
+        if (dirInfo.Parent != null)
+        {
+            return GetDirectoryInTreeThatContains(Path.GetFullPath(Path.Combine(currentDirectory, "..")), targetDirectoryName);
+        }
+        else
+        {
+            return null;
+        }
+    }
+    return null;
 }
 
 void PrintUsage()
@@ -81,8 +98,8 @@ do
     if (imagePaths.Count == 0)
     {
         Console.WriteLine("No image provided. Using default image.");
-        imagePaths.Add(Path.GetFullPath(Path.Combine(
-            GetThisFilePath(), "../../../..", "test", "test_models", "images", "australia.jpg")));
+        imagePaths.Add(Path.Combine(
+            GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"), "test_models", "images", "australia.jpg"));
     }
     for (int i = 0; i < imagePaths.Count; i++)
     {

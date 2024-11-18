@@ -8,7 +8,15 @@ from pathlib import Path
 
 import onnxruntime_genai as og
 
-REPO_ROOT = Path(__file__).parents[2]
+
+def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
+    curr_path = Path(current_dir).absolute()
+    target_dir = glob.glob(str(curr_path / target_dir_name))
+    if target_dir:
+        return Path(target_dir[0]).absolute()
+    else:
+        return _find_dir_contains_sub_dir(curr_path / '..', target_dir_name)
+
 
 def _complete(text, state):
     return (glob.glob(text + "*") + [None])[state]
@@ -47,7 +55,7 @@ def run(args: argparse.Namespace):
             if args.image_paths:
                 image_paths = args.image_paths
             else:
-                image_paths = [str(REPO_ROOT / "test" / "test_models" / "images" / "australia.jpg")]
+                image_paths = [str(_find_dir_contains_sub_dir(Path(__file__), "test") / "test_models" / "images" / "australia.jpg")]
 
         image_paths = [image_path for image_path in image_paths]
 
