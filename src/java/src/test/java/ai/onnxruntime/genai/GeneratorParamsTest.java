@@ -14,7 +14,7 @@ public class GeneratorParamsTest {
   public void testValidSearchOption() throws GenAIException {
     // test setting an invalid search option throws a GenAIException
     try (SimpleGenAI generator = new SimpleGenAI(TestUtils.tinyGpt2ModelPath());
-        GeneratorParams params = generator.createGeneratorParams("Ignoed"); ) {
+        GeneratorParams params = generator.createGeneratorParams("Ignored"); ) {
       params.setSearchOption("early_stopping", true); // boolean
       params.setSearchOption("max_length", 20); // number
     }

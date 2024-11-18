@@ -23,7 +23,7 @@ public class TestUtils {
     return getFilePathFromResource("/hf-internal-testing/tiny-random-gpt2-fp32");
   }
 
-  public static final String testVisioniModelPath() {
+  public static final String testVisionModelPath() {
     return getFilePathFromResource("/vision-preprocessing");
   }
 

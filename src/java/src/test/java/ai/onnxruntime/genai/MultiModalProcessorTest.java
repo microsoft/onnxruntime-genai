@@ -15,7 +15,7 @@ public class MultiModalProcessorTest {
 
   @Test
   public void testBatchEncodeDecode() throws GenAIException {
-    try (Model model = new Model(TestUtils.testVisioniModelPath());
+    try (Model model = new Model(TestUtils.testVisionModelPath());
         MultiModalProcessor multiModalProcessor = new MultiModalProcessor(model);
         TokenizerStream stream = multiModalProcessor.createStream();
         GeneratorParams generatorParams = model.createGeneratorParams()) {

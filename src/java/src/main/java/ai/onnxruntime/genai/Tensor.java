@@ -72,7 +72,7 @@ public final class Tensor implements AutoCloseable {
    *
    * @param handle The native tensor handle.
    */
-  public Tensor(long handle) {
+  Tensor(long handle) {
     nativeHandle = handle;
     elementType = ElementType.values()[getTensorType(handle)];
     shape = getTensorShape(handle);

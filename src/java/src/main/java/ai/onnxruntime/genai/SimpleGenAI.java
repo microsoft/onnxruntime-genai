@@ -89,11 +89,14 @@ public class SimpleGenAI implements AutoCloseable {
    */
   public GeneratorParams createGeneratorParams(int[] tokenIds, int sequenceLength, int batchSize)
       throws GenAIException {
-    GeneratorParams generatorParams = model.createGeneratorParams();
+    GeneratorParams generatorParams = null;
     try {
+      generatorParams = model.createGeneratorParams();
       generatorParams.setInput(tokenIds, sequenceLength, batchSize);
     } catch (GenAIException e) {
-      generatorParams.close();
+      if (generatorParams != null) {
+        generatorParams.close();
+      }
       throw e;
     }
 
@@ -151,9 +154,11 @@ public class SimpleGenAI implements AutoCloseable {
   public void close() {
     if (tokenizer != null) {
       tokenizer.close();
+      tokenizer = null;
     }
     if (model != null) {
       model.close();
+      model = null;
     }
   }
 }
