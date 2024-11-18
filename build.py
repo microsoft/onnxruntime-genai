@@ -130,7 +130,7 @@ def _parse_args():
 
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
-    parser.add_argument("--disable_guidance", action="store_true", help="Whether to use DML. Default is to not use DML.")
+    parser.add_argument("--disable_guidance", action="store_true", help="Whether to add guidance support. Default is True.")
     
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
     platform_group = parser.add_mutually_exclusive_group()

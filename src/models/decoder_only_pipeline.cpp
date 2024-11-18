@@ -244,7 +244,7 @@ void DecoderOnlyPipelineState::UpdateInputsOutputs(const DeviceSpan<int32_t>& ne
   input_ids_.Update(next_tokens_unk);
   position_inputs_.Update(current_length);
   if (kv_cache_) kv_cache_->Update(beam_indices, current_length);
-  logits_.Update();
+  logits_.Update(next_tokens_unk);
 }
 
 OrtValue* DecoderOnlyPipelineState::GetOutput(const char* name) {

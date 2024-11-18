@@ -99,7 +99,6 @@ FetchContent_Declare(
   GIT_REPOSITORY ${DEP_URL_corrosion}
   GIT_TAG ${DEP_SHA1_corrosion}
   )
-# Set any global configuration variables such as `Rust_TOOLCHAIN` before this line!
 onnxruntime_fetchcontent_makeavailable(Corrosion)
 FetchContent_Declare(
   llguidance

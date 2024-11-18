@@ -39,7 +39,7 @@ void Gpt_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan
   input_ids_.Update(next_tokens);
   position_inputs_.Update(current_length);
   kv_cache_.Update(beam_indices, current_length);
-  logits_.Update();
+  logits_.Update(next_tokens);
 }
 
 }  // namespace Generators

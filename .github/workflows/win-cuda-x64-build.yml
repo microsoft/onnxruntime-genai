@@ -59,7 +59,7 @@ jobs:
       run: |
         mkdir ort/lib
         move ${{ env.ORT_PACKAGE_NAME }}/buildTransitive/native/include ort/
-        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/  
+        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/
         
     - name: Install Rust
       run: |
