@@ -5,28 +5,24 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using Xunit;
 using Xunit.Abstractions;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
-    public class TestsFixture : IDisposable
-    {
-        private OgaHandle _handle;
-        public TestsFixture()
-        {
-            _handle = new OgaHandle();
-        }
-
-        public void Dispose()
-        {
-            _handle.Dispose();
-        }
-    }
-
-    public class OnnxRuntimeGenAITests : IClassFixture<TestsFixture>
+    public class OnnxRuntimeGenAITests
     {
         private readonly ITestOutputHelper output;
+
+        // From https://stackoverflow.com/a/47841442
+        private static string GetThisFilePath([CallerFilePath] string path = null)
+        {
+            return path;
+        }
+
+        private static readonly string _phi2Path = Path.GetFullPath(Path.Combine(
+            GetThisFilePath(),"../..", "test_models", "phi-2", "int4", "cpu"));
 
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
@@ -37,7 +33,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         {
             public IgnoreOnModelAbsenceFact()
             {
-                string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+                string modelPath = _phi2Path;
                 bool exists = System.IO.Directory.Exists(modelPath);
                 if (!System.IO.Directory.Exists(modelPath))
                 {
@@ -117,7 +113,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             float temp = 0.6f;
             ulong maxLength = 20;
 
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -176,7 +172,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             float temp = 0.6f;
             ulong maxLength = 20;
 
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -236,7 +232,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             float temp = 0.6f;
             ulong maxLength = 20;
 
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -292,7 +288,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
         public void TestTokenizerBatchEncodeDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -321,7 +317,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]
         public void TestTokenizerBatchEncodeSingleDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -352,7 +348,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeStreamDecode")]
         public void TestTokenizerBatchEncodeStreamDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -388,7 +384,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerSingleEncodeDecode")]
         public void TestTokenizerSingleEncodeDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -412,7 +408,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnModelAbsenceFact(DisplayName = "TestPhi2")]
         public void TestPhi2()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
