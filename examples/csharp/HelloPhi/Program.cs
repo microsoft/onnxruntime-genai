@@ -8,7 +8,7 @@ void PrintUsage()
     Console.WriteLine("Usage:");
     Console.WriteLine("  -m model_path");
     Console.WriteLine("\t\t\t\tPath to the model");
-    Console.WriteLine("  --interactive (optional)");
+    Console.WriteLine("  --non-interactive (optional)");
     Console.WriteLine("\t\t\t\tInteractive mode");
 }
 
@@ -20,16 +20,16 @@ if (args.Length < 1)
     Environment.Exit(-1);
 }
 
-bool interactive = false;
+bool interactive = true;
 string modelPath = string.Empty;
 
 uint i = 0;
 while (i < args.Length)
 {
     var arg = args[i];
-    if (arg == "--interactive")
+    if (arg == "--non-interactive")
     {
-        interactive = true;
+        interactive = false;
     }
     else if (arg == "-m")
     {

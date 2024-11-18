@@ -13,7 +13,7 @@ def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
     curr_path = Path(current_dir).absolute()
     target_dir = glob.glob(target_dir_name, root_dir=curr_path)
     if target_dir:
-        return Path(target_dir[0]).absolute()
+        return Path(curr_path / target_dir[0]).absolute()
     else:
         if curr_path.parent == curr_path:
             # Root dir
@@ -37,7 +37,7 @@ def run(args: argparse.Namespace):
     processor = model.create_multimodal_processor()
     tokenizer_stream = processor.create_stream()
 
-    interactive = args.interactive
+    interactive = not args.non_interactive
 
     while True:
         if interactive:
@@ -126,7 +126,7 @@ if __name__ == "__main__":
         '-pr', '--prompt', required=False, help='Input prompts to generate tokens from.'
     )
     parser.add_argument(
-        '--interactive', default=False, required=False, help='Interactive mode'
+        '--non-interactive', action=argparse.BooleanOptionalAction, required=False, help='Non-interactive mode, mainly for CI usage'
     )
     args = parser.parse_args()
     run(args)

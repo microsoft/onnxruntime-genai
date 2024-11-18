@@ -35,7 +35,7 @@ void PrintUsage()
     Console.WriteLine("\t\t\t\tPath to the model");
     Console.WriteLine("  --image_paths");
     Console.WriteLine("\t\t\t\tPath to the images");
-    Console.WriteLine("  --interactive (optional)");
+    Console.WriteLine("  --non-interactive (optional), mainly for CI usage");
     Console.WriteLine("\t\t\t\tInteractive mode");
 }
 
@@ -47,7 +47,7 @@ if (args.Length < 1)
     Environment.Exit(-1);
 }
 
-bool interactive = false;
+bool interactive = true;
 string modelPath = string.Empty;
 List<string> imagePaths = new List<string>();
 
@@ -55,9 +55,9 @@ uint i_arg = 0;
 while (i_arg < args.Length)
 {
     var arg = args[i_arg];
-    if (arg == "--interactive")
+    if (arg == "--non-interactive")
     {
-        interactive = true;
+        interactive = false;
     }
     else if (arg == "-m")
     {
