@@ -19,9 +19,24 @@
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
 #endif
 #endif
+TEST(CAPITests, Config) {
+#if TEST_PHI2
+  // Test modifying config settings
+  auto config = OgaConfig::Create(PHI2_PATH);
+  config->AppendProvider("brainium");
+  config->SetProviderOption("super_ai", "custom_field", "hello");
+  config->AppendProvider("human");
+  config->SetProviderOption("brainium", "custom_field1", "hello1");
+  config->SetProviderOption("brainium", "custom_field2", "hello2");
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+#endif
+}
+
 TEST(CAPITests, TokenizerCAPI) {
 #if TEST_PHI2
-  auto model = OgaModel::Create(PHI2_PATH);
+  auto config = OgaConfig::Create(PHI2_PATH);
+  auto model = OgaModel::Create(*config);
   auto tokenizer = OgaTokenizer::Create(*model);
 
   // Encode single decode single

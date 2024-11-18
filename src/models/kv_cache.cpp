@@ -166,10 +166,24 @@ KV_Cache::KV_Cache(State& state)
     }
   }
 
+  auto kv_cache_size_bytes = SizeOf(type_) * shape_[0] * shape_[1] * shape_[2] * shape_[3];
   for (int i = 0; i < layer_count_ * 2; ++i) {
     presents_.push_back(
         sb_kv_caches_.empty() ? OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_)
                               : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
+#if USE_CUDA
+    if (model_.device_type_ == DeviceType::CUDA) {
+      cudaMemsetAsync(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes, model_.cuda_stream_);
+    } else
+#endif
+    {
+      if (model_.device_type_ != DeviceType::WEBGPU) {
+        // FIXME: GetTensorMutableRawData might (depending on device) return device memory.
+        // In that case one can not memset on it.
+        // For now remove this for WebGPU but it should be fixed for other devices as well.
+        memset(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes);
+      }
+    }
   }
 }
 

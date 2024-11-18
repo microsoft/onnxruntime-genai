@@ -495,9 +495,8 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
 
-  // If no device gets set, default to CPU
+  // If no device is set, create it, default to CPU
   if (!p_device_) {
-    assert(device_type_ == DeviceType::CPU);
     p_device_ = GetDeviceInterface(device_type_);
   }
 }
@@ -538,7 +537,10 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
     config_overlay = settings->GenerateConfigOverlay();
   }
   auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
+  return CreateModel(ort_env, std::move(config));
+}
 
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small" || config->model.type == "phimoe" || config->model.type == "qwen2" || config->model.type == "nemotron" || config->model.type == "chatglm")
