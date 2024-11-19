@@ -129,7 +129,7 @@ if __name__ == "__main__":
         "--image_paths", nargs='*', type=str, required=False, help="Path to the images, mainly for CI usage"
     )
     parser.add_argument(
-        '-pr', '--prompt', required=False, help='Input prompts to generate tokens from.'
+        '-pr', '--prompt', required=False, help='Input prompts to generate tokens from, mainly for CI usage'
     )
     parser.add_argument(
         '--non-interactive', action=argparse.BooleanOptionalAction, required=False, help='Non-interactive mode, mainly for CI usage'
