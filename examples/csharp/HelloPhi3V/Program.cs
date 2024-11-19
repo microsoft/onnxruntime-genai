@@ -138,12 +138,16 @@ do
     generatorParams.SetInputs(inputTensors);
 
     using var generator = new Generator(model, generatorParams);
+    var watch = System.Diagnostics.Stopwatch.StartNew();
     while (!generator.IsDone())
     {
         generator.ComputeLogits();
         generator.GenerateNextToken();
         Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
     }
+    watch.Stop();
+    var runTimeInSeconds = watch.Elapsed.TotalSeconds;
+    Console.WriteLine($"Total Time: {runTimeInSeconds:0.00}");
 
     if (images != null)
     {
