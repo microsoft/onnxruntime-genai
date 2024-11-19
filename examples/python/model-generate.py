@@ -4,13 +4,16 @@ import time
 
 def main(args):
     if args.verbose: print("Loading model...")
-    config = og.Config(args.model_path)
-    config.clear_providers()
-    if args.provider != "cpu":
-        if args.verbose:
-            print(f"Setting model to {args.provider}...")
-        config.append_provider(args.provider)
-    model = og.Model(config)
+    if hasattr(og, 'Config'):
+        config = og.Config(args.model_path)
+        config.clear_providers()
+        if args.provider != "cpu":
+            if args.verbose:
+                print(f"Setting model to {args.provider}...")
+            config.append_provider(args.provider)
+        model = og.Model(config)
+    else:
+        model = og.Model(args.model_path)
 
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
