@@ -388,6 +388,10 @@ void Whisper_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, Device
   }
 }
 
+void Whisper_State::Initialize(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
+  run_state_ = RunState::Encoder_Decoder_Init;
+}
+
 void Whisper_State::Finalize() {
   if (output_cross_qk_.size() && alignment_heads_) {
 #if USE_CUDA

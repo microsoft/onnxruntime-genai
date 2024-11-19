@@ -24,6 +24,7 @@ struct Whisper_State : State {
 
  private:
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool search_buffers);
+  void Initialize(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices);
   void Finalize() override;
 
   const Whisper_Model& model_;

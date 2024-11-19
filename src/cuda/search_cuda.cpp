@@ -206,15 +206,15 @@ std::span<float> Search_Cuda::GetScores() {
 }
 
 // Set user input tokens (batch_beam_size, sequence_length)
-void GreedySearch_Cuda::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
+void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_->cuda_stream);
   *done_cpu_ = false;
 
-  auto next_tokens_gpu = const_cast<DeviceSpan<int32_t>&>(next_tokens).Span();
+  auto next_tokens_gpu = next_tokens.Span();
   cuda::Launch_AppendNextTokensToSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
   sequences_.AfterAppendNextTokens(next_tokens, params_->BatchBeamSize());
 
-  if (sequences_.GetSequenceLength() == params_->search.max_length) {
+  if (sequences_.GetSequenceLength() >= params_->search.max_length) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
@@ -225,7 +225,7 @@ void GreedySearch_Cuda::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
   *done_cpu_ = false;
 }
 
-void BeamSearch_Cuda::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
+void BeamSearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   auto next_tokens_gpu = next_tokens.Span();
   cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetNextSequences().Span(), params_->search.batch_size, params_->search.num_beams, sequences_.max_length_, GetStream());
   cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->search.batch_size, params_->search.num_beams, sequences_.max_length_, GetStream());

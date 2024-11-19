@@ -267,9 +267,9 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
   }
 }
 
-void GreedySearch_Cpu::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
+void GreedySearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   // Set user-defined next tokens
-  auto next_tokens_cpu = const_cast<DeviceSpan<int32_t>&>(next_tokens).Span();
+  auto next_tokens_cpu = next_tokens.Span();
   auto batch_size = params_->search.batch_size;
   auto tokens_count_per_batch = next_tokens_cpu.size() / batch_size;
   for (size_t j = 0; j < tokens_count_per_batch; j++) {
@@ -298,7 +298,7 @@ void GreedySearch_Cpu::RewindTo(size_t index) {
   sequences_.RewindTo(index);
 }
 
-void BeamSearch_Cpu::SetUserTokens(DeviceSpan<int32_t>& next_tokens) {
+void BeamSearch_Cpu::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
   // Set user-defined next tokens
   auto next_tokens_cpu = next_tokens.Span();
   auto batch_beam_size = params_->BatchBeamSize();
