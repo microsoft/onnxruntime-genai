@@ -4,6 +4,7 @@
 import argparse
 import os
 import glob
+import time
 from pathlib import Path
 
 import onnxruntime_genai as og
@@ -93,6 +94,7 @@ def run(args: argparse.Namespace):
         params.set_search_options(max_length=7680)
 
         generator = og.Generator(model, params)
+        start_time = time.time()
 
         while not generator.is_done():
             generator.compute_logits()
@@ -100,6 +102,10 @@ def run(args: argparse.Namespace):
 
             new_token = generator.get_next_tokens()[0]
             print(tokenizer_stream.decode(new_token), end="", flush=True)
+
+        print()
+        total_run_time = time.time() - start_time
+        print(f"Total Time : {total_run_time:.2f}")
 
         for _ in range(3):
             print()
