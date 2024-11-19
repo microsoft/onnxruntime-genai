@@ -147,7 +147,7 @@ jobs:
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
-  - template: steps/utils/perform-nuget-validation-with-model.yml
+  - template: steps/nuget-validation-step.yml
     parameters:
       CsprojFolder: "examples/csharp/HelloPhi"
       CsprojName: "HelloPhi"
@@ -164,7 +164,7 @@ jobs:
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
-  - template: steps/utils/perform-nuget-validation-with-model.yml
+  - template: steps/nuget-validation-step.yml
     parameters:
       CsprojFolder: "examples/csharp/HelloPhi3V"
       CsprojName: "HelloPhi3V"

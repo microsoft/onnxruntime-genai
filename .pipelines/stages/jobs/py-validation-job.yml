@@ -164,7 +164,7 @@ jobs:
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
-  - template: steps/utils/perform-python-validation-with-model.yml
+  - template: steps/python-validation-step.yml
     parameters:
       PythonScriptFolder: "examples/python"
       PythonScriptName: "model-generate.py"
@@ -180,7 +180,7 @@ jobs:
       HuggingFaceToken: $(HF_TOKEN)
       os: ${{ parameters.os }}
 
-  - template: steps/utils/perform-python-validation-with-model.yml
+  - template: steps/python-validation-step.yml
     parameters:
       PythonScriptFolder: "examples/python"
       PythonScriptName: "phi3v.py"
