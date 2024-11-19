@@ -147,6 +147,7 @@ do
     }
     watch.Stop();
     var runTimeInSeconds = watch.Elapsed.TotalSeconds;
+    Console.WriteLine();
     Console.WriteLine($"Total Time: {runTimeInSeconds:0.00}");
 
     if (images != null)

@@ -22,6 +22,8 @@ steps:
       workingDirectory: ${{ parameters.WorkingDirectory }}
       env:
         HF_TOKEN: ${{ parameters.HuggingFaceToken }}
+      condition: succeededOrFailed() # Run this even if previous tasks failed.
+
   - ${{ if eq(parameters.os, 'win') }}:
     - powershell: |
         python -m pip install "huggingface_hub[cli]"
@@ -32,3 +34,4 @@ steps:
       workingDirectory: ${{ parameters.WorkingDirectory }}
       env:
         HF_TOKEN: ${{ parameters.HuggingFaceToken }}
+      condition: succeededOrFailed() # Run this even if previous tasks failed.
