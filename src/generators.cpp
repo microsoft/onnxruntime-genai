@@ -67,11 +67,10 @@ static auto g_validate_shutdown = std::make_unique<ValidateShutdown>();  // Must
 
 std::unique_ptr<OrtGlobals>&
 GetOrtGlobals() {
-
   // Initialize g_globals using the g_globals_mutex
   if (!g_globals) {
     std::lock_guard<std::mutex> lock(g_globals_mutex);
-    if (!g_globals) // Now that we're in the mutex, double check
+    if (!g_globals)  // Now that we're in the mutex, double check
       g_globals = std::make_unique<OrtGlobals>();
   }
 
