@@ -83,6 +83,8 @@ popd
 # Install Rust
 export RUSTUP_HOME=/usr/.rustup 
 export CARGO_HOME=/usr/.cargo 
+chmod -R 777 /usr/.rustup
+chmod -R 777 /usr/.cargo
 curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh -s -- -y
 
 cd /
