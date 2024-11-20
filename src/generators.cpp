@@ -51,19 +51,18 @@ OrtGlobals::OrtGlobals()
   env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
 }
 
+static std::unique_ptr<OrtGlobals> g_globals;
+static std::mutex g_globals_mutex;
+
 // Ensure Shutdown() has been called before process exit
 struct ValidateShutdown {
   ~ValidateShutdown() {
-    if (GetOrtGlobals()) {
+    if (g_globals) {
       std::cerr << "OGA Error: Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
       std::abort();
     }
   }
-};
-
-static std::unique_ptr<OrtGlobals> g_globals;
-static std::mutex g_globals_mutex;
-static auto g_validate_shutdown = std::make_unique<ValidateShutdown>();  // Must be after the above line so the destructor runs before the above destructor
+} g_shutdown;  // This struct should stay immediately after the g_globals and g_globals_mutex
 
 std::unique_ptr<OrtGlobals>&
 GetOrtGlobals() {
