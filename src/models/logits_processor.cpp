@@ -20,7 +20,7 @@ namespace Generators {
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(int vocab_size, uint32_t eos_token,
                                                  const std::string& guidance_type, const std::string& guidance_data,
                                                  std::shared_ptr<Tokenizer> tokenizer, const std::string& tokenizer_path)
-    : vocab_size_(vocab_size), tokenizer_(std::move(tokenizer)), eos_token_(eos_token) {
+    : vocab_size_(vocab_size), eos_token_(eos_token), tokenizer_(std::move(tokenizer)) {
   if (guidance_type.empty() || guidance_data.empty()) {
     throw std::runtime_error("Guidance type and data must be provided");
   }
