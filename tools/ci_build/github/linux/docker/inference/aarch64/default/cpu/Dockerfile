@@ -9,5 +9,8 @@ RUN cd /tmp/scripts && /tmp/scripts/install_centos.sh && /tmp/scripts/install_de
 ARG BUILD_UID=1001
 ARG BUILD_USER=onnxruntimedev
 RUN adduser --uid $BUILD_UID $BUILD_USER
+ENV PATH=$HOME/.cargo/bin:$PATH
+ENV RUSTUP_HOME=$HOME/.rustup
+ENV CARGO_HOME=$HOME/.cargo
 WORKDIR /home/$BUILD_USER
 USER $BUILD_USER

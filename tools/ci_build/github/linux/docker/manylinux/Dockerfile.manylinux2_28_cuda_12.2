@@ -16,5 +16,8 @@ RUN adduser --uid $BUILD_UID $BUILD_USER
 WORKDIR /home/$BUILD_USER
 USER $BUILD_USER
 ENV PATH /usr/local/dotnet:$PATH
+ENV PATH=$HOME/.cargo/bin:$PATH
+ENV RUSTUP_HOME=$HOME/.rustup
+ENV CARGO_HOME=$HOME/.cargo
 ENV CUDAHOSTCXX /opt/rh/gcc-toolset-12/root/usr/bin/g++
 ENV CUDA_MODULE_LOADING "LAZY"
