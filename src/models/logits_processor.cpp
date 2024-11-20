@@ -1,3 +1,5 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -6,7 +8,9 @@
 #include <string>
 #include <sys/types.h>
 
+#if USE_GUIDANCE
 #include "llguidance.h"
+#endif
 
 #include "logits_processor.h"
 
@@ -134,7 +138,7 @@ std::unique_ptr<LogitsProcessor> CreateLogitsProcessor(const LogitsProcessorConf
 
 #endif
 
-  Log("warning", "No supported LogitsProcessor found. e.g. to use guidance, build with USE_GUIDANCE=1");
+  Log("warning", "No supported LogitsProcessor found. e.g. to use guidance, build with use_guidance=true");
   return nullptr;
 }
 }  // namespace Generators

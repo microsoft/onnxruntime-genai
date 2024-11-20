@@ -26,6 +26,19 @@ def _path_from_env_var(env_var: str):
     env_var_value = os.environ.get(env_var)
     return Path(env_var_value) if env_var_value is not None else None
 
+def strtobool (val):
+    """Convert a string representation of truth to true (1) or false (0).
+    True values are 'y', 'yes', 't', 'true', 'on', and '1'; false values
+    are 'n', 'no', 'f', 'false', 'off', and '0'.  Raises ValueError if
+    'val' is anything else.
+    """
+    val = str(val).lower()
+    if val in ('y', 'yes', 't', 'true', 'on', '1'):
+        return True
+    elif val in ('n', 'no', 'f', 'false', 'off', '0'):
+        return False
+    else:
+        raise ValueError("invalid truth value %r" % (val,))
 
 def _parse_args():
     class Parser(argparse.ArgumentParser):
@@ -130,7 +143,7 @@ def _parse_args():
 
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
-    parser.add_argument("--disable_guidance", action="store_true", help="Whether to add guidance support. Default is True.")
+    parser.add_argument("--use_guidance", default=True, type=strtobool, help="Whether to add guidance support. Default is True.")
     
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
     platform_group = parser.add_mutually_exclusive_group()
@@ -479,7 +492,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
-        f"-DUSE_GUIDANCE={'ON' if not args.disable_guidance else 'OFF'}",
+        f"-DUSE_GUIDANCE={'ON' if args.use_guidance else 'OFF'}",
     ]
 
     if args.ort_home:

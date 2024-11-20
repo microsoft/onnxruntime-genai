@@ -94,10 +94,7 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
-              export CARGO_HOME=/ort_genai_src/.cargo RUSTUP_HOME=/ort_genai_src/.rustup && \
-              curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh -s -- -y && \
               /usr/bin/cmake --preset linux_gcc_cuda_release \
-                -DRust_COMPILER=/ort_genai_src/.cargo/bin/rustc \
                 -DMANYLINUX=ON \
                 -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} "
 
@@ -110,7 +107,6 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
-              export CARGO_HOME=/ort_genai_src/.cargo RUSTUP_HOME=/ort_genai_src/.rustup && \
               /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 
       - name: Use Dummy HuggingFace Token

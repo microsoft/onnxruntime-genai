@@ -75,8 +75,6 @@ jobs:
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
-            export CARGO_HOME=/onnxruntime_src/.cargo RUSTUP_HOME=/onnxruntime_src/.rustup && \
-            curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh -s -- -y && \
             /usr/bin/cmake --preset linux_gcc_cpu_release \
               -DRust_COMPILER=/onnxruntime_src/.cargo/bin/rustc "
 
@@ -85,7 +83,6 @@ jobs:
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
           -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c " \
-            export CARGO_HOME=/onnxruntime_src/.cargo RUSTUP_HOME=/onnxruntime_src/.rustup && \
             /usr/bin/cmake --build --preset linux_gcc_cpu_release"
 
       - name: Docker -- Check test directory
