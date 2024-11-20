@@ -16,7 +16,7 @@ namespace Generators {
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(int vocab_size, uint32_t eos_token,
                                                  const std::string& guidance_type, const std::string& guidance_data,
                                                  std::shared_ptr<Tokenizer> tokenizer, const std::string& tokenizer_path)
-    : vocab_size_(vocab_size), tokenizer_(std::move(tokenizer)) {
+    : vocab_size_(vocab_size), tokenizer_(std::move(tokenizer)), eos_token_(eos_token) {
   if (guidance_type.empty() || guidance_data.empty()) {
     throw std::runtime_error("Guidance type and data must be provided");
   }
@@ -91,9 +91,15 @@ std::vector<uint32_t> GuidanceLogitsProcessor::ComputeMask() {
   }
 
   std::vector<uint32_t> mask;
-  mask.reserve((vocab_size_ - 1) / 32 + 1);
-  for (int i = 0; i < (vocab_size_ - 1) / 32 + 1; i++) {
-    mask.push_back(mask_result.sample_mask[i]);
+  if (mask_result.is_stop) {
+    mask = std::vector<uint32_t>((vocab_size_ - 1) / 32 + 1, 0);
+    uint32_t eos_mask32 = 1 << (eos_token_ % 32);
+    mask[eos_token_ / 32] = eos_mask32;
+  } else {
+    mask.reserve((vocab_size_ - 1) / 32 + 1);
+    for (int i = 0; i < (vocab_size_ - 1) / 32 + 1; i++) {
+      mask.push_back(mask_result.sample_mask[i]);
+    }
   }
   return mask;
 }

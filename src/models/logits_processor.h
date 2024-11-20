@@ -54,6 +54,7 @@ struct GuidanceLogitsProcessor : public LogitsProcessor {
   void CommitTokens(uint32_t token) override;
 
   size_t vocab_size_;
+  uint32_t eos_token_;
   std::unique_ptr<LlgConstraint, LlgConstraintDeleter> llg_constraint_;
   std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter> llg_tokenizer_;
   std::shared_ptr<Tokenizer> tokenizer_;
