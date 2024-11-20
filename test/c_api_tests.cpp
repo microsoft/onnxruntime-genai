@@ -348,6 +348,10 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
+TEST(CAPITests, Shutdown) {
+  OgaShutdown(); // Shutdown in the middle, and see if the next test works properly
+}
+
 #if TEST_PHI2
 
 struct Phi2Test {

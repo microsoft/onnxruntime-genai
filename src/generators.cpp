@@ -61,11 +61,21 @@ struct ValidateShutdown {
   }
 };
 
+static std::unique_ptr<OrtGlobals> g_globals;
+static std::mutex g_globals_mutex;
+static auto g_validate_shutdown = std::make_unique<ValidateShutdown>();  // Must be after the above line so the destructor runs before the above destructor
+
 std::unique_ptr<OrtGlobals>&
 GetOrtGlobals() {
-  static auto globals = std::make_unique<OrtGlobals>();
-  static auto validate = std::make_unique<ValidateShutdown>();  // Must be after the above line so the destructor runs before the above destructor
-  return globals;
+
+  // Initialize g_globals using the g_globals_mutex
+  if (!g_globals) {
+    std::lock_guard<std::mutex> lock(g_globals_mutex);
+    if (!g_globals) // Now that we're in the mutex, double check
+      g_globals = std::make_unique<OrtGlobals>();
+  }
+
+  return g_globals;
 }
 
 // Used by Shutdown() to display the counts and types of any leaked objects
@@ -81,7 +91,7 @@ void Shutdown() {
     std::abort();
   }
 
-  GetOrtGlobals().reset();  // Delete now because on process exit is too late
+  g_globals.reset();
 }
 
 OrtEnv& GetOrtEnv() {
@@ -313,6 +323,8 @@ bool Generator::IsSessionTerminated() const {
 }
 
 void Generator::GenerateNextToken() {
+  if (search_->IsDone())
+    throw std::runtime_error("Search is already done, can't generate next token");
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (!computed_logits_)
     throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
