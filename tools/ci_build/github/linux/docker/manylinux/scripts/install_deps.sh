@@ -80,5 +80,8 @@ cmake --build build-cmake
 mv ./build-cmake/ninja /usr/bin
 popd
 
+# Install Rust
+curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh -s -- -y\
+
 cd /
 rm -rf /tmp/src
