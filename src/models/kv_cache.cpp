@@ -176,7 +176,10 @@ KV_Cache::KV_Cache(State& state)
     } else
 #endif
     {
-      memset(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes);
+      if (model_.device_type_ == DeviceType::CPU) {
+        // FIXME: this is a device ternsor and we can only use memset for cpu. Revisit for other EPs.
+        memset(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes);
+      }
     }
   }
 }
