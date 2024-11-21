@@ -184,7 +184,7 @@ KV_Cache::KV_Cache(State& state)
         }
       }
     }
-  } catch (const Ort::Exception& e) {
+  } catch ([[maybe_unused]] const Ort::Exception&) {
     std::ostringstream oss;
     oss << "Could not allocate the key-value cache buffer of shape: ["
         << "batch_size (" << shape_[0] << "), num_key_value_heads ("
