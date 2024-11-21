@@ -81,6 +81,8 @@ struct DeviceInterface {
   virtual std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) = 0;
   virtual std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) = 0;
 
+  virtual void Synchronize() = 0;  // Synchronize the device, typically used for timing or debugging
+
   virtual cudaStream_t GetCudaStream() {
     assert(false);
     return nullptr;

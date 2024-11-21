@@ -495,9 +495,8 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
 
-  // If no device gets set, default to CPU
+  // If no device is set, create it, default to CPU
   if (!p_device_) {
-    assert(device_type_ != DeviceType::CUDA);
     p_device_ = GetDeviceInterface(device_type_);
   }
 }
