@@ -30,3 +30,4 @@ steps:
           pipeline: $(Build.DefinitionName)
           runVersion: 'specific'
           buildId: ${{ parameters.BuildId }}
+    condition: succeededOrFailed() # Run this even if previous tasks failed.
