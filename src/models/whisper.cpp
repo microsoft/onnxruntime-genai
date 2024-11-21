@@ -149,12 +149,11 @@ void WhisperDecoderState::UpdateInputsOutputs(const RoamingArray<int32_t>& next_
   }
 
   if (output_cross_qk_.size() && output_cross_qk_shape_[2] != 1) {
-    // Resize output QKs from (batch_size, num_heads, sequence_length, total_sequence_length)
+    // Resize output QKs from (batch_size, num_heads, sequence_length, total_sequence_length) for audio processing
     // to (batch_size, num_heads, 1, total_sequence_length) for token generation
     output_cross_qk_shape_[2] = 1;
     for (int i = 0; i < model_.config_->model.decoder.num_hidden_layers; i++) {
-      auto new_output_cross_qk = OrtValue::CreateTensor(*model_.allocator_device_, output_cross_qk_shape_, output_cross_qk_type_);
-      output_cross_qk_[i] = std::move(new_output_cross_qk);
+      output_cross_qk_[i] = OrtValue::CreateTensor(*model_.allocator_device_, output_cross_qk_shape_, output_cross_qk_type_);
       outputs_[output_cross_qk_index_ + i] = output_cross_qk_[i].get();
     }
   }
@@ -283,10 +282,6 @@ void WhisperState::UpdateCrossQKSearchBuffer(int current_length) {
 #endif
   }
 }
-#if USE_CUDA
-template void WhisperState::UpdateCrossQKSearchBuffer<half>(int current_length);
-#endif
-template void WhisperState::UpdateCrossQKSearchBuffer<float>(int current_length);
 
 template <typename T>
 void WhisperState::FinalizeCrossQK(int current_length) {
@@ -312,10 +307,6 @@ void WhisperState::FinalizeCrossQK(int current_length) {
 #endif
   }
 }
-#if USE_CUDA
-template void WhisperState::FinalizeCrossQK<half>(int current_length);
-#endif
-template void WhisperState::FinalizeCrossQK<float>(int current_length);
 
 RoamingArray<float> WhisperState::Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) {
   if (encoder_state_->first_run_) {
@@ -326,7 +317,7 @@ RoamingArray<float> WhisperState::Run(int current_length, RoamingArray<int32_t> 
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
 
     // TODO: Transpose the K caches only when the else branch is run for the first time.
-    // Otherwise the GetOutput(output_cross_qk_{i}) method returns transposed K caches.
+    // Otherwise the GetOutput(present_key_self_{i}) method returns transposed K caches.
     TransposeKCaches(cross_cache_->GetValues());
     TransposeKCaches(decoder_state_->kv_cache_.GetPresents());
 
