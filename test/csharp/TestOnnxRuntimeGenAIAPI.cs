@@ -554,12 +554,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 using var logits = generator.GetOutput("logits");
                 if (_useCudaModel)
                 {
-                    Assert.Equal(ElementType.float32, logits.Type());
-                    base_output = logits.GetData<float>().ToArray();
+                    Assert.Equal(ElementType.float16, logits.Type());
+                    // TODO: GetData with float16?
                 }
                 else
                 {
-                    Assert.Equal(ElementType.float16, logits.Type());
+                    Assert.Equal(ElementType.float32, logits.Type());
+                    base_output = logits.GetData<float>().ToArray();
                 }
                 output_shape = logits.Shape();
                 outputSize = logits.NumElements();
@@ -580,13 +581,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 using var logits = generator.GetOutput("logits");
                 if (_useCudaModel)
                 {
-                    Assert.Equal(ElementType.float32, logits.Type());
-                    var adapter_output = logits.GetData<float>().ToArray();
-                    Assert.NotEqual(base_output, adapter_output);
+                    Assert.Equal(ElementType.float16, logits.Type());
+                    // TODO: GetData with float16?
                 }
                 else
                 {
-                    Assert.Equal(ElementType.float16, logits.Type());
+                    Assert.Equal(ElementType.float32, logits.Type());
+                    var adapter_output = logits.GetData<float>().ToArray();
+                    Assert.NotEqual(base_output, adapter_output);
                 }
                 Assert.Equal(outputSize, logits.NumElements());
                 Assert.Equal(output_shape, logits.Shape());
