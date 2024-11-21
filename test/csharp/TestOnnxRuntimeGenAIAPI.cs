@@ -38,20 +38,22 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             return null;
         }
 
-        private static string _phi2Path {
-            get
+        private static Lazy<string> _availablePhi2Path = new Lazy<string>(() =>
+        {
+            string cpuModelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                               "test_models", "phi-2", "int4", "cpu");
+            string cudaModelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                               "test_models", "phi-2", "int4", "cuda");
+            // Prefer CUDA model if available.
+            if (System.IO.Directory.Exists(cudaModelPath))
             {
-                string cpuModelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
-                                                         "test_models", "phi-2", "int4", "cpu");
-                string cudaModelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
-                                                         "test_models", "phi-2", "int4", "cuda");
-                if (System.IO.Directory.Exists(cudaModelPath))
-                {
-                    return cudaModelPath;
-                }
-                return cpuModelPath;
+                return cudaModelPath;
             }
-        }
+
+            return cpuModelPath;
+        });
+
+        private static string _phi2Path => _availablePhi2Path.Value;
 
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
