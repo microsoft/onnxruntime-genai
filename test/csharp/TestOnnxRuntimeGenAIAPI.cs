@@ -15,14 +15,31 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
     {
         private readonly ITestOutputHelper output;
 
-        // From https://stackoverflow.com/a/47841442
-        private static string GetThisFilePath([CallerFilePath] string path = null)
+        private static string GetDirectoryInTreeThatContains(string currentDirectory, string targetDirectoryName)
         {
-            return path;
+            bool found = false;
+            foreach (string d in Directory.GetDirectories(currentDirectory, searchPattern: targetDirectoryName))
+            {
+                found = true;
+                return Path.Combine(currentDirectory, targetDirectoryName);
+            }
+            if (!found)
+            {
+                DirectoryInfo dirInfo = new DirectoryInfo(currentDirectory);
+                if (dirInfo.Parent != null)
+                {
+                    return GetDirectoryInTreeThatContains(Path.GetFullPath(Path.Combine(currentDirectory, "..")), targetDirectoryName);
+                }
+                else
+                {
+                    return null;
+                }
+            }
+            return null;
         }
 
-        private static readonly string _phi2Path = Path.GetFullPath(Path.Combine(
-            GetThisFilePath(),"../..", "test_models", "phi-2", "int4", "cpu"));
+        private static readonly string _phi2Path = Path.Combine(
+            GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"), "test_models", "phi-2", "int4", "cpu");
 
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
