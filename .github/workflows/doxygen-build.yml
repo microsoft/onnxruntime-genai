@@ -1,0 +1,19 @@
+name: "Doxygen Build"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - main
+    - rel-*
+  pull_request:
+jobs:
+  doxygen_build:
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
+    steps:
+    - uses: mattnotmitt/doxygen-action
+      with:
+        doxyfile-path: 'src/csharp/Doxyfile_csharp.cfg'
+
+    - uses: mattnotmitt/doxygen-action
+      with:
+        doxyfile-path: 'src/java/Doxyfile_java.cfg'
