@@ -130,7 +130,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
             var inputIDsShape = new ulong[] { 2, 4 };
             ulong batchSize = inputIDsShape[0];
-            ulong sequenceLength = inputIDsShape[1];
             var expectedOutput = new int[] { 0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
                                              0, 0, 195, 731, 731, 114, 114, 114, 114, 114 };
 
@@ -140,20 +139,22 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 Assert.NotNull(config);
                 using (var model = new Model(config))
                 {
-                    using (var generatorParams = new GeneratorParams(model))
+                    Assert.NotNull(model);
+                    using(var generatorParams = new GeneratorParams(model))
                     {
                         Assert.NotNull(generatorParams);
 
                         generatorParams.SetSearchOption("max_length", maxLength);
-                        generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
+                        generatorParams.SetSearchOption("batch_size", batchSize);
 
                         using (var generator = new Generator(model, generatorParams))
                         {
-                            Assert.NotNull(generator);
+                            Assert.NotNull(generatorParams);
 
+                            generator.AppendTokens(inputIDs);
+                            Assert.False(generator.IsDone());
                             while (!generator.IsDone())
                             {
-                                generator.ComputeLogits();
                                 generator.GenerateNextToken();
                             }
 
@@ -163,15 +164,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                                 var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
                                 Assert.Equal(expectedSequence, sequence);
                             }
-                        }
-
-                        var sequences = model.Generate(generatorParams);
-                        Assert.NotNull(sequences);
-
-                        for (ulong i = 0; i < batchSize; i++)
-                        {
-                            var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
-                            Assert.Equal(expectedSequence, sequences[i].ToArray());
                         }
                     }
                 }
@@ -198,6 +190,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
                     };
+                    ulong batchSize = (ulong)strings.Length;
 
                     var sequences = tokenizer.EncodeBatch(strings);
                     Assert.NotNull(sequences);
@@ -206,16 +199,32 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     using GeneratorParams generatorParams = new GeneratorParams(model);
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetInputSequences(sequences);
                     generatorParams.SetSearchOption("max_length", maxLength);
+                    generatorParams.SetSearchOption("batch_size", batchSize);
                     generatorParams.SetSearchOption("do_sample", true);
                     generatorParams.SetSearchOption("top_k", topK);
                     generatorParams.SetSearchOption("temperature", temp);
-                    var outputSequences = model.Generate(generatorParams);
-                    Assert.NotNull(outputSequences);
 
-                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
-                    Assert.NotNull(outputStrings);
+                    using (var generator = new Generator(model, generatorParams))
+                    {
+                        Assert.NotNull(generator);
+
+                        generator.AppendTokenSequences(sequences);
+
+                        while (!generator.IsDone())
+                        {
+                            generator.GenerateNextToken();
+                        }
+
+                        for (ulong i = 0; i < batchSize; i++)
+                        {
+                            var sequence = generator.GetSequence(i).ToArray();
+                            Assert.NotNull(sequence);
+
+                            var outputString = tokenizer.Decode(sequence);
+                            Assert.NotNull(outputString);
+                        }
+                    }
                 }
             }
         }
@@ -240,6 +249,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
                     };
+                    ulong batchSize = (ulong)strings.Length;
 
                     var sequences = tokenizer.EncodeBatch(strings);
                     Assert.NotNull(sequences);
@@ -248,16 +258,32 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     using GeneratorParams generatorParams = new GeneratorParams(model);
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetInputSequences(sequences);
                     generatorParams.SetSearchOption("max_length", maxLength);
+                    generatorParams.SetSearchOption("batch_size", batchSize);
                     generatorParams.SetSearchOption("do_sample", true);
                     generatorParams.SetSearchOption("top_p", topP);
                     generatorParams.SetSearchOption("temperature", temp);
-                    var outputSequences = model.Generate(generatorParams);
-                    Assert.NotNull(outputSequences);
 
-                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
-                    Assert.NotNull(outputStrings);
+                    using (var generator = new Generator(model, generatorParams))
+                    {
+                        Assert.NotNull(generator);
+
+                        generator.AppendTokenSequences(sequences);
+
+                        while (!generator.IsDone())
+                        {
+                            generator.GenerateNextToken();
+                        }
+
+                        for (ulong i = 0; i < batchSize; i++)
+                        {
+                            var sequence = generator.GetSequence(i).ToArray();
+                            Assert.NotNull(sequence);
+
+                            var outputString = tokenizer.Decode(sequence);
+                            Assert.NotNull(outputString);
+                        }
+                    }
                 }
             }
         }
@@ -283,6 +309,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
                     };
+                    ulong batchSize = (ulong)strings.Length;
 
                     var sequences = tokenizer.EncodeBatch(strings);
                     Assert.NotNull(sequences);
@@ -291,17 +318,33 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     using GeneratorParams generatorParams = new GeneratorParams(model);
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetInputSequences(sequences);
                     generatorParams.SetSearchOption("max_length", maxLength);
+                    generatorParams.SetSearchOption("batch_size", batchSize);
                     generatorParams.SetSearchOption("do_sample", true);
                     generatorParams.SetSearchOption("top_k", topK);
                     generatorParams.SetSearchOption("top_p", topP);
                     generatorParams.SetSearchOption("temperature", temp);
-                    var outputSequences = model.Generate(generatorParams);
-                    Assert.NotNull(outputSequences);
+                    
+                    using (var generator = new Generator(model, generatorParams))
+                    {
+                        Assert.NotNull(generator);
 
-                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
-                    Assert.NotNull(outputStrings);
+                        generator.AppendTokenSequences(sequences);
+
+                        while (!generator.IsDone())
+                        {
+                            generator.GenerateNextToken();
+                        }
+
+                        for (ulong i = 0; i < batchSize; i++)
+                        {
+                            var sequence = generator.GetSequence(i).ToArray();
+                            Assert.NotNull(sequence);
+
+                            var outputString = tokenizer.Decode(sequence);
+                            Assert.NotNull(outputString);
+                        }
+                    }
                 }
             }
         }
@@ -442,6 +485,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
                     };
+                    var batchSize = (ulong)strings.Length;
 
                     var sequences = tokenizer.EncodeBatch(strings);
                     Assert.NotNull(sequences);
@@ -451,13 +495,28 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     Assert.NotNull(generatorParams);
 
                     generatorParams.SetSearchOption("max_length", 20);
-                    generatorParams.SetInputSequences(sequences);
+                    generatorParams.SetSearchOption("batch_size", batchSize);
 
-                    var outputSequences = model.Generate(generatorParams);
-                    Assert.NotNull(outputSequences);
+                    using (var generator = new Generator(model, generatorParams))
+                    {
+                        Assert.NotNull(generator);
 
-                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
-                    Assert.NotNull(outputStrings);
+                        generator.AppendTokenSequences(sequences);
+
+                        while (!generator.IsDone())
+                        {
+                            generator.GenerateNextToken();
+                        }
+
+                        for (ulong i = 0; i < batchSize; i++)
+                        {
+                            var sequence = generator.GetSequence(i).ToArray();
+                            Assert.NotNull(sequence);
+
+                            var outputString = tokenizer.Decode(sequence);
+                            Assert.NotNull(outputString);
+                        }
+                    }
                 }
             }
         }
@@ -542,12 +601,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             {
                 using var genParams = new GeneratorParams(model);
                 genParams.SetSearchOption("max_length", 20);
-                genParams.SetInputSequences(sequences);
+                genParams.SetSearchOption("batch_size", 3);
 
                 using var generator = new Generator(model, genParams);
+                generator.AppendTokenSequences(sequences);
                 while(!generator.IsDone())
                 {
-                    generator.ComputeLogits();
                     generator.GenerateNextToken();
                 }
 
@@ -569,13 +628,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             {
                 using var genParams = new GeneratorParams(model);
                 genParams.SetSearchOption("max_length", 20);
-                genParams.SetInputSequences(sequences);
+                genParams.SetSearchOption("batch_size", 3);
 
                 using var generator = new Generator(model, genParams);
                 generator.SetActiveAdapter(adapters, "adapters_a_and_b");
+                generator.AppendTokenSequences(sequences);
                 while (!generator.IsDone())
                 {
-                    generator.ComputeLogits();
                     generator.GenerateNextToken();
                 }
                 using var logits = generator.GetOutput("logits");

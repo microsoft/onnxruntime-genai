@@ -100,7 +100,6 @@ def run(args: argparse.Namespace):
         start_time = time.time()
 
         while not generator.is_done():
-            generator.compute_logits()
             generator.generate_next_token()
 
             new_token = generator.get_next_tokens()[0]

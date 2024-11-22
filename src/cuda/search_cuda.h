@@ -46,6 +46,8 @@ struct GreedySearch_Cuda : Search_Cuda {
   void SampleTopK(int k, float t) override { SampleTopKTopP(k, 0.0, t); }
   void SampleTopP(float p, float t) override { SampleTopKTopP(-1, p, t); }
   void SampleTopKTopP(int k, float p, float t) override;
+  void AppendTokens(DeviceSpan<int32_t>& next_tokens) override;  // shape (batch_size, sequence_length)
+  void RewindTo(size_t index) override;
 
  private:
   DeviceSpan<int32_t> next_tokens_buffer_;
@@ -62,6 +64,8 @@ struct BeamSearch_Cuda : Search_Cuda {
   // In Beam Search there are batch_size * num_beams sequences. Index is batch_id * num_beams + beam_id... Easier to use the other version.
   DeviceSpan<int32_t> GetSequence(size_t index) override;
   DeviceSpan<int32_t> GetSequence(size_t batch_id, size_t beam_id);
+
+  void AppendTokens(DeviceSpan<int32_t>& next_tokens) override;
 
   void SelectTop() override;
 
