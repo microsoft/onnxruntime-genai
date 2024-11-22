@@ -604,7 +604,7 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     """
     Run the tests.
     """
-    lib_dir = args.build_dir / "test"
+    lib_dir = args.build_dir
     if util.is_windows():
         # On Windows, the unit test executable is found inside a directory named after the configuration
         # (e.g. Debug, Release, etc.) within the test directory.
@@ -616,7 +616,7 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         lib_dir = args.ort_home / "lib"
 
     ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
-    util.run(ctest_cmd, cwd=str(args.build_dir / "test"))
+    util.run(ctest_cmd, cwd=str(args.build_dir))
 
     if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
