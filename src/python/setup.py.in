@@ -26,7 +26,7 @@ package_name = '@TARGET_NAME@'
 def _onnxruntime_dependency() -> str:
     dependency = None
     # Use stable version as default
-    ort_version = os.environ.get("ONNXRUNTIME_VERSION", "1.20.0")
+    ort_version = os.environ.get("ONNXRUNTIME_VERSION", "1.20.1")
 
     if package_name == "onnxruntime-genai":
         dependency = "onnxruntime"
