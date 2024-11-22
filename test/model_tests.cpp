@@ -18,6 +18,12 @@
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
 #endif
 #endif
+#if USE_DML
+#include <DirectML.h>
+#include <wrl.h>
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#endif
 
 // To generate this file:
 // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
@@ -26,6 +32,29 @@ static const std::pair<const char*, const char*> c_tiny_gpt2_model_paths[] = {
     {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32-cuda", "fp32"},
     {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp16-cuda", "fp16"},
 };
+
+#if USE_DML
+TEST(ModelTests, DMLAdapterSelection) {
+#if TEST_PHI2
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
+  auto d3d12Device = model->GetD3D12Device();
+
+  auto adapterLuid = d3d12Device->GetAdapterLuid();  
+  for (const auto& provider_option: model->config_->model.decoder.session_options.provider_options) {
+    if (provider_option.name == "dml") {
+      for (const auto& [name, value] : provider_option.options) {
+        if (name == "luid") {
+          if (auto separator_position = value.find(":"); separator_position != std::string::npos) {
+            EXPECT_EQ(adapterLuid.HighPart, std::stol(value.substr(0, separator_position)));
+            EXPECT_EQ(adapterLuid.LowPart, std::stoul(value.substr(separator_position + 1)));
+          }
+        }
+      }
+    }
+  }
+#endif
+}
+#endif
 
 // DML doesn't support GPT attention
 #if !USE_DML
