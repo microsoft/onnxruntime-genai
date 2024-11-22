@@ -41,11 +41,11 @@ jobs:
       with:
         dotnet-version: '8.0.x'
 
-    - name: Install Rust
+    - name: Install Rust Toolchain
       run: |
         $exePath = "$env:TEMP\rustup-init.exe"
         (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
-        & $exePath -y
+        & $exePath -y --default-toolchain=1.82.0
         Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
 
     - name: Download OnnxRuntime Nightly

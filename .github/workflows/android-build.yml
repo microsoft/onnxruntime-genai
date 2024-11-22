@@ -82,8 +82,8 @@ jobs:
           unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
           ls -lR ort
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@1.82.0
 
       - name: Install Rust Toolchain
         run: |
