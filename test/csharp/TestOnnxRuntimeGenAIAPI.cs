@@ -38,8 +38,55 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             return null;
         }
 
-        private static readonly string _phi2Path = Path.Combine(
-            GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"), "test_models", "phi-2", "int4", "cpu");
+        private static bool _useCudaModel = false;
+
+        private static Lazy<string> _lazyPhi2Path = new Lazy<string>(() =>
+        {
+            string cpuModelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                               "test_models", "phi-2", "int4", "cpu");
+            string cudaModelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                               "test_models", "phi-2", "int4", "cuda");
+            // Prefer CUDA model if available.
+            if (System.IO.Directory.Exists(cudaModelPath))
+            {
+                _useCudaModel = true;
+                return cudaModelPath;
+            }
+
+            _useCudaModel = false;
+            return cpuModelPath;
+        });
+
+        private static string _phi2Path => _lazyPhi2Path.Value;
+
+        private static Lazy<string> _lazyTinyRandomGpt2ModelPath = new Lazy<string>(() =>
+        {
+            string modelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                            "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            if (System.IO.Directory.Exists(modelPath))
+            {
+                return modelPath;
+            }
+
+            return null;
+        });
+
+        private static string _tinyRandomGpt2ModelPath => _lazyTinyRandomGpt2ModelPath.Value;
+
+        private static Lazy<string> _lazyAdaptersPath = new Lazy<string>(() =>
+        {
+            string modelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                            "test_models", "adapters");
+            if (System.IO.Directory.Exists(modelPath))
+            {
+                return modelPath;
+            }
+
+            return null;
+        });
+
+        private static string _adaptersPath => _lazyAdaptersPath.Value;
+
 
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
@@ -63,7 +110,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [Fact(DisplayName = "TestConfig")]
         public void TestConfig()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            string modelPath = _tinyRandomGpt2ModelPath;
             using (var config = new Config(modelPath))
             {
                 config.ClearProviders();
@@ -87,7 +134,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             var expectedOutput = new int[] { 0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
                                              0, 0, 195, 731, 731, 114, 114, 114, 114, 114 };
 
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            string modelPath = _tinyRandomGpt2ModelPath;
             using (var config = new Config(modelPath))
             {
                 Assert.NotNull(config);
@@ -418,7 +465,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [Fact(DisplayName = "TestTensorAndAddExtraInput")]
         public void TestTensorAndAddExtraInput()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            string modelPath = _tinyRandomGpt2ModelPath;
             using var model = new Model(modelPath);
             Assert.NotNull(model);
 
@@ -452,7 +499,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         {
             public IgnoreOnAdaptersAbsentFact()
             {
-                string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "adapters");
+                string modelPath = _adaptersPath;
                 bool exists = System.IO.Directory.Exists(modelPath);
                 if (!System.IO.Directory.Exists(modelPath))
                 {
@@ -468,7 +515,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnAdaptersAbsentFact(DisplayName = "TestAdapters")]
         public void TestAdapters()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "adapters");
+            string modelPath = _adaptersPath;
             string adapterPath = Path.Combine(modelPath, "adapters.onnx_adapter");
 
             using var model = new Model(modelPath);
@@ -489,7 +536,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
             Int64 outputSize = 0;
             Int64[] output_shape;
-            float[] base_output;
+            float[] base_output = [];
 
             // Run base scenario
             {
@@ -505,10 +552,18 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 }
 
                 using var logits = generator.GetOutput("logits");
-                Assert.Equal(ElementType.float32, logits.Type());
+                if (_useCudaModel)
+                {
+                    Assert.Equal(ElementType.float16, logits.Type());
+                    // TODO: GetData with float16?
+                }
+                else
+                {
+                    Assert.Equal(ElementType.float32, logits.Type());
+                    base_output = logits.GetData<float>().ToArray();
+                }
                 output_shape = logits.Shape();
                 outputSize = logits.NumElements();
-                base_output = logits.GetData<float>().ToArray();
             }
             // Adapter scenario. The output must be affected
             {
@@ -524,12 +579,19 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     generator.GenerateNextToken();
                 }
                 using var logits = generator.GetOutput("logits");
-                Assert.Equal(ElementType.float32, logits.Type());
+                if (_useCudaModel)
+                {
+                    Assert.Equal(ElementType.float16, logits.Type());
+                    // TODO: GetData with float16?
+                }
+                else
+                {
+                    Assert.Equal(ElementType.float32, logits.Type());
+                    var adapter_output = logits.GetData<float>().ToArray();
+                    Assert.NotEqual(base_output, adapter_output);
+                }
                 Assert.Equal(outputSize, logits.NumElements());
                 Assert.Equal(output_shape, logits.Shape());
-
-                var adapter_output = logits.GetData<float>().ToArray();
-                Assert.NotEqual(base_output, adapter_output);
             }
         }
     }
