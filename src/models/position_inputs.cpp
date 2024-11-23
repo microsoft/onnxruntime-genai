@@ -181,6 +181,7 @@ void PositionInputs::UpdatePositionIDs(int total_length, int new_kv_length) {
   }
 
   switch (model_.device_type_) {
+    case DeviceType::WEBGPU:
     case DeviceType::CPU: {
       type_ == Ort::TypeToTensorType<int32_t> ? UpdatePositionIDsImpl<int32_t>(total_length, new_kv_length)
                                               : UpdatePositionIDsImpl<int64_t>(total_length, new_kv_length);
