@@ -75,14 +75,14 @@ See https://onnxruntime.ai/docs/genai/howto/install
 
    params = og.GeneratorParams(model)
    params.set_search_options(**search_options)
-   params.input_ids = input_tokens
+
    generator = og.Generator(model, params)
+   generator.append_tokens(input_tokens)
   
    print("Output: ", end='', flush=True)
 
    try:
       while not generator.is_done():
-        generator.compute_logits()
         generator.generate_next_token()
 
         new_token = generator.get_next_tokens()[0]
