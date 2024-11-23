@@ -30,7 +30,7 @@ struct State {
   State(const GeneratorParams& params, const Model& model_);
   virtual ~State();
 
-  virtual DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
+  virtual DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
   virtual void Finalize() {}
 
@@ -38,6 +38,8 @@ struct State {
   void UnsetTerminate();
   mutable bool session_terminated_{};
   OrtValue* GetInput(const char* name);
+
+  virtual void RewindTo(size_t index) { (void)index; };
 
   virtual OrtValue* GetOutput(const char* name);
 

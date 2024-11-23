@@ -76,7 +76,6 @@ void CXX_API(const char* model_path) {
     auto generator = OgaGenerator::Create(*model, *params);
 
     while (!generator->IsDone()) {
-      generator->ComputeLogits();
       generator->GenerateNextToken();
 
       const auto num_tokens = generator->GetSequenceCount(0);
@@ -162,7 +161,6 @@ void C_API(const char* model_path) {
     CheckResult(OgaCreateGenerator(model, params, &generator));
 
     while (!OgaGenerator_IsDone(generator)) {
-      CheckResult(OgaGenerator_ComputeLogits(generator));
       CheckResult(OgaGenerator_GenerateNextToken(generator));
 
       const int32_t num_tokens = OgaGenerator_GetSequenceCount(generator, 0);
