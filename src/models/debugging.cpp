@@ -3,15 +3,7 @@
 #include "../generators.h"
 #include "utils.h"
 #include <cinttypes>
-
-#if USE_CUDA
-#include "../cuda/cuda_common.h"
-#endif
-
-#if USE_DML
-#include "../dml/dml_helpers.h"
 #include "model.h"
-#endif
 
 namespace Generators {
 static constexpr size_t c_value_count = 10;  // Dump this many values from the start of a tensor
@@ -92,6 +84,12 @@ void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool 
       break;
     case OrtMemoryInfoDeviceType_GPU: {
       stream << "GPU\r\n";
+      auto type = type_info->GetElementType();
+      auto tensor_span = std::span<uint8_t>{const_cast<OrtValue*>(value)->GetTensorMutableData<uint8_t>(), SizeOf(type) * element_count};
+      auto device_span = model.p_device_->WrapMemory<uint8_t>(tensor_span);
+      DumpValues(stream, type, device_span.CopyDeviceToCpu().data(), element_count);
+      break;
+#if 0
 #if USE_CUDA
       auto type = type_info->GetElementType();
       size_t element_size = SizeOf(type);
@@ -120,6 +118,7 @@ void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool 
       DumpValues(stream, type, cpu_copy.get(), element_count);
 #else
       stream << "Unexpected, using GPU memory but not compiled with CUDA or DML?";
+#endif
 #endif
       break;
     }

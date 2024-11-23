@@ -144,7 +144,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   std::unique_ptr<OrtSessionOptions> session_options_;
 
   cudaStream_t cuda_stream_{};
-  DeviceInterface* p_device_{};
+  mutable DeviceInterface* p_device_{};
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
   Ort::Allocator* allocator_device_{};   // Can be CUDA or CPU based on the DeviceType in the model
