@@ -258,7 +258,7 @@ void Logits::Update(DeviceSpan<int32_t> next_tokens_unk) {
   if (!logits_processors_.empty() && logits_processors_.at(0)) {
     auto next_tokens = next_tokens_unk.CopyDeviceToCpu();
     for (int i = 0; i < next_tokens.size(); i++) {
-      logits_processors_[i]->CommitTokens(static_cast<uint32_t>(next_tokens[i]));
+      logits_processors_[i]->CommitToken(static_cast<uint32_t>(next_tokens[i]));
     }
     mask_future_ = std::async(std::launch::async, [&]() {
       std::vector<std::vector<uint32_t>> result;
@@ -309,6 +309,8 @@ void Logits::AddMask(std::span<float> logits, std::vector<std::vector<uint32_t>>
     auto logits_span = logits.subspan(vocab_index, vocab_size);
     auto& mask = masks[index];
     for (size_t i = 0; i < vocab_size; i++) {
+      // mask is a 32-bit integer, where each bit corresponds to a token in the vocabulary.
+      // If the bit is set, the corresponding token is masked (i.e., its logit is set to the lowest possible value).  
       logits_span[i] = mask[i / 32] & (1 << (i % 32)) ? logits_span[i] : std::numeric_limits<float>::lowest();
     }
     vocab_index += vocab_size;

@@ -50,15 +50,15 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(int vocab_size, uint32_t eos_to
   auto prefix_len = tokenizer_->Encode(kTokenizePrefixStr).size();
   tokenize_data_ = {tokenizer_.get(), prefix_len};
   LlgTokenizerInit tokenizer_init = {
-      static_cast<uint32_t>(vocab_size_),
-      eos_token,
-      nullptr,
-      nullptr,
-      json_data.c_str(),
-      false,
-      tokenize_fn,
-      false,
-      &tokenize_data_,
+      static_cast<uint32_t>(vocab_size_), // vocab_size
+      eos_token, // eos_token
+      nullptr, // token_lens
+      nullptr, // token_bytes
+      json_data.c_str(), // tokenizer_json config data
+      false, // tokenize_assumes_string
+      tokenize_fn, // tokenize_fn
+      false, // use_approximate_greedy_tokenize_fn
+      &tokenize_data_, // user_data
   };
 
   char error_buf[128];
@@ -108,7 +108,7 @@ std::vector<uint32_t> GuidanceLogitsProcessor::ComputeMask() {
   return mask;
 }
 
-void GuidanceLogitsProcessor::CommitTokens(uint32_t token) {
+void GuidanceLogitsProcessor::CommitToken(uint32_t token) {
   LlgCommitResult commit_result;
   auto error = llg_commit_token(llg_constraint_.get(), token, &commit_result);
   if (error != 0) {

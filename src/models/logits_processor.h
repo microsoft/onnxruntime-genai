@@ -29,7 +29,7 @@ struct LogitsProcessor {
   LogitsProcessor() = default;
   virtual ~LogitsProcessor() = default;
   virtual std::vector<uint32_t> ComputeMask() = 0;
-  virtual void CommitTokens(uint32_t token) = 0;
+  virtual void CommitToken(uint32_t token) = 0;
 };
 
 #if USE_GUIDANCE
@@ -53,7 +53,7 @@ struct GuidanceLogitsProcessor : public LogitsProcessor {
                           const std::string& guidance_data, std::shared_ptr<Tokenizer> tokenizer,
                           const std::string& tokenizer_path);
   std::vector<uint32_t> ComputeMask() override;
-  void CommitTokens(uint32_t token) override;
+  void CommitToken(uint32_t token) override;
 
   size_t vocab_size_;
   uint32_t eos_token_;

@@ -45,7 +45,7 @@ TEST(LogitsProcessorTests, TestRegex) {
                                                                           reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
   for (auto id : target_ids) {
     auto mask = processor->ComputeMask();
-    processor->CommitTokens(id);
+    processor->CommitToken(id);
   }
 }
 
@@ -62,7 +62,7 @@ TEST(LogitsProcessorTests, TestJsonSchema) {
                                                                           reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
   for (auto id : target_ids) {
     auto mask = processor->ComputeMask();
-    processor->CommitTokens(id);
+    processor->CommitToken(id);
   }
 }
 
