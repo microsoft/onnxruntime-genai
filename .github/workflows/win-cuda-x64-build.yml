@@ -73,11 +73,6 @@ jobs:
       run: |
         echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-    - name: Build the C# API and Run the C# Tests
-      run: |
-        cd test\csharp
-        dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
-
     - name: Install the Python Wheel and Test Dependencies
       run: |
         python -m pip install -r test\python\requirements.txt
@@ -99,6 +94,12 @@ jobs:
       run: |
         
         Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir -Recurse
+
+    - name: Build the C# API and Run the C# Tests
+      run: |
+        $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH
+        cd test\csharp
+        dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
 
     - name: Prepend CUDA to PATH and Run tests
       run: |

@@ -27,14 +27,35 @@ Java_ai_onnxruntime_genai_Generator_destroyGenerator(JNIEnv* env, jobject thiz, 
   OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(native_handle));
 }
 
+JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_Generator_appendTokenSequences(JNIEnv* env, jobject thiz, jlong native_handle,
+                                                         jlong sequences_handle) {
+  OgaGenerator* generator = reinterpret_cast<OgaGenerator*>(native_handle);
+  const OgaSequences* sequences = reinterpret_cast<const OgaSequences*>(sequences_handle);
+
+  ThrowIfError(env, OgaGenerator_AppendTokenSequences(generator, sequences));
+}
+
+JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_Generator_appendTokens(JNIEnv* env, jobject thiz, jlong native_handle, jintArray token_ids) {
+  OgaGenerator* generator = reinterpret_cast<OgaGenerator*>(native_handle);
+
+  jint* tokens = env->GetIntArrayElements(token_ids, nullptr);
+  jsize num_tokens = env->GetArrayLength(token_ids);
+
+  ThrowIfError(env, OgaGenerator_AppendTokens(generator, reinterpret_cast<int32_t*>(tokens), num_tokens));
+
+  env->ReleaseIntArrayElements(token_ids, tokens, JNI_ABORT);
+}
+
 JNIEXPORT jboolean JNICALL
 Java_ai_onnxruntime_genai_Generator_isDone(JNIEnv* env, jobject thiz, jlong native_handle) {
   return OgaGenerator_IsDone(reinterpret_cast<OgaGenerator*>(native_handle));
 }
 
 JNIEXPORT void JNICALL
-Java_ai_onnxruntime_genai_Generator_computeLogitsNative(JNIEnv* env, jobject thiz, jlong native_handle) {
-  ThrowIfError(env, OgaGenerator_ComputeLogits(reinterpret_cast<OgaGenerator*>(native_handle)));
+Java_ai_onnxruntime_genai_Generator_rewindTo(JNIEnv* env, jobject thiz, jlong native_handle, jlong length) {
+  ThrowIfError(env, OgaGenerator_RewindTo(reinterpret_cast<OgaGenerator*>(native_handle), length));
 }
 
 JNIEXPORT void JNICALL

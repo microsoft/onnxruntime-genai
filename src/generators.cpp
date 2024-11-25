@@ -4,6 +4,7 @@
 #include "generators.h"
 #include "sequences.h"
 #include "models/model.h"
+#include "models/decoder_only.h"
 #include "search.h"
 #include "cpu/interface.h"
 #include "cuda/interface.h"
@@ -101,7 +102,8 @@ struct GenaiInterfaceImpl : GenaiInterface {
   void DumpSpan(std::ostream& stream, std::span<const float> values) override { return DumpSpan(stream, values); }
   void DumpSpan(std::ostream& stream, std::span<const int> values) override { return DumpSpan(stream, values); }
 
-  void Sequences_AfterAppendNextTokens(Sequences* p_this, DeviceSpan<int32_t> next_tokens) override { return p_this->AfterAppendNextTokens(next_tokens); }
+  void Sequences_AfterAppendNextTokens(Sequences* p_this, DeviceSpan<int32_t> next_tokens, size_t batch_beam_size) override { return p_this->AfterAppendNextTokens(next_tokens, batch_beam_size); }
+  void Sequences_RewindTo(Sequences* p_this, size_t new_length) override { return p_this->RewindTo(new_length); }
 } g_genai;
 
 #if USE_CUDA
@@ -117,8 +119,9 @@ CudaInterface* GetCudaInterface() {
                                                              [](void* h) { dlclose(h); }};
 #endif
 
-  if (!cuda_library)
-    throw std::runtime_error("Cuda interface not available");
+  if (!cuda_library) {
+    throw std::runtime_error("Cuda interface not available.");
+  }
 
   Generators::CudaInterface* GetInterface(GenaiInterface * p_genai);
   static CudaInterface* cuda_interface{[] {
@@ -137,14 +140,16 @@ namespace cuda {
 void LaunchInt32ToInt64(const int32_t* input, int64_t* output, int count, cudaStream_t stream) { GetCudaInterface()->Int32ToInt64(input, output, count, stream); }
 void LaunchFp16ToFp32(const uint16_t* input, float* output, int count, cudaStream_t stream) { GetCudaInterface()->Fp16ToFp32(input, output, count, stream); }
 void LaunchFp32ToFp16(const float* input, uint16_t* output, int count, cudaStream_t stream) { GetCudaInterface()->Fp32ToFp16(input, output, count, stream); }
+void LaunchExpandAndInt32ToInt64(const int32_t* src, int64_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) { GetCudaInterface()->LaunchExpandAndInt32ToInt64(src, dst, num_beams, batch_size, sequence_length, stream); }
+void LaunchExpand(const int32_t* src, int32_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) { GetCudaInterface()->LaunchExpand(src, dst, num_beams, batch_size, sequence_length, stream); }
 template <>
-void Launch_UpdatePositionIds<int32_t>(int32_t* position_ids, int batch_beam_size, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, stream); }
+void Launch_UpdatePositionIds<int32_t>(int32_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, total_length, new_kv_length, stream); }
 template <>
-void Launch_UpdatePositionIds<int64_t>(int64_t* position_ids, int batch_beam_size, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, stream); }
+void Launch_UpdatePositionIds<int64_t>(int64_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, total_length, new_kv_length, stream); }
 template <>
-void Launch_UpdateAttentionMask<int32_t>(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_mask_data, batch_beam_size, current_length, max_length, update_only, stream); }
+void Launch_UpdateAttentionMask<int32_t>(int32_t* mask_data, const int32_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_data, batch_beam_size, new_kv_length, total_length, max_length, update_only, stream); }
 template <>
-void Launch_UpdateAttentionMask<int64_t>(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_mask_data, batch_beam_size, current_length, max_length, update_only, stream); }
+void Launch_UpdateAttentionMask<int64_t>(int64_t* mask_data, const int64_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_data, batch_beam_size, new_kv_length, total_length, max_length, update_only, stream); }
 void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) { GetCudaInterface()->LaunchHandleEOSArray(batch_logits, batch_beam_size, vocab_size, eos_token_ids, eos_token_ids_count, stream); }
 void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache, const int32_t* src_indir_cache, const int32_t* beam_ids, int batch_size, int beam_width, int input_seq_length, int max_seq_length, int current_length, cudaStream_t stream) { GetCudaInterface()->UpdateCacheIndirectionKernelLauncher(tgt_indir_cache, src_indir_cache, beam_ids, batch_size, beam_width, input_seq_length, max_seq_length, current_length, stream); }
 void ReorderPastStatesKernelLauncher(void* out_buffer, const void* in_buffer, int batch_size, int num_heads, int max_length, int head_size, int chunk_size, cudaStream_t stream) { GetCudaInterface()->ReorderPastStatesKernelLauncher(out_buffer, in_buffer, batch_size, num_heads, max_length, head_size, chunk_size, stream); }
@@ -216,12 +221,13 @@ void GeneratorParams::TryGraphCapture(int max_bs) {
 }
 
 void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
+  if (config.model.type == "gpt2" || config.model.type == "llama" || config.model.type == "gemma" || config.model.type == "gemma2" || config.model.type == "mistral" || config.model.type == "phi" || config.model.type == "phi3" || config.model.type == "phi3small" || config.model.type == "phimoe" || config.model.type == "qwen2" || config.model.type == "decoder-pipeline")
+    throw std::runtime_error("Please use generator.AppendTokens for " + config.model.type + ". SetInputs is not supported for this model type.");
+
   for (const auto& [name, tensor] : named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
-      input_ids = std::span<const int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
-                                           tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
-      batch_size = static_cast<int>(tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0]);
-      sequence_length = static_cast<int>(input_ids.size()) / batch_size;
+      aux_input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
+                                        tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
     } else {
       // If the nominal name is found in the map, use the graph name.
       // Else, use the nominal name as the graph name.
@@ -246,36 +252,57 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("search max_length is 0");
   if (params.search.max_length > model.config_->model.context_length)
     throw std::runtime_error("max_length (" + std::to_string(params.search.max_length) + ") cannot be greater than model context_length (" + std::to_string(model.config_->model.context_length) + ")");
-  if (params.batch_size < 1)
-    throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.batch_size));
+  if (params.search.batch_size < 1)
+    throw std::runtime_error("batch_size must be 1 or greater, is " + std::to_string(params.search.batch_size));
   if (params.config.model.vocab_size < 1)
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
-  if (params.sequence_length >= params.search.max_length)
-    throw std::runtime_error("input sequence_length (" + std::to_string(params.sequence_length) + ") is >= max_length (" + std::to_string(params.search.max_length) + ")");
-  if (params.input_ids.empty() || params.input_ids.data() == nullptr)
-    throw std::runtime_error("input_ids not set in GeneratorParams");
 
   search_ = CreateSearch(params);
-  state_ = model.CreateState(search_->GetSequenceLengths(), params);
+  state_ = model.CreateState(search_->GetSequenceLengths(), params);  // Search sequence lengths set when creating state
+
+  // Temporary solution for multimodal and whisper models
+  if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
+    AppendTokens(params.aux_input_ids);
+  }
 }
 
-void Generator::ComputeLogits() {
-  ThrowErrorIfSessionTerminated(state_->session_terminated_);
-  if (computed_logits_)
-    throw std::runtime_error("ComputeLogits called again without calling GenerateNextToken first");
+DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(const cpu_span<int32_t>& input_ids) {
+  auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(input_ids.size());
+  auto cpu_span = input_ids_device.CpuSpan();
+  std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
+  input_ids_device.CopyCpuToDevice();
+  return input_ids_device;
+}
 
-  auto logits = state_->Run(search_->GetSequenceLength(), search_->GetNextTokens(), search_->GetNextIndices());
+void Generator::AppendTokens(const cpu_span<int32_t>& input_ids) {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (input_ids.size() == 0)
+    throw std::runtime_error("input_ids is empty");
+  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v")
+    throw std::runtime_error("Please use params.SetInputs for " + model_->config_->model.type + ". AppendTokens is not supported for this model type.");
+  if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
+    throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
+
+  auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
+  search_->AppendTokens(input_ids_device);
+
+  computed_logits_ = false;
+  ComputeLogits(input_ids_device);
+}
+
+void Generator::ComputeLogits(DeviceSpan<int32_t>& next_tokens) {
+  if (computed_logits_)
+    throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
+
+  auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
     DumpSpan(stream, logits.CopyDeviceToCpu());
     stream << std::endl;
   }
-  search_->SetLogits(logits);
+  SetLogits(logits);
+  just_rewinded_ = false;
   computed_logits_ = true;
-
-  auto& search = search_->params_->search;
-  search_->ApplyMinLength(search.min_length);
-  search_->ApplyRepetitionPenalty(search.repetition_penalty);
 }
 
 void Generator::SetRuntimeOption(const char* key, const char* value) {
@@ -297,8 +324,9 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
 
 bool Generator::IsDone() const {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
-  if (computed_logits_)
-    throw std::runtime_error("IsDone() can't be called in the middle of processing logits");
+  if (computed_logits_) {
+    return false;
+  }
 
   bool is_done = search_->IsDone();
   if (is_done) {
@@ -312,12 +340,25 @@ bool Generator::IsSessionTerminated() const {
   return state_->session_terminated_;
 }
 
+void Generator::SetLogits(DeviceSpan<float> logits) {
+  search_->SetLogits(logits);
+  computed_logits_ = true;
+}
+
 void Generator::GenerateNextToken() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
-  if (!computed_logits_)
-    throw std::runtime_error("Must call ComputeLogits before GenerateNextToken");
+  if (search_->GetSequenceLength() == 0 && !computed_logits_)
+    throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");
+  if (!computed_logits_) {
+    auto next_tokens = search_->GetNextTokens();
+    if (just_rewinded_)
+      search_->AppendTokens(next_tokens);
+    ComputeLogits(next_tokens);
+  }
   computed_logits_ = false;
   auto& search = search_->params_->search;
+  search_->ApplyMinLength(search.min_length);
+  search_->ApplyRepetitionPenalty(search.repetition_penalty);
 
   if (g_log.enabled && g_log.generate_next_token) {
     auto& stream = Log("generate_next_token");
@@ -354,28 +395,32 @@ void Generator::GenerateNextToken() {
   }
 }
 
-DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
-  return search_->GetSequence(index);
+void Generator::RewindToLength(size_t new_length) {
+  if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v" || model_->config_->model.type == "decoder-pipeline")
+    throw std::runtime_error("RewindTo is currently not supported for " + model_->config_->model.type + ".");
+  if (new_length > search_->GetSequenceLength())
+    throw std::runtime_error("Cannot rewind to a length greater than the current sequence length");
+  if (new_length == search_->GetSequenceLength())
+    return;
+  size_t batch_size = search_->params_->search.batch_size;
+  if (batch_size > 1 && new_length != 0)
+    throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
+  search_->RewindTo(new_length);
+  state_->RewindTo(new_length);
+  computed_logits_ = false;
+  just_rewinded_ = true;
 }
 
-TokenSequences Generate(const Model& model, const GeneratorParams& params) {
-  auto generator = CreateGenerator(model, params);
-
-  while (!generator->IsDone()) {
-    generator->ComputeLogits();
-    generator->GenerateNextToken();
+DeviceSpan<float> Generator::GetLogits() {
+  if (!computed_logits_) {
+    auto next_tokens = search_->GetNextTokens();
+    ComputeLogits(next_tokens);
   }
+  return search_->GetLogits();
+}
 
-  TokenSequences result;
-
-  for (int i = 0; i < params.batch_size * params.search.num_return_sequences; i++) {
-    auto sequence = generator->search_->GetSequence(i);
-    auto sequence_cpu = sequence.CopyDeviceToCpu();
-
-    auto& v = result.emplace_back();
-    v.assign(sequence_cpu.begin(), sequence_cpu.end());
-  }
-  return result;
+DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
+  return search_->GetSequence(index);
 }
 
 }  // namespace Generators

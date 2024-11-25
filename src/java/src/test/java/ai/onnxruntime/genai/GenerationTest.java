@@ -6,7 +6,6 @@ package ai.onnxruntime.genai;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import java.util.function.Consumer;
 import java.util.logging.Logger;
@@ -42,14 +41,11 @@ public class GenerationTest {
   @EnabledIf("havePhi2")
   public void testUsageNoListener() throws GenAIException {
     try (SimpleGenAI generator = new SimpleGenAI(phi2ModelPath());
-        GeneratorParams params =
-            generator.createGeneratorParams(
-                TestUtils.applyPhi2ChatTemplate("What's 6 times 7?")); ) {
+        GeneratorParams params = generator.createGeneratorParams(); ) {
       params.setSearchOption("max_length", 20);
-
-      String result = generator.generate(params, null);
+      String result =
+          generator.generate(params, TestUtils.applyPhi2ChatTemplate("What's 6 times 7?"), null);
       logger.info("Result: " + result);
-      assertNotNull(result);
     }
   }
 
@@ -57,16 +53,14 @@ public class GenerationTest {
   @EnabledIf("havePhi2")
   public void testUsageWithListener() throws GenAIException {
     try (SimpleGenAI generator = new SimpleGenAI(phi2ModelPath());
-        GeneratorParams params =
-            generator.createGeneratorParams(
-                TestUtils.applyPhi2ChatTemplate("What's 6 times 7?")); ) {
+        GeneratorParams params = generator.createGeneratorParams(); ) {
       params.setSearchOption("max_length", 20);
-
       Consumer<String> listener = token -> logger.info("onTokenGenerate: " + token);
-      String result = generator.generate(params, listener);
+      String result =
+          generator.generate(
+              params, TestUtils.applyPhi2ChatTemplate("What's 6 times 7?"), listener);
 
       logger.info("Result: " + result);
-      assertNotNull(result);
     }
   }
 
@@ -84,13 +78,13 @@ public class GenerationTest {
       try (Sequences sequences = tokenizer.encodeBatch(prompts);
           GeneratorParams params = model.createGeneratorParams()) {
         params.setSearchOption("max_length", 200);
-        params.setInput(sequences);
+        params.setSearchOption("batch_size", prompts.length);
 
         long[] outputShape;
 
         try (Generator generator = new Generator(model, params); ) {
+          generator.appendTokenSequences(sequences);
           while (!generator.isDone()) {
-            generator.computeLogits();
             generator.generateNextToken();
           }
 
@@ -102,10 +96,10 @@ public class GenerationTest {
 
         try (Adapters adapters = new Adapters(model);
             Generator generator = new Generator(model, params); ) {
+          generator.appendTokenSequences(sequences);
           adapters.loadAdapters(TestUtils.testAdapterTestAdaptersPath(), "adapters_a_and_b");
           generator.setActiveAdapter(adapters, "adapters_a_and_b");
           while (!generator.isDone()) {
-            generator.computeLogits();
             generator.generateNextToken();
           }
           try (Tensor logits = generator.getOutput("logits")) {
@@ -133,8 +127,8 @@ public class GenerationTest {
             0, 0, 195, 731
           };
 
-      params.setInput(inputIDs, sequenceLength, batchSize);
       params.setSearchOption("max_length", maxLength);
+      params.setSearchOption("batch_size", batchSize);
 
       int[] expectedOutput =
           new int[] {
@@ -142,11 +136,14 @@ public class GenerationTest {
             0, 0, 195, 731, 731, 114, 114, 114, 114, 114
           };
 
-      try (Sequences output = model.generate(params)) {
-        assertEquals(output.numSequences(), batchSize);
+      try (Generator generator = new Generator(model, params); ) {
+        generator.appendTokens(inputIDs);
+        while (!generator.isDone()) {
+          generator.generateNextToken();
+        }
 
         for (int i = 0; i < batchSize; i++) {
-          int[] outputIds = output.getSequence(i);
+          int[] outputIds = generator.getSequence(i);
           for (int j = 0; j < maxLength; j++) {
             assertEquals(outputIds[j], expectedOutput[i * maxLength + j]);
           }

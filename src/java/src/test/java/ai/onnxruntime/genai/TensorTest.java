@@ -17,10 +17,11 @@ public class TensorTest {
   public void testAddTensorInput() throws GenAIException {
     // test setting an invalid search option throws a GenAIException
     try (SimpleGenAI generator = new SimpleGenAI(TestUtils.tinyGpt2ModelPath());
-        GeneratorParams params = generator.createGeneratorParams("Whatever"); ) {
+        GeneratorParams params = generator.createGeneratorParams(); ) {
       long[] shape = {2, 2};
       Tensor.ElementType elementType = Tensor.ElementType.float32;
       ByteBuffer data = ByteBuffer.allocateDirect(4 * Float.BYTES).order(ByteOrder.nativeOrder());
+      ;
 
       FloatBuffer floatBuffer = data.asFloatBuffer();
       floatBuffer.put(new float[] {1.0f, 2.0f, 3.0f, 4.0f});
