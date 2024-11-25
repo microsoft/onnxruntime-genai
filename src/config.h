@@ -155,6 +155,7 @@ struct Config {
     bool do_sample{};  // True to do randomized sampling through top_k and top_p, if false, the top logit score is chosen
     int min_length{};
     int max_length{};  // If omitted or 0 in json file, will be set to model.context_length on load
+    int batch_size{1};
     int num_beams{1};  // 1 means no beam search.
     int num_return_sequences{1};
     float repetition_penalty{1.0f};  // 1.0 means no penalty.
