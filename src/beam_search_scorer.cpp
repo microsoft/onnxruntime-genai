@@ -44,15 +44,14 @@ bool BeamHypotheses::CanImprove(float best_sum_logprobs, int current_length) con
 }
 
 BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
-    : batch_size_{parameters.batch_size},
+    : batch_size_{parameters.search.batch_size},
       num_beams_{parameters.search.num_beams},
       max_length_{parameters.search.max_length},
       pad_token_id_{parameters.config.model.pad_token_id},
       eos_token_id_{parameters.config.model.eos_token_id},
       early_stopping_{parameters.search.early_stopping},
-      not_done_count_{parameters.batch_size} {
+      not_done_count_{parameters.search.batch_size} {
   auto& device = *parameters.p_device;
-
   size_t const batch_beam_size = static_cast<size_t>(batch_size_) * num_beams_;
 
   std::span<HypothesisScore> beams;
@@ -66,8 +65,8 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
   next_beam_tokens_ = parameters.p_device->Allocate<int32_t>(batch_beam_size);
   next_beam_indices_ = parameters.p_device->Allocate<int32_t>(batch_beam_size);
 
-  // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
-  size_t const per_beam = (max_length_ * (max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;
+  // Space to store intermediate sequence
+  size_t const per_beam = (max_length_ * (max_length_ + 1)) / 2;
   hypothesis_buffer_ = device.Allocate<int32_t>(batch_beam_size * per_beam, true);
 
   memset(next_beam_scores_.Span().data(), 0, next_beam_scores_.Span().size_bytes());
@@ -75,7 +74,7 @@ BeamSearchScorer::BeamSearchScorer(const GeneratorParams& parameters)
   // Initialize score of first beam of each group with 0 and the rest with -1e9.
   // This ensures that the beams in the same group don't produce same tokens every time.
   std::span<float> const beam_scores = next_beam_scores_.Span();
-  for (int i = 0; i < parameters.batch_size; i++) {
+  for (int i = 0; i < parameters.search.batch_size; i++) {
     for (int j = 1; j < parameters.search.num_beams; j++) {
       beam_scores[i * parameters.search.num_beams + j] = -1e9;
     }
@@ -190,7 +189,6 @@ void BeamSearchScorer::Finalize(Sequences& sequences,
       std::span<const int32_t> src = sequences.GetSequence(batch_beam_index).Span();
       auto clone = hypothesis_buffer_.Span().subspan(hypothesis_buffer_used_, src.size());
       hypothesis_buffer_used_ += clone.size();
-
       copy(cpu_span{src}, cpu_span{clone});
       beam_hyp.Add(clone, final_score);
     }

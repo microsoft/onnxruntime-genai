@@ -9,31 +9,53 @@
 namespace Generators {
 namespace cuda {
 
-__global__ void ExpandInputSequences(const int32_t* input_sequences, int32_t* sequences, int batch_size, int beam_size, int current_length, int max_length) {
+__global__ void ExpandInputSequences(int32_t* input_sequences, int32_t* sequences, int batch_size, int beam_size, int sequence_length, int max_length) {
   // The original inputs are not expanded, this expands them in place into the sequences
   for (size_t batch = 0; batch < batch_size; batch++) {
     for (size_t beam = 0; beam < beam_size; beam++) {
-      for (int j = 0; j < current_length; j++) {
-        sequences[(batch * beam_size + beam) * max_length + j] =
-            static_cast<int32_t>(input_sequences[batch * current_length + j]);
+      for (int j = 0; j < sequence_length; j++) {
+        sequences[(batch * beam_size + beam) * max_length + j] = input_sequences[batch * sequence_length + j];
       }
     }
   }
 }
 
-void Launch_ExpandInputSequences(std::span<const int32_t> input_sequences, std::span<int32_t> sequences, int batch_size, int beam_size, int current_length, int max_length, cudaStream_t stream) {
-  ExpandInputSequences<<<1, 1, 0, stream>>>(input_sequences.data(), sequences.data(), batch_size, beam_size, current_length, max_length);
+void Launch_ExpandInputSequences(const std::span<int32_t> input_sequences, std::span<int32_t> sequences, int batch_size, int beam_size, int max_length, cudaStream_t stream) {
+  const int total_elements = static_cast<int>(input_sequences.size());
+  const int new_length = total_elements / batch_size;
+  ExpandInputSequences<<<1, 1, 0, stream>>>(input_sequences.data(), sequences.data(), batch_size, beam_size, new_length, max_length);
 }
 
-__global__ void AppendNextTokenToSequences(const int32_t* next_tokens, int32_t* sequences, int batch_beam_size, int current_length, int max_length) {
-  // Append next token to each sequence.
-  for (int i = 0; i < batch_beam_size; i++) {
-    sequences[i * max_length + current_length] = next_tokens[i];
+__global__ void AppendNextTokensToSequences(const int32_t* next_tokens, int32_t* sequences, int batch_beam_size, int past_length, int new_length, int max_length) {
+  // Append next tokens to each sequence.
+  int global_index = blockIdx.x * blockDim.x + threadIdx.x;
+  int batch_index = global_index / new_length;
+  int token_index = global_index % new_length;
+  if (global_index < batch_beam_size * new_length) {
+    sequences[batch_index * max_length + past_length + token_index] = next_tokens[global_index];
   }
 }
 
-void Launch_AppendNextTokenToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int current_length, int max_length, cudaStream_t stream) {
-  AppendNextTokenToSequences<<<1, 1, 0, stream>>>(next_tokens.data(), sequences.data(), batch_beam_size, current_length, max_length);
+void Launch_AppendNextTokensToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int past_length, int max_length, cudaStream_t stream) {
+  const int total_elements = static_cast<int>(next_tokens.size());
+  const int blockSize = std::min(total_elements, 256);
+  const int gridSize = (total_elements + blockSize - 1) / blockSize;
+  const int new_length = total_elements / batch_beam_size;
+  AppendNextTokensToSequences<<<gridSize, blockSize, 0, stream>>>(next_tokens.data(), sequences.data(), batch_beam_size, past_length, new_length, max_length);
+}
+
+__global__ void GetLastTokens(int32_t* next_tokens, const int32_t* sequences, int batch_beam_size, int sequence_length, int max_length) {
+  // Get the last token of each sequence.
+  int batch_beam_index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (batch_beam_index < batch_beam_size) {
+    next_tokens[batch_beam_index] = sequences[batch_beam_index * max_length + sequence_length - 1];
+  }
+}
+
+void Launch_GetLastTokens(int32_t* next_tokens, const int32_t* sequences, int batch_beam_size, int sequence_length, int max_length, cudaStream_t stream) {
+  const int blockSize = std::min(batch_beam_size, 256);
+  const int gridSize = (batch_beam_size + blockSize - 1) / blockSize;
+  GetLastTokens<<<gridSize, blockSize, 0, stream>>>(next_tokens, sequences, batch_beam_size, sequence_length, max_length);
 }
 
 __global__ void ArgMax(cub::KeyValuePair<int, float>* argmaxen, int32_t* next_tokens, int batch_size) {
@@ -49,7 +71,7 @@ struct ArgMaxDataImpl : ArgMaxData {
   cuda_unique_ptr<cub::KeyValuePair<int, float>> argmaxen_owner_;
 };
 
-__global__ void CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu) {
+__global__ void CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu) {
   // Look for EOS tokens, if seen set EOS flag and replace with pad token
   for (size_t batch_id = 0; batch_id < next_tokens_count; ++batch_id) {
     if (next_tokens[batch_id] == eos_token_id || eos_meet[batch_id] == true) {
@@ -75,8 +97,8 @@ __global__ void CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* e
   }
 }
 
-void Launch_CheckForEOS(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu, cudaStream_t stream) {
-  CheckForEOS<<<1, 1, 0, stream>>>(next_tokens, next_tokens_count, eos_meet, eos_token_id, pad_token_id, done_cpu);
+void Launch_CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu, cudaStream_t stream) {
+  CheckForEOSAndPad<<<1, 1, 0, stream>>>(next_tokens, next_tokens_count, eos_meet, eos_token_id, pad_token_id, done_cpu);
 }
 
 __global__ void AddProbsKernel(float* log_probs,

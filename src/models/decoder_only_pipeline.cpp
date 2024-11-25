@@ -79,7 +79,7 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
   return false;
 }
 
-DeviceSpan<float> IntermediatePipelineState::Run(int current_length, DeviceSpan<int32_t> next_tokens,
+DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
   State::Run(*model_.sessions_[id_], params_->BatchBeamSize());
 
@@ -106,11 +106,9 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   }
 }
 
-DeviceSpan<float> DecoderOnlyPipelineState::Run(int current_length, DeviceSpan<int32_t> next_tokens,
+DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                 DeviceSpan<int32_t> next_indices) {
-  if (!first_run_) {
-    UpdateInputsOutputs(next_tokens, next_indices, current_length);
-  }
+  UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
   for (auto& pipeline_state : pipeline_states_) {
     if (first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_prompt) {
@@ -202,7 +200,7 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int current_length, DeviceSpan<i
     }
 
     // Run the intermediate pipeline state
-    pipeline_state->Run(current_length, next_tokens, next_indices);
+    pipeline_state->Run(total_length, next_tokens, next_indices);
 
     // Transfer ownership of all the non-managed outputs from the current pipeline state to the ortvalue store.
     // All non managed outputs are assumed to be on CPU
@@ -239,12 +237,13 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int current_length, DeviceSpan<i
   return logits_.Get();
 }
 
-void DecoderOnlyPipelineState::UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens_unk,
-                                                   DeviceSpan<int32_t> beam_indices, int current_length) {
-  input_ids_.Update(next_tokens_unk);
-  position_inputs_.Update(current_length);
-  if (kv_cache_) kv_cache_->Update(beam_indices, current_length);
-  logits_.Update();
+void DecoderOnlyPipelineState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens,
+                                                   DeviceSpan<int32_t> beam_indices, int total_length) {
+  input_ids_.Update(next_tokens);
+  size_t new_length = input_ids_.GetShape()[1];
+  position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
+  if (kv_cache_) kv_cache_->Update(beam_indices, total_length);
+  logits_.Update(next_tokens, new_length);
 }
 
 OrtValue* DecoderOnlyPipelineState::GetOutput(const char* name) {

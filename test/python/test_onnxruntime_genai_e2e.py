@@ -27,13 +27,16 @@ def run_model(model_path: str | bytes | os.PathLike):
 
     sequences = tokenizer.encode_batch(prompts)
     params = og.GeneratorParams(model)
-    params.set_search_options(max_length=200)
-    params.try_graph_capture_with_max_batch_size(4)
-    params.input_ids = sequences
+    params.set_search_options(batch_size=3, max_length=200)
+    params.try_graph_capture_with_max_batch_size(3)
 
-    output_sequences = model.generate(params)
-    output = tokenizer.decode_batch(output_sequences)
-    assert output
+    generator = og.Generator(model, params)
+    generator.append_tokens(sequences)
+    while not generator.is_done():
+        generator.generate_next_token()
+    
+    for i in range(3):
+        assert generator.get_sequence(i) is not None
 
 
 def get_args():

@@ -8,17 +8,23 @@ struct KV_Cache_Combined {
   KV_Cache_Combined(State& state);
 
   void Add();  // Add to state inputs/outputs
-  void Update(DeviceSpan<int32_t> beam_indices, int current_length);
+  void Update(DeviceSpan<int32_t> beam_indices, int total_length);
+  void RewindTo(size_t index);
 
   template <typename ScoreType>
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
 
  private:
+  template <typename T>
+  void RewindPastTensorsTo(size_t index);
+
   State& state_;
   const Model& model_{state_.model_};
   int layer_count_;
   size_t input_index_{~0U}, output_index_{~0U};
+
+  bool is_first_update_{true};
 
   std::array<int64_t, 5> shape_;
   ONNXTensorElementDataType type_;
@@ -34,18 +40,27 @@ struct KV_Cache {
   static bool IsCacheNeeded(const Model& model);
 
   void AddEncoder();  // If model has an initial encoder step, this is used
+  // Register input_ids as ORT session input.
+  // Called only once during initialization of state.
   void Add();
-  void Update(DeviceSpan<int32_t> beam_indices, int current_length);
+  // Move present to past. Prepare present output for next generation iteration.
+  void Update(DeviceSpan<int32_t> beam_indices, int total_length);
+  void RewindTo(size_t index);
   template <typename ScoreType>
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
 
  private:
+  template <typename T>
+  void RewindPastTensorsTo(size_t index);
+
   State& state_;
   const Model& model_{state_.model_};
   int layer_count_;
   size_t input_index_{~0U}, output_index_{~0U};
   bool past_present_share_buffer_;  // True if model.decoder.past_present_share_buffer is set to true, and we're using cuda, and not beam search
+
+  bool is_first_update_{true};
 
   std::array<int64_t, 4> shape_;
   ONNXTensorElementDataType type_;

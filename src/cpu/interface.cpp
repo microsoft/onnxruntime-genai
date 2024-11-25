@@ -51,6 +51,8 @@ struct CpuInterface : DeviceInterface {
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
+
+  void Synchronize() override {}  // Nothing to do as CPU is always in sync with itself
 } g_cpu;
 
 DeviceInterface* GetCpuInterface() { return &g_cpu; }

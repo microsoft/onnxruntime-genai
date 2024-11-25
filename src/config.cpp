@@ -579,6 +579,8 @@ struct Search_Element : JSON::Element {
       v_.min_length = static_cast<int>(value);
     } else if (name == "max_length") {
       v_.max_length = static_cast<int>(value);
+    } else if (name == "batch_size") {
+      v_.batch_size = static_cast<int>(value);
     } else if (name == "num_beams") {
       v_.num_beams = static_cast<int>(value);
     } else if (name == "num_return_sequences") {

@@ -437,7 +437,24 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     } else if (provider_options.name == "dml") {
       if (!p_dml_api_) {
         auto current_module_path = CurrentModulePath();
-        dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
+
+        bool contains_device_luid = false;
+        LUID device_luid{};
+        for (const auto& [name, value] : provider_options.options) {
+          if (name == "luid") {
+            if (auto separator_position = value.find(":"); separator_position != std::string::npos) {
+              device_luid.HighPart = std::stol(value.substr(0, separator_position));
+              device_luid.LowPart = std::stol(value.substr(separator_position + 1));
+              contains_device_luid = true;
+            }
+          }
+        }
+
+        if (contains_device_luid) {
+          dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path, &device_luid);
+        } else {
+          dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
+        }
 
         constexpr auto directml_dll = "DirectML.dll";
         wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll, nullptr, 0));
@@ -495,9 +512,8 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
 
-  // If no device gets set, default to CPU
+  // If no device is set, create it, default to CPU
   if (!p_device_) {
-    assert(device_type_ == DeviceType::CPU);
     p_device_ = GetDeviceInterface(device_type_);
   }
 }

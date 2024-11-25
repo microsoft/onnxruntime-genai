@@ -19,11 +19,12 @@ struct Whisper_Model : Model {
 
 struct Whisper_State : State {
   Whisper_State(const Whisper_Model& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params);
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   OrtValue* GetOutput(const char* name) override;
 
  private:
-  void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool search_buffers);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool search_buffers);
+  void Initialize(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices);
   void Finalize() override;
 
   const Whisper_Model& model_;

@@ -37,15 +37,12 @@ TEST(SamplingTests, BatchedSamplingTopPCpu) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_p = 0.25f;
-  params->batch_size = 4;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = 4;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CPU);
   params->device_type = Generators::DeviceType::CPU;
   auto generator = Generators::CreateGenerator(*model, *params);
   auto logits = params->p_device->WrapMemory<float>(logits_cpu);
-  generator->search_->SetLogits(logits);
-  generator->computed_logits_ = true;
+  generator->SetLogits(logits);
   // Verify outputs match expected outputs
   generator->GenerateNextToken();
   auto next_tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
@@ -67,16 +64,13 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_k = 2;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CPU);
   params->device_type = Generators::DeviceType::CPU;
   auto generator = Generators::CreateGenerator(*model, *params);
   auto logits_copy = logits_cpu;
   auto logits = params->p_device->WrapMemory<float>(logits_copy);
-  generator->search_->SetLogits(logits);
-  generator->computed_logits_ = true;
+  generator->SetLogits(logits);
 
   // Verify outputs match expected outputs
   generator->GenerateNextToken();
@@ -105,16 +99,13 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
   params->search.do_sample = true;
   params->search.top_k = 2;
   params->search.top_p = 0.25f;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CPU);
   params->device_type = Generators::DeviceType::CPU;
   auto generator = Generators::CreateGenerator(*model, *params);
   auto logits_copy = logits_cpu;
   auto logits = params->p_device->WrapMemory<float>(logits_copy);
-  generator->search_->SetLogits(logits);
-  generator->computed_logits_ = true;
+  generator->SetLogits(logits);
   // Verify outputs match expected outputs
   generator->GenerateNextToken();
   auto next_tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
@@ -159,9 +150,7 @@ TEST(SamplingTests, RandomizedSamplingTopPCpu) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_p = 0.95f;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CPU);
   params->device_type = Generators::DeviceType::CPU;
   std::vector<float> logits_cpu(config.model.vocab_size * batch_size);
@@ -175,8 +164,7 @@ TEST(SamplingTests, RandomizedSamplingTopPCpu) {
     CreateRandomLogits(logits_cpu.data(), num_large, config.model.vocab_size, batch_size, engine);
     auto logits_copy = logits_cpu;
     auto logits = params->p_device->WrapMemory<float>(logits_copy);
-    generator->search_->SetLogits(logits);
-    generator->computed_logits_ = true;
+    generator->SetLogits(logits);
     generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
     // Verify outputs match expected outputs
@@ -201,9 +189,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_k = k;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CPU);
   params->device_type = Generators::DeviceType::CPU;
   std::vector<float> logits_cpu(config.model.vocab_size * batch_size);
@@ -217,8 +203,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
     CreateRandomLogits(logits_cpu.data(), num_large, config.model.vocab_size, batch_size, engine);
     auto logits_copy = logits_cpu;
     auto logits = params->p_device->WrapMemory<float>(logits_copy);
-    generator->search_->SetLogits(logits);
-    generator->computed_logits_ = true;
+    generator->SetLogits(logits);
     generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
     // Verify outputs match expected outputs
@@ -245,9 +230,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
   params->search.do_sample = true;
   params->search.top_k = k;
   params->search.top_p = p;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CPU);
   params->device_type = Generators::DeviceType::CPU;
   std::vector<float> logits_cpu(config.model.vocab_size * batch_size);
@@ -261,8 +244,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
     CreateRandomLogits(logits_cpu.data(), num_large, config.model.vocab_size, batch_size, engine);
     auto logits_copy = logits_cpu;
     auto logits = params->p_device->WrapMemory<float>(logits_copy);
-    generator->search_->SetLogits(logits);
-    generator->computed_logits_ = true;
+    generator->SetLogits(logits);
     generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
     // Verify outputs match expected outputs
@@ -295,15 +277,12 @@ TEST(SamplingTests, BatchedSamplingTopPCuda) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_p = 0.25f;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
   auto logits = AllocateFromCpuMem<float>(*params->p_device, logits_cpu);
   auto generator = Generators::CreateGenerator(*model, *params);
-  generator->search_->SetLogits(logits);
-  generator->computed_logits_ = true;
+  generator->SetLogits(logits);
   // Verify outputs match expected outputs
   generator->GenerateNextToken();
   auto next_tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
@@ -326,15 +305,12 @@ TEST(SamplingTests, BatchedSamplingTopKCuda) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_k = 2;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
   auto logits = AllocateFromCpuMem<float>(*params->p_device, logits_cpu);
   auto generator = Generators::CreateGenerator(*model, *params);
-  generator->search_->SetLogits(logits);
-  generator->computed_logits_ = true;
+  generator->SetLogits(logits);
   // Verify outputs match expected outputs
   generator->GenerateNextToken();
   auto next_tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
@@ -362,15 +338,12 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
   params->search.do_sample = true;
   params->search.top_k = 2;
   params->search.top_p = 0.25f;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
   auto logits = AllocateFromCpuMem<float>(*params->p_device, logits_cpu);
   auto generator = Generators::CreateGenerator(*model, *params);
-  generator->search_->SetLogits(logits);
-  generator->computed_logits_ = true;
+  generator->SetLogits(logits);
   // Verify outputs match expected outputs
   generator->GenerateNextToken();
   auto next_tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
@@ -393,9 +366,7 @@ TEST(SamplingTests, RandomizedSamplingTopPCuda) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_p = 0.95f;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = params->p_device->Allocate<float>(config.model.vocab_size * batch_size);
@@ -410,8 +381,7 @@ TEST(SamplingTests, RandomizedSamplingTopPCuda) {
     auto generator = Generators::CreateGenerator(*model, *params);
     LaunchGeometricDecayKernel(logits_gpu.Span().data(), config.model.vocab_size, batch_size, num_large, 20.0f, params->cuda_stream);
     LaunchFisherYatesKernel(logits_gpu.Span().data(), indices_buffer.Span().data(), config.model.vocab_size, batch_size, params->cuda_stream);
-    generator->search_->SetLogits(logits_gpu); 
-    generator->computed_logits_ = true;
+    generator->SetLogits(logits_gpu); 
     generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
     auto logits_cpu = logits_gpu.CopyDeviceToCpu();
@@ -437,9 +407,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
   params->search.max_length = 10;
   params->search.do_sample = true;
   params->search.top_k = k;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = params->p_device->Allocate<float>(config.model.vocab_size * batch_size);
@@ -454,8 +422,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
     LaunchGeometricDecayKernel(logits_gpu.Span().data(), config.model.vocab_size, batch_size, num_large, 20.0f, params->cuda_stream);
     LaunchFisherYatesKernel(logits_gpu.Span().data(), indices_buffer.Span().data(), config.model.vocab_size, batch_size, params->cuda_stream);
     auto generator = Generators::CreateGenerator(*model, *params);
-    generator->search_->SetLogits(logits_gpu);
-    generator->computed_logits_ = true;
+    generator->SetLogits(logits_gpu);
     generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
     auto logits_cpu = logits_gpu.CopyDeviceToCpu();
@@ -483,9 +450,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCuda) {
   params->search.do_sample = true;
   params->search.top_k = k;
   params->search.top_p = p;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = params->p_device->Allocate<float>(config.model.vocab_size * batch_size);
@@ -499,8 +464,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCuda) {
     auto generator = Generators::CreateGenerator(*model, *params);
     LaunchGeometricDecayKernel(logits_gpu.Span().data(), config.model.vocab_size, batch_size, num_large, 20.0f, params->cuda_stream);
     LaunchFisherYatesKernel(logits_gpu.Span().data(), indices_buffer.Span().data(), config.model.vocab_size, batch_size, params->cuda_stream);
-    generator->search_->SetLogits(logits_gpu);
-    generator->computed_logits_ = true;
+    generator->SetLogits(logits_gpu);
     generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
     auto logits_cpu = logits_gpu.CopyDeviceToCpu();
@@ -523,9 +487,7 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda) {
 
   auto params = Generators::CreateGeneratorParams(config);
   params->search.max_length = 10;
-  params->batch_size = batch_size;
-  params->sequence_length = 1;
-  params->input_ids = input_ids;
+  params->search.batch_size = batch_size;
   params->p_device = Generators::GetDeviceInterface(Generators::DeviceType::CUDA);
   params->device_type = Generators::DeviceType::CUDA;
   auto logits_gpu = params->p_device->Allocate<float>(config.model.vocab_size * batch_size);
@@ -539,8 +501,7 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda) {
     LaunchGeometricDecayKernel(logits_gpu.Span().data(), config.model.vocab_size, batch_size, num_large, 20.0f, params->cuda_stream);
     LaunchFisherYatesKernel(logits_gpu.Span().data(), indices_buffer.Span().data(), config.model.vocab_size, batch_size, params->cuda_stream);
     auto generator = Generators::CreateGenerator(*model, *params);
-    generator->search_->SetLogits(logits_gpu);
-    generator->computed_logits_ = true;
+    generator->SetLogits(logits_gpu);
     generator->GenerateNextToken();
     auto next_tokens = generator->search_->GetNextTokens().CopyDeviceToCpu();
     auto logits_cpu = logits_gpu.CopyDeviceToCpu();

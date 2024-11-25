@@ -112,6 +112,10 @@ struct CudaInterfaceImpl : CudaInterface {
     return std::make_unique<BeamSearch_Cuda>(params);
   }
 
+  void Synchronize() override {
+    ::cudaStreamSynchronize(cuda_stream_.get());
+  }
+
   cudaStream_t GetCudaStream() override {
     return cuda_stream_.get();
   }
@@ -128,20 +132,28 @@ struct CudaInterfaceImpl : CudaInterface {
     cuda::LaunchFp32ToFp16(input, output, count, stream);
   }
 
-  void Launch_UpdatePositionIds(int32_t* position_ids, int batch_beam_size, cudaStream_t stream) override {
-    cuda::Launch_UpdatePositionIds(position_ids, batch_beam_size, stream);
+  void LaunchExpandAndInt32ToInt64(const int32_t* src, int64_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) override {
+    cuda::LaunchExpandAndInt32ToInt64(src, dst, num_beams, batch_size, sequence_length, stream);
   }
 
-  void Launch_UpdatePositionIds(int64_t* position_ids, int batch_beam_size, cudaStream_t stream) override {
-    cuda::Launch_UpdatePositionIds(position_ids, batch_beam_size, stream);
+  void LaunchExpand(const int32_t* src, int32_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) override {
+    cuda::LaunchExpand(src, dst, num_beams, batch_size, sequence_length, stream);
   }
 
-  void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) override {
-    cuda::Launch_UpdateAttentionMask(mask_data, old_mask_data, batch_beam_size, current_length, max_length, update_only, stream);
+  void Launch_UpdatePositionIds(int32_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) override {
+    cuda::Launch_UpdatePositionIds(position_ids, batch_beam_size, total_length, new_kv_length, stream);
   }
 
-  void Launch_UpdateAttentionMask(int64_t* mask_data, const int64_t* old_mask_data, int batch_beam_size, int current_length, int max_length, bool update_only, cudaStream_t stream) override {
-    cuda::Launch_UpdateAttentionMask(mask_data, old_mask_data, batch_beam_size, current_length, max_length, update_only, stream);
+  void Launch_UpdatePositionIds(int64_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) override {
+    cuda::Launch_UpdatePositionIds(position_ids, batch_beam_size, total_length, new_kv_length, stream);
+  }
+
+  void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream) override {
+    cuda::Launch_UpdateAttentionMask(mask_data, old_data, batch_beam_size, new_kv_length, total_length, max_length, update_only, stream);
+  }
+
+  void Launch_UpdateAttentionMask(int64_t* mask_data, const int64_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream) override {
+    cuda::Launch_UpdateAttentionMask(mask_data, old_data, batch_beam_size, new_kv_length, total_length, max_length, update_only, stream);
   }
 
   void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) override {
@@ -215,8 +227,8 @@ void DumpSpan<float>(std::ostream& stream, std::span<const float> values) { retu
 template <>
 void DumpSpan<int>(std::ostream& stream, std::span<const int> values) { return gp_genai->DumpSpan(stream, values); }
 
-void Sequences::AfterAppendNextTokens(DeviceSpan<int32_t> next_tokens) { return gp_genai->Sequences_AfterAppendNextTokens(this, next_tokens); }
-
+void Sequences::AfterAppendNextTokens(DeviceSpan<int32_t>& next_tokens, size_t batch_beam_size) { return gp_genai->Sequences_AfterAppendNextTokens(this, next_tokens, batch_beam_size); }
+void Sequences::RewindTo(size_t new_length) { return gp_genai->Sequences_RewindTo(this, new_length); }
 }  // namespace Generators
 
 #ifdef _WIN32

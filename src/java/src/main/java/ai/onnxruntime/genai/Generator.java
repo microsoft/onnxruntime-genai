@@ -62,16 +62,49 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
-   * Computes the logits for the next token in the sequence.
+   * Appends tokens to the generator.
    *
+   * @param tokens The tokens to append.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
-  public void computeLogits() throws GenAIException {
+  public void appendTokens(int[] tokens) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
 
-    computeLogitsNative(nativeHandle);
+    appendTokens(nativeHandle, tokens);
+  }
+
+  /**
+   * Appends token sequences to the generator.
+   *
+   * @param sequences The sequences to append.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void appendTokenSequences(Sequences sequences) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    if (sequences.nativeHandle() == 0) {
+      throw new IllegalArgumentException("sequences has been freed and is invalid");
+    }
+
+    appendTokenSequences(nativeHandle, sequences.nativeHandle());
+  }
+
+  /**
+   * Rewinds the generator by the specified number of tokens.
+   *
+   * @param numTokens The number of tokens to rewind.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void rewindTokens(int numTokens) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    rewindTokens(nativeHandle, numTokens);
   }
 
   /**
@@ -136,7 +169,6 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
     @Override
     public Integer next() {
       try {
-        computeLogits();
         generateNextToken();
         return getLastTokenInSequence(0);
       } catch (GenAIException e) {
@@ -159,8 +191,13 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   private native void destroyGenerator(long nativeHandle);
 
   private native boolean isDone(long nativeHandle);
+  
+  private native void appendTokens(long nativeHandle, int[] tokens) throws GenAIException;
 
-  private native void computeLogitsNative(long nativeHandle) throws GenAIException;
+  private native void appendTokenSequences(long nativeHandle, long sequencesHandle)
+      throws GenAIException;
+
+  private native void rewindTokens(long nativeHandle, int numTokens) throws GenAIException;
 
   private native void generateNextTokenNative(long nativeHandle) throws GenAIException;
 

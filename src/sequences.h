@@ -5,9 +5,7 @@ namespace Generators {
 struct Sequences {
   Sequences(const GeneratorParams& params)
       : max_length_{params.search.max_length},
-        current_length_{static_cast<int>(params.input_ids.size()) / params.batch_size} {
-    assert(current_length_ * params.batch_size == params.input_ids.size());  // Ensure size divided perfectly
-
+        current_length_{0} {
     const size_t sequences_size = static_cast<size_t>(params.BatchBeamSize()) * max_length_;
     sequences_ = params.p_device->Allocate<int32_t>(sequences_size);
     if (params.search.num_beams > 1)
@@ -26,9 +24,12 @@ struct Sequences {
   int GetSequenceLength() const { return current_length_; }
 
   // After tokens are appended, this function must be called to update the state & log the tokens
-  void AfterAppendNextTokens(DeviceSpan<int32_t> next_tokens);
+  void AfterAppendNextTokens(DeviceSpan<int32_t>& next_tokens, size_t batch_beam_size);
 
   const int max_length_;
+
+  // Rewind sequences to ith token
+  void RewindTo(size_t index);
 
  private:
   // Two buffers of shape (batch_size, num_beams, max_seq_length) to store sequences.

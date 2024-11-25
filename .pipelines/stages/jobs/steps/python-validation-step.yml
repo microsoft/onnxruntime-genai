@@ -1,0 +1,97 @@
+parameters:
+- name: PythonScriptFolder
+  type: string
+- name: PythonScriptName
+  type: string
+- name: LocalFolder
+  type: string
+- name: ModelFolder
+  type: string
+
+steps:
+  - task: Docker@2
+    inputs:
+      containerRegistry: onnxruntimebuildcache
+      command: "login"
+      addPipelineData: false
+    displayName: "Log in to container registry"
+
+  - powershell: |
+      $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
+      azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
+    displayName: 'Download CUDA $(cuda_version)'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    condition: and(eq(variables['os'], 'win'), eq(variables['ep'], 'cuda'))
+  - powershell: |
+      python -m pip install -r test/python/requirements.txt
+      if ("$(ep)" -eq "cuda") {
+        $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
+        $env:PATH = "$env:CUDA_PATH\bin;$env:CUDA_PATH\extras\CUPTI\lib64;$env:PATH"
+        Write-Host $env:PATH
+        python -m pip install -r test/python/cuda/torch/requirements.txt
+        python -m pip install -r test/python/cuda/ort/requirements.txt
+      }
+      elseif ("$(ep)" -eq "directml") {
+        python -m pip install -r test/python/directml/torch/requirements.txt
+        python -m pip install -r test/python/directml/ort/requirements.txt
+      }
+      else {
+        python -m pip install -r test/python/cpu/torch/requirements.txt
+        python -m pip install -r test/python/cpu/ort/requirements.txt
+      }
+      cd ${{ parameters.PythonScriptFolder }}
+      python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
+
+      if ("$(ep)" -eq "directml") {
+        python ${{ parameters.PythonScriptName }} -m .\${{ parameters.LocalFolder }}\${{ parameters.ModelFolder }} --provider dml --non-interactive
+      } else {
+        python ${{ parameters.PythonScriptName }} -m .\${{ parameters.LocalFolder }}\${{ parameters.ModelFolder }} --provider $(ep) --non-interactive
+      }
+    displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact on Windows'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    condition: eq(variables['os'], 'win')
+
+  - bash: |
+      set -e -x
+      az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+      az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+      docker pull $(cuda_docker_image)
+      python_exe=/opt/python/cp310-cp310/bin/python3.10
+
+      docker run \
+        --gpus all \
+        --rm \
+        --volume $(Build.Repository.LocalPath):/ort_genai_src \
+        --volume $(Build.BinariesDirectory):/ort_genai_binary \
+        -e HF_TOKEN=$HF_TOKEN \
+        -w /ort_genai_src/ $(cuda_docker_image) \
+        bash -c " \
+            export ORTGENAI_LOG_ORT_LIB=1 && \
+            $python_exe -m pip install -r /ort_genai_src/test/python/requirements.txt && \
+            $python_exe -m pip install -r /ort_genai_src/test/python/cuda/torch/requirements.txt && \
+            $python_exe -m pip install -r /ort_genai_src/test/python/cuda/ort/requirements.txt && \
+            cd /ort_genai_src/${{ parameters.PythonScriptFolder }} && \
+            $python_exe -m pip install --no-index --find-links=/ort_genai_binary/wheel $(pip_package_name) && \
+            $python_exe ${{ parameters.PythonScriptName }} -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} --provider $(ep) --non-interactive"
+
+    displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact on Linux CUDA'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    condition: and(eq(variables['os'], 'linux'), eq(variables['ep'], 'cuda'))
+
+  - bash: |
+      export ORTGENAI_LOG_ORT_LIB=1
+      python -m pip install -r test/python/requirements.txt
+      if [[ "$(os)" == "linux" ]]; then
+        python -m pip install -r test/python/cpu/torch/requirements.txt
+        python -m pip install -r test/python/cpu/ort/requirements.txt
+      fi
+      if [[ "$(os)" == "osx" ]]; then
+        python -m pip install -r test/python/macos/torch/requirements.txt
+        python -m pip install -r test/python/macos/ort/requirements.txt
+      fi
+      cd ${{ parameters.PythonScriptFolder }}
+      python -m pip install --no-index --find-links=$(Build.BinariesDirectory)/wheel $(pip_package_name)
+      python ${{ parameters.PythonScriptName }} -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} --provider $(ep) --non-interactive
+    displayName: 'Run ${{ parameters.PythonScriptName }} With Artifact on Linux/macOS CPU'
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    condition: and(or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx')), eq(variables['ep'], 'cpu'))
