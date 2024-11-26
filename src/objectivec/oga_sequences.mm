@@ -28,7 +28,7 @@
 
 - (size_t)getCountWithError:(NSError**)error {
   try {
-      return _sequences->Count();
+    return _sequences->Count();
   }
   OGA_OBJC_API_IMPL_CATCH(error, size_t(-1))
 }

@@ -82,6 +82,12 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--skip-macos-test",
+        action="store_true",
+        help="Skip macos platform tests. Specify this argument when build targets only contain ios archs. ",
+    )
+
+    parser.add_argument(
         "--ort-version", required=True, help="The ORT version to depend on."
     )
 
@@ -148,6 +154,8 @@ def main():
             '--ort_version',
             args.ort_version
         ]
+        if args.skip_macos_test:
+            test_apple_packages_args.append("--skip_macos_test")
 
         run(test_apple_packages_args)
 
@@ -172,6 +180,9 @@ def main():
         if args.test:
             test_c_pod_args = ["pod", "lib", "lint", "--verbose"]
 
+            if args.skip_macos_test:
+                test_c_pod_args.append("--platforms=ios")
+
             run(test_c_pod_args, cwd=c_pod_staging_dir)
 
         log.info("Assembling Objective-C pod.")
@@ -186,6 +197,8 @@ def main():
 
         if args.test:
             test_objc_pod_args = ["pod", "lib", "lint", "--verbose", f"--include-podspecs={c_pod_podspec}"]
+            if args.skip_macos_test:
+                test_objc_pod_args.append("--platforms=ios")
 
             run(test_objc_pod_args, cwd=objc_pod_staging_dir)
 
