@@ -21,21 +21,20 @@ Java_ai_onnxruntime_genai_Model_createModel(JNIEnv* env, jobject thiz, jstring m
   return reinterpret_cast<jlong>(model);
 }
 
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Model_createModelFromConfig(JNIEnv* env, jobject thiz, jlong config_handle) {
+  const OgaConfig* config = reinterpret_cast<const OgaConfig*>(config_handle);
+
+  OgaModel* model = nullptr;
+  if (ThrowIfError(env, OgaCreateModelFromConfig(config, &model))) {
+    return 0;
+  }
+
+  return reinterpret_cast<jlong>(model);
+}
+
 JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Model_destroyModel(JNIEnv* env, jobject thiz, jlong model_handle) {
   OgaModel* model = reinterpret_cast<OgaModel*>(model_handle);
   OgaDestroyModel(model);
-}
-
-JNIEXPORT jlong JNICALL
-Java_ai_onnxruntime_genai_Model_generate(JNIEnv* env, jobject thiz, jlong model_handle,
-                                         jlong generator_params_handle) {
-  const OgaModel* model = reinterpret_cast<const OgaModel*>(model_handle);
-  const OgaGeneratorParams* params = reinterpret_cast<const OgaGeneratorParams*>(generator_params_handle);
-  OgaSequences* sequences = nullptr;
-  if (ThrowIfError(env, OgaGenerate(model, params, &sequences))) {
-    return 0;
-  }
-
-  return reinterpret_cast<jlong>(sequences);
 }

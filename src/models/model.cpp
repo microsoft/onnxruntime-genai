@@ -65,7 +65,18 @@ void State::Run(OrtSession& session, int new_batch_size) {
   }
 }
 
+void State::SetTerminate() {
+  session_terminated_ = true;
+  run_options_->SetTerminate();
+}
+
+void State::UnsetTerminate() {
+  session_terminated_ = false;
+  run_options_->UnsetTerminate();
+}
+
 OrtValue* State::GetInput(const char* name) {
+  ThrowErrorIfSessionTerminated(session_terminated_);
   for (size_t i = 0; i < input_names_.size(); i++) {
     if (std::strcmp(input_names_[i], name) == 0) {
       return inputs_[i];
@@ -75,6 +86,7 @@ OrtValue* State::GetInput(const char* name) {
 }
 
 OrtValue* State::GetOutput(const char* name) {
+  ThrowErrorIfSessionTerminated(session_terminated_);
   for (size_t i = 0; i < output_names_.size(); i++) {
     if (std::strcmp(output_names_[i], name) == 0) {
       return outputs_[i];
@@ -329,7 +341,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   }
 
   if (config_session_options.enable_mem_pattern.has_value()) {
-    if (config_session_options.enable_cpu_mem_arena.value())
+    if (config_session_options.enable_mem_pattern.value())
       session_options.EnableMemPattern();
     else
       session_options.DisableMemPattern();
@@ -397,17 +409,18 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
       ort_provider_options->Update(keys.data(), values.data(), keys.size());
 
-      // Create and set our cudaStream_t
-      if (!cuda_stream_.get())
-        cuda_stream_.Create();
-
-      ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_.get());
-
-      session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
       // Device type determines the scoring device.
       // Only use the primary session options to determine the device type
-      if (is_primary_session_options)
+      if (is_primary_session_options) {
         device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
+        p_device_ = GetDeviceInterface(device_type_);
+
+        // Create and set our cudaStream_t
+        cuda_stream_ = p_device_->GetCudaStream();
+        ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_);
+      }
+
+      session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
 
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
@@ -424,7 +437,24 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     } else if (provider_options.name == "dml") {
       if (!p_dml_api_) {
         auto current_module_path = CurrentModulePath();
-        dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
+
+        bool contains_device_luid = false;
+        LUID device_luid{};
+        for (const auto& [name, value] : provider_options.options) {
+          if (name == "luid") {
+            if (auto separator_position = value.find(":"); separator_position != std::string::npos) {
+              device_luid.HighPart = std::stol(value.substr(0, separator_position));
+              device_luid.LowPart = std::stol(value.substr(separator_position + 1));
+              contains_device_luid = true;
+            }
+          }
+        }
+
+        if (contains_device_luid) {
+          dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path, &device_luid);
+        } else {
+          dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
+        }
 
         constexpr auto directml_dll = "DirectML.dll";
         wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll, nullptr, 0));
@@ -481,6 +511,11 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
+
+  // If no device is set, create it, default to CPU
+  if (!p_device_) {
+    p_device_ = GetDeviceInterface(device_type_);
+  }
 }
 
 void Model::CreateSessionOptions() {
@@ -519,7 +554,10 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
     config_overlay = settings->GenerateConfigOverlay();
   }
   auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
+  return CreateModel(ort_env, std::move(config));
+}
 
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small" || config->model.type == "phimoe" || config->model.type == "qwen2" || config->model.type == "nemotron" || config->model.type == "chatglm")

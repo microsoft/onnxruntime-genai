@@ -5,28 +5,88 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
 using Xunit;
 using Xunit.Abstractions;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
-    public class TestsFixture : IDisposable
-    {
-        private OgaHandle _handle;
-        public TestsFixture()
-        {
-            _handle = new OgaHandle();
-        }
-
-        public void Dispose()
-        {
-            _handle.Dispose();
-        }
-    }
-
-    public class OnnxRuntimeGenAITests : IClassFixture<TestsFixture>
+    public class OnnxRuntimeGenAITests
     {
         private readonly ITestOutputHelper output;
+
+        private static string GetDirectoryInTreeThatContains(string currentDirectory, string targetDirectoryName)
+        {
+            bool found = false;
+            foreach (string d in Directory.GetDirectories(currentDirectory, searchPattern: targetDirectoryName))
+            {
+                found = true;
+                return Path.Combine(currentDirectory, targetDirectoryName);
+            }
+            if (!found)
+            {
+                DirectoryInfo dirInfo = new DirectoryInfo(currentDirectory);
+                if (dirInfo.Parent != null)
+                {
+                    return GetDirectoryInTreeThatContains(Path.GetFullPath(Path.Combine(currentDirectory, "..")), targetDirectoryName);
+                }
+                else
+                {
+                    return null;
+                }
+            }
+            return null;
+        }
+
+        private static bool _useCudaModel = false;
+
+        private static Lazy<string> _lazyPhi2Path = new Lazy<string>(() =>
+        {
+            string cpuModelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                               "test_models", "phi-2", "int4", "cpu");
+            string cudaModelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                               "test_models", "phi-2", "int4", "cuda");
+            // Prefer CUDA model if available.
+            if (System.IO.Directory.Exists(cudaModelPath))
+            {
+                _useCudaModel = true;
+                return cudaModelPath;
+            }
+
+            _useCudaModel = false;
+            return cpuModelPath;
+        });
+
+        private static string _phi2Path => _lazyPhi2Path.Value;
+
+        private static Lazy<string> _lazyTinyRandomGpt2ModelPath = new Lazy<string>(() =>
+        {
+            string modelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                            "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            if (System.IO.Directory.Exists(modelPath))
+            {
+                return modelPath;
+            }
+
+            return null;
+        });
+
+        private static string _tinyRandomGpt2ModelPath => _lazyTinyRandomGpt2ModelPath.Value;
+
+        private static Lazy<string> _lazyAdaptersPath = new Lazy<string>(() =>
+        {
+            string modelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                            "test_models", "adapters");
+            if (System.IO.Directory.Exists(modelPath))
+            {
+                return modelPath;
+            }
+
+            return null;
+        });
+
+        private static string _adaptersPath => _lazyAdaptersPath.Value;
+
 
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
@@ -37,13 +97,29 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         {
             public IgnoreOnModelAbsenceFact()
             {
-                string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+                string modelPath = _phi2Path;
                 bool exists = System.IO.Directory.Exists(modelPath);
                 if (!System.IO.Directory.Exists(modelPath))
                 {
                     // Skip this test on some machines since the model cannot be downloaded on those machines at runtime.
                     Skip = "Skipping this test since the model does not exist.";
                 }
+            }
+        }
+
+        [Fact(DisplayName = "TestConfig")]
+        public void TestConfig()
+        {
+            string modelPath = _tinyRandomGpt2ModelPath;
+            using (var config = new Config(modelPath))
+            {
+                config.ClearProviders();
+                config.SetProviderOption("cuda", "device_id", "0");
+                config.SetProviderOption("cuda", "catch_fire", "false");
+                config.AppendProvider("pigeon");
+                // At this point the providers is 'cuda' first and 'pigeon' as secondary.
+                // Given some provider options are made up and there is no pigeon provider, the model won't load.
+                // This tests the API
             }
         }
 
@@ -54,46 +130,41 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
             var inputIDsShape = new ulong[] { 2, 4 };
             ulong batchSize = inputIDsShape[0];
-            ulong sequenceLength = inputIDsShape[1];
             var expectedOutput = new int[] { 0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
                                              0, 0, 195, 731, 731, 114, 114, 114, 114, 114 };
 
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
-            using (var model = new Model(modelPath))
+            string modelPath = _tinyRandomGpt2ModelPath;
+            using (var config = new Config(modelPath))
             {
-                Assert.NotNull(model);
-                using (var generatorParams = new GeneratorParams(model))
+                Assert.NotNull(config);
+                using (var model = new Model(config))
                 {
-                    Assert.NotNull(generatorParams);
-
-                    generatorParams.SetSearchOption("max_length", maxLength);
-                    generatorParams.SetInputIDs(inputIDs, sequenceLength, batchSize);
-
-                    using (var generator = new Generator(model, generatorParams))
+                    Assert.NotNull(model);
+                    using(var generatorParams = new GeneratorParams(model))
                     {
-                        Assert.NotNull(generator);
+                        Assert.NotNull(generatorParams);
 
-                        while (!generator.IsDone())
+                        generatorParams.SetSearchOption("max_length", maxLength);
+                        generatorParams.SetSearchOption("batch_size", batchSize);
+
+                        using (var generator = new Generator(model, generatorParams))
                         {
-                            generator.ComputeLogits();
-                            generator.GenerateNextToken();
+                            Assert.NotNull(generatorParams);
+
+                            generator.AppendTokens(inputIDs);
+                            Assert.False(generator.IsDone());
+                            while (!generator.IsDone())
+                            {
+                                generator.GenerateNextToken();
+                            }
+
+                            for (ulong i = 0; i < batchSize; i++)
+                            {
+                                var sequence = generator.GetSequence(i).ToArray();
+                                var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
+                                Assert.Equal(expectedSequence, sequence);
+                            }
                         }
-
-                        for (ulong i = 0; i < batchSize; i++)
-                        {
-                            var sequence = generator.GetSequence(i).ToArray();
-                            var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
-                            Assert.Equal(expectedSequence, sequence);
-                        }
-                    }
-
-                    var sequences = model.Generate(generatorParams);
-                    Assert.NotNull(sequences);
-
-                    for (ulong i = 0; i < batchSize; i++)
-                    {
-                        var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
-                        Assert.Equal(expectedSequence, sequences[i].ToArray());
                     }
                 }
             }
@@ -106,7 +177,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             float temp = 0.6f;
             ulong maxLength = 20;
 
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -119,6 +190,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
                     };
+                    ulong batchSize = (ulong)strings.Length;
 
                     var sequences = tokenizer.EncodeBatch(strings);
                     Assert.NotNull(sequences);
@@ -127,16 +199,32 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     using GeneratorParams generatorParams = new GeneratorParams(model);
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetInputSequences(sequences);
                     generatorParams.SetSearchOption("max_length", maxLength);
+                    generatorParams.SetSearchOption("batch_size", batchSize);
                     generatorParams.SetSearchOption("do_sample", true);
                     generatorParams.SetSearchOption("top_k", topK);
                     generatorParams.SetSearchOption("temperature", temp);
-                    var outputSequences = model.Generate(generatorParams);
-                    Assert.NotNull(outputSequences);
 
-                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
-                    Assert.NotNull(outputStrings);
+                    using (var generator = new Generator(model, generatorParams))
+                    {
+                        Assert.NotNull(generator);
+
+                        generator.AppendTokenSequences(sequences);
+
+                        while (!generator.IsDone())
+                        {
+                            generator.GenerateNextToken();
+                        }
+
+                        for (ulong i = 0; i < batchSize; i++)
+                        {
+                            var sequence = generator.GetSequence(i).ToArray();
+                            Assert.NotNull(sequence);
+
+                            var outputString = tokenizer.Decode(sequence);
+                            Assert.NotNull(outputString);
+                        }
+                    }
                 }
             }
         }
@@ -148,7 +236,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             float temp = 0.6f;
             ulong maxLength = 20;
 
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -161,6 +249,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
                     };
+                    ulong batchSize = (ulong)strings.Length;
 
                     var sequences = tokenizer.EncodeBatch(strings);
                     Assert.NotNull(sequences);
@@ -169,16 +258,32 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     using GeneratorParams generatorParams = new GeneratorParams(model);
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetInputSequences(sequences);
                     generatorParams.SetSearchOption("max_length", maxLength);
+                    generatorParams.SetSearchOption("batch_size", batchSize);
                     generatorParams.SetSearchOption("do_sample", true);
                     generatorParams.SetSearchOption("top_p", topP);
                     generatorParams.SetSearchOption("temperature", temp);
-                    var outputSequences = model.Generate(generatorParams);
-                    Assert.NotNull(outputSequences);
 
-                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
-                    Assert.NotNull(outputStrings);
+                    using (var generator = new Generator(model, generatorParams))
+                    {
+                        Assert.NotNull(generator);
+
+                        generator.AppendTokenSequences(sequences);
+
+                        while (!generator.IsDone())
+                        {
+                            generator.GenerateNextToken();
+                        }
+
+                        for (ulong i = 0; i < batchSize; i++)
+                        {
+                            var sequence = generator.GetSequence(i).ToArray();
+                            Assert.NotNull(sequence);
+
+                            var outputString = tokenizer.Decode(sequence);
+                            Assert.NotNull(outputString);
+                        }
+                    }
                 }
             }
         }
@@ -191,7 +296,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             float temp = 0.6f;
             ulong maxLength = 20;
 
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -204,6 +309,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
                     };
+                    ulong batchSize = (ulong)strings.Length;
 
                     var sequences = tokenizer.EncodeBatch(strings);
                     Assert.NotNull(sequences);
@@ -212,17 +318,33 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     using GeneratorParams generatorParams = new GeneratorParams(model);
                     Assert.NotNull(generatorParams);
 
-                    generatorParams.SetInputSequences(sequences);
                     generatorParams.SetSearchOption("max_length", maxLength);
+                    generatorParams.SetSearchOption("batch_size", batchSize);
                     generatorParams.SetSearchOption("do_sample", true);
                     generatorParams.SetSearchOption("top_k", topK);
                     generatorParams.SetSearchOption("top_p", topP);
                     generatorParams.SetSearchOption("temperature", temp);
-                    var outputSequences = model.Generate(generatorParams);
-                    Assert.NotNull(outputSequences);
+                    
+                    using (var generator = new Generator(model, generatorParams))
+                    {
+                        Assert.NotNull(generator);
 
-                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
-                    Assert.NotNull(outputStrings);
+                        generator.AppendTokenSequences(sequences);
+
+                        while (!generator.IsDone())
+                        {
+                            generator.GenerateNextToken();
+                        }
+
+                        for (ulong i = 0; i < batchSize; i++)
+                        {
+                            var sequence = generator.GetSequence(i).ToArray();
+                            Assert.NotNull(sequence);
+
+                            var outputString = tokenizer.Decode(sequence);
+                            Assert.NotNull(outputString);
+                        }
+                    }
                 }
             }
         }
@@ -230,7 +352,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
         public void TestTokenizerBatchEncodeDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -259,7 +381,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeSingleDecode")]
         public void TestTokenizerBatchEncodeSingleDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -290,7 +412,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeStreamDecode")]
         public void TestTokenizerBatchEncodeStreamDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -326,7 +448,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerSingleEncodeDecode")]
         public void TestTokenizerSingleEncodeDecode()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -350,7 +472,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnModelAbsenceFact(DisplayName = "TestPhi2")]
         public void TestPhi2()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "cpu", "phi-2");
+            string modelPath = _phi2Path;
             using (var model = new Model(modelPath))
             {
                 Assert.NotNull(model);
@@ -363,6 +485,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                         "Rats are awesome pets!",
                         "The quick brown fox jumps over the lazy dog."
                     };
+                    var batchSize = (ulong)strings.Length;
 
                     var sequences = tokenizer.EncodeBatch(strings);
                     Assert.NotNull(sequences);
@@ -372,13 +495,28 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     Assert.NotNull(generatorParams);
 
                     generatorParams.SetSearchOption("max_length", 20);
-                    generatorParams.SetInputSequences(sequences);
+                    generatorParams.SetSearchOption("batch_size", batchSize);
 
-                    var outputSequences = model.Generate(generatorParams);
-                    Assert.NotNull(outputSequences);
+                    using (var generator = new Generator(model, generatorParams))
+                    {
+                        Assert.NotNull(generator);
 
-                    var outputStrings = tokenizer.DecodeBatch(outputSequences);
-                    Assert.NotNull(outputStrings);
+                        generator.AppendTokenSequences(sequences);
+
+                        while (!generator.IsDone())
+                        {
+                            generator.GenerateNextToken();
+                        }
+
+                        for (ulong i = 0; i < batchSize; i++)
+                        {
+                            var sequence = generator.GetSequence(i).ToArray();
+                            Assert.NotNull(sequence);
+
+                            var outputString = tokenizer.Decode(sequence);
+                            Assert.NotNull(outputString);
+                        }
+                    }
                 }
             }
         }
@@ -386,7 +524,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [Fact(DisplayName = "TestTensorAndAddExtraInput")]
         public void TestTensorAndAddExtraInput()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+            string modelPath = _tinyRandomGpt2ModelPath;
             using var model = new Model(modelPath);
             Assert.NotNull(model);
 
@@ -420,7 +558,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         {
             public IgnoreOnAdaptersAbsentFact()
             {
-                string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "adapters");
+                string modelPath = _adaptersPath;
                 bool exists = System.IO.Directory.Exists(modelPath);
                 if (!System.IO.Directory.Exists(modelPath))
                 {
@@ -436,7 +574,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnAdaptersAbsentFact(DisplayName = "TestAdapters")]
         public void TestAdapters()
         {
-            string modelPath = Path.Combine(Directory.GetCurrentDirectory(), "test_models", "adapters");
+            string modelPath = _adaptersPath;
             string adapterPath = Path.Combine(modelPath, "adapters.onnx_adapter");
 
             using var model = new Model(modelPath);
@@ -457,47 +595,62 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
             Int64 outputSize = 0;
             Int64[] output_shape;
-            float[] base_output;
+            float[] base_output = [];
 
             // Run base scenario
             {
                 using var genParams = new GeneratorParams(model);
                 genParams.SetSearchOption("max_length", 20);
-                genParams.SetInputSequences(sequences);
+                genParams.SetSearchOption("batch_size", 3);
 
                 using var generator = new Generator(model, genParams);
+                generator.AppendTokenSequences(sequences);
                 while(!generator.IsDone())
                 {
-                    generator.ComputeLogits();
                     generator.GenerateNextToken();
                 }
 
                 using var logits = generator.GetOutput("logits");
-                Assert.Equal(ElementType.float32, logits.Type());
+                if (_useCudaModel)
+                {
+                    Assert.Equal(ElementType.float16, logits.Type());
+                    // TODO: GetData with float16?
+                }
+                else
+                {
+                    Assert.Equal(ElementType.float32, logits.Type());
+                    base_output = logits.GetData<float>().ToArray();
+                }
                 output_shape = logits.Shape();
                 outputSize = logits.NumElements();
-                base_output = logits.GetData<float>().ToArray();
             }
             // Adapter scenario. The output must be affected
             {
                 using var genParams = new GeneratorParams(model);
                 genParams.SetSearchOption("max_length", 20);
-                genParams.SetInputSequences(sequences);
+                genParams.SetSearchOption("batch_size", 3);
 
                 using var generator = new Generator(model, genParams);
                 generator.SetActiveAdapter(adapters, "adapters_a_and_b");
+                generator.AppendTokenSequences(sequences);
                 while (!generator.IsDone())
                 {
-                    generator.ComputeLogits();
                     generator.GenerateNextToken();
                 }
                 using var logits = generator.GetOutput("logits");
-                Assert.Equal(ElementType.float32, logits.Type());
+                if (_useCudaModel)
+                {
+                    Assert.Equal(ElementType.float16, logits.Type());
+                    // TODO: GetData with float16?
+                }
+                else
+                {
+                    Assert.Equal(ElementType.float32, logits.Type());
+                    var adapter_output = logits.GetData<float>().ToArray();
+                    Assert.NotEqual(base_output, adapter_output);
+                }
                 Assert.Equal(outputSize, logits.NumElements());
                 Assert.Equal(output_shape, logits.Shape());
-
-                var adapter_output = logits.GetData<float>().ToArray();
-                Assert.NotEqual(base_output, adapter_output);
             }
         }
     }

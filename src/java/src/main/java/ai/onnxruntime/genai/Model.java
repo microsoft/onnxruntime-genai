@@ -10,6 +10,10 @@ public final class Model implements AutoCloseable {
     nativeHandle = createModel(modelPath);
   }
 
+  public Model(Config config) throws GenAIException {
+    nativeHandle = createModelFromConfig(config.nativeHandle());
+  }
+
   /**
    * Creates a Tokenizer instance for this model. The model contains the configuration information
    * that determines the tokenizer to use.
@@ -43,27 +47,6 @@ public final class Model implements AutoCloseable {
     return new GeneratorParams(this);
   }
 
-  /**
-   * Run the model to generate output sequences. Generation is limited to the "max_length" value
-   * (default:300) in the generator parameters. Use a Tokenizer to decode the generated sequences.
-   *
-   * @param generatorParams The generator parameters.
-   * @return The generated sequences.
-   * @throws GenAIException If the call to the GenAI native API fails.
-   */
-  public Sequences generate(GeneratorParams generatorParams) throws GenAIException {
-    if (generatorParams.nativeHandle() == 0) {
-      throw new IllegalArgumentException("generatorParams has been freed and is invalid");
-    }
-
-    if (nativeHandle == 0) {
-      throw new IllegalStateException("Instance has been freed and is invalid");
-    }
-
-    long sequencesHandle = generate(nativeHandle, generatorParams.nativeHandle());
-    return new Sequences(sequencesHandle);
-  }
-
   @Override
   public void close() {
     if (nativeHandle != 0) {
@@ -85,8 +68,7 @@ public final class Model implements AutoCloseable {
   }
 
   private native long createModel(String modelPath) throws GenAIException;
+  private native long createModelFromConfig(long configHandle) throws GenAIException;
 
   private native void destroyModel(long modelHandle);
-
-  private native long generate(long modelHandle, long generatorParamsHandle) throws GenAIException;
 }

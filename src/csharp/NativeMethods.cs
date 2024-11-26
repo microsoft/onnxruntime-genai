@@ -38,8 +38,29 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern void OgaDestroyResult(IntPtr /* OgaResult* */ result);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaCreateConfig(byte[] /* const char* */ configPath,
+                                                                     out IntPtr /* OgaConfig** */ config);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern void OgaDestroyConfig(IntPtr /* OgaConfig* */ config);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigClearProviders(IntPtr /* OgaConfig* */ config);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigAppendProvider(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ provider_name);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigSetProviderOption(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ provider_name,
+                                                                                byte[] /* const char* */ option_name, byte[] /* const char* */ option_value);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateModel(byte[] /* const char* */ configPath,
                                                                     out IntPtr /* OgaModel** */ model);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaCreateModelFromConfig(IntPtr /* const OgaConfig* */ config,
+                                                                              out IntPtr /* OgaModel** */ model);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyModel(IntPtr /* OgaModel* */ model);
@@ -65,20 +86,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(IntPtr /* OgaGeneratorParams* */ generatorParams,
                                                                                                        int /* int32_t */ maxBatchSize);
 
-        // This function is used to set the input IDs for the generator.
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern unsafe IntPtr /* OgaResult* */ OgaGeneratorParamsSetInputIDs(IntPtr /* OgaGeneratorParams* */ generatorParams,
-                                                                                          int* /* const int32_t* */ inputIDs,
-                                                                                          UIntPtr /* size_t */ inputIDsCount,
-                                                                                          UIntPtr /* size_t */ sequenceLength,
-                                                                                          UIntPtr /* size_t */ batchSize);
-
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetInputSequences(IntPtr /* OgaGeneratorParams* */ generatorParams,
-                                                                                         IntPtr /* const OgaSequences* */ sequences);
-
-
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetModelInput(IntPtr /* OgaGeneratorParams* */ generatorParams,
                                                                                      byte[] /* const char* */ name,
@@ -98,15 +105,28 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         // This function is used to check if the generator has finished generating all sequences.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern bool OgaGenerator_IsDone(IntPtr /* const OgaGenerator* */ generator);
-
-        // This function is used to compute the logits for the next token in the sequence.
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGenerator_ComputeLogits(IntPtr /* OgaGenerator* */ generator);
+        public static extern byte OgaGenerator_IsDone(IntPtr /* const OgaGenerator* */ generator);
 
         // This function is used to generate the next token in the sequence using the greedy search algorithm.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGenerator_GenerateNextToken(IntPtr /* OgaGenerator* */ generator);
+
+        // This function is used to append tokens to the sequence.
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern unsafe IntPtr /* OgaResult* */ OgaGenerator_AppendTokens(IntPtr /* OgaGenerator* */ generator,
+                                                                                      int* /* const int32_t* */ tokens,
+                                                                                      UIntPtr /* size_t */ tokenCount);
+
+        // This function is used to append a Sequences
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_AppendTokenSequences(IntPtr /* OgaGenerator* */ generator,
+                                                                                       IntPtr /* const OgaSequences* */ sequences);
+                                                                                       
+
+        // This function is used to rewind the generator to the given index.
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_RewindTo(IntPtr /* OgaGenerator* */ generator,
+                                                                            UIntPtr /* size_t */ index);
 
         // This function returns the length of the sequence at the given index.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -152,13 +172,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* const int32_t* */ OgaSequencesGetSequenceData(IntPtr /* const OgaSequences* */ sequences,
                                                                                      UIntPtr /* size_t */ sequenceIndex);
-
-        // This function is used to generate sequences for the given model using the given generator parameters.
-        // The OgaSequences object is an array of sequences, where each sequence is an array of tokens.
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGenerate(IntPtr /* const OgaModel* */ model,
-                                                                 IntPtr /* const OgaGeneratorParams* */ generatorParams,
-                                                                 out IntPtr /* OgaSequences** */ sequences);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateTokenizer(IntPtr /* const OgaModel* */ model,

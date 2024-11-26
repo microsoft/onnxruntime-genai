@@ -22,7 +22,7 @@ You can call a high level `generate()` method to generate all of the output at o
 // See https://aka.ms/new-console-template for more information
 using Microsoft.ML.OnnxRuntimeGenAI;
 
-OgaHandle ogaHandle = new OgaHandle();
+using OgaHandle ogaHandle = new OgaHandle();
 
 // Specify the location of your downloaded model.
 // Many models are published on HuggingFace e.g. 
@@ -121,11 +121,11 @@ This implementation checks if a number is prime by iterating only up to the squa
 ## Source code repository
 
 ONNX Runtime is an open source project. See:
-* (https://github.com/microsoft/onnxruntime)[https://github.com/microsoft/onnxruntime]
-* (https://github.com/microsoft/onnxruntime-genai)[https://github.com/microsoft/onnxruntime-genai]
+* (ONNX Runtime)[https://github.com/microsoft/onnxruntime]
+* (ONNX Runtime GenAI)[https://github.com/microsoft/onnxruntime-genai]
 
 ## Documentation
 
-See (https://onxxruntime.ai/docs/genai)[https://onxxruntime.ai/docs/genai]
+See (ONNX Runtime GenAI Documentation)[https://onxxruntime.ai/docs/genai]
 
 

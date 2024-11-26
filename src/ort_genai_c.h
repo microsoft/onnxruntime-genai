@@ -51,6 +51,7 @@ typedef struct OgaResult OgaResult;
 typedef struct OgaGeneratorParams OgaGeneratorParams;
 typedef struct OgaGenerator OgaGenerator;
 typedef struct OgaRuntimeSettings OgaRuntimeSettings;
+typedef struct OgaConfig OgaConfig;
 typedef struct OgaModel OgaModel;
 // OgaSequences is an array of token arrays where the number of token arrays can be obtained using
 // OgaSequencesCount and the number of tokens in each token array can be obtained using OgaSequencesGetSequenceCount.
@@ -172,13 +173,54 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* setti
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSettings* settings, const char* handle_name, void* handle);
 
 /*
- * \brief Creates a model from the given configuration directory and device type.
+ * \brief Creates an OgaConfig from the given configuration directory.
+ * \param[in] config_path The path to the configuration directory. The path is expected to be encoded in UTF-8.
+ * \param[out] out The created config.
+ * \return OgaResult containing the error message if the creation of the config failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaConfig** out);
+
+/*
+ * \brief Clear the list of providers in the given config
+ * \param[in] config The config to clear the providers from.
+ * \return OgaResult containing the error message if the clearing of the providers failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearProviders(OgaConfig* config);
+
+/*
+ * \brief Add the provider at the end of the list of providers in the given config if it doesn't already exist
+ * if it already exists, does nothing.
+ * \param[in] config The config to set the provider on.
+ * \param[in] provider The provider to set on the config.
+ * \return OgaResult containing the error message if the setting of the provider failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAppendProvider(OgaConfig* config, const char* provider);
+
+/*
+ * \brief Set a provider option
+ * \param[in] config The config to set the provider option on.
+ * \param[in] provider The provider to set the option on.
+ * \param[in] key The key of the option to set.
+ * \param[in] value The value of the option to set.
+ * \return OgaResult containing the error message if the setting of the provider option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config, const char* provider, const char* key, const char* value);
+
+/*
+ * \brief Creates a model from the given configuration directory.
  * \param[in] config_path The path to the model configuration directory. The path is expected to be encoded in UTF-8.
- * \param[in] device_type The device type to use for the model.
  * \param[out] out The created model.
  * \return OgaResult containing the error message if the model creation failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out);
+
+/*
+ * \brief Creates a model from the given configuration.
+ * \param[in] config The configuration to use for the model.
+ * \param[out] out The created model.
+ * \return OgaResult containing the error message if the model creation failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out);
 
 /*
  * \brief Creates a model from the given configuration directory, runtime settings and device type.
@@ -191,20 +233,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaMo
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out);
 
 /*
+ * \brief Destroys the given config
+ * \param[in] config The config to be destroyed.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyConfig(OgaConfig* config);
+
+/*
  * \brief Destroys the given model.
  * \param[in] model The model to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyModel(OgaModel* model);
-
-/*
- * \brief Generates an array of token arrays from the model execution based on the given generator params.
- * \param[in] model The model to use for generation.
- * \param[in] generator_params The parameters to use for generation.
- * \param[out] out The generated sequences of tokens. The caller is responsible for freeing the sequences using OgaDestroySequences
- *             after it is done using the sequences.
- * \return OgaResult containing the error message if the generation failed.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerate(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaSequences** out);
 
 /*
  * \brief Creates a OgaGeneratorParams from the given model.
@@ -223,26 +261,6 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* gener
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size);
-
-/*
- * \brief Sets the input ids for the generator params. The input ids are used to seed the generation.
- * \param[in] generator_params The generator params to set the input ids on.
- * \param[in] input_ids The input ids array of size input_ids_count = batch_size * sequence_length.
- * \param[in] input_ids_count The total number of input ids.
- * \param[in] sequence_length The sequence length of the input ids.
- * \param[in] batch_size The batch size of the input ids.
- * \return OgaResult containing the error message if the setting of the input ids failed.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputIDs(OgaGeneratorParams* generator_params, const int32_t* input_ids,
-                                                                 size_t input_ids_count, size_t sequence_length, size_t batch_size);
-
-/*
- * \brief Sets the input id sequences for the generator params. The input id sequences are used to seed the generation.
- * \param[in] generator_params The generator params to set the input ids on.
- * \param[in] sequences The input id sequences.
- * \return OgaResult containing the error message if the setting of the input id sequences failed.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputSequences(OgaGeneratorParams* generator_params, const OgaSequences* sequences);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* generator_params, const OgaNamedTensors* named_tensors);
 
@@ -278,14 +296,42 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
  * \return True if the generator has finished generating all the sequences, false otherwise.
  */
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
+OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator);
+
+/*
+ * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
+ * \param[in] oga_generator The generator to add the input ids to.
+ * \param[in] p_sequences The input id sequences.
+ * \return OgaResult containing the error message if the setting of the input ids failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* oga_generator, const OgaSequences* p_sequences);
+
+/*
+ * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
+ * \param[in] oga_generator The generator to add the input ids to.
+ * \param[in] input_ids The input ids to add.
+ * \param[in] input_ids_count The number of input ids to add (batch_size * sequence_length).
+ * \return OgaResult containing the error message if the setting of the input ids failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* oga_generator, int32_t* input_ids, size_t input_ids_count);
 
 /*
  * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored in the generator.
  * \param[in] generator The generator to compute the logits for.
  * \return OgaResult containing the error message if the computation of the logits failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_ComputeLogits(OgaGenerator* generator);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, const char* key, const char* value);
+
+/*
+ * \brief Rewinds the generator to the given length. This is useful when the user wants to rewind the generator to a specific length
+ *        and continue generating from that point.
+ * \param[in] generator The generator to rewind to the given length.
+ * \param[in] new_length The new length to rewind the generator to.
+ * \return OgaResult containing the error message if the rewinding failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t new_length);
 
 /*
  * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
