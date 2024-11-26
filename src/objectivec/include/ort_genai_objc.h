@@ -64,17 +64,6 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (nullable instancetype)initWithPath:(NSString*)path
                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
-/**
- * Generate sequences with the model.
- * The inputs and outputs are pre-allocated.
- *
- * @param params The generation params to use.
- * @param error Optional error information set if an error occurs.
- * @return The generated sequences.
- */
-- (nullable OGASequences*)generate:(OGAGeneratorParams*)params
-                             error:(NSError**)error;
-
 @end
 
 /**
@@ -232,27 +221,6 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
             error:(NSError**)error;
 
 /**
- * Set input with raw input ids.
- * @param rawPointer The pointer of the input ids data.
- * @param inputIdsCount The count of input ids.
- * @param sequenceLength The sequence length.
- * @param batchSize The batch size.
- * @param error Optional error information set if an error occurs.
- */
-- (BOOL)setInputIds:(const int32_t*)rawPointer
-      inputIdsCount:(size_t)inputIdsCount
-     sequenceLength:(size_t)sequenceLength
-          batchSize:(size_t)batchSize
-              error:(NSError**)error;
-/**
- * Set input with sequences type.
- * @param sequences The sequences.
- * @param error Optional error information set if an error occurs.
- */
-- (BOOL)setInputSequences:(OGASequences*)sequences
-                    error:(NSError**)error;
-
-/**
  * Set input with name and corresponding tensor.
  * @param name The input name.
  * @param tensor The tensor.
@@ -305,11 +273,28 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @return The result, or false if an error occurs.
  */
 - (BOOL)isDoneWithError:(NSError**)error NS_SWIFT_NAME(isDone()) __attribute__((swift_error(nonnull_error)));
+
 /**
- * Compute logits based on the input.
+ * Appends token sequences to the generator.
+ * @param sequences The sequences to append.
  * @param error Optional error information set if an error occurs.
  */
-- (BOOL)computeLogitsWithError:(NSError**)error NS_SWIFT_NAME(computeLogits());
+- (BOOL)appendTokenSequences:(OGASequences*)sequences error:(NSError**)error;
+
+/**
+ * Appends token sequences to the generator.
+ * @param tokens The tokens to append.
+ * @param error Optional error information set if an error occurs.
+ */
+- (BOOL)appendTokens:(NSArray<NSNumber*>*)tokens error:(NSError**)error;
+
+/**
+ * Rewinds the generator by the specified number of tokens.
+ * @param length The number of tokens to rewind.
+ * @param error Optional error information set if an error occurs.
+ */
+- (BOOL)rewindTo:(NSUInteger)length error:(NSError**)error;
+
 /**
  * Generate next token
  * @param error Optional error information set if an error occurs.
@@ -342,10 +327,6 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 @interface OGATensor : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
-- (nullable instancetype)initWithDataPointer:(void*)data
-                                       shape:(NSArray<NSNumber*>*)shape
-                                        type:(OGAElementType)elementType
-                                       error:(NSError**)error;
 - (OGAElementType)getTypeWithError:(NSError**)error NS_SWIFT_NAME(type());
 - (nullable void*)getDataPointerWithError:(NSError**)error NS_SWIFT_NAME(dataPointer());
 

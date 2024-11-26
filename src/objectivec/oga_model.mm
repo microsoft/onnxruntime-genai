@@ -21,15 +21,6 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (nullable OGASequences*)generate:(OGAGeneratorParams*)params error:(NSError**)error {
-  try {
-    std::unique_ptr<OgaSequences> output_sequences =
-        _model->Generate([params CXXAPIOgaGeneratorParams]);
-    return [[OGASequences alloc] initWithCXXPointer:std::move(output_sequences)];
-  }
-  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
-}
-
 - (const OgaModel&)CXXAPIOgaModel {
   return *(_model.get());
 }

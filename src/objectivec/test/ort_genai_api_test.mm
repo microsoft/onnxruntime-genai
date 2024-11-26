@@ -10,6 +10,14 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@interface OGATensor (Testing)
+
+- (nullable instancetype)initWithDataPointer:(void*)data
+                                       shape:(NSArray<NSNumber*>*)shape
+                                        type:(OGAElementType)elementType
+                                       error:(NSError**)error;
+@end
+
 @interface ORTGenAIAPITest : XCTestCase
 
 @end
@@ -47,6 +55,7 @@ NS_ASSUME_NONNULL_BEGIN
     ORTAssertNullableResultSuccessful(params, error);
 
     OGATensor* tensor = [[OGATensor alloc] initWithDataPointer:data.data() shape:shape type:OGAElementTypeFloat32 error:&error];
+    ORTAssertNullableResultSuccessful(tensor, error);
 
     ret = [params setModelInput:@"test_input" tensor:tensor error:&error];
     ORTAssertBoolResultSuccessful(ret, error);
@@ -54,9 +63,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)testGetOutput {
     std::vector<int64_t> input_ids_shape{2, 4};
-    std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+    NSArray<NSNumber*>* input_ids = @[@0, @0, @0, @52, @0, @0, @195, @731];
     const auto batch_size = input_ids_shape[0];
-    const auto input_sequence_length = input_ids_shape[1];
     int max_length = 10;
 
     NSError *error = nil;
@@ -67,30 +75,31 @@ NS_ASSUME_NONNULL_BEGIN
     OGAGeneratorParams *params = [[OGAGeneratorParams alloc] initWithModel:model error:&error];
     ORTAssertNullableResultSuccessful(params, error);
 
-    [params setInputIds:input_ids.data()
-          inputIdsCount:input_ids.size()
-         sequenceLength:input_sequence_length
-              batchSize:batch_size
-                   error:&error];
-
     [params setSearchOption:@"max_length" doubleValue:max_length error:&error];
+    [params setSearchOption:@"batch_size" doubleValue:batch_size error:&error];
+
+    XCTAssertNil(error);
 
     OGAGenerator* generator = [[OGAGenerator alloc] initWithModel:model
                                                            params:params
                                                             error:&error];
+
+    [generator appendTokens:input_ids error:&error];
+    XCTAssertNil(error);
+
+    ORTAssertNullableResultSuccessful(generator, error);
+
     // check prompt
      // full logits has shape [2, 4, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 4, 5]
     std::vector<float> expected_sampled_logits_prompt{0.29694548f, 0.00955007f, 0.0430819f, 0.10063869f, 0.0437237f,
-                                                    0.27329233f, 0.00841076f, -0.1060291f, 0.11328877f, 0.13369876f,
-                                                    0.30323744f, 0.0545997f, 0.03894716f, 0.11702324f, 0.0410665f,
-                                                    -0.12675379f, -0.04443946f, 0.14492269f, 0.03021223f, -0.03212897f,
-                                                    0.29694548f, 0.00955007f, 0.0430819f, 0.10063869f, 0.0437237f,
-                                                    0.27329233f, 0.00841076f, -0.1060291f, 0.11328877f, 0.13369876f,
-                                                    -0.04699047f, 0.17915794f, 0.20838135f, 0.10888482f, -0.00277808f,
-                                                    0.2938929f, -0.10538938f, -0.00226692f, 0.12050669f, -0.10622668f};
+                                                      0.27329233f, 0.00841076f, -0.1060291f, 0.11328877f, 0.13369876f,
+                                                      0.30323744f, 0.0545997f, 0.03894716f, 0.11702324f, 0.0410665f,
+                                                      -0.12675379f, -0.04443946f, 0.14492269f, 0.03021223f, -0.03212897f,
+                                                      0.29694548f, 0.00955007f, 0.0430819f, 0.10063869f, 0.0437237f,
+                                                      0.27329233f, 0.00841076f, -0.1060291f, 0.11328877f, 0.13369876f,
+                                                      -0.04699047f, 0.17915794f, 0.20838135f, 0.10888482f, -0.00277808f,
+                                                      0.2938929f, -0.10538938f, -0.00226692f, 0.12050669f, -0.10622668f};
 
-    ret = [generator computeLogitsWithError:&error];
-    ORTAssertBoolResultSuccessful(ret, error);
     OGATensor* prompt_logits_ptr = [generator getOutput:@"logits" error:&error];
     ORTAssertNullableResultSuccessful(prompt_logits_ptr, error);
     auto prompt_logits = static_cast<float*>([prompt_logits_ptr getDataPointerWithError:&error]);
@@ -104,13 +113,13 @@ NS_ASSUME_NONNULL_BEGIN
 
     ret = [generator generateNextTokenWithError:&error];
     ORTAssertBoolResultSuccessful(ret, error);
+    ret = [generator generateNextTokenWithError:&error];
+    ORTAssertBoolResultSuccessful(ret, error);
+
     // check for the 1st token generation
     // full logits has shape [2, 1, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 1, 5]
     std::vector<float> expected_sampled_logits_token_gen{0.03742531f, -0.05752287f, 0.14159015f, 0.04210977f, -0.1484456f,
-                                                       0.3041716f, -0.08701379f, -0.03778192f, 0.07471392f, -0.02049096f};
-
-    ret = [generator computeLogitsWithError:&error];
-    ORTAssertBoolResultSuccessful(ret, error);
+                                                         0.3041716f, -0.08701379f, -0.03778192f, 0.07471392f, -0.02049096f};
 
     OGATensor* token_gen_logits_ptr = [generator getOutput:@"logits" error:&error];
     ORTAssertNullableResultSuccessful(token_gen_logits_ptr, error);

@@ -30,9 +30,30 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
-- (BOOL)computeLogitsWithError:(NSError**)error {
+- (BOOL)appendTokenSequences:(OGASequences*)sequences error:(NSError**)error {
   try {
-    _generator->ComputeLogits();
+    _generator->AppendTokenSequences([sequences CXXAPIOgaSequences]);
+    return YES;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
+- (BOOL)appendTokens:(NSArray<NSNumber*>*)tokens error:(NSError**)error {
+  std::vector<int32_t> cxxTokens;
+  for (NSNumber* object in tokens) {
+    cxxTokens.push_back([object intValue]);
+  }
+
+  try {
+    _generator->AppendTokens(cxxTokens.data(), cxxTokens.size());
+    return YES;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
+- (BOOL)rewindTo:(NSUInteger)length error:(NSError**)error {
+  try {
+    _generator->RewindTo(length);
     return YES;
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)

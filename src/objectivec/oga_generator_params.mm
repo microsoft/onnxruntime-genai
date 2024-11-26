@@ -29,26 +29,6 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
-- (BOOL)setInputIds:(const int32_t*)rawPointer
-      inputIdsCount:(size_t)inputIdsCount
-     sequenceLength:(size_t)sequenceLength
-          batchSize:(size_t)batchSize
-              error:(NSError**)error {
-  try {
-    _generatorParams->SetInputIDs(rawPointer, inputIdsCount, sequenceLength, batchSize);
-    return YES;
-  }
-  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
-}
-
-- (BOOL)setInputSequences:(OGASequences*)sequences error:(NSError**)error {
-  try {
-    _generatorParams->SetInputSequences([sequences CXXAPIOgaSequences]);
-    return YES;
-  }
-  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
-}
-
 - (BOOL)setModelInput:(NSString*)name tensor:(OGATensor*)tensor error:(NSError**)error {
   try {
     _generatorParams->SetModelInput([name UTF8String], [tensor CXXAPIOgaTensor]);
