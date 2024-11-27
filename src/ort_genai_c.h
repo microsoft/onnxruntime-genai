@@ -341,6 +341,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator, const char* name, OgaTensor** out);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* oga_generator, OgaTensor** out);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* oga_generator, OgaTensor* tensor);
+
 /*
  * \brief Returns the number of tokens in the sequence at the given index.
  * \param[in] generator The generator to get the count of the tokens for the sequence at the given index.

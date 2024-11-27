@@ -309,6 +309,16 @@ struct OgaGenerator : OgaAbstract {
     return std::unique_ptr<OgaTensor>(out);
   }
 
+  std::unique_ptr<OgaTensor> GetLogits() {
+    OgaTensor* out;
+    OgaCheckResult(OgaGenerator_GetLogits(this, &out));
+    return std::unique_ptr<OgaTensor>(out);
+  }
+
+  void SetLogits(OgaTensor& tensor) {
+    OgaCheckResult(OgaGenerator_SetLogits(this, &tensor));
+  }
+
 #if __cplusplus >= 202002L
   std::span<const int32_t> GetSequence(size_t index) const {
     return {GetSequenceData(index), GetSequenceCount(index)};

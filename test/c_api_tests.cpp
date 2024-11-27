@@ -286,6 +286,44 @@ TEST(CAPITests, GetOutputCAPI) {
   }
 }
 
+TEST(CAPITests, SetLogitsCAPI) {
+  std::vector<int64_t> input_ids_shape{2, 4};
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+
+  int batch_size = static_cast<int>(input_ids_shape[0]);
+  int max_length = 10;
+
+  // To generate this file:
+  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
+  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+
+  // check prompt
+  auto raw_logits = generator->GetOutput("logits");
+  auto raw_logits_shape = raw_logits->Shape();
+  for (auto& shape : raw_logits_shape) {
+    std::cout << shape << " ";
+  }
+  std::cout << std::endl;
+  std::vector<float> expected_sampled_logits_prompt{0.29694548f, 0.00955007f, 0.0430819f, 0.10063869f, 0.0437237f};
+  std::vector<float> dummy_logits(2 * 4 * 1000, 0.0f);
+  for (int i = 0; i < dummy_logits.size(); i++) {
+    dummy_logits[i] = expected_sampled_logits_prompt[i % expected_sampled_logits_prompt.size()];
+  }
+  std::vector<int64_t> dummy_logits_shape{2, 4, 1000};
+  auto logits = OgaTensor::Create(dummy_logits.data(), dummy_logits_shape.data(), dummy_logits_shape.size(), OgaElementType_float32);
+  generator->SetLogits(*logits);
+  std::cout << "Set logits" << std::endl;
+}
+
 TEST(CAPITests, SetTerminate) {
 #if TEST_PHI2
 
@@ -665,5 +703,3 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 }
-
-

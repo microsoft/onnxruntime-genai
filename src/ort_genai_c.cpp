@@ -370,6 +370,33 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* oga_generator, OgaTensor** out) {
+  OGA_TRY
+  // Run ComputeLogits to get the logits if computed_logits_ is false
+  auto logits_span = reinterpret_cast<Generators::Generator*>(oga_generator)->GetLogits();
+  OgaGenerator_GetOutput(oga_generator, "logits", out);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* oga_generator, OgaTensor* tensor) {
+  OGA_TRY
+  auto generator = reinterpret_cast<Generators::Generator*>(oga_generator);
+  auto logits_tensor = reinterpret_cast<Generators::Tensor*>(tensor);
+  size_t element_count = logits_tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
+  auto new_logits_span = std::span<const float>(reinterpret_cast<float*>(logits_tensor->ort_tensor_->GetTensorMutableRawData()), element_count);
+  auto logits = generator->search_->GetLogits();
+  if (static_cast<size_t>(new_logits_span.size()) != logits.size()) {
+    throw std::runtime_error("Generator::SetLogits passed an array of size " +
+                             std::to_string(new_logits_span.size()) + " but should be size " + std::to_string(logits.size()));
+  }
+  Generators::copy(new_logits_span, logits.CpuSpan());
+  logits.CopyCpuToDevice();
+  generator->computed_logits_ = true;
+  return nullptr;
+  OGA_CATCH
+}
+
 size_t OGA_API_CALL OgaGenerator_GetSequenceCount(const OgaGenerator* oga_generator, size_t index) {
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
   return generator.GetSequence(static_cast<int>(index)).size();
