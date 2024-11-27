@@ -374,7 +374,19 @@ OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* oga_generator, OgaT
   OGA_TRY
   // Run ComputeLogits to get the logits if computed_logits_ is false
   auto logits_span = reinterpret_cast<Generators::Generator*>(oga_generator)->GetLogits();
-  OgaGenerator_GetOutput(oga_generator, "logits", out);
+  auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
+  std::vector<int64_t> shape{generator.state_->params_->search.batch_size, 1, generator.model_->config_->model.vocab_size};
+  logits_span.CopyDeviceToCpu();
+  std::span<const float> cpu_logits_span = logits_span.CpuSpan();
+
+  std::unique_ptr<OrtValue> ortvalue_clone = OrtValue::CreateTensor(generator.model_->allocator_cpu_,
+                                                                    shape,
+                                                                    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+  auto clone_span = std::span<float>(reinterpret_cast<float*>(ortvalue_clone->GetTensorMutableRawData()), cpu_logits_span.size());
+  Generators::copy(cpu_logits_span, clone_span);
+  auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
+  tensor->external_owner_ = tensor;
+  *out = reinterpret_cast<OgaTensor*>(tensor.get());
   return nullptr;
   OGA_CATCH
 }
@@ -382,6 +394,9 @@ OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* oga_generator, OgaT
 OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* oga_generator, OgaTensor* tensor) {
   OGA_TRY
   auto generator = reinterpret_cast<Generators::Generator*>(oga_generator);
+  if (!generator->computed_logits_) {
+    throw std::runtime_error("logits are not computed yet. Please call GenerateNextToken or AppendTokens before calling SetLogits.");
+  }
   auto logits_tensor = reinterpret_cast<Generators::Tensor*>(tensor);
   size_t element_count = logits_tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
   auto new_logits_span = std::span<const float>(reinterpret_cast<float*>(logits_tensor->ort_tensor_->GetTensorMutableRawData()), element_count);
