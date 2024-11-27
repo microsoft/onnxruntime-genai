@@ -44,13 +44,14 @@ void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream,
                                        int num_alignment_heads,
                                        const int* alignment_heads,
                                        int frames,
-                                       int max_length);
+                                       int max_length,
+                                       int sequence_length=1);
 
 template <typename T>
 void LaunchFinalizeCrossQK(cudaStream_t stream,
                            int iteration_number,
                            int context_decoding_len,
-                           int batch_size,
+                           int batch_beam_size,
                            int num_beams,
                            int max_length,
                            int num_alignment_heads,

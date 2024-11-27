@@ -61,7 +61,7 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
     input_names_.push_back(model_.config_->model.decoder.inputs.past_sequence_length.c_str());
     inputs_.push_back(past_sequence_length_.get());
   }
-  
+
   // Add cache indirection
   if (model_.session_info_->HasInput(model_.config_->model.decoder.inputs.cache_indirection)) {
     auto cache_indirection_type = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.cache_indirection);
@@ -89,7 +89,7 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
     output_cross_qk_type_ = model_.session_info_->GetOutputDataType(output_cross_qk_name);
     output_cross_qk_shape_ = std::array<int64_t, 4>{params_->BatchBeamSize(), model_.config_->model.decoder.num_attention_heads, params_->sequence_length, num_frames / 2};
     output_cross_qk_index_ = outputs_.size();
-    
+
     for (int i = 0; i < model_.config_->model.decoder.num_hidden_layers; i++) {
       output_cross_qk_.emplace_back(OrtValue::CreateTensor(*model_.allocator_device_, output_cross_qk_shape_, output_cross_qk_type_));
       output_cross_qk_names_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.output_cross_qk_names, i));
@@ -271,14 +271,15 @@ void WhisperState::UpdateCrossQKSearchBuffer(int current_length) {
     cuda::LaunchCopyCrossQKSingleDecodeStep(model_.cuda_stream_,
                                             cross_qk_search_buffer_->GetTensorMutableData<T>(),
                                             output_cross_qk_ptrs_gpu_.data(),
-                                            current_length - params_->sequence_length,
+                                            current_length - (first_run_ ? (params_->sequence_length) : 1),
                                             params_->BatchBeamSize(),
                                             model_.config_->model.decoder.num_hidden_layers,
                                             static_cast<int32_t>(decoder_state_->output_cross_qk_shape_[1]),
                                             static_cast<int32_t>(alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0]),
                                             alignment_heads_->GetTensorData<int32_t>(),
                                             static_cast<int32_t>(decoder_state_->output_cross_qk_shape_[3]),
-                                            params_->search.max_length);
+                                            params_->search.max_length,
+                                            first_run_ ? (params_->sequence_length) : 1);
 #endif
   }
 }
@@ -289,11 +290,11 @@ void WhisperState::FinalizeCrossQK(int current_length) {
 #if USE_CUDA
     // Instantiate final output for cross QKs
     auto num_alignment_heads = alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0];
-    auto cross_qk_shape = std::array<int64_t, 5>{params_->batch_size, params_->search.num_return_sequences, num_alignment_heads, current_length, encoder_state_->GetNumFrames() / 2};
+    auto cross_qk_shape = std::array<int64_t, 5>{params_->batch_size, params_->search.num_return_sequences, num_alignment_heads, current_length - 1, encoder_state_->GetNumFrames() / 2};
     cross_qk_final_ = OrtValue::CreateTensor(*model_.allocator_device_, cross_qk_shape, decoder_state_->output_cross_qk_type_);
 
     cuda::LaunchFinalizeCrossQK(model_.cuda_stream_,
-                                current_length - params_->sequence_length,
+                                current_length - 1,
                                 params_->sequence_length,
                                 static_cast<int32_t>(decoder_state_->output_cross_qk_shape_[0]),
                                 params_->search.num_beams,
@@ -331,6 +332,7 @@ RoamingArray<float> WhisperState::Run(int current_length, RoamingArray<int32_t> 
 
     return logits;
   } else {
+    first_run_ = false;
     // Update inputs and outputs for decoder
     decoder_state_->UpdateInputsOutputs(next_tokens, next_indices, current_length, first_run_);
 
@@ -344,7 +346,6 @@ RoamingArray<float> WhisperState::Run(int current_length, RoamingArray<int32_t> 
     } else {
       UpdateCrossQKSearchBuffer<float>(current_length);
     }
-    first_run_ = false;
 
     return logits;
   }
