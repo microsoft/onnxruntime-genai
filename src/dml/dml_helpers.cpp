@@ -21,14 +21,14 @@ static bool IsSoftwareAdapter(IDXGIAdapter1* adapter) {
   return desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE || (is_basic_render_driver_vendor_id && is_basic_render_driver_device_id);
 };
 
-static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters() {
+static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters(PLUID device_luid = nullptr) {
   ComPtr<IDXGIFactory4> dxgi_factory;
   THROW_IF_FAILED(CreateDXGIFactory(IID_PPV_ARGS(&dxgi_factory)));
 
   std::vector<ComPtr<IDXGIAdapter1>> adapter_infos;
 
   ComPtr<IDXGIFactory6> dxgi_factory6;
-  if (SUCCEEDED(dxgi_factory.As(&dxgi_factory6))) {
+  if (SUCCEEDED(dxgi_factory.As(&dxgi_factory6)) && !device_luid) {
     // Enumerate adapters by performance. This only works in Windows 10 Version 1803 and later.
     ComPtr<IDXGIAdapter1> adapter;
     for (uint32_t adapter_index = 0;
@@ -66,7 +66,16 @@ static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters() {
       ComPtr<ID3D12Device> d3d12_device;
       THROW_IF_FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12_device)));
 
-      if (d3d12_device) {
+      if (d3d12_device && device_luid) {
+        DXGI_ADAPTER_DESC1 description = {};
+        THROW_IF_FAILED(adapter->GetDesc1(&description));
+
+        // Check if current adapter LUID is the same as the target one
+        if (device_luid->HighPart == description.AdapterLuid.HighPart && device_luid->LowPart == description.AdapterLuid.LowPart) {
+          adapter_infos.emplace_back(std::move(adapter));
+          break;
+        }
+      } else if (d3d12_device) {
         adapter_infos.emplace_back(std::move(adapter));
       }
     }
@@ -75,15 +84,15 @@ static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters() {
   return adapter_infos;
 }
 
-static ComPtr<IDXGIAdapter1> CreatePerformantAdapter() {
-  auto filtered_adapters = EnumerateAdapters();
+static ComPtr<IDXGIAdapter1> CreateAdapter(PLUID device_luid = nullptr) {
+  auto filtered_adapters = EnumerateAdapters(device_luid);
   if (filtered_adapters.empty()) {
     throw std::runtime_error("No adapter is available for DML.");
   }
   return filtered_adapters.front();
 }
 
-DmlObjects CreateDmlObjects(const std::string& current_module_path) {
+DmlObjects CreateDmlObjects(const std::string& current_module_path, PLUID device_luid) {
   D3D12_COMMAND_QUEUE_DESC command_queue_description = {
       D3D12_COMMAND_LIST_TYPE_COMPUTE,
       0,
@@ -93,8 +102,7 @@ DmlObjects CreateDmlObjects(const std::string& current_module_path) {
 
   DmlObjects dml_objects;
 
-  auto adapter = CreatePerformantAdapter();
-
+  auto adapter = CreateAdapter(device_luid);
   ComPtr<ID3D12SDKConfiguration1> d3d12_sdk_config;
   ComPtr<ID3D12DeviceFactory> d3d12_factory;
 

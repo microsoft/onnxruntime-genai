@@ -10,13 +10,13 @@ namespace Generators {
 BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
     : stream_{parameters.cuda_stream} {
   state_cpu_ = CudaMallocHostArray<cuda::BeamScorerState>(1);
-  state_cpu_->batch_size_ = static_cast<size_t>(parameters.batch_size);
+  state_cpu_->batch_size_ = static_cast<size_t>(parameters.search.batch_size);
   state_cpu_->num_beams_ = static_cast<size_t>(parameters.search.num_beams);
   state_cpu_->max_length_ = static_cast<size_t>(parameters.search.max_length);
   state_cpu_->pad_token_id_ = parameters.config.model.pad_token_id;
   state_cpu_->eos_token_id_ = parameters.config.model.eos_token_id;
   state_cpu_->early_stopping_ = parameters.search.early_stopping;
-  state_cpu_->not_done_count_ = parameters.batch_size;
+  state_cpu_->not_done_count_ = parameters.search.batch_size;
   state_cpu_->hypothesis_buffer_used_ = 0;
   state_gpu_ = CudaMallocArray<cuda::BeamScorerState>(1);
   cudaMemcpyAsync(state_gpu_.get(), state_cpu_.get(), sizeof(cuda::BeamScorerState), ::cudaMemcpyHostToDevice, stream_);
@@ -35,10 +35,10 @@ BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
   next_beam_tokens_ = parameters.p_device->Allocate<int32_t>(batch_beam_size);
   next_beam_indices_ = parameters.p_device->Allocate<int32_t>(batch_beam_size);
 
-  cuda::LaunchInitScoresKernel(next_beam_scores_.Span().data(), parameters.batch_size, parameters.search.num_beams, stream_);
+  cuda::LaunchInitScoresKernel(next_beam_scores_.Span().data(), parameters.search.batch_size, parameters.search.num_beams, stream_);
 
-  // Space to store intermediate sequence with length sequence_length, sequence_length + 1, ..., max_sequence_length.
-  size_t per_beam = (state_cpu_->max_length_ * (state_cpu_->max_length_ + 1) - (parameters.sequence_length - 1) * parameters.sequence_length) / 2;
+  // Space to store intermediate sequence.
+  size_t per_beam = (state_cpu_->max_length_ * (state_cpu_->max_length_ + 1)) / 2;
   hypothesis_buffer_ = device.Allocate<int32_t>(batch_beam_size * per_beam);
 }
 

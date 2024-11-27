@@ -13,7 +13,7 @@ namespace Generators {
 
 Logits::Logits(State& state)
     : state_{state},
-      shape_{static_cast<int64_t>(state_.params_->batch_size) * state_.params_->search.num_beams, state_.params_->sequence_length, model_.config_->model.vocab_size},
+      shape_{static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
@@ -69,6 +69,8 @@ Logits::Logits(State& state)
 #endif
     }
   }
+
+  input_sequence_lengths.resize(state_.params_->search.batch_size);
 }
 
 #pragma warning(push)
@@ -77,19 +79,17 @@ Logits::Logits(State& state)
 DeviceSpan<float> Logits::Get() {
   size_t element_count = shape_[0] * shape_[1] * shape_[2];
 
-  // First iteration? Then copy the logits over to a {batch_beams, 1, vocab_size} tensor
   // The model's output logits are {batch_size*num_beams, input_seq_len, vocab_size}
   OrtValue* logits_of_last_token = output_raw_.get();
+  std::array<int64_t, 3> shape_last{shape_[0], 1, shape_[2]};
   if (shape_[1] != 1) {
     const size_t seq_length = shape_[1];
     const size_t vocab_size = shape_[2];
     const size_t num_beams = state_.params_->search.num_beams;
     const size_t element_count_last_token = shape_[0] * shape_[2];
 
-    shape_[1] = 1;
-
     // create new OrtValue for logits_of_last_token and use output_last_tokens_ to hold it
-    output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_last, type_);
 
     if (type_ == Ort::TypeToTensorType<Ort::Float16_t>)
       logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(*model_.allocator_device_, shape_);
@@ -99,15 +99,9 @@ DeviceSpan<float> Logits::Get() {
     size_t element_size = type_ == Ort::TypeToTensorType<float> ? 4 : 2;
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
-    const auto* input_ids = state_.params_->input_ids.data();
-    for (int batch_index = 0; batch_index < state_.params_->batch_size; batch_index++) {
+    for (int batch_index = 0; batch_index < state_.params_->search.batch_size; batch_index++) {
       // Find the first non pad token from the end
-      size_t token_index = seq_length;
-      while (token_index-- > 0) {
-        if (input_ids[token_index] != model_.config_->model.pad_token_id)
-          break;
-      }
-
+      size_t token_index = input_sequence_lengths[batch_index] - 1;
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
         switch (model_.device_type_) {
           case DeviceType::DML: {
@@ -152,8 +146,6 @@ DeviceSpan<float> Logits::Get() {
 
         vocab_index += vocab_size;
       }
-
-      input_ids += seq_length;
     }
 
     element_count = shape_[0] * shape_[2];  // shape_[1] is now 1, so the element count must be updated
@@ -186,14 +178,14 @@ DeviceSpan<float> Logits::Get() {
 #if USE_DML
   // DML doesn't support on-device scoring yet, so we need to download some data to the CPU
   if (model_.device_type_ == DeviceType::DML) {
-    value32_cpu_ = OrtValue::CreateTensor<float>(model_.allocator_cpu_, shape_);
+    value32_cpu_ = OrtValue::CreateTensor<float>(model_.allocator_cpu_, shape_last);
   }
 #endif
 
   if (logits_.empty() || logits_of_last_token->GetTensorMutableRawData() != logits_.Span().data())
     logits_ = WrapTensor<float>(*state_.params_->p_device, *logits_of_last_token);
 
-  if (!logits_processors_.empty() && logits_processors_.at(0)) {
+  if (!logits_processors_.empty() && logits_processors_.at(0) && logits_masks_.empty()) {
     logits_masks_ = mask_future_.get();
   }
 
@@ -254,11 +246,11 @@ DeviceSpan<float> Logits::Get() {
 
 #pragma warning(pop)
 
-void Logits::Update(DeviceSpan<int32_t> next_tokens_unk) {
-  if (!logits_processors_.empty() && logits_processors_.at(0)) {
-    auto next_tokens = next_tokens_unk.CopyDeviceToCpu();
-    for (int i = 0; i < next_tokens.size(); i++) {
-      logits_processors_[i]->CommitToken(static_cast<uint32_t>(next_tokens[i]));
+void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length) {
+  if (!logits_processors_.empty() && logits_processors_.at(0) && new_kv_length == 1) {
+    auto next_tokens_cpu = next_tokens.CopyDeviceToCpu();
+    for (int i = 0; i < next_tokens_cpu.size(); i++) {
+      logits_processors_[i]->CommitToken(static_cast<uint32_t>(next_tokens_cpu[i]));
     }
     mask_future_ = std::async(std::launch::async, [&]() {
       std::vector<std::vector<uint32_t>> result;
@@ -271,10 +263,27 @@ void Logits::Update(DeviceSpan<int32_t> next_tokens_unk) {
     });
   }
 
-  if (output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1] == 1) {
+  if (static_cast<size_t>(output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1]) == new_kv_length && new_kv_length == 1) {
     return;
   }
 
+  // Store length of input sequence for each batch for the get step
+  for (int b = 0; b < state_.params_->search.batch_size; b++) {
+    // Find the first non pad token from the end
+    size_t token_index = new_kv_length;
+    while (token_index-- > 0) {
+      auto next_token = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan()[b * new_kv_length + token_index];
+      if (next_token != model_.config_->model.pad_token_id)
+        break;
+    }
+    input_sequence_lengths[b] = static_cast<int>(token_index + 1);
+  }
+
+  if (static_cast<size_t>(output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1]) == new_kv_length) {
+    return;
+  }
+
+  shape_[1] = new_kv_length;
   StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t> ? sb_logits16_ : sb_logits32_;
   output_raw_ = !sb_logits ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
                            : sb_logits->CreateTensorOnStaticBuffer(shape_, type_);
@@ -310,7 +319,7 @@ void Logits::AddMask(std::span<float> logits, std::vector<std::vector<uint32_t>>
     auto& mask = masks[index];
     for (size_t i = 0; i < vocab_size; i++) {
       // mask is a 32-bit integer, where each bit corresponds to a token in the vocabulary.
-      // If the bit is set, the corresponding token is masked (i.e., its logit is set to the lowest possible value).  
+      // If the bit is set, the corresponding token is masked (i.e., its logit is set to the lowest possible value).
       logits_span[i] = mask[i / 32] & (1 << (i % 32)) ? logits_span[i] : std::numeric_limits<float>::lowest();
     }
     vocab_index += vocab_size;
@@ -323,6 +332,41 @@ void Logits::AddMask(DeviceSpan<float> logits, DeviceSpan<uint32_t> mask) {
                             static_cast<int>(shape_[2]), mask.Span().data(), model_.cuda_stream_);
 }
 #endif
+
+void Logits::ResetProcessors() {
+  if (!state_.params_->guidance_type.empty() && !state_.params_->guidance_data.empty()) {
+    logits_processors_.clear();
+    logits_masks_.clear();
+    auto tokenizer = model_.CreateTokenizer();
+    LogitsProcessorConfig config = {
+        model_.config_->model.vocab_size,
+        static_cast<uint32_t>(model_.config_->model.eos_token_id),
+        state_.params_->guidance_type,
+        state_.params_->guidance_data,
+        tokenizer,
+        model_.config_->config_path.string()};
+    logits_processors_.resize(shape_[0]);
+    for (int i = 0; i < shape_[0]; i++) {
+      logits_processors_[i] = CreateLogitsProcessor(config);
+    }
+    if (logits_processors_.at(0)) {
+      // Compute the mask maybe time consuming, so we do it in a separate thread
+      mask_future_ = std::async(std::launch::async, [&]() {
+        std::vector<std::vector<uint32_t>> result;
+        for (int i = 0; i < shape_[0]; i++) {
+          auto processor = logits_processors_.at(i).get();
+          if (processor == nullptr) {
+            result.push_back({});
+            continue;
+          }
+          auto mask = processor->ComputeMask();
+          result.push_back(std::move(mask));
+        }
+        return result;
+      });
+    }
+  }
+}
 
 void Logits::Add() {
   output_index_ = state_.outputs_.size();

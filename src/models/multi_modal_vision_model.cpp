@@ -84,12 +84,12 @@ EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const Generat
   inputs_embeds_.Add();
 }
 
-void EmbeddingState::UpdateInputsAndOutputs(DeviceSpan<int32_t> next_tokens) {
+void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool is_prompt) {
   input_ids_.Update(next_tokens);
-  image_features_.Update();
+  image_features_.Update(is_prompt);
 }
 
-DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) {
+DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
   State::Run(*model_.embedding_session_, batch_size);
 
@@ -104,7 +104,7 @@ VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorPara
   image_features_.Add();
 }
 
-DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) {
+DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   const int num_images = static_cast<int>(inputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[0]);
   State::Run(*model_.vision_session_, num_images);
 
@@ -122,17 +122,19 @@ DecoderState::DecoderState(const MultiModalVisionModel& model, DeviceSpan<int32_
   kv_cache_.Add();
 }
 
-DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) {
+DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   State::Run(*model_.decoder_session_, batch_size);
   return logits_.Get();
 }
 
-void DecoderState::UpdateInputsAndOutputs(int current_length, DeviceSpan<int32_t> beam_indices) {
-  position_inputs_.Update(current_length);
-  kv_cache_.Update(beam_indices, current_length);
-  logits_.Update();
-  inputs_embeds_.UpdateSequenceLength();
+void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
+  int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
+  size_t new_length = next_tokens.size() / batch_size;
+  position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
+  kv_cache_.Update(beam_indices, total_length);
+  logits_.Update(next_tokens, new_length);
+  inputs_embeds_.UpdateSequenceLength(new_length);
 }
 
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& model,
@@ -147,7 +149,7 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& mo
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths_unk, params, captured_graph_info_.get());
 }
 
-DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t> next_tokens,
+DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                                                DeviceSpan<int32_t> next_indices) {
   // Pipeline state defines the pipeline of the execution of the models
   // Prompt stage:
@@ -157,6 +159,10 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   // Generation stage:
   //   - input_ids, image_features -> |embeddings_model| -> inputs_embeds
   //   - inputs_embeds -> |decoder_model| -> logits
+
+  embedding_state_->UpdateInputsOutputs(next_tokens, is_prompt_);
+  decoder_state_->UpdateInputsOutputs(next_tokens, current_length, next_indices);
+
   if (is_prompt_) {
     if (num_image_tokens_ > 0) {
       vision_state_->Run(current_length, next_tokens, next_indices);
@@ -173,12 +179,8 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     return logits;
   }
 
-  embedding_state_->UpdateInputsAndOutputs(next_tokens);
-  decoder_state_->UpdateInputsAndOutputs(current_length, next_indices);
-
   embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
   embedding_state_->Run(current_length, next_tokens, next_indices);
-
   return decoder_state_->Run(current_length, next_tokens, next_indices);
 }
 

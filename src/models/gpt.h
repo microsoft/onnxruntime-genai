@@ -17,8 +17,10 @@ struct Gpt_Model : Model {
 };
 
 struct Gpt_State : State {
-  Gpt_State(const Gpt_Model& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params);
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) override;
+  Gpt_State(const Gpt_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params);
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
+
+  void RewindTo(size_t index) override;
 
  private:
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int current_length);
