@@ -33,7 +33,9 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (nullable NSString*)decode:(const int32_t*)tokensData length:(size_t)tokensLength error:(NSError**)error {
+- (nullable NSString*)decode:(const int32_t*)tokensData
+                      length:(size_t)tokensLength
+                       error:(NSError**)error {
   try {
     OgaString result = _tokenizer->Decode(tokensData, tokensLength);
     return [NSString stringWithUTF8String:result];
@@ -46,4 +48,3 @@
 }
 
 @end
-

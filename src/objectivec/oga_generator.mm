@@ -10,8 +10,8 @@
 }
 
 - (nullable instancetype)initWithModel:(OGAModel*)model
-                   params:(OGAGeneratorParams*)params
-                    error:(NSError**)error {
+                                params:(OGAGeneratorParams*)params
+                                 error:(NSError**)error {
   if ((self = [super init]) == nil) {
     return nil;
   }
@@ -67,8 +67,7 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
-- (nullable OGATensor*)getOutput:(NSString*)name
-                           error:(NSError**)error {
+- (nullable OGATensor*)getOutput:(NSString*)name error:(NSError**)error {
   try {
     std::unique_ptr<OgaTensor> output = _generator->GetOutput([name UTF8String]);
     return [[OGATensor alloc] initWithCXXPointer:std::move(output)];
@@ -76,16 +75,14 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (nullable const int32_t*)sequenceDataAtIndex:(size_t)index
-                                         error:(NSError**)error {
+- (nullable const int32_t*)sequenceDataAtIndex:(size_t)index error:(NSError**)error {
   try {
     return _generator->GetSequenceData(index);
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (size_t)sequenceCountAtIndex:(size_t)index
-                        error:(NSError**)error {
+- (size_t)sequenceCountAtIndex:(size_t)index error:(NSError**)error {
   try {
     return _generator->GetSequenceCount(index);
   }

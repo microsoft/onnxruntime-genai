@@ -29,7 +29,8 @@
 - (int32_t)getLastElementWithError:(NSError**)error {
   if (_size == 0) {
     if (error != nil) {
-      NSDictionary *errorDictionary = @{NSLocalizedDescriptionKey : @"The size of this span is invalid"};
+      NSDictionary* errorDictionary =
+          @{NSLocalizedDescriptionKey : @"The size of this span is invalid"};
       *error = [[NSError alloc] initWithDomain:kOgaErrorDomain code:-1 userInfo:errorDictionary];
     }
     return -1;

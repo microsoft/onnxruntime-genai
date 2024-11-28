@@ -27,7 +27,7 @@
   try {
     OGANamedTensors* result = [[OGANamedTensors alloc]
         initWithCXXPointer:_processor->ProcessImages([prompt UTF8String],
-                                                        &[images CXXAPIOgaImages])];
+                                                     &[images CXXAPIOgaImages])];
     return result;
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)

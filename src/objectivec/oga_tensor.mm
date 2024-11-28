@@ -19,16 +19,16 @@
 }
 
 - (nullable instancetype)initWithDataPointer:(void*)data
-                          shape:(NSArray<NSNumber*>*)shape
-                           type:(OGAElementType)elementType
-                          error:(NSError**)error {
+                                       shape:(NSArray<NSNumber*>*)shape
+                                        type:(OGAElementType)elementType
+                                       error:(NSError**)error {
   try {
     std::vector<int64_t> cxxShape;
     for (NSNumber* object in shape) {
       cxxShape.push_back([object longLongValue]);
     }
     self = [self initWithCXXPointer:OgaTensor::Create(data, cxxShape.data(), cxxShape.size(),
-                                    static_cast<OgaElementType>(elementType))];
+                                                      static_cast<OgaElementType>(elementType))];
     return self;
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)

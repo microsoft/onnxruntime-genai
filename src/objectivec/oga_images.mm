@@ -9,16 +9,16 @@
   std::unique_ptr<OgaImages> _images;
 }
 
-- (nullable instancetype)initWithPath:(NSArray<NSString *> *)paths error:(NSError**)error {
+- (nullable instancetype)initWithPath:(NSArray<NSString*>*)paths error:(NSError**)error {
   if ((self = [super init]) == nil) {
     return nil;
   }
 
   try {
-    std::vector<const char *> cpp_paths;
+    std::vector<const char*> cpp_paths;
     cpp_paths.reserve([paths count]);
 
-    for (NSString* path in paths){
+    for (NSString* path in paths) {
       cpp_paths.push_back([path UTF8String]);
     }
 

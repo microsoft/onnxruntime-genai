@@ -21,7 +21,8 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (nullable instancetype)initWithMultiModalProcessor:(OGAMultiModalProcessor*)processor error:(NSError**)error {
+- (nullable instancetype)initWithMultiModalProcessor:(OGAMultiModalProcessor*)processor
+                                               error:(NSError**)error {
   if ((self = [super init]) == nil) {
     return nil;
   }

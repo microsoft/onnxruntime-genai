@@ -20,7 +20,7 @@
 
 - (nullable instancetype)initWithError:(NSError**)error {
   try {
-    self = [self initWithCXXPointer: OgaSequences::Create()];
+    self = [self initWithCXXPointer:OgaSequences::Create()];
     return self;
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
@@ -33,16 +33,14 @@
   OGA_OBJC_API_IMPL_CATCH(error, size_t(-1))
 }
 
-- (nullable const int32_t*)sequenceDataAtIndex:(size_t)index
-                                         error:(NSError**)error {
+- (nullable const int32_t*)sequenceDataAtIndex:(size_t)index error:(NSError**)error {
   try {
     return _sequences->SequenceData(index);
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (size_t)sequenceCountAtIndex:(size_t)index
-                         error:(NSError**)error {
+- (size_t)sequenceCountAtIndex:(size_t)index error:(NSError**)error {
   try {
     return _sequences->SequenceCount(index);
   }

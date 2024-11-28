@@ -9,8 +9,7 @@
   std::unique_ptr<OgaNamedTensors> _tensor;
 }
 
-- (instancetype)initWithCXXPointer:(std::unique_ptr<OgaNamedTensors>)ptr
-{
+- (instancetype)initWithCXXPointer:(std::unique_ptr<OgaNamedTensors>)ptr {
   if ((self = [super init]) == nil) {
     return nil;
   }
