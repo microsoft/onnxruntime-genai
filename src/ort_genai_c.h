@@ -341,8 +341,23 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator, const char* name, OgaTensor** out);
 
+/*
+ * \brief Returns a copy of the logits from the model as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
+ *        and will be released when the OgaTensor is destroyed
+ * \param[in] generator The generator to run the GetLogits on
+ * \param[out] out The OgaTensor containing the logits, it only contains the last token logits even in prompt processing
+ * \return OgaResult containing the error message if the computation failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* oga_generator, OgaTensor** out);
 
+/*
+ * \brief Sets the logits to the generator. This is useful when the user wants to set the logits to a specific value
+ *        for example when doing guided generation.
+ * \param[in] generator The generator to set the logits on
+ * \param[in] tensor The OgaTensor containing the logits, it must have the same shape as the logits returned by GetLogits
+ * which is the last token logits.
+ * \return OgaResult containing the error message if the setting of the logits failed.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* oga_generator, OgaTensor* tensor);
 
 /*
