@@ -195,7 +195,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @return The sequence data at the given index, or nil if an error occurs.
  */
 - (nullable const int32_t*)sequenceDataAtIndex:(size_t)index
-                                   error:(NSError**)error;
+                                         error:(NSError**)error;
 
 /**
  * Retrieve the sequence count at the given index.
@@ -336,7 +336,6 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  */
 - (size_t)sequenceCountAtIndex:(size_t)index
                          error:(NSError**)error;
-
 
 /**
  * Clean up the resource before process exits.
