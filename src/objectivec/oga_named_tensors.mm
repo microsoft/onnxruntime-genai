@@ -11,6 +11,10 @@
 
 - (instancetype)initWithCXXPointer:(std::unique_ptr<OgaNamedTensors>)ptr
 {
+  if ((self = [super init]) == nil) {
+    return nil;
+  }
+
   _tensor = std::move(ptr);
   return self;
 }

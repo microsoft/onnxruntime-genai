@@ -22,7 +22,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface OGASequences ()
 
 - (nullable instancetype)initWithError:(NSError**)error;
-- (instancetype)initWithCXXPointer:(std::unique_ptr<OgaSequences>)ptr;
+- (instancetype)initWithCXXPointer:(std::unique_ptr<OgaSequences>)ptr NS_DESIGNATED_INITIALIZER;
 
 - (OgaSequences&)CXXAPIOgaSequences;
 
@@ -36,7 +36,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface OGAImages ()
 
-- (OgaImages*)CXXAPIOgaImages;
+- (OgaImages&)CXXAPIOgaImages;
 
 @end
 

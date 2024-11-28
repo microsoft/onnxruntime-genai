@@ -17,7 +17,7 @@
  * [params setSearchOption:@"max_length" doubleValue:200 error:&error];
  *
  * OGASequences* output_sequences = [model generate:params error:&error];
- * NSString* out_string = [tokenizer decode:[output_sequences sequenceAtIndex:0] error:&error];
+ * NSString* out_string = [tokenizer decode:[output_sequences sequenceDataAtIndex:0] length:[output_sequences sequenceCountAtIndex:0] error:&error];
  *
  */
 
@@ -96,10 +96,12 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * Decode sequences to text
  *
  * @param data The sequences data to be encoded.
+ * @param tokensLength The length of the sequences data to be encoded.
  * @param error Optional error information set if an error occurs.
  * @return The decoding result, or nil if an error occurs.
  */
-- (nullable NSString*)decode:(OGAInt32Span*)data
+- (nullable NSString*)decode:(const int32_t*)data
+                      length:(size_t)tokensLength
                        error:(NSError**)error;
 
 @end
@@ -168,7 +170,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @param error Optional error information set if an error occurs.
  * @return The last element, or -1 if an error occurs.
  */
-- (int32_t)lastElementWithError:(NSError**)error NS_SWIFT_NAME(lastElement());
+- (int32_t)getLastElementWithError:(NSError**)error NS_SWIFT_NAME(lastElement());
 
 @end
 
@@ -187,13 +189,22 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (size_t)getCountWithError:(NSError**)error NS_SWIFT_NAME(count());
 
 /**
- * Retrieve the sequence at the given index
+ * Retrieve the sequence data at the given index.
  * @param index The index needed.
  * @param error Optional error information set if an error occurs.
- * @return The sequence at the given index, or nil if an error occurs.
+ * @return The sequence data at the given index, or nil if an error occurs.
  */
-- (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index
-                                    error:(NSError**)error;
+- (nullable const int32_t*)sequenceDataAtIndex:(size_t)index
+                                   error:(NSError**)error;
+
+/**
+ * Retrieve the sequence count at the given index.
+ * @param index The index needed.
+ * @param error Optional error information set if an error occurs.
+ * @return The sequence count at the given index, or nil if an error occurs.
+ */
+- (size_t)sequenceCountAtIndex:(size_t)index
+                         error:(NSError**)error;
 
 @end
 
@@ -272,7 +283,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @param error Optional error information set if an error occurs.
  * @return The result, or false if an error occurs.
  */
-- (BOOL)isDoneWithError:(NSError**)error NS_SWIFT_NAME(isDone()) __attribute__((swift_error(nonnull_error)));
+- (BOOL)isDoneWithError:(NSError**)error __attribute__((swift_error(nonnull_error)));
 
 /**
  * Appends token sequences to the generator.
@@ -293,13 +304,13 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @param length The number of tokens to rewind.
  * @param error Optional error information set if an error occurs.
  */
-- (BOOL)rewindTo:(NSUInteger)length error:(NSError**)error;
+- (BOOL)rewindTo:(size_t)length error:(NSError**)error;
 
 /**
  * Generate next token
  * @param error Optional error information set if an error occurs.
  */
-- (BOOL)generateNextTokenWithError:(NSError**)error NS_SWIFT_NAME(generateNextToken());
+- (BOOL)generateNextTokenWithError:(NSError**)error;
 /**
  * Get the output tensor.
  * @param name The output name.
@@ -309,13 +320,23 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (nullable OGATensor*)getOutput:(NSString*)name error:(NSError**)error;
 
 /**
- * Retrieve the sequence at the given index.
+ * Retrieve the sequence data at the given index.
  * @param index The index needed.
  * @param error Optional error information set if an error occurs.
- * @return The sequence at the given index, or nil if an error occurs.
+ * @return The sequence data at the given index, or nil if an error occurs.
  */
-- (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index
-                                    error:(NSError**)error;
+- (nullable const int32_t*)sequenceDataAtIndex:(size_t)index
+                                         error:(NSError**)error;
+
+/**
+ * Retrieve the sequence count at the given index.
+ * @param index The index needed.
+ * @param error Optional error information set if an error occurs.
+ * @return The sequence length at the given index, or nil if an error occurs.
+ */
+- (size_t)sequenceCountAtIndex:(size_t)index
+                         error:(NSError**)error;
+
 
 /**
  * Clean up the resource before process exits.

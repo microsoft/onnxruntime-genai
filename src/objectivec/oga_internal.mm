@@ -26,7 +26,7 @@
   return _size;
 }
 
-- (int32_t)lastElementWithError:(NSError**)error {
+- (int32_t)getLastElementWithError:(NSError**)error {
   if (_size == 0) {
     if (error != nil) {
       NSDictionary *errorDictionary = @{NSLocalizedDescriptionKey : @"The size of this span is invalid"};

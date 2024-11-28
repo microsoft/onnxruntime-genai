@@ -10,17 +10,17 @@
 }
 
 - (instancetype)initWithCXXPointer:(std::unique_ptr<OgaSequences>)ptr {
+  if ((self = [super init]) == nil) {
+    return nil;
+  }
+
   _sequences = std::move(ptr);
   return self;
 }
 
 - (nullable instancetype)initWithError:(NSError**)error {
-  if ((self = [super init]) == nil) {
-    return nil;
-  }
-
   try {
-    _sequences = OgaSequences::Create();
+    self = [self initWithCXXPointer: OgaSequences::Create()];
     return self;
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
@@ -33,14 +33,20 @@
   OGA_OBJC_API_IMPL_CATCH(error, size_t(-1))
 }
 
-- (nullable OGAInt32Span*)sequenceAtIndex:(size_t)index
-                                    error:(NSError**)error {
+- (nullable const int32_t*)sequenceDataAtIndex:(size_t)index
+                                         error:(NSError**)error {
   try {
-    size_t sequenceLength = _sequences->SequenceCount(index);
-    const int32_t* data = _sequences->SequenceData(index);
-    return [[OGAInt32Span alloc] initWithDataPointer:data size:sequenceLength];
+    return _sequences->SequenceData(index);
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+}
+
+- (size_t)sequenceCountAtIndex:(size_t)index
+                         error:(NSError**)error {
+  try {
+    return _sequences->SequenceCount(index);
+  }
+  OGA_OBJC_API_IMPL_CATCH(error, size_t(-1))
 }
 
 - (OgaSequences&)CXXAPIOgaSequences {

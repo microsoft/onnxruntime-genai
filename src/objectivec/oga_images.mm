@@ -28,8 +28,8 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (OgaImages*)CXXAPIOgaImages {
-  return _images.get();
+- (OgaImages&)CXXAPIOgaImages {
+  return *(_images.get());
 }
 
 @end

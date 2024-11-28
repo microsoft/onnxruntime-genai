@@ -10,7 +10,7 @@
 #pragma clang diagnostic ignored "-Wdocumentation"
 #endif  // defined(__clang__)
 
-#import "ort_genai.h"
+#include "ort_genai.h"
 
 #if defined(__clang__)
 #pragma clang diagnostic pop

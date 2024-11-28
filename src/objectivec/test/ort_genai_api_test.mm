@@ -76,18 +76,17 @@ NS_ASSUME_NONNULL_BEGIN
     ORTAssertNullableResultSuccessful(params, error);
 
     [params setSearchOption:@"max_length" doubleValue:max_length error:&error];
-    [params setSearchOption:@"batch_size" doubleValue:batch_size error:&error];
+    XCTAssertNil(error);
 
+    [params setSearchOption:@"batch_size" doubleValue:batch_size error:&error];
     XCTAssertNil(error);
 
     OGAGenerator* generator = [[OGAGenerator alloc] initWithModel:model
                                                            params:params
                                                             error:&error];
-
+    ORTAssertNullableResultSuccessful(generator, error);
     [generator appendTokens:input_ids error:&error];
     XCTAssertNil(error);
-
-    ORTAssertNullableResultSuccessful(generator, error);
 
     // check prompt
      // full logits has shape [2, 4, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 4, 5]
