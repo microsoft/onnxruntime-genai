@@ -38,22 +38,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _modelHandle; } }
 
-        /// <summary>
-        /// Run the model to generate output sequences.
-        /// <param name="generatorParams">The generator parameters.</param>
-        /// <returns>
-        /// The generated sequences.
-        /// </returns>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
-        public Sequences Generate(GeneratorParams generatorParams)
-        {
-            IntPtr nativeSequences = IntPtr.Zero;
-            Result.VerifySuccess(NativeMethods.OgaGenerate(_modelHandle, generatorParams.Handle, out nativeSequences));
-            return new Sequences(nativeSequences);
-        }
-
         ~Model()
         {
             Dispose(false);

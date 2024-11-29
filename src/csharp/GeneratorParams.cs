@@ -69,38 +69,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         }
 
         /// <summary>
-        /// Sets the prompt/s for model execution.
-        /// </summary>
-        /// <param name="inputIDs">The encoded input ids.</param>
-        /// <param name="sequenceLength">The sequence length.</param>
-        /// <param name="batchSize">The batch size.</param>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
-        public void SetInputIDs(ReadOnlySpan<int> inputIDs, ulong sequenceLength, ulong batchSize)
-        {
-            unsafe
-            {
-                fixed (int* inputIDsPtr = inputIDs)
-                {
-                    Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputIDs(_generatorParamsHandle, inputIDsPtr, (UIntPtr)inputIDs.Length, (UIntPtr)sequenceLength, (UIntPtr)batchSize));
-                }
-            }
-        }
-
-        /// <summary>
-        ///  Sets the sequences for model execution.
-        /// </summary>
-        /// <param name="sequences">The Sequences containing the encoded prompt.</param>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
-        public void SetInputSequences(Sequences sequences)
-        {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputSequences(_generatorParamsHandle, sequences.Handle));
-        }
-
-        /// <summary>
         /// Add a Tensor as a model input.
         /// </summary>
         /// <param name="name">The name of the model input the tensor will provide.</param>

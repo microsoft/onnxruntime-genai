@@ -31,13 +31,13 @@ struct EmbeddingState : State {
   EmbeddingState(const EmbeddingState&) = delete;
   EmbeddingState& operator=(const EmbeddingState&) = delete;
 
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices = {}) override;
 
  private:
   friend struct MultiModalPipelineState;
 
-  void UpdateInputsAndOutputs(DeviceSpan<int32_t> next_tokens);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool is_prompt);
 
   const MultiModalVisionModel& model_;
   int64_t num_image_tokens_;
@@ -55,7 +55,7 @@ struct VisionState : State {
   VisionState(const VisionState&) = delete;
   VisionState& operator=(const VisionState&) = delete;
 
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices = {}) override;
 
  private:
@@ -75,7 +75,7 @@ struct DecoderState : State {
   DecoderState(const DecoderState&) = delete;
   DecoderState& operator=(const DecoderState&) = delete;
 
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
 
   const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_; };
@@ -83,7 +83,7 @@ struct DecoderState : State {
  private:
   friend struct MultiModalPipelineState;
 
-  void UpdateInputsAndOutputs(int current_length, DeviceSpan<int32_t> beam_indices);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
 
   const MultiModalVisionModel& model_;
   const CapturedGraphInfo* captured_graph_info_;
@@ -100,7 +100,7 @@ struct MultiModalPipelineState : State {
   MultiModalPipelineState(const MultiModalPipelineState&) = delete;
   MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
 
-  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens,
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
 
  private:

@@ -30,9 +30,7 @@ struct SamplingBenchmark {
 
     auto params = Generators::CreateGeneratorParams(config);
     params->search.max_length = 10;
-    params->batch_size = batch_size_;
-    params->sequence_length = 1;
-    params->input_ids = input_ids;
+    params->search.batch_size = batch_size_;
     params->p_device = Generators::GetDeviceInterface(device_type_);
     params->device_type = device_type_;
 

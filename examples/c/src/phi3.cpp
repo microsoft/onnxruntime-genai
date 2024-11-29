@@ -150,15 +150,12 @@ void CXX_API(const char* model_path) {
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 1024);
-    params->SetInputSequences(*sequences);
 
     auto generator = OgaGenerator::Create(*model, *params);
-    std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call, &catch_terminate, generator.get()));
+    generator->AppendTokenSequences(*sequences);
 
-    try {
-      while (!generator->IsDone()) {
-        generator->ComputeLogits();
-        generator->GenerateNextToken();
+    while (!generator->IsDone()) {
+      generator->GenerateNextToken();
 
         if (is_first_token) {
           timing.RecordFirstTokenTimestamp();
@@ -261,16 +258,14 @@ void C_API(const char* model_path) {
     OgaGeneratorParams* params;
     CheckResult(OgaCreateGeneratorParams(model, &params));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 1024));
-    CheckResult(OgaGeneratorParamsSetInputSequences(params, sequences));
 
     OgaGenerator* generator;
     CheckResult(OgaCreateGenerator(model, params, &generator));
+    CheckResult(OgaGenerator_AppendTokenSequences(generator, sequences));
 
     std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call_C, &catch_terminate, generator));
 
     while (!OgaGenerator_IsDone(generator)) {
-      if (CheckIfSessionTerminated(OgaGenerator_ComputeLogits(generator), generator))
-        break;
       if (CheckIfSessionTerminated(OgaGenerator_GenerateNextToken(generator), generator))
         break;
 

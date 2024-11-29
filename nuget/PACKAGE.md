@@ -22,7 +22,7 @@ You can call a high level `generate()` method to generate all of the output at o
 // See https://aka.ms/new-console-template for more information
 using Microsoft.ML.OnnxRuntimeGenAI;
 
-OgaHandle ogaHandle = new OgaHandle();
+using OgaHandle ogaHandle = new OgaHandle();
 
 // Specify the location of your downloaded model.
 // Many models are published on HuggingFace e.g. 

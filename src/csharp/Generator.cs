@@ -36,9 +36,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// </exception>
         public bool IsDone()
         {
-            return NativeMethods.OgaGenerator_IsDone(_generatorHandle);
+            return NativeMethods.OgaGenerator_IsDone(_generatorHandle) != 0;
         }
 
+<<<<<<< HEAD
         /// <summary>
         /// Computes the logits for the next token in the sequence.
         /// </summary>
@@ -46,8 +47,22 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// Thrown when the call to the GenAI native API fails.
         /// </exception>
         public void ComputeLogits()
+=======
+        public void AppendTokens(ReadOnlySpan<int> tokens)
+>>>>>>> main
         {
-            Result.VerifySuccess(NativeMethods.OgaGenerator_ComputeLogits(_generatorHandle));
+            unsafe
+            {
+                fixed (int* tokenIDsPtr = tokens)
+                {
+                    Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, tokenIDsPtr, (UIntPtr)tokens.Length));
+                }
+            }
+        }
+
+        public void AppendTokenSequences(Sequences sequences)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokenSequences(_generatorHandle, sequences.Handle));
         }
 
         /// <summary>
@@ -59,6 +74,18 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public void GenerateNextToken()
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken(_generatorHandle));
+        }
+
+        /// <summary>
+        /// Rewind to a specific index.
+        /// </summary>
+        /// <param name="index">The index to rewind.</param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
+        public void RewindTo(ulong index)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_RewindTo(_generatorHandle, (UIntPtr)index));
         }
 
         /// <summary>
