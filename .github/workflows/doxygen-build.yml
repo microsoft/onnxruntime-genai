@@ -25,15 +25,15 @@ jobs:
       - name: Run C/C++ doxygen
         run: |
           cd src/
-          doxygen-1.9.8/bin/doxygen Doxyfile
+          ../doxygen-1.9.8/bin/doxygen Doxyfile
 
       - name: Run CSharp doxygen
         run: |
           cd src/csharp/
-          doxygen-1.9.8/bin/doxygen Doxyfile_csharp.cfg
+          ../../doxygen-1.9.8/bin/doxygen Doxyfile_csharp.cfg
 
       - name: Run Java doxygen
         run: |
           cd src/java/
-          doxygen-1.9.8/bin/doxygen Doxyfile_java.cfg
+          ../../doxygen-1.9.8/bin/doxygen Doxyfile_java.cfg
 
