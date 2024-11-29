@@ -39,17 +39,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return NativeMethods.OgaGenerator_IsDone(_generatorHandle) != 0;
         }
 
-<<<<<<< HEAD
         /// <summary>
-        /// Computes the logits for the next token in the sequence.
+        /// Appends tokens to the generator.
         /// </summary>
+        /// <param name="tokens">The tokens to append.</param>
         /// <exception cref="OnnxRuntimeGenAIException">
         /// Thrown when the call to the GenAI native API fails.
         /// </exception>
-        public void ComputeLogits()
-=======
         public void AppendTokens(ReadOnlySpan<int> tokens)
->>>>>>> main
         {
             unsafe
             {
