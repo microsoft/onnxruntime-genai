@@ -10,8 +10,8 @@ on:
   pull_request:
 jobs:
   build:
-    name: Generate C/C++ API docs
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-github-Ubuntu2204-AMD-CPU"]
+    name: Generate API docs
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     steps:
       - uses: actions/checkout@v4
       - name: Install doxygen and dependencies
@@ -34,5 +34,3 @@ jobs:
         run: |
           doxygen-1.9.8/bin/doxygen src/java/Doxyfile_java.cfg
 
-      - name: Log source commit
-        run: git rev-parse --short HEAD > build/doxygen/html/source-version.txt
