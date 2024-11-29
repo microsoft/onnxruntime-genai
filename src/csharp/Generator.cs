@@ -57,6 +57,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        /// <summary>
+        /// Appends token sequences to the generator.
+        /// </summary>
+        /// <param name="sequences">The sequences to append.</param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public void AppendTokenSequences(Sequences sequences)
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokenSequences(_generatorHandle, sequences.Handle));
