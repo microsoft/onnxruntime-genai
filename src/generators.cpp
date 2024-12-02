@@ -283,6 +283,12 @@ void Generator::AppendTokens(const cpu_span<int32_t>& input_ids) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
+  if (just_generated_) {
+    just_generated_ = false;
+    auto next_tokens = search_->GetNextTokens();
+    ComputeLogits(next_tokens);
+  }
+
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->AppendTokens(input_ids_device);
 
@@ -370,6 +376,7 @@ void Generator::GenerateNextToken() {
            << std::endl;
   }
 
+  just_generated_ = true;
   if (!search.do_sample || search.top_k == 1) {
     search_->SelectTop();
     return;
@@ -408,6 +415,7 @@ void Generator::RewindToLength(size_t new_length) {
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   computed_logits_ = false;
+  just_generated_ = false;
   just_rewinded_ = true;
 }
 

@@ -129,7 +129,8 @@ struct Generator : LeakChecked<Generator> {
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(const cpu_span<int32_t>& input_ids);
   void ComputeLogits(DeviceSpan<int32_t>& next_tokens);
-  bool just_rewinded_{false};
+  bool just_rewinded_{};
+  bool just_generated_{};
 };
 
 struct OrtGlobals {
