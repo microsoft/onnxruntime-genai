@@ -60,7 +60,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// </summary>
         public override bool IsInvalid => handle == IntPtr.Zero;
 
-        private override bool ReleaseHandle()
+        protected override bool ReleaseHandle()
         {
             NativeMethods.OgaDestroyAdapters(handle);
             handle = IntPtr.Zero;
