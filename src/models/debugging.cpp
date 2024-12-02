@@ -43,11 +43,19 @@ void DumpSpan(std::ostream& stream, std::span<const T> values) {
     for (auto v : values)
       stream << v << ' ';
   } else {
-    for (size_t i = 0; i < c_value_count / 2; i++)
-      stream << values[i] << ' ';
+    for (size_t i = 0; i < c_value_count / 2; i++) {
+      if constexpr (std::is_same<T, uint8_t>::value || std::is_same<T, int8_t>::value)
+        stream << static_cast<int>(values[i]) << ' ';
+      else
+        stream << values[i] << ' ';
+    }
     stream << "... ";
-    for (size_t i = values.size() - c_value_count / 2; i < values.size(); i++)
-      stream << values[i] << ' ';
+    for (size_t i = values.size() - c_value_count / 2; i < values.size(); i++) {
+      if constexpr (std::is_same<T, uint8_t>::value || std::is_same<T, int8_t>::value)
+        stream << static_cast<int>(values[i]) << ' ';
+      else
+        stream << values[i] << ' ';
+    }
   }
 }
 

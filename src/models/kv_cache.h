@@ -95,14 +95,13 @@ struct SlidingWindowKeyValueCache {
 
   void Add();
   void Update(DeviceSpan<int32_t> beam_indices, int current_length);
-
- private:
   void Slide();
 
+ private:
   State& state_;
   const Model& model_{state_.model_};
-  int layer_count_;
-  int window_size_;
+  int layer_count_{0};
+  int window_size_{0};
   size_t input_index_{~0U}, output_index_{~0U};
 
   std::array<int64_t, 4> key_cache_shape_in_, key_cache_shape_out_;
@@ -112,5 +111,7 @@ struct SlidingWindowKeyValueCache {
   std::vector<std::unique_ptr<OrtValue>> key_caches_in_, value_caches_in_;
   std::vector<std::unique_ptr<OrtValue>> key_caches_out_, value_caches_out_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
+
+  bool is_first_update_{true};
 };
 }  // namespace Generators

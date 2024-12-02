@@ -557,7 +557,10 @@ void SlidingWindowKeyValueCache::Slide() {
 }
 
 void SlidingWindowKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current_length) {
-  if (window_size_ == 1) {
+  if (is_first_update_) {
+    is_first_update_ = false;
+    return;
+  } else if (window_size_ == 1) {
     Slide();
     return;
   }
@@ -628,17 +631,17 @@ void SlidingWindowKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int cu
       {
         cpu_span<uint8_t> value_cache_dst(value_cache_data + (j * updated_value_cache_shape_in[2] * updated_value_cache_shape_in[3]),
                                           (value_cache_shape_in_[2] - updated_window_size) * updated_value_cache_shape_in[3]);
-        cpu_span<uint8_t> value_cache_src(value_cache_in_data + (j * value_cache_shape_out_[2] * value_cache_shape_out_[3]) +
-                                              (updated_window_size * value_cache_shape_out_[3]),
+        cpu_span<uint8_t> value_cache_src(value_cache_in_data + (j * value_cache_shape_in_[2] * value_cache_shape_in_[3]) +
+                                              (updated_window_size * value_cache_shape_in_[3]),
                                           (value_cache_shape_in_[2] - updated_window_size) * value_cache_shape_in_[3]);
         std::copy(value_cache_src.begin(), value_cache_src.end(), value_cache_dst.begin());
       }
       {
         cpu_span<uint8_t> value_cache_dst(value_cache_data + (j * updated_value_cache_shape_in[2] * updated_value_cache_shape_in[3]) +
                                               ((value_cache_shape_in_[2] - updated_window_size) * updated_value_cache_shape_in[3]),
-                                          window_size_ * value_cache_shape_out_[3]);
+                                          value_cache_shape_out_[2] * value_cache_shape_out_[3]);
         cpu_span<uint8_t> value_cache_src(value_cache_out_data + (j * value_cache_shape_out_[2] * value_cache_shape_out_[3]),
-                                          window_size_ * value_cache_shape_out_[3]);
+                                          value_cache_shape_out_[2] * value_cache_shape_out_[3]);
         std::copy(value_cache_src.begin(), value_cache_src.end(), value_cache_dst.begin());
       }
     }

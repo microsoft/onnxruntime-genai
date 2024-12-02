@@ -68,7 +68,7 @@ void PositionInputs::Add() {
   }
 }
 
-void PositionInputs::Update(const DeviceSpan<int32_t>& next_tokens, int total_length, int new_length) {
+void PositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
   if (has_posid_input_) {
     // Initialize on first update
     if (is_first_update_) {
@@ -295,7 +295,7 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
 }
 
 template <typename T>
-void PositionInputs::CreateAndInitializePositionIDs(const DeviceSpan<int32_t>& next_tokens, std::array<int64_t, 2> shape) {
+void PositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
@@ -325,7 +325,7 @@ void PositionInputs::CreateAndInitializePositionIDs(const DeviceSpan<int32_t>& n
 }
 
 template <typename T>
-void PositionInputs::CreateAndInitializeAttentionMask(const DeviceSpan<int32_t>& next_tokens, std::array<int64_t, 2> shape) {
+void PositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   attention_mask_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
@@ -458,5 +458,127 @@ void PositionInputs::RewindMask(size_t index) {
   }
 }
 #endif
+
+SlidingWindowPositionInputs::SlidingWindowPositionInputs(State& state)
+    : state_{state} {
+  has_posid_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.position_ids);
+  has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
+
+  if (!model_.config_->model.decoder.sliding_window_key_value_cache.has_value()) {
+    throw std::runtime_error("Sliding a window over input_ids requires sliding_window_key_value_cache to be set in the config.");
+  }
+
+  window_size_ = model_.config_->model.decoder.sliding_window_key_value_cache->window_size;
+
+  if (has_posid_input_) {
+    position_ids_type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
+    if (position_ids_type_ != Ort::TypeToTensorType<int64_t>)
+      throw std::runtime_error("SlidingWindowPositionInputs only supports int64_t position_ids");
+
+    position_ids_shape_ = {1, model_.config_->model.decoder.sliding_window_key_value_cache->window_size};
+  }
+
+  if (has_mask_input_) {
+    auto attention_mask_type = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
+    if (attention_mask_type != Ort::TypeToTensorType<float>)
+      throw std::runtime_error("SlidingWindowPositionInputs only supports float attention_mask");
+
+    attention_mask_shape_ = {1, model_.config_->model.context_length};
+  }
+}
+
+void SlidingWindowPositionInputs::Add() {
+  if (has_posid_input_) {
+    position_ids_index_ = state_.inputs_.size();
+    state_.input_names_.push_back(model_.config_->model.decoder.inputs.position_ids.c_str());
+    state_.inputs_.push_back(position_ids_.get());
+  }
+
+  if (has_mask_input_) {
+    attention_mask_index_ = state_.inputs_.size();
+    state_.input_names_.push_back(model_.config_->model.decoder.inputs.attention_mask.c_str());
+    state_.inputs_.push_back(attention_mask_.get());
+  }
+}
+
+void SlidingWindowPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
+  if (window_index_ == 0) {
+    num_windows_ = (next_tokens.size() + window_size_ - 1) / window_size_;
+    if (has_posid_input_) {
+      position_ids_ = OrtValue::CreateTensor(*model_.allocator_device_, position_ids_shape_, position_ids_type_);
+
+      auto* position_ids_data = position_ids_->GetTensorMutableData<int64_t>();
+      for (int i = 0, j = 0; i < position_ids_shape_[1]; i++) {
+        if (next_tokens.CpuSpan()[i] == model_.config_->model.pad_token_id) {
+          position_ids_data[i] = 0;
+        } else {
+          position_ids_data[i] = j++;
+        }
+      }
+    }
+
+    if (has_mask_input_) {
+      attention_mask_ = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, Ort::TypeToTensorType<float>);
+      auto* attention_mask_data = attention_mask_->GetTensorMutableData<float>();
+      std::fill(attention_mask_data, attention_mask_data + attention_mask_shape_[1], 0.0f);
+      for (size_t i = 0; i < window_size_; i++) {
+        attention_mask_data[attention_mask_shape_[1] - window_size_ + i] = next_tokens.CpuSpan()[i] == model_.config_->model.pad_token_id ? 0.0f : 1.0f;
+      }
+      for (size_t i = 0; i < window_size_; i++) {
+        if (attention_mask_data[attention_mask_shape_[1] - window_size_ + i] == 1.0f) {
+          attention_mask_backward_offset_ = attention_mask_shape_[1] - window_size_ + i - 1;
+          break;
+        }
+      }
+    }
+  } else if (window_index_ < num_windows_) {
+    if (has_posid_input_) {
+      auto* position_ids_data = position_ids_->GetTensorMutableData<int64_t>();
+      const auto last_position = position_ids_data[window_size_ - 1];
+      std::iota(position_ids_data, position_ids_data + window_size_, last_position + 1);
+    }
+
+    if (has_mask_input_) {
+      auto* attention_mask_data = attention_mask_->GetTensorMutableData<float>();
+      std::fill_n(attention_mask_data + attention_mask_backward_offset_ - window_size_ + 1, window_size_, 1.0f);
+
+      attention_mask_backward_offset_ -= window_size_;
+    }
+  } else {
+    if (has_posid_input_) {
+      const auto last_position = position_ids_->GetTensorData<int64_t>()[position_ids_shape_[1] - 1];
+      if (position_ids_shape_[1] != 1) {
+        position_ids_shape_[1] = 1;
+        position_ids_ = OrtValue::CreateTensor(*model_.allocator_device_, position_ids_shape_, position_ids_type_);
+      }
+      position_ids_->GetTensorMutableData<int64_t>()[0] = last_position + 1;
+    }
+
+    if (has_mask_input_) {
+      attention_mask_->GetTensorMutableData<float>()[attention_mask_backward_offset_] = 1.0f;
+      if (attention_mask_backward_offset_ > 0) {
+        attention_mask_backward_offset_ -= 1;
+      }
+    }
+  }
+
+  if (has_posid_input_) {
+    state_.inputs_[position_ids_index_] = position_ids_.get();
+  }
+
+  if (has_mask_input_) {
+    state_.inputs_[attention_mask_index_] = attention_mask_.get();
+  }
+
+  window_index_++;
+}
+
+std::unique_ptr<PositionInputsInterface> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths) {
+  if (state.model_.config_->model.decoder.sliding_window_key_value_cache.has_value()) {
+    return std::make_unique<SlidingWindowPositionInputs>(state);
+  } else {
+    return std::make_unique<PositionInputs>(state.model_, state, sequence_lengths);
+  }
+}
 
 }  // namespace Generators

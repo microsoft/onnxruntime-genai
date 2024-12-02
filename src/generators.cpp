@@ -275,15 +275,21 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   }
 }
 
-DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(const cpu_span<int32_t> input_ids) {
-  auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(input_ids.size());
+DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
+  size_t input_ids_size = input_ids.size();
+  if (model_->config_->model.decoder.sliding_window_key_value_cache.has_value()) {
+    const auto window_size = model_->config_->model.decoder.sliding_window_key_value_cache->window_size;
+    input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
+  }
+  auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
-  std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
+  std::fill_n(cpu_span.begin(), input_ids_size, model_->config_->model.pad_token_id);
+  std::copy_backward(input_ids.begin(), input_ids.end(), cpu_span.end());
   input_ids_device.CopyCpuToDevice();
   return input_ids_device;
 }
 
-void Generator::AppendTokens(const cpu_span<int32_t> input_ids) {
+void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
