@@ -374,16 +374,15 @@ OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* oga_generator, OgaT
   OGA_TRY
   auto logits_span = reinterpret_cast<Generators::Generator*>(oga_generator)->GetLogits();
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
-  std::vector<int64_t> shape{generator.state_->params_->search.batch_size, 1, generator.model_->config_->model.vocab_size};
-  logits_span.CopyDeviceToCpu();
-  std::span<const float> cpu_logits_span = logits_span.CpuSpan();
+  const std::array<int64_t, 3> shape{generator.state_->params_->search.batch_size, 1, generator.model_->config_->model.vocab_size};
+  auto cpu_logits_span = logits_span.CopyDeviceToCpu();
 
   // Copy logits to cpu tensor
   std::unique_ptr<OrtValue> ortvalue_clone = OrtValue::CreateTensor(generator.model_->allocator_cpu_,
                                                                     shape,
                                                                     ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   auto clone_span = std::span<float>(reinterpret_cast<float*>(ortvalue_clone->GetTensorMutableRawData()), cpu_logits_span.size());
-  Generators::copy(cpu_logits_span, clone_span);
+  auto clone_span = std::span<float>(ortvalue_clone->GetTensorMutableData<float>()), cpu_logits_span.size());
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
   tensor->external_owner_ = tensor;
   *out = reinterpret_cast<OgaTensor*>(tensor.get());
@@ -399,7 +398,7 @@ OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* oga_generator, OgaT
   }
   auto logits_tensor = reinterpret_cast<Generators::Tensor*>(tensor);
   size_t element_count = logits_tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
-  auto new_logits_span = std::span<const float>(reinterpret_cast<float*>(logits_tensor->ort_tensor_->GetTensorMutableRawData()), element_count);
+  auto new_logits_span = std::span<const float>(logits_tensor->ort_tensor_->GetTensorData<float>(), element_count);
   auto logits = generator->search_->GetLogits();
   if (static_cast<size_t>(new_logits_span.size()) != logits.size()) {
     throw std::runtime_error("Generator::SetLogits passed an array of size " +
