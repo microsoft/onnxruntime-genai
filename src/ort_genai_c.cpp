@@ -375,13 +375,14 @@ OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* oga_generator, OgaT
   auto logits_span = reinterpret_cast<Generators::Generator*>(oga_generator)->GetLogits();
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
   const std::array<int64_t, 3> shape{generator.state_->params_->search.batch_size, 1, generator.model_->config_->model.vocab_size};
-  auto cpu_logits_span = logits_span.CopyDeviceToCpu();
+  std::span<const float> cpu_logits_span = logits_span.CopyDeviceToCpu();
 
   // Copy logits to cpu tensor
   std::unique_ptr<OrtValue> ortvalue_clone = OrtValue::CreateTensor(generator.model_->allocator_cpu_,
                                                                     shape,
                                                                     ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
   auto clone_span = std::span<float>(ortvalue_clone->GetTensorMutableData<float>(), cpu_logits_span.size());
+  Generators::copy(cpu_logits_span, clone_span);
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
   tensor->external_owner_ = tensor;
   *out = reinterpret_cast<OgaTensor*>(tensor.get());
