@@ -34,7 +34,7 @@ final class GenAI {
   /** The short name of the ONNX runtime shared library */
   static final String ONNXRUNTIME_LIBRARY_NAME = "onnxruntime";
 
-  /** The value of the  system property */
+  /** The value of the system property */
   private static String libraryDirPathProperty;
 
   /** The OS & CPU architecture string */

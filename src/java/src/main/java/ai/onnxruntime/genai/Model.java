@@ -3,9 +3,7 @@
  */
 package ai.onnxruntime.genai;
 
-/**
- * An ORT GenAI model.
- */
+/** An ORT GenAI model. */
 public final class Model implements AutoCloseable {
   private long nativeHandle;
 
