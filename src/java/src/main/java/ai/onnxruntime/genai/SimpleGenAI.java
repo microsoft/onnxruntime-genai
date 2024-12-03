@@ -25,7 +25,7 @@ import java.util.function.Consumer;
  * Create a class that implements the TokenUpdateListener interface and provide an instance of that
  * class as the `listener` argument.
  */
-public class SimpleGenAI {
+public class SimpleGenAI implements AutoCloseable {
   private Model model;
   private Tokenizer tokenizer;
 
@@ -98,5 +98,17 @@ public class SimpleGenAI {
     }
 
     return result;
+  }
+
+  @Override
+  public void close() {
+    if (tokenizer != null) {
+      tokenizer.close();
+      tokenizer = null;
+    }
+    if (model != null) {
+      model.close();
+      model = null;
+    }
   }
 }
