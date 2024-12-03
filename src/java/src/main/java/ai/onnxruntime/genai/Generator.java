@@ -150,6 +150,32 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
     return getSequenceLastToken(nativeHandle, sequenceIndex);
   }
 
+  /**
+   * Fetches and returns the output tensor with the given name.
+   *
+   * @param name The name of the output needed.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public Tensor getOutput(String name) throws GenAIException {
+    long tensorHandle = getOutputNative(nativeHandle, name);
+    return new Tensor(tensorHandle);
+  }
+
+  /**
+   * Activates one of the loaded adapters.
+   *
+   * @param adapters The Adapters container.
+   * @param adapterName The adapter name that was previously loaded.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void setActiveAdapter(Adapters adapters, String adapterName) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    setActiveAdapter(nativeHandle, adapters.nativeHandle(), adapterName);
+  }
+
   /** Closes the Generator and releases any associated resources. */
   @Override
   public void close() {
@@ -191,7 +217,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   private native void destroyGenerator(long nativeHandle);
 
   private native boolean isDone(long nativeHandle);
-  
+
   private native void appendTokens(long nativeHandle, int[] tokens) throws GenAIException;
 
   private native void appendTokenSequences(long nativeHandle, long sequencesHandle)
@@ -206,4 +232,9 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
   private native int getSequenceLastToken(long nativeHandle, long sequenceIndex)
       throws GenAIException;
+
+  private native void setActiveAdapter(
+      long nativeHandle, long adaptersNativeHandle, String adapterName) throws GenAIException;
+
+  private native long getOutputNative(long nativeHandle, String outputName) throws GenAIException;
 }
