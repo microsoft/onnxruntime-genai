@@ -129,7 +129,9 @@ struct Generator : LeakChecked<Generator> {
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(const cpu_span<int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
-  enum Action { standard, generated, rewound };
+  enum Action { standard,
+                generated,
+                rewound };
   Action last_action_{standard};
 };
 
