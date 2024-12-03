@@ -9,6 +9,7 @@ import xml.etree.ElementTree as ET
 def parse_args():
     parser = argparse.ArgumentParser()
 
+    parser.add_argument('--cxx-output-dir')
     parser.add_argument('--java-output-dir')
     parser.add_argument('--csharp-output-dir')
 
@@ -21,7 +22,10 @@ def extract_java_metadata(output_dir):
     print(index_xml)
     tree = ET.parse(index_xml)
     root = tree.getroot()
-    for child in root.findall("./compound[@kind='class']"):
+    klasses = root.findall("./compound[@kind='class']")
+    structs = root.findall("./compound[@kind='struct']")
+    compounds = klasses + structs
+    for child in compounds:
         the_class_name = child.findall('./name')[0].text
         ref_id = child.attrib['refid']
         print(ref_id, the_class_name)
@@ -41,7 +45,8 @@ def extract_java_metadata(output_dir):
 if __name__ == '__main__':
     args = parse_args()
 
+    cxx_output_dir = args.cxx_output_dir
     java_output_dir = args.java_output_dir
     csharp_output_dir = args.csharp_output_dir
 
-    extract_java_metadata(java_output_dir)
+    extract_java_metadata(cxx_output_dir)
