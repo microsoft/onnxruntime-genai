@@ -3,7 +3,10 @@
  */
 package ai.onnxruntime.genai;
 
-/** The MultiModalProcessor class is responsible for converting text/images into a NamedTensors list that can be fed into a Generator class instance. */
+/**
+ * The MultiModalProcessor class is responsible for converting text/images into a NamedTensors list
+ * that can be fed into a Generator class instance.
+ */
 public class MultiModalProcessor implements AutoCloseable {
   private long nativeHandle;
 
@@ -83,9 +86,11 @@ public class MultiModalProcessor implements AutoCloseable {
 
   private native void destroyMultiModalProcessor(long tokenizerHandle);
 
-  private native long processorProcessImages(long processorHandle, String prompt, long imagesHandle) throws GenAIException;
+  private native long processorProcessImages(long processorHandle, String prompt, long imagesHandle)
+      throws GenAIException;
 
   private native String processorDecode(long processorHandle, int[] sequence) throws GenAIException;
 
-  private native long createTokenizerStreamFromProcessor(long processorHandle) throws GenAIException;
+  private native long createTokenizerStreamFromProcessor(long processorHandle)
+      throws GenAIException;
 }

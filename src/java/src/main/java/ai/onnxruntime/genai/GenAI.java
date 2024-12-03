@@ -67,6 +67,8 @@ final class GenAI {
     }
   }
 
+  static native void shutdown();
+
   /* Computes and initializes OS_ARCH_STR (such as linux-x64) */
   private static String initOsArch() {
     String detectedOS = null;
