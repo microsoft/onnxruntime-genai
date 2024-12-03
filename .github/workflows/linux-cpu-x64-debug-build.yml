@@ -1,0 +1,104 @@
+name: "Linux CPU x64 Build"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - main
+    - rel-*
+  pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+env:
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
+  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
+jobs:
+  linux_cpu_x64:
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
+    steps:
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Get the Latest OnnxRuntime Nightly Version
+        shell: pwsh
+        run: |
+          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+          Write-Host "$ORT_NIGHTLY_VERSION"
+          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Download OnnxRuntime Nightly
+        run: |
+          dotnet new console
+          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
+          dotnet build
+        continue-on-error: true
+
+      - name: list files
+        shell: bash
+        run: |
+          ls -l
+          ls -R ${{ env.ORT_PACKAGE_NAME }}
+        continue-on-error: true
+
+# TODO: Find out why do we need to to have libonnxruntime.so.$ort_version
+      - name: Extract OnnxRuntime library and header files
+        run: |
+          set -e -x
+          mkdir -p ort/lib
+          mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/build/native/include ort/
+          mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
+          cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
+
+      - name: Build with CMake and GCC
+        run: |
+          set -e -x
+          rm -rf build
+          cmake --preset linux_gcc_cpu_debug
+          cmake --build --preset linux_gcc_cpu_debug
+
+      - name: Install the python wheel and test dependencies
+        run: |
+          python3 -m pip install -r test/python/requirements.txt --user
+          python3 -m pip install -r test/python/cpu/torch/requirements.txt --user
+          python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
+          python3 -m pip install --user --no-index --no-deps --find-links build/cpu/wheel onnxruntime_genai
+
+      - name: Use Dummy HuggingFace Token
+        run: |
+          echo "HF_TOKEN=12345" >> $GITHUB_ENV
+
+      - name: Verify Build Artifacts
+        if: always()
+        continue-on-error: true
+        run: |
+          ls -l ${{ github.workspace }}/build/cpu
+          ls -l ${{ github.workspace }}/build/cpu/wheel
+
+      # This will also download all the test models to the test/test_models directory
+      # These models are used by the python tests as well as C#, C++ and others.
+      - name: Run the python tests
+        run: |
+          export ORTGENAI_LOG_ORT_LIB=1
+          python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
+
+      - name: Build the C# API and Run the C# Tests
+        run: |
+          export ORTGENAI_LOG_ORT_LIB=1
+          cd test/csharp
+          dotnet test /p:Configuration=Debug /p:NativeBuildOutputDir="../../build/cpu/" /p:OrtLibDir="../../ort/lib/" --verbosity normal
+
+      - name: Run tests
+        run: |
+          set -e -x
+          export ORTGENAI_LOG_ORT_LIB=1
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/ort/lib
+          ./build/cpu/unit_tests

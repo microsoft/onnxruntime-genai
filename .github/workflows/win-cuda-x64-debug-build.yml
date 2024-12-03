@@ -1,0 +1,109 @@
+name: "Windows CUDA x64 Build"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - main
+    - rel-*
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  AZCOPY_AUTO_LOGIN_TYPE: MSI
+  AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
+  cuda_dir: "${{ github.workspace }}\\cuda_sdk"
+  cuda_version: "12.2"
+  CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.2
+  binaryDir: 'build/cuda/win-x64'
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
+
+jobs:
+  windows-cuda-x64-build:
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10" ]
+    steps:
+    - name: Checkout OnnxRuntime GenAI repo
+      uses: actions/checkout@v4
+      with:
+        submodules: true
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11.x'
+        architecture: 'x64'
+
+    - name: Download cuda
+      run: |
+        azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ env.cuda_version }}" ${{ env.cuda_dir}}
+
+    - uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Download OnnxRuntime Nightly
+      shell: pwsh
+      run: |
+        $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+        $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+        Write-Host "$ORT_NIGHTLY_VERSION"
+        "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+        nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -ExcludeVersion -NonInteractive
+
+    - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
+      continue-on-error: true
+
+    - name: Extract OnnxRuntime library and header files
+      run: |
+        mkdir ort/lib
+        move ${{ env.ORT_PACKAGE_NAME }}/buildTransitive/native/include ort/
+        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/    
+
+    - name: Configure CMake
+      run: |
+        cmake --preset windows_x64_cuda_debug -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }}
+
+    - name: Build with CMake
+      run: |
+        cmake --build --preset windows_x64_cuda_debug --parallel
+
+    - name: Add CUDA to PATH
+      run: |
+        echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    - name: Install the Python Wheel and Test Dependencies
+      run: |
+        python -m pip install -r test\python\requirements.txt
+        python -m pip install -r test\python\cuda\torch\requirements.txt
+        python -m pip install -r test\python\cuda\ort\requirements.txt
+        python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+
+    - name: Use Dummy HuggingFace Token
+      run: |
+        Add-Content -Path $env:GITHUB_ENV -Value "HF_TOKEN=12345"
+
+    - name: Run the Python Tests
+      run: |
+        python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models" --e2e
+
+    - name: Verify Build Artifacts
+      if: always()
+      continue-on-error: true
+      run: |
+        
+        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir -Recurse
+
+    - name: Build the C# API and Run the C# Tests
+      run: |
+        $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH
+        cd test\csharp
+        dotnet test /p:Configuration=debug /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Debug" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
+
+    - name: Prepend CUDA to PATH and Run tests
+      run: |
+        $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
+        echo "Current PATH variable is: $env:PATH" 
+        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Debug
+        & .\$env:binaryDir\Debug\unit_tests.exe

@@ -1,0 +1,151 @@
+name: "Linux CUDA x64 Build"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - main
+    - rel-*
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Linux&api-version=6.0-preview.1"
+  ORT_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
+  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
+  DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
+
+jobs:
+  linux-cuda-x64-build:
+    env :
+      PYTHON_EXECUTABLE: "/opt/python/cp310-cp310/bin/python3.10"
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10" ]
+    steps:
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+# We are using the same manylinux repo as the one used in the packaging build
+      - name: Checkout ManyLinux repo
+        uses: actions/checkout@v4
+        with:
+          repository: pypa/manylinux
+          ref: 5eda9aded5462201e6310105728d33016e637ea7
+          clean: true
+          path: manylinux
+          submodules: true
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Get the Latest OnnxRuntime Nightly Version
+        shell: pwsh
+        run: |
+          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+          Write-Host "$ORT_NIGHTLY_VERSION"
+          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Download OnnxRuntime Nightly
+        run: |
+          dotnet new console
+          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
+          dotnet build
+        continue-on-error: true
+
+      - name: list files
+        shell: bash
+        run: |
+          ls -l
+          ls -R ${{ env.ORT_PACKAGE_NAME }}
+        continue-on-error: true
+
+      - name: Extract OnnxRuntime library and header files
+        run: |
+          set -e -x
+          mkdir -p ort/lib
+          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/buildTransitive/native/include ort/
+          mv microsoft.ml.onnxruntime.gpu.linux/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
+          cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
+
+
+      - name: Get Docker Image
+        run: |
+          set -e -x
+          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+          az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+          python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_12.2  \
+            --context tools/ci_build/github/linux/docker/manylinux  \
+            --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+            --container-registry onnxruntimebuildcache \
+            --manylinux-src manylinux \
+            --multiple_repos \
+            --repository onnxruntimecudabuildx64
+
+      - name: Config with Cmake in Docker
+        run: |
+          set -e -x
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -w /ort_genai_src onnxruntimecudabuildx64 \
+            bash -c " \
+              /usr/bin/cmake --preset linux_gcc_cuda_debug \
+                -DMANYLINUX=ON \
+                -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} "
+
+      - name: Build with Cmake in Docker
+        run: |
+          set -e -x
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -w /ort_genai_src onnxruntimecudabuildx64 \
+            bash -c " \
+              /usr/bin/cmake --build --preset linux_gcc_cuda_debug"
+
+      - name: Use Dummy HuggingFace Token
+        run: |
+          echo "HF_TOKEN=12345" >> $GITHUB_ENV
+
+      - name: Install the onnxruntime-genai Python wheel and run python test
+        run: |
+          echo "Installing the onnxruntime-genai Python wheel and running the Python tests"
+          docker run \
+            --gpus all \
+            --rm \
+            --volume /data/ortgenai_pytorch_models:/data/ortgenai_pytorch_models \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -e HF_TOKEN=$HF_TOKEN \
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
+              ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e"
+
+      # TODO: Enable this by adding dotnet to the docker image
+      # - name: Build the C# API and Run the C# Tests
+      #   run: |
+      #     echo "Building the C# API and running the C# tests"
+      #     docker run \
+      #       --gpus all \
+      #       --rm \
+      #       --volume $GITHUB_WORKSPACE:/ort_genai_src \
+      #       -w /ort_genai_src/test/csharp onnxruntimecudabuildx64 bash -c " \
+      #         dotnet test /p:NativeBuildOutputDir='/ort_genai_src/build/cuda/'"
+
+      - name: Docker -- Run unit tests
+        run: |
+          echo "Running docker image onnxruntimecudabuildx64"
+          docker run \
+            --gpus all \
+            --rm \
+            --volume /data/ortgenai_pytorch_models:/data/ortgenai_pytorch_models \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -w /ort_genai_src onnxruntimecudabuildx64 bash -c "ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/unit_tests"
