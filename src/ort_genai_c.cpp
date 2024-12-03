@@ -372,13 +372,13 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
 
 OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* oga_generator, OgaTensor** out) {
   OGA_TRY
-  auto& generator = *reinterpret_cast<Generators::Generator*>(oga_generator);
-  auto logits_span = generator.GetLogits();
-  const std::array<int64_t, 3> shape{generator.state_->params_->search.batch_size, 1, generator.model_->config_->model.vocab_size};
+  auto generator = reinterpret_cast<Generators::Generator*>(oga_generator);
+  auto logits_span = generator->GetLogits();
+  const std::array<int64_t, 3> shape{generator->state_->params_->search.batch_size, 1, generator->model_->config_->model.vocab_size};
   std::span<const float> cpu_logits_span = logits_span.CopyDeviceToCpu();
 
   // Copy logits to cpu tensor
-  std::unique_ptr<OrtValue> ortvalue_clone = OrtValue::CreateTensor<float>(generator.model_->allocator_cpu_, shape);
+  std::unique_ptr<OrtValue> ortvalue_clone = OrtValue::CreateTensor<float>(generator->model_->allocator_cpu_, shape);
   auto clone_span = std::span<float>(ortvalue_clone->GetTensorMutableData<float>(), cpu_logits_span.size());
   Generators::copy(cpu_logits_span, clone_span);
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
@@ -398,7 +398,7 @@ OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* oga_generator, OgaT
   size_t element_count = logits_tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
   auto new_logits_span = std::span<const float>(logits_tensor->ort_tensor_->GetTensorData<float>(), element_count);
   auto logits = generator->search_->GetLogits();
-  if (static_cast<size_t>(new_logits_span.size()) != logits.size()) {
+  if (new_logits_span.size() != logits.size()) {
     throw std::runtime_error("Generator::SetLogits passed an array of size " +
                              std::to_string(new_logits_span.size()) + " but should be size " + std::to_string(logits.size()));
   }
