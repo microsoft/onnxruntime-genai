@@ -1,4 +1,4 @@
-name: "Linux CUDA x64 Build"
+name: "Linux CUDA x64 Debug Build"
 on:
   workflow_dispatch:
   push:

@@ -1,4 +1,4 @@
-name: "Windows CUDA x64 Build"
+name: "Windows CUDA x64 Debug Build"
 on:
   workflow_dispatch:
   push:

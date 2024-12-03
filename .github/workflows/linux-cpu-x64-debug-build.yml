@@ -1,4 +1,4 @@
-name: "Linux CPU x64 Build"
+name: "Linux CPU x64 Debug Build"
 on:
   workflow_dispatch:
   push:
