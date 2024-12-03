@@ -66,11 +66,11 @@ jobs:
 
     - name: Configure CMake
       run: |
-        cmake --preset windows_x64_cpu_release
+        cmake --preset windows_x64_cpu_debug
 
     - name: Build with CMake
       run: |
-        cmake --build --preset windows_x64_cpu_release --parallel
+        cmake --build --preset windows_x64_cpu_debug --parallel
 
     - name: Install the python wheel and test dependencies
       run: |
@@ -90,7 +90,7 @@ jobs:
     - name: Build the C# API and Run the C# Tests
       run: |
         cd test\csharp
-        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib" --verbosity normal
+        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Debug" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib" --verbosity normal
 
     - name: Verify Build Artifacts
       if: always()
@@ -101,8 +101,8 @@ jobs:
 
     - name: Run tests
       run: |
-        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
-        & .\$env:binaryDir\Release\unit_tests.exe
+        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Debug
+        & .\$env:binaryDir\Debug\unit_tests.exe
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3

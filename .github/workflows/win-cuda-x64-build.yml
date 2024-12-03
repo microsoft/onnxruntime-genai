@@ -63,11 +63,11 @@ jobs:
 
     - name: Configure CMake
       run: |
-        cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }}
+        cmake --preset windows_x64_cuda_debug -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }}
 
     - name: Build with CMake
       run: |
-        cmake --build --preset windows_x64_cuda_release --parallel
+        cmake --build --preset windows_x64_cuda_debug --parallel
 
     - name: Add CUDA to PATH
       run: |
@@ -99,11 +99,11 @@ jobs:
       run: |
         $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH
         cd test\csharp
-        dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
+        dotnet test /p:Configuration=debug /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Debug" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
 
     - name: Prepend CUDA to PATH and Run tests
       run: |
         $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
         echo "Current PATH variable is: $env:PATH" 
-        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
-        & .\$env:binaryDir\Release\unit_tests.exe
+        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Debug
+        & .\$env:binaryDir\Debug\unit_tests.exe

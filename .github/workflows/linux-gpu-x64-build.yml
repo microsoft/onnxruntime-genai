@@ -94,7 +94,7 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
-              /usr/bin/cmake --preset linux_gcc_cuda_release \
+              /usr/bin/cmake --preset linux_gcc_cuda_debug \
                 -DMANYLINUX=ON \
                 -DPYTHON_EXECUTABLE=${{ env.PYTHON_EXECUTABLE }} "
 
@@ -107,7 +107,7 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
-              /usr/bin/cmake --build --preset linux_gcc_cuda_release"
+              /usr/bin/cmake --build --preset linux_gcc_cuda_debug"
 
       - name: Use Dummy HuggingFace Token
         run: |
