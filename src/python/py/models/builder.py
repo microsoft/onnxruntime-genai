@@ -58,7 +58,7 @@ class Model:
         self.ep_attrs = {
             "cpu": {},
             "cuda": {
-                "enable_cuda_graph": extra_options.get("enable_cuda_graph", "0"),        # "1" if the model is able to enable cuda graph, "0" otherwise
+                "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",        # "1" if the model is able to enable cuda graph, "0" otherwise
             },
             "rocm": {
                 "tunable_op_enable": "1",
@@ -2095,7 +2095,7 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
-        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1" or self.ep == "dml":
+        if self.ep_attrs["cuda"]["enable_cuda_graph"] or self.ep == "dml":
             # ORT does not allow nodes to be placed on mulitple execution providers
             # with cuda graph enabled. We've only verified it works with GQA and with
             # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded
@@ -2994,7 +2994,7 @@ class Phi3MoE128KModel(MistralModel):
         self.moe_attrs["activation_type"] = "silu"
         self.moe_attrs["normalize_routing_weights"] = 0
         self.moe_attrs["use_sparse_mixer"] = 1
-        self.moe_attrs["use_int4"] = 0 if "use_8bits_moe" in extra_options and extra_options["use_8bits_moe"] == "1" else 1
+        self.moe_attrs["use_int4"] = 0 if extra_options.get("use_8bits_moe", False) else 1
 
         self.make_rotary_embedding_multi_cache()
 
