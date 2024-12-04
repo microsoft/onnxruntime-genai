@@ -311,6 +311,10 @@ struct PyGenerator {
     generator_->ComputeLogits();
   }
 
+  pybind11::array GetInput(const std::string& name) {
+    return ToNumpy(generator_->state_->GetInput(name.c_str()), *(generator_->model_));
+  }
+  
   pybind11::array GetOutput(const std::string& name) {
     return ToNumpy(generator_->state_->GetOutput(name.c_str()), *(generator_->model_));
   }
@@ -442,6 +446,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init<Model&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
       .def("compute_logits", &PyGenerator::ComputeLogits)
+      .def("get_input", &PyGenerator::GetInput)
       .def("get_output", &PyGenerator::GetOutput)
       .def("get_logits", &PyGenerator::GetLogits)
       .def("set_logits", &PyGenerator::SetLogits)

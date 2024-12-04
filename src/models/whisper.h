@@ -76,6 +76,7 @@ struct WhisperState : State {
   WhisperState& operator=(const WhisperState&) = delete;
 
   RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
+  OrtValue* GetInput(const char* name) override;
   OrtValue* GetOutput(const char* name) override;
 
 private:

@@ -365,6 +365,24 @@ void WhisperState::Finalize(int current_length) {
   }
 }
 
+OrtValue* WhisperState::GetInput(const char* name) {
+  // Check if input name is in encoder state's inputs
+  for (size_t i = 0; i < encoder_state_->input_names_.size(); i++) {
+    if (std::strcmp(encoder_state_->input_names_[i], name) == 0) {
+      return encoder_state_->inputs_[i];
+    }
+  }
+
+  // Check if input name is in decoder state's inputs
+  for (size_t i = 0; i < decoder_state_->input_names_.size(); i++) {
+    if (std::strcmp(decoder_state_->input_names_[i], name) == 0) {
+      return decoder_state_->inputs_[i];
+    }
+  }
+
+  return State::GetInput(name);
+};
+
 OrtValue* WhisperState::GetOutput(const char* name) {
   // Check if output name is in encoder state's outputs
   for (size_t i = 0; i < encoder_state_->output_names_.size(); i++) {

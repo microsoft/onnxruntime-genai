@@ -181,6 +181,31 @@ RoamingArray<float> MultiModalPipelineState::Run(int current_length, RoamingArra
   return decoder_state_->Run(current_length, next_tokens, next_indices);
 }
 
+OrtValue* MultiModalPipelineState::GetInput(const char* name) {
+  // Check if input name is in vision state's inputs
+  for (size_t i = 0; i < vision_state_->input_names_.size(); i++) {
+    if (std::strcmp(vision_state_->input_names_[i], name) == 0) {
+      return vision_state_->inputs_[i];
+    }
+  }
+
+  // Check if input name is in embedding state's inputs
+  for (size_t i = 0; i < embedding_state_->input_names_.size(); i++) {
+    if (std::strcmp(embedding_state_->input_names_[i], name) == 0) {
+      return embedding_state_->inputs_[i];
+    }
+  }
+
+  // Check if input name is in decoder state's inputs
+  for (size_t i = 0; i < decoder_state_->input_names_.size(); i++) {
+    if (std::strcmp(decoder_state_->input_names_[i], name) == 0) {
+      return decoder_state_->inputs_[i];
+    }
+  }
+
+  return State::GetInput(name);
+};
+
 OrtValue* MultiModalPipelineState::GetOutput(const char* name) {
   // Check if output name is in vision state's outputs
   for (size_t i = 0; i < vision_state_->output_names_.size(); i++) {

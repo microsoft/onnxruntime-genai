@@ -33,8 +33,7 @@ struct State {
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
   virtual void Finalize(int current_length) {}
 
-  OrtValue* GetInput(const char* name);
-
+  virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
 
   void ClearIO();  // Clear all inputs/outputs
