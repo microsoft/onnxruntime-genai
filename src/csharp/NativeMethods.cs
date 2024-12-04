@@ -123,10 +123,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                        IntPtr /* const OgaSequences* */ sequences);
                                                                                        
 
-        // This function is used to rewind the generator to the given index.
+        // This function is used to rewind the generator to the given newLength.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGenerator_RewindTo(IntPtr /* OgaGenerator* */ generator,
-                                                                            UIntPtr /* size_t */ index);
+                                                                            UIntPtr /* size_t */ newLength);
 
         // This function returns the length of the sequence at the given index.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

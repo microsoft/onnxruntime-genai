@@ -41,9 +41,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken(_generatorHandle));
         }
 
-        public void RewindTo(ulong index)
+        /// <summary>
+        /// Rewinds the generator to the given newLength.
+        /// Throw on error
+        /// </summary>
+        /// <param name="newLength"></param>
+        public void RewindTo(ulong newLength)
         {
-            Result.VerifySuccess(NativeMethods.OgaGenerator_RewindTo(_generatorHandle, (UIntPtr)index));
+            Result.VerifySuccess(NativeMethods.OgaGenerator_RewindTo(_generatorHandle, (UIntPtr)newLength));
         }
 
         public ReadOnlySpan<int> GetSequence(ulong index)
