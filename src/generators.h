@@ -111,7 +111,7 @@ struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
-  void AppendTokens(const cpu_span<int32_t>& input_ids);
+  void AppendTokens(const cpu_span<int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
   DeviceSpan<float> GetLogits();
@@ -127,9 +127,12 @@ struct Generator : LeakChecked<Generator> {
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
 
  private:
-  DeviceSpan<int32_t> AllocateInputIdsOnDevice(const cpu_span<int32_t>& input_ids);
-  void ComputeLogits(DeviceSpan<int32_t>& next_tokens);
-  bool just_rewinded_{false};
+  DeviceSpan<int32_t> AllocateInputIdsOnDevice(const cpu_span<int32_t> input_ids);
+  void ComputeLogits(DeviceSpan<int32_t> next_tokens);
+  enum Action { standard,   // Default, set in any other case
+                generated,  // Set after GenerateNextToken
+                rewound };  // Set after RewindToLength
+  Action last_action_{standard};
 };
 
 struct OrtGlobals {
