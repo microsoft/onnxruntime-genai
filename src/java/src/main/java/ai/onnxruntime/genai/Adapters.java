@@ -4,6 +4,9 @@
  */
 package ai.onnxruntime.genai;
 
+/**
+ * A container of adapters.
+ */
 public final class Adapters implements AutoCloseable {
   private long nativeHandle = 0;
 
