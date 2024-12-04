@@ -3040,6 +3040,15 @@ class ChatGLMModel(Model):
         layer.self_attn = layer.self_attn if hasattr(layer, 'self_attn') else layer.self_attention
         super().make_layer(layer_id, layer)
 
+class OLMoModel(Model):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
+        layernorm.weight = torch.ones(self.hidden_size)
+        layernorm.bias = torch.zeros(self.hidden_size)
+        super().make_layernorm(layer_id, layernorm, skip, simple, location)
+
 def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
@@ -3153,6 +3162,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
             config.hidden_act = "swiglu"
             onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "OlmoForCausalLM":
+            onnx_model = OLMoModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
