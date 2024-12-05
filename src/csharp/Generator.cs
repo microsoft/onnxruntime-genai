@@ -20,13 +20,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return NativeMethods.OgaGenerator_IsDone(_generatorHandle) != 0;
         }
 
-        public void AppendTokens(ReadOnlySpan<int> tokens)
+        public void AppendTokens(ReadOnlySpan<int> inputIDs)
         {
             unsafe
             {
-                fixed (int* tokenIDsPtr = tokens)
+                fixed (int* inputIDsPtr = inputIDs)
                 {
-                    Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, tokenIDsPtr, (UIntPtr)tokens.Length));
+                    Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, inputIDsPtr, (UIntPtr)inputIDs.Length));
                 }
             }
         }

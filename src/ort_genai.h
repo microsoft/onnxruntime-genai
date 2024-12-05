@@ -287,8 +287,8 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
   }
 
-  void RewindTo(size_t length) {
-    OgaCheckResult(OgaGenerator_RewindTo(this, length));
+  void RewindTo(size_t new_length) {
+    OgaCheckResult(OgaGenerator_RewindTo(this, new_length));
   }
 
   void SetRuntimeOption(const char* key, const char* value) {
