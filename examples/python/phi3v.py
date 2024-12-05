@@ -99,13 +99,22 @@ def run(args: argparse.Namespace):
         generator = og.Generator(model, params)
         start_time = time.time()
 
-        while not generator.is_done():
-            generator.generate_next_token()
-
-            new_token = generator.get_next_tokens()[0]
-            print(tokenizer_stream.decode(new_token), end="", flush=True)
-
-        print()
+        generated_text = ""   
+          
+        # Loop to generate each token after calling compute_logits  
+        while True:  
+            generator.compute_logits()  # Prepare the output logits  
+            generator.generate_next_token()  # Generate the next token  
+            new_tokens = generator.get_next_tokens()  # Get the output tokens  
+  
+            for token in new_tokens:  
+                generated_text += tokenizer_stream.decode(token)  # Decode each token and accumulate text  
+  
+            if generator.is_done():  
+                break  
+  
+        # Print out the generated tokens  
+        print(generated_text)  
         total_run_time = time.time() - start_time
         print(f"Total Time : {total_run_time:.2f}")
 
