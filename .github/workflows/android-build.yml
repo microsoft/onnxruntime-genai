@@ -82,6 +82,13 @@ jobs:
           unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
           ls -lR ort
 
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@1.82.0
+
+      - name: Install Rust Android Toolchain
+        run: |
+          rustup target add --toolchain 1.82.0-x86_64-unknown-linux-gnu x86_64-linux-android
+
       - name: Create Android build
         run: |
           set -e -x

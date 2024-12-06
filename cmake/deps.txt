@@ -15,3 +15,5 @@ googletest;https://github.com/google/googletest/archive/530d5c8c84abd2a46f38583e
 microsoft_wil;https://github.com/microsoft/wil/archive/refs/tags/v1.0.230629.1.zip;e4a542a323c070376f7c2d1973d0f7ddbc1d2fa5
 directx_headers;https://github.com/microsoft/DirectX-Headers/archive/refs/tags/v1.613.1.zip;47653509a3371eabb156360f42faf582f314bf2e
 onnxruntime_extensions;https://github.com/microsoft/onnxruntime-extensions.git;2c3e936cfc3401ba7ebb79d02b9e52a50439ffc3
+llguidance;https://github.com/microsoft/llguidance.git;4dc358feef3cdf0542a5f95b5f4e92761887a25d
+corrosion;https://github.com/corrosion-rs/corrosion.git;64289b1d79d6d19cd2e241db515381a086bb8407

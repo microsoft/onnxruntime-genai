@@ -50,7 +50,7 @@ struct DeviceSpan {
   }
 
   // Copy device memory to CPU memory and return the CPU accessible memory
-  std::span<T> CopyDeviceToCpu() {
+  std::span<T> CopyDeviceToCpu() const {
     p_device_memory_->CopyDeviceToCpu();
     return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_cpu_) + begin_, length_};
   }

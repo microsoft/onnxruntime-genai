@@ -10,6 +10,9 @@ else \
     echo "Using default gcc because CUDA version is less than 12"; \
     cd /tmp/scripts && /tmp/scripts/install_centos.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts; \
 fi
+ENV PATH="/usr/.cargo/bin:$PATH"
+ENV RUSTUP_HOME="/usr/.rustup"
+ENV CARGO_HOME="/usr/.cargo"
 ARG BUILD_UID=1001
 ARG BUILD_USER=onnxruntimedev
 RUN adduser --uid $BUILD_UID $BUILD_USER

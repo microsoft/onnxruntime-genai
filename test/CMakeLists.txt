@@ -13,6 +13,7 @@ add_executable(unit_tests
   model_tests.cpp
   sampling_tests.cpp
   sampling_benchmark.cpp
+  logits_processor_tests.cpp
 )
 
 target_include_directories(unit_tests PRIVATE
@@ -21,6 +22,7 @@ target_include_directories(unit_tests PRIVATE
 )
 
 target_link_directories(unit_tests PRIVATE ${ORT_LIB_DIR})
+
 target_link_libraries(unit_tests PRIVATE
   onnxruntime-genai-static
   GTest::gtest_main
@@ -56,3 +58,4 @@ if (NOT MSVC)
 endif()
 
 include(GoogleTest)
+
