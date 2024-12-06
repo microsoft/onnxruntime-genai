@@ -50,15 +50,15 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(int vocab_size, uint32_t eos_to
   auto prefix_len = tokenizer_->Encode(kTokenizePrefixStr).size();
   tokenize_data_ = {tokenizer_.get(), prefix_len};
   LlgTokenizerInit tokenizer_init = {
-      static_cast<uint32_t>(vocab_size_), // vocab_size
-      eos_token, // eos_token
-      nullptr, // token_lens
-      nullptr, // token_bytes
-      json_data.c_str(), // tokenizer_json config data
-      false, // tokenize_assumes_string
-      tokenize_fn, // tokenize_fn
-      false, // use_approximate_greedy_tokenize_fn
-      &tokenize_data_, // user_data
+      static_cast<uint32_t>(vocab_size_),  // vocab_size
+      eos_token,                           // eos_token
+      nullptr,                             // token_lens
+      nullptr,                             // token_bytes
+      json_data.c_str(),                   // tokenizer_json config data
+      false,                               // tokenize_assumes_string
+      tokenize_fn,                         // tokenize_fn
+      false,                               // use_approximate_greedy_tokenize_fn
+      &tokenize_data_,                     // user_data
   };
 
   char error_buf[128];
