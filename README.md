@@ -50,7 +50,9 @@ See https://onnxruntime.ai/docs/genai/howto/install
 
 3. Run the model
 
-   ## Build from source / Next release (0.6.0)
+   *Main branch contains new API changes. For examples compatible with current release (0.5.2), [see release branch](https://github.com/microsoft/onnxruntime-genai/tree/rel-0.5.2).*
+
+   ### Build from source / Next release (0.6.0)
 
    ```python
    import onnxruntime_genai as og
@@ -96,7 +98,7 @@ See https://onnxruntime.ai/docs/genai/howto/install
    del generator
    ```
 
-   ## Current release (until 0.5.x)
+   ### Current release (until 0.5.x)
 
    ```python
    import onnxruntime_genai as og
