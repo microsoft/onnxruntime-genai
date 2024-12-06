@@ -244,11 +244,13 @@ def _validate_build_dir(args: argparse.Namespace):
             # also tweak build directory name for mac builds
             target_sys = "macOS"
 
-        args.build_dir = Path("build") / target_sys
+        # set to a config specific build dir if no build_dir specified from command arguments
+        args.build_dir = Path("build") / target_sys / args.config
 
-    # set to a config specific build dir. it should exist unless we're creating the cmake setup
     is_strict = not args.update
-    args.build_dir = args.build_dir.resolve(strict=is_strict) / args.config
+    # Use user-specified build_dir and ignore args.config
+    # This is to better accommodate the existing cmake presets which can uses arbitrary paths.
+    args.build_dir = args.build_dir.resolve(strict=is_strict)
 
 
 def _validate_cuda_args(args: argparse.Namespace):
@@ -468,7 +470,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
             is_x64_host = platform.machine() == "AMD64"
             if is_x64_host:
-                toolset_options += ["host=x64"]
+                pass
 
             if args.use_cuda:
                 toolset_options += ["cuda=" + str(args.cuda_home)]
@@ -639,6 +641,10 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         csharp_test_command = [dotnet, "test"]
         csharp_test_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_test_command, env=env, cwd=str(REPO_ROOT / "test" / "csharp"))
+
+    if args.build_java:
+        ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
+        util.run(ctest_cmd, cwd=str(args.build_dir / "src" / "java"))
 
     if args.android:
         _run_android_tests(args)

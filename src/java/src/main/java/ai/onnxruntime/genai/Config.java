@@ -11,23 +11,23 @@ public final class Config implements AutoCloseable {
   }
 
   public void clearProviders() {
-	if (nativeHandle == 0) {
-	  throw new IllegalStateException("Instance has been freed and is invalid");
-	}
-	clearProviders(nativeHandle);
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+    clearProviders(nativeHandle);
   }
 
   public void appendProvider(String provider_name) {
     if (nativeHandle == 0) {
-	  throw new IllegalStateException("Instance has been freed and is invalid");
+      throw new IllegalStateException("Instance has been freed and is invalid");
     }
-	appendProvider(nativeHandle, provider_name);
+    appendProvider(nativeHandle, provider_name);
   }
 
   public void setProviderOption(String provider_name, String option_name, String option_value) {
     if (nativeHandle == 0) {
-	  throw new IllegalStateException("Instance has been freed and is invalid");
-	}
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
     setProviderOption(nativeHandle, provider_name, option_name, option_value);
   }
 
@@ -52,8 +52,13 @@ public final class Config implements AutoCloseable {
   }
 
   private native long createConfig(String modelPath) throws GenAIException;
+
   private native void destroyConfig(long configHandle);
+
   private native void clearProviders(long configHandle);
+
   private native void appendProvider(long configHandle, String provider_name);
-  private native void setProviderOption(long configHandle, String provider_name, String option_name, String option_value);
+
+  private native void setProviderOption(
+      long configHandle, String provider_name, String option_name, String option_value);
 }
