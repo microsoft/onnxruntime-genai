@@ -64,7 +64,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   /**
    * Appends tokens to the generator.
    *
-   * @param tokens The tokens to append.
+   * @param inputIDs The tokens to append.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void appendTokens(int[] inputIDs) throws GenAIException {

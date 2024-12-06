@@ -36,7 +36,7 @@
  * }
  * auto output_sequence = generator->GetSequenceData(0);
  * auto output_string = tokenizer->Decode(output_sequence, generator->GetSequenceCount(0));
- * 
+ *
  * std::cout << "Output: " << std::endl << output_string << std::endl;
  */
 
