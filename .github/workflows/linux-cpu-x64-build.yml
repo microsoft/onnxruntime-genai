@@ -70,19 +70,16 @@ jobs:
           mv microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/linux-x64/native/* ort/lib/
           cp ort/lib/libonnxruntime.so ort/lib/libonnxruntime.so.1
 
-      - name: Build with CMake and GCC
+      - name: Build with Python
         run: |
-          set -e -x
-          rm -rf build
-          cmake --preset linux_gcc_cpu_debug
-          cmake --build --preset linux_gcc_cpu_debug
+          python3 build.py --parallel --config=Debug --build_csharp
 
       - name: Install the python wheel and test dependencies
         run: |
           python3 -m pip install -r test/python/requirements.txt --user
           python3 -m pip install -r test/python/cpu/torch/requirements.txt --user
           python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
-          python3 -m pip install --user --no-index --no-deps --find-links build/cpu/wheel onnxruntime_genai
+          python3 -m pip install --user --no-index --no-deps --find-links build/Linux/Debug/wheel onnxruntime_genai
 
       - name: Use Dummy HuggingFace Token
         run: |
@@ -92,8 +89,8 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          ls -l ${{ github.workspace }}/build/cpu
-          ls -l ${{ github.workspace }}/build/cpu/wheel
+          ls -l ${{ github.workspace }}/build/Linux/Debug
+          ls -l ${{ github.workspace }}/build/Linux/Debug/wheel
 
       # This will also download all the test models to the test/test_models directory
       # These models are used by the python tests as well as C#, C++ and others.
@@ -106,16 +103,16 @@ jobs:
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
           cd test/csharp
-          dotnet test /p:Configuration=Debug /p:NativeBuildOutputDir="../../build/cpu/" /p:OrtLibDir="../../ort/lib/" --verbosity normal
+          dotnet test /p:Configuration=Debug /p:NativeBuildOutputDir="../../build/Linux/Debug/" /p:OrtLibDir="../../ort/lib/" --verbosity normal
 
       - name: Build the Java API and Run the Java Tests
         run: |
           set -e -x
-          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja"
+          python3 build.py --config=Release --build_dir build/Linux/Debug --build_java --parallel --cmake_generator "Ninja"
 
       - name: Run tests
         run: |
           set -e -x
           export ORTGENAI_LOG_ORT_LIB=1
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/ort/lib
-          ./build/cpu/unit_tests
+          ./build/Linux/Debug/unit_tests

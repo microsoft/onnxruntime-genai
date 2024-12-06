@@ -11,7 +11,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  binaryDir: 'build/cpu/win-x64'
+  binaryDir: 'build/Windows/Debug'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 
@@ -76,13 +76,9 @@ jobs:
       with:
         languages: 'cpp'
 
-    - name: Configure CMake
+    - name: Build with Python
       run: |
-        cmake --preset windows_x64_cpu_debug
-
-    - name: Build with CMake
-      run: |
-        cmake --build --preset windows_x64_cpu_debug --parallel
+        python3 build.py --parallel --config=Debug --build_csharp --build_java
 
     - name: Install the python wheel and test dependencies
       run: |
@@ -102,11 +98,7 @@ jobs:
     - name: Build the C# API and Run the C# Tests
       run: |
         cd test\csharp
-        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Debug" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib" --verbosity normal
-
-    - name: Build the Java API and Run the Java Tests
-      run: |
-        python3 build.py --config=Debug --build_dir $env:binaryDir --build_java --parallel
+        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib" --verbosity normal
 
     - name: Verify Build Artifacts
       if: always()

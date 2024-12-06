@@ -70,26 +70,18 @@ jobs:
           --container-registry onnxruntimebuildcache \
           --repository ort_genai_linux_arm64_gha
 
-      - name: Docker -- Configure with CMake and GCC
+      - name: Build with Python
         run: |
-          docker run --rm \
-          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/cmake --preset linux_gcc_cpu_debug"
-
-      - name: Docker -- Build with CMake and GCC
-        run: |
-          docker run --rm \
-          --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/cmake --build --preset linux_gcc_cpu_debug"
+          python3 build.py --parallel --config=Debug
 
       - name: Docker -- Check test directory
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "ls -l /onnxruntime_src/build/cpu/test/"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "ls -l /onnxruntime_src/build/Linux/Debug/test/"
 
       - name: Docker -- Run tests
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/onnxruntime_src/ort/lib/ /onnxruntime_src/build/cpu/unit_tests"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/onnxruntime_src/ort/lib/ /onnxruntime_src/build/Linux/Debug/unit_tests"

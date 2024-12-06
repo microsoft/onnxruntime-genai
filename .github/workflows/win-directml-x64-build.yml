@@ -22,7 +22,7 @@ env:
   d3d12_dir: "Microsoft.Direct3D.D3D12.1.614.1"
   d3d12_zip: "Microsoft.Direct3D.D3D12.1.614.1.zip"
   d3d12_url: "https://www.nuget.org/api/v2/package/Microsoft.Direct3D.D3D12/1.614.1"
-  binaryDir: 'build/directml/win-x64'
+  binaryDir: 'build/Windows/Release'
 
 
 jobs:
@@ -78,13 +78,9 @@ jobs:
         mv $env:d3d12_dir\build\native\bin\x64\D3D12Core.dll ort\lib
         mv $env:dml_dir\include\DirectML.h ort\include
 
-    - name: Configure CMake
+    - name: Build with Python
       run: |
-        cmake --preset windows_x64_directml_release -DTEST_PHI2=False
-
-    - name: Build with CMake
-      run: |
-        cmake --build --preset windows_x64_directml_release --parallel
+        python build.py --parallel --config=Release --use_dml
 
     - name: Install the Python Wheel and Test Dependencies
       run: |

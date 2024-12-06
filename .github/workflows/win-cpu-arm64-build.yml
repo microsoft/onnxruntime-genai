@@ -11,7 +11,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  binaryDir: 'build/cpu/win-arm64'
+  binaryDir: 'build/Windows/Release'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 
@@ -52,14 +52,9 @@ jobs:
         move ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
         move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-arm64/native/* ort/lib/
 
-    - name: Configure CMake
+    - name: Build with Python
       run: |
-        python -m pip install wheel
-        cmake --preset windows_arm64_cpu_release
-
-    - name: Build with CMake
-      run: |
-        cmake --build --preset windows_arm64_cpu_release --parallel
+        python build.py --parallel --config=Release --build_csharp
 
     - name: Build the C# API and Run the C# Tests
       run: |

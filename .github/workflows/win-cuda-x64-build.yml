@@ -17,7 +17,7 @@ env:
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
   cuda_version: "12.2"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.2
-  binaryDir: 'build/cuda/win-x64'
+  binaryDir: 'build/Windows/Debug'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
 
@@ -61,17 +61,13 @@ jobs:
         move ${{ env.ORT_PACKAGE_NAME }}/buildTransitive/native/include ort/
         move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/    
 
-    - name: Configure CMake
-      run: |
-        cmake --preset windows_x64_cuda_debug -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }}
-
-    - name: Build with CMake
-      run: |
-        cmake --build --preset windows_x64_cuda_debug --parallel
-
     - name: Add CUDA to PATH
       run: |
         echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+    - name: Build with Python
+      run: |
+        python build.py --cuda_home=${{ env.cuda_dir }}\\v${{ env.cuda_version }} --parallel --config=Debug
 
     - name: Install the Python Wheel and Test Dependencies
       run: |
