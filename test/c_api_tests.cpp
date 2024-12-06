@@ -680,12 +680,15 @@ TEST(CAPITests, SetGuidance) {
   auto input_sequences = OgaSequences::Create();
   tokenizer->Encode(input_string, *input_sequences);
   auto params = OgaGeneratorParams::Create(*model);
-  params->SetInputSequences(*input_sequences);
   params->SetSearchOption("max_length", 32);
   params->SetGuidance("regex", "answer: .*");
 
-  auto sequences = model->Generate(*params);
-  auto out_string = tokenizer->Decode(sequences->SequenceData(0), sequences->SequenceCount(0));
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*input_sequences);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+  auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
   auto output = std::string(out_string).substr(std::string(input_string).size());
   EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
 
