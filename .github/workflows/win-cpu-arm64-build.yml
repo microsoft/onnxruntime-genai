@@ -54,6 +54,7 @@ jobs:
 
     - name: Build with Python
       run: |
+        python -m pip install requests
         python build.py --parallel --config=Release --build_csharp
 
     - name: Build the C# API and Run the C# Tests

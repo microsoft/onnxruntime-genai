@@ -78,6 +78,7 @@ jobs:
 
     - name: Build with Python
       run: |
+        python3 -m pip install requests
         python3 build.py --parallel --config=Debug --build_csharp --build_java
 
     - name: Install the python wheel and test dependencies

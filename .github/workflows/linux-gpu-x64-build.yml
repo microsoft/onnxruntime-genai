@@ -94,6 +94,7 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install requests && \
               ${{ env.PYTHON_EXECUTABLE }} build.py --use_cuda --parallel --config=Debug"
 
       - name: Use Dummy HuggingFace Token

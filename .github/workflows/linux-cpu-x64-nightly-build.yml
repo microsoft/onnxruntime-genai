@@ -41,6 +41,7 @@ jobs:
           
       - name: Build with Python
         run: |
+          python3 -m pip install requests
           python3 build.py --parallel --config=Release
 
       - name: Install the python wheel and test dependencies
