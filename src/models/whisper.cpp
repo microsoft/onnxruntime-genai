@@ -286,7 +286,7 @@ void WhisperState::UpdateCrossQKSearchBuffer(int current_length) {
 
 template <typename T>
 void WhisperState::FinalizeCrossQK(int current_length) {
-  if (decoder_state_->output_cross_qk_.size() && alignment_heads_) {
+  if (decoder_state_->output_cross_qk_.size() && alignment_heads_ && decoder_state_->cache_indirection_) {
 #if USE_CUDA
     // Instantiate final output for cross QKs
     auto num_alignment_heads = alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0];
