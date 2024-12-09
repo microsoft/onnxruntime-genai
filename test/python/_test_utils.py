@@ -104,7 +104,7 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
         device,
     ]
 
-    extra_options = ["--extra_options"]
+    extra_options = ["--extra_options", "include_hidden_states=true"]
     if device == "cpu" and precision == "int4":
         extra_options += ["int4_accuracy_level=4"]
     if one_layer:
