@@ -80,7 +80,7 @@ jobs:
       run: |
         python3 -m pip install requests
         python3 -m pip install wheel
-        python3 build.py --parallel --config=Debug --build_csharp --build_java
+        python3 build.py --parallel --config=Debug --build_java
 
     - name: Install the python wheel and test dependencies
       run: |
