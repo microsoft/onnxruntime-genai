@@ -332,7 +332,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * Retrieve the sequence count at the given index.
  * @param index The index needed.
  * @param error Optional error information set if an error occurs.
- * @return The sequence length at the given index, or nil if an error occurs.
+ * @return The sequence count at the given index, or size_t(-1) if an error occurs.
  */
 - (size_t)sequenceCountAtIndex:(size_t)index
                          error:(NSError**)error;
