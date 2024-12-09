@@ -313,11 +313,18 @@ class Model:
             config = GenerationConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
         except:
             config = AutoConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+
         inputs = dict(zip(self.input_names, self.input_names))
         inputs.update({
             "past_key_names": "past_key_values.%d.key",
             "past_value_names": "past_key_values.%d.value",
         })
+        outputs = dict(zip(self.output_names, self.output_names))
+        outputs.update({
+            "present_key_names": "present.%d.key",
+            "present_value_names": "present.%d.value",
+        })
+
         genai_config = {
             "model": {
                 "bos_token_id": config.bos_token_id if hasattr(config, "bos_token_id") else 1,  # config.bos_token_id not present in ChatGLM model configs.
@@ -331,11 +338,7 @@ class Model:
                     "head_size": self.head_size,
                     "hidden_size": self.hidden_size,
                     "inputs": inputs,
-                    "outputs": {
-                        "logits": "logits",
-                        "present_key_names": "present.%d.key",
-                        "present_value_names": "present.%d.value",
-                    },
+                    "outputs": outputs,
                     "num_attention_heads": self.num_attn_heads,
                     "num_hidden_layers": self.num_layers,
                     "num_key_value_heads": self.num_kv_heads,

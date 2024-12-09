@@ -171,7 +171,9 @@ struct Outputs_Element : JSON::Element {
   explicit Outputs_Element(Config::Model::Decoder::Outputs& v) : v_{v} {}
 
   void OnString(std::string_view name, std::string_view value) override {
-    if (name == "logits") {
+    if (name == "hidden_states") {
+      v_.hidden_states = value;
+    } else if (name == "logits") {
       v_.logits = value;
     } else if (name == "present_key_names") {
       v_.present_key_names = value;
