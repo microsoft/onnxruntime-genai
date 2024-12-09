@@ -58,7 +58,7 @@ class Model:
         self.ep_attrs = {
             "cpu": {},
             "cuda": {
-                "enable_cuda_graph": extra_options.get("enable_cuda_graph", "0"),        # "1" if the model is able to enable cuda graph, "0" otherwise
+                "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",        # "1" if the model is able to enable cuda graph, "0" otherwise
             },
             "rocm": {
                 "tunable_op_enable": "1",
@@ -297,7 +297,7 @@ class Model:
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
             },
-            "use_qdq": False,           # Use QDQ format
+            "use_qdq": extra_options.get("use_qdq", False),           # Use QDQ format
         }
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
@@ -2095,7 +2095,7 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
-        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1" or self.ep == "dml":
+        if self.extra_options.get("enable_cuda_graph", False) or self.ep == "dml":
             # ORT does not allow nodes to be placed on mulitple execution providers
             # with cuda graph enabled. We've only verified it works with GQA and with
             # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded
@@ -2994,7 +2994,7 @@ class Phi3MoE128KModel(MistralModel):
         self.moe_attrs["activation_type"] = "silu"
         self.moe_attrs["normalize_routing_weights"] = 0
         self.moe_attrs["use_sparse_mixer"] = 1
-        self.moe_attrs["use_int4"] = 0 if "use_8bits_moe" in extra_options and extra_options["use_8bits_moe"] == "1" else 1
+        self.moe_attrs["use_int4"] = 0 if extra_options.get("use_8bits_moe", False) else 1
 
         self.make_rotary_embedding_multi_cache()
 
@@ -3040,27 +3040,26 @@ class ChatGLMModel(Model):
         layer.self_attn = layer.self_attn if hasattr(layer, 'self_attn') else layer.self_attention
         super().make_layer(layer_id, layer)
 
+
 def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
     """
-    if "int4_is_symmetric" in kv_pairs:
-        if kv_pairs["int4_is_symmetric"] in {"false", "False", "0"}:
-            kv_pairs["int4_is_symmetric"] = False
-        elif kv_pairs["int4_is_symmetric"] in {"true", "True", "1"}:
-            kv_pairs["int4_is_symmetric"] = True
+    bools = ["int4_is_symmetric", "use_qdq", "use_8bits_moe", "enable_cuda_graph"]
+    for key in bools:
+        if key in kv_pairs:
+            if kv_pairs[key] in {"false", "False", "0"}:
+                kv_pairs[key] = False
+            elif kv_pairs[key] in {"true", "True", "1"}:
+                kv_pairs[key] = True
+            else:
+                raise ValueError(f"{key} must be false/False/0 or true/True/1.")
     
     if "int4_op_types_to_quantize" in kv_pairs:
         op_types_to_quantize = ()
         for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
             op_types_to_quantize += (op_type, )
         kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
-
-    if "use_8bits_moe" in kv_pairs:
-        assert(kv_pairs["use_8bits_moe"] == "1" or kv_pairs["use_8bits_moe"] == "0"), "use_8bits_moe must be 0 or 1."
-
-    if "enable_cuda_graph" in kv_pairs:
-        assert(kv_pairs["enable_cuda_graph"] == "1" or kv_pairs["enable_cuda_graph"] == "0"), "enable_cuda_graph must be 0 or 1."
 
 
 def parse_extra_options(kv_items):
