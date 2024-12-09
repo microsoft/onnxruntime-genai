@@ -2661,43 +2661,6 @@ class Phi3Mini4KModel(MistralModel):
             super().make_mlp_unpacked(layer_id, mlp, root_input)
         super().make_mlp_proj(layer_id, mlp, root_input)
 
-class NemotronModel(LlamaModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.layernorm_attrs["simple"] = False
-        self.layernorm_attrs["add_offset"] = 1
-        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
-
-    def make_mlp_proj(self, layer_id, mlp, root_input):
-        # Make nodes for the MLP subgraph
-        #
-        #          root_input
-        #              |
-        #         UpProjMatMul
-        #              |
-        #           ActFunc
-        #              |
-        #         DownProjMatMul
-
-        up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
-        up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
-
-        act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")
-
-        # Make output MatMul node
-        down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
-        down_name = self.make_matmul(mlp.down_proj, down_basename, f"{act_fn_name}/output_0")
-
-        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
-        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
-
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
-        return super().make_attention(layer_id, attention, root_input, **kwargs)
-
-    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
-        num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
-        super().make_rotary_embedding(rotemb, name, root_input, num_heads=num_heads, rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
 
 class Phi3Mini128KModel(Phi3Mini4KModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -2767,6 +2730,7 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
             self.rotemb_attrs["create_rotary_embedding_caches"] = False
 
         return cos_cache_name, sin_cache_name
+
 
 class Phi3Small8KModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -3008,6 +2972,45 @@ class Phi3MoE128KModel(MistralModel):
             self.layernorm_attrs["last_layernorm"] = True
 
 
+class NemotronModel(LlamaModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.layernorm_attrs["simple"] = False
+        self.layernorm_attrs["add_offset"] = 1
+        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
+
+    def make_mlp_proj(self, layer_id, mlp, root_input):
+        # Make nodes for the MLP subgraph
+        #
+        #          root_input
+        #              |
+        #         UpProjMatMul
+        #              |
+        #           ActFunc
+        #              |
+        #         DownProjMatMul
+
+        up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
+        up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
+
+        act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")
+
+        # Make output MatMul node
+        down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
+        down_name = self.make_matmul(mlp.down_proj, down_basename, f"{act_fn_name}/output_0")
+
+        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
+        return super().make_attention(layer_id, attention, root_input, **kwargs)
+
+    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
+        num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
+        super().make_rotary_embedding(rotemb, name, root_input, num_heads=num_heads, rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
+
+
 class ChatGLMModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
@@ -3117,7 +3120,11 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     if "config_only" not in extra_options:
         # List architecture options in alphabetical order
-        if config.architectures[0] == "GemmaForCausalLM":
+        if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
+            # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
+            config.hidden_act = "swiglu"
+            onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "GemmaForCausalLM":
             onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
             onnx_model = Gemma2Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
@@ -3125,6 +3132,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = LlamaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "MistralForCausalLM":
             onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "NemotronForCausalLM":
+            onnx_model = NemotronModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiForCausalLM":
             onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 4096:
@@ -3147,12 +3156,6 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen2ForCausalLM":
             onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "NemotronForCausalLM":
-            onnx_model = NemotronModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
-            # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
-            config.hidden_act = "swiglu"
-            onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
