@@ -95,7 +95,7 @@ jobs:
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install requests && \
-              ${{ env.PYTHON_EXECUTABLE }} build.py --use_cuda --parallel --config=Debug"
+              ${{ env.PYTHON_EXECUTABLE }} build.py --use_cuda --cuda_home=/usr/local/cuda-12.2 --parallel --config=Debug"
 
       - name: Use Dummy HuggingFace Token
         run: |

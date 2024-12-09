@@ -54,6 +54,8 @@ jobs:
 
       - name: Build with Python
         run: |
+          python3 -m pip install requests
+          python3 -m pip install wheel
           python3 build.py --parallel --config=Release --build_csharp --build_java --cmake_generator "Unix Makefiles"
 
       - name: Install the python wheel and test dependencies
