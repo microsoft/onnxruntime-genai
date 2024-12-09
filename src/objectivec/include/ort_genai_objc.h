@@ -301,10 +301,10 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 /**
  * Rewinds the generator by the specified number of tokens.
- * @param length The number of tokens to rewind.
+ * @param new_length The desired length in tokens after rewinding.
  * @param error Optional error information set if an error occurs.
  */
-- (BOOL)rewindTo:(size_t)length error:(NSError**)error;
+- (BOOL)rewindTo:(size_t)new_length error:(NSError**)error;
 
 /**
  * Generate next token
