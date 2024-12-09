@@ -14,11 +14,12 @@ This folder contains the model builder for quickly creating optimized and quanti
   - [GGUF Model](#gguf-model)
   - [Extra Options](#extra-options)
     - [Config Only](#config-only)
+    - [Hugging Face Authentication](#hugging-face-authentication)
     - [Exclude Embedding Layer](#exclude-embedding-layer)
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
+    - [Include Hidden States](#include-hidden-states-output)
     - [Enable CUDA Graph](#enable-cuda-graph)
     - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
-    - [Hugging Face Authentication](#hugging-face-authentication)
     - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
     - [LoRA Models](#lora-models)
   - [Unit Testing Models](#unit-testing-models)
@@ -142,6 +143,18 @@ python3 builder.py -m model_name -o path_to_output_folder -p precision -e execut
 
 Afterwards, please open the `genai_config.json` file in the output folder and modify the fields as needed for your model. You should store your ONNX model in the output folder as well.
 
+#### Hugging Face Authentication
+
+This scenario is for when you need to disable the Hugging Face authentication or use a different authentication token than the one stored in [huggingface-cli login](https://huggingface.co/docs/huggingface_hub/main/en/guides/cli#huggingface-cli-login).
+
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_token=false
+
+# From source:
+python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_token=false
+```
+
 #### Exclude Embedding Layer
 
 This scenario is for when you want to exclude the embedding layer from your ONNX model.
@@ -166,6 +179,20 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options exclude_lm_head=true
 ```
 
+#### Include Hidden States Output
+
+This scenario is for when you want to include the hidden states as an output to your ONNX model.
+
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options include_hidden_states=true
+
+# From source:
+python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options include_hidden_states=true
+```
+
+Note that this is the same as outputting embeddings since the last hidden states are also known as the embeddings.
+
 #### Enable CUDA Graph
 
 This scenario is for when you want to enable CUDA graph for your ONNX model.
@@ -188,18 +215,6 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 
 # From source:
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options use_8bits_moe=true
-```
-
-#### Hugging Face Authentication
-
-This scenario is for when you need to disable the Hugging Face authentication or use a different authentication token than the one stored in [huggingface-cli login](https://huggingface.co/docs/huggingface_hub/main/en/guides/cli#huggingface-cli-login).
-
-```
-# From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_token=false
-
-# From source:
-python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_token=false
 ```
 
 #### Use QDQ Pattern for Quantization
