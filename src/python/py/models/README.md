@@ -168,7 +168,7 @@ python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p p
 
 #### Enable CUDA Graph
 
-This scenario is for when you want to enable cuda graph for your ONNX model.
+This scenario is for when you want to enable CUDA graph for your ONNX model.
 
 ```
 # From wheel:
