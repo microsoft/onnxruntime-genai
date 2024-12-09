@@ -86,7 +86,7 @@ class Model:
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
         }
-        self.exclude_embeds = "exclude_embeds" in extra_options
+        self.exclude_embeds = extra_options.get("exclude_embeds", False)
         if self.exclude_embeds:
             self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
 
@@ -104,9 +104,12 @@ class Model:
             "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
             "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
-        self.exclude_lm_head = "exclude_lm_head" in extra_options
+        self.exclude_lm_head = extra_options.get("exclude_lm_head", False)
+        self.include_hidden_states = extra_options.get("include_hidden_states", False)
         if self.exclude_lm_head:
             self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
+        elif self.include_hidden_states:
+            self.output_names = ["hidden_states"] + self.output_names
 
         # Store names of nodes already created
         self.node_names = set()
@@ -364,7 +367,7 @@ class Model:
             ep_options = { self.ep : self.ep_attrs[self.ep] }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
-        if self.extra_options.get("prompt_templates", "0") == "1":
+        if self.extra_options.get("include_prompt_templates", False):
             prompt_templates = self._get_prompt_templates(model_name_or_path, extra_kwargs)
             if prompt_templates is not None:
                 genai_config["model"]["prompt_templates"] = prompt_templates
@@ -1012,7 +1015,7 @@ class Model:
 
         output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
         output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
-        if self.layernorm_attrs["last_layernorm"] and self.exclude_lm_head:
+        if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
             output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
 
@@ -2026,17 +2029,7 @@ class Model:
                 from onnxruntime_genai.models.quantized_model import QuantModel
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
-            model = QuantModel.from_pretrained(
-                self.quant_type,
-                input_path,
-                self.quant_attrs["bits"],
-                self.quant_attrs["group_size"],
-                self.quant_attrs["use_g_idx"],
-                q_size,
-                kv_size,
-                self.intermediate_size,
-                self.num_layers,
-            )
+            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"], q_size, kv_size, self.intermediate_size, self.num_layers)
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
@@ -3045,7 +3038,7 @@ def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
     """
-    bools = ["int4_is_symmetric", "use_qdq", "use_8bits_moe", "enable_cuda_graph"]
+    bools = ["int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "use_8bits_moe", "use_qdq", "include_prompt_templates"]
     for key in bools:
         if key in kv_pairs:
             if kv_pairs[key] in {"false", "False", "0"}:
@@ -3060,6 +3053,11 @@ def check_extra_options(kv_pairs):
         for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
             op_types_to_quantize += (op_type, )
         kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
+
+    if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
+        # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
+        # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
+        raise ValueError(f"Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
 
 def parse_extra_options(kv_items):
@@ -3249,21 +3247,31 @@ def get_args():
                     The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
+                hf_token = false/token: Use this to manage authentication with Hugging Face.
+                    Default behavior is to use the authentication token stored by `huggingface-cli login`.
+                    If false, authentication with Hugging Face will be disabled.
+                    If token, you can provide a custom authentication token that differs from the one stored in your environment.
+                    If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
                 exclude_embeds = Remove embedding layer from your ONNX model.
                     Use this option when you want to remove the embedding layer from within your ONNX model.
                     Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
-                enable_cuda_graph = 1: The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
-                    is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
-                    and the graph structure.
-                use_8bits_moe = 1: Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
-                hf_token = false/token: Use this to disable authentication with Hugging Face or provide a custom authentication token that differs from the one stored in your environment. Default behavior is to use the authentication token stored by `huggingface-cli login`.
-                    If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
-                use_qdq = 1: Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
+                include_hidden_states = Include hidden states as output from your ONNX model.
+                    Use this option when you want to have the hidden states as an output from your ONNX model.
+                    In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
+                enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
+                    If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
+                    It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
+                use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
+                    If true, the QMoE op will use 4-bit quantization. If false, the QMoE op will use 8-bits quantization.
+                use_qdq = Use the QDQ decomposition for ops.
+                    Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
-                prompt_templates = 1: Include per-role prompt templates in the GenAI config file. Default is 0 (not to include).
+                    Use this option for LoRA models.
+                include_prompt_templates = Include prompt templates in the GenAI config file. Default is false.
+                    Use this option to include per-role prompt templates in the `genai_config.json` file.
             """),
     )
 
