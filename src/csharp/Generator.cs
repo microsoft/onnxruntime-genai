@@ -42,17 +42,17 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// <summary>
         /// Appends tokens to the generator.
         /// </summary>
-        /// <param name="tokens">The tokens to append.</param>
+        /// <param name="inputIDs">The tokens to append.</param>
         /// <exception cref="OnnxRuntimeGenAIException">
         /// Thrown when the call to the GenAI native API fails.
         /// </exception>
-        public void AppendTokens(ReadOnlySpan<int> tokens)
+        public void AppendTokens(ReadOnlySpan<int> inputIDs)
         {
             unsafe
             {
-                fixed (int* tokenIDsPtr = tokens)
+                fixed (int* inputIDsPtr = inputIDs)
                 {
-                    Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, tokenIDsPtr, (UIntPtr)tokens.Length));
+                    Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, inputIDsPtr, (UIntPtr)inputIDs.Length));
                 }
             }
         }
@@ -81,15 +81,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         }
 
         /// <summary>
-        /// Rewind to a specific index.
+        /// Rewinds the generator to the given newLength.
         /// </summary>
-        /// <param name="index">The index to rewind.</param>
+        /// <param name="newLength">The desired length.</param>
         /// <exception cref="OnnxRuntimeGenAIException">
         /// Thrown when the call to the GenAI native API fails.
         /// </exception>
-        public void RewindTo(ulong index)
+        public void RewindTo(ulong newLength)
         {
-            Result.VerifySuccess(NativeMethods.OgaGenerator_RewindTo(_generatorHandle, (UIntPtr)index));
+            Result.VerifySuccess(NativeMethods.OgaGenerator_RewindTo(_generatorHandle, (UIntPtr)newLength));
         }
 
         /// <summary>

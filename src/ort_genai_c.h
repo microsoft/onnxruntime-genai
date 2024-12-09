@@ -341,7 +341,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* g
  * \brief Rewinds the generator to the given length. This is useful when the user wants to rewind the generator to a specific length
  *        and continue generating from that point.
  * \param[in] generator The generator to rewind to the given length.
- * \param[in] new_length The new length to rewind the generator to.
+ * \param[in] new_length The desired length in tokens after rewinding.
  * \return OgaResult containing the error message if the rewinding failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t new_length);
