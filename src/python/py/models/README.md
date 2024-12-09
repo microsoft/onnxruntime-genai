@@ -17,7 +17,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Hugging Face Authentication](#hugging-face-authentication)
     - [Exclude Embedding Layer](#exclude-embedding-layer)
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
-    - [Include Hidden States](#include-hidden-states-output)
+    - [Include Last Hidden States Output](#include-last-hidden-states-output)
     - [Enable CUDA Graph](#enable-cuda-graph)
     - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
     - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
@@ -179,9 +179,9 @@ python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o p
 python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options exclude_lm_head=true
 ```
 
-#### Include Hidden States Output
+#### Include Last Hidden States Output
 
-This scenario is for when you want to include the hidden states as an output to your ONNX model.
+This scenario is for when you want to include the last hidden states as an output to your ONNX model.
 
 ```
 # From wheel:
