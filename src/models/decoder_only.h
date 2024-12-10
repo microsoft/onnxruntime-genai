@@ -24,7 +24,7 @@ struct DecoderOnly_State : State {
   void RewindTo(size_t index) override;
 
  private:
-  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int total_length);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length);
 
   const DecoderOnly_Model& model_;
   CapturedGraphInfoPtr captured_graph_info_;
