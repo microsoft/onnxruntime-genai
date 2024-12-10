@@ -290,6 +290,7 @@ Model::~Model() = default;
 
 void Model::InitDeviceAllocator(OrtSession& session) {
   allocator_device_ = &allocator_cpu_;
+  allocator_kvcache_ = &allocator_cpu_;
 #if USE_CUDA
   if (device_type_ == DeviceType::CUDA) {
     allocator_device_ = GetCudaAllocator(session);
