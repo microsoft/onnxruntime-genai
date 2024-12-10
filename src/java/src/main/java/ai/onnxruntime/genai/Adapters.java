@@ -4,9 +4,7 @@
  */
 package ai.onnxruntime.genai;
 
-/**
- * A container of adapters.
- */
+/** A container of adapters. */
 public final class Adapters implements AutoCloseable {
   private long nativeHandle = 0;
 
@@ -40,8 +38,8 @@ public final class Adapters implements AutoCloseable {
   }
 
   /**
-   * Unloads the adapter with the given identifier from the previosly loaded adapters.
-   * If the adapter is not found, or if it cannot be unloaded (when it is in use), an error is returned.
+   * Unloads the adapter with the given identifier from the previosly loaded adapters. If the
+   * adapter is not found, or if it cannot be unloaded (when it is in use), an error is returned.
    *
    * @param adapterName A unique user supplied adapter identifier.
    * @throws GenAIException If the call to the GenAI native API fails.
