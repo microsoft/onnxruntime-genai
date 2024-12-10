@@ -11,9 +11,9 @@ public final class Config implements AutoCloseable {
   private long nativeHandle;
 
   /**
-   * Create a Config
+   * Creates an OgaConfig from the given configuration directory.
    *
-   * @param modelPath The path to a GenAI model/.
+   * @param modelPath The path to the configuration directory.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
   public Config(String modelPath) throws GenAIException {

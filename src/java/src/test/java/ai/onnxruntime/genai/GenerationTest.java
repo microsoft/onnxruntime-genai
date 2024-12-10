@@ -97,7 +97,7 @@ public class GenerationTest {
         try (Adapters adapters = new Adapters(model);
             Generator generator = new Generator(model, params); ) {
           generator.appendTokenSequences(sequences);
-          adapters.loadAdapters(TestUtils.testAdapterTestAdaptersPath(), "adapters_a_and_b");
+          adapters.loadAdapter(TestUtils.testAdapterTestAdaptersPath(), "adapters_a_and_b");
           generator.setActiveAdapter(adapters, "adapters_a_and_b");
           while (!generator.isDone()) {
             generator.generateNextToken();
