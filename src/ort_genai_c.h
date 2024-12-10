@@ -72,7 +72,6 @@ typedef struct OgaAdapters OgaAdapters;
 //! @}
 
 /** \addtogroup Global
- *ONNX Runtime Generative AI C API
  * @{
  */
 
