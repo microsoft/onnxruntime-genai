@@ -3,13 +3,26 @@
  */
 package ai.onnxruntime.genai;
 
+/** An ORT GenAI model. */
 public final class Model implements AutoCloseable {
   private long nativeHandle;
 
+  /**
+   * Construct a Model from folder path.
+   *
+   * @param modelPath The path of the GenAI model.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
   public Model(String modelPath) throws GenAIException {
     nativeHandle = createModel(modelPath);
   }
 
+  /**
+   * Construct a Model from Config
+   *
+   * @param config The config to use.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
   public Model(Config config) throws GenAIException {
     nativeHandle = createModelFromConfig(config.nativeHandle());
   }
