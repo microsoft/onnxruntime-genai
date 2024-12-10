@@ -65,7 +65,7 @@ jobs:
           python3 -m pip install -r test/python/requirements.txt
           python3 -m pip install -r test/python/macos/torch/requirements.txt
           python3 -m pip install -r test/python/macos/ort/requirements.txt
-          python3 -m pip install build/MacOSX/Release/wheel/onnxruntime_genai*.whl --no-deps
+          python3 -m pip install build/MacOS/Release/wheel/onnxruntime_genai*.whl --no-deps
 
       - name: Remove the ort lib and header files
         run: |
@@ -75,8 +75,8 @@ jobs:
         if: always()
         continue-on-error: true
         run: |
-          ls -l ${{ github.workspace }}/build/MacOSX/Release
-          ls -l ${{ github.workspace }}/build/MacOSX/Release/wheel
+          ls -l ${{ github.workspace }}/build/MacOS/Release
+          ls -l ${{ github.workspace }}/build/MacOS/Release/wheel
 
       # This will also download all the test models to the test/test_models directory
       # These models are used by the python tests as well as C#, C++ and others.
@@ -92,18 +92,18 @@ jobs:
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
           cd test/csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/MacOSX/Release" --verbosity normal
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/MacOS/Release" --verbosity normal
 
       - name: Build the Java API and Run the Java Tests
         run: |
           set -e -x
           source genai-macos-venv/bin/activate
-          python3 build.py --config=Release --build_dir build/cpu/osx-arm64 --build_java --parallel --cmake_generator "Unix Makefiles"
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/MacOSX/Release" --verbosity normal
+          python3 build.py --config=Release --build_java --parallel --cmake_generator "Unix Makefiles"
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/MacOS/Release" --verbosity normal
 
       - name: Run tests
         run: |
           set -e -x
           export ORTGENAI_LOG_ORT_LIB=1
-          export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:$GITHUB_WORKSPACE/build/MacOSX/Release
-          ./build/MacOSX/Release/unit_tests
+          export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:$GITHUB_WORKSPACE/build/MacOS/Release
+          ./build/MacOS/Release/unit_tests
