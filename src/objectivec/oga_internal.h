@@ -42,11 +42,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface OGATensor ()
 
-- (nullable instancetype)initWithDataPointer:(void*)data
-                                       shape:(NSArray<NSNumber*>*)shape
-                                        type:(OGAElementType)elementType
-                                       error:(NSError**)error;
-
 - (instancetype)initWithCXXPointer:(std::unique_ptr<OgaTensor>)ptr NS_DESIGNATED_INITIALIZER;
 
 - (OgaTensor&)CXXAPIOgaTensor;

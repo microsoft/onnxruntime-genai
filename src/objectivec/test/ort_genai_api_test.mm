@@ -10,14 +10,6 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface OGATensor (Testing)
-
-- (nullable instancetype)initWithDataPointer:(void*)data
-                                       shape:(NSArray<NSNumber*>*)shape
-                                        type:(OGAElementType)elementType
-                                       error:(NSError**)error;
-@end
-
 @interface ORTGenAIAPITest : XCTestCase
 
 @end
@@ -102,6 +94,8 @@ NS_ASSUME_NONNULL_BEGIN
     OGATensor* prompt_logits_ptr = [generator getOutput:@"logits" error:&error];
     ORTAssertNullableResultSuccessful(prompt_logits_ptr, error);
     auto prompt_logits = static_cast<float*>([prompt_logits_ptr getDataPointerWithError:&error]);
+    XCTAssertNil(error);
+    XCTAssertNotEqual(prompt_logits, nullptr);
     const int num_prompt_outputs_to_check = 40;
     const int sample_size = 200;
     const float tolerance = 0.001f;
@@ -124,6 +118,8 @@ NS_ASSUME_NONNULL_BEGIN
     ORTAssertNullableResultSuccessful(token_gen_logits_ptr, error);
 
     auto token_gen_logits = static_cast<float*>([token_gen_logits_ptr getDataPointerWithError:&error]);
+    XCTAssertNil(error);
+    XCTAssertNotEqual(token_gen_logits, nullptr);
     int num_token_gen_outputs_to_check = 10;
 
     for (int i = 0; i < num_token_gen_outputs_to_check; i++) {

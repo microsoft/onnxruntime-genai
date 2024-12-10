@@ -347,6 +347,10 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 @interface OGATensor : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
+- (nullable instancetype)initWithDataPointer:(void*)data
+                                       shape:(NSArray<NSNumber*>*)shape
+                                        type:(OGAElementType)elementType
+                                       error:(NSError**)error;
 - (OGAElementType)getTypeWithError:(NSError**)error NS_SWIFT_NAME(type());
 - (nullable void*)getDataPointerWithError:(NSError**)error NS_SWIFT_NAME(dataPointer());
 
