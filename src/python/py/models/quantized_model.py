@@ -130,7 +130,7 @@ class QuantizedModel:
                                 raise NotImplementedError(f"Dtype: {global_quant_config['dtype']} not supported.")
 
                     if layer_id not in self.layers:
-                        module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, local_bits, local_group_size))
+                        module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, local_bits, global_group_size))
                     else:
                         module = self.layers[layer_id]
 
