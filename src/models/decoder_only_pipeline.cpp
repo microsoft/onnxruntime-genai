@@ -100,15 +100,6 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   if (key_value_cache_) {
     key_value_cache_->Add();
   }
-  // if (KV_Cache::IsCacheNeeded(model)) {
-  //   if (model.config_->model.decoder.sliding_window.has_value()) {
-  //     sliding_window_key_value_cache_ = std::make_unique<SlidingWindowKeyValueCache>(*this);
-  //     sliding_window_key_value_cache_->Add();
-  //   } else {
-  //     kv_cache_ = std::make_unique<KV_Cache>(*this);
-  //     kv_cache_->Add();
-  //   }
-  // }
   extra_inputs_.Add();
 
   for ([[maybe_unused]] const auto& pipeline_model : model_.config_->model.decoder.pipeline) {

@@ -243,7 +243,7 @@ void SlidingWindowInputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
       value_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape_, type_);
     }
 
-    value_->GetTensorMutableData<int32_t>()[0] = new_tokens.Span().front();
+    value_->GetTensorMutableData<int32_t>()[0] = new_tokens.Span()[0];
   }
 
   state_.inputs_[input_index_] = value_.get();
