@@ -286,8 +286,8 @@ struct Pipeline_Element : JSON::Element {
   PipelineModelObject_Element object_{v_};
 };
 
-struct SlidingWindowKeyValueCache_Element : JSON::Element {
-  explicit SlidingWindowKeyValueCache_Element(std::optional<Config::Model::Decoder::SlidingWindowKeyValueCache>& v) : v_{v} {}
+struct SlidingWindow_Element : JSON::Element {
+  explicit SlidingWindow_Element(std::optional<Config::Model::Decoder::SlidingWindow>& v) : v_{v} {}
 
   void OnNumber(std::string_view name, double value) override {
     if (name == "window_size") {
@@ -299,7 +299,7 @@ struct SlidingWindowKeyValueCache_Element : JSON::Element {
   }
 
  private:
-  std::optional<Config::Model::Decoder::SlidingWindowKeyValueCache>& v_;
+  std::optional<Config::Model::Decoder::SlidingWindow>& v_;
 };
 
 struct Decoder_Element : JSON::Element {
@@ -337,9 +337,9 @@ struct Decoder_Element : JSON::Element {
     if (name == "outputs") {
       return outputs_;
     }
-    if (name == "sliding_window_key_value_cache") {
-      v_.sliding_window_key_value_cache = Config::Model::Decoder::SlidingWindowKeyValueCache{};
-      return sliding_window_key_value_cache_;
+    if (name == "sliding_window") {
+      v_.sliding_window = Config::Model::Decoder::SlidingWindow{};
+      return sliding_window_;
     }
     throw JSON::unknown_value_error{};
   }
@@ -356,7 +356,7 @@ struct Decoder_Element : JSON::Element {
   Inputs_Element inputs_{v_.inputs};
   Outputs_Element outputs_{v_.outputs};
   Pipeline_Element pipeline_{v_.pipeline};
-  SlidingWindowKeyValueCache_Element sliding_window_key_value_cache_{v_.sliding_window_key_value_cache};
+  SlidingWindow_Element sliding_window_{v_.sliding_window};
 };
 
 struct VisionInputs_Element : JSON::Element {

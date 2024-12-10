@@ -107,11 +107,11 @@ struct Config {
       int num_hidden_layers{};
       int head_size{};
 
-      struct SlidingWindowKeyValueCache {
+      struct SlidingWindow {
         int window_size{128};
         int pad_value{};
       };
-      std::optional<SlidingWindowKeyValueCache> sliding_window_key_value_cache;
+      std::optional<SlidingWindow> sliding_window;
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};

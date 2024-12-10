@@ -277,8 +277,10 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
   size_t input_ids_size = input_ids.size();
-  if (model_->config_->model.decoder.sliding_window_key_value_cache.has_value()) {
-    const auto window_size = model_->config_->model.decoder.sliding_window_key_value_cache->window_size;
+  if (model_->config_->model.decoder.sliding_window.has_value()) {
+    // If the model has a sliding window, pad the input_ids to the next multiple of the window size
+    // so that the input_ids can be divided into window size chunks.
+    const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
     input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
   }
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(input_ids_size);

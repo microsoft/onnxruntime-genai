@@ -92,19 +92,23 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
     : State{params, model},
       model_{model},
       input_ids_{CreateInputIDs(*this)},
+      key_value_cache_{CreateKeyValueCache(*this)},
       position_inputs_{CreatePositionInputs(*this, sequence_lengths)} {
   input_ids_->Add();
   position_inputs_->Add();
   logits_.Add();
-  if (KV_Cache::IsCacheNeeded(model)) {
-    if (model.config_->model.decoder.sliding_window_key_value_cache.has_value()) {
-      sliding_window_key_value_cache_ = std::make_unique<SlidingWindowKeyValueCache>(*this);
-      sliding_window_key_value_cache_->Add();
-    } else {
-      kv_cache_ = std::make_unique<KV_Cache>(*this);
-      kv_cache_->Add();
-    }
+  if (key_value_cache_) {
+    key_value_cache_->Add();
   }
+  // if (KV_Cache::IsCacheNeeded(model)) {
+  //   if (model.config_->model.decoder.sliding_window.has_value()) {
+  //     sliding_window_key_value_cache_ = std::make_unique<SlidingWindowKeyValueCache>(*this);
+  //     sliding_window_key_value_cache_->Add();
+  //   } else {
+  //     kv_cache_ = std::make_unique<KV_Cache>(*this);
+  //     kv_cache_->Add();
+  //   }
+  // }
   extra_inputs_.Add();
 
   for ([[maybe_unused]] const auto& pipeline_model : model_.config_->model.decoder.pipeline) {
@@ -229,19 +233,19 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
   size_t num_chunks{1};
-  if (first_run_ && sliding_window_key_value_cache_) {
-    int window_size = model_.config_->model.decoder.sliding_window_key_value_cache->window_size;
+  if (first_run_ && model_.config_->model.decoder.sliding_window.has_value()) {
+    int window_size = model_.config_->model.decoder.sliding_window->window_size;
     num_chunks = (next_tokens.size() + window_size - 1) / window_size;
   }
 
   for (size_t i = 0; i < num_chunks; ++i) {
     RunPipeline(total_length, next_tokens, next_indices);
 
-    if (sliding_window_key_value_cache_ && i < num_chunks - 1) {
-      sliding_window_key_value_cache_->Slide();
+    if (model_.config_->model.decoder.sliding_window.has_value() && i < num_chunks - 1) {
+      // Sliding the window over the input_ids, key_cache, and value_cache, position_ids, and attention_mask
       input_ids_->Update(next_tokens);
-      size_t new_length = input_ids_->GetShape()[1];
-      position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
+      key_value_cache_->Update(next_indices, total_length);
+      position_inputs_->Update(next_tokens, total_length, static_cast<int>(input_ids_->GetShape()[1]));
     }
   }
 
@@ -268,8 +272,7 @@ void DecoderOnlyPipelineState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tok
   input_ids_->Update(next_tokens);
   size_t new_length = input_ids_->GetShape()[1];
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
-  if (kv_cache_) kv_cache_->Update(beam_indices, total_length);
-  if (sliding_window_key_value_cache_) sliding_window_key_value_cache_->Update(beam_indices, total_length);
+  if (key_value_cache_) key_value_cache_->Update(beam_indices, total_length);
   logits_.Update(next_tokens, new_length);
 }
 

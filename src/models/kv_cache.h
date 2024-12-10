@@ -4,6 +4,16 @@
 
 namespace Generators {
 
+struct KeyValueCacheInterface {
+  virtual ~KeyValueCacheInterface() = default;
+  virtual void Add() = 0;
+  virtual void AddEncoder() = 0;
+  virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) = 0;
+  virtual void RewindTo(size_t index) = 0;
+
+  static bool IsCacheNeeded(const Model& model);
+};
+
 struct KV_Cache_Combined {
   KV_Cache_Combined(State& state);
 
@@ -34,23 +44,22 @@ struct KV_Cache_Combined {
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
 
-struct KV_Cache {
+struct KV_Cache : KeyValueCacheInterface {
   KV_Cache(State& state);
 
-  static bool IsCacheNeeded(const Model& model);
-
-  void AddEncoder();  // If model has an initial encoder step, this is used
+  void AddEncoder() override;  // If model has an initial encoder step, this is used
   // Register input_ids as ORT session input.
   // Called only once during initialization of state.
-  void Add();
+  void Add() override;
   // Move present to past. Prepare present output for next generation iteration.
-  void Update(DeviceSpan<int32_t> beam_indices, int total_length);
-  void RewindTo(size_t index);
+  void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
+  void RewindTo(size_t index) override;
+
+ private:
   template <typename ScoreType>
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
 
- private:
   template <typename T>
   void RewindPastTensorsTo(size_t index);
 
@@ -90,18 +99,27 @@ struct Cross_Cache {
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
 
-struct SlidingWindowKeyValueCache {
+struct SlidingWindowKeyValueCache : KeyValueCacheInterface {
   SlidingWindowKeyValueCache(State& state);
 
-  void Add();
-  void Update(DeviceSpan<int32_t> beam_indices, int current_length);
-  void Slide();
+  void Add() override;
+  void AddEncoder() override {
+    throw std::runtime_error("SlidingWindowKeyValueCache does not support AddEncoder.");
+  };
+  void Update(DeviceSpan<int32_t> beam_indices, int current_length) override;
+  void RewindTo(size_t index) override {
+    throw std::runtime_error("SlidingWindowKeyValueCache does not support RewindTo.");
+  }
 
  private:
+  void Slide();
+
   State& state_;
   const Model& model_{state_.model_};
   int layer_count_{0};
   int window_size_{0};
+  size_t num_windows_{1};
+  size_t window_index_{0};
   size_t input_index_{~0U}, output_index_{~0U};
 
   std::array<int64_t, 4> key_cache_shape_in_, key_cache_shape_out_;
@@ -114,4 +132,7 @@ struct SlidingWindowKeyValueCache {
 
   bool is_first_update_{true};
 };
+
+std::unique_ptr<KeyValueCacheInterface> CreateKeyValueCache(State& state);
+
 }  // namespace Generators

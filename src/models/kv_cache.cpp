@@ -188,7 +188,7 @@ void KV_Cache_Combined::PickPastState(DeviceSpan<int32_t> beam_indices, int inde
   }
 }
 
-bool KV_Cache::IsCacheNeeded(const Model& model) {
+bool KeyValueCacheInterface::IsCacheNeeded(const Model& model) {
   return model.session_info_->HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, 0));
 }
 
@@ -446,7 +446,7 @@ void Cross_Cache::AddInputs() {
 SlidingWindowKeyValueCache::SlidingWindowKeyValueCache(State& state)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      window_size_{model_.config_->model.decoder.sliding_window_key_value_cache->window_size},
+      window_size_{model_.config_->model.decoder.sliding_window->window_size},
       key_cache_shape_in_{model_.config_->model.decoder.num_key_value_heads, 1,
                           model_.config_->model.decoder.head_size, model_.config_->model.context_length - window_size_},
       key_cache_shape_out_{model_.config_->model.decoder.num_key_value_heads, 1,
@@ -474,13 +474,13 @@ SlidingWindowKeyValueCache::SlidingWindowKeyValueCache(State& state)
         OrtValue::CreateTensor(*model_.allocator_device_, key_cache_shape_in_, type_));
     std::fill_n(key_caches_in_[i]->GetTensorMutableData<uint8_t>(),
                 ElementCountFromShape(key_cache_shape_in_),
-                static_cast<uint8_t>(model_.config_->model.decoder.sliding_window_key_value_cache->pad_value));
+                static_cast<uint8_t>(model_.config_->model.decoder.sliding_window->pad_value));
 
     value_caches_in_.push_back(
         OrtValue::CreateTensor(*model_.allocator_device_, value_cache_shape_in_, type_));
     std::fill_n(value_caches_in_[i]->GetTensorMutableData<uint8_t>(),
                 ElementCountFromShape(value_cache_shape_in_),
-                static_cast<uint8_t>(model_.config_->model.decoder.sliding_window_key_value_cache->pad_value));
+                static_cast<uint8_t>(model_.config_->model.decoder.sliding_window->pad_value));
 
     key_caches_out_.push_back(
         OrtValue::CreateTensor(*model_.allocator_device_, key_cache_shape_out_, type_));
@@ -558,14 +558,18 @@ void SlidingWindowKeyValueCache::Slide() {
 
 void SlidingWindowKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current_length) {
   if (is_first_update_) {
+    num_windows_ = (current_length + window_size_ - 1) / window_size_;
     is_first_update_ = false;
+    window_index_++;
     return;
-  } else if (window_size_ == 1) {
+  } else if (window_size_ == 1 || window_index_ < num_windows_) {
     Slide();
+    window_index_++;
     return;
   }
 
-  // No sliding needed. But we need to concatenate the last window_size_ elements to the end of the cache
+  // Transition from prompt processing to token generation.
+  // Concatenate the last window_size_ elements to the end of the cache
 
   // key_caches_in_ = Concat(key_caches_in_[:, :, :, 1:], key_caches_out_)
   // [num_key_value_heads, 1, head_size, context_length-1] = [num_key_value_heads, 1, head_size, context_length - window_size_ - 1] +
@@ -661,6 +665,18 @@ void SlidingWindowKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int cu
     state_.inputs_[input_index_ + 2 * layer_idx + 1] = value_caches_in_[layer_idx].get();
     state_.outputs_[output_index_ + 2 * layer_idx] = key_caches_out_[layer_idx].get();
     state_.outputs_[output_index_ + 2 * layer_idx + 1] = value_caches_out_[layer_idx].get();
+  }
+}
+
+std::unique_ptr<KeyValueCacheInterface> CreateKeyValueCache(State& state) {
+  if (!KeyValueCacheInterface::IsCacheNeeded(state.model_)) {
+    return nullptr;
+  }
+
+  if (state.model_.config_->model.decoder.sliding_window) {
+    return std::make_unique<SlidingWindowKeyValueCache>(state);
+  } else {
+    return std::make_unique<KV_Cache>(state);
   }
 }
 

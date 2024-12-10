@@ -464,24 +464,25 @@ SlidingWindowPositionInputs::SlidingWindowPositionInputs(State& state)
   has_posid_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.position_ids);
   has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
 
-  if (!model_.config_->model.decoder.sliding_window_key_value_cache.has_value()) {
-    throw std::runtime_error("Sliding a window over input_ids requires sliding_window_key_value_cache to be set in the config.");
+  if (has_posid_input_ || has_mask_input_) {
+    if (!model_.config_->model.decoder.sliding_window.has_value()) {
+      throw std::runtime_error("Sliding a window over position_ids and attention_mask requires sliding_window to be set in the genai_config.json.");
+    }
+    window_size_ = model_.config_->model.decoder.sliding_window->window_size;
   }
-
-  window_size_ = model_.config_->model.decoder.sliding_window_key_value_cache->window_size;
 
   if (has_posid_input_) {
     position_ids_type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
-    if (position_ids_type_ != Ort::TypeToTensorType<int64_t>)
-      throw std::runtime_error("SlidingWindowPositionInputs only supports int64_t position_ids");
+    if (position_ids_type_ != Ort::TypeToTensorType<int32_t>)
+      throw std::runtime_error("SlidingWindowPositionInputs only supports int32_t position_ids");
 
-    position_ids_shape_ = {1, model_.config_->model.decoder.sliding_window_key_value_cache->window_size};
+    position_ids_shape_ = {1, model_.config_->model.decoder.sliding_window->window_size};
   }
 
   if (has_mask_input_) {
-    auto attention_mask_type = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
-    if (attention_mask_type != Ort::TypeToTensorType<float>)
-      throw std::runtime_error("SlidingWindowPositionInputs only supports float attention_mask");
+    attention_mask_type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
+    if (attention_mask_type_ != Ort::TypeToTensorType<int32_t>)
+      throw std::runtime_error("SlidingWindowPositionInputs only supports int32_t attention_mask");
 
     attention_mask_shape_ = {1, model_.config_->model.context_length};
   }
@@ -505,11 +506,15 @@ void SlidingWindowPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int to
   if (window_index_ == 0) {
     num_windows_ = (next_tokens.size() + window_size_ - 1) / window_size_;
     if (has_posid_input_) {
-      position_ids_ = OrtValue::CreateTensor(*model_.allocator_device_, position_ids_shape_, position_ids_type_);
+      position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, position_ids_type_);
 
-      auto* position_ids_data = position_ids_->GetTensorMutableData<int64_t>();
+      // next_tokens will always be padded so that it's size is a multiple of window_size_
+      // next_tokens -> [0, a, b, c, d, e]
+      // window_size = 3, num_windows = 2, pad_token = 0
+      // window_index = 0, position_ids_ -> [0, 0, 1]
+      auto* position_ids_data = position_ids_->GetTensorMutableData<int32_t>();
       for (int i = 0, j = 0; i < position_ids_shape_[1]; i++) {
-        if (next_tokens.CpuSpan()[i] == model_.config_->model.pad_token_id) {
+        if (next_tokens.Span()[i] == model_.config_->model.pad_token_id) {
           position_ids_data[i] = 0;
         } else {
           position_ids_data[i] = j++;
@@ -518,14 +523,19 @@ void SlidingWindowPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int to
     }
 
     if (has_mask_input_) {
-      attention_mask_ = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, Ort::TypeToTensorType<float>);
-      auto* attention_mask_data = attention_mask_->GetTensorMutableData<float>();
-      std::fill(attention_mask_data, attention_mask_data + attention_mask_shape_[1], 0.0f);
+      attention_mask_ = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, attention_mask_type_);
+
+      // next_tokens will always be padded so that it's size is a multiple of window_size_
+      // next_tokens -> [0, a, b, c, d, e]
+      // window_size = 3, num_windows = 2, pad_token = 0
+      // window_index = 0, attention_mask_ -> ([0] * context_length - window_size_) + [0, 1, 1]
+      auto* attention_mask_data = attention_mask_->GetTensorMutableData<int32_t>();
+      std::fill(attention_mask_data, attention_mask_data + attention_mask_shape_[1], 0);
       for (size_t i = 0; i < window_size_; i++) {
-        attention_mask_data[attention_mask_shape_[1] - window_size_ + i] = next_tokens.CpuSpan()[i] == model_.config_->model.pad_token_id ? 0.0f : 1.0f;
+        attention_mask_data[attention_mask_shape_[1] - window_size_ + i] = next_tokens.CpuSpan()[i] == model_.config_->model.pad_token_id ? 0 : 1;
       }
       for (size_t i = 0; i < window_size_; i++) {
-        if (attention_mask_data[attention_mask_shape_[1] - window_size_ + i] == 1.0f) {
+        if (attention_mask_data[attention_mask_shape_[1] - window_size_ + i] == 1) {
           attention_mask_backward_offset_ = attention_mask_shape_[1] - window_size_ + i - 1;
           break;
         }
@@ -533,29 +543,42 @@ void SlidingWindowPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int to
     }
   } else if (window_index_ < num_windows_) {
     if (has_posid_input_) {
-      auto* position_ids_data = position_ids_->GetTensorMutableData<int64_t>();
+      // next_tokens will always be padded so that it's size is a multiple of window_size_
+      // next_tokens -> [0, a, b, c, d, e]
+      // window_size = 3, num_windows = 2, pad_token = 0
+      // window_index = 1, position_ids_ -> [2, 3, 4]
+
+      auto* position_ids_data = position_ids_->GetTensorMutableData<int32_t>();
       const auto last_position = position_ids_data[window_size_ - 1];
       std::iota(position_ids_data, position_ids_data + window_size_, last_position + 1);
     }
 
     if (has_mask_input_) {
-      auto* attention_mask_data = attention_mask_->GetTensorMutableData<float>();
-      std::fill_n(attention_mask_data + attention_mask_backward_offset_ - window_size_ + 1, window_size_, 1.0f);
-
+      // next_tokens will always be padded so that it's size is a multiple of window_size_
+      // next_tokens -> [0, a, b, c, d, e]
+      // window_size = 3, num_windows = 2, pad_token = 0
+      // window_index = 1, attention_mask_ -> ([0] * context_length - (2 * window_size_)) + [0, 1, 1, 1, 1, 1]
+      auto* attention_mask_data = attention_mask_->GetTensorMutableData<int32_t>();
+      std::fill_n(attention_mask_data + attention_mask_backward_offset_ - window_size_ + 1, window_size_, 1);
       attention_mask_backward_offset_ -= window_size_;
     }
   } else {
+    // All prompt token chunks have been processed. Now we process the tokens generated by the model.
     if (has_posid_input_) {
-      const auto last_position = position_ids_->GetTensorData<int64_t>()[position_ids_shape_[1] - 1];
+      // next_tokens -> [f]
+      // position_ids_ -> [5]
+      const auto last_position = position_ids_->GetTensorData<int32_t>()[position_ids_shape_[1] - 1];
       if (position_ids_shape_[1] != 1) {
         position_ids_shape_[1] = 1;
-        position_ids_ = OrtValue::CreateTensor(*model_.allocator_device_, position_ids_shape_, position_ids_type_);
+        position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, position_ids_type_);
       }
-      position_ids_->GetTensorMutableData<int64_t>()[0] = last_position + 1;
+      position_ids_->GetTensorMutableData<int32_t>()[0] = last_position + 1;
     }
 
     if (has_mask_input_) {
-      attention_mask_->GetTensorMutableData<float>()[attention_mask_backward_offset_] = 1.0f;
+      // next_tokens -> [f]
+      // attention_mask_ -> ([0] * context_length - (2 * window_size_) - 1) + [0, 1, 1, 1, 1, 1, 1]
+      attention_mask_->GetTensorMutableData<int32_t>()[attention_mask_backward_offset_] = 1;
       if (attention_mask_backward_offset_ > 0) {
         attention_mask_backward_offset_ -= 1;
       }
@@ -574,7 +597,7 @@ void SlidingWindowPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int to
 }
 
 std::unique_ptr<PositionInputsInterface> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths) {
-  if (state.model_.config_->model.decoder.sliding_window_key_value_cache.has_value()) {
+  if (state.model_.config_->model.decoder.sliding_window.has_value()) {
     return std::make_unique<SlidingWindowPositionInputs>(state);
   } else {
     return std::make_unique<PositionInputs>(state.model_, state, sequence_lengths);
