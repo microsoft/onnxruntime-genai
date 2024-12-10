@@ -3,13 +3,24 @@
  */
 package ai.onnxruntime.genai;
 
+/**
+ * Use Config to set multiple ORT execution providers. The EP used will be chosen based on the
+ * insertion order.
+ */
 public final class Config implements AutoCloseable {
   private long nativeHandle;
 
+  /**
+   * Creates a Config from the given configuration directory.
+   *
+   * @param modelPath The path to the configuration directory.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
   public Config(String modelPath) throws GenAIException {
     nativeHandle = createConfig(modelPath);
   }
 
+  /** Clear all providers. */
   public void clearProviders() {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
@@ -17,6 +28,11 @@ public final class Config implements AutoCloseable {
     clearProviders(nativeHandle);
   }
 
+  /**
+   * Append a provider with the given name.
+   *
+   * @param provider_name The provider name.
+   */
   public void appendProvider(String provider_name) {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
@@ -24,6 +40,13 @@ public final class Config implements AutoCloseable {
     appendProvider(nativeHandle, provider_name);
   }
 
+  /**
+   * Set options for a provider.
+   *
+   * @param provider_name The provider name.
+   * @param option_name The option name.
+   * @param option_value The option value.
+   */
   public void setProviderOption(String provider_name, String option_name, String option_value) {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
