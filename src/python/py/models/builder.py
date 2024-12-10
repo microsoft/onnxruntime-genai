@@ -1958,7 +1958,7 @@ class Model:
         return output_name
 
     def make_q_lm_head(self, lm_head):
-        lm_head.g_idx = 0
+        #lm_head.g_idx = 0
         self.make_matmul_op(lm_head, "/lm_head/MatMul", root_input=self.layernorm_attrs["output_0"], logits=True)
 
     def make_lm_head(self, lm_head):
