@@ -163,7 +163,7 @@ struct OgaSequences : OgaAbstract {
   std::span<const int32_t> Get(size_t index) const {
     return {SequenceData(index), SequenceCount(index)};
   }
-  void Append(const std::span<const int32_t>& sequence) {
+  void Append(std::span<const int32_t> sequence) {
     OgaCheckResult(OgaAppendTokenSequence(sequence.data(), sequence.size(), this));
   }
   void Append(const std::vector<int32_t>& sequence) {
@@ -280,7 +280,7 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_AppendTokenSequences(this, &sequences));
   }
 
-  void AppendTokens(int32_t* input_ids, size_t input_ids_count) {
+  void AppendTokens(const int32_t* input_ids, size_t input_ids_count) {
     OgaCheckResult(OgaGenerator_AppendTokens(this, input_ids, input_ids_count));
   }
 

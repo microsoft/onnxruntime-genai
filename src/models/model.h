@@ -181,15 +181,11 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   std::unique_ptr<DmlExecutionContext> dml_execution_context_;
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
   ComPtr<IDMLDevice> dml_device_;
-  std::unique_ptr<Ort::Allocator> dml_owned_allocator_;
 #endif
-#if USE_WEBGPU
-  std::unique_ptr<Ort::Allocator> webgpu_owned_allocator_;
-  std::unique_ptr<OrtIoBinding> webgpu_io_binding_;
-#endif
-#if USE_DML || USE_WEBGPU
-  std::unique_ptr<OrtMemoryInfo> memory_info_device_;
-#endif
+
+  std::unique_ptr<Ort::Allocator> owned_allocator_device_{};  // nullptr if n/a
+  std::unique_ptr<OrtMemoryInfo> memory_info_device_{};       // nullptr if n/a
+
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };
