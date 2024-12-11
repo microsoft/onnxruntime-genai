@@ -111,17 +111,6 @@ target_include_directories(onnxruntime-genai-static PUBLIC ${onnxruntime_extensi
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 
-if(USE_GUIDANCE)
-  target_include_directories(onnxruntime-genai PUBLIC ${llguidance_SOURCE_DIR}/parser/)
-  target_include_directories(onnxruntime-genai-static PUBLIC ${llguidance_SOURCE_DIR}/parser/)
-  target_link_libraries(onnxruntime-genai PRIVATE llguidance_parser)
-  target_link_libraries(onnxruntime-genai-static PUBLIC llguidance_parser)
-  if (WIN32)
-    # bcrypt is needed for the rust std lib
-    target_link_libraries(onnxruntime-genai PRIVATE bcrypt)
-    target_link_libraries(onnxruntime-genai-static PRIVATE bcrypt)
-  endif()
-endif()
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
@@ -142,6 +131,8 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${ORT_HEADER_DIR})
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${GENERATORS_ROOT})
+  # target_include_directories(onnxruntime-genai-cuda PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
+  # target_include_directories(onnxruntime-genai-cuda PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api/)
   target_link_libraries(onnxruntime-genai-cuda PRIVATE cublasLt cublas curand cufft cudart)
   set_target_properties(onnxruntime-genai-cuda PROPERTIES LINKER_LANGUAGE CUDA)
   add_dependencies(onnxruntime-genai onnxruntime-genai-cuda)
@@ -155,6 +146,19 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-DEF:${GENERATORS_ROOT}/cuda/symbols.def")
   else()
     message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
+  endif()
+endif()
+
+
+if(USE_GUIDANCE)
+  target_include_directories(onnxruntime-genai PUBLIC ${llguidance_SOURCE_DIR}/parser/)
+  target_include_directories(onnxruntime-genai-static PUBLIC ${llguidance_SOURCE_DIR}/parser/)
+  target_link_libraries(onnxruntime-genai PRIVATE llguidance_parser)
+  target_link_libraries(onnxruntime-genai-static PUBLIC llguidance_parser)
+  if (WIN32)
+    # bcrypt is needed for the rust std lib
+    target_link_libraries(onnxruntime-genai PRIVATE bcrypt)
+    target_link_libraries(onnxruntime-genai-static PRIVATE bcrypt)
   endif()
 endif()
 

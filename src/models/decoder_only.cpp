@@ -37,7 +37,7 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
 void DecoderOnly_State::RewindTo(size_t index) {
   position_inputs_.RewindTo(index);
   kv_cache_.RewindTo(index);
-  logits_.ResetProcessors();
+  // logits_.ResetProcessors();
 }
 
 void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {

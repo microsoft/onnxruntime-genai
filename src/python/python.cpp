@@ -8,6 +8,7 @@
 #include "../ort_genai.h"
 #include "../json.h"
 #include "../search.h"
+#include "../logits_processor.h"
 #include "../models/model.h"
 #include "../logging.h"
 #include "../smartptrs.h"

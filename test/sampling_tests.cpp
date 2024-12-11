@@ -5,6 +5,7 @@
 #include <generators.h>
 #include <search.h>
 #include <models/model.h>
+#include <logits_processor.h>
 #include <iostream>
 #include <random>
 

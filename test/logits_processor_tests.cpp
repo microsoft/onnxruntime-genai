@@ -5,7 +5,7 @@
 #include <generators.h>
 #include <search.h>
 #include <models/model.h>
-#include <models/logits_processor.h>
+#include <logits_processor.h>
 #include <cstdio>
 #include <iostream>
 #include <random>
@@ -38,14 +38,16 @@ TEST(LogitsProcessorTests, TestRegex) {
   std::string text = "answer: I am a robot";
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   auto tokenizer = model->CreateTokenizer();
-  auto processor = std::make_unique<Generators::GuidanceLogitsProcessor>(model->config_->model.vocab_size,
-                                                                         model->config_->model.eos_token_id, "regex",
-                                                                         regex, tokenizer, model->config_->config_path.string().c_str());
+  auto params = Generators::CreateGeneratorParams(*model);
+  params->SetGuidance("regex", regex);
+  auto generator = Generators::CreateGenerator(*model, *params);
+  auto processor = std::make_unique<Generators::GuidanceLogitsProcessor>(*generator->state_);
   auto target_ids = Generators::GuidanceLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(Generators::GuidanceLogitsProcessor::kTokenizePrefixStr).size(),
                                                                           reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
   for (auto id : target_ids) {
-    auto mask = processor->ComputeMask();
-    processor->CommitToken(id);
+    auto mask = processor->GetMask();
+    auto tokens = std::vector<int32_t>{static_cast<int32_t>(id)};
+    processor->CommitTokens(std::span<int32_t>(tokens));
   }
 }
 
@@ -55,14 +57,16 @@ TEST(LogitsProcessorTests, TestJsonSchema) {
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   auto tokenizer = model->CreateTokenizer();
-  auto processor = std::make_unique<Generators::GuidanceLogitsProcessor>(model->config_->model.vocab_size,
-                                                                         model->config_->model.eos_token_id, "json_schema",
-                                                                         json_schema, tokenizer, model->config_->config_path.string().c_str());
+  auto params = Generators::CreateGeneratorParams(*model);
+  params->SetGuidance("json_schema", json_schema);
+  auto generator = Generators::CreateGenerator(*model, *params);
+  auto processor = std::make_unique<Generators::GuidanceLogitsProcessor>(*generator->state_);
   auto target_ids = Generators::GuidanceLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(Generators::GuidanceLogitsProcessor::kTokenizePrefixStr).size(),
                                                                           reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
   for (auto id : target_ids) {
-    auto mask = processor->ComputeMask();
-    processor->CommitToken(id);
+    auto mask = processor->GetMask();
+    auto tokens = std::vector<int32_t>{static_cast<int32_t>(id)};
+    processor->CommitTokens(std::span<int32_t>(tokens));
   }
 }
 

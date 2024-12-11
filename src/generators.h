@@ -46,6 +46,7 @@ struct Model;
 struct State;
 struct Search;
 struct Tokenizer;
+struct LogitsProcessor;
 
 template <typename T>
 DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
@@ -128,6 +129,7 @@ struct Generator : LeakChecked<Generator> {
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
+  std::unique_ptr<LogitsProcessor> logits_processor_;
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
 
  private:
