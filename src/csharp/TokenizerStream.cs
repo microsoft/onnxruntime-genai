@@ -5,6 +5,9 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    /// <summary>
+    /// Use this to decode token strings incrementally, one token at a time.
+    /// </summary>
     public class TokenizerStream : IDisposable
     {
         private IntPtr _tokenizerStreamHandle;
@@ -17,6 +20,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _tokenizerStreamHandle; } }
 
+        /// <summary>
+        /// Decode one token.
+        /// </summary>
+        /// <param name="token">The token.</param>
+        /// <returns>
+        /// The decoded result.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public string Decode(int token)
         {
             IntPtr decodedStr = IntPtr.Zero;
