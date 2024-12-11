@@ -20,7 +20,7 @@ public final class Config implements AutoCloseable {
     nativeHandle = createConfig(modelPath);
   }
 
-  /** Clear all providers. */
+  /** Clear the list of providers in the config */
   public void clearProviders() {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
@@ -29,7 +29,8 @@ public final class Config implements AutoCloseable {
   }
 
   /**
-   * Append a provider with the given name.
+   * Add the provider at the end of the list of providers in the given config if it doesn't already exist.
+   * If it already exists, does nothing.
    *
    * @param provider_name The provider name.
    */
@@ -41,17 +42,17 @@ public final class Config implements AutoCloseable {
   }
 
   /**
-   * Set options for a provider.
+   * Set a provider option.
    *
    * @param provider_name The provider name.
-   * @param option_name The option name.
-   * @param option_value The option value.
+   * @param option_key The key of the option to set.
+   * @param option_value The value of the option to set.
    */
-  public void setProviderOption(String provider_name, String option_name, String option_value) {
+  public void setProviderOption(String provider_name, String option_key, String option_value) {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
-    setProviderOption(nativeHandle, provider_name, option_name, option_value);
+    setProviderOption(nativeHandle, provider_name, option_key, option_value);
   }
 
   @Override
@@ -83,5 +84,5 @@ public final class Config implements AutoCloseable {
   private native void appendProvider(long configHandle, String provider_name);
 
   private native void setProviderOption(
-      long configHandle, String provider_name, String option_name, String option_value);
+      long configHandle, String provider_name, String option_key, String option_value);
 }
