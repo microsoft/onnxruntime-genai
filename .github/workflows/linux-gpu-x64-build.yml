@@ -129,16 +129,15 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e"
 
-      # TODO: Enable this by adding dotnet to the docker image
-      # - name: Build the C# API and Run the C# Tests
-      #   run: |
-      #     echo "Building the C# API and running the C# tests"
-      #     docker run \
-      #       --gpus all \
-      #       --rm \
-      #       --volume $GITHUB_WORKSPACE:/ort_genai_src \
-      #       -w /ort_genai_src/test/csharp onnxruntimecudabuildx64 bash -c " \
-      #         dotnet test /p:NativeBuildOutputDir='/ort_genai_src/build/cuda/'"
+      - name: Build the C# API and Run the C# Tests
+        run: |
+          echo "Building the C# API and running the C# tests"
+          docker run \
+            --gpus all \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/ort_genai_src \
+            -w /ort_genai_src/test/csharp onnxruntimecudabuildx64 bash -c " \
+              dotnet test /p:NativeBuildOutputDir='/ort_genai_src/build/cuda/' --verbosity normal"
 
       - name: Docker -- Run unit tests
         run: |

@@ -1,21 +1,17 @@
-ARG BASEIMAGE=onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20240530.3
+ARG BASEIMAGE=onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11_dotnet:20241120.3
 
 FROM $BASEIMAGE
-ADD scripts /tmp/scripts
 
-RUN if [ "$(echo $CUDA_VERSION | cut -d. -f1)" -ge 12 ]; then \
-    echo "Using GCC 12 because CUDA version is greater than or equal to 12"; \
-    cd /tmp/scripts && /tmp/scripts/install_centos_gcc12.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts; \
-else \
-    echo "Using default gcc because CUDA version is less than 12"; \
-    cd /tmp/scripts && /tmp/scripts/install_centos.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts; \
-fi
+ENV PATH=/usr/lib/jvm/msopenjdk-17/bin:$PATH
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+ENV JAVA_HOME=/usr/lib/jvm/msopenjdk-17
+ENV CUDAHOSTCXX=/opt/rh/gcc-toolset-11/root/usr/bin/g++
+ADD scripts /tmp/scripts
+RUN cd /tmp/scripts && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts
 
 ARG BUILD_UID=1001
 ARG BUILD_USER=onnxruntimedev
 RUN adduser --uid $BUILD_UID $BUILD_USER
 WORKDIR /home/$BUILD_USER
 USER $BUILD_USER
-ENV PATH /usr/local/dotnet:$PATH
-ENV CUDAHOSTCXX /opt/rh/gcc-toolset-11/root/usr/bin/g++
-ENV CUDA_MODULE_LOADING "LAZY"

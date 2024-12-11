@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e -x
 pushd .
-PYTHON_EXES=("/opt/python/cp38-cp38/bin/python3.8" "/opt/python/cp39-cp39/bin/python3.9" "/opt/python/cp310-cp310/bin/python3.10" "/opt/python/cp311-cp311/bin/python3.11" "/opt/python/cp312-cp312/bin/python3.12")
+PYTHON_EXES=("/opt/python/cp310-cp310/bin/python3.10" "/opt/python/cp311-cp311/bin/python3.11" "/opt/python/cp312-cp312/bin/python3.12")
 
 popd
 export ONNX_ML=1
@@ -64,11 +64,6 @@ mkdir -p /tmp/src
 cd /tmp/src
 
 CPU_ARCH=$(uname -m)
-
-# Install CMake
-echo "Installing cmake"
-GetFile "https://github.com/Kitware/CMake/releases/download/v3.28.1/cmake-3.28.1-linux-$CPU_ARCH.tar.gz" "/tmp/src/cmake.tar.gz"
-tar -zxf /tmp/src/cmake.tar.gz --strip=1 -C /usr
 
 # Install Ninja
 echo "Installing Ninja"
