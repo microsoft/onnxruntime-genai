@@ -300,7 +300,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (BOOL)appendTokens:(NSArray<NSNumber*>*)tokens error:(NSError**)error;
 
 /**
- * Rewinds the generator by the specified number of tokens.
+ * Rewinds the generator to the given length.
  * @param new_length The desired length in tokens after rewinding.
  * @param error Optional error information set if an error occurs.
  */
