@@ -4,6 +4,7 @@
  */
 package ai.onnxruntime.genai;
 
+/** A container of adapters. */
 public final class Adapters implements AutoCloseable {
   private long nativeHandle = 0;
 
@@ -22,13 +23,13 @@ public final class Adapters implements AutoCloseable {
   }
 
   /**
-   * Load an adapter from the specified path.
+   * Loads the model adapter from the given adapter file path and adapter name.
    *
    * @param adapterFilePath The path of the adapter.
    * @param adapterName A unique user supplied adapter identifier.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
-  public void loadAdapters(String adapterFilePath, String adapterName) throws GenAIException {
+  public void loadAdapter(String adapterFilePath, String adapterName) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
@@ -37,12 +38,13 @@ public final class Adapters implements AutoCloseable {
   }
 
   /**
-   * Unload an adapter.
+   * Unloads the adapter with the given identifier from the previosly loaded adapters. If the
+   * adapter is not found, or if it cannot be unloaded (when it is in use), an error is returned.
    *
    * @param adapterName A unique user supplied adapter identifier.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
-  public void unloadAdapters(String adapterName) throws GenAIException {
+  public void unloadAdapter(String adapterName) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }

@@ -154,6 +154,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
    * Fetches and returns the output tensor with the given name.
    *
    * @param name The name of the output needed.
+   * @return The tensor.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
   public Tensor getOutput(String name) throws GenAIException {
