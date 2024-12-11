@@ -40,4 +40,4 @@ jobs:
       - name: Run API diff
         run: |
           python -m pip install -U jsonpickle
-          python .\tools\ci_build\validate_doxygen_xml.py --cxx-output-dir .\src\cxx_dox\  --java-output-dir .\src\java\java_dox\ --csharp-output-dir .\src\csharp\csharp_dox\
+          python ./tools/ci_build/validate_doxygen_xml.py --cxx-output-dir ./src/cxx_dox  --java-output-dir ./src/java/java_dox --csharp-output-dir ./src/csharp/csharp_dox
