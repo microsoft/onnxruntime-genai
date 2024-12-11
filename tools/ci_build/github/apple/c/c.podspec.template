@@ -1,0 +1,29 @@
+Pod::Spec.new do |s|
+  s.name                = "@NAME@"
+  s.version             = "@VERSION@"
+  s.summary             = "@SUMMARY@"
+  s.homepage            = "https://github.com/microsoft/onnxruntime-genai"
+  s.license	            = { :type => "MIT", :file => "@LICENSE_FILE@" }
+  s.author              = {"ONNX Runtime" => "onnxruntime@microsoft.com" }
+  s.source              = { :http => 'file:///http_source_placeholder' }
+
+  s.ios.deployment_target = "@IOS_DEPLOYMENT_TARGET@"
+  s.osx.deployment_target = "@MACOSX_DEPLOYMENT_TARGET@"
+
+  s.vendored_frameworks = "@ORTGENAI_C_FRAMEWORK@"
+  s.static_framework    = true
+  s.framework           = ['ImageIO', 'CoreGraphics']
+  s.weak_framework      = [ @WEAK_FRAMEWORK@ ]
+
+  s.source_files        = "@ORTGENAI_C_HEADERS_DIR@/*.h"
+
+  s.preserve_paths      = [ "@LICENSE_FILE@" ]
+  s.description         = "@DESCRIPTION@"
+  s.libraries = "c++"
+  s.dependency 'onnxruntime-c', '~> @ORT_VERSION@'
+
+  s.pod_target_xcconfig = {
+    "OTHER_CPLUSPLUSFLAGS" => "-fvisibility=hidden -fvisibility-inlines-hidden",
+  }
+end
+
