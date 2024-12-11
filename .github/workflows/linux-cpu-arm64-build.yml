@@ -72,7 +72,15 @@ jobs:
 
       - name: Build with Python
         run: |
-          python3 build.py --parallel --config=Debug
+          set -e -x
+          docker run \
+            --rm \
+            --volume $GITHUB_WORKSPACE:/onnxruntime_src \
+            -w /onnxruntime_src ort_genai_linux_arm64_gha \
+            bash -c " \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install wheel && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install requests && \
+              ${{ env.PYTHON_EXECUTABLE }} build.py --parallel --config=Debug"
 
       - name: Docker -- Check test directory
         run: |

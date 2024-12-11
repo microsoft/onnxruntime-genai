@@ -95,7 +95,7 @@ jobs:
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install requests && \
-              ${{ env.PYTHON_EXECUTABLE }} build.py --use_cuda --cuda_home=/usr/local/cuda-12.2 --parallel --config=Debug"
+              ${{ env.PYTHON_EXECUTABLE }} build.py --use_cuda --cuda_home=/usr/local/cuda-12.2 --parallel --config=Debug --cmake_extra_defines=MANYLINUX=ON"
 
       - name: Use Dummy HuggingFace Token
         run: |
@@ -114,7 +114,7 @@ jobs:
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
               ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/Linux/Debug/wheel/onnxruntime_genai*linux*.whl --no-deps --user && \
+              ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/Linux/Debug/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
               ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e"
 
       # TODO: Enable this by adding dotnet to the docker image

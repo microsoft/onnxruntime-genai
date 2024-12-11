@@ -56,7 +56,7 @@ jobs:
         run: |
           python3 -m pip install requests
           python3 -m pip install wheel
-          python3 build.py --parallel --use_csharp --config=Release --cmake_generator "Unix Makefiles"
+          python3 build.py --parallel --build_csharp --config=Release --cmake_generator "Unix Makefiles"
 
       - name: Install the python wheel and test dependencies
         run: |
