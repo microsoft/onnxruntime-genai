@@ -23,7 +23,6 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@class OGAInt32Span;
 @class OGATensor;
 @class OGASequences;
 @class OGANamedTensors;
@@ -95,12 +94,12 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 /**
  * Decode sequences to text
  *
- * @param data The sequences data to be encoded.
+ * @param tokensData The sequences data to be encoded.
  * @param tokensLength The length of the sequences data to be encoded.
  * @param error Optional error information set if an error occurs.
  * @return The decoding result, or nil if an error occurs.
  */
-- (nullable NSString*)decode:(const int32_t*)data
+- (nullable NSString*)decode:(const int32_t*)tokensData
                       length:(size_t)tokensLength
                        error:(NSError**)error;
 
@@ -140,38 +139,6 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  */
 - (nullable NSString*)decode:(int32_t)token
                        error:(NSError**)error;
-@end
-
-/**
- * Wraps a raw int32_t pointer and its size. Represents a data sequence.
- */
-@interface OGAInt32Span : NSObject
-
-- (instancetype)init NS_UNAVAILABLE;
-/**
- * Creates a span with underlying data.
- *
- * @param pointer The underlying data pointer to use.
- * @param size The underlying data size.
- * @return The instance, or nil if an error occurs.
- */
-- (nullable instancetype)initWithDataPointer:(const int32_t*)pointer size:(size_t)size;
-
-/**
- * The underlying data pointer
- */
-- (const int32_t*)pointer;
-/**
- * The underlying data size
- */
-- (size_t)size;
-/**
- * The last element in this data sequence
- * @param error Optional error information set if an error occurs.
- * @return The last element, or -1 if an error occurs.
- */
-- (int32_t)getLastElementWithError:(NSError**)error NS_SWIFT_NAME(lastElement());
-
 @end
 
 /**
@@ -301,10 +268,10 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 /**
  * Rewinds the generator to the given length.
- * @param new_length The desired length in tokens after rewinding.
+ * @param newLength The desired length in tokens after rewinding.
  * @param error Optional error information set if an error occurs.
  */
-- (BOOL)rewindTo:(size_t)new_length error:(NSError**)error;
+- (BOOL)rewindTo:(size_t)newLength error:(NSError**)error;
 
 /**
  * Generate next token
@@ -379,6 +346,10 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (nullable OGANamedTensors*)processImages:(NSString*)prompt
                                     images:(OGAImages*)images
                                      error:(NSError**)error;
+
+- (nullable NSString*)decode:(const int32_t*)tokensData
+                      length:(size_t)tokensLength
+                       error:(NSError**)error;
 @end
 
 NS_ASSUME_NONNULL_END

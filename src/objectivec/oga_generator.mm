@@ -51,9 +51,9 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
-- (BOOL)rewindTo:(size_t)new_length error:(NSError**)error {
+- (BOOL)rewindTo:(size_t)newLength error:(NSError**)error {
   try {
-    _generator->RewindTo(new_length);
+    _generator->RewindTo(newLength);
     return YES;
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)

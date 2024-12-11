@@ -33,9 +33,11 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
-- (nullable NSString*)decode:(OGAInt32Span*)data error:(NSError**)error {
+- (nullable NSString*)decode:(const int32_t*)tokensData
+                      length:(size_t)tokensLength
+                       error:(NSError**)error {
   try {
-    OgaString result = _processor->Decode(data.pointer, data.size);
+    OgaString result = _processor->Decode(tokensData, tokensLength);
     return [NSString stringWithUTF8String:result];
   }
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
