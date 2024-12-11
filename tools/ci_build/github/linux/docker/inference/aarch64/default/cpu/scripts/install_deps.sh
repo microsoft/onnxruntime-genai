@@ -40,7 +40,7 @@ cd /tmp/src
 
 CPU_ARCH=$(uname -m)
 echo "Installing cmake"
-GetFile "https://github.com/Kitware/CMake/releases/download/v3.28.1/cmake-3.28.1-linux-$CPU_ARCH.tar.gz" "/tmp/src/cmake.tar.gz"
+GetFile "https://github.com/Kitware/CMake/releases/download/v3.31.0/cmake-3.31.0-linux-$CPU_ARCH.tar.gz" "/tmp/src/cmake.tar.gz"
 tar -zxf /tmp/src/cmake.tar.gz --strip=1 -C /usr
 
 echo "Installing Ninja"
