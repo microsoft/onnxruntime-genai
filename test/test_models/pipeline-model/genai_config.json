@@ -18,8 +18,7 @@
                 "past_value_names": "past_key_values.%d.value"
             },
             "outputs": {
-                "hidden_states": "hidden_states",
-		"logits": "logits",
+                "logits": "logits",
                 "present_key_names": "present.%d.key",
                 "present_value_names": "present.%d.value"
             },

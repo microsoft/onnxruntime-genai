@@ -324,6 +324,9 @@ class Model:
             "present_key_names": "present.%d.key",
             "present_value_names": "present.%d.value",
         })
+        if "hidden_states" in outputs:
+            # Remove 'hidden_states' from 'outputs' entry in config since ORT GenAI doesn't use it
+            del outputs["hidden_states"]
 
         genai_config = {
             "model": {
