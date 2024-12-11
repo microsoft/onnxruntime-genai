@@ -14,7 +14,13 @@ public final class GeneratorParams implements AutoCloseable {
   private long nativeHandle = 0;
   private ByteBuffer tokenIdsBuffer;
 
-  GeneratorParams(Model model) throws GenAIException {
+  /**
+   * Creates a GeneratorParams from the given model.
+   *
+   * @param model The model to use.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public GeneratorParams(Model model) throws GenAIException {
     if (model.nativeHandle() == 0) {
       throw new IllegalStateException("model has been freed and is invalid");
     }
@@ -27,7 +33,7 @@ public final class GeneratorParams implements AutoCloseable {
    *
    * @param optionName The option name.
    * @param value The option value.
-   * @throws GenAIException
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void setSearchOption(String optionName, double value) throws GenAIException {
     if (nativeHandle == 0) {
@@ -42,7 +48,7 @@ public final class GeneratorParams implements AutoCloseable {
    *
    * @param optionName The option name.
    * @param value The option value.
-   * @throws GenAIException
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void setSearchOption(String optionName, boolean value) throws GenAIException {
     if (nativeHandle == 0) {

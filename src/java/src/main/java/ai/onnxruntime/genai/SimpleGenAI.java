@@ -37,7 +37,7 @@ public class SimpleGenAI implements AutoCloseable {
    */
   public SimpleGenAI(String modelPath) throws GenAIException {
     model = new Model(modelPath);
-    tokenizer = model.createTokenizer();
+    tokenizer = new Tokenizer(model);
   }
 
   /**
@@ -48,7 +48,7 @@ public class SimpleGenAI implements AutoCloseable {
    * @throws GenAIException on failure
    */
   public GeneratorParams createGeneratorParams() throws GenAIException {
-    return model.createGeneratorParams();
+    return new GeneratorParams(model);
   }
 
   /**

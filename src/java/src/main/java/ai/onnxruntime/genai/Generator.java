@@ -94,8 +94,8 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
-   * Rewinds the generator to the given length. This is useful when the user wants to rewind the generator to a specific length
-   * and continue generating from that point.
+   * Rewinds the generator to the given length. This is useful when the user wants to rewind the
+   * generator to a specific length and continue generating from that point.
    *
    * @param newLength The desired length in tokens after rewinding.
    * @throws GenAIException If the call to the GenAI native API fails.
@@ -109,7 +109,8 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
-   * Computes the logits from the model based on the input ids and the past state. The computed logits are stored in the generator.
+   * Computes the logits from the model based on the input ids and the past state. The computed
+   * logits are stored in the generator.
    *
    * @throws GenAIException If the call to the GenAI native API fails.
    */
