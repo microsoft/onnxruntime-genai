@@ -1,5 +1,8 @@
 # ONNX Runtime generate() API
 
+## *Main branch contains new API changes and examples in main branch reflect these changes. For example scripts compatible with current release (0.5.2), [see release branch](https://github.com/microsoft/onnxruntime-genai/tree/rel-0.5.2).*
+
+
 [![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed/absoluteLatest)
 
 Run Llama, Phi, Gemma, Mistral with ONNX Runtime.
@@ -49,8 +52,6 @@ See https://onnxruntime.ai/docs/genai/howto/install
    ```
 
 3. Run the model
-
-   *Main branch contains new API changes. For examples compatible with current release (0.5.2), [see release branch](https://github.com/microsoft/onnxruntime-genai/tree/rel-0.5.2).*
 
    ### Build from source / Next release (0.6.0)
 
