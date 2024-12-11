@@ -71,10 +71,10 @@ struct DecoderOnlyPipelineState : State {
   // Stores all the outputs from the previous pipeline state(s)
   std::unordered_map<std::string, std::unique_ptr<OrtValue>> ortvalue_store_;
 
-  std::unique_ptr<InputIDsInterface> input_ids_;
+  std::unique_ptr<InputIDs> input_ids_;
   Logits logits_{*this};
-  std::unique_ptr<KeyValueCacheInterface> key_value_cache_;
-  std::unique_ptr<PositionInputsInterface> position_inputs_;
+  std::unique_ptr<KeyValueCache> key_value_cache_;
+  std::unique_ptr<PositionInputs> position_inputs_;
   ExtraInputs extra_inputs_{*this};
 };
 

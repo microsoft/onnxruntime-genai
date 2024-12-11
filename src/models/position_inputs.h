@@ -9,15 +9,15 @@
 
 namespace Generators {
 
-struct PositionInputsInterface {
-  virtual ~PositionInputsInterface() = default;
+struct PositionInputs {
+  virtual ~PositionInputs() = default;
   virtual void Add() = 0;
   virtual void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) = 0;
   virtual void RewindTo(size_t index) = 0;
 };
 
-struct PositionInputs : PositionInputsInterface {
-  PositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk);
+struct PositionInputsDefault : PositionInputs {
+  PositionInputsDefault(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk);
 
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
@@ -93,15 +93,15 @@ struct PositionInputs : PositionInputsInterface {
 #endif
 };
 
-struct SlidingWindowPositionInputs : PositionInputsInterface {
-  SlidingWindowPositionInputs(State& state);
-  SlidingWindowPositionInputs(const SlidingWindowPositionInputs&) = delete;
-  SlidingWindowPositionInputs& operator=(const SlidingWindowPositionInputs&) = delete;
+struct WindowedPositionInputs : PositionInputs {
+  WindowedPositionInputs(State& state);
+  WindowedPositionInputs(const WindowedPositionInputs&) = delete;
+  WindowedPositionInputs& operator=(const WindowedPositionInputs&) = delete;
 
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
   void RewindTo(size_t index) override {
-    throw std::runtime_error("SlidingWindowPositionInputs does not support RewindTo.");
+    throw std::runtime_error("WindowedPositionInputs does not support RewindTo.");
   };
 
  private:
@@ -122,11 +122,11 @@ struct SlidingWindowPositionInputs : PositionInputsInterface {
   size_t attention_mask_index_{~0U};
   size_t position_ids_index_{~0U};
 
-  size_t window_size_{0};
-  size_t num_windows_{1};
-  size_t window_index_{0};
+  size_t window_size_{};
+  size_t num_windows_{};
+  size_t window_index_{};
 };
 
-std::unique_ptr<PositionInputsInterface> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths);
+std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths);
 
 }  // namespace Generators

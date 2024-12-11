@@ -4,17 +4,17 @@
 
 namespace Generators {
 
-struct InputIDsInterface {
-  virtual ~InputIDsInterface() = default;
+struct InputIDs {
+  virtual ~InputIDs() = default;
   virtual void Add() = 0;
   virtual std::array<int64_t, 2> GetShape() const = 0;
   virtual void Update(DeviceSpan<int32_t>& next_tokens) = 0;
 };
 
-struct InputIDs : InputIDsInterface {
-  InputIDs(State& state);
-  InputIDs(const InputIDs&) = delete;
-  InputIDs& operator=(const InputIDs&) = delete;
+struct InputIDsDefault : InputIDs {
+  InputIDsDefault(State& state);
+  InputIDsDefault(const InputIDsDefault&) = delete;
+  InputIDsDefault& operator=(const InputIDsDefault&) = delete;
 
   // Register input_ids as ORT session input.
   // Called only once during initialization of state.
@@ -52,10 +52,10 @@ struct InputIDs : InputIDsInterface {
   std::unique_ptr<OrtValue> past_sequence_length_;
 };
 
-struct SlidingWindowInputIDs : public InputIDsInterface {
-  SlidingWindowInputIDs(State& state);
-  SlidingWindowInputIDs(const SlidingWindowInputIDs&) = delete;
-  SlidingWindowInputIDs& operator=(const SlidingWindowInputIDs&) = delete;
+struct WindowedInputIDs : public InputIDs {
+  WindowedInputIDs(State& state);
+  WindowedInputIDs(const WindowedInputIDs&) = delete;
+  WindowedInputIDs& operator=(const WindowedInputIDs&) = delete;
 
   void Add() override;
   void Update(DeviceSpan<int32_t>& next_tokens) override;
@@ -65,9 +65,9 @@ struct SlidingWindowInputIDs : public InputIDsInterface {
   State& state_;
   const Model& model_{state_.model_};
   size_t input_index_{~0U};
-  size_t window_size_{0};
-  size_t num_windows_{1};
-  size_t window_index_{0};
+  size_t window_size_{};
+  size_t num_windows_{};
+  size_t window_index_{};
   const char* name_;
   std::array<int64_t, 2> shape_{};
   ONNXTensorElementDataType type_;
@@ -75,6 +75,6 @@ struct SlidingWindowInputIDs : public InputIDsInterface {
   std::unique_ptr<OrtValue> value_;
 };
 
-std::unique_ptr<InputIDsInterface> CreateInputIDs(State& state);
+std::unique_ptr<InputIDs> CreateInputIDs(State& state);
 
 }  // namespace Generators

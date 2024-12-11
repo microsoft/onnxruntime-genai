@@ -27,10 +27,10 @@ struct Gpt_State : State {
 
   const Gpt_Model& model_;
 
-  InputIDs input_ids_{*this};
+  InputIDsDefault input_ids_{*this};
   Logits logits_{*this};
-  KV_Cache_Combined kv_cache_{*this};
-  PositionInputs position_inputs_;
+  KeyValueCacheDefault_Combined kv_cache_{*this};
+  PositionInputsDefault position_inputs_;
   ExtraInputs extra_inputs_{*this};
 };
 }  // namespace Generators

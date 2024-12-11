@@ -15,6 +15,8 @@ void ThreadPool::Compute(const std::function<void(size_t)>& func) {
   for (auto& thread : threads_) {
     thread.join();
   }
+
+  threads_.clear();
 }
 
 }  // namespace Generators

@@ -4,8 +4,8 @@
 
 namespace Generators {
 
-struct KeyValueCacheInterface {
-  virtual ~KeyValueCacheInterface() = default;
+struct KeyValueCache {
+  virtual ~KeyValueCache() = default;
   virtual void Add() = 0;
   virtual void AddEncoder() = 0;
   virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) = 0;
@@ -14,8 +14,8 @@ struct KeyValueCacheInterface {
   static bool IsCacheNeeded(const Model& model);
 };
 
-struct KV_Cache_Combined {
-  KV_Cache_Combined(State& state);
+struct KeyValueCacheDefault_Combined {
+  KeyValueCacheDefault_Combined(State& state);
 
   void Add();  // Add to state inputs/outputs
   void Update(DeviceSpan<int32_t> beam_indices, int total_length);
@@ -44,8 +44,8 @@ struct KV_Cache_Combined {
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
 
-struct KV_Cache : KeyValueCacheInterface {
-  KV_Cache(State& state);
+struct KeyValueCacheDefault : KeyValueCache {
+  KeyValueCacheDefault(State& state);
 
   void AddEncoder() override;  // If model has an initial encoder step, this is used
   // Register input_ids as ORT session input.
@@ -80,7 +80,7 @@ struct KV_Cache : KeyValueCacheInterface {
   std::vector<StaticBuffer*> sb_kv_caches_;
 };
 
-// Very similar to the KV_Cache, but is only created once at the encoder step, then used without modification for every decoder step
+// Very similar to the KeyValueCacheDefault, but is only created once at the encoder step, then used without modification for every decoder step
 struct Cross_Cache {
   Cross_Cache(State& state);
 
@@ -99,16 +99,16 @@ struct Cross_Cache {
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
 
-struct SlidingWindowKeyValueCache : KeyValueCacheInterface {
-  SlidingWindowKeyValueCache(State& state);
+struct WindowedKeyValueCache : KeyValueCache {
+  WindowedKeyValueCache(State& state);
 
   void Add() override;
   void AddEncoder() override {
-    throw std::runtime_error("SlidingWindowKeyValueCache does not support AddEncoder.");
+    throw std::runtime_error("WindowedKeyValueCache does not support AddEncoder.");
   };
   void Update(DeviceSpan<int32_t> beam_indices, int current_length) override;
   void RewindTo(size_t index) override {
-    throw std::runtime_error("SlidingWindowKeyValueCache does not support RewindTo.");
+    throw std::runtime_error("WindowedKeyValueCache does not support RewindTo.");
   }
 
  private:
@@ -116,10 +116,10 @@ struct SlidingWindowKeyValueCache : KeyValueCacheInterface {
 
   State& state_;
   const Model& model_{state_.model_};
-  int layer_count_{0};
-  int window_size_{0};
-  size_t num_windows_{1};
-  size_t window_index_{0};
+  int layer_count_{};
+  int window_size_{};
+  size_t num_windows_{};
+  size_t window_index_{};
   size_t input_index_{~0U}, output_index_{~0U};
 
   std::array<int64_t, 4> key_cache_shape_in_, key_cache_shape_out_;
@@ -133,6 +133,6 @@ struct SlidingWindowKeyValueCache : KeyValueCacheInterface {
   bool is_first_update_{true};
 };
 
-std::unique_ptr<KeyValueCacheInterface> CreateKeyValueCache(State& state);
+std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state);
 
 }  // namespace Generators

@@ -5,7 +5,7 @@
 
 namespace Generators {
 
-InputIDs::InputIDs(State& state)
+InputIDsDefault::InputIDsDefault(State& state)
     : state_{state} {
   name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
   shape_ = {state_.params_->BatchBeamSize(), 0};
@@ -41,7 +41,7 @@ InputIDs::InputIDs(State& state)
   }
 }
 
-void InputIDs::Add() {
+void InputIDsDefault::Add() {
   input_index_ = state_.inputs_.size();
 
   state_.inputs_.push_back(value_.get());
@@ -55,7 +55,7 @@ void InputIDs::Add() {
   }
 }
 
-void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
+void InputIDsDefault::Update(DeviceSpan<int32_t>& new_tokens) {
   const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids,
                                                int32_t pad_token_id) {
     int32_t seq_length = 0;
@@ -191,7 +191,7 @@ void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
   is_prompt_ = false;
 }
 
-SlidingWindowInputIDs::SlidingWindowInputIDs(State& state) : state_{state} {
+WindowedInputIDs::WindowedInputIDs(State& state) : state_{state} {
   name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
 
   if (!model_.config_->model.decoder.sliding_window.has_value()) {
@@ -207,18 +207,18 @@ SlidingWindowInputIDs::SlidingWindowInputIDs(State& state) : state_{state} {
   type_ = model_.session_info_->GetInputDataType(name_);
 
   if (type_ != Ort::TypeToTensorType<int32_t>) {
-    throw std::runtime_error("SlidingWindowInputIDs only supports int32_t input_ids.");
+    throw std::runtime_error("WindowedInputIDs only supports int32_t input_ids.");
   }
 }
 
-void SlidingWindowInputIDs::Add() {
+void WindowedInputIDs::Add() {
   input_index_ = state_.inputs_.size();
 
   state_.inputs_.push_back(value_.get());
   state_.input_names_.push_back(name_);
 }
 
-void SlidingWindowInputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
+void WindowedInputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
   if (window_index_ == 0) {
     num_windows_ = (new_tokens.size() + window_size_ - 1) / window_size_;
 
@@ -250,11 +250,11 @@ void SlidingWindowInputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
   window_index_++;
 }
 
-std::unique_ptr<InputIDsInterface> CreateInputIDs(State& state) {
+std::unique_ptr<InputIDs> CreateInputIDs(State& state) {
   if (state.model_.config_->model.decoder.sliding_window.has_value()) {
-    return std::make_unique<SlidingWindowInputIDs>(state);
+    return std::make_unique<WindowedInputIDs>(state);
   } else {
-    return std::make_unique<InputIDs>(state);
+    return std::make_unique<InputIDsDefault>(state);
   }
 }
 
