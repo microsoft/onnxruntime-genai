@@ -29,7 +29,7 @@ jobs:
       inputs:
         script: |
           set -e -x
-          python3 -m pip install requests
+          python3 -m pip install requests huggingface_hub
           python3 tools/ci_build/github/apple/build_and_assemble_apple_pods.py \
             --build-dir "$(Build.BinariesDirectory)/apple_framework" \
             --staging-dir "$(Build.BinariesDirectory)/staging" \
