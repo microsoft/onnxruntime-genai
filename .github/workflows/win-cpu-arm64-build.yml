@@ -34,6 +34,18 @@ jobs:
       with:
         nuget-version: '5.x'
 
+    - name: Setup Java 21
+      uses: actions/setup-java@v4
+      with:
+        java-version: '21'
+        distribution: 'temurin'
+        cache: 'gradle'
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: '8.6'
+
     - name: Download OnnxRuntime Nightly
       shell: powershell
       run: |
@@ -54,17 +66,13 @@ jobs:
 
     - name: Configure CMake
       run: |
-        python -m pip install wheel
+        python -m pip install wheel requests
+
         cmake --preset windows_arm64_cpu_release
 
     - name: Build with CMake
       run: |
         cmake --build --preset windows_arm64_cpu_release --parallel
-
-    - name: Build the C# API and Run the C# Tests
-      run: |
-        cd test\csharp
-        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
 
     - name: Install the Python Wheel and Test Dependencies
       run: |
@@ -75,6 +83,15 @@ jobs:
     - name: Run the Python Tests
       run: |
         python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
+
+    - name: Build the C# API and Run the C# Tests
+      run: |
+        cd test\csharp
+        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
+
+    - name: Build the Java API and Run the Java Tests
+      run: |
+        python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
 
     - name: Verify Build Artifacts
       if: always()

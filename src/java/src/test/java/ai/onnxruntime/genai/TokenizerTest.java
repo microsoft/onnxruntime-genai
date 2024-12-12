@@ -12,15 +12,16 @@ import org.junit.jupiter.api.Test;
 public class TokenizerTest {
   @Test
   public void testBatchEncodeDecode() throws GenAIException {
-    try (Model model = new Model(TestUtils.testModelPath());
+    try (Model model = new Model(TestUtils.tinyGpt2ModelPath());
         Tokenizer tokenizer = new Tokenizer(model)) {
       String[] inputs = new String[] {"This is a test", "This is another test"};
-      Sequences encoded = tokenizer.encodeBatch(inputs);
-      String[] decoded = tokenizer.decodeBatch(encoded);
+      try (Sequences encoded = tokenizer.encodeBatch(inputs)) {
+        String[] decoded = tokenizer.decodeBatch(encoded);
 
-      assertEquals(inputs.length, decoded.length);
-      for (int i = 0; i < inputs.length; i++) {
-        assert inputs[i].equals(decoded[i]);
+        assertEquals(inputs.length, decoded.length);
+        for (int i = 0; i < inputs.length; i++) {
+          assert inputs[i].equals(decoded[i]);
+        }
       }
     }
   }

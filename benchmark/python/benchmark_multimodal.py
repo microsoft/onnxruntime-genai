@@ -63,7 +63,6 @@ def run_benchmark(args, model, processor, image, generation_length, max_length):
     for _ in tqdm(range(args.warmup)):
         generator = og.Generator(model, params)
         while not generator.is_done():
-            generator.compute_logits()
             generator.generate_next_token()
         if args.print_model_output: print(processor.decode(generator.get_sequence(0)))
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
@@ -92,11 +91,10 @@ def run_benchmark(args, model, processor, image, generation_length, max_length):
         if args.use_graph_capture:
             params.try_graph_capture_with_max_batch_size(1)
 
-        generator = og.Generator(model, params)
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
-        generator.compute_logits()
+        generator = og.Generator(model, params)
         prompt_end_time = time.perf_counter()
         prompt_times.append(prompt_end_time - prompt_start_time)
 
@@ -110,15 +108,10 @@ def run_benchmark(args, model, processor, image, generation_length, max_length):
         while not generator.is_done() and i < generation_length:
             # Run inference
             token_gen_start_time = time.perf_counter()
-            generator.compute_logits()
-            token_gen_end_time = time.perf_counter()
-
-            sampling_start_time = time.perf_counter()
             generator.generate_next_token()
-            sampling_end_time = time.perf_counter()
+            token_gen_end_time = time.perf_counter()
             
             token_gen_times.append(token_gen_end_time - token_gen_start_time)
-            sampling_times.append(sampling_end_time - sampling_start_time)
             i += 1
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)

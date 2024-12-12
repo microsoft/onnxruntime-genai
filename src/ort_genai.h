@@ -26,13 +26,18 @@
  * tokenizer->Encode("A great recipe for Kung Pao chicken is ", *sequences);
  *
  * auto params = OgaGeneratorParams::Create(*model);
- * params->SetInputSequences(*sequences);
  * params->SetSearchOption("max_length", 200);
+ * params->SetSearchOption("batch_size", 1);
  *
- * auto output_sequences = model->Generate(*params);
- * auto out_string = tokenizer->Decode(output_sequences->Get(0));
+ * auto generator = OgaGenerator::Create(*model, *params);
+ * generator->AppendTokenSequences(*sequences);
+ * while (!generator->IsDone()) {
+ *  generator->GenerateNextToken();
+ * }
+ * auto output_sequence = generator->GetSequenceData(0);
+ * auto output_string = tokenizer->Decode(output_sequence, generator->GetSequenceCount(0));
  *
- * std::cout << "Output: " << std::endl << out_string << std::endl;
+ * std::cout << "Output: " << std::endl << output_string << std::endl;
  */
 
 // The types defined in this file are to give us zero overhead C++ style interfaces around an opaque C pointer.
@@ -287,8 +292,8 @@ struct OgaGenerator : OgaAbstract {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
   }
 
-  void RewindTo(size_t length) {
-    OgaCheckResult(OgaGenerator_RewindTo(this, length));
+  void RewindTo(size_t new_length) {
+    OgaCheckResult(OgaGenerator_RewindTo(this, new_length));
   }
 
   void SetRuntimeOption(const char* key, const char* value) {
@@ -307,6 +312,16 @@ struct OgaGenerator : OgaAbstract {
     OgaTensor* out;
     OgaCheckResult(OgaGenerator_GetOutput(this, name, &out));
     return std::unique_ptr<OgaTensor>(out);
+  }
+
+  std::unique_ptr<OgaTensor> GetLogits() {
+    OgaTensor* out;
+    OgaCheckResult(OgaGenerator_GetLogits(this, &out));
+    return std::unique_ptr<OgaTensor>(out);
+  }
+
+  void SetLogits(OgaTensor& tensor) {
+    OgaCheckResult(OgaGenerator_SetLogits(this, &tensor));
   }
 
 #if __cplusplus >= 202002L

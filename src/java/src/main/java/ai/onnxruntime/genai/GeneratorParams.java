@@ -5,7 +5,6 @@
 package ai.onnxruntime.genai;
 
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 
 /**
  * The `GeneratorParams` class represents the parameters used for generating sequences with a model.
@@ -44,7 +43,7 @@ public final class GeneratorParams implements AutoCloseable {
    *
    * @param name Name of the model input the tensor will provide.
    * @param tensor Tensor to add.
-   * @throws GenAIException
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void setInput(String name, Tensor tensor) throws GenAIException {
     if (nativeHandle == 0) {
@@ -62,7 +61,7 @@ public final class GeneratorParams implements AutoCloseable {
    * Add a NamedTensors as a model input.
    *
    * @param namedTensors NamedTensors to add.
-   * @throws GenAIException
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void setInputs(NamedTensors namedTensors) throws GenAIException {
     if (nativeHandle == 0) {
@@ -108,7 +107,6 @@ public final class GeneratorParams implements AutoCloseable {
 
   private native void setModelInput(long nativeHandle, String inputName, long tensorHandle)
       throws GenAIException;
-  
-  private native void setInputs(long nativeHandle, long namedTensorsHandle)
-      throws GenAIException;
+
+  private native void setInputs(long nativeHandle, long namedTensorsHandle) throws GenAIException;
 }

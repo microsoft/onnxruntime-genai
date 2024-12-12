@@ -137,8 +137,6 @@ DeviceSpan<float> Logits::Get() {
     }
   }
 
-  assert(shape_[1] == 1);
-
 #if USE_DML
   // DML doesn't support on-device scoring yet, so we need to download some data to the CPU
   if (model_.device_type_ == DeviceType::DML) {

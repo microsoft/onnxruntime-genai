@@ -266,7 +266,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   }
 }
 
-DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(const cpu_span<int32_t>& input_ids) {
+DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(const cpu_span<int32_t> input_ids) {
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(input_ids.size());
   auto cpu_span = input_ids_device.CpuSpan();
   std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
@@ -274,7 +274,7 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(const cpu_span<int32_t>&
   return input_ids_device;
 }
 
-void Generator::AppendTokens(const cpu_span<int32_t>& input_ids) {
+void Generator::AppendTokens(const cpu_span<int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
@@ -283,14 +283,17 @@ void Generator::AppendTokens(const cpu_span<int32_t>& input_ids) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
+  if (last_action_ == Action::generated) {
+    ComputeLogits(search_->GetNextTokens());
+  }
+
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->AppendTokens(input_ids_device);
-
   computed_logits_ = false;
   ComputeLogits(input_ids_device);
 }
 
-void Generator::ComputeLogits(DeviceSpan<int32_t>& next_tokens) {
+void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
@@ -301,7 +304,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t>& next_tokens) {
     stream << std::endl;
   }
   SetLogits(logits);
-  just_rewinded_ = false;
+  last_action_ = Action::standard;
   computed_logits_ = true;
 }
 
@@ -351,7 +354,7 @@ void Generator::GenerateNextToken() {
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");
   if (!computed_logits_) {
     auto next_tokens = search_->GetNextTokens();
-    if (just_rewinded_)
+    if (last_action_ == Action::rewound)
       search_->AppendTokens(next_tokens);
     ComputeLogits(next_tokens);
   }
@@ -370,6 +373,7 @@ void Generator::GenerateNextToken() {
            << std::endl;
   }
 
+  last_action_ = Action::generated;
   if (!search.do_sample || search.top_k == 1) {
     search_->SelectTop();
     return;
@@ -408,13 +412,12 @@ void Generator::RewindToLength(size_t new_length) {
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   computed_logits_ = false;
-  just_rewinded_ = true;
+  last_action_ = Action::rewound;
 }
 
 DeviceSpan<float> Generator::GetLogits() {
   if (!computed_logits_) {
-    auto next_tokens = search_->GetNextTokens();
-    ComputeLogits(next_tokens);
+    ComputeLogits(search_->GetNextTokens());
   }
   return search_->GetLogits();
 }

@@ -286,6 +286,84 @@ TEST(CAPITests, GetOutputCAPI) {
   }
 }
 
+TEST(CAPITests, GetLogitsCAPI) {
+  std::vector<int64_t> input_ids_shape{2, 4};
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+
+  int batch_size = static_cast<int>(input_ids_shape[0]);
+  int max_length = 10;
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+
+  // check prompt generation, GetLogits() returns last token logits
+  // full logits has shape [2, 1, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 1, 5]
+  std::vector<float> expected_sampled_logits_prompt{-0.12675379f, -0.04443946f, 0.14492269f, 0.03021223f, -0.03212897f,
+                                                    0.2938929f, -0.10538938f, -0.00226692f, 0.12050669f, -0.10622668f};
+
+  auto prompt_logits_ptr = generator->GetLogits();
+  auto prompt_logits = reinterpret_cast<float*>(prompt_logits_ptr->Data());
+  int num_prompt_outputs_to_check = 10;
+  int sample_size = 200;
+  float tolerance = 0.001f;
+  // Verify outputs match expected outputs
+  for (int i = 0; i < num_prompt_outputs_to_check; i++) {
+    EXPECT_NEAR(expected_sampled_logits_prompt[i], prompt_logits[i * sample_size], tolerance);
+  }
+
+  generator->GenerateNextToken();
+  // check for the 1st token generation
+  // full logits has shape [2, 1, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 1, 5]
+  std::vector<float> expected_sampled_logits_token_gen{0.03742531f, -0.05752287f, 0.14159015f, 0.04210977f, -0.1484456f,
+                                                       0.3041716f, -0.08701379f, -0.03778192f, 0.07471392f, -0.02049096f};
+
+  auto token_gen_logits_ptr = generator->GetLogits();
+  auto token_gen_logits = reinterpret_cast<float*>(token_gen_logits_ptr->Data());
+  int num_token_gen_outputs_to_check = 10;
+
+  for (int i = 0; i < num_token_gen_outputs_to_check; i++) {
+    EXPECT_NEAR(expected_sampled_logits_token_gen[i], token_gen_logits[i * sample_size], tolerance);
+  }
+}
+
+TEST(CAPITests, SetLogitsCAPI) {
+  std::vector<int64_t> input_ids_shape{2, 4};
+  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+
+  int batch_size = static_cast<int>(input_ids_shape[0]);
+  int max_length = 10;
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids.data(), input_ids.size());
+
+  std::vector<float> expected_sampled_logits_prompt{0.29694548f, 0.00955007f, 0.0430819f, 0.10063869f, 0.0437237f};
+  std::vector<float> dummy_logits(2 * 1000, 0.0f);
+  for (int i = 0; i < dummy_logits.size(); i++) {
+    dummy_logits[i] = expected_sampled_logits_prompt[i % expected_sampled_logits_prompt.size()];
+  }
+  std::vector<int64_t> dummy_logits_shape{2, 1, 1000};
+  auto logits = OgaTensor::Create(dummy_logits.data(), dummy_logits_shape.data(), dummy_logits_shape.size(), OgaElementType_float32);
+  auto raw_logits = generator->GetLogits();
+  generator->SetLogits(*logits);
+  auto retrieved_logits = generator->GetLogits();
+  auto retrieved_data = reinterpret_cast<float*>(retrieved_logits->Data());
+  for (int i = 0; i < dummy_logits.size(); i++) {
+    EXPECT_EQ(dummy_logits[i], retrieved_data[i]);
+  }
+}
+
 TEST(CAPITests, SetTerminate) {
 #if TEST_PHI2
 
@@ -665,5 +743,3 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 }
-
-

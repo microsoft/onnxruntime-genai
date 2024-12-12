@@ -114,7 +114,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         // This function is used to append tokens to the sequence.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern unsafe IntPtr /* OgaResult* */ OgaGenerator_AppendTokens(IntPtr /* OgaGenerator* */ generator,
-                                                                                      int* /* const int32_t* */ tokens,
+                                                                                      int* /* const int32_t* */ inputIDs,
                                                                                       UIntPtr /* size_t */ tokenCount);
 
         // This function is used to append a Sequences
@@ -123,10 +123,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                        IntPtr /* const OgaSequences* */ sequences);
                                                                                        
 
-        // This function is used to rewind the generator to the given index.
+        // This function is used to rewind the generator to the given newLength.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGenerator_RewindTo(IntPtr /* OgaGenerator* */ generator,
-                                                                            UIntPtr /* size_t */ index);
+                                                                            UIntPtr /* size_t */ newLength);
 
         // This function returns the length of the sequence at the given index.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

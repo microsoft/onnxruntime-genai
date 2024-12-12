@@ -152,10 +152,12 @@ void CXX_API(const char* model_path) {
     params->SetSearchOption("max_length", 1024);
 
     auto generator = OgaGenerator::Create(*model, *params);
+    std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call, &catch_terminate, generator.get()));
     generator->AppendTokenSequences(*sequences);
 
-    while (!generator->IsDone()) {
-      generator->GenerateNextToken();
+    try {
+      while (!generator->IsDone()) {
+        generator->GenerateNextToken();
 
         if (is_first_token) {
           timing.RecordFirstTokenTimestamp();

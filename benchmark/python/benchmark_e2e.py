@@ -72,14 +72,13 @@ def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
     params.set_search_options(max_length=prompt_length, min_length=prompt_length)
-    params.input_ids = tokens
 
     if use_graph_capture:
         params.try_graph_capture_with_max_batch_size(1)
 
     generator=og.Generator(model, params)
+    generator.append_tokens(tokens)
     while not generator.is_done():
-        generator.compute_logits()
         generator.generate_next_token()
     return tokenizer.decode(generator.get_sequence(0))
 
@@ -237,9 +236,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         tokens = tokenizer.encode_batch(prompt)
 
     params = og.GeneratorParams(model)
-    params.input_ids = tokens
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
-    params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
+    params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length, batch_size=batch_size)
 
     if args.use_graph_capture:
         params.try_graph_capture_with_max_batch_size(batch_size)
@@ -247,8 +245,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if args.verbose: print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
         generator = og.Generator(model, params)
+        generator.append_tokens(tokens)
         while not generator.is_done():
-            generator.compute_logits()
             generator.generate_next_token()
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
@@ -271,7 +269,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
         # Prepare run
         params = og.GeneratorParams(model)
-        params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
+        params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length, batch_size=batch_size)
 
         if args.use_graph_capture:
             params.try_graph_capture_with_max_batch_size(batch_size)

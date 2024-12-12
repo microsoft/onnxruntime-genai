@@ -78,9 +78,9 @@ Java_ai_onnxruntime_genai_Generator_getSequenceNative(JNIEnv* env, jobject thiz,
   // as there's no 'destroy' function in GenAI C API for the tokens we assume the OgaGenerator owns the memory.
   // copy the tokens so there's no potential for Java code to write to it (values should be treated as const)
   // or attempt to access the memory after the OgaGenerator is destroyed.
-  jintArray java_int_array = env->NewIntArray(num_tokens);
+  jintArray java_int_array = env->NewIntArray(static_cast<jsize>(num_tokens));
   // jint is `long` on Windows and `int` on linux. 32-bit but requires reinterpret_cast.
-  env->SetIntArrayRegion(java_int_array, 0, num_tokens, reinterpret_cast<const jint*>(tokens));
+  env->SetIntArrayRegion(java_int_array, 0, static_cast<jsize>(num_tokens), reinterpret_cast<const jint*>(tokens));
 
   return java_int_array;
 }
@@ -98,4 +98,24 @@ Java_ai_onnxruntime_genai_Generator_getSequenceLastToken(JNIEnv* env, jobject th
   }
 
   return jint(tokens[num_tokens - 1]);
+}
+
+JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_Generator_setActiveAdapter(JNIEnv* env, jobject thiz, jlong native_handle,
+                                                     jlong adapters_native_handle, jstring adapter_name) {
+  CString name{env, adapter_name};
+  ThrowIfError(env, OgaSetActiveAdapter(reinterpret_cast<OgaGenerator*>(native_handle),
+                                        reinterpret_cast<OgaAdapters*>(adapters_native_handle),
+                                        name));
+}
+
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Generator_getOutputNative(JNIEnv* env, jobject thiz, jlong native_handle,
+                                                    jstring output_name) {
+  OgaTensor* tensor = nullptr;
+  CString name{env, output_name};
+  if (ThrowIfError(env, OgaGenerator_GetOutput(reinterpret_cast<OgaGenerator*>(native_handle), name, &tensor))) {
+    return 0;
+  }
+  return reinterpret_cast<jlong>(tensor);
 }

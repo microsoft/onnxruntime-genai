@@ -13,9 +13,9 @@ endif()
 
 set(JAVA_SRC_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 # <build output dir>/src/java (path used with add_subdirectory in root CMakeLists.txt)
-set(JAVA_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR})  
+set(JAVA_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR})
 
-# Should we use onnxruntime-genai or onnxruntime-genai-static? Using onnxruntime-genai for now. 
+# Should we use onnxruntime-genai or onnxruntime-genai-static? Using onnxruntime-genai for now.
 # Add dependency on native target
 set(JAVA_DEPENDS onnxruntime-genai)
 
@@ -34,20 +34,20 @@ elseif (ANDROID)
 endif()
 
 # this jar is solely used to signaling mechanism for dependency management in CMake
-# if any of the Java sources change, the jar (and generated headers) will be regenerated 
+# if any of the Java sources change, the jar (and generated headers) will be regenerated
 # and the onnxruntime-genai-jni target will be rebuilt
 set(JAVA_OUTPUT_JAR ${JAVA_OUTPUT_DIR}/build/libs/onnxruntime-genai.jar)
 set(GRADLE_ARGS clean jar -x test)
 
 # this jar is solely used to signaling mechanism for dependency management in CMake
-# if any of the Java sources change, the jar (and generated headers) will be regenerated 
+# if any of the Java sources change, the jar (and generated headers) will be regenerated
 # and the onnxruntime-genai-jni target will be rebuilt
 set(JAVA_OUTPUT_JAR ${JAVA_SRC_ROOT}/build/libs/onnxruntime-genai.jar)
 set(GRADLE_ARGS clean jar -x test)
 
-add_custom_command(OUTPUT ${JAVA_OUTPUT_JAR} 
-                   COMMAND ${GRADLE_EXECUTABLE} ${GRADLE_OPTIONS} ${GRADLE_ARGS} 
-                   WORKING_DIRECTORY ${JAVA_SRC_ROOT} 
+add_custom_command(OUTPUT ${JAVA_OUTPUT_JAR}
+                   COMMAND ${GRADLE_EXECUTABLE} ${GRADLE_OPTIONS} ${GRADLE_ARGS}
+                   WORKING_DIRECTORY ${JAVA_SRC_ROOT}
                    DEPENDS ${genai4j_gradle_files} ${genai4j_srcs})
 add_custom_target(onnxruntime-genai4j DEPENDS ${JAVA_OUTPUT_JAR})
 
@@ -60,13 +60,13 @@ file(GLOB genai4j_native_src
     "${JAVA_SRC_ROOT}/src/main/native/*.h"
     "${SRC_ROOT}/ort_genai_c.h"
     )
-    
+
 add_library(onnxruntime-genai-jni SHARED ${genai4j_native_src})
 set_property(TARGET onnxruntime-genai-jni PROPERTY CXX_STANDARD 17)
 add_dependencies(onnxruntime-genai-jni onnxruntime-genai4j)
 # the JNI headers are generated in the genai4j target
 target_include_directories(onnxruntime-genai-jni PRIVATE ${SRC_ROOT}
-                                                           ${JAVA_SRC_ROOT}/build/headers 
+                                                           ${JAVA_SRC_ROOT}/build/headers
                                                            ${JNI_INCLUDE_DIRS})
 target_link_libraries(onnxruntime-genai-jni PUBLIC onnxruntime-genai)
 
@@ -104,13 +104,13 @@ file(MAKE_DIRECTORY ${JAVA_PACKAGE_LIB_DIR})
 
 # Add the native genai library to the native-lib dir
 add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different 
-                      $<TARGET_FILE:onnxruntime-genai> 
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                      $<TARGET_FILE:onnxruntime-genai>
                       ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai>)
 
 # Add the JNI bindings to the native-jni dir
 add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different 
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
                       $<TARGET_FILE:onnxruntime-genai-jni>
                       ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai-jni>)
 
@@ -140,21 +140,21 @@ if (ANDROID)
   file(MAKE_DIRECTORY ${ANDROID_PACKAGE_HEADERS_DIR})
   file(MAKE_DIRECTORY ${ANDROID_PACKAGE_ABI_DIR})
 
-  # copy C/C++ API headers to be packed into Android AAR package  
-  add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD 
+  # copy C/C++ API headers to be packed into Android AAR package
+  add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC_ROOT}/ort_genai.h ${ANDROID_PACKAGE_HEADERS_DIR})
-  add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD 
+  add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC_ROOT}/ort_genai_c.h ${ANDROID_PACKAGE_HEADERS_DIR})
 
   # Copy onnxruntime-genai.so and onnxruntime-genai-jni.so for building Android AAR package
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                     COMMAND ${CMAKE_COMMAND} -E copy_if_different 
+                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                        $<TARGET_FILE:onnxruntime-genai>
                        ${ANDROID_PACKAGE_ABI_DIR}/$<TARGET_LINKER_FILE_NAME:onnxruntime-genai>)
 
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                     COMMAND ${CMAKE_COMMAND} -E copy_if_different 
-                       $<TARGET_FILE:onnxruntime-genai-jni> 
+                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                       $<TARGET_FILE:onnxruntime-genai-jni>
                        ${ANDROID_PACKAGE_ABI_DIR}/$<TARGET_LINKER_FILE_NAME:onnxruntime-genai-jni>)
 
   # Generate the Android AAR package
@@ -176,20 +176,20 @@ if (ANDROID)
   file(GLOB android_test_files "${ANDROID_TEST_SRC_ROOT}/*")
   file(COPY ${android_test_files} DESTINATION ${ANDROID_TEST_PACKAGE_DIR})
 
-  set(ANDROID_TEST_PACKAGE_LIB_DIR ${ANDROID_TEST_PACKAGE_DIR}/app/libs)  
+  set(ANDROID_TEST_PACKAGE_LIB_DIR ${ANDROID_TEST_PACKAGE_DIR}/app/libs)
   set(ANDROID_TEST_PACKAGE_APP_ASSETS_DIR ${ANDROID_TEST_PACKAGE_DIR}/app/src/main/assets)
   file(MAKE_DIRECTORY ${ANDROID_TEST_PACKAGE_LIB_DIR})
   file(MAKE_DIRECTORY ${ANDROID_TEST_PACKAGE_APP_ASSETS_DIR})
 
   # Copy the test model to the assets folder in the test app
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                     COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different 
+                     COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
                        ${REPO_ROOT}/test/test_models/hf-internal-testing/tiny-random-gpt2-fp32
                        ${ANDROID_TEST_PACKAGE_APP_ASSETS_DIR}/model)
 
   # Copy the Android AAR package we built to the libs folder of our test app
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                     COMMAND ${CMAKE_COMMAND} -E copy_if_different 
+                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                        ${ANDROID_PACKAGE_OUTPUT_DIR}/outputs/aar/onnxruntime-genai-debug.aar
                        ${ANDROID_TEST_PACKAGE_LIB_DIR}/onnxruntime-genai.aar)
 
@@ -207,19 +207,38 @@ if (ENABLE_TESTS)
     # On windows ctest requires a test to be an .exe(.com) file
     # With gradle wrapper we get gradlew.bat. We delegate execution to a separate .cmake file
     # That can handle both .exe and .bat
-    add_test(NAME onnxruntime-genai4j_test 
-             COMMAND ${CMAKE_COMMAND} 
-               -DGRADLE_EXECUTABLE=${GRADLE_EXECUTABLE} 
-               -DBIN_DIR=${JAVA_OUTPUT_DIR} 
+    add_test(NAME onnxruntime-genai4j_test
+             COMMAND ${CMAKE_COMMAND}
+               -DGRADLE_EXECUTABLE=${GRADLE_EXECUTABLE}
+               -DBIN_DIR=${JAVA_OUTPUT_DIR}
                -DJAVA_SRC_ROOT=${JAVA_SRC_ROOT}
                -DJAVA_PACKAGE_LIB_DIR=${JAVA_PACKAGE_LIB_DIR}
                -P ${JAVA_SRC_ROOT}/windows-unittests.cmake)
   else()
-    add_test(NAME onnxruntime-genai4j_test 
-             COMMAND ${GRADLE_EXECUTABLE} cmakeCheck 
+    add_test(NAME onnxruntime-genai4j_test
+             COMMAND ${GRADLE_EXECUTABLE} cmakeCheck
                -DcmakeBuildDir=${JAVA_OUTPUT_DIR} -DnativeLibDir=${JAVA_PACKAGE_LIB_DIR}
              WORKING_DIRECTORY ${JAVA_SRC_ROOT})
   endif()
+
+  if(WIN32)
+    set(ONNXRUNTIME_GENAI_DEPENDENCY "*.dll")
+  elseif(APPLE)
+    set(ONNXRUNTIME_GENAI_DEPENDENCY "*.dylib")
+  else()
+    set(ONNXRUNTIME_GENAI_DEPENDENCY "*.so")
+  endif()
+
+  file(GLOB ort_native_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_GENAI_DEPENDENCY}")
+
+  # Copy ORT native libs for Java tests
+  foreach(LIB_FILE ${ort_native_libs})
+    add_custom_command(
+            TARGET onnxruntime-genai-jni POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy
+                    ${LIB_FILE}
+                    ${JAVA_PACKAGE_LIB_DIR}/)
+  endforeach()
 
   set_property(TEST onnxruntime-genai4j_test APPEND PROPERTY DEPENDS onnxruntime-genai-jni)
 endif()

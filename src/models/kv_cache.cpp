@@ -97,7 +97,7 @@ void KV_Cache_Combined::RewindTo(size_t index) {
 
 template <typename T>
 void KV_Cache_Combined::RewindPastTensorsTo(size_t index) {
-  assert(index > 0 && shape_[3] >= index);
+  assert(index > 0 && shape_[3] >= static_cast<int64_t>(index));
   std::array<int64_t, 5> new_shape = shape_;
   new_shape[3] = static_cast<int>(index);
   auto batch_x_num_heads = new_shape[1] * new_shape[2];
@@ -324,7 +324,7 @@ void KV_Cache::RewindTo(size_t index) {
 
 template <typename T>
 void KV_Cache::RewindPastTensorsTo(size_t index) {
-  assert(index > 0 && shape_[2] >= index && !past_present_share_buffer_);
+  assert(index > 0 && shape_[2] >= static_cast<int64_t>(index) && !past_present_share_buffer_);
   std::array<int64_t, 4> new_shape = shape_;
   new_shape[2] = static_cast<int>(index);
   auto batch_x_num_heads = new_shape[0] * new_shape[1];

@@ -20,13 +20,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return NativeMethods.OgaGenerator_IsDone(_generatorHandle) != 0;
         }
 
-        public void AppendTokens(ReadOnlySpan<int> tokens)
+        public void AppendTokens(ReadOnlySpan<int> inputIDs)
         {
             unsafe
             {
-                fixed (int* tokenIDsPtr = tokens)
+                fixed (int* inputIDsPtr = inputIDs)
                 {
-                    Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, tokenIDsPtr, (UIntPtr)tokens.Length));
+                    Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, inputIDsPtr, (UIntPtr)inputIDs.Length));
                 }
             }
         }
@@ -41,9 +41,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken(_generatorHandle));
         }
 
-        public void RewindTo(ulong index)
+        /// <summary>
+        /// Rewinds the generator to the given newLength.
+        /// Throw on error
+        /// </summary>
+        /// <param name="newLength"></param>
+        public void RewindTo(ulong newLength)
         {
-            Result.VerifySuccess(NativeMethods.OgaGenerator_RewindTo(_generatorHandle, (UIntPtr)index));
+            Result.VerifySuccess(NativeMethods.OgaGenerator_RewindTo(_generatorHandle, (UIntPtr)newLength));
         }
 
         public ReadOnlySpan<int> GetSequence(ulong index)

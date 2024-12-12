@@ -9,9 +9,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI" Version="0.5.1" Condition=" '$(Configuration)' == 'Debug' OR '$(Configuration)' == 'Release' " />
-    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.Cuda" Version="0.5.1" Condition=" '$(Configuration)' == 'Debug_Cuda' OR '$(Configuration)' == 'Release_Cuda' " />
-    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.DirectML" Version="0.5.1" Condition=" '$(Configuration)' == 'Debug_DirectML' OR '$(Configuration)' == 'Release_DirectML' " />
+    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI" Version="0.6.0-dev" Condition=" '$(Configuration)' == 'Debug' OR '$(Configuration)' == 'Release' " />
+    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.Cuda" Version="0.6.0-dev" Condition=" '$(Configuration)' == 'Debug_Cuda' OR '$(Configuration)' == 'Release_Cuda' " />
+    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.DirectML" Version="0.6.0-dev" Condition=" '$(Configuration)' == 'Debug_DirectML' OR '$(Configuration)' == 'Release_DirectML' " />
   </ItemGroup>
 
 </Project>
