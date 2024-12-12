@@ -5,7 +5,6 @@
 #include <memory>
 #include "model.h"
 #include "static_buffer.h"
-// #include "logits_processor.h"
 
 namespace Generators {
 
@@ -20,13 +19,8 @@ struct Logits {
   // Resize logits to [bz, token_count, vocab_size] if necessary.
   void Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length);
 
-  // // Reset logits processors to support rewind.
-  // void ResetProcessors();
-
  private:
   void HandleEOSArray(std::span<float> logits);
-
-  // void AddMask(std::span<float> logits, std::vector<std::vector<uint32_t>>& mask);
 
   State& state_;
   const Model& model_{state_.model_};
@@ -51,14 +45,8 @@ struct Logits {
   StaticBuffer* sb_logits32_{};
   StaticBuffer* sb_logits16_{};
 
-  // std::vector<std::unique_ptr<LogitsProcessor>> logits_processors_;
-  // std::future<std::vector<std::vector<uint32_t>>> mask_future_;
-  // std::vector<std::vector<uint32_t>> logits_masks_;
-
 #if USE_CUDA
   DeviceSpan<int32_t> cuda_eos_token_ids_;  // eos_token_ids from params, but in cuda accessible memory
-  // DeviceSpan<uint32_t> cuda_logits_mask_ptr_;
-  // void AddMask(DeviceSpan<float> logits, DeviceSpan<uint32_t> mask);
 #endif
 
 #if USE_DML
