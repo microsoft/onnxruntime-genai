@@ -179,6 +179,8 @@ jobs:
 
   - template: steps/utils/set-genai-version.yml
 
+  - task: NuGetAuthenticate@1
+
   - powershell: |
       dotnet --info
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:IncludeMobileTargets=true --verbosity normal
