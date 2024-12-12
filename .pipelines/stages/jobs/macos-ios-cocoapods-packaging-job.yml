@@ -36,5 +36,5 @@ jobs:
             --test \
             --variant Full \
             --build-settings-file "${{ variables.buildSettingsFile }}" \
-            --build-apple-framework-args==--config=$(cmake_build_type) \
+            --build-apple-framework-arg==--config=$(cmake_build_type) \
             --ort-version ${{parameters.ort_version}}

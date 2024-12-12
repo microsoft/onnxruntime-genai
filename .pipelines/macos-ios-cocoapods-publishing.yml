@@ -2,7 +2,7 @@ parameters:
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
-  default: '1.18.0'
+  default: '1.19.0'
 
 - name: build_config
   displayName: 'Build Configuration'
