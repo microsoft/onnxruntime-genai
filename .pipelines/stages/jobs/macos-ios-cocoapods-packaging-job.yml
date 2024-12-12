@@ -64,5 +64,5 @@ jobs:
       displayName: "List staged artifacts"
 
     - publish: "$(Build.ArtifactStagingDirectory)"
-      artifact: "ios_packaging_artifacts_${{ lower(parameters.packageVariant) }}"
+      artifact: "macos_ios_cocoapods_packaging_artifacts"
       displayName: "Publish artifacts"
