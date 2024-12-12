@@ -29,7 +29,8 @@ jobs:
       inputs:
         script: |
           set -e -x
-          python tools/ci_build/github/apple/build_and_assemble_apple_pods.py \
+          python3 -m pip install requests
+          python3 tools/ci_build/github/apple/build_and_assemble_apple_pods.py \
             --build-dir "$(Build.BinariesDirectory)/apple_framework" \
             --staging-dir "$(Build.BinariesDirectory)/staging" \
             --pod-version "$(genai_version)" \
