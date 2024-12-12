@@ -157,7 +157,6 @@ DeviceSpan<float> Logits::Get() {
           cuda_eos_token_ids_.Span().data(),
           static_cast<int>(cuda_eos_token_ids_.size()),
           model_.cuda_stream_);
-
     return logits_;
   }
 #endif
@@ -186,7 +185,6 @@ DeviceSpan<float> Logits::Get() {
 #endif
 
   HandleEOSArray(logits_.Span());
-
   return logits_;
 }
 

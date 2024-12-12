@@ -2,8 +2,6 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include <memory>
-#include "model.h"
 #include "static_buffer.h"
 
 namespace Generators {

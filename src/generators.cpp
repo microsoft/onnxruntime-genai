@@ -426,7 +426,9 @@ void Generator::RewindToLength(size_t new_length) {
     throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
-  logits_processor_->Reset();
+  if (logits_processor_) {
+    logits_processor_->Reset();
+  }
   computed_logits_ = false;
   last_action_ = Action::rewound;
 }

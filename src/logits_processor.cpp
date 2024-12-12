@@ -231,7 +231,6 @@ std::unique_ptr<LogitsProcessor> CreateLogitsProcessor(const State& state) {
 #if USE_GUIDANCE
     return std::make_unique<GuidanceLogitsProcessor>(state);
 #endif
-
     Log("warning", "No supported LogitsProcessor found. e.g. to use guidance, build with use_guidance=true");
   }
   return nullptr;
