@@ -24,9 +24,9 @@
 NS_ASSUME_NONNULL_BEGIN
 
 #if __DOXYGEN__
-    #define SWIFT_NONNULL_ERROR
+#define SWIFT_NONNULL_ERROR
 #else
-    #define SWIFT_NONNULL_ERROR __attribute__((swift_error(nonnull_error)))
+#define SWIFT_NONNULL_ERROR __attribute__((swift_error(nonnull_error)))
 #endif
 
 @class OGATensor;

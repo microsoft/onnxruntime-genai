@@ -18,6 +18,10 @@ log = get_logger("validate_doxygen")
 JAVA_NAMESPACE_PREFIX = "ai::onnxruntime::genai::"
 CSHARP_NAMESPACE_PREFIX = "Microsoft::ML::OnnxRuntimeGenAI::"
 CXX_NAMESPACE_PREFIX = "Oga"
+OBJC_NAMESPACE_PREFIX = "OGA"
+
+OBJC_FUNCTION_SUFFIX_ERROR = ":error:"
+OBJC_FUNCTION_SUFFIX_WITH_ERROR = "WithError:"
 
 # https://github.com/okunishinishi/python-stringcase/blob/master/stringcase.py
 def lowercase(string):
@@ -60,6 +64,12 @@ class ParameterMetadata:
 class FunctionMetadata:
     def __init__(self, function_name, params: [ParameterMetadata]):
         self.function_name = function_name
+        function_name = function_name.removesuffix(OBJC_FUNCTION_SUFFIX_ERROR)
+        function_name = function_name.removesuffix(OBJC_FUNCTION_SUFFIX_WITH_ERROR)
+        parts = function_name.split(':')
+        if len(parts) > 1:
+            # Assume Objective-C function name. Only extract the first part.
+            function_name = parts[0]
         self.normalized_name = snakecase(function_name)
         self.param = params
 
@@ -70,6 +80,7 @@ class ClassMetadata:
         class_name = class_name.removeprefix(CXX_NAMESPACE_PREFIX)
         class_name = class_name.removeprefix(JAVA_NAMESPACE_PREFIX)
         class_name = class_name.removeprefix(CSHARP_NAMESPACE_PREFIX)
+        class_name = class_name.removeprefix(OBJC_NAMESPACE_PREFIX)
         self.normalized_name = snakecase(class_name)
         self.functions = functions
 
@@ -80,6 +91,7 @@ def parse_args():
     parser.add_argument('--cxx-output-dir')
     parser.add_argument('--java-output-dir')
     parser.add_argument('--csharp-output-dir')
+    parser.add_argument('--objc-output-dir')
 
     return parser.parse_args()
 
@@ -151,10 +163,18 @@ if __name__ == '__main__':
     cxx_output_dir = args.cxx_output_dir
     java_output_dir = args.java_output_dir
     csharp_output_dir = args.csharp_output_dir
+    objc_output_dir = args.objc_output_dir
 
     cxx_metadata = extract_metadata(cxx_output_dir)
     java_metadata = extract_metadata(java_output_dir)
     csharp_metadata = extract_metadata(csharp_output_dir)
+    objc_metadata = extract_metadata(objc_output_dir)
 
+    log.info("/************** Java **************/")
     diff_metadata(cxx_metadata, java_metadata)
+    log.info("\n")
+    log.info("/************** C# **************/")
     diff_metadata(cxx_metadata, csharp_metadata)
+    log.info("\n")
+    log.info("/************** Objective-C **************/")
+    diff_metadata(cxx_metadata, objc_metadata)
