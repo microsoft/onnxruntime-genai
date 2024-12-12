@@ -4,8 +4,6 @@
 
 import re
 import argparse
-import jsonpickle
-import logging
 from pathlib import Path
 from functools import cmp_to_key
 import xml.etree.ElementTree as ET
@@ -22,6 +20,10 @@ OBJC_NAMESPACE_PREFIX = "OGA"
 
 OBJC_FUNCTION_SUFFIX_ERROR = ":error:"
 OBJC_FUNCTION_SUFFIX_WITH_ERROR = "WithError:"
+
+GETTER_FUNCTION_PREFIX = "get"
+
+IGNORE_CLASSES = ["OgaString", "OgaResult", "OgaHandle"]
 
 # https://github.com/okunishinishi/python-stringcase/blob/master/stringcase.py
 def lowercase(string):
@@ -66,9 +68,12 @@ class FunctionMetadata:
         self.function_name = function_name
         function_name = function_name.removesuffix(OBJC_FUNCTION_SUFFIX_ERROR)
         function_name = function_name.removesuffix(OBJC_FUNCTION_SUFFIX_WITH_ERROR)
+
+        function_name = function_name.removeprefix(GETTER_FUNCTION_PREFIX)
         parts = function_name.split(':')
         if len(parts) > 1:
-            # Assume Objective-C function name. Only extract the first part.
+            # Assume Objective-C function name. Only check the first part.
+            # For example, in the extract name 'decode:length:error:', we only check 'decode'
             function_name = parts[0]
         self.normalized_name = snakecase(function_name)
         self.param = params
@@ -108,6 +113,8 @@ def extract_metadata(output_dir):
     classes = []
     for child in compounds:
         the_class_name = child.findall('./name')[0].text
+        if the_class_name in IGNORE_CLASSES:
+            continue
         ref_id = child.attrib['refid']
 
         class_compound_xml_path = xml_dir / f"{ref_id}.xml"
@@ -150,7 +157,7 @@ def diff_metadata(cxx_metadata: [ClassMetadata], java_metadata: [ClassMetadata])
         for function in klass.functions:
             target_java_function = next((x for x in target_java_class.functions if x.normalized_name == function.normalized_name), None)
             if target_java_function is None:
-                log.warning(f"In class {target_java_class.class_name}, function '{function.function_name}' doesn't exist in bindings")
+                log.warning(f"In class {target_java_class.class_name}, function '{function.function_name}' doesn't exist")
 
 
 
@@ -172,9 +179,12 @@ if __name__ == '__main__':
 
     log.info("/************** Java **************/")
     diff_metadata(cxx_metadata, java_metadata)
-    log.info("\n")
+    log.info("/************ End Java *************/")
+
     log.info("/************** C# **************/")
     diff_metadata(cxx_metadata, csharp_metadata)
-    log.info("\n")
-    log.info("/************** Objective-C **************/")
+    log.info("/************ End C# ***************/")
+
+    log.info("/*********** Objective-C **************/")
     diff_metadata(cxx_metadata, objc_metadata)
+    log.info("/********** End Objective-C **********/")
