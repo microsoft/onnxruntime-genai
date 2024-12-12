@@ -1,0 +1,15 @@
+parameters:
+- name: ort_version
+  type: string
+
+- name: build_config
+  type: string
+  default: 'Release'
+
+stages:
+- stage: Build_MacOS_iOS_CocoaPods_Archive
+  jobs:
+  - template: jobs/macos-ios-cocoapods-packaging-job.yml
+    parameters:
+      ort_version: ${{ parameters.ort_version }}
+      build_config: ${{ parameters.build_config }}
