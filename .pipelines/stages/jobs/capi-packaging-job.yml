@@ -111,5 +111,6 @@ jobs:
     - template: steps/capi-appleframework-step.yml
       parameters:
         build_config: ${{ parameters.build_config }}
+        build_settings_file: "tools/ci_build/github/apple/default_full_ios_framework_build_settings.json"
 
   - template: steps/compliant-and-cleanup-step.yml

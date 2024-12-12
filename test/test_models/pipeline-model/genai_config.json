@@ -45,7 +45,7 @@
                             "past_key_values.0.value"
                         ],
                         "outputs": [
-                            "/model/layers.1/final_norm_layernorm/output_0",
+                            "hidden_states",
                             "present.0.key",
                             "present.0.value"
                         ],
@@ -63,7 +63,7 @@
                     "language_model_head": {
                         "filename": "lm_head.onnx",
                         "inputs": [
-                            "/model/layers.1/final_norm_layernorm/output_0"
+                            "hidden_states"
                         ],
                         "outputs": [
                             "logits"
