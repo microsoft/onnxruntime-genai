@@ -23,6 +23,12 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+#if __DOXYGEN__
+    #define SWIFT_NONNULL_ERROR
+#else
+    #define SWIFT_NONNULL_ERROR __attribute__((swift_error(nonnull_error)))
+#endif
+
 @class OGATensor;
 @class OGASequences;
 @class OGANamedTensors;
@@ -58,6 +64,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * Creates a model.
  *
  * @param path The path to the ONNX GenAI model folder.
+ * @param error Optional error information set if an error occurs.
  * @return The instance, or nil if an error occurs.
  */
 - (nullable instancetype)initWithPath:(NSString*)path
@@ -194,6 +201,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * Set input with NamedTensors type.
  * @param namedTensors The named tensors.
  * @param error Optional error information set if an error occurs.
+ * @return YES if succeed, or NO if an error occurs.
  */
 - (BOOL)setInputs:(OGANamedTensors*)namedTensors
             error:(NSError**)error;
@@ -203,6 +211,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @param name The input name.
  * @param tensor The tensor.
  * @param error Optional error information set if an error occurs.
+ * @return YES if succeed, or NO if an error occurs.
  */
 - (BOOL)setModelInput:(NSString*)name
                tensor:(OGATensor*)tensor
@@ -213,6 +222,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @param key The option key.
  * @param value The option value.
  * @param error Optional error information set if an error occurs.
+ * @return YES if succeed, or NO if an error occurs.
  */
 - (BOOL)setSearchOption:(NSString*)key
             doubleValue:(double)value
@@ -222,6 +232,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @param key The option key.
  * @param value The option value.
  * @param error Optional error information set if an error occurs.
+ * @return YES if succeed, or NO if an error occurs.
  */
 - (BOOL)setSearchOption:(NSString*)key
               boolValue:(BOOL)value
@@ -250,12 +261,13 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @param error Optional error information set if an error occurs.
  * @return The result, or false if an error occurs.
  */
-- (BOOL)isDoneWithError:(NSError**)error __attribute__((swift_error(nonnull_error)));
+- (BOOL)isDoneWithError:(NSError**)error SWIFT_NONNULL_ERROR;
 
 /**
  * Appends token sequences to the generator.
  * @param sequences The sequences to append.
  * @param error Optional error information set if an error occurs.
+ * @return YES if succeed, or NO if an error occurs.
  */
 - (BOOL)appendTokenSequences:(OGASequences*)sequences error:(NSError**)error;
 
@@ -263,6 +275,7 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * Appends token sequences to the generator.
  * @param tokens The tokens to append.
  * @param error Optional error information set if an error occurs.
+ * @return YES if succeed, or NO if an error occurs.
  */
 - (BOOL)appendTokens:(NSArray<NSNumber*>*)tokens error:(NSError**)error;
 
@@ -270,12 +283,14 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * Rewinds the generator to the given length.
  * @param newLength The desired length in tokens after rewinding.
  * @param error Optional error information set if an error occurs.
+ * @return YES if succeed, or NO if an error occurs.
  */
 - (BOOL)rewindTo:(size_t)newLength error:(NSError**)error;
 
 /**
  * Generate next token
  * @param error Optional error information set if an error occurs.
+ * @return YES if succeed, or NO if an error occurs.
  */
 - (BOOL)generateNextTokenWithError:(NSError**)error;
 /**
@@ -311,42 +326,107 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 @end
 
+/** Wraps ORT native Tensor. */
 @interface OGATensor : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
+/**
+ * Constructs a Tensor with the given data, shape and element type.
+ *
+ * @param data The data for the Tensor. Must be a direct ByteBuffer with native byte order.
+ * @param shape The shape of the Tensor.
+ * @param elementType The type of elements in the Tensor.
+ * @param error Optional error information set if an error occurs.
+ * @return The result, or nil if an error occurs.
+ */
 - (nullable instancetype)initWithDataPointer:(void*)data
                                        shape:(NSArray<NSNumber*>*)shape
                                         type:(OGAElementType)elementType
                                        error:(NSError**)error;
+/**
+ * Get the element type.
+ *
+ * @param error Optional error information set if an error occurs.
+ * @return The element type.
+ */
 - (OGAElementType)getTypeWithError:(NSError**)error NS_SWIFT_NAME(type());
+
+/**
+ * Get the raw data pointer.
+ *
+ * @param error Optional error information set if an error occurs.
+ * @return The result, or nil if an error occurs.
+ */
 - (nullable void*)getDataPointerWithError:(NSError**)error NS_SWIFT_NAME(dataPointer());
 
 @end
 
+/**
+ * This class is an intermediate storage class that bridges the output of preprocessing and the
+ * input of the ONNX model.
+ */
 @interface OGANamedTensors : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
 
 @end
 
+/**
+ * This class can load images from the given path and prepare them for processing.
+ */
 @interface OGAImages : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
+
+/**
+ * Construct an OGAImages instance.
+ *
+ * @param paths The image paths.
+ * @param error Optional error information set if an error occurs.
+ * @return The result, or nil if an error occurs.
+ */
 - (nullable instancetype)initWithPath:(NSArray<NSString*>*)paths
                                 error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 @end
 
+/**
+ * The MultiModalProcessor class is responsible for converting text/images into a NamedTensors list
+ * that can be fed into a Generator class instance.
+ */
 @interface OGAMultiModalProcessor : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
+/**
+ * Construct an OGAMultiModalProcessor for a given model.
+ *
+ * @param model The model to be used.
+ * @param error Optional error information set if an error occurs.
+ * @return The result, or nil if an error occurs.
+ */
 - (nullable instancetype)initWithModel:(OGAModel*)model
                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
+/**
+ * Processes a string and image into a NamedTensor.
+ *
+ * @param prompt Text to encode as token ids.
+ * @param images image input.
+ * @param error Optional error information set if an error occurs.
+ * @return The OGANamedTensors object.
+ */
 - (nullable OGANamedTensors*)processImages:(NSString*)prompt
                                     images:(OGAImages*)images
                                      error:(NSError**)error;
 
+/**
+ * Decodes a sequence of token ids into text.
+ *
+ * @param tokensData The sequences data to be encoded.
+ * @param tokensLength The length of the sequences data to be encoded.
+ * @param error Optional error information set if an error occurs.
+ * @return The text representation of the sequence.
+ */
 - (nullable NSString*)decode:(const int32_t*)tokensData
                       length:(size_t)tokensLength
                        error:(NSError**)error;
