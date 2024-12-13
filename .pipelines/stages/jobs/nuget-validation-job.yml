@@ -88,6 +88,16 @@ jobs:
     ${{ else }}:
       value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
 
+  - name: prebuild_phi3_5_vision_model_folder
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
+      value: 'gpu/gpu-int4-rtn-block-32'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: 'gpu/gpu-int4-rtn-block-32'
+    ${{ else }}:
+      value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
+
   - name: cuda_docker_image
     ${{ if eq(parameters.cuda_version, '11.8') }}:
       value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20240531.1
@@ -120,17 +130,7 @@ jobs:
     inputs:
       version: '8.x'
 
-  - template: steps/utils/download-huggingface-model.yml
-    parameters:
-      StepName: 'Download Model from HuggingFace'
-      HuggingFaceRepo: 'microsoft/Phi-3-mini-4k-instruct-onnx'
-      RepoFolder: $(prebuild_phi3_mini_model_folder)
-      LocalFolder: 'models'
-      WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/HelloPhi'
-      HuggingFaceToken: $(HF_TOKEN)
-      os: ${{ parameters.os }}
-
-  - template: steps/utils//flex-download-pipeline-artifact.yml
+  - template: steps/utils/flex-download-pipeline-artifact.yml
     parameters:
       StepName: 'Download NuGet Artifacts'
       ArtifactName: $(artifactName)-nuget
@@ -138,75 +138,38 @@ jobs:
       SpecificArtifact: ${{ parameters.specificArtifact }}
       BuildId: ${{ parameters.BuildId }}
 
-  - ${{ if eq(parameters.os, 'win') }}:
-    - ${{ if eq(parameters.ep, 'cuda') }}:
-      - powershell: |
-          $env:AZCOPY_MSI_CLIENT_ID = "63b63039-6328-442f-954b-5a64d124e5b4";
-          azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
-        displayName: 'Download CUDA $(cuda_version)'
-        workingDirectory: '$(Build.Repository.LocalPath)'
-    - powershell: |
-        if ("$(ep)" -eq "cuda") {
-          $env:CUDA_PATH = '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
-          $env:PATH = "$env:CUDA_PATH\bin;$env:CUDA_PATH\extras\CUPTI\lib64;$env:PATH"
-          Write-Host $env:PATH
-        }
-        dotnet --info
-        Copy-Item -Force -Recurse -Verbose $(Build.BinariesDirectory)/nuget/* -Destination examples/csharp/HelloPhi/
-        cd examples/csharp/HelloPhi
-        Move-Item models\$(prebuild_phi3_mini_model_folder) models\phi-3
-        dotnet restore -r $(os)-$(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
-        dotnet run -r $(os)-$(arch) --configuration $(csproj_configuration) --no-restore --verbosity normal -- -m ./models/phi-3
-      displayName: 'Run Example With Artifact'
-      workingDirectory: '$(Build.Repository.LocalPath)'
-      env:
-        NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
-        NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
-  - ${{ elseif or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
-    - bash: |
-       dotnet --info
-       cp $(Build.BinariesDirectory)/nuget/* examples/csharp/HelloPhi/
-       cd examples/csharp/HelloPhi
-       mv models/$(prebuild_phi3_mini_model_folder) models/phi-3
-       dotnet restore -r $(os)-$(arch) /property:Configuration=$(csproj_configuration) --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
-       dotnet build ./HelloPhi.csproj -r $(os)-$(arch) /property:Configuration=$(csproj_configuration) --no-restore --self-contained
-       ls -l ./bin/$(csproj_configuration)/net6.0/$(os)-$(arch)/
-      displayName: 'Perform dotnet restore & build'
-      workingDirectory: '$(Build.Repository.LocalPath)'
-      env:
-        NUGET_PLUGIN_HANDSHAKE_TIMEOUT_IN_SECONDS: 180
-        NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
+  - template: steps/utils/download-huggingface-model.yml
+    parameters:
+      HuggingFaceRepo: 'microsoft/Phi-3-mini-4k-instruct-onnx'
+      LocalFolder: 'phi3-mini'
+      RepoFolder: $(prebuild_phi3_mini_model_folder)
+      WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/HelloPhi'
+      HuggingFaceToken: $(HF_TOKEN)
+      os: ${{ parameters.os }}
 
-    - ${{ if eq(parameters.ep, 'cuda') }}:
-      - bash: |
-          set -e -x
-          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-          az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
-          docker pull $(cuda_docker_image)
+  - template: steps/nuget-validation-step.yml
+    parameters:
+      CsprojFolder: "examples/csharp/HelloPhi"
+      CsprojName: "HelloPhi"
+      CsprojConfiguration: $(csproj_configuration)
+      LocalFolder: 'phi3-mini'
+      ModelFolder: $(prebuild_phi3_mini_model_folder)
 
-          docker run \
-            --gpus all \
-            --rm \
-            --volume $(Build.Repository.LocalPath):/ort_genai_src \
-            --volume $(Build.BinariesDirectory):/ort_genai_binary \
-            -e HF_TOKEN=$HF_TOKEN \
-            -w /ort_genai_src/ $(cuda_docker_image) \
-            bash -c " \
-                export ORTGENAI_LOG_ORT_LIB=1 && \
-                cd /ort_genai_src/examples/csharp/HelloPhi && \
-                chmod +x ./bin/Release_Cuda/net6.0/linux-x64/HelloPhi && \
-                ./bin/Release_Cuda/net6.0/linux-x64/HelloPhi -m ./models/phi-3"
+  - template: steps/utils/download-huggingface-model.yml
+    parameters:
+      HuggingFaceRepo: 'microsoft/Phi-3.5-vision-instruct-onnx'
+      LocalFolder: 'phi3.5-vision'
+      RepoFolder: $(prebuild_phi3_5_vision_model_folder)
+      WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/HelloPhi3V'
+      HuggingFaceToken: $(HF_TOKEN)
+      os: ${{ parameters.os }}
 
-        displayName: 'Run Example With Artifact'
-        workingDirectory: '$(Build.Repository.LocalPath)'
-
-    - ${{ elseif eq(parameters.ep, 'cpu') }}:
-      - bash: |
-          export ORTGENAI_LOG_ORT_LIB=1
-          cd examples/csharp/HelloPhi
-          dotnet run -r $(os)-$(arch) --configuration $(csproj_configuration) --no-build --verbosity normal -- -m ./models/phi-3
-        displayName: 'Run Example With Artifact'
-        workingDirectory: '$(Build.Repository.LocalPath)'
+  - template: steps/nuget-validation-step.yml
+    parameters:
+      CsprojFolder: "examples/csharp/HelloPhi3V"
+      CsprojName: "HelloPhi3V"
+      CsprojConfiguration: $(csproj_configuration)
+      LocalFolder: 'phi3.5-vision'
+      ModelFolder: $(prebuild_phi3_5_vision_model_folder)
 
   - template: steps/compliant-and-cleanup-step.yml
-

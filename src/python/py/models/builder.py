@@ -54,12 +54,11 @@ class Model:
         self.nodes = []
 
         # EP-specific variables
-        enable_cuda_graph = extra_options.get("enable_cuda_graph", "0")
         self.ep = ep
         self.ep_attrs = {
             "cpu": {},
             "cuda": {
-                "enable_cuda_graph": enable_cuda_graph,        # "1" if the the model is able to enable cuda graph, "0" otherwise
+                "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",        # "1" if the model is able to enable cuda graph, "0" otherwise
             },
             "rocm": {
                 "tunable_op_enable": "1",
@@ -87,7 +86,7 @@ class Model:
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
         }
-        self.exclude_embeds = "exclude_embeds" in extra_options
+        self.exclude_embeds = extra_options.get("exclude_embeds", False)
         if self.exclude_embeds:
             self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
 
@@ -105,9 +104,12 @@ class Model:
             "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
             "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
-        self.exclude_lm_head = "exclude_lm_head" in extra_options
+        self.exclude_lm_head = extra_options.get("exclude_lm_head", False)
+        self.include_hidden_states = extra_options.get("include_hidden_states", False)
         if self.exclude_lm_head:
             self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
+        elif self.include_hidden_states:
+            self.output_names = ["hidden_states"] + self.output_names
 
         # Store names of nodes already created
         self.node_names = set()
@@ -295,9 +297,10 @@ class Model:
             "int4": {
                 "accuracy_level": int(extra_options.get("int4_accuracy_level", 0)),   # Default is 0 for non-QDQ formats, default is 4 for QDQ formats
                 "block_size": int(extra_options.get("int4_block_size", 32)),
+                "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
             },
-            "use_qdq": False,           # Use QDQ format
+            "use_qdq": extra_options.get("use_qdq", False),           # Use QDQ format
         }
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
@@ -310,11 +313,21 @@ class Model:
             config = GenerationConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
         except:
             config = AutoConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+
         inputs = dict(zip(self.input_names, self.input_names))
         inputs.update({
             "past_key_names": "past_key_values.%d.key",
             "past_value_names": "past_key_values.%d.value",
         })
+        outputs = dict(zip(self.output_names, self.output_names))
+        outputs.update({
+            "present_key_names": "present.%d.key",
+            "present_value_names": "present.%d.value",
+        })
+        if "hidden_states" in outputs:
+            # Remove 'hidden_states' from 'outputs' entry in config since ORT GenAI doesn't use it
+            del outputs["hidden_states"]
+
         genai_config = {
             "model": {
                 "bos_token_id": config.bos_token_id if hasattr(config, "bos_token_id") else 1,  # config.bos_token_id not present in ChatGLM model configs.
@@ -328,11 +341,7 @@ class Model:
                     "head_size": self.head_size,
                     "hidden_size": self.hidden_size,
                     "inputs": inputs,
-                    "outputs": {
-                        "logits": "logits",
-                        "present_key_names": "present.%d.key",
-                        "present_value_names": "present.%d.value",
-                    },
+                    "outputs": outputs,
                     "num_attention_heads": self.num_attn_heads,
                     "num_hidden_layers": self.num_layers,
                     "num_key_value_heads": self.num_kv_heads,
@@ -364,6 +373,11 @@ class Model:
             ep_options = { self.ep : self.ep_attrs[self.ep] }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
+        if self.extra_options.get("include_prompt_templates", False):
+            prompt_templates = self._get_prompt_templates(model_name_or_path, extra_kwargs)
+            if prompt_templates is not None:
+                genai_config["model"]["prompt_templates"] = prompt_templates
+
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
@@ -373,6 +387,30 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
+    def _get_prompt_templates(self, hf_name, extra_kwargs):
+        try:
+            # disable end of sentence padding with eos_token=None
+            tokenizer = AutoTokenizer.from_pretrained(hf_name, token=self.hf_token, trust_remote_code=True, eos_token=None, **extra_kwargs)
+            system_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}], tokenize=False)
+            system_user_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}], tokenize=False)
+            system_user_assistant_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}, {'role': 'assistant', 'content': '{Content}'}], tokenize=False)
+            assert system_user_template.startswith(system_template), "Chat templates may contain padding tokens, leading to incorrect prompt templates"
+            assert system_user_assistant_template.startswith(system_user_template), "Chat templates may contain padding tokens, leading to incorrect prompt templates"
+            user_template = system_user_template[len(system_template):]
+            assistant_template = system_user_assistant_template[len(system_user_template):]
+            prompt_template = system_user_assistant_template[len(system_template):]
+            prompt_template = prompt_template[:prompt_template.rfind('{Content}')]
+            templates = {
+                "system": system_template,
+                "user": user_template,
+                "assistant": assistant_template,
+                "prompt": prompt_template
+            }
+            return templates 
+        except Exception as e:
+            print(f"Failed to get prompt templates. Error: {e}")
+            return None
+        
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
         gc.collect()
@@ -435,7 +473,7 @@ class Model:
         quant = MatMul4BitsQuantizer(
             model=model,
             block_size=self.quant_attrs["int4"]["block_size"],
-            is_symmetric=True,
+            is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
             nodes_to_exclude=[],
             quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
@@ -983,7 +1021,7 @@ class Model:
 
         output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
         output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
-        if self.layernorm_attrs["last_layernorm"] and self.exclude_lm_head:
+        if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
             output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
 
@@ -1533,7 +1571,6 @@ class Model:
         self.layernorm_attrs["skip_input"] = f"{o_matmul_name if not o_bias_exists else o_add_name}/output_0"
 
     def make_attention_unpacked(self, layer_id, attention, root_input, **kwargs):
-
         qkv_proj = 'qkv_proj' if hasattr(attention, 'qkv_proj') else 'query_key_value'
         qkv_linear = eval(f"attention.{qkv_proj}")
 
@@ -1670,6 +1707,7 @@ class Model:
 
         mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
         mlp.up_proj.weight = torch.nn.Parameter(packed_proj.weight[self.intermediate_size :, :])
+
         # Delete original packed weights
         del packed_proj
 
@@ -1962,7 +2000,7 @@ class Model:
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
-        # input_layernorm --> attention --> MLP --> output_layernorm
+        # input_layernorm --> attention --> output_layernorm --> MLP
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
         self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
@@ -1997,17 +2035,7 @@ class Model:
                 from onnxruntime_genai.models.quantized_model import QuantModel
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
-            model = QuantModel.from_pretrained(
-                self.quant_type,
-                input_path,
-                self.quant_attrs["bits"],
-                self.quant_attrs["group_size"],
-                self.quant_attrs["use_g_idx"],
-                q_size,
-                kv_size,
-                self.intermediate_size,
-                self.num_layers,
-            )
+            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"], q_size, kv_size, self.intermediate_size, self.num_layers)
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
@@ -2066,7 +2094,7 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
-        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1" or self.ep == "dml":
+        if self.extra_options.get("enable_cuda_graph", False) or self.ep == "dml":
             # ORT does not allow nodes to be placed on mulitple execution providers
             # with cuda graph enabled. We've only verified it works with GQA and with
             # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded
@@ -2636,43 +2664,6 @@ class Phi3Mini4KModel(MistralModel):
             super().make_mlp_unpacked(layer_id, mlp, root_input)
         super().make_mlp_proj(layer_id, mlp, root_input)
 
-class NemotronModel(LlamaModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.layernorm_attrs["simple"] = False
-        self.layernorm_attrs["add_offset"] = 1
-        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
-
-    def make_mlp_proj(self, layer_id, mlp, root_input):
-        # Make nodes for the MLP subgraph
-        #
-        #          root_input
-        #              |
-        #         UpProjMatMul
-        #              |
-        #           ActFunc
-        #              |
-        #         DownProjMatMul
-
-        up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
-        up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
-
-        act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")
-
-        # Make output MatMul node
-        down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
-        down_name = self.make_matmul(mlp.down_proj, down_basename, f"{act_fn_name}/output_0")
-
-        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
-        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
-
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
-        return super().make_attention(layer_id, attention, root_input, **kwargs)
-
-    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
-        num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
-        super().make_rotary_embedding(rotemb, name, root_input, num_heads=num_heads, rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
 
 class Phi3Mini128KModel(Phi3Mini4KModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -2742,6 +2733,7 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
             self.rotemb_attrs["create_rotary_embedding_caches"] = False
 
         return cos_cache_name, sin_cache_name
+
 
 class Phi3Small8KModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -2965,7 +2957,7 @@ class Phi3MoE128KModel(MistralModel):
         self.moe_attrs["activation_type"] = "silu"
         self.moe_attrs["normalize_routing_weights"] = 0
         self.moe_attrs["use_sparse_mixer"] = 1
-        self.moe_attrs["use_int4"] = 0 if "use_8bits_moe" in extra_options and extra_options["use_8bits_moe"] == "1" else 1
+        self.moe_attrs["use_int4"] = 0 if extra_options.get("use_8bits_moe", False) else 1
 
         self.make_rotary_embedding_multi_cache()
 
@@ -2981,6 +2973,45 @@ class Phi3MoE128KModel(MistralModel):
         if layer_id == self.num_layers - 1:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
+
+
+class NemotronModel(LlamaModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.layernorm_attrs["simple"] = False
+        self.layernorm_attrs["add_offset"] = 1
+        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
+
+    def make_mlp_proj(self, layer_id, mlp, root_input):
+        # Make nodes for the MLP subgraph
+        #
+        #          root_input
+        #              |
+        #         UpProjMatMul
+        #              |
+        #           ActFunc
+        #              |
+        #         DownProjMatMul
+
+        up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
+        up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
+
+        act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")
+
+        # Make output MatMul node
+        down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
+        down_name = self.make_matmul(mlp.down_proj, down_basename, f"{act_fn_name}/output_0")
+
+        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
+        return super().make_attention(layer_id, attention, root_input, **kwargs)
+
+    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
+        num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
+        super().make_rotary_embedding(rotemb, name, root_input, num_heads=num_heads, rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
 
 
 class ChatGLMModel(Model):
@@ -3011,23 +3042,36 @@ class ChatGLMModel(Model):
         layer.self_attn = layer.self_attn if hasattr(layer, 'self_attn') else layer.self_attention
         super().make_layer(layer_id, layer)
 
+
 def check_extra_options(kv_pairs):
+    """
+    Check key-value pairs and set values correctly
+    """
+    bools = ["int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "use_8bits_moe", "use_qdq", "include_prompt_templates"]
+    for key in bools:
+        if key in kv_pairs:
+            if kv_pairs[key] in {"false", "False", "0"}:
+                kv_pairs[key] = False
+            elif kv_pairs[key] in {"true", "True", "1"}:
+                kv_pairs[key] = True
+            else:
+                raise ValueError(f"{key} must be false/False/0 or true/True/1.")
+    
     if "int4_op_types_to_quantize" in kv_pairs:
         op_types_to_quantize = ()
         for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
             op_types_to_quantize += (op_type, )
         kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
 
-    if "use_8bits_moe" in kv_pairs:
-        assert(kv_pairs["use_8bits_moe"] == "1" or kv_pairs["use_8bits_moe"] == "0"), "use_8bits_moe must be 0 or 1."
-
-    if "enable_cuda_graph" in kv_pairs:
-        assert(kv_pairs["enable_cuda_graph"] == "1" or kv_pairs["enable_cuda_graph"] == "0"), "enable_cuda_graph must be 0 or 1."
+    if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
+        # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
+        # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
+        raise ValueError(f"Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
 
 def parse_extra_options(kv_items):
     """
-    Parse key value pairs that are separated by '='
+    Parse key-value pairs that are separated by '='
     """
     kv_pairs = {}
 
@@ -3079,7 +3123,11 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     if "config_only" not in extra_options:
         # List architecture options in alphabetical order
-        if config.architectures[0] == "GemmaForCausalLM":
+        if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
+            # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
+            config.hidden_act = "swiglu"
+            onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "GemmaForCausalLM":
             onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
             onnx_model = Gemma2Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
@@ -3087,6 +3135,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = LlamaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "MistralForCausalLM":
             onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "NemotronForCausalLM":
+            onnx_model = NemotronModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiForCausalLM":
             onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 4096:
@@ -3109,12 +3159,6 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen2ForCausalLM":
             onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "NemotronForCausalLM":
-            onnx_model = NemotronModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
-            # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
-            config.hidden_act = "swiglu"
-            onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
@@ -3201,6 +3245,8 @@ def get_args():
                     2 is fp16.
                     1 is fp32.
                 int4_block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
+                int4_is_symmetric = Quantize the weights symmetrically. Default is true.
+                    If true, quantization is done to int4. If false, quantization is done to uint4.
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
                     Use this option when you want to quantize specific ops.
                     Separate the op types with a '/' when passing them here (e.g. int4_op_types_to_quantize=MatMul/Gather)
@@ -3210,20 +3256,31 @@ def get_args():
                     The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
+                hf_token = false/token: Use this to manage authentication with Hugging Face.
+                    Default behavior is to use the authentication token stored by `huggingface-cli login`.
+                    If false, authentication with Hugging Face will be disabled.
+                    If token, you can provide a custom authentication token that differs from the one stored in your environment.
+                    If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
                 exclude_embeds = Remove embedding layer from your ONNX model.
                     Use this option when you want to remove the embedding layer from within your ONNX model.
                     Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
-                enable_cuda_graph = 1: The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
-                    is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
-                    and the graph structure.
-                use_8bits_moe = 1: Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
-                hf_token = false/token: Use this to disable authentication with Hugging Face or provide a custom authentication token that differs from the one stored in your environment. Default behavior is to use the authentication token stored by `huggingface-cli login`.
-                    If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
-                use_qdq = 1: Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
+                include_hidden_states = Include hidden states as output from your ONNX model.
+                    Use this option when you want to have the hidden states as an output from your ONNX model.
+                    In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
+                enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
+                    If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
+                    It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
+                use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
+                    If true, the QMoE op will use 4-bit quantization. If false, the QMoE op will use 8-bits quantization.
+                use_qdq = Use the QDQ decomposition for ops.
+                    Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
+                    Use this option for LoRA models.
+                include_prompt_templates = Include prompt templates in the GenAI config file. Default is false.
+                    Use this option to include per-role prompt templates in the `genai_config.json` file.
             """),
     )
 

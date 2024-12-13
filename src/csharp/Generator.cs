@@ -17,17 +17,38 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public bool IsDone()
         {
-            return NativeMethods.OgaGenerator_IsDone(_generatorHandle);
+            return NativeMethods.OgaGenerator_IsDone(_generatorHandle) != 0;
         }
 
-        public void ComputeLogits()
+        public void AppendTokens(ReadOnlySpan<int> inputIDs)
         {
-            Result.VerifySuccess(NativeMethods.OgaGenerator_ComputeLogits(_generatorHandle));
+            unsafe
+            {
+                fixed (int* inputIDsPtr = inputIDs)
+                {
+                    Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokens(_generatorHandle, inputIDsPtr, (UIntPtr)inputIDs.Length));
+                }
+            }
+        }
+
+        public void AppendTokenSequences(Sequences sequences)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_AppendTokenSequences(_generatorHandle, sequences.Handle));
         }
 
         public void GenerateNextToken()
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_GenerateNextToken(_generatorHandle));
+        }
+
+        /// <summary>
+        /// Rewinds the generator to the given newLength.
+        /// Throw on error
+        /// </summary>
+        /// <param name="newLength"></param>
+        public void RewindTo(ulong newLength)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_RewindTo(_generatorHandle, (UIntPtr)newLength));
         }
 
         public ReadOnlySpan<int> GetSequence(ulong index)

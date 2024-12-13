@@ -2,23 +2,29 @@
     "models": [
         {
             "name": "Qwen/Qwen2.5-7B-Instruct",
-            "chat_template": "<|im_start|>\n <|user|> \n {input} <|im_end>\n'<|im_start|>assistant\n"
+            "chat_template": "<|im_start|>\n <|user|> \n {input} <|im_end>\n'<|im_start|>assistant\n",
+            "metrics": []
         },
         {
             "name": "meta-llama/Llama-2-7b-chat-hf",
-            "chat_template": "<s>[INST]<<SYS>>\n{input}<</SYS>>[INST]"
+            "chat_template": "<s>[INST]<<SYS>>\n{input}<</SYS>>[INST]",
+            "metrics": []
+
         },
         {
             "name": "mistralai/Mistral-7B-Instruct-v0.3",
-            "chat_template": " \"[INST] \" + {input} + \"[/INST]\""
+            "chat_template": " \"[INST] \" + {input} + \"[/INST]\"",
+            "metrics": []
         },
         {
             "name": "microsoft/Phi-3.5-mini-instruct",
-            "chat_template": "<|user|>\n{input} <|end|>\n<|assistant|>"
+            "chat_template": "<|user|>\n{input} <|end|>\n<|assistant|>",
+            "metrics": []
         },
         {
             "name": "google/gemma-2-2b-it",
-            "chat_template": "'<start_of_turn>' + <|user|> '\n' + {input}  + '<end_of_turn>\n"
+            "chat_template": "'<start_of_turn>' + <|user|> '\n' + {input}  + '<end_of_turn>\n",
+            "metrics": []
         }
     ],
     "inputs": [

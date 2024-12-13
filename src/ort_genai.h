@@ -26,13 +26,18 @@
  * tokenizer->Encode("A great recipe for Kung Pao chicken is ", *sequences);
  *
  * auto params = OgaGeneratorParams::Create(*model);
- * params->SetInputSequences(*sequences);
  * params->SetSearchOption("max_length", 200);
+ * params->SetSearchOption("batch_size", 1);
  *
- * auto output_sequences = model->Generate(*params);
- * auto out_string = tokenizer->Decode(output_sequences->Get(0));
+ * auto generator = OgaGenerator::Create(*model, *params);
+ * generator->AppendTokenSequences(*sequences);
+ * while (!generator->IsDone()) {
+ *  generator->GenerateNextToken();
+ * }
+ * auto output_sequence = generator->GetSequenceData(0);
+ * auto output_string = tokenizer->Decode(output_sequence, generator->GetSequenceCount(0));
  *
- * std::cout << "Output: " << std::endl << out_string << std::endl;
+ * std::cout << "Output: " << std::endl << output_string << std::endl;
  */
 
 // The types defined in this file are to give us zero overhead C++ style interfaces around an opaque C pointer.
@@ -76,6 +81,28 @@ struct OgaRuntimeSettings : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyRuntimeSettings(reinterpret_cast<OgaRuntimeSettings*>(p)); }
 };
 
+struct OgaConfig : OgaAbstract {
+  static std::unique_ptr<OgaConfig> Create(const char* config_path) {
+    OgaConfig* p;
+    OgaCheckResult(OgaCreateConfig(config_path, &p));
+    return std::unique_ptr<OgaConfig>(p);
+  }
+
+  void ClearProviders() {
+    OgaCheckResult(OgaConfigClearProviders(this));
+  }
+
+  void AppendProvider(const char* provider) {
+    OgaCheckResult(OgaConfigAppendProvider(this, provider));
+  }
+
+  void SetProviderOption(const char* provider, const char* name, const char* value) {
+    OgaCheckResult(OgaConfigSetProviderOption(this, provider, name, value));
+  }
+
+  static void operator delete(void* p) { OgaDestroyConfig(reinterpret_cast<OgaConfig*>(p)); }
+};
+
 struct OgaModel : OgaAbstract {
   static std::unique_ptr<OgaModel> Create(const char* config_path) {
     OgaModel* p;
@@ -87,11 +114,10 @@ struct OgaModel : OgaAbstract {
     OgaCheckResult(OgaCreateModelWithRuntimeSettings(config_path, &settings, &p));
     return std::unique_ptr<OgaModel>(p);
   }
-
-  std::unique_ptr<OgaSequences> Generate(const OgaGeneratorParams& params) const {
-    OgaSequences* p;
-    OgaCheckResult(OgaGenerate(this, &params, &p));
-    return std::unique_ptr<OgaSequences>(p);
+  static std::unique_ptr<OgaModel> Create(OgaConfig& config) {
+    OgaModel* p;
+    OgaCheckResult(OgaCreateModelFromConfig(&config, &p));
+    return std::unique_ptr<OgaModel>(p);
   }
 
   static void operator delete(void* p) { OgaDestroyModel(reinterpret_cast<OgaModel*>(p)); }
@@ -224,14 +250,6 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
   }
 
-  void SetInputIDs(const int32_t* input_ids, size_t input_ids_count, size_t sequence_length, size_t batch_size) {
-    OgaCheckResult(OgaGeneratorParamsSetInputIDs(this, input_ids, input_ids_count, sequence_length, batch_size));
-  }
-
-  void SetInputSequences(const OgaSequences& sequences) {
-    OgaCheckResult(OgaGeneratorParamsSetInputSequences(this, &sequences));
-  }
-
   void SetModelInput(const char* name, OgaTensor& tensor) {
     OgaCheckResult(OgaGeneratorParamsSetModelInput(this, name, &tensor));
   }
@@ -248,7 +266,7 @@ struct OgaGeneratorParams : OgaAbstract {
 };
 
 struct OgaGenerator : OgaAbstract {
-  static std::unique_ptr<OgaGenerator> Create(const OgaModel& model, const OgaGeneratorParams& params) {
+  static std::unique_ptr<OgaGenerator> Create(const OgaModel& model, OgaGeneratorParams& params) {
     OgaGenerator* p;
     OgaCheckResult(OgaCreateGenerator(&model, &params, &p));
     return std::unique_ptr<OgaGenerator>(p);
@@ -258,16 +276,24 @@ struct OgaGenerator : OgaAbstract {
     return OgaGenerator_IsDone(this);
   }
 
+  void AppendTokenSequences(const OgaSequences& sequences) {
+    OgaCheckResult(OgaGenerator_AppendTokenSequences(this, &sequences));
+  }
+
+  void AppendTokens(int32_t* input_ids, size_t input_ids_count) {
+    OgaCheckResult(OgaGenerator_AppendTokens(this, input_ids, input_ids_count));
+  }
+
   bool IsSessionTerminated() const {
     return OgaGenerator_IsSessionTerminated(this);
   }
 
-  void ComputeLogits() {
-    OgaCheckResult(OgaGenerator_ComputeLogits(this));
-  }
-
   void GenerateNextToken() {
     OgaCheckResult(OgaGenerator_GenerateNextToken(this));
+  }
+
+  void RewindTo(size_t new_length) {
+    OgaCheckResult(OgaGenerator_RewindTo(this, new_length));
   }
 
   void SetRuntimeOption(const char* key, const char* value) {
@@ -286,6 +312,16 @@ struct OgaGenerator : OgaAbstract {
     OgaTensor* out;
     OgaCheckResult(OgaGenerator_GetOutput(this, name, &out));
     return std::unique_ptr<OgaTensor>(out);
+  }
+
+  std::unique_ptr<OgaTensor> GetLogits() {
+    OgaTensor* out;
+    OgaCheckResult(OgaGenerator_GetLogits(this, &out));
+    return std::unique_ptr<OgaTensor>(out);
+  }
+
+  void SetLogits(OgaTensor& tensor) {
+    OgaCheckResult(OgaGenerator_SetLogits(this, &tensor));
   }
 
 #if __cplusplus >= 202002L

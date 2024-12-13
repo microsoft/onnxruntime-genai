@@ -49,13 +49,14 @@ $ cd phi3-vision-128k-instruct/pytorch
 $ huggingface-cli download microsoft/Phi-3-vision-128k-instruct --local-dir .
 ```
 
-Now, let's download the modified PyTorch modeling files that have been uploaded to the Phi-3 vision ONNX repositories on Hugging Face. Here, let's use `microsoft/Phi-3-vision-128k-instruct-onnx-cpu` as the example ONNX repo.
-
 ### Download the modified PyTorch modeling files
+
+Now, let's download the modified PyTorch modeling files that have been uploaded to the Phi-3 vision ONNX repository on Hugging Face.
+
 ```bash
 # Download modified files
 $ cd ..
-$ huggingface-cli download microsoft/Phi-3-vision-128k-instruct-onnx-cpu --include onnx/* --local-dir .
+$ huggingface-cli download microsoft/Phi-3-vision-128k-instruct-onnx --include onnx/* --local-dir .
 ```
 
 ### Replace original PyTorch repo files with modified files
@@ -65,8 +66,7 @@ $ huggingface-cli download microsoft/Phi-3-vision-128k-instruct-onnx-cpu --inclu
 $ rm pytorch/config.json
 $ mv onnx/config.json pytorch/
 
-# In our `modeling_phi3_v.py`, we replaced `from .image_embedding_phi3_v import Phi3ImageEmbedding`
-# with `from .image_embedding_phi3_v_for_onnx import Phi3ImageEmbedding`
+# In our `modeling_phi3_v.py`, we modified some classes for exporting to ONNX
 $ rm pytorch/modeling_phi3_v.py
 $ mv onnx/modeling_phi3_v.py pytorch/
 
@@ -103,35 +103,7 @@ $ python3 builder.py --input ./pytorch --output ./dml --precision fp16 --executi
 
 ## 3. Build `genai_config.json` and `processor_config.json`
 
-Currently, both JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Phi-3 vision model. [Here](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-cpu/blob/main/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json` and [here](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-cpu/blob/main/cpu-int4-rtn-block-32-acc-level-4/processor_config.json) is an example for `processor_config.json`.
-
-### For DirectML
-Replace
-```json
-"provider_options": []
-```
-in `genai_config.json` With
-```json
-"provider_options": [
-    {
-        "dml" : {}
-    }
-]
-```
-
-### For CUDA
-Replace
-```json
-"provider_options": []
-```
-in `genai_config.json` With
-```json
-"provider_options": [
-    {
-        "cuda" : {}
-    }
-]
-```
+Currently, both JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Phi-3 vision model. [Here](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json` and [here](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/processor_config.json) is an example for `processor_config.json`.
 
 ## 4. Run Phi-3 vision ONNX models
 
@@ -139,11 +111,11 @@ in `genai_config.json` With
 
 ### CUDA
 ```bash
-$ python .\phi3v.py -m .\phi3-vision-128k-instruct\cuda
+$ python .\phi3v.py -m .\phi3-vision-128k-instruct\cuda -p cuda
 ```
 
 ### DirectML
 
 ```bash
-$ python .\phi3v.py -m .\phi3-vision-128k-instruct\dml
+$ python .\phi3v.py -m .\phi3-vision-128k-instruct\dml -p dml
 ```

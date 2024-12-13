@@ -471,6 +471,38 @@ struct Embedding_Element : JSON::Element {
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
 
+struct PromptTemplates_Element : JSON::Element {
+  explicit PromptTemplates_Element(std::optional<Config::Model::PromptTemplates>& v) : v_{v} {}
+
+  void OnString(std::string_view name, std::string_view value) override {
+    // if one of templates is given in json, then any non-specified template will be default "{Content}"
+    if (name == "assistant") {
+      EnsureAvailable();
+      v_->assistant = value;
+    } else if (name == "prompt") {
+      EnsureAvailable();
+      v_->prompt = value;
+    } else if (name == "system") {
+      EnsureAvailable();
+      v_->system = value;
+    } else if (name == "user") {
+      EnsureAvailable();
+      v_->user = value;
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  std::optional<Config::Model::PromptTemplates>& v_;
+
+  void EnsureAvailable() {
+    if (!v_.has_value()) {
+      v_.emplace();
+    }
+  }
+};
+
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v) : v_{v} {}
 
@@ -519,6 +551,9 @@ struct Model_Element : JSON::Element {
     if (name == "embedding") {
       return embedding_;
     }
+    if (name == "prompt_templates") {
+      return prompt_templates_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -529,6 +564,7 @@ struct Model_Element : JSON::Element {
   Eos_Array_Element eos_token_ids_{v_};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
+  PromptTemplates_Element prompt_templates_{v_.prompt_templates};
 };
 
 struct Search_Element : JSON::Element {
@@ -543,6 +579,8 @@ struct Search_Element : JSON::Element {
       v_.min_length = static_cast<int>(value);
     } else if (name == "max_length") {
       v_.max_length = static_cast<int>(value);
+    } else if (name == "batch_size") {
+      v_.batch_size = static_cast<int>(value);
     } else if (name == "num_beams") {
       v_.num_beams = static_cast<int>(value);
     } else if (name == "num_return_sequences") {
@@ -590,6 +628,21 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 
 void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
   Search_Element(search).OnBool(name, value);
+}
+
+void ClearProviders(Config& config) {
+  config.model.decoder.session_options.provider_options.clear();
+}
+
+void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
+  std::ostringstream json;
+  json << R"({")" << provider_name << R"(":{)";
+  if (!option_name.empty()) {
+    json << R"(")" << option_name << R"(":")" << option_value << R"(")";
+  }
+  json << R"(}})";
+  ProviderOptionsArray_Element element{config.model.decoder.session_options.provider_options};
+  JSON::Parse(element, json.str());
 }
 
 bool IsCudaGraphEnabled(Config::SessionOptions& session_options) {

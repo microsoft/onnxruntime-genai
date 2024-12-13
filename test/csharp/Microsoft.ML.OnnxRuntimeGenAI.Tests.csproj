@@ -31,6 +31,10 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>
+    <None Condition="Exists('$(NativeBuildOutputDir)\onnxruntime-genai-cuda.dll')" Include="$(NativeBuildOutputDir)\onnxruntime-genai-cuda.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
     <None Condition="Exists('$(OrtLibDir)\onnxruntime.dll')" Include="$(OrtLibDir)\onnxruntime.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
@@ -46,6 +50,10 @@
 
     <!-- Linux -->
     <None Condition="Exists('$(NativeBuildOutputDir)\libonnxruntime-genai.so')" Include="$(NativeBuildOutputDir)\libonnxruntime-genai.so">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+    <None Condition="Exists('$(NativeBuildOutputDir)\libonnxruntime-genai-cuda.so')" Include="$(NativeBuildOutputDir)\libonnxruntime-genai-cuda.so">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>

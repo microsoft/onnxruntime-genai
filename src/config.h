@@ -18,6 +18,7 @@ struct Config {
     static constexpr std::string_view ImageFeaturesName = "image_features";
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
+    static constexpr std::string_view promptTemplate = "{Content}";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -44,7 +45,7 @@ struct Config {
     std::optional<std::string> enable_profiling;
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
     //                     Identify the reason for the crash to enable allocator sharing by default.
-    bool use_env_allocators{false};
+    bool use_env_allocators{};
 
     std::vector<ProviderOptions> provider_options;
   };
@@ -140,12 +141,21 @@ struct Config {
       std::vector<PipelineModel> pipeline;
 
     } decoder;
+
+    struct PromptTemplates {
+      std::string assistant{Defaults::promptTemplate};
+      std::string prompt{Defaults::promptTemplate};
+      std::string system{Defaults::promptTemplate};
+      std::string user{Defaults::promptTemplate};
+    };
+    std::optional<PromptTemplates> prompt_templates;
   } model;
 
   struct Search {
     bool do_sample{};  // True to do randomized sampling through top_k and top_p, if false, the top logit score is chosen
     int min_length{};
     int max_length{};  // If omitted or 0 in json file, will be set to model.context_length on load
+    int batch_size{1};
     int num_beams{1};  // 1 means no beam search.
     int num_return_sequences{1};
     float repetition_penalty{1.0f};  // 1.0 means no penalty.
@@ -170,6 +180,8 @@ struct Config {
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
+void ClearProviders(Config& config);
+void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 bool IsCudaGraphEnabled(Config::SessionOptions& session_options);
 
 }  // namespace Generators
