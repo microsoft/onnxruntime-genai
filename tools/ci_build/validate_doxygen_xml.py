@@ -142,12 +142,12 @@ def extract_metadata(output_dir):
 
     return classes
 
-def diff_metadata(cxx_metadata: [ClassMetadata], java_metadata: [ClassMetadata]):
+def diff_metadata(cxx_metadata: [ClassMetadata], target_metadata: [ClassMetadata]):
     for klass in cxx_metadata:
         if klass.normalized_name == "abstract":
             continue
-        target_java_class = next((x for x in java_metadata if x.normalized_name == klass.normalized_name), None)
-        if target_java_class is None:
+        target_class = next((x for x in target_metadata if x.normalized_name == klass.normalized_name), None)
+        if target_class is None:
             log.warning(f"The class '{klass.class_name}' doesn't exist")
             continue
 
@@ -155,14 +155,10 @@ def diff_metadata(cxx_metadata: [ClassMetadata], java_metadata: [ClassMetadata])
         #print(jsonpickle.encode(target_java_class, indent=2))
 
         for function in klass.functions:
-            target_java_function = next((x for x in target_java_class.functions if x.normalized_name == function.normalized_name), None)
-            if target_java_function is None:
-                log.warning(f"In class {target_java_class.class_name}, function '{function.function_name}' doesn't exist")
+            target_function = next((x for x in target_class.functions if x.normalized_name == function.normalized_name), None)
+            if target_function is None:
+                log.warning(f"In class {target_class.class_name}, function '{function.function_name}' doesn't exist")
 
-
-
-def diff_csharp_metadata(cxx_metadata: [ClassMetadata], csharp_metadata: [ClassMetadata]):
-    pass
 
 if __name__ == '__main__':
     args = parse_args()
