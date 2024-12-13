@@ -56,7 +56,7 @@ def _build_for_apple_sysroot(
             *base_build_command,
             "--apple_sysroot=" + apple_sysroot,
             "--osx_arch=" + current_arch,
-            "--build_dir=" + build_config,
+            "--build_dir=" + build_dir_current_arch,
         ]
 
         # the actual build process for current arch
