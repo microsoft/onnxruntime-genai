@@ -24,10 +24,10 @@ namespace Generators {
 
 #if USE_GUIDANCE
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
-    : vocab_size_(state.params_->config.model.vocab_size), 
-      eos_token_(state.params_->config.model.eos_token_id), 
-      batch_size_(state.params_->search.batch_size),      // moved before device_type_
-      device_type_(state.params_->device_type) {          // moved after batch_size
+    : vocab_size_(state.params_->config.model.vocab_size),
+      eos_token_(state.params_->config.model.eos_token_id),
+      batch_size_(state.params_->search.batch_size),  // moved before device_type_
+      device_type_(state.params_->device_type) {      // moved after batch_size
   guidance_type_ = state.params_->guidance_type;
   guidance_data_ = state.params_->guidance_data;
   if (guidance_type_.empty() || guidance_data_.empty()) {
@@ -165,7 +165,7 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
   if (device_type_ == DeviceType::CUDA) {
     for (int i = 0; i < masks.size(); i++) {
       cudaMemcpyAsync(cuda_logits_mask_ptr_.Span().data() + (i * vocab_size_ / 32), masks.at(i).data(),
-                      masks.at(i).size() * sizeof(uint32_t), ::cudaMemcpyHostToDevice, cuda_stream_);
+                      static_cast<int>(masks.at(i).size() * sizeof(uint32_t)), ::cudaMemcpyHostToDevice, cuda_stream_);
     }
     cuda::LaunchAddLogitsMask(logits.Span().data(), batch_size_, vocab_size_, cuda_logits_mask_ptr_.Span().data(), cuda_stream_);
     return;
