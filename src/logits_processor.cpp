@@ -24,7 +24,10 @@ namespace Generators {
 
 #if USE_GUIDANCE
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
-    : vocab_size_(state.params_->config.model.vocab_size), eos_token_(state.params_->config.model.eos_token_id), device_type_(state.params_->device_type), batch_size_(state.params_->search.batch_size) {
+    : vocab_size_(state.params_->config.model.vocab_size), 
+      eos_token_(state.params_->config.model.eos_token_id), 
+      batch_size_(state.params_->search.batch_size),      // moved before device_type_
+      device_type_(state.params_->device_type) {          // moved after batch_size
   guidance_type_ = state.params_->guidance_type;
   guidance_data_ = state.params_->guidance_data;
   if (guidance_type_.empty() || guidance_data_.empty()) {
@@ -108,11 +111,11 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
 
 std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
   std::vector<std::vector<uint32_t>> masks;
-  for (int i = 0; i < batch_size_; i++) {
+  for (int batch_idx = 0; batch_idx < batch_size_; batch_idx++) {  // renamed 'i' to 'batch_idx'
     LlgMaskResult mask_result;
-    auto error = llg_compute_mask(llg_constraints_[i].get(), &mask_result);
+    auto error = llg_compute_mask(llg_constraints_[batch_idx].get(), &mask_result);
     if (error != 0) {
-      std::string error_message = llg_get_error(llg_constraints_[i].get());
+      std::string error_message = llg_get_error(llg_constraints_[batch_idx].get());
       throw std::runtime_error("Error computing mask: " + error_message);
     }
 
