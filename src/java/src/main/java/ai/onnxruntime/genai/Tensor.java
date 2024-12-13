@@ -18,7 +18,7 @@ public final class Tensor implements AutoCloseable {
 
   // The values in this enum must match ONNX values
   // https://github.com/onnx/onnx/blob/159fa47b7c4d40e6d9740fcf14c36fff1d11ccd8/onnx/onnx.proto#L499-L544
-  /** ORT native element types. */
+  /** Element types that correspond to OnnxRuntime supported element types. */
   public enum ElementType {
     undefined,
     float32,
