@@ -1,0 +1,46 @@
+name: "Check Android SDK and Emulator Installation"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - test
+
+jobs:
+  check_android_sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      - name: Set up environment variables
+        run: |
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+
+      - name: Install SDK Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget unzip
+          wget https://dl.google.com/android/repository/commandlinetools-linux-8512546_latest.zip -O cmdline-tools.zip
+          unzip cmdline-tools.zip -d $ANDROID_HOME/cmdline-tools
+          mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
+
+      - name: Install Android Emulator
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME --install "emulator"
+
+      - name: Verify Installation
+        run: |
+          echo "Checking if Android SDK and Emulator are installed..."
+          if [ -d "$ANDROID_SDK_ROOT" ]; then
+            echo "Android SDK is installed at $ANDROID_SDK_ROOT"
+          else
+            echo "Android SDK is not installed"
+          fi
+
+          emulator_path="$ANDROID_HOME/emulator/emulator"
+          if [ -f "$emulator_path" ]; then
+            echo "Android Emulator is installed at $emulator_path"
+          else
+            echo "Android Emulator is not installed"
+          fi
