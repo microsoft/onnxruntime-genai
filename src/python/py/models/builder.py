@@ -1714,21 +1714,45 @@ class Model:
     def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
         #
-        #           root_input
-        #          /          \
+        #            root_input
+        #           /          \
+        #          /            \
         #   UpProjMatMul    GateProjMatMul
-        #          \          |
-        #           \     ActFunc
-        #            \   /
-        #             Mul
-        #              |
-        #        DownProjMatMul
+        #         |              |
+        #     UpProjAdd     GateProjAdd
+        #          \             |
+        #           \         ActFunc
+        #            \       /
+        #             \     /
+        #              \   /
+        #               Mul
+        #                |
+        #          DownProjMatMul
+        #                |
+        #           DownProjAdd
 
-        # Make MatMul nodes
-        gate_basename = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
-        gate_name = self.make_matmul(mlp.gate_proj, gate_basename, root_input)
-        up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
-        up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
+        # Check if Add nodes need to be made (if bias exists)
+        gate_bias_exists = mlp.gate_proj.bias is not None and torch.count_nonzero(mlp.gate_proj.bias) > 0
+        up_bias_exists = mlp.up_proj.bias is not None and torch.count_nonzero(mlp.up_proj.bias) > 0
+        down_bias_exists = mlp.down_proj.bias is not None and torch.count_nonzero(mlp.down_proj.bias) > 0
+
+        # Make Gate proj nodes
+        gate_matmul_basename = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
+        gate_matmul_name = self.make_matmul(mlp.gate_proj, gate_matmul_basename, root_input)
+        gate_name = gate_matmul_name
+        if gate_bias_exists:
+            gate_add_name = f"/model/layers.{layer_id}/mlp/gate_proj/Add"
+            self.make_add_bias(mlp.gate_proj.bias.detach().numpy(), gate_add_name, root_input=f"{gate_name}/output_0")
+            gate_name = gate_add_name
+
+        # Make Up proj nodes
+        up_matmul_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
+        up_matmul_name = self.make_matmul(mlp.up_proj, up_matmul_basename, root_input)
+        up_name = up_matmul_name
+        if up_bias_exists:
+            up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
+            self.make_add_bias(mlp.up_proj.bias.detach().numpy(), up_add_name, root_input=f"{up_name}/output_0")
+            up_name = up_add_name
 
         # Make activation node(s)
         act_fn_name = self.make_activation(layer_id, root_input=f"{gate_name}/output_0")
@@ -1740,8 +1764,13 @@ class Model:
 
         # Make output MatMul node
         down_proj = getattr(mlp, "down_proj", None) or getattr(mlp, "dense_4h_to_h", None)
-        down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
-        down_name = self.make_matmul(down_proj, down_basename, f"{mul_name}/output_0")
+        down_matmul_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
+        down_matmul_name = self.make_matmul(down_proj, down_matmul_basename, f"{mul_name}/output_0")
+        down_name = down_matmul_name
+        if down_bias_exists:
+            down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
+            self.make_add_bias(mlp.down_proj.bias.detach().numpy(), down_add_name, root_input=f"{down_name}/output_0")
+            down_name = down_add_name
 
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
@@ -1761,23 +1790,33 @@ class Model:
         #              |
         #           FC2_Add
 
+        # Check if Add nodes need to be made (if bias exists)
+        fc1_bias_exists = mlp.fc1.bias is not None and torch.count_nonzero(mlp.fc1.bias) > 0
+        fc2_bias_exists = mlp.fc2.bias is not None and torch.count_nonzero(mlp.fc2.bias) > 0
+
         # Make first layer of fully connected nodes (FC1)
         fc1_matmul_basename = f"/model/layers.{layer_id}/mlp/fc1/MatMul"
         fc1_matmul_name = self.make_matmul(mlp.fc1, fc1_matmul_basename, root_input)
-        fc1_add_name = f"/model/layers.{layer_id}/mlp/fc1/Add"
-        self.make_add_bias(mlp.fc1.bias.detach().numpy(), fc1_add_name, root_input=f"{fc1_matmul_name}/output_0")
+        fc1_name = fc1_matmul_name
+        if fc1_bias_exists:
+            fc1_add_name = f"/model/layers.{layer_id}/mlp/fc1/Add"
+            self.make_add_bias(mlp.fc1.bias.detach().numpy(), fc1_add_name, root_input=f"{fc1_name}/output_0")
+            fc1_name = fc1_add_name
 
         # Make activation function
-        act_fn_name = self.make_activation(layer_id, root_input=f"{fc1_add_name}/output_0")
+        act_fn_name = self.make_activation(layer_id, root_input=f"{fc1_name}/output_0")
 
         # Make second layer of fully connected nodes (FC2)
         fc2_matmul_basename = f"/model/layers.{layer_id}/mlp/fc2/MatMul"
         fc2_matmul_name = self.make_matmul(mlp.fc2, fc2_matmul_basename, root_input=f"{act_fn_name}/output_0")
-        fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
-        self.make_add_bias(mlp.fc2.bias.detach().numpy(), fc2_add_name, root_input=f"{fc2_matmul_name}/output_0")
+        fc2_name = fc2_matmul_name
+        if fc2_bias_exists:
+            fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
+            self.make_add_bias(mlp.fc2.bias.detach().numpy(), fc2_add_name, root_input=f"{fc2_name}/output_0")
+            fc2_name = fc2_add_name
 
         # Assign output 0 of MLP layer as output of last layer
-        self.mlp_attrs["output_0"] = f"{fc2_add_name}/output_0"
+        self.mlp_attrs["output_0"] = f"{fc2_name}/output_0"
 
     def make_block_sparse_moe(self, layer_id, bsm, root_input):
         # Make nodes for the QMoE subgraph
@@ -1968,24 +2007,28 @@ class Model:
         return output_name
 
     def make_lm_head(self, lm_head):
+        # Check if there are ops to insert after MatMul
         bias_exists = lm_head.bias is not None
         scale_exists = self.lm_head_attrs["scale"] != 1
         mask_exists = self.lm_head_attrs["mask"] is not None
 
         matmul_basename = "/lm_head/MatMul"
         root_input = self.layernorm_attrs["output_0"]
-        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not bias_exists and not scale_exists)
+        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not(bias_exists or scale_exists or mask_exists))
+        lm_name = matmul_name
 
         if bias_exists:
             add_name = "/lm_head/Add"
-            self.make_add_bias(lm_head.bias.detach().numpy(), add_name, root_input=f"{matmul_name}/output_0", logits=not scale_exists)
+            self.make_add_bias(lm_head.bias.detach().numpy(), add_name, root_input=f"{lm_name}/output_0", logits=not(scale_exists or mask_exists))
+            lm_name = add_name
 
         if scale_exists:
             mul_name = "/lm_head/Mul"
-            mul_inputs = [f"{matmul_name if not bias_exists else add_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
+            mul_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
             mul_output = "logits" if not mask_exists else f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
             self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
+            lm_name = mul_name
 
         if mask_exists:
             # Save logits mask as initializer
@@ -1993,10 +2036,11 @@ class Model:
             self.make_external_tensor(self.lm_head_attrs["mask"].detach().numpy(), logits_mask_name)
 
             where_name = "/lm_head/Where"
-            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{mul_name}/output_0"]
+            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{lm_name}/output_0"]
             where_output = "logits"
             self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
             self.make_value_info(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
+            lm_name = where_name
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
@@ -2552,7 +2596,6 @@ class QwenModel(MistralModel):
 class PhiModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        # self.input_shapes["position_ids"] = [1]  # Note: This is optional and only needed if you want position_ids to be an int instead of a 2D tensor
         self.layernorm_attrs["simple"] = False
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
         self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
