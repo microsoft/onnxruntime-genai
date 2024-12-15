@@ -3043,6 +3043,13 @@ class ChatGLMModel(Model):
         super().make_layer(layer_id, layer)
 
 
+class GraniteModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.embed_attrs["scale"] = config.embedding_multiplier
+        self.lm_head_attrs["scale"] = 1 / config.logits_scaling
+
+
 def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
@@ -3131,6 +3138,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
             onnx_model = Gemma2Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "GraniteForCausalLM":
+            onnx_model = GraniteModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "LlamaForCausalLM":
             onnx_model = LlamaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "MistralForCausalLM":
