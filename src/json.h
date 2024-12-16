@@ -13,12 +13,13 @@ struct type_mismatch {                           // When a file has one type, bu
   size_t seen, expected;
 };
 
-struct Value : std::variant<std::string_view, double, bool, std::nullptr_t> {
+struct Value : private std::variant<std::string_view, double, bool, std::nullptr_t> {
   using std::variant<std::string_view, double, bool, std::nullptr_t>::variant;
+  static constexpr size_t type_count_v = std::variant_size_v<variant>;
 
   // This will generate a descriptive error when the types don't match
   template <typename T>
-  T Get() {
+  T Get() const {
     try {
       return std::get<T>(*this);
     } catch (const std::bad_variant_access&) {
@@ -26,11 +27,11 @@ struct Value : std::variant<std::string_view, double, bool, std::nullptr_t> {
     }
   }
 
-  operator std::string() { return std::string{Get<std::string_view>()}; }
-  operator double() { return Get<double>(); }
-  operator float() { return static_cast<float>(Get<double>()); }
-  operator int() { return static_cast<int>(Get<double>()); }
-  operator bool() { return Get<bool>(); }
+  operator std::string() const { return std::string{Get<std::string_view>()}; }
+  operator double() const { return Get<double>(); }
+  operator float() const { return static_cast<float>(Get<double>()); }
+  operator int() const { return static_cast<int>(Get<double>()); }
+  operator bool() const { return Get<bool>(); }
 };
 
 struct Element {
