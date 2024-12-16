@@ -54,7 +54,7 @@ struct GuidanceLogitsProcessor : public LogitsProcessor {
  private:
   std::vector<std::vector<uint32_t>> ComputeMask();
 
-  size_t vocab_size_;
+  int vocab_size_;
   uint32_t eos_token_;
   int batch_size_;
   DeviceType device_type_;

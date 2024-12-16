@@ -163,7 +163,7 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
 
 #if USE_CUDA
   if (device_type_ == DeviceType::CUDA) {
-    for (int i = 0; i < masks.size(); i++) {
+    for (int i = 0; i < static_cast<int>(masks.size()); i++) {
       cudaMemcpyAsync(cuda_logits_mask_ptr_.Span().data() + (i * vocab_size_ / 32), masks.at(i).data(),
                       static_cast<int>(masks.at(i).size() * sizeof(uint32_t)), ::cudaMemcpyHostToDevice, cuda_stream_);
     }
