@@ -13,12 +13,6 @@ InputIDs::InputIDs(State& state)
 
   if (state_.GetCapturedGraphInfo()) {
     sb_input_ids_ = state_.GetCapturedGraphInfo()->sb_input_ids_.get();
-
-#if USE_DML
-    if (model_.device_type_ == DeviceType::DML) {
-      sb_input_ids_int32_ = state_.GetCapturedGraphInfo()->sb_input_ids_int32_.get();
-    }
-#endif
   }
 
   if (model_.session_info_->HasInput(model_.config_->model.decoder.inputs.current_sequence_length) &&
@@ -56,29 +50,26 @@ void InputIDs::Add() {
 }
 
 void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
-  const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids,
-                                               int32_t pad_token_id) {
-    int32_t seq_length = 0;
+  auto new_tokens_cpu = new_tokens.CopyDeviceToCpu();
+
+  const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids, int32_t pad_token_id) {
     for (int32_t i = 0; i < input_ids.size(); i++) {
-      if (input_ids[i] == pad_token_id) {
-        break;
-      }
-      seq_length++;
+      if (input_ids[i] == pad_token_id)
+        return i;
     }
-    return seq_length;
+    return static_cast<int32_t>(input_ids.size());
   };
 
   if (current_sequence_length_ && past_sequence_length_) {
     if (state_.params_->BatchBeamSize() != 1) {
       throw std::runtime_error("Batch size must be 1 for current_sequence_length and past_sequence_length inputs");
     }
-    auto new_sequence_length = get_unpadded_sequence_length(new_tokens.CpuSpan(), model_.config_->model.pad_token_id);
+    auto new_sequence_length = get_unpadded_sequence_length(new_tokens_cpu, model_.config_->model.pad_token_id);
     *current_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
     *past_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
   }
 
-  // Resize input_ids shape based on new_tokens
-  // For beam search
+  // For beam search, resize input_ids shape based on new_tokens
   size_t sequence_length = static_cast<size_t>(new_tokens.size()) / state_.params_->BatchBeamSize();
   if (is_prompt_ && state_.params_->search.num_beams > 1)
     sequence_length = static_cast<size_t>(new_tokens.size()) / state_.params_->search.batch_size;
@@ -87,20 +78,8 @@ void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
     shape_[1] = sequence_length;
     if (!sb_input_ids_) {
       value_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-
-#if USE_DML
-      if (model_.device_type_ == DeviceType::DML) {
-        value_int32_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-      }
-#endif
     } else {
       value_ = sb_input_ids_->CreateTensorOnStaticBuffer(shape_, type_);
-
-#if USE_DML
-      if (model_.device_type_ == DeviceType::DML) {
-        value_int32_ = sb_input_ids_int32_->CreateTensorOnStaticBuffer(shape_, Ort::TypeToTensorType<int32_t>);
-      }
-#endif
     }
 
     state_.inputs_[input_index_] = value_.get();
@@ -121,33 +100,8 @@ void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
 #endif
       } break;
 
-      case DeviceType::DML: {
-#if USE_DML
-        ComPtr<ID3D12Resource> source_resource;
-        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, value_int32_->GetTensorMutableRawData(), &source_resource));
-
-        auto source = std::span<const uint8_t>(
-            reinterpret_cast<const uint8_t*>(new_tokens.CpuSpan().data()),
-            new_tokens.CpuSpan().size_bytes());
-
-        model_.GetDmlUploadHeap()->BeginUploadToGpu(
-            source_resource.Get(),
-            0,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            source);
-
-        DmlHelpers::DmlCastInputToOutput(
-            model_.GetDmlExecutionContext(),
-            *model_.allocator_device_,
-            *value_int32_,
-            value_,
-            model_.GetDmlDevice(),
-            model_.GetOrtDmlApi(),
-            input_ids_cast_command_list_state_);
-#endif
-      } break;
       default: {
-        // CPU, WEBGPU
+        // CPU, DML, WEBGPU
         auto* data = value_->GetTensorMutableData<int64_t>();
         auto next_tokens = new_tokens.Span();
         for (int b = 0; b < shape_[0]; b++) {

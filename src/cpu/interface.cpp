@@ -7,6 +7,7 @@
 
 namespace Generators {
 
+static Ort::Allocator* ort_allocator_{};
 const char* label_cpu = "cpu";
 
 struct CpuMemory final : DeviceBuffer {
@@ -30,18 +31,23 @@ struct CpuMemory final : DeviceBuffer {
   void CopyDeviceToCpu() override {}  // Nothing to do, device is also CPU
   void CopyCpuToDevice() override {}  // Nothing to do, device is also CPU
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
-    if (GetType() == label_cpu)
-      memcpy(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes);
-    else
-      throw std::runtime_error("CpuMemory::CopyFromDevice not implemented for " + std::string(source.GetType()));
+    CopyThroughCpu(*this, begin_dest, source, begin_source, size_in_bytes);
+  }
+
+  void Zero() override {
+    memset(p_device_, 0, size_in_bytes_);
   }
 
   bool owned_;
 };
 
 struct CpuInterface : DeviceInterface {
-  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size, bool cpu_accessible) override {
-    // cpu_accessible is ignored, as with the cpu, the device is also the cpu
+  void InitAllocator(Ort::Allocator& allocator) override {
+    assert(!ort_allocator_);
+    ort_allocator_ = &allocator;
+  }
+
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<CpuMemory>(size);
   }
 

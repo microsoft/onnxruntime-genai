@@ -219,10 +219,7 @@ void PositionInputs::CreateNextAttentionMaskTensor(int total_length) {
     attention_mask_shape_[1] = state_.params_->search.max_length;
     attention_mask_next_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
     if (is_first_mask_update_) {
-      cudaMemsetAsync(attention_mask_next_->GetTensorMutableRawData(),
-                      0,
-                      (type_ == Ort::TypeToTensorType<int32_t> ? sizeof(int32_t) : sizeof(int64_t)) * attention_mask_shape_[0] * attention_mask_shape_[1],
-                      model_.cuda_stream_);
+      ByteWrapTensor(*model_.p_device_, *attention_mask_next_).Zero();
     }
 #elif USE_DML
     attention_mask_shape_[1] = state_.params_->search.max_length;

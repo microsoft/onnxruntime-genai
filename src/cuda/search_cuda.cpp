@@ -31,8 +31,8 @@ Search_Cuda::Search_Cuda(const GeneratorParams& params)
 GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
     : Search_Cuda{params} {
   next_tokens_buffer_ = params.p_device->Allocate<int32_t>(params.search.batch_size);
+  next_tokens_buffer_.Zero();
   next_tokens_ = gpu_span<int32_t>(next_tokens_buffer_.Span());
-  cudaMemsetAsync(next_tokens_.data(), 0, next_tokens_.size_bytes(), params_->cuda_stream);
 
   unsigned long long random_seed;
   if (params_->search.random_seed != -1)

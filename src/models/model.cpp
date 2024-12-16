@@ -15,11 +15,7 @@
 #include "multi_modal_vision_model.h"
 #include "decoder_only_pipeline.h"
 #if USE_DML
-#include <wil/wrl.h>
-#include "dml_provider_factory.h"
-#include "../dml/dml_helpers.h"
-
-std::string CurrentModulePath();
+#include "../dml/interface.h"
 #endif
 
 namespace Generators {
@@ -222,20 +218,20 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   return token_id;
 }
 
-#if USE_CUDA
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-Ort::Allocator* GetCudaAllocator(OrtSession& session) {
-  auto& globals = *GetOrtGlobals();
-  if (!globals.allocator_cuda_) {
-    globals.memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    globals.allocator_cuda_ = Ort::Allocator::Create(session, *globals.memory_info_cuda_);
+Ort::Allocator* GetDeviceAllocator(OrtSession& session, DeviceType type) {
+  auto& device = GetOrtGlobals()->allocator_device_[static_cast<int>(type)];
+  if (!device) {
+    static const char* device_type_names[static_cast<int>(DeviceType::MAX)] = {"CPU", "Cuda", "DML", "WebGPU Buffer"};
+    auto memory_info = OrtMemoryInfo::Create(device_type_names[static_cast<int>(type)], OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    device = Ort::Allocator::Create(session, *memory_info);
+    GetDeviceInterface(type)->InitAllocator(*device);
   }
-  return globals.allocator_cuda_.get();
+  return device.get();
 }
-#endif
 
 SessionInfo::SessionInfo(OrtSession& session) {
   Add(session);
@@ -290,27 +286,15 @@ Model::~Model() = default;
 
 void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
   allocator_device_ = &allocator_cpu_;
-#if USE_CUDA
-  if (device_type_ == DeviceType::CUDA) {
-    allocator_device_ = GetCudaAllocator(session);
-  }
-#endif
-#if USE_DML
-  if (device_type_ == DeviceType::DML) {
-    memory_info_device_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    dml_owned_allocator_ = Ort::Allocator::Create(session, *memory_info_device_);
-    allocator_device_ = dml_owned_allocator_.get();
-  }
-#endif
+  if (device_type_== DeviceType::CUDA)
+    allocator_device_ = GetDeviceAllocator(session, device_type_);
+
   allocator_kvcache_ = allocator_device_;
-#if USE_WEBGPU
-  if (device_type_ == DeviceType::WEBGPU) {
-    // for webgpu we only use device memory for kv_cache
-    memory_info_device_ = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    webgpu_owned_allocator_ = Ort::Allocator::Create(session, *memory_info_device_);
-    allocator_kvcache_ = webgpu_owned_allocator_.get();
+  if (device_type_ == DeviceType::WEBGPU || device_type_ == DeviceType::DML) {
+    // for dml and webgpu we only use device memory for kv_cache
+    allocator_kvcache_ = GetDeviceAllocator(session, device_type_);
   }
-#endif
+
   session_info_ = std::make_unique<SessionInfo>(session);
   captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), allocator_device_);
 }
@@ -436,52 +420,19 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 #if USE_DML
     } else if (provider_options.name == "dml") {
       if (!p_dml_api_) {
-        auto current_module_path = CurrentModulePath();
-
-        bool contains_device_luid = false;
         LUID device_luid{};
+        LUID* p_device_luid{};
         for (const auto& [name, value] : provider_options.options) {
           if (name == "luid") {
             if (auto separator_position = value.find(":"); separator_position != std::string::npos) {
               device_luid.HighPart = std::stol(value.substr(0, separator_position));
               device_luid.LowPart = std::stol(value.substr(separator_position + 1));
-              contains_device_luid = true;
+              p_device_luid = &device_luid;
             }
           }
         }
 
-        if (contains_device_luid) {
-          dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path, &device_luid);
-        } else {
-          dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
-        }
-
-        constexpr auto directml_dll = "DirectML.dll";
-        wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll, nullptr, 0));
-        THROW_LAST_ERROR_IF(!smart_directml_dll);
-
-        if (LoadLibraryEx(directml_dll, nullptr, 0) == NULL) {
-          throw std::runtime_error("DirectML.dll not found");
-        }
-
-        auto dml_create_device1_fn = reinterpret_cast<decltype(&DMLCreateDevice1)>(GetProcAddress(smart_directml_dll.get(), "DMLCreateDevice1"));
-        THROW_LAST_ERROR_IF(!dml_create_device1_fn);
-        THROW_IF_FAILED(dml_create_device1_fn(dml_objects_.d3d12_device.Get(), DML_CREATE_DEVICE_FLAG_NONE, DML_FEATURE_LEVEL_5_0, IID_PPV_ARGS(&dml_device_)));
-
-        Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api_)));
-        if (!p_dml_api_) {
-          throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
-        }
-
-        dml_execution_context_ = std::make_unique<DmlExecutionContext>(
-            dml_objects_.d3d12_device.Get(),
-            dml_device_.Get(),
-            dml_objects_.command_queue.Get(),
-            *allocator_device_,
-            p_dml_api_);
-
-        dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
-        dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
+        InitDmlInterface(p_device_luid);
       }
 
       if (!disable_graph_capture) {
@@ -489,7 +440,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         session_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
       }
 
-      p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&session_options, dml_device_.Get(), dml_objects_.command_queue.Get());
+      SetDmlProvider(session_options);
 
       if (is_primary_session_options)
         device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
@@ -520,6 +471,11 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
+#if 0
+  ClearProviders(*config_);
+  SetProviderOption(*config_, "dml", {}, {});
+#endif
+
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true, false);
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {

@@ -7,6 +7,8 @@ struct GenaiInterface {
   virtual void HeapFree(void*) = 0;
 #endif
 
+  virtual void CopyThroughCpu(Generators::DeviceBuffer& dest, size_t begin_dest, Generators::DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) = 0;
+
   virtual Generators::LogItems& GetLogItems() = 0;
   virtual std::ostream& operator_leftshift(std::ostream& stream, Generators::SGR sgr_code) = 0;
   virtual std::ostream& Log(std::string_view label, std::string_view text = {}) = 0;
@@ -42,9 +44,7 @@ struct CudaInterface : DeviceInterface {
   virtual void LaunchFinalizeCrossQK(cudaStream_t stream, int iteration_number, int context_decoding_len, int batch_size, int num_beams, int max_length, int num_alignment_heads, int frames_of_k, const float* cross_qk_buffer_data, float* cross_qk_output, int num_return_sequences, const int* cache_indir_data) = 0;
 
   virtual cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream) = 0;
-  virtual cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind) = 0;
   virtual cudaError_t cudaMemsetAsync(void* ptr, int value, size_t count, cudaStream_t stream) = 0;
-  virtual cudaError_t cudaMemset(void* ptr, int value, size_t count) = 0;
 };
 #endif
 }  // namespace Generators

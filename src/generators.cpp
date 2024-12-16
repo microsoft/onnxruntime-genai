@@ -8,6 +8,7 @@
 #include "search.h"
 #include "cpu/interface.h"
 #include "cuda/interface.h"
+#include "dml/interface.h"
 #if USE_CUDA
 #include "models/kernels.h"
 #endif
@@ -89,18 +90,31 @@ OrtEnv& GetOrtEnv() {
   return *GetOrtGlobals()->env_;
 }
 
+// Fallback to copy between two separate device buffers by going through CPU memory (slow unless we're the CPU device)
+void CopyThroughCpu(DeviceBuffer& dest, size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) {
+  source.CopyDeviceToCpu();
+  auto source_span = std::span<const uint8_t>(source.p_cpu_+begin_source, size_in_bytes);
+  dest.AllocateCpu();
+  std::copy(source_span.begin(), source_span.end(), dest.p_cpu_ + begin_dest);
+  dest.CopyCpuToDevice();
+}
+
 struct GenaiInterfaceImpl : GenaiInterface {
 #if _WIN32
   void* HeapAllocate(size_t size) override { return std::malloc(size); }
   void HeapFree(void* p) override { std::free(p); }
 #endif
 
+  void CopyThroughCpu(DeviceBuffer& dest, size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
+    return Generators::CopyThroughCpu(dest, begin_dest, source, begin_source, size_in_bytes);
+  }
+
   Generators::LogItems& GetLogItems() override { return g_log; }
   std::ostream& operator_leftshift(std::ostream& stream, Generators::SGR sgr_code) override { return stream << sgr_code; }
   std::ostream& Log(std::string_view label, std::string_view text = {}) override { return Log(label, text); }
 
-  void DumpSpan(std::ostream& stream, std::span<const float> values) override { return DumpSpan(stream, values); }
-  void DumpSpan(std::ostream& stream, std::span<const int> values) override { return DumpSpan(stream, values); }
+  void DumpSpan(std::ostream& stream, std::span<const float> values) override { return Generators::DumpSpan(stream, values); }
+  void DumpSpan(std::ostream& stream, std::span<const int> values) override { return Generators::DumpSpan(stream, values); }
 
   void Sequences_AfterAppendNextTokens(Sequences* p_this, DeviceSpan<int32_t> next_tokens, size_t batch_beam_size) override { return p_this->AfterAppendNextTokens(next_tokens, batch_beam_size); }
   void Sequences_RewindTo(Sequences* p_this, size_t new_length) override { return p_this->RewindTo(new_length); }
@@ -136,6 +150,7 @@ CudaInterface* GetCudaInterface() {
   return cuda_interface;
 }
 
+
 namespace cuda {
 void LaunchInt32ToInt64(const int32_t* input, int64_t* output, int count, cudaStream_t stream) { GetCudaInterface()->Int32ToInt64(input, output, count, stream); }
 void LaunchFp16ToFp32(const uint16_t* input, float* output, int count, cudaStream_t stream) { GetCudaInterface()->Fp16ToFp32(input, output, count, stream); }
@@ -160,6 +175,7 @@ void LaunchFinalizeCrossQK<float>(cudaStream_t stream, int iteration_number, int
 }  // namespace cuda
 #endif
 
+
 std::string to_string(DeviceType device_type) {
   switch (device_type) {
     case DeviceType::CPU:
@@ -182,6 +198,10 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
 #if USE_CUDA
     case DeviceType::CUDA:
       return GetCudaInterface();
+#endif
+#if USE_DML
+    case DeviceType::DML:
+      return GetDmlInterface();
 #endif
   }
 }
@@ -427,7 +447,5 @@ DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
 
 #if USE_CUDA
 cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream) { return Generators::GetCudaInterface()->cudaMemcpyAsync(dst, src, count, kind, stream); }
-cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind) { return Generators::GetCudaInterface()->cudaMemcpy(dst, src, count, kind); }
 cudaError_t cudaMemsetAsync(void* ptr, int value, size_t count, cudaStream_t stream) { return Generators::GetCudaInterface()->cudaMemsetAsync(ptr, value, count, stream); }
-cudaError_t cudaMemset(void* ptr, int value, size_t count) { return Generators::GetCudaInterface()->cudaMemset(ptr, value, count); }
 #endif

@@ -11,33 +11,9 @@
 
 namespace Generators {
 
+GenaiInterface* gp_genai{};
+Ort::Allocator* ort_allocator_{};
 const char* label_cuda = "cuda";
-const char* label_cuda_cpu = "cuda_cpu";
-
-struct HostMemory final : DeviceBuffer {
-  HostMemory(size_t size) {
-    size_in_bytes_ = size;
-    ::cudaHostAlloc(&p_device_, size, 0);
-    p_cpu_ = p_device_;  // CPU & GPU both access the same memory here
-  }
-
-  ~HostMemory() override {
-    ::cudaFreeHost(p_device_);
-  }
-
-  const char* GetType() const override { return label_cuda_cpu; }
-  void AllocateCpu() override {}      // Nothing to do, device is also CPU
-  void CopyDeviceToCpu() override {}  // Nothing to do, device is also CPU
-  void CopyCpuToDevice() override {}  // Nothing to do, device is also CPU
-  void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
-    if (source.GetType() == label_cuda_cpu)
-      ::memcpy(p_cpu_ + begin_dest, source.p_cpu_ + begin_source, size_in_bytes);
-    else if (source.GetType() == label_cuda)
-      ::cudaMemcpyAsync(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes, ::cudaMemcpyDeviceToHost, GetStream());
-    else
-      throw std::runtime_error("Cuda HostMemory::CopyFromDevice not implemented for " + std::string(source.GetType()));
-  }
-};
 
 struct GpuMemory final : DeviceBuffer {
   GpuMemory(size_t size) : owned_{true} {
@@ -66,21 +42,24 @@ struct GpuMemory final : DeviceBuffer {
 
   void CopyDeviceToCpu() override {
     AllocateCpu();
-    ::cudaMemcpy(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost);
+    ::cudaMemcpyAsync(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost, GetStream());
+    ::cudaStreamSynchronize(GetStream());
   }
 
   void CopyCpuToDevice() override {
     assert(p_cpu_);
-    ::cudaMemcpy(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice);
+    ::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream());
   }
 
-  void CopyFrom(size_t begin_source, DeviceBuffer& source, size_t begin_dest, size_t size_in_bytes) override {
-    if (source.GetType() == label_cuda_cpu)
-      ::cudaMemcpyAsync(p_device_ + begin_source, source.p_device_ + begin_dest, size_in_bytes, ::cudaMemcpyHostToDevice, GetStream());
-    else if (source.GetType() == label_cuda)
-      ::cudaMemcpyAsync(p_device_ + begin_source, source.p_device_ + begin_dest, size_in_bytes, ::cudaMemcpyDeviceToDevice, GetStream());
+  void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
+    if (source.GetType() == label_cuda)
+      ::cudaMemcpyAsync(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes, ::cudaMemcpyDeviceToDevice, GetStream());
     else
-      throw std::runtime_error("Cuda GpuMemory::CopyFromDevice not implemented for " + std::string(source.GetType()));
+      gp_genai->CopyThroughCpu(*this, begin_dest, source, begin_source, size_in_bytes);
+  }
+
+  void Zero() override {
+    ::cudaMemsetAsync(p_device_, 0, size_in_bytes_, GetStream());
   }
 
   bool owned_;  // If we own the memory, we delete it on destruction
@@ -94,9 +73,12 @@ struct CudaInterfaceImpl : CudaInterface {
   ~CudaInterfaceImpl() {
   }
 
-  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size, bool cpu_accessible) override {
-    if (cpu_accessible)
-      return std::make_shared<HostMemory>(size);
+  void InitAllocator(Ort::Allocator& allocator) override {
+    assert(!ort_allocator_);
+    ort_allocator_ = &allocator;
+  }
+
+  std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
     return std::make_shared<GpuMemory>(size);
   }
 
@@ -180,16 +162,8 @@ struct CudaInterfaceImpl : CudaInterface {
     return ::cudaMemcpyAsync(dst, src, count, kind, stream);
   }
 
-  cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind) override {
-    return ::cudaMemcpy(dst, src, count, kind);
-  }
-
   cudaError_t cudaMemsetAsync(void* ptr, int value, size_t count, cudaStream_t stream) override {
     return ::cudaMemsetAsync(ptr, value, count, stream);
-  }
-
-  cudaError_t cudaMemset(void* ptr, int value, size_t count) override {
-    return ::cudaMemset(ptr, value, count);
   }
 
  private:
@@ -201,7 +175,6 @@ std::unique_ptr<CudaInterface> g_cuda_device;
 DeviceInterface& GetCudaDeviceInterface() { return *g_cuda_device; }
 cudaStream_t GetStream() { return g_cuda_device->GetCudaStream(); }
 
-GenaiInterface* gp_genai{};
 LogItems& GetLogItems() { return gp_genai->GetLogItems(); }
 std::ostream& operator<<(std::ostream& stream, SGR sgr_code) { return gp_genai->operator_leftshift(stream, sgr_code); }
 std::ostream& Log(std::string_view label, std::string_view text) { return gp_genai->Log(label, text); }

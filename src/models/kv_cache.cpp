@@ -220,23 +220,13 @@ KV_Cache::KV_Cache(State& state)
     }
   }
 
-  auto kv_cache_size_bytes = SizeOf(type_) * shape_[0] * shape_[1] * shape_[2] * shape_[3];
   try {
     for (int i = 0; i < layer_count_ * 2; ++i) {
       presents_.push_back(
           sb_kv_caches_.empty() ? OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_)
                                 : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
-#if USE_CUDA
-      if (model_.device_type_ == DeviceType::CUDA) {
-        cudaMemsetAsync(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes, model_.cuda_stream_);
-      } else
-#endif
-      {
-        if (model_.device_type_ == DeviceType::CPU) {
-          // FIXME: this is a device ternsor and we can only use memset for cpu. Revisit for other EPs.
-          memset(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes);
-        }
-      }
+      // Zero the memory so we don't leak any data from the previous run
+      ByteWrapTensor(*model_.p_device_, *presents_.back()).Zero();
     }
   } catch (const Ort::Exception&) {
     std::ostringstream oss;

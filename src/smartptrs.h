@@ -5,6 +5,10 @@
 #include <memory>
 #include "span.h"
 
+namespace Ort {
+struct Allocator;
+}
+
 namespace Generators {
 struct Search;
 struct Sequences;
@@ -21,6 +25,7 @@ struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
   virtual void CopyDeviceToCpu() = 0;  // Allocates p_cpu_ if necessary and copies p_device_ memory into it
   virtual void CopyCpuToDevice() = 0;
   virtual void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) = 0;
+  virtual void Zero() = 0;  // Zero out the device memory
 
   uint8_t* p_device_{};
   uint8_t* p_cpu_{};
@@ -37,6 +42,8 @@ struct DeviceSpan {
 
   bool empty() const { return length_ == 0; }
   size_t size() const { return length_; }
+
+  operator DeviceSpan<const T>() const { return DeviceSpan<const T>(*p_device_memory_, begin_, length_); }
 
   DeviceSpan<T> subspan(size_t begin, size_t length) { return DeviceSpan<T>(*p_device_memory_, begin_ + begin, length); }
 
@@ -58,24 +65,35 @@ struct DeviceSpan {
   // Copy CPU memory to device memory, typically used after calling CpuSpan or CopyDeviceToCpu to update the device memory with the modifications made
   void CopyCpuToDevice() { p_device_memory_->CopyCpuToDevice(); }
 
+  // Zero out the device memory
+  void Zero() { p_device_memory_->Zero(); }
+
+  void CopyFrom(const DeviceSpan<const T>& source) {
+    assert(source.size() == size());  // Spans must be the same size to copy
+    p_device_memory_->CopyFrom(begin_ * sizeof(T), *source.p_device_memory_, source.begin_ * sizeof(T), length_ * sizeof(T));
+  }
+
  private:
   DeviceSpan(DeviceBuffer& memory, size_t begin, size_t length)
       : p_device_memory_{memory.shared_from_this()}, begin_{begin}, length_{length} {}
 
   std::shared_ptr<DeviceBuffer> p_device_memory_;
   size_t begin_{}, length_{};  // Subspan of p_device_memory_, relative to original memory block
+  template <typename U>
+  friend struct DeviceSpan;  // All DeviceSpans are friends
 };
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
+  virtual void InitAllocator(Ort::Allocator& allocator) = 0;
 
   template <typename T>
-  DeviceSpan<T> Allocate(size_t count, bool cpu_accessible = false) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count, cpu_accessible)); }
-  virtual std::shared_ptr<DeviceBuffer> AllocateBase(size_t size, bool cpu_accessible) = 0;
+  DeviceSpan<T> Allocate(size_t count) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count)); }
+  virtual std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) = 0;
 
   // Wraps an existing memory block, useful for tensors. Use WrapTensor for OrtValue vs calling this directly
   template <typename T>
-  DeviceSpan<T> WrapMemory(std::span<T> memory) { return DeviceSpan<T>(WrapMemoryBase(memory.data(), memory.size_bytes())); }
+  DeviceSpan<T> WrapMemory(std::span<T> memory) { return DeviceSpan<T>(WrapMemoryBase(const_cast<std::remove_const_t<T>*>(memory.data()), memory.size_bytes())); }
   virtual std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) = 0;
 
   virtual std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) = 0;
