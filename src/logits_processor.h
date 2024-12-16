@@ -43,7 +43,7 @@ struct LlgTokenizerDeleter {
 
 struct GuidanceLogitsProcessor : public LogitsProcessor {
   // llguidance need to use tokenizer.json to add special tokens
-  static constexpr const char* kDefaultVocabFile = "tokenizer.json"; 
+  static constexpr const char* kDefaultVocabFile = "tokenizer.json";
   // tokenizer need to tokenize token with special prefix
   static constexpr const char* kTokenizePrefixStr = "\x02";
 
@@ -53,8 +53,8 @@ struct GuidanceLogitsProcessor : public LogitsProcessor {
   void Reset() override;
   // GetMask is used to get the logits mask
   std::vector<std::vector<uint32_t>> GetMask();
-  // tokenize_partial is used to tokenize the input tokens with special prefix, this will get stable 
-  // token ids. 
+  // tokenize_partial is used to tokenize the input tokens with special prefix, this will get stable
+  // token ids.
   static std::vector<int32_t> tokenize_partial(const Tokenizer* tokenizer, const size_t prefix_len,
                                                const uint8_t* bytes, size_t bytes_len);
 

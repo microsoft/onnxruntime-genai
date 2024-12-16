@@ -104,8 +104,8 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   void SetInputs(const NamedTensors& inputs);
 
-  std::string guidance_type; // e.g. json_schema or regex
-  std::string guidance_data; // e.g. rules data in json_schema or regex 
+  std::string guidance_type;  // e.g. json_schema or regex
+  std::string guidance_data;  // e.g. rules data in json_schema or regex
   void SetGuidance(std::string_view type, std::string_view data);
 
  private:
