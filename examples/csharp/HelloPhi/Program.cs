@@ -85,7 +85,7 @@ do
     if (option == 1) // Complete Output
     {
         using var generator = new Generator(model, generatorParams);
-        generator.AppendTokens(sequences);
+        generator.AppendTokenSequences(sequences);
         var watch = System.Diagnostics.Stopwatch.StartNew();
         while (!generator.IsDone())
         {
