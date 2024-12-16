@@ -300,6 +300,12 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
+  constexpr std::array<DeviceType, 2> devices_supporting_continuous_decoding{DeviceType::CPU, DeviceType::CUDA};
+  if (search_->GetSequenceLength() != 0 &&
+      std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
+                   [this](DeviceType device_type) { return device_type == state_->params_->device_type; }))
+    throw std::runtime_error("Continuous decoding is not supported on the selected device type: " + to_string(state_->params_->device_type));
+
   if (last_action_ == Action::generated) {
     ComputeLogits(search_->GetNextTokens());
   }

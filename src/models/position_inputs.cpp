@@ -170,8 +170,6 @@ void PositionInputsDefault::CreateNextPositionIDsTensor() {
 void PositionInputsDefault::UpdatePositionIDs(int total_length, int new_kv_length) {
   if (position_ids_shape_[0] != 1 && !(total_length == 0 || new_kv_length == 1))
     throw std::runtime_error("PositionInputsDefault::UpdatePositionIDs - batch_size must be 1 for continuous decoding.");
-  if (DeviceType::DML == model_.device_type_ && !(total_length == 0 || new_kv_length == 1))
-    throw std::runtime_error("PositionInputsDefault::UpdatePositionIDs - DML does not support continuous decoding.");
 
   // Reallocate position_ids when new_kv_length changes
   if (position_ids_shape_[1] != new_kv_length) {
