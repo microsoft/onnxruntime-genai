@@ -106,6 +106,7 @@ do
     {
         using var tokenizerStream = tokenizer.CreateStream();
         using var generator = new Generator(model, generatorParams);
+        generator.AppendTokenSequences(sequences);
         var watch = System.Diagnostics.Stopwatch.StartNew();
         while (!generator.IsDone())
         {
