@@ -13,17 +13,25 @@ struct type_mismatch {                           // When a file has one type, bu
   size_t seen, expected;
 };
 
-using Value = std::variant<std::string_view, double, bool, std::nullptr_t>;
+struct Value : std::variant<std::string_view, double, bool, std::nullptr_t> {
+  using std::variant<std::string_view, double, bool, std::nullptr_t>::variant;
 
-// To see descriptive errors when types don't match, use this instead of std::get
-template <typename T>
-T& Get(Value& var) {
-  try {
-    return std::get<T>(var);
-  } catch (const std::bad_variant_access&) {
-    throw type_mismatch{var.index(), Value{T{}}.index()};
+  // This will generate a descriptive error when the types don't match
+  template <typename T>
+  T Get() {
+    try {
+      return std::get<T>(*this);
+    } catch (const std::bad_variant_access&) {
+      throw type_mismatch{index(), Value{T{}}.index()};
+    }
   }
-}
+
+  operator std::string() { return std::string{Get<std::string_view>()}; }
+  operator double() { return Get<double>(); }
+  operator float() { return static_cast<float>(Get<double>()); }
+  operator int() { return static_cast<int>(Get<double>()); }
+  operator bool() { return Get<bool>(); }
+};
 
 struct Element {
   virtual void OnComplete(bool empty) {}  // Called when parsing for this element is finished (empty is true when it's an empty element)
