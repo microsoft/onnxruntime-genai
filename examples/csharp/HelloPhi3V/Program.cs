@@ -141,7 +141,6 @@ do
     var watch = System.Diagnostics.Stopwatch.StartNew();
     while (!generator.IsDone())
     {
-        generator.ComputeLogits();
         generator.GenerateNextToken();
         Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
     }

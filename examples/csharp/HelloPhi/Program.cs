@@ -82,17 +82,23 @@ do
     using GeneratorParams generatorParams = new GeneratorParams(model);
     generatorParams.SetSearchOption("min_length", 50);
     generatorParams.SetSearchOption("max_length", 200);
-    generatorParams.SetInputSequences(sequences);
     if (option == 1) // Complete Output
     {
+        using var generator = new Generator(model, generatorParams);
+        generator.AppendTokens(sequences);
         var watch = System.Diagnostics.Stopwatch.StartNew();
-        var outputSequences = model.Generate(generatorParams);
-        var outputString = tokenizer.Decode(outputSequences[0]);
+        while (!generator.IsDone())
+        {
+            generator.GenerateNextToken();
+        }
+
+        var outputSequence = generator.GetSequence(0);
+        var outputString = tokenizer.Decode(outputSequence);
         watch.Stop();
         var runTimeInSeconds = watch.Elapsed.TotalSeconds;
         Console.WriteLine("Output:");
         Console.WriteLine(outputString);
-        var totalTokens = outputSequences[0].Length;
+        var totalTokens = outputSequence.Length;
         Console.WriteLine($"Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
     }
 
@@ -103,7 +109,6 @@ do
         var watch = System.Diagnostics.Stopwatch.StartNew();
         while (!generator.IsDone())
         {
-            generator.ComputeLogits();
             generator.GenerateNextToken();
             Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
         }
