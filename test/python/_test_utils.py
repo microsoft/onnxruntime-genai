@@ -55,7 +55,8 @@ def run_subprocess(
 def get_model_paths():
     hf_paths = {
         "phi-2": "microsoft/phi-2",
-        # "phi-3-mini": "microsoft/Phi-3-mini-128k-instruct",
+        "phi-3.5": "microsoft/Phi-3.5-mini-instruct",
+        "granite-3.0": "ibm-granite/granite-3.0-2b-instruct",
     }
 
     ci_data_path = os.path.join("/", "data", "ortgenai_pytorch_models")
