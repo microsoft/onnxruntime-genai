@@ -267,7 +267,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);  // Search sequence lengths set when creating state
 
-  logits_processor_ = CreateLogitsProcessor(*state_);
+  logits_processor_ = CreateLogitsProcessor(*state_); // Could be nullptr if no logits processor is used
   // Temporary solution for multimodal and whisper models
   if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
     AppendTokens(params.aux_input_ids);

@@ -20,8 +20,11 @@ namespace Generators {
 struct LogitsProcessor {
   LogitsProcessor() = default;
   virtual ~LogitsProcessor() = default;
+  // CommitTokens is used to commit the generated tokens to the logits processor
   virtual void CommitTokens(std::span<int32_t> tokens) = 0;
+  // ProcessLogits is used to add logits mask to the logits
   virtual void ProcessLogits(DeviceSpan<float> logits) = 0;
+  // Reset is used to reset the logits processor after rewinding
   virtual void Reset() = 0;
 };
 
@@ -39,15 +42,19 @@ struct LlgTokenizerDeleter {
 };
 
 struct GuidanceLogitsProcessor : public LogitsProcessor {
-  static constexpr const char* kDefaultVocabFile = "tokenizer.json";
+  // llguidance need to use tokenizer.json to add special tokens
+  static constexpr const char* kDefaultVocabFile = "tokenizer.json"; 
+  // tokenizer need to tokenize token with special prefix
   static constexpr const char* kTokenizePrefixStr = "\x02";
 
   GuidanceLogitsProcessor(const State& state);
-
   void ProcessLogits(DeviceSpan<float> logits) override;
   void CommitTokens(std::span<int32_t> tokens) override;
   void Reset() override;
+  // GetMask is used to get the logits mask
   std::vector<std::vector<uint32_t>> GetMask();
+  // tokenize_partial is used to tokenize the input tokens with special prefix, this will get stable 
+  // token ids. 
   static std::vector<int32_t> tokenize_partial(const Tokenizer* tokenizer, const size_t prefix_len,
                                                const uint8_t* bytes, size_t bytes_len);
 

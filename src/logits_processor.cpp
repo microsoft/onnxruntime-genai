@@ -26,16 +26,16 @@ namespace Generators {
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     : vocab_size_(state.params_->config.model.vocab_size),
       eos_token_(state.params_->config.model.eos_token_id),
-      batch_size_(state.params_->search.batch_size),  // moved before device_type_
-      device_type_(state.params_->device_type) {      // moved after batch_size
+      batch_size_(state.params_->search.batch_size),
+      device_type_(state.params_->device_type) {
   guidance_type_ = state.params_->guidance_type;
   guidance_data_ = state.params_->guidance_data;
   if (guidance_type_.empty() || guidance_data_.empty()) {
-    throw std::runtime_error("Guidance type and data must be provided");
+    throw std::runtime_error("Guidance type and data must be provided together");
   }
 
-  if (guidance_type_ != "json_schema" && guidance_type_ != "regex" && guidance_type_ != "grammar") {
-    throw std::runtime_error("Unsupported guidance type: " + std::string(guidance_type_));
+  if (guidance_type_ != "json_schema" && guidance_type_ != "regex") {
+    throw std::runtime_error("Unsupported guidance type: " + std::string(guidance_type_) + " (only json_schema and regex are supported)");
   }
 
   auto tokenize_fn = (LlgTokenizeFn) + [](const void* user_data, const uint8_t* bytes,
@@ -87,7 +87,7 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     } else if (guidance_type_ == "regex") {
       constraint_ptr = llg_new_constraint_regex(&constraint_init, guidance_data_.data());
     } else {
-      constraint_ptr = llg_new_constraint(&constraint_init, guidance_data_.data());
+      throw std::runtime_error("Unsupported guidance type: " + std::string(guidance_type_) + " (only json_schema and regex are supported)");
     }
     if (llg_get_error(constraint_ptr) != nullptr) {
       std::string error_message = llg_get_error(constraint_ptr);
@@ -97,6 +97,7 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     llg_constraints_[i] = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
   }
 
+  // Compute the mask asynchronously to avoid blocking the model inference on device
   mask_future_ = std::async(std::launch::async, [&]() {
     return ComputeMask();
   });
@@ -200,7 +201,7 @@ void GuidanceLogitsProcessor::Reset() {
     } else if (guidance_type_ == "regex") {
       constraint_ptr = llg_new_constraint_regex(&constraint_init, guidance_data_.data());
     } else {
-      constraint_ptr = llg_new_constraint(&constraint_init, guidance_data_.data());
+      throw std::runtime_error("Unsupported guidance type: " + std::string(guidance_type_) + " (only json_schema and regex are supported)");
     }
     if (llg_get_error(constraint_ptr) != nullptr) {
       std::string error_message = llg_get_error(constraint_ptr);
