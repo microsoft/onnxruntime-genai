@@ -527,13 +527,13 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
         command += [
             "-DCMAKE_SYSTEM_NAME=iOS",
-            "-DENABLE_PYTHON=OFF",
-            "-DENABLE_TESTS=OFF",
-            "-DENABLE_MODEL_BENCHMARK=OFF",
             f"-DIOS_ARCH={args.osx_arch}",
             f"-DIPHONEOS_DEPLOYMENT_TARGET={args.apple_deploy_target}",
             # The following arguments are specific to the OpenCV toolchain file
             f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file()}",
+            "-DENABLE_PYTHON=OFF",
+            "-DENABLE_TESTS=OFF",
+            "-DENABLE_MODEL_BENCHMARK=OFF",
         ]
 
     if args.macos == "Catalyst":
@@ -542,9 +542,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
         macabi_target = f"{args.osx_arch}-apple-ios{args.apple_deploy_target}-macabi"
         command += [
-            "-DENABLE_PYTHON=OFF",
-            "-DENABLE_TESTS=OFF",
-            "-DENABLE_MODEL_BENCHMARK=OFF",
             "-DCMAKE_CXX_COMPILER_TARGET=" + macabi_target,
             "-DCMAKE_C_COMPILER_TARGET=" + macabi_target,
             "-DCMAKE_CC_COMPILER_TARGET=" + macabi_target,
@@ -555,6 +552,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             f"-DCMAKE_CC_FLAGS=--target={macabi_target}",
             f"-DCMAKE_CC_FLAGS_RELEASE=-O3 -DNDEBUG --target={macabi_target}",
             "-DMAC_CATALYST=1",
+            "-DENABLE_PYTHON=OFF",
+            "-DENABLE_TESTS=OFF",
+            "-DENABLE_MODEL_BENCHMARK=OFF",
         ]
 
     if args.arm64:
