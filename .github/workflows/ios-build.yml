@@ -10,7 +10,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 jobs:
-  iphonesimulator_arm64-build:
+  iphonesimulator-arm64-build:
     runs-on: macos-latest # arm64
     steps:
       - name: Checkout OnnxRuntime GenAI repo
