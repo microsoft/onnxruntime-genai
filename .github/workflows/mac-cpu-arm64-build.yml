@@ -101,7 +101,7 @@ jobs:
         run: |
           set -e -x
           source genai-macos-venv/bin/activate
-          python3 build.py --config=Release --build_dir build/cpu/osx-arm64 --build_java --parallel --cmake_generator "Unix Makefiles" --osx_arch arm64
+          python3 build.py --config=Release --build_dir build/cpu/osx-arm64 --build_java --parallel --cmake_generator "Unix Makefiles" --macos MacOSX --osx_arch arm64 --apple_deploy_target 12.0
 
       - name: Run tests
         run: |

@@ -500,9 +500,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     if args.ios or args.macos:
         platform_name = "macabi" if args.macos == "Catalyst" else args.apple_sysroot
         command += [
-            "-DENABLE_PYTHON=OFF",
-            "-DENABLE_TESTS=OFF",
-            "-DENABLE_MODEL_BENCHMARK=OFF",
             "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + args.apple_deploy_target,
             f"-DBUILD_APPLE_FRAMEWORK={'ON' if args.build_apple_framework else 'OFF'}",
             "-DPLATFORM_NAME=" + platform_name,
@@ -530,6 +527,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
         command += [
             "-DCMAKE_SYSTEM_NAME=iOS",
+            "-DENABLE_PYTHON=OFF",
+            "-DENABLE_TESTS=OFF",
+            "-DENABLE_MODEL_BENCHMARK=OFF",
             f"-DIOS_ARCH={args.osx_arch}",
             f"-DIPHONEOS_DEPLOYMENT_TARGET={args.apple_deploy_target}",
             # The following arguments are specific to the OpenCV toolchain file
@@ -542,6 +542,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
         macabi_target = f"{args.osx_arch}-apple-ios{args.apple_deploy_target}-macabi"
         command += [
+            "-DENABLE_PYTHON=OFF",
+            "-DENABLE_TESTS=OFF",
+            "-DENABLE_MODEL_BENCHMARK=OFF",
             "-DCMAKE_CXX_COMPILER_TARGET=" + macabi_target,
             "-DCMAKE_C_COMPILER_TARGET=" + macabi_target,
             "-DCMAKE_CC_COMPILER_TARGET=" + macabi_target,
