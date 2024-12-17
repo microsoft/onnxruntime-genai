@@ -1681,41 +1681,49 @@ class Model:
 
     def make_mlp_unpacked_lora(self, layer_id, mlp, root_input):
         from peft.tuners.lora.layer import LoraLayer
+        gate_up_linear = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
 
         # Create GateProj/UpProj base layers
         gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        gate_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[ : self.intermediate_size, :], requires_grad=False)
+        gate_proj.weight = torch.nn.Parameter(gate_up_linear.weight[ : self.intermediate_size, :], requires_grad=False)
+        gate_proj.bias = None if gate_up_linear.bias is None else torch.nn.Parameter(gate_up_linear.bias[: self.intermediate_size], requires_grad=False)
 
         up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        up_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[self.intermediate_size :, :], requires_grad=False)
+        up_proj.weight = torch.nn.Parameter(gate_up_linear.weight[self.intermediate_size :, :], requires_grad=False)
+        up_proj.bias = None if gate_up_linear.bias is None else torch.nn.Parameter(gate_up_linear.bias[self.intermediate_size :], requires_grad=False)
 
         # Create GateProj/UpProj lora_B layers
         lora_B = mlp.lora_B.default
 
         gate_proj_lora_B = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
         gate_proj_lora_B.weight = torch.nn.Parameter(lora_B.weight[ : self.intermediate_size, :], requires_grad=False)
+        gate_proj_lora_B.bias = None if lora_B.bias is None else torch.nn.Parameter(lora_B.bias[: self.intermediate_size], requires_grad=False)
 
         up_proj_lora_B = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
         up_proj_lora_B.weight = torch.nn.Parameter(lora_B.weight[self.intermediate_size :, :], requires_grad=False)
+        up_proj_lora_B.bias = None if lora_B.bias is None else torch.nn.Parameter(lora_B.bias[self.intermediate_size :], requires_grad=False)
 
         # Create GateProj/UpProj LoRA layers
         mlp.gate_proj = LoraLayer(q_proj)
-        mlp.gate_proj.lora_A = mlp.gate_up_proj.lora_A
+        mlp.gate_proj.lora_A = gate_up_linear.lora_A
         mlp.gate_proj.lora_B.default = gate_proj_lora_B
-        mlp.gate_proj.scaling = mlp.gate_up_proj.scaling
+        mlp.gate_proj.scaling = gate_up_linear.scaling
 
         mlp.up_proj = LoraLayer(k_proj)
-        mlp.up_proj.lora_A = mlp.gate_up_proj.lora_A
+        mlp.up_proj.lora_A = gate_up_linear.lora_A
         mlp.up_proj.lora_B.default = up_proj_lora_B
-        mlp.up_proj.scaling = mlp.gate_up_proj.scaling
+        mlp.up_proj.scaling = gate_up_linear.scaling
 
     def make_mlp_unpacked_regular(self, layer_id, mlp, root_input):
         gate_up_linear = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
+
         mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        mlp.gate_proj.weight = torch.nn.Parameter(gate_up_linear.weight[: self.intermediate_size, :])
+        mlp.gate_proj.weight = torch.nn.Parameter(gate_up_linear.weight[: self.intermediate_size, :], requires_grad=False)
+        mlp.gate_proj.bias = None if gate_up_linear.bias is None else torch.nn.Parameter(gate_up_linear.bias[: self.intermediate_size], requires_grad=False)
 
         mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
         mlp.up_proj.weight = torch.nn.Parameter(gate_up_linear.weight[self.intermediate_size :, :])
+        mlp.up_proj.bias = None if gate_up_linear.bias is None else torch.nn.Parameter(gate_up_linear.bias[self.intermediate_size :], requires_grad=False)
 
         # Delete original packed weights
         del gate_up_linear
