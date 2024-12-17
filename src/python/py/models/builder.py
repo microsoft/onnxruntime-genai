@@ -1482,6 +1482,9 @@ class Model:
         #                    |
         #                  O_Add
 
+        # Unpack attention weights if needed
+        self.make_attention_unpacked(layer_id, attention, root_input, **kwargs)
+
         # Make MatMul nodes
         if self.attention_attrs["use_packed_matmul"]:
             # Combine 3 MatMuls into 1 packed MatMul
@@ -1571,8 +1574,10 @@ class Model:
         self.layernorm_attrs["skip_input"] = f"{o_matmul_name if not o_bias_exists else o_add_name}/output_0"
 
     def make_attention_unpacked(self, layer_id, attention, root_input, **kwargs):
-        qkv_proj = 'qkv_proj' if hasattr(attention, 'qkv_proj') else 'query_key_value'
-        qkv_linear = eval(f"attention.{qkv_proj}")
+        qkv_linear = getattr(attention, "qkv_proj", None) or getattr(attention, "query_key_value", None)
+        if qkv_linear is None:
+            # Return early if there's nothing to unpack
+            return
 
         if hasattr(qkv_linear, "base_layer"):
             # For LoRA packed `MatMul`
@@ -1581,12 +1586,8 @@ class Model:
             # For regular packed `MatMul`
             return self.make_attention_unpacked_regular(layer_id, attention, qkv_linear, root_input, **kwargs)
 
-        # Delete original packed weights and any references to them (e.g. `del qkv_linear` isn't sufficient)
+        # Delete original packed weights
         del qkv_linear
-        if hasattr(attention, 'qkv_proj'):
-            del attention.qkv_proj
-        else:
-            del attention.query_key_value
 
     def make_attention_unpacked_lora(self, layer_id, attention, qkv_linear, root_input, **kwargs):
         from peft.tuners.lora.layer import LoraLayer
@@ -1655,6 +1656,9 @@ class Model:
         attention.v_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[q_size + kv_size :], requires_grad=False)
 
     def make_mlp(self, layer_id, mlp, root_input):
+        # Unpack MLP weights if needed
+        self.make_mlp_unpacked(layer_id, mlp, root_input)
+
         if self.mlp_attrs["use_proj"]:
             self.make_mlp_proj(layer_id, mlp, root_input)
         elif self.mlp_attrs["use_fc"]:
@@ -1663,6 +1667,11 @@ class Model:
             raise NotImplementedError(f"The MLP layer type is not set.")
 
     def make_mlp_unpacked(self, layer_id, mlp, root_input):
+        gate_up_linear = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
+        if gate_up_linear is None:
+            # Return early if there's nothing to unpack
+            return
+
         if hasattr(mlp, "base_layer"):
             # For LoRA packed `MatMul`
             return self.make_mlp_unpacked_lora(layer_id, mlp, root_input)
@@ -1701,15 +1710,15 @@ class Model:
         mlp.up_proj.scaling = mlp.gate_up_proj.scaling
 
     def make_mlp_unpacked_regular(self, layer_id, mlp, root_input):
-        packed_proj = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
+        gate_up_linear = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
         mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        mlp.gate_proj.weight = torch.nn.Parameter(packed_proj.weight[: self.intermediate_size, :])
+        mlp.gate_proj.weight = torch.nn.Parameter(gate_up_linear.weight[: self.intermediate_size, :])
 
         mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        mlp.up_proj.weight = torch.nn.Parameter(packed_proj.weight[self.intermediate_size :, :])
+        mlp.up_proj.weight = torch.nn.Parameter(gate_up_linear.weight[self.intermediate_size :, :])
 
         # Delete original packed weights
-        del packed_proj
+        del gate_up_linear
 
     def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
@@ -2697,16 +2706,6 @@ class Phi3Mini4KModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        if self.quant_type is None:
-            super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
-        super().make_attention(layer_id, attention, root_input, **kwargs)
-
-    def make_mlp_proj(self, layer_id, mlp, root_input):
-        if self.quant_type is None:
-            super().make_mlp_unpacked(layer_id, mlp, root_input)
-        super().make_mlp_proj(layer_id, mlp, root_input)
-
 
 class Phi3Mini128KModel(Phi3Mini4KModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -3070,16 +3069,9 @@ class ChatGLMModel(Model):
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         if self.quant_type is None:
-            super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
             # Add dummy rotary_emb attribute
             attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
         return super().make_attention(layer_id, attention, root_input, **kwargs)
-
-
-    def make_mlp_proj(self, layer_id, mlp, root_input):
-        if self.quant_type is None:
-            super().make_mlp_unpacked(layer_id, mlp, root_input)
-        super().make_mlp_proj(layer_id, mlp, root_input)
 
     def make_layer(self, layer_id, layer):
         layer.self_attn = layer.self_attn if hasattr(layer, 'self_attn') else layer.self_attention
