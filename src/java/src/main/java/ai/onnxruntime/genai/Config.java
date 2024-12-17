@@ -4,14 +4,14 @@
 package ai.onnxruntime.genai;
 
 /**
- * Use Config to set multiple ORT execution providers. The EP used will be chosen based on the
+ * Use Config to set the ORT execution providers (EPs) and their options. The EPs are applied based on
  * insertion order.
  */
 public final class Config implements AutoCloseable {
   private long nativeHandle;
 
   /**
-   * Creates an OgaConfig from the given configuration directory.
+   * Creates a Config from the given configuration directory.
    *
    * @param modelPath The path to the configuration directory.
    * @throws GenAIException If the call to the GenAI native API fails.
@@ -20,7 +20,7 @@ public final class Config implements AutoCloseable {
     nativeHandle = createConfig(modelPath);
   }
 
-  /** Clear all providers. */
+  /** Clear the list of providers in the config */
   public void clearProviders() {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
@@ -29,29 +29,30 @@ public final class Config implements AutoCloseable {
   }
 
   /**
-   * Append a provider with the given name.
+   * Add the provider at the end of the list of providers in the given config if it doesn't already
+   * exist. If it already exists, does nothing.
    *
-   * @param provider_name The provider name.
+   * @param providerName The provider name.
    */
-  public void appendProvider(String provider_name) {
+  public void appendProvider(String providerName) {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
-    appendProvider(nativeHandle, provider_name);
+    appendProvider(nativeHandle, providerName);
   }
 
   /**
-   * Set options for a provider.
+   * Set a provider option.
    *
-   * @param provider_name The provider name.
-   * @param option_name The option name.
-   * @param option_value The option value.
+   * @param providerName The provider name.
+   * @param optionKey The key of the option to set.
+   * @param optionValue The value of the option to set.
    */
-  public void setProviderOption(String provider_name, String option_name, String option_value) {
+  public void setProviderOption(String providerName, String optionKey, String optionValue) {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
-    setProviderOption(nativeHandle, provider_name, option_name, option_value);
+    setProviderOption(nativeHandle, providerName, optionKey, optionValue);
   }
 
   @Override
@@ -83,5 +84,5 @@ public final class Config implements AutoCloseable {
   private native void appendProvider(long configHandle, String provider_name);
 
   private native void setProviderOption(
-      long configHandle, String provider_name, String option_name, String option_value);
+      long configHandle, String providerName, String optionKey, String optionValue);
 }

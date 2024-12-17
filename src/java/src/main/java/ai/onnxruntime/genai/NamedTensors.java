@@ -4,8 +4,7 @@
 package ai.onnxruntime.genai;
 
 /**
- * This class is an intermediate storage class that bridges the output of preprocessing and the
- * input of the ONNX model.
+ * This class is a list of tensors with names that match up with model input names.
  */
 public class NamedTensors implements AutoCloseable {
   private long nativeHandle;
