@@ -7,6 +7,7 @@ package ai.onnxruntime.genai;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
+/** Currently wraps an ORT Tensor. */
 public final class Tensor implements AutoCloseable {
   private long nativeHandle = 0;
   private final ElementType elementType;
@@ -17,6 +18,7 @@ public final class Tensor implements AutoCloseable {
 
   // The values in this enum must match ONNX values
   // https://github.com/onnx/onnx/blob/159fa47b7c4d40e6d9740fcf14c36fff1d11ccd8/onnx/onnx.proto#L499-L544
+  /** Element types that correspond to OnnxRuntime supported element types. */
   public enum ElementType {
     undefined,
     float32,

@@ -34,7 +34,7 @@ final class GenAI {
   /** The short name of the ONNX runtime shared library */
   static final String ONNXRUNTIME_LIBRARY_NAME = "onnxruntime";
 
-  /** The value of the {@link #GENAI_NATIVE_PATH} system property */
+  /** The value of the GENAI_NATIVE_PATH system property */
   private static String libraryDirPathProperty;
 
   /** The OS & CPU architecture string */
@@ -268,7 +268,7 @@ final class GenAI {
 
   /**
    * Maps the library name into a platform dependent library filename. Converts macOS's "jnilib" to
-   * "dylib" but otherwise is the same as {@link System#mapLibraryName(String)}.
+   * "dylib" but otherwise is the same as System#mapLibraryName(String).
    *
    * @param library The library name
    * @return The library filename.

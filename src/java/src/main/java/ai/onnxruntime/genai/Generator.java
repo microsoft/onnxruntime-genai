@@ -94,7 +94,8 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
-   * Rewinds the generator by the specified number of tokens.
+   * Rewinds the generator to the given length. This is useful when the user wants to rewind the
+   * generator to a specific length and continue generating from that point.
    *
    * @param newLength The desired length in tokens after rewinding.
    * @throws GenAIException If the call to the GenAI native API fails.
@@ -108,7 +109,8 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
-   * Generates the next token in the sequence.
+   * Computes the logits from the model based on the input ids and the past state. The computed
+   * logits are stored in the generator.
    *
    * @throws GenAIException If the call to the GenAI native API fails.
    */
@@ -151,9 +153,10 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
-   * Fetches and returns the output tensor with the given name.
+   * Returns a copy of the model output identified by the given name as a Tensor.
    *
    * @param name The name of the output needed.
+   * @return The tensor.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
   public Tensor getOutput(String name) throws GenAIException {
@@ -162,7 +165,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
-   * Activates one of the loaded adapters.
+   * Sets the adapter with the given adapter name as active.
    *
    * @param adapters The Adapters container.
    * @param adapterName The adapter name that was previously loaded.
