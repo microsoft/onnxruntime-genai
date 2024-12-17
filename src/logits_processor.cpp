@@ -122,7 +122,6 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
 
     std::vector<uint32_t> mask;
     if (mask_result.is_stop) {
-      std::cout << "should stop" << std::endl;
       mask = std::vector<uint32_t>((vocab_size_ - 1) / 32 + 1, 0);
       uint32_t eos_mask32 = 1 << (eos_token_ % 32);
       mask[eos_token_ / 32] = eos_mask32;
@@ -171,7 +170,7 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
     cuda::LaunchAddLogitsMask(logits.Span().data(), batch_size_, vocab_size_, cuda_logits_mask_ptr_.Span().data(), cuda_stream_);
     return;
   }
-#else
+#endif
   size_t vocab_index = 0;
 
   auto logits_span = logits.Span();
@@ -185,7 +184,6 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
     }
     vocab_index += vocab_size_;
   }
-#endif
 }
 
 void GuidanceLogitsProcessor::Reset() {
