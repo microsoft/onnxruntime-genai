@@ -7,7 +7,7 @@ package ai.onnxruntime.genai;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
-/** Wraps ORT native Tensor. */
+/** Currently wraps an ORT Tensor. */
 public final class Tensor implements AutoCloseable {
   private long nativeHandle = 0;
   private final ElementType elementType;
