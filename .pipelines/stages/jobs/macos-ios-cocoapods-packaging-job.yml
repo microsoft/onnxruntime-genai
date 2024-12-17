@@ -10,6 +10,8 @@ jobs:
     vmImage: 'macOS-latest'
   variables:
     buildSettingsFile: "tools/ci_build/github/apple/default_full_apple_framework_build_settings.json"
+    cPodName: onnxruntime-genai-c
+    objcPodName: onnxruntime-genai-objc
 
   workspace:
     clean: all
@@ -29,12 +31,38 @@ jobs:
       inputs:
         script: |
           set -e -x
-          python tools/ci_build/github/apple/build_and_assemble_apple_pods.py \
+          python3 -m pip install requests huggingface_hub
+          python3 tools/ci_build/github/apple/build_and_assemble_apple_pods.py \
             --build-dir "$(Build.BinariesDirectory)/apple_framework" \
             --staging-dir "$(Build.BinariesDirectory)/staging" \
             --pod-version "$(genai_version)" \
             --test \
             --variant Full \
             --build-settings-file "${{ variables.buildSettingsFile }}" \
-            --build-apple-framework-args==--config=$(cmake_build_type) \
+            --build-apple-framework-arg=--config=$(cmake_build_type) \
             --ort-version ${{parameters.ort_version}}
+
+    - script: |
+        set -e -x
+
+        for POD_NAME in "${{ variables.cPodName}}" "${{ variables.objcPodName }}";
+        do
+          ./tools/ci_build/github/apple/assemble_apple_packaging_artifacts.sh \
+            "$(Build.BinariesDirectory)/staging" \
+            "$(Build.ArtifactStagingDirectory)" \
+            "${POD_NAME}" \
+            "$(genai_version)"
+        done
+
+        # copy over helper script for use in release pipeline
+        # cp tools/ci_build/github/apple/package_release_tasks.py "$(Build.ArtifactStagingDirectory)"
+      displayName: "Assemble artifacts"
+
+    - script: |
+        set -e -x
+        ls -R "$(Build.ArtifactStagingDirectory)"
+      displayName: "List staged artifacts"
+
+    - publish: "$(Build.ArtifactStagingDirectory)"
+      artifact: "macos_ios_cocoapods_packaging_artifacts"
+      displayName: "Publish artifacts"
