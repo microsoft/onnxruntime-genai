@@ -56,7 +56,7 @@ def get_model_paths():
     hf_paths = {
         "phi-2": "microsoft/phi-2",
         "phi-3.5": "microsoft/Phi-3.5-mini-instruct",
-        "llama-3.2": "meta-llama/Llama-3.2-1B-instruct",
+        # "llama-3.2": "meta-llama/Llama-3.2-1B-instruct",
         "granite-3.0": "ibm-granite/granite-3.0-2b-instruct",
     }
 
