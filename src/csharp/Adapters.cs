@@ -53,7 +53,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         internal IntPtr Handle { get { return handle; } }
 
         /// <summary>
-        /// Implement SafeHandle override
+        /// Implement SafeHandle override.
         /// </summary>
         public override bool IsInvalid => handle == IntPtr.Zero;
 

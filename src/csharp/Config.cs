@@ -49,7 +49,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// </exception>
         public void AppendProvider(string providerName)
         {
-            Result.VerifySuccess(NativeMethods.OgaConfigAppendProvider(_configHandle, StringUtils.ToUtf8(provider)));
+            Result.VerifySuccess(NativeMethods.OgaConfigAppendProvider(_configHandle, StringUtils.ToUtf8(providerName)));
         }
 
         /// <summary>

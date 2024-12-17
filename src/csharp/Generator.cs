@@ -31,9 +31,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// <returns>
         /// True if the generation process is done, false otherwise.
         /// </returns>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
         public bool IsDone()
         {
             return NativeMethods.OgaGenerator_IsDone(_generatorHandle) != 0;
