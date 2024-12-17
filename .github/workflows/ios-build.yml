@@ -1,0 +1,41 @@
+name: "iOS ARM64 Build"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+    - main
+    - rel-*
+  pull_request:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+jobs:
+  iphonesimulator-arm64-build:
+    runs-on: macos-latest # arm64
+    steps:
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.x'
+
+      - name: Install the python wheel and dependencies
+        run: |
+          python3 -m venv genai-macos-venv
+          source genai-macos-venv/bin/activate
+          python3 -m pip install requests
+
+      - name: Run iOS Build
+        run: |
+          set -e -x
+          source genai-macos-venv/bin/activate
+          python3 build.py --ios \
+              --parallel \
+              --apple_sysroot iphonesimulator \
+              --osx_arch arm64 \
+              --apple_deploy_target 15.4 \
+              --cmake_generator 'Xcode' \
+              --build_dir build_iphonesimulator

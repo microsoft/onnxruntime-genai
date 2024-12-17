@@ -18,7 +18,7 @@ public class MultiModalProcessorTest {
     try (Model model = new Model(TestUtils.testVisionModelPath());
         MultiModalProcessor multiModalProcessor = new MultiModalProcessor(model);
         TokenizerStream stream = multiModalProcessor.createStream();
-        GeneratorParams generatorParams = model.createGeneratorParams()) {
+        GeneratorParams generatorParams = new GeneratorParams(model)) {
       String inputs =
           new String(
               "<|user|>\n<|image_1|>\n Can you convert the table to markdown format?\n<|end|>\n<|assistant|>\n");

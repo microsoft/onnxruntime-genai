@@ -10,6 +10,12 @@ package ai.onnxruntime.genai;
 public class MultiModalProcessor implements AutoCloseable {
   private long nativeHandle;
 
+  /**
+   * Construct a MultiModalProcessor for a given model.
+   *
+   * @param model The model to be used.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
   public MultiModalProcessor(Model model) throws GenAIException {
     assert (model.nativeHandle() != 0); // internal code should never pass an invalid model
 
