@@ -886,7 +886,7 @@ class QuantModel:
         elif quant_type == "gptq":
             model = GPTQModel(quant_type, **kwargs)
         elif quant_type == "quark":
-            model = AWQModel(quant_type, **kwargs)
+            model = QuarkModel(quant_type, **kwargs)
         else:
             raise NotImplementedError(f"The {quant_type} quantized model is not currently supported.")
 
