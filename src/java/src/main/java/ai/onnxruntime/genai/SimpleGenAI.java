@@ -29,9 +29,15 @@ public class SimpleGenAI implements AutoCloseable {
   private Model model;
   private Tokenizer tokenizer;
 
+  /**
+   * Construct a SimpleGenAI instance from model path.
+   *
+   * @param modelPath The path to the GenAI model.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
   public SimpleGenAI(String modelPath) throws GenAIException {
     model = new Model(modelPath);
-    tokenizer = model.createTokenizer();
+    tokenizer = new Tokenizer(model);
   }
 
   /**
@@ -42,7 +48,7 @@ public class SimpleGenAI implements AutoCloseable {
    * @throws GenAIException on failure
    */
   public GeneratorParams createGeneratorParams() throws GenAIException {
-    return model.createGeneratorParams();
+    return new GeneratorParams(model);
   }
 
   /**
