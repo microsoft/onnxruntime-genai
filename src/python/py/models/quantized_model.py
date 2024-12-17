@@ -743,7 +743,7 @@ class AWQModel(QuantizedModel):
 
 
 class GPTQModel(QuantizedModel):
-    def __init__(self, quant_type, input_path, quant_attrs, use_g_idx, q_size, kv_size, intermediate_size, num_layers):
+    def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
         super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
 
         # Unpack and repack all `QuantizedTensorModule` classes in model
