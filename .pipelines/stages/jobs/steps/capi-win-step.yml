@@ -47,6 +47,13 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
+    $exePath = "$env:TEMP\rustup-init.exe"
+    (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+    & $exePath -y --default-toolchain=1.82.0
+    Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
+  displayName: 'Install Rust Toolchain'
+
+- powershell: |
     cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
   displayName: 'Configure CMake C API with CUDA'
   condition: eq(variables['ep'], 'cuda')
