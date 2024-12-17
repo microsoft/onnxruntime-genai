@@ -3,8 +3,8 @@ on:
   workflow_dispatch:
   push:
     branches:
-    - main
-    - rel-*
+      - main
+      - rel-*
   pull_request:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -20,13 +20,16 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12.x'
+          python-version: "3.12.x"
 
       - name: Install the python wheel and dependencies
         run: |
           python3 -m venv genai-macos-venv
           source genai-macos-venv/bin/activate
           python3 -m pip install requests
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@1.82.0
 
       - name: Run iOS Build
         run: |
