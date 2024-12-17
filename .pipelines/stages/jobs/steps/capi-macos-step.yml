@@ -29,7 +29,7 @@ steps:
     echo "build_config=${{ parameters.build_config }}"
   displayName: 'Print Parameters'
 
-- bash: |
+- powershell: |
     rustup toolchain install 1.82.0-x86_64-apple-darwin
     rustup default 1.82.0-x86_64-apple-darwin
 
