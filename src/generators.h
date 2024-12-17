@@ -60,7 +60,7 @@ enum struct DeviceType {
   CUDA,
   DML,
   WEBGPU,
-  QNN_WITH_SHARED_MEMORY,
+  QNN,
 };
 
 std::string to_string(DeviceType device_type);

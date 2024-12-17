@@ -10,22 +10,23 @@ struct KeyValueCache {
   virtual void AddEncoder() = 0;
   virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) = 0;
   virtual void RewindTo(size_t index) = 0;
-
-  static bool IsCacheNeeded(const Model& model);
 };
 
-struct KeyValueCacheDefault_Combined {
+struct KeyValueCacheDefault_Combined : KeyValueCache {
   KeyValueCacheDefault_Combined(State& state);
 
-  void Add();  // Add to state inputs/outputs
-  void Update(DeviceSpan<int32_t> beam_indices, int total_length);
-  void RewindTo(size_t index);
+  void Add() override;  // Add to state inputs/outputs
+  void AddEncoder() override {
+    throw std::runtime_error("KeyValueCacheDefault_Combined does not support AddEncoder.");
+  };
+  void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
+  void RewindTo(size_t index) override;
 
+ private:
   template <typename ScoreType>
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
   void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
 
- private:
   template <typename T>
   void RewindPastTensorsTo(size_t index);
 

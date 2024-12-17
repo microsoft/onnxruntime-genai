@@ -58,7 +58,7 @@ bool IntermediatePipelineState::HasOutput(std::string_view name) const {
 }
 
 bool IntermediatePipelineState::SupportsPrimaryDevice() const {
-  if (model_.device_type_ == DeviceType::CPU || model_.device_type_ == DeviceType::QNN_WITH_SHARED_MEMORY) {
+  if (model_.device_type_ == DeviceType::CPU || model_.device_type_ == DeviceType::QNN) {
     return true;
   } else if (model_.device_type_ == DeviceType::CUDA) {
     if (!model_.config_->model.decoder.pipeline[id_].session_options.has_value()) {

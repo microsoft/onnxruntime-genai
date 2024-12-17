@@ -93,6 +93,15 @@ struct PositionInputsDefault : PositionInputs {
 #endif
 };
 
+// Certain models can only process a fixed number of tokens at a time.
+// For example, given a prompt with 120 tokens, and a model that can only process 20 tokens at a time,
+// this class will split the position ids into 6 windows of 20 tokens each.
+// At each update step, the next window of position ids is prepared.
+// This is done until all windows have been processed before switching to the model-generation phase
+// where position ids are prepared one id at a time.
+// This class will also prepare the attention mask for each iteration. The attention mask buffer is allocated just
+// once and reused for each iteration by setting the mask to 1 for current window tokens and previously active window tokens
+// In contrast, PositionInputsDefault processes all position ids at once.
 struct WindowedPositionInputs : PositionInputs {
   WindowedPositionInputs(State& state);
   WindowedPositionInputs(const WindowedPositionInputs&) = delete;

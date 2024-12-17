@@ -52,6 +52,13 @@ struct InputIDsDefault : InputIDs {
   std::unique_ptr<OrtValue> past_sequence_length_;
 };
 
+// Certain models can only process a fixed number of tokens at a time.
+// For example, given a prompt with 120 tokens, and a model that can only process 20 tokens at a time,
+// this class will split the prompt into 6 windows of 20 tokens each.
+// At each update step, the next window of tokens is processed.
+// This is done until all windows have been processed before switching to the model-generated tokens
+// which are processed one token at a time.
+// In contrast, InputIDsDefault processes all prompt tokens at once.
 struct WindowedInputIDs : public InputIDs {
   WindowedInputIDs(State& state);
   WindowedInputIDs(const WindowedInputIDs&) = delete;

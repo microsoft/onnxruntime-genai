@@ -25,6 +25,10 @@ int64_t ElementCountFromShape(const std::array<int64_t, 4>& shape) {
   return std::accumulate(shape.begin(), shape.end(), int64_t{1}, std::multiplies<int64_t>());
 }
 
+bool IsCacheNeeded(const Model& model) {
+  return model.session_info_->HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, 0));
+}
+
 }  // namespace
 
 KeyValueCacheDefault_Combined::KeyValueCacheDefault_Combined(State& state)
@@ -186,10 +190,6 @@ void KeyValueCacheDefault_Combined::PickPastState(DeviceSpan<int32_t> beam_indic
   } else {
     PickPastState<Ort::Float16_t>(beam_indices, index);
   }
-}
-
-bool KeyValueCache::IsCacheNeeded(const Model& model) {
-  return model.session_info_->HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, 0));
 }
 
 KeyValueCacheDefault::KeyValueCacheDefault(State& state)
@@ -455,6 +455,10 @@ WindowedKeyValueCache::WindowedKeyValueCache(State& state)
                             model_.config_->model.context_length - window_size_, model_.config_->model.decoder.head_size},
       value_cache_shape_out_{model_.config_->model.decoder.num_key_value_heads, 1,
                              window_size_, model_.config_->model.decoder.head_size} {
+  if (layer_count_ == 0) {
+    throw std::runtime_error("Expected there to be at least 1 layer in the model. Actual: " +
+                             std::to_string(layer_count_) + ". Please check the num_hidden_layers attribute in the model configuration.");
+  }
   for (int i = 0; i < layer_count_; ++i) {
     input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_key_names, i));
     input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.past_value_names, i));
@@ -669,7 +673,7 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current
 }
 
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
-  if (!KeyValueCache::IsCacheNeeded(state.model_)) {
+  if (!IsCacheNeeded(state.model_)) {
     return nullptr;
   }
 

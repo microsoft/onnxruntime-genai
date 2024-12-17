@@ -292,7 +292,7 @@ OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* oga_gene
   }
 
   auto input_ids = Generators::PadInputs(span_sequences, generator.model_->config_->model.pad_token_id);
-  generator.AppendTokens(Generators::cpu_span<const int32_t>(input_ids.data(), input_ids.size()));
+  generator.AppendTokens(input_ids);
   return nullptr;
   OGA_CATCH
 }

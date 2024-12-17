@@ -316,7 +316,7 @@ void Model::InitDeviceAllocator(OrtSession& session) {
   }
 #endif
 
-  if (device_type_ == DeviceType::QNN_WITH_SHARED_MEMORY) {
+  if (device_type_ == DeviceType::QNN) {
     memory_info_device_ = OrtMemoryInfo::Create("QnnHtpShared", OrtAllocatorType::OrtDeviceAllocator, 0,
                                                 OrtMemType::OrtMemTypeDefault);
     owned_allocator_device_ = Ort::Allocator::Create(session, *memory_info_device_);
@@ -519,7 +519,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       // on the other hand, not sure if is_primary_session_options is the right thing to check here.
       if (const auto opt_it = opts.find("enable_htp_shared_memory_allocator");
           opt_it != opts.end() && opt_it->second == "1") {
-        device_type_ = DeviceType::QNN_WITH_SHARED_MEMORY;
+        device_type_ = DeviceType::QNN;
       }
 
       session_options.AppendExecutionProvider("QNN", opts);
@@ -707,7 +707,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   switch (device_type_) {
     case DeviceType::WEBGPU:
     case DeviceType::DML:
-    case DeviceType::QNN_WITH_SHARED_MEMORY:
+    case DeviceType::QNN:
       // DML and WebGpu doesn't currently support on-device scoring, so we use the CPU for non-cache inputs/outputs
     case DeviceType::CPU:
       for (int i = 0; i < batch_size; i++) {

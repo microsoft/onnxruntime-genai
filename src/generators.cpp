@@ -177,7 +177,7 @@ std::string to_string(DeviceType device_type) {
       return "DirectML";
     case DeviceType::WEBGPU:
       return "WebGpu";
-    case DeviceType::QNN_WITH_SHARED_MEMORY:
+    case DeviceType::QNN:
       return "QnnWithSharedMemory";
   }
   throw std::runtime_error("Unknown device type");
@@ -276,16 +276,16 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 }
 
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
-  size_t input_ids_size = input_ids.size();
+  size_t padded_input_ids_size = input_ids.size();
   if (model_->config_->model.decoder.sliding_window.has_value()) {
     // If the model has a sliding window, pad the input_ids to the next multiple of the window size
     // so that the input_ids can be divided into window size chunks.
     const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
-    input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
+    padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
   }
-  auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(input_ids_size);
+  auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
-  std::fill_n(cpu_span.begin(), input_ids_size, model_->config_->model.pad_token_id);
+  std::fill_n(cpu_span.begin(), padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
   std::copy_backward(input_ids.begin(), input_ids.end(), cpu_span.end());
   input_ids_device.CopyCpuToDevice();
   return input_ids_device;

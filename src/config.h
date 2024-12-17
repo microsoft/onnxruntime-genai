@@ -107,9 +107,9 @@ struct Config {
       int num_hidden_layers{};
       int head_size{};
 
-      struct SlidingWindow {
-        int window_size{128};
-        int pad_value{};
+      struct SlidingWindow {  // Sliding window parameters for models that process input prompt in chunks
+        int window_size{};    // The size of the window to slide over the input prompt
+        int pad_value{};      // The key-value cache padding value to use for the sliding window for inactive tokens
       };
       std::optional<SlidingWindow> sliding_window;
 

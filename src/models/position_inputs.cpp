@@ -242,7 +242,7 @@ void PositionInputsDefault::UpdateAttentionMask(int total_length, int new_kv_len
   switch (model_.device_type_) {
     case DeviceType::WEBGPU:
     case DeviceType::CPU:
-    case DeviceType::QNN_WITH_SHARED_MEMORY: {
+    case DeviceType::QNN: {
       type_ == Ort::TypeToTensorType<int32_t> ? UpdateAttentionMaskImpl<int32_t>(total_length)
                                               : UpdateAttentionMaskImpl<int64_t>(total_length);
       break;
@@ -528,7 +528,7 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
       // window_size = 3, num_windows = 2, pad_token = 0
       // window_index = 0, attention_mask_ -> ([0] * context_length - window_size_) + [0, 1, 1]
       auto* attention_mask_data = attention_mask_->GetTensorMutableData<int32_t>();
-      std::fill(attention_mask_data, attention_mask_data + attention_mask_shape_[1], 0);
+      std::fill_n(attention_mask_data, attention_mask_shape_[1] - window_size_, 0);
       for (size_t i = 0; i < window_size_; i++) {
         attention_mask_data[attention_mask_shape_[1] - window_size_ + i] = next_tokens.CpuSpan()[i] == model_.config_->model.pad_token_id ? 0 : 1;
       }
