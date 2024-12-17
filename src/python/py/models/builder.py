@@ -37,7 +37,7 @@ class Model:
 
         self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]
-        self.io_dtype = io_dtype      # {'fp16', 'fp32'}
+        self.io_dtype = io_dtype      # {"fp16", "fp32"}
         self.onnx_dtype = onnx_dtype  # {"int4", "fp16", "fp32"}
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
         self.adapter_path = extra_options.get("adapter_path", None)
@@ -3102,6 +3102,38 @@ def parse_hf_token(hf_token):
     return hf_token
 
 
+def is_supported(model_name, input_path = None, cache_dir = None, **extra_options):
+    supported_archs = set([
+        "ChatGLMForConditionalGeneration",
+        "ChatGLMModel",
+        "GemmaForCausalLM",
+        "Gemma2ForCausalLM",
+        "LlamaForCausalLM",
+        "MistralForCausalLM",
+        "NemotronForCausalLM",
+        "PhiForCausalLM",
+        "PhiMoEForCausalLM",
+        "Phi3ForCausalLM",
+        "Phi3SmallForCausalLM",
+        "Phi3VForCausalLM",
+        "Qwen2ForCausalLM",
+    ])
+
+    # Create cache directory
+    if cache_dir is None:
+        cache_dir = os.path.join(".", "cache_dir")
+    os.makedirs(cache_dir, exist_ok=True)
+
+    # Load model config
+    extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
+    hf_name = input_path if os.path.isdir(input_path) else model_name
+    hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
+
+    # Check if model architecture is supported
+    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=True, **extra_kwargs)
+    return config.architectures[0] in supported_archs
+
+
 def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
@@ -3228,7 +3260,7 @@ def get_args():
         "--cache_dir",
         required=False,
         type=str,
-        default=os.path.join('.', 'cache_dir'),
+        default=os.path.join(".", "cache_dir"),
         help="Cache directory for Hugging Face files and temporary ONNX external data files",
     )
 
