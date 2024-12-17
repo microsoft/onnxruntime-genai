@@ -4,7 +4,7 @@
 package ai.onnxruntime.genai;
 
 /**
- * Use Config to set the ORT execution providers (EPs) and their options. The EPs are applied based on 
+ * Use Config to set the ORT execution providers (EPs) and their options. The EPs are applied based on
  * insertion order.
  */
 public final class Config implements AutoCloseable {

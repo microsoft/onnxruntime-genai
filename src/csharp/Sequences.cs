@@ -5,6 +5,9 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    /// <summary>
+    /// Represents a collection of encoded prompts/responses.
+    /// </summary>
     public class Sequences : IDisposable
     {
         private IntPtr _sequencesHandle;
@@ -19,8 +22,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _sequencesHandle; } }
 
+        /// <summary>
+        /// The number of individual sequence.
+        /// </summary>
         public ulong NumSequences { get { return _numSequences; } }
 
+        /// <summary>
+        /// The indexed accessor of individual sequence.
+        /// </summary>
         public ReadOnlySpan<int> this[ulong sequenceIndex]
         {
             get
