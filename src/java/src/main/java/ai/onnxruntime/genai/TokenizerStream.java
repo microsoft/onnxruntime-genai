@@ -10,11 +10,23 @@ public class TokenizerStream implements AutoCloseable {
 
   private long nativeHandle = 0;
 
+  /**
+   * Construct a TokenizerStream.
+   *
+   * @param tokenizerStreamHandle The native handle.
+   */
   TokenizerStream(long tokenizerStreamHandle) {
     assert (tokenizerStreamHandle != 0); // internal usage should never pass an invalid handle
     nativeHandle = tokenizerStreamHandle;
   }
 
+  /**
+   * Decode one token.
+   *
+   * @param token The token.
+   * @return The decoded result.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
   public String decode(int token) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
