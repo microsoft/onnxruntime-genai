@@ -2,7 +2,8 @@ parameters:
 - name: build_config
   type: string
   default: 'release'
-
+- name: build_settings_file
+  type: string
 steps:
 
 - checkout: self
@@ -11,6 +12,9 @@ steps:
   submodules: recursive
 
 - template: utils/set-genai-version.yml
+- template: utils/set-cmake-build-type.yml
+  parameters:
+    build_config: ${{parameters.build_config}}
 
 - template: utils/set-nightly-build-option-variable.yml
 
@@ -19,7 +23,8 @@ steps:
     python3 -m pip install requests
     python3 tools/ci_build/github/apple/build_apple_framework.py \
           --build_dir "$(Build.BinariesDirectory)/apple_framework" \
-          tools/ci_build/github/apple/default_full_ios_framework_build_settings.json
+          --config $(cmake_build_type) \
+          "${{ parameters.build_settings_file }}"
 
     mkdir $(Build.BinariesDirectory)/artifacts
     mkdir -p $(Build.BinariesDirectory)/artifacts_staging/onnxruntime-genai.xcframework

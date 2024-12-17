@@ -229,13 +229,11 @@ def _validate_build_dir(args: argparse.Namespace):
             # also tweak build directory name for mac builds
             target_sys = "macOS"
 
-        # set to a config specific build dir if no build_dir specified from command arguments
-        args.build_dir = Path("build") / target_sys / args.config
+        args.build_dir = Path("build") / target_sys
 
+    # set to a config specific build dir. it should exist unless we're creating the cmake setup
     is_strict = not args.update
-    # Use user-specified build_dir and ignore args.config
-    # This is to better accommodate the existing cmake presets which can uses arbitrary paths.
-    args.build_dir = args.build_dir.resolve(strict=is_strict)
+    args.build_dir = args.build_dir.resolve(strict=is_strict) / args.config
 
 
 def _validate_cuda_args(args: argparse.Namespace):
@@ -505,6 +503,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             "-DENABLE_PYTHON=OFF",
             "-DENABLE_TESTS=OFF",
             "-DENABLE_MODEL_BENCHMARK=OFF",
+            "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + args.apple_deploy_target,
             f"-DBUILD_APPLE_FRAMEWORK={'ON' if args.build_apple_framework else 'OFF'}",
             "-DPLATFORM_NAME=" + platform_name,
         ]

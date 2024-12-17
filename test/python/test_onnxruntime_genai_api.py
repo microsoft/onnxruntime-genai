@@ -395,14 +395,14 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
                     for kv in ["key", "value"]
                     for i in range(num_layers)
                 ],
-                [f"/model/layers.{num_layers}/final_norm_layernorm/output_0"]
+                ["hidden_states"]
                 + [
                     f"present.{i}.{kv}"
                     for kv in ["key", "value"]
                     for i in range(num_layers)
                 ],
             ),
-            ([f"/model/layers.{num_layers}/final_norm_layernorm/output_0"], ["logits"]),
+            ([f"hidden_states"], ["logits"]),
         ]
 
         for i, split_name in enumerate(["embeds", "transformer", "lm_head"]):

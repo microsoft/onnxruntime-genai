@@ -86,7 +86,7 @@ class Model:
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
         }
-        self.exclude_embeds = "exclude_embeds" in extra_options
+        self.exclude_embeds = extra_options.get("exclude_embeds", False)
         if self.exclude_embeds:
             self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
 
@@ -104,9 +104,12 @@ class Model:
             "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
             "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
-        self.exclude_lm_head = "exclude_lm_head" in extra_options
+        self.exclude_lm_head = extra_options.get("exclude_lm_head", False)
+        self.include_hidden_states = extra_options.get("include_hidden_states", False)
         if self.exclude_lm_head:
             self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
+        elif self.include_hidden_states:
+            self.output_names = ["hidden_states"] + self.output_names
 
         # Store names of nodes already created
         self.node_names = set()
@@ -309,11 +312,21 @@ class Model:
             config = GenerationConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
         except:
             config = AutoConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+
         inputs = dict(zip(self.input_names, self.input_names))
         inputs.update({
             "past_key_names": "past_key_values.%d.key",
             "past_value_names": "past_key_values.%d.value",
         })
+        outputs = dict(zip(self.output_names, self.output_names))
+        outputs.update({
+            "present_key_names": "present.%d.key",
+            "present_value_names": "present.%d.value",
+        })
+        if "hidden_states" in outputs:
+            # Remove 'hidden_states' from 'outputs' entry in config since ORT GenAI doesn't use it
+            del outputs["hidden_states"]
+
         genai_config = {
             "model": {
                 "bos_token_id": config.bos_token_id if hasattr(config, "bos_token_id") else 1,  # config.bos_token_id not present in ChatGLM model configs.
@@ -327,11 +340,7 @@ class Model:
                     "head_size": self.head_size,
                     "hidden_size": self.hidden_size,
                     "inputs": inputs,
-                    "outputs": {
-                        "logits": "logits",
-                        "present_key_names": "present.%d.key",
-                        "present_value_names": "present.%d.value",
-                    },
+                    "outputs": outputs,
                     "num_attention_heads": self.num_attn_heads,
                     "num_hidden_layers": self.num_layers,
                     "num_key_value_heads": self.num_kv_heads,
@@ -363,7 +372,7 @@ class Model:
             ep_options = { self.ep : self.ep_attrs[self.ep] }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
-        if self.extra_options.get("prompt_templates", "0") == "1":
+        if self.extra_options.get("include_prompt_templates", False):
             prompt_templates = self._get_prompt_templates(model_name_or_path, extra_kwargs)
             if prompt_templates is not None:
                 genai_config["model"]["prompt_templates"] = prompt_templates
@@ -1011,7 +1020,7 @@ class Model:
 
         output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
         output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
-        if self.layernorm_attrs["last_layernorm"] and self.exclude_lm_head:
+        if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
             output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
 
@@ -2669,43 +2678,6 @@ class Phi3Mini4KModel(MistralModel):
             super().make_mlp_unpacked(layer_id, mlp, root_input)
         super().make_mlp_proj(layer_id, mlp, root_input)
 
-class NemotronModel(LlamaModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.layernorm_attrs["simple"] = False
-        self.layernorm_attrs["add_offset"] = 1
-        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
-
-    def make_mlp_proj(self, layer_id, mlp, root_input):
-        # Make nodes for the MLP subgraph
-        #
-        #          root_input
-        #              |
-        #         UpProjMatMul
-        #              |
-        #           ActFunc
-        #              |
-        #         DownProjMatMul
-
-        up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
-        up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
-
-        act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")
-
-        # Make output MatMul node
-        down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
-        down_name = self.make_matmul(mlp.down_proj, down_basename, f"{act_fn_name}/output_0")
-
-        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
-        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
-
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
-        return super().make_attention(layer_id, attention, root_input, **kwargs)
-
-    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
-        num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
-        super().make_rotary_embedding(rotemb, name, root_input, num_heads=num_heads, rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
 
 class Phi3Mini128KModel(Phi3Mini4KModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -2775,6 +2747,7 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
             self.rotemb_attrs["create_rotary_embedding_caches"] = False
 
         return cos_cache_name, sin_cache_name
+
 
 class Phi3Small8KModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -3016,6 +2989,45 @@ class Phi3MoE128KModel(MistralModel):
             self.layernorm_attrs["last_layernorm"] = True
 
 
+class NemotronModel(LlamaModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.layernorm_attrs["simple"] = False
+        self.layernorm_attrs["add_offset"] = 1
+        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
+
+    def make_mlp_proj(self, layer_id, mlp, root_input):
+        # Make nodes for the MLP subgraph
+        #
+        #          root_input
+        #              |
+        #         UpProjMatMul
+        #              |
+        #           ActFunc
+        #              |
+        #         DownProjMatMul
+
+        up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
+        up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
+
+        act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")
+
+        # Make output MatMul node
+        down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
+        down_name = self.make_matmul(mlp.down_proj, down_basename, f"{act_fn_name}/output_0")
+
+        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
+        return super().make_attention(layer_id, attention, root_input, **kwargs)
+
+    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
+        num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
+        super().make_rotary_embedding(rotemb, name, root_input, num_heads=num_heads, rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
+
+
 class ChatGLMModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
@@ -3049,7 +3061,7 @@ def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
     """
-    bools = ["int4_is_symmetric", "use_qdq", "use_8bits_moe", "enable_cuda_graph"]
+    bools = ["int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "use_8bits_moe", "use_qdq", "include_prompt_templates"]
     for key in bools:
         if key in kv_pairs:
             if kv_pairs[key] in {"false", "False", "0"}:
@@ -3064,6 +3076,11 @@ def check_extra_options(kv_pairs):
         for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
             op_types_to_quantize += (op_type, )
         kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
+
+    if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
+        # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
+        # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
+        raise ValueError(f"Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
 
 def parse_extra_options(kv_items):
@@ -3120,7 +3137,11 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     if "config_only" not in extra_options:
         # List architecture options in alphabetical order
-        if config.architectures[0] == "GemmaForCausalLM":
+        if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
+            # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
+            config.hidden_act = "swiglu"
+            onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "GemmaForCausalLM":
             onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
             onnx_model = Gemma2Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
@@ -3128,6 +3149,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = LlamaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "MistralForCausalLM":
             onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "NemotronForCausalLM":
+            onnx_model = NemotronModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiForCausalLM":
             onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 4096:
@@ -3150,12 +3173,6 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen2ForCausalLM":
             onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "NemotronForCausalLM":
-            onnx_model = NemotronModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
-            # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
-            config.hidden_act = "swiglu"
-            onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
@@ -3253,21 +3270,31 @@ def get_args():
                     The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
+                hf_token = false/token: Use this to manage authentication with Hugging Face.
+                    Default behavior is to use the authentication token stored by `huggingface-cli login`.
+                    If false, authentication with Hugging Face will be disabled.
+                    If token, you can provide a custom authentication token that differs from the one stored in your environment.
+                    If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
                 exclude_embeds = Remove embedding layer from your ONNX model.
                     Use this option when you want to remove the embedding layer from within your ONNX model.
                     Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
-                enable_cuda_graph = 1: The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
-                    is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
-                    and the graph structure.
-                use_8bits_moe = 1: Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
-                hf_token = false/token: Use this to disable authentication with Hugging Face or provide a custom authentication token that differs from the one stored in your environment. Default behavior is to use the authentication token stored by `huggingface-cli login`.
-                    If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
-                use_qdq = 1: Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
+                include_hidden_states = Include hidden states as output from your ONNX model.
+                    Use this option when you want to have the hidden states as an output from your ONNX model.
+                    In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
+                enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
+                    If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
+                    It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
+                use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
+                    If true, the QMoE op will use 4-bit quantization. If false, the QMoE op will use 8-bits quantization.
+                use_qdq = Use the QDQ decomposition for ops.
+                    Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
-                prompt_templates = 1: Include per-role prompt templates in the GenAI config file. Default is 0 (not to include).
+                    Use this option for LoRA models.
+                include_prompt_templates = Include prompt templates in the GenAI config file. Default is false.
+                    Use this option to include per-role prompt templates in the `genai_config.json` file.
             """),
     )
 
