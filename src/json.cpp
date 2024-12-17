@@ -7,7 +7,7 @@
 
 namespace JSON {
 static constexpr const char* value_names[] = {"string", "number", "bool", "null"};
-static_assert(std::size(value_names) == Value::type_count_v);
+static_assert(std::size(value_names) == std::variant_size_v<Value>);
 
 struct JSON {
   JSON(Element& element, std::string_view document);
