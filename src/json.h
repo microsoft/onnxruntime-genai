@@ -32,7 +32,7 @@ struct Value : private std::variant<std::string_view, double, bool, std::nullptr
   operator float() const { return static_cast<float>(Get<double>()); }
   operator int() const { return static_cast<int>(Get<double>()); }
   operator bool() const { return Get<bool>(); }
-  explicit operator char() const = delete;  // To avoid ambiguity when converting to std::string
+  operator char() const = delete;  // To avoid ambiguity when converting to std::string
 };
 
 struct Element {
