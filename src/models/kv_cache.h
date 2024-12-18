@@ -12,12 +12,12 @@ struct KeyValueCache {
   virtual void RewindTo(size_t index) = 0;
 };
 
-struct KeyValueCacheDefault_Combined : KeyValueCache {
-  KeyValueCacheDefault_Combined(State& state);
+struct CombinedKeyValueCache : KeyValueCache {
+  CombinedKeyValueCache(State& state);
 
   void Add() override;  // Add to state inputs/outputs
   void AddEncoder() override {
-    throw std::runtime_error("KeyValueCacheDefault_Combined does not support AddEncoder.");
+    throw std::runtime_error("CombinedKeyValueCache does not support AddEncoder.");
   };
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   void RewindTo(size_t index) override;
@@ -45,8 +45,8 @@ struct KeyValueCacheDefault_Combined : KeyValueCache {
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
 
-struct KeyValueCacheDefault : KeyValueCache {
-  KeyValueCacheDefault(State& state);
+struct DefaultKeyValueCache : KeyValueCache {
+  DefaultKeyValueCache(State& state);
 
   void AddEncoder() override;  // If model has an initial encoder step, this is used
   // Register input_ids as ORT session input.
@@ -81,9 +81,9 @@ struct KeyValueCacheDefault : KeyValueCache {
   std::vector<StaticBuffer*> sb_kv_caches_;
 };
 
-// Very similar to the KeyValueCacheDefault, but is only created once at the encoder step, then used without modification for every decoder step
-struct Cross_Cache {
-  Cross_Cache(State& state);
+// Very similar to the DefaultKeyValueCache, but is only created once at the encoder step, then used without modification for every decoder step
+struct CrossCache {
+  CrossCache(State& state);
 
   void AddOutputs();
   void AddInputs();

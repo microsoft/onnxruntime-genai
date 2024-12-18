@@ -16,8 +16,8 @@ struct PositionInputs {
   virtual void RewindTo(size_t index) = 0;
 };
 
-struct PositionInputsDefault : PositionInputs {
-  PositionInputsDefault(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk);
+struct DefaultPositionInputs : PositionInputs {
+  DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk);
 
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
@@ -101,7 +101,7 @@ struct PositionInputsDefault : PositionInputs {
 // where position ids are prepared one id at a time.
 // This class will also prepare the attention mask for each iteration. The attention mask buffer is allocated just
 // once and reused for each iteration by setting the mask to 1 for current window tokens and previously active window tokens
-// In contrast, PositionInputsDefault processes all position ids at once.
+// In contrast, DefaultPositionInputs processes all position ids at once.
 struct WindowedPositionInputs : PositionInputs {
   WindowedPositionInputs(State& state);
   WindowedPositionInputs(const WindowedPositionInputs&) = delete;

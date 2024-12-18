@@ -89,8 +89,8 @@ struct DecoderState : State {
   const CapturedGraphInfo* captured_graph_info_;
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
-  PositionInputsDefault position_inputs_;  // Model input
-  KeyValueCacheDefault kv_cache_{*this};   // Model input
+  DefaultPositionInputs position_inputs_;  // Model input
+  DefaultKeyValueCache kv_cache_{*this};   // Model input
   Logits logits_{*this};                   // Model output
 };
 
