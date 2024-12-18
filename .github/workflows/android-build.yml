@@ -21,7 +21,7 @@ jobs:
     #       it doesn't work on macos-14.
     #         HVF error: HV_UNSUPPORTED
     #       it works on macos-13 but with macos-15 being released soon that isn't a long term solution.
-    runs-on: ubuntu-latest
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
@@ -40,47 +40,37 @@ jobs:
         with:
           gradle-version: '8.6'
 
-      # Check the NDK that we're using
-      - name: Check Android NDKs
+      # Check the Android SDK and NDK that we're using
+      - name: Check Android SDK and NDK
         run: |
           set -e -x
           uname -m
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -l $ANDROID_HOME
+
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
           echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
           echo "ANDROID_NDK_LATEST_HOME=$ANDROID_NDK_LATEST_HOME"
           ls -l $ANDROID_HOME/ndk
+
+      - name: Check if emulator is installed and install it if needed
+        run: |
+          if [ -d "${ANDROID_SDK_ROOT}/emulator" ]; then
+              echo "${ANDROID_SDK_ROOT}/emulator exists"
+          else
+              ${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager --install "emulator"
+          fi
 
       # Needed for linux
       - name: Install jq
         run: |
           sudo apt-get install jq
 
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
         with:
           submodules: true
-
-      - name: Get the Latest OnnxRuntime Nightly Version
-        run: |
-          ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
-          echo "$ORT_NIGHTLY_VERSION"
-          echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
-
-      # have to create a dummy project to use `add package`
-      - name: Download OnnxRuntime Nightly
-        run: |
-          dotnet new console
-          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
-
-      - name: Extract ONNX Runtime AAR
-        run: |
-          set -e -x
-          ls -l
-          unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
-          ls -lR ort
 
       - name: Create Android build
         run: |
