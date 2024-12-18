@@ -1679,6 +1679,9 @@ class Model:
             # For regular packed `MatMul`
             return self.make_mlp_unpacked_regular(layer_id, mlp, root_input)
 
+        # Delete original packed weights
+        del gate_up_linear
+
     def make_mlp_unpacked_lora(self, layer_id, mlp, root_input):
         from peft.tuners.lora.layer import LoraLayer
         gate_up_linear = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
@@ -1724,9 +1727,6 @@ class Model:
         mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
         mlp.up_proj.weight = torch.nn.Parameter(gate_up_linear.weight[self.intermediate_size :, :])
         mlp.up_proj.bias = None if gate_up_linear.bias is None else torch.nn.Parameter(gate_up_linear.bias[self.intermediate_size :], requires_grad=False)
-
-        # Delete original packed weights
-        del gate_up_linear
 
     def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
