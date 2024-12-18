@@ -745,6 +745,7 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 }
 
+#if USE_GUIDANCE
 TEST(CAPITests, SetGuidance) {
 #if TEST_PHI2
 
@@ -770,3 +771,4 @@ TEST(CAPITests, SetGuidance) {
 
 #endif
 }
+#endif
