@@ -551,6 +551,8 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             # The following arguments are specific to the OpenCV toolchain file
             f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file()}",
         ]
+        if args.use_guidance:
+            command += ["-DRust_CARGO_TARGET=aarch64-apple-ios-sim"]
 
     if args.macos == "Catalyst":
         if args.cmake_generator == "Xcode":

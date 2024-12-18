@@ -31,6 +31,10 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@1.82.0
 
+      - name: Install Rust target
+        run: |
+          rustup target add aarch64-apple-ios-sim
+
       - name: Run iOS Build
         run: |
           set -e -x
