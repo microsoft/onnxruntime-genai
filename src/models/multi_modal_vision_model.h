@@ -42,7 +42,7 @@ struct EmbeddingState : State {
   const MultiModalVisionModel& model_;
   int64_t num_image_tokens_;
 
-  InputIDsDefault input_ids_{*this};                                // Model input
+  DefaultInputIDs input_ids_{*this};                                // Model input
   ImageFeatures image_features_{*this, ImageFeatures::Mode::Input,  // Optional model input
                                 model_.config_->model.embedding.inputs.image_features,
                                 num_image_tokens_};

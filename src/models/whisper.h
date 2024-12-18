@@ -34,7 +34,7 @@ struct Whisper_State : State {
     Decoder,
   } run_state_{RunState::Encoder_Decoder_Init};
 
-  InputIDsDefault decoder_input_ids_{*this};
+  DefaultInputIDs decoder_input_ids_{*this};
   Logits logits_{*this};
   KeyValueCacheDefault kv_cache_{*this};
   Cross_Cache cross_cache_{*this};

@@ -29,7 +29,7 @@ struct DecoderOnly_State : State {
   const DecoderOnly_Model& model_;
   CapturedGraphInfoPtr captured_graph_info_;
 
-  InputIDsDefault input_ids_{*this};
+  DefaultInputIDs input_ids_{*this};
   Logits logits_{*this};
   KeyValueCacheDefault kv_cache_{*this};
   PositionInputsDefault position_inputs_;

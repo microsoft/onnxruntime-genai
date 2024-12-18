@@ -27,7 +27,7 @@ struct Gpt_State : State {
 
   const Gpt_Model& model_;
 
-  InputIDsDefault input_ids_{*this};
+  DefaultInputIDs input_ids_{*this};
   Logits logits_{*this};
   KeyValueCacheDefault_Combined kv_cache_{*this};
   PositionInputsDefault position_inputs_;

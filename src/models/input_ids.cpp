@@ -5,7 +5,7 @@
 
 namespace Generators {
 
-InputIDsDefault::InputIDsDefault(State& state)
+DefaultInputIDs::DefaultInputIDs(State& state)
     : state_{state} {
   name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
   shape_ = {state_.params_->BatchBeamSize(), 0};
@@ -41,7 +41,7 @@ InputIDsDefault::InputIDsDefault(State& state)
   }
 }
 
-void InputIDsDefault::Add() {
+void DefaultInputIDs::Add() {
   input_index_ = state_.inputs_.size();
 
   state_.inputs_.push_back(value_.get());
@@ -55,7 +55,7 @@ void InputIDsDefault::Add() {
   }
 }
 
-void InputIDsDefault::Update(DeviceSpan<int32_t>& new_tokens) {
+void DefaultInputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
   const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids,
                                                int32_t pad_token_id) {
     int32_t seq_length = 0;
@@ -254,7 +254,7 @@ std::unique_ptr<InputIDs> CreateInputIDs(State& state) {
   if (state.model_.config_->model.decoder.sliding_window.has_value()) {
     return std::make_unique<WindowedInputIDs>(state);
   } else {
-    return std::make_unique<InputIDsDefault>(state);
+    return std::make_unique<DefaultInputIDs>(state);
   }
 }
 

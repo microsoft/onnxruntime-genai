@@ -11,10 +11,10 @@ struct InputIDs {
   virtual void Update(DeviceSpan<int32_t>& next_tokens) = 0;
 };
 
-struct InputIDsDefault : InputIDs {
-  InputIDsDefault(State& state);
-  InputIDsDefault(const InputIDsDefault&) = delete;
-  InputIDsDefault& operator=(const InputIDsDefault&) = delete;
+struct DefaultInputIDs : InputIDs {
+  DefaultInputIDs(State& state);
+  DefaultInputIDs(const DefaultInputIDs&) = delete;
+  DefaultInputIDs& operator=(const DefaultInputIDs&) = delete;
 
   // Register input_ids as ORT session input.
   // Called only once during initialization of state.
@@ -58,7 +58,7 @@ struct InputIDsDefault : InputIDs {
 // At each update step, the next window of tokens is processed.
 // This is done until all windows have been processed before switching to the model-generated tokens
 // which are processed one token at a time.
-// In contrast, InputIDsDefault processes all prompt tokens at once.
+// In contrast, DefaultInputIDs processes all prompt tokens at once.
 struct WindowedInputIDs : public InputIDs {
   WindowedInputIDs(State& state);
   WindowedInputIDs(const WindowedInputIDs&) = delete;
