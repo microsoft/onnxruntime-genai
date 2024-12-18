@@ -28,10 +28,6 @@ jobs:
         with:
           submodules: true
 
-      - uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
       - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
@@ -62,25 +58,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: true
-
-      - name: Get the Latest OnnxRuntime Nightly Version
-        run: |
-          ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
-          echo "$ORT_NIGHTLY_VERSION"
-          echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
-
-      # have to create a dummy project to use `add package`
-      - name: Download OnnxRuntime Nightly
-        run: |
-          dotnet new console
-          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
-
-      - name: Extract ONNX Runtime AAR
-        run: |
-          set -e -x
-          ls -l
-          unzip microsoft.ml.onnxruntime/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/android/native/onnxruntime.aar -d ort
-          ls -lR ort
 
       - name: Create Android build
         run: |
