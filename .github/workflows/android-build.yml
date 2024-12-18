@@ -21,7 +21,7 @@ jobs:
     #       it doesn't work on macos-14.
     #         HVF error: HV_UNSUPPORTED
     #       it works on macos-13 but with macos-15 being released soon that isn't a long term solution.
-    runs-on: ubuntu-24.04
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
