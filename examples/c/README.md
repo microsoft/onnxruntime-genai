@@ -258,16 +258,17 @@ cmake --build . --config Release
 ./phi3 path_to_model
 ```
 
-## Phi-3 vision
+## Phi-3.5 vision
 
 ### Download model
 
-You can use one of the following models for this sample:
-* [Phi-3 vision model for CPU](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-cpu)
-* [Phi-3 vision model for CUDA](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-cuda)
-* [Phi-3 vision model for DirectML](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-directml)
-  
-Clone one of the models above.
+This example uses the [Phi-3.5 vision model](https://huggingface.co/microsoft/Phi-3.5-vision-instruct).
+
+You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the Hugging Face CLI.
+
+```bash
+huggingface-cli download microsoft/Phi-3.5-vision-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
+```
 
 ### Run on Windows
 
@@ -368,4 +369,3 @@ cmake --build . --config Release
 cd build/Release
 ./phi3v path_to_model
 ```
-
