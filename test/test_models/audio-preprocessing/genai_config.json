@@ -18,6 +18,7 @@
                 "cross_past_value_names": "past_value_cross_%d"
             },
             "outputs": {
+                "logits": "logits",
                 "present_key_names": "present_key_self_%d",
                 "present_value_names": "present_value_self_%d",
                 "output_cross_qk_names": "output_cross_qk_%d"
@@ -35,9 +36,10 @@
             "head_size": 64,
             "hidden_size": 384,
             "inputs": {
-                "audio_features" : "audio_features"
+                "audio_features": "audio_features"
             },
             "outputs" : {
+                "encoder_hidden_states": "encoder_hidden_states", 
                 "cross_present_key_names": "present_key_cross_%d",
                 "cross_present_value_names": "present_value_cross_%d"
             },
