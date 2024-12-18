@@ -271,7 +271,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
   // Temporary solution for multimodal and whisper models
   if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
-    AppendTokens(params.aux_input_ids);
+    AuxAppendTokens(params.aux_input_ids);
   }
 }
 
@@ -289,6 +289,20 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
   std::copy_backward(input_ids.begin(), input_ids.end(), cpu_span.end());
   input_ids_device.CopyCpuToDevice();
   return input_ids_device;
+}
+
+// TODO(aciddelgado): Remove this function once SetInputs is moved to generator
+void Generator::AuxAppendTokens(cpu_span<const int32_t> input_ids) {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (input_ids.size() == 0)
+    throw std::runtime_error("input_ids is empty");
+  if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
+    throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
+
+  auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
+  search_->AppendTokens(input_ids_device);
+  computed_logits_ = false;
+  ComputeLogits(input_ids_device);
 }
 
 void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
