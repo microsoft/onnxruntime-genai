@@ -387,7 +387,7 @@ class QuantizedModel:
         self.layers = list(self.layers.values())
         self.layers.sort(key=lambda m: m.layer_id)
 
-        # Set properties of each layer based on quantization type 
+        # Set properties of each layer based on quantization type
         self.set_properties()
 
     def get_config(self, quant_attrs):
@@ -399,8 +399,6 @@ class QuantizedModel:
             dtype_bits_maps = {
                 "uint4": 4,
                 "int4": 4,
-                # "uint8": 8,
-                # "int8": 8,
             }
 
             self.global_bits = dtype_bits_maps[global_dtype]
@@ -814,7 +812,6 @@ class QuarkModel(QuantizedModel):
         for i, layer in enumerate(self.layers):
             if i >= self.num_layers:
                 break
-            print(f"Unpacking and repacking layer {i}")
 
             # Unpack and repack all `QuantizedTensorModule` classes in attention
             self_attn = getattr(layer, "self_attn", None) or getattr(layer, "self_attention", None)
