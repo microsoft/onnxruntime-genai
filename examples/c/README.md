@@ -16,16 +16,16 @@ mkdir include
 mkdir lib
 ```
 
-## Phi-3 mini
+## Phi-3.5 mini
 
 ### Download model
 
-This example uses the [Phi-3 mini model](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct).
+This example uses the [Phi-3.5 mini model](https://huggingface.co/microsoft/Phi-3.5-mini-instruct).
 
-You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the HuggingFace CLI.
+You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the Hugging Face CLI.
 
 ```bash
-huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
+huggingface-cli download microsoft/Phi-3.5-mini-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
 ```
 
 ### Windows x64 CPU
@@ -37,21 +37,21 @@ Change into the `onnxruntime-genai\examples\c` folder.
 1. Install onnxruntime
    
    ```cmd
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip -o onnxruntime-win-x64-1.19.2.zip
-   tar xvf onnxruntime-win-x64-1.19.2.zip
-   copy onnxruntime-win-x64-1.19.2\include\* include
-   copy onnxruntime-win-x64-1.19.2\lib\* lib
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-x64-1.20.1.zip -o onnxruntime-win-x64-1.20.1.zip
+   tar xvf onnxruntime-win-x64-1.20.1.zip
+   copy onnxruntime-win-x64-1.20.1\include\* include
+   copy onnxruntime-win-x64-1.20.1\lib\* lib
    ```
 
 2. Install onnxruntime-genai
 
    ```cmd
-   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-cpu-x64-capi.zip -o onnxruntime-genai-win-cpu-x64-capi.zip
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.5.2/onnxruntime-genai-win-cpu-x64-capi.zip -o onnxruntime-genai-win-cpu-x64-capi.zip
    tar xvf onnxruntime-genai-win-cpu-x64-capi.zip
    cd onnxruntime-genai-win-cpu-x64-capi
-   tar xvf onnxruntime-genai-0.4.0-win-x64.zip
-   copy onnxruntime-genai-0.4.0-win-x64\include\* ..\include
-   copy onnxruntime-genai-0.4.0-win-x64\lib\* ..\lib
+   tar xvf onnxruntime-genai-0.5.2-win-x64.zip
+   copy onnxruntime-genai-0.5.2-win-x64\include\* ..\include
+   copy onnxruntime-genai-0.5.2-win-x64\lib\* ..\lib
    cd ..
    ```
 
@@ -81,8 +81,8 @@ Change into the `onnxruntime-genai\examples\c` folder.
    ```cmd
    mkdir onnxruntime-win-x64-directml
    cd onnxruntime-win-x64-directml
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg
-   tar xvf Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/Microsoft.ML.OnnxRuntime.DirectML.1.20.1.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.20.1.nupkg
+   tar xvf Microsoft.ML.OnnxRuntime.DirectML.1.20.1.nupkg
    copy build\native\include\* ..\include
    copy runtimes\win-x64\native\* ..\lib
    cd ..
@@ -91,12 +91,12 @@ Change into the `onnxruntime-genai\examples\c` folder.
 2. Install onnxruntime-genai
 
    ```cmd
-   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-directml-x64-capi.zip -o onnxruntime-genai-win-directml-x64-capi.zip
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.5.2/onnxruntime-genai-win-directml-x64-capi.zip -o onnxruntime-genai-win-directml-x64-capi.zip
    tar xvf onnxruntime-genai-win-directml-x64-capi.zip
    cd onnxruntime-genai-win-directml-x64-capi
-   tar xvf onnxruntime-genai-0.4.0-win-x64-dml.zip
-   copy onnxruntime-genai-0.4.0-win-x64-dml\include\* ..\include
-   copy onnxruntime-genai-0.4.0-win-x64-dml\lib\* ..\lib
+   tar xvf onnxruntime-genai-0.5.2-win-x64-dml.zip
+   copy onnxruntime-genai-0.5.2-win-x64-dml\include\* ..\include
+   copy onnxruntime-genai-0.5.2-win-x64-dml\lib\* ..\lib
    cd ..
    ```
 
@@ -124,21 +124,21 @@ Change into the `onnxruntime-genai\examples\c` folder.
 1. Install onnxruntime
    
    ```cmd
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-arm64-1.19.2.zip -o onnxruntime-win-arm64-1.19.2.zip
-   tar xvf onnxruntime-win-arm64-1.19.2.zip
-   copy onnxruntime-win-arm64-1.19.2\include\* include
-   copy onnxruntime-win-arm64-1.19.2\lib\* lib
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-arm64-1.20.1.zip -o onnxruntime-win-arm64-1.20.1.zip
+   tar xvf onnxruntime-win-arm64-1.20.1.zip
+   copy onnxruntime-win-arm64-1.20.1\include\* include
+   copy onnxruntime-win-arm64-1.20.1\lib\* lib
    ```
 
 2. Install onnxruntime-genai
 
    ```cmd
-   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-cpu-arm64-capi.zip -o onnxruntime-genai-win-cpu-arm64-capi.zip
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.5.2/onnxruntime-genai-win-cpu-arm64-capi.zip -o onnxruntime-genai-win-cpu-arm64-capi.zip
    tar xvf onnxruntime-genai-win-cpu-arm64-capi.zip
    cd onnxruntime-genai-win-cpu-arm64-capi
-   tar xvf onnxruntime-genai-0.4.0-win-arm64.zip
-   copy onnxruntime-genai-0.4.0-win-arm64\include\* ..\include
-   copy onnxruntime-genai-0.4.0-win-arm64\lib\* ..\lib
+   tar xvf onnxruntime-genai-0.5.2-win-arm64.zip
+   copy onnxruntime-genai-0.5.2-win-arm64\include\* ..\include
+   copy onnxruntime-genai-0.5.2-win-arm64\lib\* ..\lib
    cd ..
    ```
 
@@ -168,8 +168,8 @@ Change into the `onnxruntime-genai\examples\c` folder.
    ```cmd
    mkdir onnxruntime-win-arm64-directml
    cd onnxruntime-win-arm64-directml
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg
-   tar xvf Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/Microsoft.ML.OnnxRuntime.DirectML.1.20.1.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.20.1.nupkg
+   tar xvf Microsoft.ML.OnnxRuntime.DirectML.1.20.1.nupkg
    copy build\native\include\* ..\include
    copy runtimes\win-arm64\native\* ..\lib
    cd ..
@@ -178,12 +178,12 @@ Change into the `onnxruntime-genai\examples\c` folder.
 2. Install onnxruntime-genai
 
    ```cmd
-   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-directml-arm64-capi.zip -o onnxruntime-genai-win-directml-arm64-capi.zip
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.5.2/onnxruntime-genai-win-directml-arm64-capi.zip -o onnxruntime-genai-win-directml-arm64-capi.zip
    tar xvf onnxruntime-genai-win-directml-arm64-capi.zip
    cd onnxruntime-genai-win-directml-arm64-capi
-   tar xvf onnxruntime-genai-0.4.0-win-arm64-dml.zip
-   copy onnxruntime-genai-0.4.0-win-arm64-dml\include\* ..\include
-   copy onnxruntime-genai-0.4.0-win-arm64-dml\lib\* ..\lib
+   tar xvf onnxruntime-genai-0.5.2-win-arm64-dml.zip
+   copy onnxruntime-genai-0.5.2-win-arm64-dml\include\* ..\include
+   copy onnxruntime-genai-0.5.2-win-arm64-dml\lib\* ..\lib
    cd ..
    ```
 
@@ -212,10 +212,10 @@ Change into the onnxruntime-genai directory.
 
    ```bash
    cd examples/c
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-1.19.2.tgz -o onnxruntime-linux-x64-1.19.2.tgz
-   tar xvzf onnxruntime-linux-x64-1.19.2.tgz
-   cp onnxruntime-linux-x64-1.19.2/include/* include
-   cp onnxruntime-linux-x64-1.19.2/lib/* lib
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz -o onnxruntime-linux-x64-1.20.1.tgz
+   tar xvzf onnxruntime-linux-x64-1.20.1.tgz
+   cp onnxruntime-linux-x64-1.20.1/include/* include
+   cp onnxruntime-linux-x64-1.20.1/lib/* lib
    cd ../..
    ```
 
@@ -279,10 +279,10 @@ Change into the onnxruntime-genai folder.
    
    ```cmd
    cd examples\c
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip -o onnxruntime-win-x64-1.19.2.zip
-   tar xvf onnxruntime-win-x64-1.19.2.zip
-   copy onnxruntime-win-x64-1.19.2\include\* include
-   copy onnxruntime-win-x64-1.19.2\lib\* lib
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-x64-1.20.1.zip -o onnxruntime-win-x64-1.20.1.zip
+   tar xvf onnxruntime-win-x64-1.20.1.zip
+   copy onnxruntime-win-x64-1.20.1\include\* include
+   copy onnxruntime-win-x64-1.20.1\lib\* lib
    ```
 
 2. Install onnxruntime-genai
@@ -324,10 +324,10 @@ Change into the onnxruntime-genai directory.
 
    ```bash
    cd examples/c
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-1.19.2.tgz -o onnxruntime-linux-x64-1.19.2.tgz
-   tar xvzf onnxruntime-linux-x64-1.19.2.tgz
-   cp onnxruntime-linux-x64-1.19.2/include/* include
-   cp onnxruntime-linux-x64-1.19.2/lib/* lib
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz -o onnxruntime-linux-x64-1.20.1.tgz
+   tar xvzf onnxruntime-linux-x64-1.20.1.tgz
+   cp onnxruntime-linux-x64-1.20.1/include/* include
+   cp onnxruntime-linux-x64-1.20.1/lib/* lib
    cd ../..
    ```
 
