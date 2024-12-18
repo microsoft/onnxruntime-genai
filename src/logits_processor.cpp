@@ -38,9 +38,9 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     throw std::runtime_error("Unsupported guidance type: " + std::string(guidance_type_) + " (only json_schema and regex are supported)");
   }
 
-  auto tokenize_fn = (LlgTokenizeFn)[](const void* user_data, const uint8_t* bytes,
-                                       size_t bytes_len, uint32_t* output_tokens, size_t output_tokens_len)
-                         ->unsigned long {
+  auto tokenize_fn = (LlgTokenizeFn) + [](const void* user_data, const uint8_t* bytes,
+                                          size_t bytes_len, uint32_t* output_tokens, size_t output_tokens_len)
+      -> unsigned long {
     const TokenizeData* tokenize_data = reinterpret_cast<const TokenizeData*>(user_data);
     auto output_ids = tokenize_partial(reinterpret_cast<const Tokenizer*>(tokenize_data->tokenizer), tokenize_data->prefix_len, bytes, bytes_len);
     size_t output_size = std::min(output_tokens_len, output_ids.size());

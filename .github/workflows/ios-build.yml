@@ -35,6 +35,8 @@ jobs:
         run: |
           set -e -x
           source genai-macos-venv/bin/activate
+          export PATH=/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib:$PATH
+          export LIBRARY_PATH="$LIBRARY_PATH:/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib" # Needed for Rust compilation and linking
           python3 build.py --ios \
               --parallel \
               --apple_sysroot iphonesimulator \
