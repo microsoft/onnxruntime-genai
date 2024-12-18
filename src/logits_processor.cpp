@@ -27,9 +27,9 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     : vocab_size_(state.params_->config.model.vocab_size),
       eos_token_(state.params_->config.model.eos_token_id),
       batch_size_(state.params_->search.batch_size),
-      device_type_(state.params_->device_type) {
-  guidance_type_ = state.params_->guidance_type;
-  guidance_data_ = state.params_->guidance_data;
+      device_type_(state.params_->device_type),
+      guidance_type_(state.params_->guidance_type),
+      guidance_data_(state.params_->guidance_data) {
   if (guidance_type_.empty() || guidance_data_.empty()) {
     throw std::runtime_error("Guidance type and data must be provided together");
   }
@@ -38,8 +38,9 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     throw std::runtime_error("Unsupported guidance type: " + std::string(guidance_type_) + " (only json_schema and regex are supported)");
   }
 
-  auto tokenize_fn = (LlgTokenizeFn) + [](const void* user_data, const uint8_t* bytes,
-                                          size_t bytes_len, uint32_t* output_tokens, size_t output_tokens_len) -> unsigned long {
+  auto tokenize_fn = (LlgTokenizeFn)[](const void* user_data, const uint8_t* bytes,
+                                       size_t bytes_len, uint32_t* output_tokens, size_t output_tokens_len)
+                         ->unsigned long {
     const TokenizeData* tokenize_data = reinterpret_cast<const TokenizeData*>(user_data);
     auto output_ids = tokenize_partial(reinterpret_cast<const Tokenizer*>(tokenize_data->tokenizer), tokenize_data->prefix_len, bytes, bytes_len);
     size_t output_size = std::min(output_tokens_len, output_ids.size());
@@ -122,6 +123,7 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
 
     std::vector<uint32_t> mask;
     if (mask_result.is_stop) {
+      // when logits processor decides to stop, we mask all tokens except the EOS token
       mask = std::vector<uint32_t>((vocab_size_ - 1) / 32 + 1, 0);
       uint32_t eos_mask32 = 1 << (eos_token_ % 32);
       mask[eos_token_ / 32] = eos_mask32;
@@ -173,7 +175,7 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
 #endif
   size_t vocab_index = 0;
 
-  auto logits_span = logits.Span();
+  auto logits_span = logits.CpuSpan();
   for (int index = 0; index < batch_size_; index++) {
     auto subspan = logits_span.subspan(vocab_index, vocab_size_);
     auto& mask = masks[index];
