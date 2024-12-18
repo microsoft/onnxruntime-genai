@@ -271,6 +271,22 @@ struct Pipeline_Element : JSON::Element {
   PipelineModelObject_Element object_{v_};
 };
 
+struct SlidingWindow_Element : JSON::Element {
+  explicit SlidingWindow_Element(std::optional<Config::Model::Decoder::SlidingWindow>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "window_size") {
+      v_->window_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "pad_value") {
+      v_->pad_value = static_cast<int>(JSON::Get<double>(value));
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  std::optional<Config::Model::Decoder::SlidingWindow>& v_;
+};
+
 struct Decoder_Element : JSON::Element {
   explicit Decoder_Element(Config::Model::Decoder& v) : v_{v} {}
 
@@ -301,6 +317,10 @@ struct Decoder_Element : JSON::Element {
     if (name == "outputs") {
       return outputs_;
     }
+    if (name == "sliding_window") {
+      v_.sliding_window = Config::Model::Decoder::SlidingWindow{};
+      return sliding_window_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -316,6 +336,7 @@ struct Decoder_Element : JSON::Element {
   Inputs_Element inputs_{v_.inputs};
   Outputs_Element outputs_{v_.outputs};
   Pipeline_Element pipeline_{v_.pipeline};
+  SlidingWindow_Element sliding_window_{v_.sliding_window};
 };
 
 struct VisionInputs_Element : JSON::Element {

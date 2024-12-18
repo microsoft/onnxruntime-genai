@@ -9,7 +9,7 @@
 
 namespace Generators {
 
-PositionInputs::PositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk)
+DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk)
     : model_{model},
       state_{state} {
   has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
@@ -59,7 +59,7 @@ PositionInputs::PositionInputs(const Model& model, State& state, DeviceSpan<int3
   }
 }
 
-void PositionInputs::Add() {
+void DefaultPositionInputs::Add() {
   if (has_posid_input_) {
     AddPositionIDs();
   }
@@ -68,7 +68,7 @@ void PositionInputs::Add() {
   }
 }
 
-void PositionInputs::Update(const DeviceSpan<int32_t>& next_tokens, int total_length, int new_length) {
+void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
   if (has_posid_input_) {
     // Initialize on first update
     if (is_first_update_) {
@@ -96,7 +96,7 @@ void PositionInputs::Update(const DeviceSpan<int32_t>& next_tokens, int total_le
   is_first_update_ = false;
 }
 
-void PositionInputs::RewindTo(size_t index) {
+void DefaultPositionInputs::RewindTo(size_t index) {
   // Reset the state of the position inputs
   if (index == 0) {
     is_first_update_ = true;
@@ -108,18 +108,18 @@ void PositionInputs::RewindTo(size_t index) {
       RewindMask(index);
 #endif
     } else
-      throw std::runtime_error("PositionInputs::RewindTo - Unsupported batch size");
+      throw std::runtime_error("DefaultPositionInputs::RewindTo - Unsupported batch size");
   }
 }
 
-void PositionInputs::AddAttentionMask() {
+void DefaultPositionInputs::AddAttentionMask() {
   mask_input_index_ = state_.inputs_.size();
 
   state_.inputs_.push_back(attention_mask_.get());
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.attention_mask.c_str());
 }
 
-void PositionInputs::AddPositionIDs() {
+void DefaultPositionInputs::AddPositionIDs() {
   posid_input_index_ = state_.inputs_.size();
 
   state_.inputs_.push_back(position_ids_.get());
@@ -127,7 +127,7 @@ void PositionInputs::AddPositionIDs() {
 }
 
 #if USE_CUDA || USE_DML
-void PositionInputs::CopyNextPositionIDsToCurrent() {
+void DefaultPositionInputs::CopyNextPositionIDsToCurrent() {
 #if USE_CUDA
   assert(model_.device_type_ == DeviceType::CUDA);
   cudaMemcpyAsync(position_ids_->GetTensorMutableRawData(),
@@ -149,7 +149,7 @@ void PositionInputs::CopyNextPositionIDsToCurrent() {
 }
 #endif
 
-void PositionInputs::CreateNextPositionIDsTensor() {
+void DefaultPositionInputs::CreateNextPositionIDsTensor() {
   if (!sb_position_ids_) {
     if (position_ids_shape_[1] == 1 && position_ids_next_) {
       position_ids_ = std::move(position_ids_next_);
@@ -167,11 +167,9 @@ void PositionInputs::CreateNextPositionIDsTensor() {
   }
 }
 
-void PositionInputs::UpdatePositionIDs(int total_length, int new_kv_length) {
+void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_length) {
   if (position_ids_shape_[0] != 1 && !(total_length == 0 || new_kv_length == 1))
-    throw std::runtime_error("PositionInputs::UpdatePositionIDs - batch_size must be 1 for continuous decoding.");
-  if (DeviceType::DML == model_.device_type_ && !(total_length == 0 || new_kv_length == 1))
-    throw std::runtime_error("PositionInputs::UpdatePositionIDs - DML does not support continuous decoding.");
+    throw std::runtime_error("DefaultPositionInputs::UpdatePositionIDs - batch_size must be 1 for continuous decoding.");
 
   // Reallocate position_ids when new_kv_length changes
   if (position_ids_shape_[1] != new_kv_length) {
@@ -206,7 +204,7 @@ void PositionInputs::UpdatePositionIDs(int total_length, int new_kv_length) {
   }
 }
 
-void PositionInputs::CreateNextAttentionMaskTensor(int total_length) {
+void DefaultPositionInputs::CreateNextAttentionMaskTensor(int total_length) {
   if (!sb_attention_mask_) {
     attention_mask_shape_[1] = total_length;
     attention_mask_next_ = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, type_);
@@ -232,18 +230,19 @@ void PositionInputs::CreateNextAttentionMaskTensor(int total_length) {
   }
 }
 
-void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
+void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
   if (position_ids_shape_[0] != 1 && !(total_length == 0 || new_kv_length == 1))
-    throw std::runtime_error("PositionInputs::UpdatePositionIDs - batch_size must be 1 for continuous decoding.");
+    throw std::runtime_error("DefaultPositionInputs::UpdatePositionIDs - batch_size must be 1 for continuous decoding.");
   if (DeviceType::DML == model_.device_type_ && !(total_length == 0 || new_kv_length == 1))
-    throw std::runtime_error("PositionInputs::UpdatePositionIDs - DML does not support continuous decoding.");
+    throw std::runtime_error("DefaultPositionInputs::UpdatePositionIDs - DML does not support continuous decoding.");
 
   CreateNextAttentionMaskTensor(total_length);
   state_.inputs_[mask_input_index_] = attention_mask_.get();
 
   switch (model_.device_type_) {
     case DeviceType::WEBGPU:
-    case DeviceType::CPU: {
+    case DeviceType::CPU:
+    case DeviceType::QNN: {
       type_ == Ort::TypeToTensorType<int32_t> ? UpdateAttentionMaskImpl<int32_t>(total_length)
                                               : UpdateAttentionMaskImpl<int64_t>(total_length);
       break;
@@ -280,7 +279,7 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
     }
 #endif
     default:
-      throw std::runtime_error("PositionInputs::Update - Unsupported device type");
+      throw std::runtime_error("DefaultPositionInputs::Update - Unsupported device type");
   }
 #if USE_DML
   if (model_.device_type_ != DeviceType::DML) {
@@ -294,7 +293,7 @@ void PositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
 }
 
 template <typename T>
-void PositionInputs::CreateAndInitializePositionIDs(const DeviceSpan<int32_t>& next_tokens, std::array<int64_t, 2> shape) {
+void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
@@ -324,7 +323,7 @@ void PositionInputs::CreateAndInitializePositionIDs(const DeviceSpan<int32_t>& n
 }
 
 template <typename T>
-void PositionInputs::CreateAndInitializeAttentionMask(const DeviceSpan<int32_t>& next_tokens, std::array<int64_t, 2> shape) {
+void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   attention_mask_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
@@ -348,14 +347,14 @@ void PositionInputs::CreateAndInitializeAttentionMask(const DeviceSpan<int32_t>&
 }
 
 template <typename T>
-void PositionInputs::InitializeSequenceLengths(std::array<int64_t, 2> shape, cpu_span<int32_t> sequence_lengths_unk) {
+void DefaultPositionInputs::InitializeSequenceLengths(std::array<int64_t, 2> shape, cpu_span<int32_t> sequence_lengths_unk) {
   for (int i = 0; i < shape[0] * state_.params_->search.num_beams; i++) {
     sequence_lengths_unk[i] = 0;
   }
 }
 
 template <typename T>
-void PositionInputs::UpdatePositionIDsImpl(int total_length, int new_kv_length) {
+void DefaultPositionInputs::UpdatePositionIDsImpl(int total_length, int new_kv_length) {
   auto* data = position_ids_->GetTensorMutableData<T>();
   if (position_ids_shape_[0] == 1) {
     // For batch size == 1 we calculate position ids with total length and new kv length for continuous decoding
@@ -369,7 +368,7 @@ void PositionInputs::UpdatePositionIDsImpl(int total_length, int new_kv_length) 
 }
 
 #if USE_DML
-void PositionInputs::UpdatePositionIDsImplDML() {
+void DefaultPositionInputs::UpdatePositionIDsImplDML() {
   ComPtr<ID3D12Resource> target_resource;
   Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
 
@@ -388,7 +387,7 @@ void PositionInputs::UpdatePositionIDsImplDML() {
 #endif
 
 template <typename T>
-void PositionInputs::UpdateAttentionMaskImpl(int total_length) {
+void DefaultPositionInputs::UpdateAttentionMaskImpl(int total_length) {
   auto* data = attention_mask_next_->GetTensorMutableData<T>();
   auto* old_data = attention_mask_->GetTensorData<T>();
   if (attention_mask_shape_[0] == 1) {
@@ -407,7 +406,7 @@ void PositionInputs::UpdateAttentionMaskImpl(int total_length) {
 }
 
 #if USE_DML
-void PositionInputs::UpdateAttentionMaskImplDML(int total_length) {
+void DefaultPositionInputs::UpdateAttentionMaskImplDML(int total_length) {
   ComPtr<ID3D12Resource> attention_mask_resource;
   Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_->GetTensorMutableRawData(), &attention_mask_resource));
   ComPtr<ID3D12Resource> attention_mask_next_resource;
@@ -442,7 +441,7 @@ void PositionInputs::UpdateAttentionMaskImplDML(int total_length) {
 #endif
 
 #if USE_CUDA
-void PositionInputs::RewindMask(size_t index) {
+void DefaultPositionInputs::RewindMask(size_t index) {
   if (sb_attention_mask_ && !is_first_mask_update_) {
     int past_length = static_cast<int>(index);
     int max_length = static_cast<int>(state_.params_->search.max_length);
@@ -457,5 +456,150 @@ void PositionInputs::RewindMask(size_t index) {
   }
 }
 #endif
+
+WindowedPositionInputs::WindowedPositionInputs(State& state)
+    : state_{state} {
+  has_posid_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.position_ids);
+  has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
+
+  if (has_posid_input_ || has_mask_input_) {
+    if (!model_.config_->model.decoder.sliding_window.has_value()) {
+      throw std::runtime_error("Sliding a window over position_ids and attention_mask requires sliding_window to be set in the genai_config.json.");
+    }
+    window_size_ = model_.config_->model.decoder.sliding_window->window_size;
+  }
+
+  if (has_posid_input_) {
+    position_ids_type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
+    if (position_ids_type_ != Ort::TypeToTensorType<int32_t>)
+      throw std::runtime_error("WindowedPositionInputs only supports int32_t position_ids");
+
+    position_ids_shape_ = {1, model_.config_->model.decoder.sliding_window->window_size};
+  }
+
+  if (has_mask_input_) {
+    attention_mask_type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
+    if (attention_mask_type_ != Ort::TypeToTensorType<int32_t>)
+      throw std::runtime_error("WindowedPositionInputs only supports int32_t attention_mask");
+
+    attention_mask_shape_ = {1, model_.config_->model.context_length};
+  }
+}
+
+void WindowedPositionInputs::Add() {
+  if (has_posid_input_) {
+    position_ids_index_ = state_.inputs_.size();
+    state_.input_names_.push_back(model_.config_->model.decoder.inputs.position_ids.c_str());
+    state_.inputs_.push_back(position_ids_.get());
+  }
+
+  if (has_mask_input_) {
+    attention_mask_index_ = state_.inputs_.size();
+    state_.input_names_.push_back(model_.config_->model.decoder.inputs.attention_mask.c_str());
+    state_.inputs_.push_back(attention_mask_.get());
+  }
+}
+
+void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
+  if (window_index_ == 0) {
+    num_windows_ = (next_tokens.size() + window_size_ - 1) / window_size_;
+    if (has_posid_input_) {
+      position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, position_ids_type_);
+
+      // next_tokens will always be padded so that it's size is a multiple of window_size_
+      // next_tokens -> [0, a, b, c, d, e]
+      // window_size = 3, num_windows = 2, pad_token = 0
+      // window_index = 0, position_ids_ -> [0, 0, 1]
+      auto* position_ids_data = position_ids_->GetTensorMutableData<int32_t>();
+      for (int i = 0, j = 0; i < position_ids_shape_[1]; i++) {
+        if (next_tokens.Span()[i] == model_.config_->model.pad_token_id) {
+          position_ids_data[i] = 0;
+        } else {
+          position_ids_data[i] = j++;
+        }
+      }
+    }
+
+    if (has_mask_input_) {
+      attention_mask_ = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, attention_mask_type_);
+
+      // next_tokens will always be padded so that it's size is a multiple of window_size_
+      // next_tokens -> [0, a, b, c, d, e]
+      // window_size = 3, num_windows = 2, pad_token = 0
+      // window_index = 0, attention_mask_ -> ([0] * context_length - window_size_) + [0, 1, 1]
+      auto* attention_mask_data = attention_mask_->GetTensorMutableData<int32_t>();
+      std::fill_n(attention_mask_data, attention_mask_shape_[1] - window_size_, 0);
+      for (size_t i = 0; i < window_size_; i++) {
+        attention_mask_data[attention_mask_shape_[1] - window_size_ + i] = next_tokens.CpuSpan()[i] == model_.config_->model.pad_token_id ? 0 : 1;
+      }
+      for (size_t i = 0; i < window_size_; i++) {
+        if (attention_mask_data[attention_mask_shape_[1] - window_size_ + i] == 1) {
+          attention_mask_backward_offset_ = attention_mask_shape_[1] - window_size_ + i - 1;
+          break;
+        }
+      }
+    }
+  } else if (window_index_ < num_windows_) {
+    if (has_posid_input_) {
+      // next_tokens will always be padded so that it's size is a multiple of window_size_
+      // next_tokens -> [0, a, b, c, d, e]
+      // window_size = 3, num_windows = 2, pad_token = 0
+      // window_index = 1, position_ids_ -> [2, 3, 4]
+
+      auto* position_ids_data = position_ids_->GetTensorMutableData<int32_t>();
+      const auto last_position = position_ids_data[window_size_ - 1];
+      std::iota(position_ids_data, position_ids_data + window_size_, last_position + 1);
+    }
+
+    if (has_mask_input_) {
+      // next_tokens will always be padded so that it's size is a multiple of window_size_
+      // next_tokens -> [0, a, b, c, d, e]
+      // window_size = 3, num_windows = 2, pad_token = 0
+      // window_index = 1, attention_mask_ -> ([0] * context_length - (2 * window_size_)) + [0, 1, 1, 1, 1, 1]
+      auto* attention_mask_data = attention_mask_->GetTensorMutableData<int32_t>();
+      std::fill_n(attention_mask_data + attention_mask_backward_offset_ - window_size_ + 1, window_size_, 1);
+      attention_mask_backward_offset_ -= window_size_;
+    }
+  } else {
+    // All prompt token chunks have been processed. Now we process the tokens generated by the model.
+    if (has_posid_input_) {
+      // next_tokens -> [f]
+      // position_ids_ -> [5]
+      const auto last_position = position_ids_->GetTensorData<int32_t>()[position_ids_shape_[1] - 1];
+      if (position_ids_shape_[1] != 1) {
+        position_ids_shape_[1] = 1;
+        position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, position_ids_type_);
+      }
+      position_ids_->GetTensorMutableData<int32_t>()[0] = last_position + 1;
+    }
+
+    if (has_mask_input_) {
+      // next_tokens -> [f]
+      // attention_mask_ -> ([0] * context_length - (2 * window_size_) - 1) + [0, 1, 1, 1, 1, 1, 1]
+      attention_mask_->GetTensorMutableData<int32_t>()[attention_mask_backward_offset_] = 1;
+      if (attention_mask_backward_offset_ > 0) {
+        attention_mask_backward_offset_ -= 1;
+      }
+    }
+  }
+
+  if (has_posid_input_) {
+    state_.inputs_[position_ids_index_] = position_ids_.get();
+  }
+
+  if (has_mask_input_) {
+    state_.inputs_[attention_mask_index_] = attention_mask_.get();
+  }
+
+  window_index_++;
+}
+
+std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths) {
+  if (state.model_.config_->model.decoder.sliding_window.has_value()) {
+    return std::make_unique<WindowedPositionInputs>(state);
+  } else {
+    return std::make_unique<DefaultPositionInputs>(state.model_, state, sequence_lengths);
+  }
+}
 
 }  // namespace Generators
