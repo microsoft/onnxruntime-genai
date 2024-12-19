@@ -1,6 +1,6 @@
-# ONNX Runtime GenAI API Python Examples
+# ONNX Runtime GenAI Python Examples
 
-## Install the onnxruntime-genai library
+## Install ONNX Runtime GenAI
 
 Install the python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install).
 
