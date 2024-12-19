@@ -6,14 +6,8 @@
 #include <sstream>
 
 namespace JSON {
-
-Element& Element::OnArray(std::string_view /*name*/) {
-  throw unknown_value_error{};
-}
-
-Element& Element::OnObject(std::string_view /*name*/) {
-  throw unknown_value_error{};
-}
+static constexpr const char* value_names[] = {"string", "number", "bool", "null"};
+static_assert(std::size(value_names) == std::variant_size_v<Value>);
 
 struct JSON {
   JSON(Element& element, std::string_view document);
@@ -148,34 +142,41 @@ void JSON::Parse_Value(Element& element, std::string_view name) {
         Parse_Array(element_array);
       } break;
       case '"': {
-        element.OnString(name, Parse_String());
+        element.OnValue(name, Parse_String());
       } break;
       case 't':
         if (Skip("rue")) {
-          element.OnBool(name, true);
+          element.OnValue(name, true);
         }
         break;
       case 'f':
         if (Skip("alse")) {
-          element.OnBool(name, false);
+          element.OnValue(name, false);
         }
         break;
       case 'n':
         if (Skip("ull")) {
-          element.OnNull(name);
+          element.OnValue(name, nullptr);
         }
         break;
       default:
         if (c >= '0' && c <= '9' || c == '-') {
           --current_;
-          element.OnNumber(name, Parse_Number());
+          element.OnValue(name, Parse_Number());
         } else
           throw unknown_value_error{};
         break;
     }
   } catch (const unknown_value_error&) {
-    throw std::runtime_error("Unknown value: " + std::string(name));
+    throw std::runtime_error(" Unknown value \"" + std::string(name) + "\"");
+  } catch (const type_mismatch& e) {
+    throw std::runtime_error(std::string(name) + " - Expected a " + std::string(value_names[e.expected]) + " but saw a " + std::string(value_names[e.seen]));
+  } catch (const std::runtime_error& e) {
+    if (!name.empty())
+      throw std::runtime_error(std::string(name) + ":" + e.what());
+    throw;
   }
+
   Parse_Whitespace();
 }
 

@@ -3,9 +3,7 @@
  */
 package ai.onnxruntime.genai;
 
-/**
- * This class is a list of tensors with names that match up with model input names.
- */
+/** This class is a list of tensors with names that match up with model input names. */
 public class NamedTensors implements AutoCloseable {
   private long nativeHandle;
 
