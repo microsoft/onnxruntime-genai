@@ -8,15 +8,13 @@ def main(args):
         started_timestamp = 0
         first_token_timestamp = 0
 
-    if hasattr(og, "Config"):
-        config = og.Config(args.model)
-        config.clear_providers()
-        if args.execution_provider != "cpu":
-            if args.verbose: print(f"Setting model to {args.execution_provider}")
-            config.append_provider(args.execution_provider)
-        model = og.Model(config)
-    else:
-        model = og.Model(args.model)
+    config = og.Config(args.model)
+    config.clear_providers()
+    if args.execution_provider != "cpu":
+        if args.verbose: print(f"Setting model to {args.execution_provider}")
+        config.append_provider(args.execution_provider)
+    model = og.Model(config)
+
     if args.verbose: print("Model loaded")
     
     tokenizer = og.Tokenizer(model)

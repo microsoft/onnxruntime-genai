@@ -93,7 +93,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                 available_models[model_name] = {"model_dir": os.path.join(sub_optimized_directory, model_name), "provider": get_ep_name(ep_name)}
 
     if model_path:
-        available_models[model_name] = {"model_dir": model_path, "provider": get_ep_name(ep_name)}
+        available_models[model_name] = {"model_dir": model_path, "provider": get_ep_name(model_path)}
 
     with gr.Blocks(css=custom_css, theme=small_and_beautiful_theme) as demo:
         history = gr.State([])

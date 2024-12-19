@@ -28,16 +28,14 @@ def _complete(text, state):
 
 def run(args: argparse.Namespace):
     print("Loading model...")
-    if hasattr(og, 'Config'):
-        config = og.Config(args.model_path)
-        config.clear_providers()
-        if args.provider != "cpu":
-            print(f"Setting model to {args.provider}...")
-            config.append_provider(args.provider)
-        model = og.Model(config)
-    else:
-        model = og.Model(args.model_path)
+    config = og.Config(args.model_path)
+    config.clear_providers()
+    if args.provider != "cpu":
+        print(f"Setting model to {args.provider}...")
+        config.append_provider(args.provider)
+    model = og.Model(config)
     print("Model loaded")
+
     processor = model.create_multimodal_processor()
     tokenizer_stream = processor.create_stream()
 

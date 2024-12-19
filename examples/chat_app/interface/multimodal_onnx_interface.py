@@ -14,14 +14,11 @@ class MultiModal_ONNXModel():
         self.og = og
 
         logging.info("Loading model...")
-        if hasattr(og, "Config"):
-            self.config = og.Config(model_path)
-            self.config.clear_providers()
-            if execution_provider != "cpu":
-                self.config.append_provider(execution_provider)
-            self.model = og.Model(self.config)
-        else:
-            self.model = og.Model(model_path)
+        self.config = og.Config(model_path)
+        self.config.clear_providers()
+        if execution_provider != "cpu":
+            self.config.append_provider(execution_provider)
+        self.model = og.Model(self.config)
         logging.info("Loaded model ...")
 
         self.processor = self.model.create_multimodal_processor()

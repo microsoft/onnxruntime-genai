@@ -68,15 +68,12 @@ def quantize_model(args):
 def run_model(args):
     # Load model
     print("Loading model...")
-    if hasattr(og, "Config"):
-        config = og.Config(args.output_path)
-        config.clear_providers()
-        if args.execution_provider != "cpu":
-            print(f"Setting model to {args.execution_provider}")
-            config.append_provider(args.execution_provider)
-        model = og.Model(config)
-    else:
-        model = og.Model(args.output_path)
+    config = og.Config(args.output_path)
+    config.clear_providers()
+    if args.execution_provider != "cpu":
+        print(f"Setting model to {args.execution_provider}")
+        config.append_provider(args.execution_provider)
+    model = og.Model(config)
     print("Model loaded")
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
