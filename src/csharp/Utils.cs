@@ -6,6 +6,9 @@ using System.Text;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    /// <summary>
+    /// A utility class that helps free native resources easily.
+    /// <summary>
     public class OgaHandle: IDisposable
     {
         private bool _disposed = false;
@@ -36,7 +39,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         }
     }
 
-    public class Utils
+    /// <summary>
+    /// Wraps some utility functions that are available globally
+    /// <summary>
+    internal class Utils
     {
         public static void SetCurrentGpuDeviceId(int device_id)
         {
@@ -54,7 +60,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             Result.VerifySuccess(NativeMethods.OgaSetLogBool(StringUtils.ToUtf8(name), value));
         }
-        
+
         public static void SetLogString(string name, string value)
         {
             Result.VerifySuccess(NativeMethods.OgaSetLogString(StringUtils.ToUtf8(name), StringUtils.ToUtf8(value)));
