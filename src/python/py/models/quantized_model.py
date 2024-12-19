@@ -804,6 +804,7 @@ class GPTQModel(QuantizedModel):
 class QuarkModel(QuantizedModel):
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
         super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
+        
         # Unpack and repack all `QuantizedTensorModule` classes in model
         for i, layer in enumerate(self.layers):
             if i >= self.num_layers:
@@ -827,6 +828,13 @@ class QuarkModel(QuantizedModel):
 
                     # Set `g_idx` to None since it's not used in `MatMulNBits`
                     q_tensors.g_idx = None
+
+        if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
+            self.unpack(self.lm_head)
+            self.repack(self.lm_head)
+
+            # Set `g_idx` to None since it's not used in `MatMulNBits`
+            self.lm_head.g_idx = None
 
     def unpack_qweight(self, module):
         """
