@@ -1966,43 +1966,36 @@ class Model:
             raise NotImplementedError(f"The {self.activation} activation function is not currently supported.")
         return output_name
 
-    def make_q_lm_head(self, lm_head):
-        #lm_head.g_idx = 0
-        self.make_matmul_op(lm_head, "/lm_head/MatMul", root_input=self.layernorm_attrs["output_0"], logits=True)
-
     def make_lm_head(self, lm_head):
-        if hasattr(lm_head, "qweight"):
-           self.make_q_lm_head(lm_head)
-        else:
-            bias_exists = lm_head.bias is not None
-            scale_exists = self.lm_head_attrs["scale"] != 1
-            mask_exists = self.lm_head_attrs["mask"] is not None
+        bias_exists = lm_head.bias is not None
+        scale_exists = self.lm_head_attrs["scale"] != 1
+        mask_exists = self.lm_head_attrs["mask"] is not None
 
-            matmul_basename = "/lm_head/MatMul"
-            root_input = self.layernorm_attrs["output_0"]
-            matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not bias_exists and not scale_exists)
+        matmul_basename = "/lm_head/MatMul"
+        root_input = self.layernorm_attrs["output_0"]
+        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not bias_exists and not scale_exists)
 
-            if bias_exists:
-                add_name = "/lm_head/Add"
-                self.make_add_bias(lm_head.bias.detach().numpy(), add_name, root_input=f"{matmul_name}/output_0", logits=not scale_exists)
+        if bias_exists:
+            add_name = "/lm_head/Add"
+            self.make_add_bias(lm_head.bias.detach().numpy(), add_name, root_input=f"{matmul_name}/output_0", logits=not scale_exists)
 
-            if scale_exists:
-                mul_name = "/lm_head/Mul"
-                mul_inputs = [f"{matmul_name if not bias_exists else add_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
-                mul_output = "logits" if not mask_exists else f"{mul_name}/output_0"
-                self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-                self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
+        if scale_exists:
+            mul_name = "/lm_head/Mul"
+            mul_inputs = [f"{matmul_name if not bias_exists else add_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
+            mul_output = "logits" if not mask_exists else f"{mul_name}/output_0"
+            self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
+            self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
-            if mask_exists:
-                # Save logits mask as initializer
-                logits_mask_name = "logits_mask"
-                self.make_external_tensor(self.lm_head_attrs["mask"].detach().numpy(), logits_mask_name)
+        if mask_exists:
+            # Save logits mask as initializer
+            logits_mask_name = "logits_mask"
+            self.make_external_tensor(self.lm_head_attrs["mask"].detach().numpy(), logits_mask_name)
 
-                where_name = "/lm_head/Where"
-                where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{mul_name}/output_0"]
-                where_output = "logits"
-                self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
-                self.make_value_info(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
+            where_name = "/lm_head/Where"
+            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{mul_name}/output_0"]
+            where_output = "logits"
+            self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
+            self.make_value_info(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
