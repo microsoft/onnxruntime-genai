@@ -51,8 +51,6 @@ class TensorModule:
     def __init__(self):
         self.weight = None
         self.bias = None
-        self.scale = None
-        self.zero_point = None
 
 class QuantizedAttention:
     def __init__(self, bits, group_size):
@@ -419,11 +417,9 @@ class QuantizedModel:
             local_dtype = layer_quant_config["dtype"]
 
             if local_dtype:
-                dtype_bits_maps = {  
-                    "uint4": 4,  
-                    "int4": 4,  
-                    #"uint8": 8,
-                    #"int8": 8,
+                dtype_bits_maps = {
+                    "uint4": 4,
+                    "int4": 4,
                 }  
             
                 local_bits = dtype_bits_maps[local_dtype]
