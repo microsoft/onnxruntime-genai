@@ -288,29 +288,42 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
 Model::~Model() = default;
 
-void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
+void Model::InitDeviceAllocator(OrtSession& session) {
   allocator_device_ = &allocator_cpu_;
+  allocator_kvcache_ = &allocator_cpu_;
 #if USE_CUDA
   if (device_type_ == DeviceType::CUDA) {
     allocator_device_ = GetCudaAllocator(session);
+    allocator_kvcache_ = allocator_device_;
   }
 #endif
+
 #if USE_DML
   if (device_type_ == DeviceType::DML) {
     memory_info_device_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    dml_owned_allocator_ = Ort::Allocator::Create(session, *memory_info_device_);
-    allocator_device_ = dml_owned_allocator_.get();
+    owned_allocator_device_ = Ort::Allocator::Create(session, *memory_info_device_);
+    allocator_device_ = owned_allocator_device_.get();
+    allocator_kvcache_ = allocator_device_;
   }
 #endif
-  allocator_kvcache_ = allocator_device_;
+
 #if USE_WEBGPU
   if (device_type_ == DeviceType::WEBGPU) {
     // for webgpu we only use device memory for kv_cache
     memory_info_device_ = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    webgpu_owned_allocator_ = Ort::Allocator::Create(session, *memory_info_device_);
-    allocator_kvcache_ = webgpu_owned_allocator_.get();
+    owned_allocator_device_ = Ort::Allocator::Create(session, *memory_info_device_);
+    allocator_kvcache_ = owned_allocator_device_.get();
   }
 #endif
+
+  if (device_type_ == DeviceType::QNN) {
+    memory_info_device_ = OrtMemoryInfo::Create("QnnHtpShared", OrtAllocatorType::OrtDeviceAllocator, 0,
+                                                OrtMemType::OrtMemTypeDefault);
+    owned_allocator_device_ = Ort::Allocator::Create(session, *memory_info_device_);
+    allocator_device_ = owned_allocator_device_.get();
+    allocator_kvcache_ = allocator_device_;
+  }
+
   session_info_ = std::make_unique<SessionInfo>(session);
   captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), allocator_device_);
 }
@@ -500,6 +513,15 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       for (auto& option : provider_options.options) {
         opts.emplace(option.first, option.second);
       }
+
+      // TODO set device_type_ in a less hacky way.
+      // now, all QNN EP enable_htp_shared_memory_allocator option values had better be consistent...
+      // on the other hand, not sure if is_primary_session_options is the right thing to check here.
+      if (const auto opt_it = opts.find("enable_htp_shared_memory_allocator");
+          opt_it != opts.end() && opt_it->second == "1") {
+        device_type_ = DeviceType::QNN;
+      }
+
       session_options.AppendExecutionProvider("QNN", opts);
     } else if (provider_options.name == "webgpu") {
       device_type_ = DeviceType::WEBGPU;
@@ -685,6 +707,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   switch (device_type_) {
     case DeviceType::WEBGPU:
     case DeviceType::DML:
+    case DeviceType::QNN:
       // DML and WebGpu doesn't currently support on-device scoring, so we use the CPU for non-cache inputs/outputs
     case DeviceType::CPU:
       for (int i = 0; i < batch_size; i++) {
