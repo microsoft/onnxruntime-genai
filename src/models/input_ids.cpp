@@ -11,16 +11,6 @@ DefaultInputIDs::DefaultInputIDs(State& state)
   shape_ = {state_.params_->BatchBeamSize(), 0};
   type_ = model_.session_info_->GetInputDataType(name_);
 
-  if (state_.GetCapturedGraphInfo()) {
-    sb_input_ids_ = state_.GetCapturedGraphInfo()->sb_input_ids_.get();
-
-#if USE_DML
-    if (model_.device_type_ == DeviceType::DML) {
-      sb_input_ids_int32_ = state_.GetCapturedGraphInfo()->sb_input_ids_int32_.get();
-    }
-#endif
-  }
-
   if (model_.session_info_->HasInput(model_.config_->model.decoder.inputs.current_sequence_length) &&
       model_.session_info_->HasInput(model_.config_->model.decoder.inputs.past_sequence_length)) {
     if (state_.params_->BatchBeamSize() != 1) {
@@ -36,7 +26,7 @@ DefaultInputIDs::DefaultInputIDs(State& state)
     current_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, current_sequence_length_shape, model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.current_sequence_length));
     *current_sequence_length_->GetTensorMutableData<int32_t>() = 0;
 
-    past_sequence_length_ = OrtValue::CreateTensor(*model_.allocator_device_, past_sequence_length_shape, model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length));
+    past_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, past_sequence_length_shape, model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length));
     *past_sequence_length_->GetTensorMutableData<int32_t>() = -1;
   }
 }
@@ -56,6 +46,40 @@ void DefaultInputIDs::Add() {
 }
 
 void DefaultInputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
+  if (!value_) {
+    shape_[1] = static_cast<int64_t>(new_tokens.size());
+
+    // If 64-bit, convert from 32-bit to 64-bit
+    auto input_ids = new_tokens.CopyDeviceToCpu();
+    if (type_ == Ort::TypeToTensorType<int64_t>) {
+      value_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape_, type_);
+      auto* p_data = value_->GetTensorMutableData<int64_t>();
+      for (auto v : input_ids) {
+        *p_data++ = v;
+      }
+    } else {
+      if (type_ != Ort::TypeToTensorType<int32_t>)
+        throw std::runtime_error("InputIDs must be int64 or int32");
+      value_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_.GetInfo(), input_ids, shape_);
+    }
+
+    value_ = model_.ExpandInputs(value_, state_.params_->search.num_beams);
+    shape_[0] *= state_.params_->search.num_beams;
+
+    if (state_.GetCapturedGraphInfo()) {
+      sb_input_ids_ = state_.GetCapturedGraphInfo()->sb_input_ids_.get();
+
+#if USE_DML
+      if (model_.device_type_ == DeviceType::DML) {
+        sb_input_ids_int32_ = state_.GetCapturedGraphInfo()->sb_input_ids_int32_.get();
+      }
+#endif
+    }
+
+    state_.inputs_[input_index_] = value_.get();
+    return;
+  }
+
   const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids,
                                                int32_t pad_token_id) {
     int32_t seq_length = 0;
