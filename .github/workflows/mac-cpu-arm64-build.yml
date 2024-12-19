@@ -61,7 +61,7 @@ jobs:
 
       - name: Build with CMake
         run: |
-          cmake --build --preset macos_arm64_cpu_release --parallel
+          cmake --build --preset macos_arm64_cpu_release --parallel -DUSE_GUIDANCE=ON
         continue-on-error: false
 
       - name: Install the python wheel and test dependencies

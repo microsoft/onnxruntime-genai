@@ -70,11 +70,11 @@ jobs:
 
     - name: Configure CMake
       run: |
-        cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }}
+        cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DUSE_GUIDANCE=ON
 
     - name: Build with CMake
       run: |
-        cmake --build --preset windows_x64_cuda_release --parallel
+        cmake --build --preset windows_x64_cuda_release --parallel -DUSE_GUIDANCE=ON
 
     - name: Add CUDA to PATH
       run: |
