@@ -1,4 +1,4 @@
-# ONNX Runtime generate() API C Example
+# ONNX Runtime GenAI C Example
 
 ## Setup
 
