@@ -52,13 +52,16 @@ jobs:
           mv ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
           mv ${{ env.ORT_PACKAGE_NAME }}/runtimes/osx-arm64/native/* ort/lib/
 
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@1.82.0
+
       - name: Configure CMake
         run: |
           cmake --preset macos_arm64_cpu_release
 
       - name: Build with CMake
         run: |
-          cmake --build --preset macos_arm64_cpu_release --parallel
+          cmake --build --preset macos_arm64_cpu_release --parallel -DUSE_GUIDANCE=ON
         continue-on-error: false
 
       - name: Install the python wheel and test dependencies

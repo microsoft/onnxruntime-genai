@@ -130,6 +130,8 @@ def _parse_args():
 
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
+    parser.add_argument("--use_guidance", action="store_true", help="Whether to add guidance support. Default is False.")
+    
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
     platform_group = parser.add_mutually_exclusive_group()
     platform_group.add_argument("--android", action="store_true", help="Build for Android")
@@ -477,6 +479,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
+        f"-DUSE_GUIDANCE={'ON' if args.use_guidance else 'OFF'}",
     ]
 
     if args.ort_home:
@@ -535,6 +538,8 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             "-DENABLE_TESTS=OFF",
             "-DENABLE_MODEL_BENCHMARK=OFF",
         ]
+        if args.use_guidance:
+            command += ["-DRust_CARGO_TARGET=aarch64-apple-ios-sim"]
 
     if args.macos == "Catalyst":
         if args.cmake_generator == "Xcode":

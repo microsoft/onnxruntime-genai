@@ -93,3 +93,19 @@ list(APPEND EXTERNAL_LIBRARIES
   ocos_operators
   noexcep_operators
 )
+
+if(USE_GUIDANCE)
+  FetchContent_Declare(
+    Corrosion
+    GIT_REPOSITORY ${DEP_URL_corrosion}
+    GIT_TAG ${DEP_SHA1_corrosion}
+    )
+  onnxruntime_fetchcontent_makeavailable(Corrosion)
+  FetchContent_Declare(
+    llguidance
+    GIT_REPOSITORY ${DEP_URL_llguidance}
+    GIT_TAG ${DEP_SHA1_llguidance}
+  )
+  onnxruntime_fetchcontent_makeavailable(llguidance)
+  corrosion_import_crate(MANIFEST_PATH ${llguidance_SOURCE_DIR}/parser/Cargo.toml)
+endif()

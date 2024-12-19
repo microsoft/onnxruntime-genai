@@ -39,6 +39,9 @@ jobs:
         with:
           gradle-version: '8.6'
 
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@1.82.0
+
       - name: Get the Latest OnnxRuntime Nightly Version
         shell: pwsh
         run: |
@@ -74,8 +77,8 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release
-          cmake --build --preset linux_gcc_cpu_release
+          cmake --preset linux_gcc_cpu_release -DUSE_GUIDANCE=ON
+          cmake --build --preset linux_gcc_cpu_release -DUSE_GUIDANCE=ON
 
       - name: Install the python wheel and test dependencies
         run: |

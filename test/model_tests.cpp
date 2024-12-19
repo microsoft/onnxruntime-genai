@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 #include <generators.h>
+#include <logits_processor.h>
 #include <search.h>
 #include <models/model.h>
 #include <iostream>
