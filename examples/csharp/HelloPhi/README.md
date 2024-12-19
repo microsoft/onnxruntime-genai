@@ -1,4 +1,4 @@
-# Generate() API C# example 
+# ONNX Runtime GenAI C# example 
 
 ## Obtain a model
 

@@ -104,15 +104,15 @@ Currently, both JSON files needed to run with ONNX Runtime GenAI are created by 
 
 ## 4. Run Phi-3.5 vision ONNX models
 
-[Here](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3v.py) is an example of how you can run your Phi-3.5 vision model with the ONNX Runtime generate() API.
+[Here](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3v.py) is an example of how you can run your Phi-3.5 vision model with ONNX Runtime GenAI.
 
 ### CUDA
 ```bash
-$ python .\phi3v.py -m .\phi3.5-vision-instruct\cuda -p cuda
+$ python .\phi3v.py -m .\phi3.5-vision-instruct\cuda -e cuda
 ```
 
 ### DirectML
 
 ```bash
-$ python .\phi3v.py -m .\phi3.5-vision-instruct\dml -p dml
+$ python .\phi3v.py -m .\phi3.5-vision-instruct\dml -e dml
 ```

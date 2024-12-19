@@ -51,17 +51,17 @@ parameters:
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
-  default: '1.20.0-dev-20241023-1635-2d00351d7b'
+  default: '1.20.1'
 
 - name: ort_cuda_version
   displayName: 'OnnxRuntime GPU version'
   type: string
-  default: '1.20.0-dev-20241022-1606-2d00351d7b'
+  default: '1.20.1'
 
 - name: ort_dml_version
   displayName: 'OnnxRuntime DML version'
   type: string
-  default: '1.20.0-dev-20241023-1635-2d00351d7b'
+  default: '1.20.1'
 
 - name: cuda_version
   displayName: 'CUDA version'

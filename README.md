@@ -1,17 +1,15 @@
-# ONNX Runtime generate() API
+# ONNX Runtime GenAI
 
 ## *Main branch contains new API changes and examples in main branch reflect these changes. For example scripts compatible with current release (0.5.2), [see release branch](https://github.com/microsoft/onnxruntime-genai/tree/rel-0.5.2).*
 
 
 [![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed/absoluteLatest)
 
-Run Llama, Phi, Gemma, Mistral with ONNX Runtime.
+Run generative AI models with ONNX Runtime.
 
 This API gives you an easy, flexible and performant way of running LLMs on device. 
 
 It implements the generative AI loop for ONNX models, including pre and post processing, inference with ONNX Runtime, logits processing, search and sampling, and KV cache management.
-
-You can call a high level `generate()` method to generate all of the output at once, or stream the output one token at a time.
 
 See documentation at https://onnxruntime.ai/docs/genai.
 

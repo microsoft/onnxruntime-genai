@@ -50,7 +50,7 @@ def _onnxruntime_dependency() -> str:
 setup(
     name=package_name,
     version='@VERSION_INFO@',
-    description='ONNX Runtime generate() API',
+    description='ONNX Runtime GenAI',
     long_description=long_description,
     long_description_content_type='text/markdown',
     packages=['onnxruntime_genai', 'onnxruntime_genai.models'],

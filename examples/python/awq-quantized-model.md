@@ -1,9 +1,9 @@
-# Create AWQ-quantized and optimized ONNX models from PyTorch models with AutoAWQ + ONNX Runtime generate() API
+# Create AWQ-quantized and optimized ONNX models from PyTorch models with AutoAWQ + ONNX Runtime GenAI
 
 ## Steps
 1. [Download your PyTorch model](#1-download-your-pytorch-model)
 2. [Install AutoAWQ](#2-install-autoawq)
-3. [Install the generate() API](#3-install-the-generate-api)
+3. [Install ONNX Runtime GenAI](#3-install-onnx-runtime-genai)
     - [CPU](#cpu)
     - [CUDA](#cuda)
     - [DirectML](#directml)
@@ -13,7 +13,7 @@
 
 Activation-aware Weight Quantization (AWQ) works by identifying the top 1% most salient weights that are most important for maintaining accuracy and quantizing the remaining 99% of weights. This leads to less accuracy loss from quantization compared to many other quantization techniques. For more on AWQ, see [here](https://arxiv.org/abs/2306.00978).
 
-This tutorial downloads the Phi-3 mini short context PyTorch model, applies AWQ quantization, generates the corresponding optimized & quantized ONNX model, and runs the ONNX model with ONNX Runtime's generate() API. If you would like to use another model, please change the model name in the instructions below.
+This tutorial downloads the Phi-3 mini short context PyTorch model, applies AWQ quantization, generates the corresponding optimized & quantized ONNX model, and runs the ONNX model with ONNX Runtime GenAI. If you would like to use another model, please change the model name in the instructions below.
 
 ## 1. Download your PyTorch model
 
@@ -47,7 +47,7 @@ $ pip install -e .
 
 Note: You can try to install AutoAWQ directly with `pip install autoawq`. However, AutoAWQ will try to auto-detect the CUDA version installed on your machine. If the CUDA version it detects is incorrect, the `.whl` file that `pip` will choose will be incorrect. This will cause an error during runtime when trying to quantize. Thus, it is recommended to install AutoAWQ from source to get the right `.whl` file.
 
-## 3. Install the generate() API
+## 3. Install ONNX Runtime GenAI
 
 Based on your desired hardware target, pick from one of the following options to install ONNX Runtime GenAI.
 
