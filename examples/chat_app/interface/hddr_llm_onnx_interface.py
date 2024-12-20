@@ -10,12 +10,21 @@ sys.path.append(os.path.join(current_dir, "..", "..", ".."))
 class ONNXModel():
     """A wrapper for OnnxRuntime-GenAI to run ONNX LLM model."""
 
-    def __init__(self, model_path):
+    def __init__(self, model_path, execution_provider):
         self.og = og
-        self.model = og.Model(f'{model_path}')
+
+        logging.info("Loading model...")
+        self.config = og.Config(model_path)
+        self.config.clear_providers()
+        if execution_provider != "cpu":
+            self.config.append_provider(execution_provider)
+        self.model = og.Model(self.config)
+        logging.info("Loaded model...")
+
         self.tokenizer = og.Tokenizer(self.model)
         self.tokenizer_stream = self.tokenizer.create_stream()
         self.model_path = model_path
+
         if "phi" in self.model_path:
             self.template_header = ""
             self.enable_history_max = 10 if "mini" in self.model_path else 2
@@ -69,17 +78,15 @@ You are a helpful AI assistant.<|eot_id|>"""
         output_tokens = []
 
         params = og.GeneratorParams(self.model)
-        params.input_ids = input_ids
-
         search_options = {"max_length" : max_length}
         params.set_search_options(**search_options)
 
         generator = og.Generator(self.model, params)
+        generator.append_tokens(input_ids)
 
         idx = 0
         while not generator.is_done():
             idx += 1
-            generator.compute_logits()
             generator.generate_next_token()
             next_token = generator.get_next_tokens()[0]
             output_tokens.append(next_token)

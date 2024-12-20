@@ -34,7 +34,7 @@ steps:
       Copy-Item -Force -Recurse -Verbose $(Build.BinariesDirectory)/nuget/* -Destination ${{ parameters.CsprojFolder }}
       cd ${{ parameters.CsprojFolder }}
       dotnet restore -r $(os)-$(arch) /property:Configuration=${{ parameters.CsprojConfiguration }} --source https://api.nuget.org/v3/index.json --source https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json --source $PWD --disable-parallel --verbosity detailed
-      dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-restore --verbosity normal -- -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} --non-interactive
+      dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-restore --verbosity normal -- -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} -e $(ep) --non-interactive
     displayName: 'Run ${{ parameters.CsprojName }} With Artifact on Windows'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: eq(variables['os'], 'win')
@@ -73,7 +73,7 @@ steps:
             export ORTGENAI_LOG_ORT_LIB=1 && \
             cd /ort_genai_src/${{ parameters.CsprojFolder }} && \
             chmod +x ./bin/Release_Cuda/net6.0/linux-x64/${{ parameters.CsprojName }} && \
-            ./bin/Release_Cuda/net6.0/linux-x64/${{ parameters.CsprojName }} -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} --non-interactive"
+            ./bin/Release_Cuda/net6.0/linux-x64/${{ parameters.CsprojName }} -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} -e $(ep) --non-interactive"
 
     displayName: 'Run ${{ parameters.CsprojName }} With Artifact on Linux CUDA'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -82,7 +82,7 @@ steps:
   - bash: |
       export ORTGENAI_LOG_ORT_LIB=1
       cd ${{ parameters.CsprojFolder }}
-      dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-build --verbosity normal -- -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} --non-interactive
+      dotnet run -r $(os)-$(arch) --configuration ${{ parameters.CsprojConfiguration }} --no-build --verbosity normal -- -m ./${{ parameters.LocalFolder }}/${{ parameters.ModelFolder }} -e $(ep) --non-interactive
     displayName: 'Run ${{ parameters.CsprojName }} With Artifact on Linux/macOS CPU'
     workingDirectory: '$(Build.Repository.LocalPath)'
     condition: and(or(eq(variables['os'], 'linux'), eq(variables['os'], 'osx')), eq(variables['ep'], 'cpu'))
