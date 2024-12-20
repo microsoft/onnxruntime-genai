@@ -125,6 +125,7 @@ struct Generator : LeakChecked<Generator> {
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
+  bool first_switch{true};
 
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(const cpu_span<int32_t> input_ids);

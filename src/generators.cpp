@@ -352,6 +352,19 @@ void Generator::GenerateNextToken() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");
+
+  // TODO: Extend the solution to make it work for batch size > 1 and num beams > 1
+  // Phi3 model switches from short factor to long factor at 4097 (original_max_position_embeddings+1) token, needs Recomputation of Position IDs and KV Cache
+  // at this stage which is achieved by rewinding to zero and appending the current sequence
+  if (model_->config_->model.type == "phi3" && search_->params_->search.batch_size == 1 && params.search.num_beams == 1) {
+    if (search_->GetSequenceLength() == 4097 && first_switch) {
+      first_switch = false;
+      auto current_seq = cpu_span<int32_t>(GetSequence(0).CpuSpan());
+      RewindToLength(0);
+      AppendTokens(current_seq);
+    }
+  }
+
   if (!computed_logits_) {
     auto next_tokens = search_->GetNextTokens();
     if (last_action_ == Action::rewound)
