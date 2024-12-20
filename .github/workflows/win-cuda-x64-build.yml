@@ -59,15 +59,22 @@ jobs:
       run: |
         mkdir ort/lib
         move ${{ env.ORT_PACKAGE_NAME }}/buildTransitive/native/include ort/
-        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/    
+        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/
+        
+    - name: Install Rust Toolchain
+      run: |
+        $exePath = "$env:TEMP\rustup-init.exe"
+        (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+        & $exePath -y --default-toolchain=1.82.0
+        Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
 
     - name: Configure CMake
       run: |
-        cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }}
+        cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DUSE_GUIDANCE=ON
 
     - name: Build with CMake
       run: |
-        cmake --build --preset windows_x64_cuda_release --parallel
+        cmake --build --preset windows_x64_cuda_release --parallel -DUSE_GUIDANCE=ON
 
     - name: Add CUDA to PATH
       run: |

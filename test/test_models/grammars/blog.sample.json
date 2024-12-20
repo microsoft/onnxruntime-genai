@@ -1,0 +1,20 @@
+{
+  "title": "New Blog Post",
+  "content": "This is the content of the blog post...",
+  "publishedDate": "2023-08-25T15:00:00Z",
+  "author": {
+    "username": "authoruser",
+    "email": "author@example.com",
+    "fullName": "Author User",
+    "age": 30,
+    "location": "Earth",
+    "interests": [
+      "Technology",
+      "Foo"
+    ]
+  },
+  "tags": [
+    "Technology",
+    "Programming"
+  ]
+}

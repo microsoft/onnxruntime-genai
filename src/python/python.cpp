@@ -8,6 +8,7 @@
 #include "../ort_genai.h"
 #include "../json.h"
 #include "../search.h"
+#include "../logits_processor.h"
 #include "../models/model.h"
 #include "../logging.h"
 #include "../smartptrs.h"
@@ -265,6 +266,9 @@ struct PyGeneratorParams {
     params_->TryGraphCapture(max_batch_size.cast<int>());
   }
 
+  void SetGuidance(const std::string& type, const std::string& data) {
+    params_->SetGuidance(type, data);
+  }
   pybind11::array py_whisper_input_features_;
   pybind11::array py_alignment_heads_;
 
@@ -396,7 +400,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("set_model_input", &PyGeneratorParams::SetModelInput)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)                                     // See config.h 'struct Search' for the options
       .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize)  // will be deprecated
-      .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize);
+      .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
+      .def("set_guidance", &PyGeneratorParams::SetGuidance);
 
   pybind11::class_<TokenizerStream>(m, "TokenizerStream")
       .def("decode", [](TokenizerStream& t, int32_t token) { return t.Decode(token); });

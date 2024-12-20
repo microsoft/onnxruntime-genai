@@ -78,13 +78,20 @@ jobs:
         mv $env:d3d12_dir\build\native\bin\x64\D3D12Core.dll ort\lib
         mv $env:dml_dir\include\DirectML.h ort\include
 
+    - name: Install Rust Toolchain
+      run: |
+        $exePath = "$env:TEMP\rustup-init.exe"
+        (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+        & $exePath -y --default-toolchain=1.82.0
+        Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
+
     - name: Configure CMake
       run: |
-        cmake --preset windows_x64_directml_release -DTEST_PHI2=False
+        cmake --preset windows_x64_directml_release -DTEST_PHI2=False -DUSE_GUIDANCE=ON
 
     - name: Build with CMake
       run: |
-        cmake --build --preset windows_x64_directml_release --parallel
+        cmake --build --preset windows_x64_directml_release --parallel -DUSE_GUIDANCE=ON
 
     - name: Install the Python Wheel and Test Dependencies
       run: |

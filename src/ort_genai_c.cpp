@@ -7,6 +7,7 @@
 #include "span.h"
 #include "ort_genai_c.h"
 #include "generators.h"
+#include "logits_processor.h"
 #include "models/model.h"
 #include "runtime_settings.h"
 #include "search.h"
@@ -257,6 +258,14 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorPa
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
   Generators::GeneratorParams::Whisper& whisper = params.inputs.emplace<Generators::GeneratorParams::Whisper>();
   whisper.input_features = reinterpret_cast<Generators::Tensor*>(tensor)->shared_from_this();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* oga_params, const char* type, const char* data) {
+  OGA_TRY
+  auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
+  params.SetGuidance(type, data);
   return nullptr;
   OGA_CATCH
 }
