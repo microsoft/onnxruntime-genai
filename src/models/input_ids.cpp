@@ -76,6 +76,7 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
 #endif
     }
 
+    is_prompt_ = false;
     state_.inputs_[input_index_] = value_.get();
     return;
   }
