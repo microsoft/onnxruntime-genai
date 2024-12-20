@@ -45,7 +45,7 @@ std::unique_ptr<Audios> LoadAudios(const std::span<const char* const>& audio_pat
     }
   }
   ort_extensions::OrtxObjectPtr<OrtxRawAudios> audios;
-  CheckResult(OrtxLoadAudios(ort_extensions::ptr(audios), audio_paths.data(), audio_paths.size()));
+  CheckResult(OrtxLoadAudios(audios.ToBeAssigned(), audio_paths.data(), audio_paths.size()));
 
   return std::make_unique<Audios>(std::move(audios), audio_paths.size());
 }
