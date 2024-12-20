@@ -30,9 +30,9 @@ def run(args: argparse.Namespace):
     print("Loading model...")
     config = og.Config(args.model_path)
     config.clear_providers()
-    if args.provider != "cpu":
-        print(f"Setting model to {args.provider}...")
-        config.append_provider(args.provider)
+    if args.execution_provider != "cpu":
+        print(f"Setting model to {args.execution_provider}...")
+        config.append_provider(args.execution_provider)
     model = og.Model(config)
     print("Model loaded")
 

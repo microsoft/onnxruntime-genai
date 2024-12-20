@@ -105,9 +105,9 @@ Console.WriteLine("Interactive: " + interactive);
 
 using Config config = new Config(modelPath);
 config.ClearProviders();
-if (!config.equals("cpu")) {
+if (executionProvider != "cpu") {
     config.AppendProvider(executionProvider);
-    if (executionProvider.equals("cuda")) {
+    if (executionProvider == "cuda") {
         config.SetProviderOption(executionProvider, "enable_cuda_graph", "0");
     }
 }
