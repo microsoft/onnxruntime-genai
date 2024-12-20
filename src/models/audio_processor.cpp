@@ -45,7 +45,7 @@ std::unique_ptr<Audios> LoadAudios(const std::span<const char* const>& audio_pat
     }
   }
   ort_extensions::OrtxObjectPtr<OrtxRawAudios> audios;
-  CheckResult(OrtxLoadAudios(ort_extensions::ptr(audios), audio_paths.data(), audio_paths.size()));
+  CheckResult(OrtxLoadAudios(audios.ToBeAssigned(), audio_paths.data(), audio_paths.size()));
 
   return std::make_unique<Audios>(std::move(audios), audio_paths.size());
 }
@@ -68,10 +68,10 @@ std::unique_ptr<NamedTensors> AudioProcessor::Process(const Audios* audios) cons
   auto named_tensors = std::make_unique<NamedTensors>();
 
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;
-  CheckResult(OrtxSpeechLogMel(processor_.get(), audios->audios_.get(), ort_extensions::ptr(result)));
+  CheckResult(OrtxSpeechLogMel(processor_.get(), audios->audios_.get(), result.ToBeAssigned()));
 
   ort_extensions::OrtxObjectPtr<OrtxTensor> mel;
-  CheckResult(OrtxTensorResultGetAt(result.get(), 0, ort_extensions::ptr(mel)));
+  CheckResult(OrtxTensorResultGetAt(result.get(), 0, mel.ToBeAssigned()));
 
   named_tensors->emplace(std::string(Config::Defaults::InputFeaturesName),
                          std::make_shared<Tensor>(ProcessMel(mel, input_features_type_, allocator)));
