@@ -228,17 +228,17 @@ void C_API(const char* model_path, const char* execution_provider) {
   std::cout << "Creating config..." << std::endl;
   CheckResult(OgaCreateConfig(model_path, &config));
 
-  CheckResult(OgaConfigClearProviders(&config));
+  CheckResult(OgaConfigClearProviders(config));
   if (strcmp(execution_provider, "cpu") != 0) {
-    CheckResult(OgaConfigAppendProvider(&config, execution_provider));
+    CheckResult(OgaConfigAppendProvider(config, execution_provider));
     if (strcmp(execution_provider, "cuda") == 0) {
-      CheckResult(OgaConfigSetProviderOption(&config, execution_provider, "enable_cuda_graph", "0"));
+      CheckResult(OgaConfigSetProviderOption(config, execution_provider, "enable_cuda_graph", "0"));
     }
   }
 
   OgaModel* model;
   std::cout << "Creating model..." << std::endl;
-  CheckResult(OgaCreateModelFromConfig(&config, &model));
+  CheckResult(OgaCreateModelFromConfig(config, &model));
 
   OgaTokenizer* tokenizer;
   std::cout << "Creating tokenizer..." << std::endl;
