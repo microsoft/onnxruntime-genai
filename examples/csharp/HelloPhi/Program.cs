@@ -8,6 +8,8 @@ void PrintUsage()
     Console.WriteLine("Usage:");
     Console.WriteLine("  -m model_path");
     Console.WriteLine("\t\t\t\tPath to the model");
+    Console.WriteLine("  -e execution_provider");
+    Console.WriteLine("\t\t\t\tExecution provider to run the model");
     Console.WriteLine("  --non-interactive (optional)");
     Console.WriteLine("\t\t\t\tInteractive mode");
 }
@@ -22,6 +24,7 @@ if (args.Length < 1)
 
 bool interactive = true;
 string modelPath = string.Empty;
+string executionProvider = string.Empty;
 
 uint i = 0;
 while (i < args.Length)
@@ -38,6 +41,13 @@ while (i < args.Length)
             modelPath = Path.Combine(args[i+1]);
         }
     }
+    else if (arg == "-e")
+    {
+        if (i + 1 < args.Length)
+        {
+            executionProvider = Path.Combine(args[i+1]);
+        }
+    }
     i++;
 }
 
@@ -45,15 +55,28 @@ if (string.IsNullOrEmpty(modelPath))
 {
     throw new Exception("Model path must be specified");
 }
+if (string.IsNullOrEmpty(executionProvider))
+{
+    throw new Exception("Execution provider must be specified");
+}
 
 Console.WriteLine("-------------");
 Console.WriteLine("Hello, Phi!");
 Console.WriteLine("-------------");
 
 Console.WriteLine("Model path: " + modelPath);
+Console.WriteLine("Execution provider: " + executionProvider);
 Console.WriteLine("Interactive: " + interactive);
 
-using Model model = new Model(modelPath);
+using Config config = new Config(modelPath);
+config.ClearProviders();
+if (!config.equals("cpu")) {
+    config.AppendProvider(executionProvider);
+    if (executionProvider.equals("cuda")) {
+        config.SetProviderOption(executionProvider, "enable_cuda_graph", "0");
+    }
+}
+using Model model = new Model(config);
 using Tokenizer tokenizer = new Tokenizer(model);
 
 var option = 2;
