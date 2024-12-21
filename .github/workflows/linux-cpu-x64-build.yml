@@ -27,6 +27,18 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.6'
+
       - name: Get the Latest OnnxRuntime Nightly Version
         shell: pwsh
         run: |
@@ -68,8 +80,9 @@ jobs:
       - name: Install the python wheel and test dependencies
         run: |
           python3 -m pip install -r test/python/requirements.txt --user
-          python3 -m pip install -r test/python/requirements-cpu.txt --user
-          python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl --user --no-deps
+          python3 -m pip install -r test/python/cpu/torch/requirements.txt --user
+          python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
+          python3 -m pip install --user --no-index --no-deps --find-links build/cpu/wheel onnxruntime_genai
 
       - name: Use Dummy HuggingFace Token
         run: |
@@ -80,6 +93,7 @@ jobs:
         continue-on-error: true
         run: |
           ls -l ${{ github.workspace }}/build/cpu
+          ls -l ${{ github.workspace }}/build/cpu/wheel
 
       # This will also download all the test models to the test/test_models directory
       # These models are used by the python tests as well as C#, C++ and others.
@@ -92,11 +106,16 @@ jobs:
         run: |
           export ORTGENAI_LOG_ORT_LIB=1
           cd test/csharp
-          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/" /p:OrtLibDir="../../ort/lib/"
+          dotnet test /p:Configuration=Release /p:NativeBuildOutputDir="../../build/cpu/" /p:OrtLibDir="../../ort/lib/" --verbosity normal
+
+      - name: Build the Java API and Run the Java Tests
+        run: |
+          set -e -x
+          python3 build.py --config=Release --build_dir build/cpu --build_java --parallel --cmake_generator "Ninja"
 
       - name: Run tests
         run: |
           set -e -x
           export ORTGENAI_LOG_ORT_LIB=1
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$GITHUB_WORKSPACE/ort/lib
-          ./build/cpu/test/unit_tests
+          ./build/cpu/unit_tests

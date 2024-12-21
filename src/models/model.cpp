@@ -1,5 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+//
+// Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
 #include <algorithm>
 #include <thread>
 
@@ -17,42 +19,28 @@
 #include "dml_provider_factory.h"
 #include "../dml/dml_helpers.h"
 
-EXTERN_C IMAGE_DOS_HEADER __ImageBase;
-
-static std::string CurrentModulePath() {
-  char path[MAX_PATH];
-  GetModuleFileNameA((HINSTANCE)&__ImageBase, path, _countof(path));
-
-  char absolute_path[MAX_PATH];
-  char* name;
-  GetFullPathNameA(path, _countof(path), absolute_path, &name);
-
-  auto idx = std::distance(absolute_path, name);
-  auto out_path = std::string(absolute_path);
-  out_path.resize(idx);
-
-  return out_path;
-}
+std::string CurrentModulePath();
 #endif
 
 namespace Generators {
 
 State::State(const GeneratorParams& params, const Model& model)
     : model_{model},
-      params_{params.shared_from_this()} {}
+      params_{params.shared_from_this()},
+      run_options_{OrtRunOptions::Create()} {}
 
-void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size) {
+void State::Run(OrtSession& session, int new_batch_size) {
   auto captured_graph_info = GetCapturedGraphInfo();
 
   if (first_run_) {
     if (captured_graph_info) {
-      model_.run_options_->AddConfigEntry("gpu_graph_id", "-1");
+      run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
     first_run_ = false;
   } else if (captured_graph_info && new_batch_size != current_batch_size_) {
     current_batch_size_ = new_batch_size;
     auto annotation_id = std::to_string(captured_graph_info->GenerateUniqueAnnotationID(new_batch_size));
-    model_.run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
+    run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
   }
 
   if (g_log.enabled && g_log.model_input_values) {
@@ -67,7 +55,8 @@ void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_s
     DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
   }
 
-  session.Run(&run_options, input_names_.data(), inputs_.data(), input_names_.size(), output_names_.data(), outputs_.data(), output_names_.size());
+  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+              output_names_.data(), outputs_.data(), output_names_.size());
 
   if (g_log.enabled && g_log.model_output_values) {
     auto& stream = Log("model_output_values");
@@ -76,7 +65,18 @@ void State::Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_s
   }
 }
 
+void State::SetTerminate() {
+  session_terminated_ = true;
+  run_options_->SetTerminate();
+}
+
+void State::UnsetTerminate() {
+  session_terminated_ = false;
+  run_options_->UnsetTerminate();
+}
+
 OrtValue* State::GetInput(const char* name) {
+  ThrowErrorIfSessionTerminated(session_terminated_);
   for (size_t i = 0; i < input_names_.size(); i++) {
     if (std::strcmp(input_names_[i], name) == 0) {
       return inputs_[i];
@@ -86,6 +86,7 @@ OrtValue* State::GetInput(const char* name) {
 }
 
 OrtValue* State::GetOutput(const char* name) {
+  ThrowErrorIfSessionTerminated(session_terminated_);
   for (size_t i = 0; i < output_names_.size(); i++) {
     if (std::strcmp(output_names_[i], name) == 0) {
       return outputs_[i];
@@ -99,6 +100,27 @@ void State::ClearIO() {
   output_names_.clear();
   inputs_.clear();
   outputs_.clear();
+}
+
+void State::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) {
+  if (!adapters_) {
+    adapters_ = adapters->shared_from_this();
+  } else if (adapters_.get() != adapters) {
+    // Two different instances of Adapters are being used. The Generator state can only manage
+    // active adapters from a single Adapters container.
+    throw std::runtime_error("Generator state can only register a single Adapters container.");
+  }
+
+  run_options_->AddActiveLoraAdapter(*adapters_->AcquireAdapter(adapter_name));
+  adapter_names_.push_back(adapter_name);
+}
+
+State::~State() {
+  if (adapters_) {
+    for (const auto& adapter_name : adapter_names_) {
+      adapters_->ReleaseAdapter(adapter_name);
+    }
+  }
 }
 
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
@@ -261,27 +283,46 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
-  // TODO: add function to create run options
-  run_options_ = OrtRunOptions::Create();
-
   CreateSessionOptions();
 }
 
 Model::~Model() = default;
 
-void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
+void Model::InitDeviceAllocator(OrtSession& session) {
   allocator_device_ = &allocator_cpu_;
+  allocator_kvcache_ = &allocator_cpu_;
 #if USE_CUDA
   if (device_type_ == DeviceType::CUDA) {
     allocator_device_ = GetCudaAllocator(session);
-  }
-#elif USE_DML
-  if (device_type_ == DeviceType::DML) {
-    memory_info_device_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    dml_owned_allocator_ = Ort::Allocator::Create(session, *memory_info_device_);
-    allocator_device_ = dml_owned_allocator_.get();
+    allocator_kvcache_ = allocator_device_;
   }
 #endif
+
+#if USE_DML
+  if (device_type_ == DeviceType::DML) {
+    memory_info_device_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    owned_allocator_device_ = Ort::Allocator::Create(session, *memory_info_device_);
+    allocator_device_ = owned_allocator_device_.get();
+    allocator_kvcache_ = allocator_device_;
+  }
+#endif
+
+#if USE_WEBGPU
+  if (device_type_ == DeviceType::WEBGPU) {
+    // for webgpu we only use device memory for kv_cache
+    memory_info_device_ = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    owned_allocator_device_ = Ort::Allocator::Create(session, *memory_info_device_);
+    allocator_kvcache_ = owned_allocator_device_.get();
+  }
+#endif
+
+  if (device_type_ == DeviceType::QNN) {
+    memory_info_device_ = OrtMemoryInfo::Create("QnnHtpShared", OrtAllocatorType::OrtDeviceAllocator, 0,
+                                                OrtMemType::OrtMemTypeDefault);
+    owned_allocator_device_ = Ort::Allocator::Create(session, *memory_info_device_);
+    allocator_device_ = owned_allocator_device_.get();
+    allocator_kvcache_ = allocator_device_;
+  }
 
   session_info_ = std::make_unique<SessionInfo>(session);
   captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), allocator_device_);
@@ -313,7 +354,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   }
 
   if (config_session_options.enable_mem_pattern.has_value()) {
-    if (config_session_options.enable_cpu_mem_arena.value())
+    if (config_session_options.enable_mem_pattern.value())
       session_options.EnableMemPattern();
     else
       session_options.DisableMemPattern();
@@ -381,17 +422,19 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
       ort_provider_options->Update(keys.data(), values.data(), keys.size());
 
-      // Create and set our cudaStream_t
-      if (!cuda_stream_.get())
-        cuda_stream_.Create();
-
-      ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_.get());
-
-      session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
       // Device type determines the scoring device.
       // Only use the primary session options to determine the device type
-      if (is_primary_session_options)
+      if (is_primary_session_options) {
         device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
+        p_device_ = GetDeviceInterface(device_type_);
+
+        // Create and set our cudaStream_t
+        cuda_stream_ = p_device_->GetCudaStream();
+        ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_);
+      }
+
+      session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
+
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 
@@ -407,7 +450,24 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     } else if (provider_options.name == "dml") {
       if (!p_dml_api_) {
         auto current_module_path = CurrentModulePath();
-        dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
+
+        bool contains_device_luid = false;
+        LUID device_luid{};
+        for (const auto& [name, value] : provider_options.options) {
+          if (name == "luid") {
+            if (auto separator_position = value.find(":"); separator_position != std::string::npos) {
+              device_luid.HighPart = std::stol(value.substr(0, separator_position));
+              device_luid.LowPart = std::stol(value.substr(separator_position + 1));
+              contains_device_luid = true;
+            }
+          }
+        }
+
+        if (contains_device_luid) {
+          dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path, &device_luid);
+        } else {
+          dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
+        }
 
         constexpr auto directml_dll = "DirectML.dll";
         wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll, nullptr, 0));
@@ -454,9 +514,29 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         opts.emplace(option.first, option.second);
       }
 
+      // TODO set device_type_ in a less hacky way.
+      // now, all QNN EP enable_htp_shared_memory_allocator option values had better be consistent...
+      // on the other hand, not sure if is_primary_session_options is the right thing to check here.
+      if (const auto opt_it = opts.find("enable_htp_shared_memory_allocator");
+          opt_it != opts.end() && opt_it->second == "1") {
+        device_type_ = DeviceType::QNN;
+      }
+
       session_options.AppendExecutionProvider("QNN", opts);
+    } else if (provider_options.name == "webgpu") {
+      device_type_ = DeviceType::WEBGPU;
+      std::unordered_map<std::string, std::string> opts;
+      for (auto& option : provider_options.options) {
+        opts.emplace(option.first, option.second);
+      }
+      session_options.AppendExecutionProvider("WebGPU", opts);
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
+  }
+
+  // If no device is set, create it, default to CPU
+  if (!p_device_) {
+    p_device_ = GetDeviceInterface(device_type_);
   }
 }
 
@@ -490,12 +570,19 @@ std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
   return std::make_shared<MultiModalProcessor>(*config_, *session_info_);
 }
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path) {
-  auto config = std::make_unique<Config>(fs::path(config_path));
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
+  std::string config_overlay;
+  if (settings) {
+    config_overlay = settings->GenerateConfigOverlay();
+  }
+  auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
+  return CreateModel(ort_env, std::move(config));
+}
 
+std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small" || config->model.type == "phimoe" || config->model.type == "qwen2")
+  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small" || config->model.type == "phimoe" || config->model.type == "qwen2" || config->model.type == "nemotron" || config->model.type == "chatglm")
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
@@ -536,8 +623,9 @@ void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<Or
   auto* fp32 = p_out->GetTensorMutableData<float>();
 
   switch (device_type) {
+    case DeviceType::WEBGPU:
     case DeviceType::DML:
-      // DML doesn't currently support on-device scoring, so we fall back to the CPU
+      // DML, WebGpu doesn't currently support on-device scoring, so we fall back to the CPU
     case DeviceType::CPU:
       for (int i = 0; i < count; i++)
         fp32[i] = FastFloat16ToFloat32(fp16[i]);
@@ -597,7 +685,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
   // If we're on CUDA, we still want to do the copy to move the data over to CUDA memory where we will read from it later.
   // DML doesn't currently support on-device scoring, so we go the same route as the CPU
-  if (num_beams == 1 && (device_type_ == DeviceType::CPU || device_type_ == DeviceType::DML)) {
+  if (num_beams == 1 && (device_type_ == DeviceType::CPU || device_type_ == DeviceType::DML || device_type_ == DeviceType::WEBGPU)) {
     return std::move(input);
   }
 
@@ -617,8 +705,10 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   auto* target = expanded_data;
 
   switch (device_type_) {
+    case DeviceType::WEBGPU:
     case DeviceType::DML:
-      // DML doesn't currently support on-device scoring, so we use the CPU for non-cache inputs/outputs
+    case DeviceType::QNN:
+      // DML and WebGpu doesn't currently support on-device scoring, so we use the CPU for non-cache inputs/outputs
     case DeviceType::CPU:
       for (int i = 0; i < batch_size; i++) {
         for (int j = 0; j < num_beams; j++) {

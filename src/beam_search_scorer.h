@@ -6,7 +6,7 @@
 namespace Generators {
 
 struct HypothesisScore {
-  cpu_span<int32_t> hypothesis;
+  std::span<int32_t> hypothesis;
   float score;
 };
 
@@ -15,12 +15,12 @@ struct BeamHypotheses {
   void Init(float length_penalty, std::span<HypothesisScore> beams);
 
   // Add a new hypothesis
-  void Add(cpu_span<int32_t> hypothesis, float sum_logprobs);
+  void Add(std::span<int32_t> hypothesis, float sum_logprobs);
 
   // Return true if this beats the worst score in the hypothesis
   bool CanImprove(float best_sum_logprobs, int current_length) const;
 
-  RoamingArray<int32_t> GetHypothesis(size_t index) const { return beams_[index].hypothesis; }
+  std::span<int32_t> GetHypothesis(size_t index) const { return beams_[index].hypothesis; }
 
   // TODO(aciddelgado): Methods to get all hypotheses and scores
 
@@ -43,10 +43,10 @@ struct BeamSearchScorer {
 
   bool IsDone() const { return not_done_count_ == 0; }
 
-  cpu_span<float> GetNextScores() { return next_beam_scores_; }
-  cpu_span<int32_t> GetNextTokens() { return next_beam_tokens_; }
-  cpu_span<int32_t> GetNextIndicesCPU() { return next_beam_indices_; }
-  BeamHypotheses GetBeamHypotheses(size_t batch_id) { return beam_hyps_[batch_id]; }
+  DeviceSpan<float> GetNextScores() { return next_beam_scores_; }
+  DeviceSpan<int32_t> GetNextTokens() { return next_beam_tokens_; }
+  DeviceSpan<int32_t> GetNextIndices() { return next_beam_indices_; }
+  DeviceSpan<int32_t> GetBeamHypotheses(size_t batch_id, size_t beam_id);
 
  private:
   int batch_size_;
@@ -57,18 +57,12 @@ struct BeamSearchScorer {
   bool early_stopping_;
   int not_done_count_;  // When zero, every batch entry is done (starts at batch_size_)
 
-  std::unique_ptr<float[]> next_beam_scores_ptr_;
-  cpu_span<float> next_beam_scores_;
+  DeviceSpan<float> next_beam_scores_;
+  DeviceSpan<int32_t> next_beam_tokens_;
+  DeviceSpan<int32_t> next_beam_indices_;
 
-  std::unique_ptr<int32_t[]> next_beam_tokens_ptr_;
-  cpu_span<int32_t> next_beam_tokens_;
-
-  std::unique_ptr<int32_t[]> next_beam_indices_ptr_;
-  cpu_span<int32_t> next_beam_indices_;
-
-  std::unique_ptr<int32_t[]> hypothesis_buffer_ptr_;  // Allocated buffer to hold all hypotheses
-  std::span<int32_t> hypothesis_buffer_;              // Span of the allocated buffer
-  int hypothesis_buffer_used_{};                      // Offset of available buffer, or length of used buffer.
+  DeviceSpan<int32_t> hypothesis_buffer_;  // Allocated buffer to hold all hypotheses
+  size_t hypothesis_buffer_used_{};        // Offset of available buffer, or length of used buffer.
 
   std::unique_ptr<HypothesisScore[]> hypothesis_scores_ptr_;  // num_beams_ * batch_size_, divided into num_beams_ chunks per BeamHypothesis in beam_hyps_
   std::unique_ptr<BeamHypotheses[]> beam_hyps_ptr_;

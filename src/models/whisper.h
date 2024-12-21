@@ -12,7 +12,7 @@ namespace Generators {
 struct WhisperModel : Model {
   WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
-  std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const override;
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
   std::unique_ptr<OrtSession> session_encoder_;  // audio_features -> encoder_hidden_states, cross_kv_cache
   std::unique_ptr<OrtSession> session_decoder_;  // input_ids, self_kv_cache, cross_kv_cache -> logits, self_kv_cache

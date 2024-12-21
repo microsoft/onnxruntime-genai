@@ -4,9 +4,11 @@
 
 namespace Generators {
 
+struct RuntimeSettings;
+
 struct Config {
   Config() = default;
-  Config(const fs::path& path);
+  Config(const fs::path& path, std::string_view json_overlay);
 
   struct Defaults {
     // Listed here in alphabetical order
@@ -23,6 +25,7 @@ struct Config {
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
     static constexpr std::string_view PixelValuesName = "pixel_values";
     static constexpr std::string_view PositionIdsName = "position_ids";
+    static constexpr std::string_view PromptTemplateName = "{Content}";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -47,7 +50,9 @@ struct Config {
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
     std::optional<std::string> enable_profiling;
-    bool use_env_allocators{true};
+    // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
+    //                     Identify the reason for the crash to enable allocator sharing by default.
+    bool use_env_allocators{};
 
     std::vector<ProviderOptions> provider_options;
   };
@@ -123,6 +128,12 @@ struct Config {
       int num_hidden_layers{};
       int head_size{};
 
+      struct SlidingWindow {  // Sliding window parameters for models that process input prompt in chunks
+        int window_size{};    // The size of the window to slide over the input prompt
+        int pad_value{};      // The key-value cache padding value to use for the sliding window for inactive tokens
+      };
+      std::optional<SlidingWindow> sliding_window;
+
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string embeddings{Defaults::InputsEmbedsName};
@@ -158,12 +169,21 @@ struct Config {
       std::vector<PipelineModel> pipeline;
 
     } decoder;
+
+    struct PromptTemplates {
+      std::string assistant{Defaults::PromptTemplateName};
+      std::string prompt{Defaults::PromptTemplateName};
+      std::string system{Defaults::PromptTemplateName};
+      std::string user{Defaults::PromptTemplateName};
+    };
+    std::optional<PromptTemplates> prompt_templates;
   } model;
 
   struct Search {
     bool do_sample{};  // True to do randomized sampling through top_k and top_p, if false, the top logit score is chosen
     int min_length{};
     int max_length{};  // If omitted or 0 in json file, will be set to model.context_length on load
+    int batch_size{1};
     int num_beams{1};  // 1 means no beam search.
     int num_return_sequences{1};
     float repetition_penalty{1.0f};  // 1.0 means no penalty.
@@ -188,6 +208,8 @@ struct Config {
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
+void ClearProviders(Config& config);
+void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 bool IsCudaGraphEnabled(Config::SessionOptions& session_options);
 
 }  // namespace Generators

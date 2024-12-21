@@ -24,6 +24,8 @@ import os
 import json
 from metrics import BenchmarkRecord
 
+import numpy as np
+
 peak_cpu_memory = 0.0
 peak_gpu_memory = 0.0
 peak_memory_lock = threading.Lock()
@@ -70,14 +72,13 @@ def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
     params.set_search_options(max_length=prompt_length, min_length=prompt_length)
-    params.input_ids = tokens
 
     if use_graph_capture:
         params.try_graph_capture_with_max_batch_size(1)
 
     generator=og.Generator(model, params)
+    generator.append_tokens(tokens)
     while not generator.is_done():
-        generator.compute_logits()
         generator.generate_next_token()
     return tokenizer.decode(generator.get_sequence(0))
 
@@ -225,13 +226,18 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
  
     # Generate prompt
-    prompt = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
-    tokens = tokenizer.encode_batch(prompt)
+    tokens, prompt = None, None
+    if args.use_random_tokens:
+        # use random tokens instead of generating a prompt using the model and then tokenizing it
+        tokens = np.random.randint(100, size=(batch_size, prompt_length))
+        prompt = [tokenizer.decode(tokens[0])] * batch_size
+    else:
+        prompt = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
+        tokens = tokenizer.encode_batch(prompt)
 
     params = og.GeneratorParams(model)
-    params.input_ids = tokens
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
-    params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
+    params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length, batch_size=batch_size)
 
     if args.use_graph_capture:
         params.try_graph_capture_with_max_batch_size(batch_size)
@@ -239,8 +245,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if args.verbose: print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
         generator = og.Generator(model, params)
+        generator.append_tokens(tokens)
         while not generator.is_done():
-            generator.compute_logits()
             generator.generate_next_token()
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
@@ -263,8 +269,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
         # Prepare run
         params = og.GeneratorParams(model)
-        params.input_ids = tokens
-        params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
+        params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length, batch_size=batch_size)
 
         if args.use_graph_capture:
             params.try_graph_capture_with_max_batch_size(batch_size)
@@ -273,7 +278,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
-        generator.compute_logits()
+        generator.append_tokens(tokens)
         prompt_end_time = time.perf_counter()
         prompt_times.append(prompt_end_time - prompt_start_time)
 
@@ -287,16 +292,11 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         while not generator.is_done() and i < generation_length:
             # Run inference
             token_gen_start_time = time.perf_counter()
-            generator.compute_logits()
-            token_gen_end_time = time.perf_counter()
-
-            sampling_start_time = time.perf_counter()
             generator.generate_next_token()
-            sampling_end_time = time.perf_counter()
-            
+            token_gen_end_time = time.perf_counter()
             token_gen_times.append(token_gen_end_time - token_gen_start_time)
-            sampling_times.append(sampling_end_time - sampling_start_time)
             i += 1
+        
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
@@ -415,6 +415,7 @@ if __name__ == "__main__":
     parser.add_argument('-gc', '--use_graph_capture', action='store_true', help='Use the graph capture feature for CUDA or DML')
     parser.add_argument('-mn', '--model_name', type=str, default='model_name', help='Model name defined by users')
     parser.add_argument('-pr', '--precision', type=str, default='fp16', help='Model precision for metrics info')
+    parser.add_argument('--use_random_tokens', action='store_true', help='Use random tokens instead of generating a prompt')
     args = parser.parse_args()
 
     # check max_lengths

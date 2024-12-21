@@ -58,7 +58,7 @@ def get_model_paths():
         # "phi-3-mini": "microsoft/Phi-3-mini-128k-instruct",
     }
 
-    ci_data_path = os.path.join("/", "data", "ortgenai_pytorch_models")
+    ci_data_path = os.path.join("/", "data", "ortgenai", "pytorch")
     if not os.path.exists(ci_data_path):
         return {}, hf_paths
 
@@ -68,10 +68,14 @@ def get_model_paths():
         "llama-2": os.path.join(ci_data_path, "Llama-2-7B-Chat-GPTQ"),
         "llama-3": os.path.join(ci_data_path, "Meta-Llama-3-8B-AWQ"),
         "mistral-v0.2": os.path.join(ci_data_path, "Mistral-7B-Instruct-v0.2-GPTQ"),
-        # "phi-2": os.path.join(ci_data_path, "phi2"),
-        # "gemma-2b": os.path.join(ci_data_path, "gemma-1.1-2b-it"),
+        "phi-2": os.path.join(ci_data_path, "phi2"),
+        "gemma-2b": os.path.join(ci_data_path, "gemma-1.1-2b-it"),
         "gemma-7b": os.path.join(ci_data_path, "gemma-7b-it-awq"),
-        # "phi-3-mini": os.path.join(ci_data_path, "phi3-mini-128k-instruct"),
+        "phi-3-mini": os.path.join(ci_data_path, "phi3-mini-128k-instruct"),
+        "gemma-2-2b": os.path.join(ci_data_path, "gemma-2-2b-it"),
+        "llama-3.2": os.path.join(ci_data_path, "llama-3.2b-1b-instruct"),
+        "qwen-2.5": os.path.join(ci_data_path, "qwen2.5-0.5b-instruct"),
+        "nemotron-mini": os.path.join(ci_data_path, "nemotron-mini-4b"),
     }
 
     return ci_paths, hf_paths
@@ -104,7 +108,7 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
         device,
     ]
 
-    extra_options = ["--extra_options"]
+    extra_options = ["--extra_options", "include_hidden_states=true"]
     if device == "cpu" and precision == "int4":
         extra_options += ["int4_accuracy_level=4"]
     if one_layer:

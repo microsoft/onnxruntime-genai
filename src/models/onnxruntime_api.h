@@ -101,6 +101,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define PATH_MAX (4096)
 #endif
 
+#if !defined(__ANDROID__)
 #define LOG_WHEN_ENABLED(LOG_FUNC) \
   if (Generators::g_log.enabled && Generators::g_log.ort_lib) LOG_FUNC
 
@@ -109,6 +110,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #define LOG_WARN(...) LOG_WHEN_ENABLED(Generators::Log("warning", __VA_ARGS__))
 #define LOG_ERROR(...) LOG_WHEN_ENABLED(Generators::Log("error", __VA_ARGS__))
 #define LOG_FATAL(...) LOG_WHEN_ENABLED(Generators::Log("fatal", __VA_ARGS__))
+#endif
 
 /** \brief Free functions and a few helpers are defined inside this namespace. Otherwise all types are the C API types
  *
@@ -515,6 +517,8 @@ struct OrtRunOptions {
    * Wraps OrtApi::RunOptionsUnsetTerminate
    */
   OrtRunOptions& UnsetTerminate();
+
+  OrtRunOptions& AddActiveLoraAdapter(const OrtLoraAdapter& adapter);  ///< Wraps OrtApi::RunOptionsSetActiveLoraAdapter
 
   static void operator delete(void* p) { Ort::api->ReleaseRunOptions(reinterpret_cast<OrtRunOptions*>(p)); }
   Ort::Abstract make_abstract;
@@ -1305,6 +1309,16 @@ struct OrtOp {
               size_t input_count,
               OrtValue* const* output_values,
               size_t output_count);
+};
+
+/** \brief LoraAdapter
+ *
+ */
+struct OrtLoraAdapter {
+  static std::unique_ptr<OrtLoraAdapter> Create(const ORTCHAR_T* adapter_file_path, OrtAllocator& allocator);  ///< Wraps OrtApi::CreateOrtLoraAdapter
+
+  static void operator delete(void* p) { Ort::api->ReleaseLoraAdapter(reinterpret_cast<OrtLoraAdapter*>(p)); }
+  Ort::Abstract make_abstract;
 };
 
 #include "onnxruntime_inline.h"

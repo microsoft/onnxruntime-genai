@@ -9,21 +9,38 @@ namespace Generators {
 
 std::string ComposeKeyValueName(const std::string& template_string, int index);
 
-struct KV_Cache_Combined {
-  KV_Cache_Combined(State& state);
+struct KeyValueCache {
+  virtual ~KeyValueCache() = default;
+  virtual void Add() = 0;
+  virtual void AddEncoder() = 0;
+  virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) = 0;
+  virtual void RewindTo(size_t index) = 0;
+};
 
-  void Add();  // Add to state inputs/outputs
-  void Update(std::span<const int32_t> beam_indices, int current_length);
+struct CombinedKeyValueCache : KeyValueCache {
+  CombinedKeyValueCache(State& state);
 
-  template <typename ScoreType>
-  void PickPastState(std::span<const int32_t> beam_indices, int index);
-  void PickPastState(std::span<const int32_t> beam_indices, int index);
+  void Add() override;  // Add to state inputs/outputs
+  void AddEncoder() override {
+    throw std::runtime_error("CombinedKeyValueCache does not support AddEncoder.");
+  };
+  void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
+  void RewindTo(size_t index) override;
 
  private:
+  template <typename ScoreType>
+  void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
+  void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
+
+  template <typename T>
+  void RewindPastTensorsTo(size_t index);
+
   State& state_;
   const Model& model_{state_.model_};
   int layer_count_;
   size_t input_index_{~0U}, output_index_{~0U};
+
+  bool is_first_update_{true};
 
   std::array<int64_t, 5> shape_;
   ONNXTensorElementDataType type_;
@@ -33,27 +50,35 @@ struct KV_Cache_Combined {
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
 
-struct KV_Cache {
-  KV_Cache(State& state);
+struct DefaultKeyValueCache : KeyValueCache {
+  DefaultKeyValueCache(State& state);
 
   static bool IsCacheNeeded(const Model& model);
 
-  void Add();
+  void Add() override;
   auto& GetShape() const { return shape_; }
   auto& GetType() const { return type_; }
   auto& GetPresents() { return presents_; }
 
-  void Update(std::span<const int32_t> beam_indices, int current_length);
-  template <typename ScoreType>
-  void PickPastState(std::span<const int32_t> beam_indices, int index);
-  void PickPastState(std::span<const int32_t> beam_indices, int index);
+  // Move present to past. Prepare present output for next generation iteration.
+  void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
+  void RewindTo(size_t index) override;
 
  private:
+  template <typename ScoreType>
+  void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
+  void PickPastState(DeviceSpan<int32_t> beam_indices, int index);
+
+  template <typename T>
+  void RewindPastTensorsTo(size_t index);
+
   State& state_;
   const Model& model_{state_.model_};
   int layer_count_;
   size_t input_index_{~0U}, output_index_{~0U};
   bool past_present_share_buffer_;  // True if model.decoder.past_present_share_buffer is set to true, and we're using cuda, and not beam search
+
+  bool is_first_update_{true};
 
   std::array<int64_t, 4> shape_;
   ONNXTensorElementDataType type_;
@@ -64,8 +89,9 @@ struct KV_Cache {
   std::vector<StaticBuffer*> sb_kv_caches_;
 };
 
-struct Cross_Cache {
-  Cross_Cache(State& state, int sequence_length = 0);
+// Very similar to the DefaultKeyValueCache, but is only created once at the encoder step, then used without modification for every decoder step
+struct CrossCache {
+  CrossCache(State& state);
 
   void AddOutputs(State& state);
   void AddInputs(State& state);
@@ -82,4 +108,41 @@ struct Cross_Cache {
   std::vector<std::unique_ptr<OrtValue>> values_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
+
+struct WindowedKeyValueCache : KeyValueCache {
+  WindowedKeyValueCache(State& state);
+
+  void Add() override;
+  void AddEncoder() override {
+    throw std::runtime_error("WindowedKeyValueCache does not support AddEncoder.");
+  };
+  void Update(DeviceSpan<int32_t> beam_indices, int current_length) override;
+  void RewindTo(size_t index) override {
+    throw std::runtime_error("WindowedKeyValueCache does not support RewindTo.");
+  }
+
+ private:
+  void Slide();
+
+  State& state_;
+  const Model& model_{state_.model_};
+  int layer_count_{};
+  int window_size_{};
+  size_t num_windows_{};
+  size_t window_index_{};
+  size_t input_index_{~0U}, output_index_{~0U};
+
+  std::array<int64_t, 4> key_cache_shape_in_, key_cache_shape_out_;
+  std::array<int64_t, 4> value_cache_shape_in_, value_cache_shape_out_;
+  ONNXTensorElementDataType type_;
+
+  std::vector<std::unique_ptr<OrtValue>> key_caches_in_, value_caches_in_;
+  std::vector<std::unique_ptr<OrtValue>> key_caches_out_, value_caches_out_;
+  std::vector<std::string> input_name_strings_, output_name_strings_;
+
+  bool is_first_update_{true};
+};
+
+std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state);
+
 }  // namespace Generators

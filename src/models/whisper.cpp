@@ -118,15 +118,11 @@ void WhisperDecoderState::UpdateInputsOutputs(const RoamingArray<int32_t>& next_
 
   if (cache_indirection_ && params_->search.num_beams > 1 && !first_update) {
 #if USE_CUDA
-    gpu_span<int32_t> beam_indices_gpu = beam_indices.GetGPU();
-    cuda_unique_ptr<int32_t> beam_indices_ptr;
+    auto beam_indices_gpu = gpu_span<int32_t>{beam_indices.Span()};
     if (beam_indices_gpu.empty()) {
-      beam_indices_ptr = CudaMallocArray<int32_t>(params_->batch_size, &beam_indices_gpu);
-      std::vector<int32_t> beam_indices_cpu(params_->batch_size, 0);
+      auto beam_indices_cpu = beam_indices.CpuSpan();
       std::iota(beam_indices_cpu.begin(), beam_indices_cpu.end(), 0);
-      CudaCheck() == cudaMemcpyAsync(beam_indices_gpu.data(), beam_indices_cpu.data(),
-                                     beam_indices_cpu.size() * sizeof(int32_t),
-                                     cudaMemcpyHostToDevice, model_.cuda_stream_);
+      beam_indices.CopyCpuToDevice();
     }
     std::unique_ptr<OrtValue> new_cache_indirection;
     auto cache_indirection_type = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.cache_indirection);
@@ -136,9 +132,9 @@ void WhisperDecoderState::UpdateInputsOutputs(const RoamingArray<int32_t>& next_
     cuda::UpdateCacheIndirectionKernelLauncher(new_cache_indirection->GetTensorMutableData<int32_t>(),
                                                cache_indirection_->GetTensorData<int32_t>(),
                                                beam_indices_gpu.data(),
-                                               params_->batch_size,
+                                               params_->search.batch_size,
                                                params_->search.num_beams,
-                                               params_->sequence_length,
+                                               0,
                                                params_->search.max_length,
                                                current_length,
                                                model_.cuda_stream_);

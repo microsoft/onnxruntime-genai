@@ -4,6 +4,10 @@
 #include "utils.h"
 #include <cinttypes>
 
+#if USE_CUDA
+#include "../cuda/cuda_common.h"
+#endif
+
 #if USE_DML
 #include "../dml/dml_helpers.h"
 #include "model.h"
@@ -15,7 +19,7 @@ static constexpr size_t c_value_count = 10;  // Dump this many values from the s
 template <typename... Types>
 const char* TypeToString(ONNXTensorElementDataType type, Ort::TypeList<Types...>) {
   const char* name = "(please add type to list)";
-  ((type == Ort::TypeToTensorType<Types> ? name = typeid(Types).name(), true : false) || ...);
+  (void)((type == Ort::TypeToTensorType<Types> ? name = typeid(Types).name(), true : false) || ...);
   return name;
 }
 
@@ -35,29 +39,20 @@ std::ostream& operator<<(std::ostream& stream, Ort::BFloat16_t v) {
 
 template <typename T>
 void DumpSpan(std::ostream& stream, std::span<const T> values) {
+  // If type is uint8_t or int8_t cast to int so it displays as an int vs a char
+  using DisplayType = std::conditional_t<std::is_same_v<T, uint8_t> || std::is_same_v<T, int8_t>, int, T>;
+
   if (values.size() <= c_value_count) {
     for (auto v : values)
-      stream << v << ' ';
+      stream << static_cast<DisplayType>(v) << ' ';
   } else {
     for (size_t i = 0; i < c_value_count / 2; i++)
-      stream << values[i] << ' ';
+      stream << static_cast<DisplayType>(values[i]) << ' ';
     stream << "... ";
     for (size_t i = values.size() - c_value_count / 2; i < values.size(); i++)
-      stream << values[i] << ' ';
+      stream << static_cast<DisplayType>(values[i]) << ' ';
   }
 }
-
-#if USE_CUDA
-template <typename T>
-void DumpCudaSpan(std::ostream& stream, std::span<const T> data) {
-  auto cpu_copy = std::make_unique<T[]>(data.size());
-  CudaCheck() == cudaMemcpy(cpu_copy.get(), data.data(), data.size_bytes(), cudaMemcpyDeviceToHost);
-
-  DumpSpan(stream, std::span<const T>{cpu_copy.get(), data.size()});
-}
-template void DumpCudaSpan(std::ostream&, std::span<const float>);
-template void DumpCudaSpan(std::ostream&, std::span<const int32_t>);
-#endif
 
 template <typename... Types>
 bool DumpSpan(std::ostream& stream, ONNXTensorElementDataType type, const void* p_values_raw, size_t count, Ort::TypeList<Types...>) {

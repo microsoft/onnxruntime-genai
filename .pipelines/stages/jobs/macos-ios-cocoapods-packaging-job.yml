@@ -1,0 +1,68 @@
+parameters:
+- name: build_config
+  type: string
+- name: ort_version
+  type: string
+
+jobs:
+- job: macos_ios_cocoapods_packaging
+  pool:
+    vmImage: 'macOS-latest'
+  variables:
+    buildSettingsFile: "tools/ci_build/github/apple/default_full_apple_framework_build_settings.json"
+    cPodName: onnxruntime-genai-c
+    objcPodName: onnxruntime-genai-objc
+
+  workspace:
+    clean: all
+  steps:
+    - checkout: self
+      clean: true
+      submodules: none
+
+    - template: steps/utils/set-genai-version.yml
+    - template: steps/utils/set-cmake-build-type.yml
+      parameters:
+        build_config: ${{parameters.build_config}}
+
+
+    - task: CmdLine@2
+      displayName: Build MacOS & iOS CocoaPods Packages
+      inputs:
+        script: |
+          set -e -x
+          python3 -m pip install requests huggingface_hub
+          python3 tools/ci_build/github/apple/build_and_assemble_apple_pods.py \
+            --build-dir "$(Build.BinariesDirectory)/apple_framework" \
+            --staging-dir "$(Build.BinariesDirectory)/staging" \
+            --pod-version "$(genai_version)" \
+            --test \
+            --variant Full \
+            --build-settings-file "${{ variables.buildSettingsFile }}" \
+            --build-apple-framework-arg=--config=$(cmake_build_type) \
+            --ort-version ${{parameters.ort_version}}
+
+    - script: |
+        set -e -x
+
+        for POD_NAME in "${{ variables.cPodName}}" "${{ variables.objcPodName }}";
+        do
+          ./tools/ci_build/github/apple/assemble_apple_packaging_artifacts.sh \
+            "$(Build.BinariesDirectory)/staging" \
+            "$(Build.ArtifactStagingDirectory)" \
+            "${POD_NAME}" \
+            "$(genai_version)"
+        done
+
+        # copy over helper script for use in release pipeline
+        # cp tools/ci_build/github/apple/package_release_tasks.py "$(Build.ArtifactStagingDirectory)"
+      displayName: "Assemble artifacts"
+
+    - script: |
+        set -e -x
+        ls -R "$(Build.ArtifactStagingDirectory)"
+      displayName: "List staged artifacts"
+
+    - publish: "$(Build.ArtifactStagingDirectory)"
+      artifact: "macos_ios_cocoapods_packaging_artifacts"
+      displayName: "Publish artifacts"

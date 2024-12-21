@@ -25,6 +25,9 @@ target_link_libraries(unit_tests PRIVATE
   onnxruntime-genai-static
   GTest::gtest_main
 )
+set_target_properties(unit_tests PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai-static>"
+)
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
 target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
@@ -41,14 +44,15 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
 endif()
 
 set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test_models/")
-set(TEST_MODEL_DES_DIR "$<TARGET_FILE_DIR:unit_tests>/test_models/")
-add_custom_command(TARGET unit_tests POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_directory ${TEST_MODEL_SRC_DIR} ${TEST_MODEL_DES_DIR}
-)
 
-add_compile_definitions(MODEL_PATH="${TEST_MODEL_DES_DIR}")
+add_compile_definitions(MODEL_PATH="${TEST_MODEL_SRC_DIR}")
 set_target_properties(unit_tests PROPERTIES FOLDER "Tests")
 source_group(TREE ${PROJECT_SOURCE_DIR} FILES ${test_srcs})
 set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_tests)
+
+# Hide symbols by default, so that shared libraries don't link to our redirected symbols (leads to infinite loops)
+if (NOT MSVC)
+  target_compile_options(unit_tests PRIVATE "-fvisibility=hidden")
+endif()
 
 include(GoogleTest)

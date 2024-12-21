@@ -18,7 +18,7 @@ struct MultiModalVisionModel : Model {
   MultiModalVisionModel(const MultiModalVisionModel&) = delete;
   MultiModalVisionModel& operator=(const MultiModalVisionModel&) = delete;
 
-  std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths,
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
 
   std::unique_ptr<OrtSession> vision_session_;     // pixel_values, image_sizes -> image_features
@@ -27,25 +27,22 @@ struct MultiModalVisionModel : Model {
 };
 
 struct EmbeddingState : State {
-  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info, const int64_t num_image_tokens);
+  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens);
   EmbeddingState(const EmbeddingState&) = delete;
   EmbeddingState& operator=(const EmbeddingState&) = delete;
 
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
-                          RoamingArray<int32_t> next_indices = {}) override;
-
-  const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_; };
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices = {}) override;
 
  private:
   friend struct MultiModalPipelineState;
 
-  void UpdateInputsAndOutputs(RoamingArray<int32_t> next_tokens);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool is_prompt);
 
   const MultiModalVisionModel& model_;
-  const CapturedGraphInfo* captured_graph_info_;
   int64_t num_image_tokens_;
 
-  InputIDs input_ids_{*this};                                       // Model input
+  DefaultInputIDs input_ids_{*this};                                // Model input
   ImageFeatures image_features_{*this, ImageFeatures::Mode::Input,  // Optional model input
                                 model_.config_->model.embedding.inputs.image_features,
                                 num_image_tokens_};
@@ -58,8 +55,8 @@ struct VisionEncoderState : State {
   VisionEncoderState(const VisionEncoderState&) = delete;
   VisionEncoderState& operator=(const VisionEncoderState&) = delete;
 
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
-                          RoamingArray<int32_t> next_indices = {}) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices = {}) override;
 
  private:
   friend struct MultiModalPipelineState;
@@ -73,47 +70,47 @@ struct VisionEncoderState : State {
 };
 
 struct DecoderState : State {
-  DecoderState(const MultiModalVisionModel& model, RoamingArray<int32_t> sequence_lengths,
+  DecoderState(const MultiModalVisionModel& model, DeviceSpan<int32_t> sequence_lengths,
                const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info);
   DecoderState(const DecoderState&) = delete;
   DecoderState& operator=(const DecoderState&) = delete;
 
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
-                          RoamingArray<int32_t> next_indices) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices) override;
 
   const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_; };
 
  private:
   friend struct MultiModalPipelineState;
 
-  void UpdateInputsOutputs(int current_length, RoamingArray<int32_t> beam_indices);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
 
   const MultiModalVisionModel& model_;
   const CapturedGraphInfo* captured_graph_info_;
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
-  PositionInputs position_inputs_;  // Model input
-  KV_Cache kv_cache_{*this};        // Model input
-  Logits logits_{*this};            // Model output
+  DefaultPositionInputs position_inputs_;  // Model input
+  DefaultKeyValueCache kv_cache_{*this};   // Model input
+  Logits logits_{*this};                   // Model output
 };
 
 struct MultiModalPipelineState : State {
-  MultiModalPipelineState(const MultiModalVisionModel& model, RoamingArray<int32_t> sequence_lengths,
+  MultiModalPipelineState(const MultiModalVisionModel& model, DeviceSpan<int32_t> sequence_lengths,
                           const GeneratorParams& params);
   MultiModalPipelineState(const MultiModalPipelineState&) = delete;
   MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
 
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens,
-                          RoamingArray<int32_t> next_indices) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices) override;
   OrtValue* GetInput(const char* name) override;
   OrtValue* GetOutput(const char* name) override;
 
  private:
-  void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices,
+  void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                            int current_length);
 
   const MultiModalVisionModel& model_;
-  int64_t num_image_tokens_{0};
+  int64_t num_image_tokens_{};
   const CapturedGraphInfoPtr captured_graph_info_;
   std::unique_ptr<EmbeddingState> embedding_state_;
   std::unique_ptr<VisionEncoderState> vision_state_;

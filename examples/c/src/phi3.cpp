@@ -6,7 +6,14 @@
 #include <iomanip>
 #include <iostream>
 #include <string>
+#include <cstring>
 #include "ort_genai.h"
+#include <thread>
+#include <csignal>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <functional>
 
 using Clock = std::chrono::high_resolution_clock;
 using TimePoint = std::chrono::time_point<Clock>;
@@ -65,16 +72,80 @@ class Timing {
 
 // C++ API Example
 
-void CXX_API(const char* model_path) {
+class TerminateSession {
+ public:
+  std::condition_variable cv;
+  std::mutex mtx;
+  bool stopFlag = false;
+
+  void signalHandler(int signum) {
+    std::cout << "Interrupt signal received. Terminating current session...\n";
+    std::unique_lock<std::mutex> lock(mtx);
+    stopFlag = true;
+    cv.notify_one();
+  }
+
+  void Generator_SetTerminate_Call(OgaGenerator* generator) {
+    std::unique_lock<std::mutex> lock(mtx);
+    while (!generator->IsDone()) {
+      if (stopFlag) {
+        generator->SetRuntimeOption("terminate_session", "1");
+        stopFlag = false;
+        break;
+      }
+      // Wait for stopflag to become true or it will timeout after 1000 ms
+      auto timeout = std::chrono::milliseconds(1000);
+      cv.wait_for(lock, timeout, [this] { return stopFlag; });
+    }
+  }
+
+  void Generator_SetTerminate_Call_C(OgaGenerator* generator) {
+    std::unique_lock<std::mutex> lock(mtx);
+    while (!OgaGenerator_IsDone(generator)) {
+      if (stopFlag) {
+        OgaGenerator_SetRuntimeOption(generator, "terminate_session", "1");
+        stopFlag = false;
+        break;
+      }
+      // Wait for stopflag to become true or it will timeout after 1000 ms
+      auto timeout = std::chrono::milliseconds(1000);
+      cv.wait_for(lock, timeout, [this] { return stopFlag; });
+    }
+  }
+};
+
+static TerminateSession catch_terminate;
+
+void signalHandlerWrapper(int signum) {
+  catch_terminate.signalHandler(signum);
+}
+
+void CXX_API(const char* model_path, const char* execution_provider) {
+  std::cout << "Creating config..." << std::endl;
+  auto config = OgaConfig::Create(model_path);
+
+  config->ClearProviders();
+  std::string provider(execution_provider);
+  if (provider.compare("cpu") != 0) {
+    config->AppendProvider(execution_provider);
+    if (provider.compare("cuda") == 0) {
+      config->SetProviderOption(execution_provider, "enable_cuda_graph", "0");
+    }
+  }
+
   std::cout << "Creating model..." << std::endl;
-  auto model = OgaModel::Create(model_path);
+  auto model = OgaModel::Create(*config);
+
   std::cout << "Creating tokenizer..." << std::endl;
   auto tokenizer = OgaTokenizer::Create(*model);
   auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
 
   while (true) {
+    signal(SIGINT, signalHandlerWrapper);
     std::string text;
-    std::cout << "Prompt: (Use quit() to exit)" << std::endl;
+    std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
+    // Clear Any cin error flags because of SIGINT
+    std::cin.clear();
     std::getline(std::cin, text);
 
     if (text == "quit()") {
@@ -93,41 +164,37 @@ void CXX_API(const char* model_path) {
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 1024);
-    params->SetInputSequences(*sequences);
 
     auto generator = OgaGenerator::Create(*model, *params);
+    std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call, &catch_terminate, generator.get()));
+    generator->AppendTokenSequences(*sequences);
 
-    while (!generator->IsDone()) {
-      generator->ComputeLogits();
-      generator->GenerateNextToken();
+    try {
+      while (!generator->IsDone()) {
+        generator->GenerateNextToken();
 
-      if (is_first_token) {
-        timing.RecordFirstTokenTimestamp();
-        is_first_token = false;
+        if (is_first_token) {
+          timing.RecordFirstTokenTimestamp();
+          is_first_token = false;
+        }
+
+        const auto num_tokens = generator->GetSequenceCount(0);
+        const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
+        std::cout << tokenizer_stream->Decode(new_token) << std::flush;
       }
-
-      // Show usage of GetOutput
-      std::unique_ptr<OgaTensor> output_logits = generator->GetOutput("logits");
-
-      // Assuming output_logits.Type() is float as it's logits
-      // Assuming shape is 1 dimensional with shape[0] being the size
-      auto logits = reinterpret_cast<float*>(output_logits->Data());
-
-      // Print out the logits using the following snippet, if needed
-      //auto shape = output_logits->Shape();
-      //for (size_t i=0; i < shape[0]; i++)
-      //   std::cout << logits[i] << " ";
-      //std::cout << std::endl;
-
-      const auto num_tokens = generator->GetSequenceCount(0);
-      const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
-      std::cout << tokenizer_stream->Decode(new_token) << std::flush;
+    }
+    catch (const std::exception& e) {
+      std::cout << "Session Terminated: " << e.what() << std::endl;
     }
 
     timing.RecordEndTimestamp();
     const int prompt_tokens_length = sequences->SequenceCount(0);
     const int new_tokens_length = generator->GetSequenceCount(0) - prompt_tokens_length;
     timing.Log(prompt_tokens_length, new_tokens_length);
+
+    if (th.joinable()) {
+      th.join();  // Join the thread if it's still running
+    }
 
     for (int i = 0; i < 3; ++i)
       std::cout << std::endl;
@@ -144,10 +211,34 @@ void CheckResult(OgaResult* result) {
   }
 }
 
-void C_API(const char* model_path) {
+bool CheckIfSessionTerminated(OgaResult* result, OgaGenerator* generator) {
+  if (result) {
+    if (OgaGenerator_IsSessionTerminated(generator)){
+      return true;
+    }
+    std::string string = OgaResultGetError(result);
+    OgaDestroyResult(result);
+    throw std::runtime_error(string);
+  }
+  return false;
+}
+
+void C_API(const char* model_path, const char* execution_provider) {
+  OgaConfig* config;
+  std::cout << "Creating config..." << std::endl;
+  CheckResult(OgaCreateConfig(model_path, &config));
+
+  CheckResult(OgaConfigClearProviders(config));
+  if (strcmp(execution_provider, "cpu") != 0) {
+    CheckResult(OgaConfigAppendProvider(config, execution_provider));
+    if (strcmp(execution_provider, "cuda") == 0) {
+      CheckResult(OgaConfigSetProviderOption(config, execution_provider, "enable_cuda_graph", "0"));
+    }
+  }
+
   OgaModel* model;
   std::cout << "Creating model..." << std::endl;
-  OgaCreateModel(model_path, &model);
+  CheckResult(OgaCreateModelFromConfig(config, &model));
 
   OgaTokenizer* tokenizer;
   std::cout << "Creating tokenizer..." << std::endl;
@@ -157,8 +248,11 @@ void C_API(const char* model_path) {
   CheckResult(OgaCreateTokenizerStream(tokenizer, &tokenizer_stream));
 
   while (true) {
+    signal(SIGINT, signalHandlerWrapper);
     std::string text;
-    std::cout << "Prompt: (Use quit() to exit)" << std::endl;
+    std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
+    // Clear Any cin error flags because of SIGINT
+    std::cin.clear();
     std::getline(std::cin, text);
 
     if (text == "quit()") {
@@ -179,14 +273,16 @@ void C_API(const char* model_path) {
     OgaGeneratorParams* params;
     CheckResult(OgaCreateGeneratorParams(model, &params));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 1024));
-    CheckResult(OgaGeneratorParamsSetInputSequences(params, sequences));
 
     OgaGenerator* generator;
     CheckResult(OgaCreateGenerator(model, params, &generator));
+    CheckResult(OgaGenerator_AppendTokenSequences(generator, sequences));
+
+    std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call_C, &catch_terminate, generator));
 
     while (!OgaGenerator_IsDone(generator)) {
-      CheckResult(OgaGenerator_ComputeLogits(generator));
-      CheckResult(OgaGenerator_GenerateNextToken(generator));
+      if (CheckIfSessionTerminated(OgaGenerator_GenerateNextToken(generator), generator))
+        break;
 
       if (is_first_token) {
         timing.RecordFirstTokenTimestamp();
@@ -196,7 +292,8 @@ void C_API(const char* model_path) {
       const int32_t num_tokens = OgaGenerator_GetSequenceCount(generator, 0);
       int32_t new_token = OgaGenerator_GetSequenceData(generator, 0)[num_tokens - 1];
       const char* new_token_string;
-      CheckResult(OgaTokenizerStreamDecode(tokenizer_stream, new_token, &new_token_string));
+      if (CheckIfSessionTerminated(OgaTokenizerStreamDecode(tokenizer_stream, new_token, &new_token_string), generator))
+        break;
       std::cout << new_token_string << std::flush;
     }
 
@@ -204,6 +301,10 @@ void C_API(const char* model_path) {
     const int prompt_tokens_length = OgaSequencesGetSequenceCount(sequences, 0);
     const int new_tokens_length = OgaGenerator_GetSequenceCount(generator, 0) - prompt_tokens_length;
     timing.Log(prompt_tokens_length, new_tokens_length);
+
+    if (th.joinable()) {
+      th.join();  // Join the thread if it's still running
+    }
 
     for (int i = 0; i < 3; ++i)
       std::cout << std::endl;
@@ -218,11 +319,13 @@ void C_API(const char* model_path) {
 }
 
 static void print_usage(int /*argc*/, char** argv) {
-  std::cerr << "usage: " << argv[0] << " model_path" << std::endl;
+  std::cerr << "usage: " << argv[0] << std::endl;
+  std::cerr << "model_path = " << argv[1] << std::endl;
+  std::cerr << "execution_provider = " << argv[2] << std::endl;
 }
 
 int main(int argc, char** argv) {
-  if (argc != 2) {
+  if (argc != 3) {
     print_usage(argc, argv);
     return -1;
   }
@@ -236,10 +339,10 @@ int main(int argc, char** argv) {
 
 #ifdef USE_CXX
   std::cout << "C++ API" << std::endl;
-  CXX_API(argv[1]);
+  CXX_API(argv[1], argv[2]);
 #else
   std::cout << "C API" << std::endl;
-  C_API(argv[1]);
+  C_API(argv[1], argv[2]);
 #endif
 
   return 0;

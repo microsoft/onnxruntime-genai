@@ -5,10 +5,16 @@
 #include <pybind11/numpy.h>
 #include <iostream>
 #include "../generators.h"
+#include "../ort_genai.h"
 #include "../json.h"
 #include "../search.h"
 #include "../models/model.h"
 #include "../logging.h"
+#include "../smartptrs.h"
+
+#if USE_CUDA
+#include "../cuda/cuda_common.h"
+#endif
 
 using namespace pybind11::literals;
 
@@ -31,7 +37,7 @@ struct npy_format_descriptor<Ort::Float16_t> {
 }  // namespace pybind11
 
 template <typename T>
-std::span<T> ToSpan(pybind11::array_t<T> v) {
+Generators::cpu_span<T> ToSpan(pybind11::array_t<T> v) {
   if constexpr (std::is_const_v<T>)
     return {v.data(), static_cast<size_t>(v.size())};
   else
@@ -160,7 +166,8 @@ pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     data = cpu_copy.get();
   }
-#elif USE_CUDA
+#endif
+#if USE_CUDA
   if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model.device_type_ == Generators::DeviceType::CUDA) {
     auto data_size = type_info->GetElementCount() * element_size;
     cpu_copy = std::make_unique<uint8_t[]>(data_size);
@@ -191,25 +198,22 @@ pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
 }
 namespace Generators {
 
-// A roaming array is one that can be in CPU or GPU memory, and will copy the memory as needed to be used from anywhere
 template <typename T>
-struct PyRoamingArray : RoamingArray<T> {
+struct PyDeviceMemorySpan {
+  void operator=(DeviceSpan<T> span) {
+    span_ = std::move(span);
+  }
+
   pybind11::array_t<T> GetNumpy() {
-    auto v = this->GetCPU();
+    auto v = span_.CopyDeviceToCpu();
     py_cpu_array_ = pybind11::array_t<T>({v.size()}, {sizeof(T)}, v.data(), pybind11::capsule(v.data(), [](void*) {}));
     return py_cpu_array_;
   }
 
+ private:
+  DeviceSpan<T> span_;
   pybind11::array_t<T> py_cpu_array_;
 };
-
-template <typename T>
-void Declare_DeviceArray(pybind11::module& m, const char* name) {
-  using Type = PyRoamingArray<T>;
-  pybind11::class_<Type>(m, name)
-      .def(
-          "get_array", [](Type& t) -> pybind11::array_t<T> { return t.GetNumpy(); }, pybind11::return_value_policy::reference_internal);
-}
 
 struct PyGeneratorParams {
   PyGeneratorParams(const Model& model) : params_{std::make_shared<GeneratorParams>(model)} {
@@ -219,23 +223,7 @@ struct PyGeneratorParams {
 
   std::shared_ptr<GeneratorParams> params_;
 
-  // Turn the python py_input_ids_ into the low level parameters
   void Prepare() {
-    // TODO: This will switch to using the variant vs being ifs
-    if (py_input_ids_.size() != 0) {
-      if (py_input_ids_.ndim() == 1) {  // Just a 1D array
-        params_->batch_size = 1;
-        params_->sequence_length = static_cast<int>(py_input_ids_.shape(0));
-      } else {
-        if (py_input_ids_.ndim() != 2)
-          throw std::runtime_error("Input IDs can only be 1 or 2 dimensional");
-
-        params_->batch_size = static_cast<int>(py_input_ids_.shape(0));
-        params_->sequence_length = static_cast<int>(py_input_ids_.shape(1));
-      }
-      params_->input_ids = ToSpan(py_input_ids_);
-    }
-
     if (py_audio_features_.size() != 0) {
       GeneratorParams::Whisper& whisper = params_->inputs.emplace<GeneratorParams::Whisper>();
       whisper.audio_features = std::make_shared<Tensor>(ToOrtValue(py_audio_features_));
@@ -277,7 +265,6 @@ struct PyGeneratorParams {
     params_->TryGraphCapture(max_batch_size.cast<int>());
   }
 
-  pybind11::array_t<int32_t> py_input_ids_;
   pybind11::array py_audio_features_;
   pybind11::array_t<int32_t> py_alignment_heads_;
 
@@ -293,22 +280,17 @@ struct PyNamedTensors {
 
 struct PyGenerator {
   PyGenerator(Model& model, PyGeneratorParams& params) {
-    params.Prepare();
-    generator_ = CreateGenerator(model, params);
+    generator_ = CreateGenerator(model, *params.params_);
   }
 
   pybind11::array_t<int32_t> GetNextTokens() {
-    py_tokens_.Assign(generator_->search_->GetNextTokens());
-    return ToPython(py_tokens_.GetCPU());
+    py_tokens_ = generator_->search_->GetNextTokens();
+    return py_tokens_.GetNumpy();
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
-    py_sequence_.Assign(generator_->search_->GetSequence(index));
-    return ToPython(py_sequence_.GetCPU());
-  }
-
-  void ComputeLogits() {
-    generator_->ComputeLogits();
+    py_sequence_ = generator_->search_->GetSequence(index);
+    return py_sequence_.GetNumpy();
   }
 
   pybind11::array GetInput(const std::string& name) {
@@ -319,32 +301,46 @@ struct PyGenerator {
     return ToNumpy(generator_->state_->GetOutput(name.c_str()), *(generator_->model_));
   }
 
-  pybind11::array_t<float> GetLogits() {
-    py_logits_.Assign(generator_->search_->GetLogits());
-    return ToPython(py_logits_.GetCPU());
+  void AppendTokens(pybind11::array_t<int32_t> tokens) {
+    generator_->AppendTokens(ToSpan(tokens));
   }
 
-  void SetLogits(pybind11::array_t<float> logits) {
-    logits_ = logits;
-    generator_->search_->SetLogits(cpu_span<float>{ToSpan(logits_)});
+  pybind11::array_t<float> GetLogits() {
+    py_logits_ = generator_->GetLogits();
+    return py_logits_.GetNumpy();
+  }
+
+  void SetLogits(pybind11::array_t<float> new_logits) {
+    auto logits = generator_->search_->GetLogits();
+    if (static_cast<size_t>(new_logits.size()) != logits.size())
+      throw std::runtime_error("Generator::SetLogits passed an array of size " + std::to_string(new_logits.size()) + " but should be size " + std::to_string(logits.size()));
+
+    copy(std::span<const float>{ToSpan(new_logits)}, logits.CpuSpan());
+    logits.CopyCpuToDevice();
+    generator_->computed_logits_ = true;
   }
 
   void GenerateNextToken() {
     generator_->GenerateNextToken();
   }
 
+  void RewindToLength(size_t new_length) {
+    generator_->RewindToLength(new_length);
+  }
+
   bool IsDone() const {
     return generator_->IsDone();
   }
 
+  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) {
+    generator_->state_->SetActiveAdapter(adapters, adapter_name);
+  }
+
  private:
   std::unique_ptr<Generator> generator_;
-  PyRoamingArray<int32_t> py_tokens_;
-  PyRoamingArray<int32_t> py_indices_;
-  PyRoamingArray<int32_t> py_sequence_;
-  PyRoamingArray<int32_t> py_sequencelengths_;
-  PyRoamingArray<float> py_logits_;
-  pybind11::array_t<float> logits_;  // Logits passed in from python, to keep the memory alive
+  PyDeviceMemorySpan<int32_t> py_tokens_;
+  PyDeviceMemorySpan<int32_t> py_sequence_;
+  PyDeviceMemorySpan<float> py_logits_;
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {
@@ -386,16 +382,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   // So that python users can catch OrtExceptions specifically
   pybind11::register_exception<Ort::Exception>(m, "OrtException");
 
-  Declare_DeviceArray<float>(m, "DeviceArray_float");
-  Declare_DeviceArray<int32_t>(m, "DeviceArray_int32");
-
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const Model&>())
       // TODO(ryanhill): Remove these entirely or replace with a single property that returns the entire config?
       .def_property_readonly("pad_token_id", [](const PyGeneratorParams& v) { return v.params_->config.model.pad_token_id; })
       .def_property_readonly("eos_token_id", [](const PyGeneratorParams& v) { return v.params_->config.model.eos_token_id; })
       .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->config.model.vocab_size; })
-      .def_readwrite("input_ids", &PyGeneratorParams::py_input_ids_)
       .def_readwrite("audio_features", &PyGeneratorParams::py_audio_features_)
       .def_readwrite("alignment_heads", &PyGeneratorParams::py_alignment_heads_)
       .def("set_inputs", [](PyGeneratorParams& generator_params, PyNamedTensors* named_tensors) {
@@ -433,11 +425,21 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def("create_stream", [](const Tokenizer& t) { return t.CreateStream(); });
 
+  // Pybind class using the C API for OgaConfig
+  pybind11::class_<OgaConfig>(m, "Config")
+      .def(pybind11::init([](const std::string& config_path) { return OgaConfig::Create(config_path.c_str()); }))
+      .def("append_provider", &OgaConfig::AppendProvider)
+      .def("set_provider_option", &OgaConfig::SetProviderOption)
+      .def("clear_providers", &OgaConfig::ClearProviders);
+
   pybind11::class_<Model, std::shared_ptr<Model>>(m, "Model")
+      .def(pybind11::init([](const OgaConfig& config) {
+        auto config_copy = std::make_unique<Config>(*reinterpret_cast<const Config*>(&config));
+        return CreateModel(GetOrtEnv(), std::move(config_copy));
+      }))
       .def(pybind11::init([](const std::string& config_path) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
-      .def("generate", [](Model& model, PyGeneratorParams& params) { params.Prepare(); return Generate(model, params); })
       .def_property_readonly(
           "device_type", [](const Model& model) { return to_string(model.device_type_); }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const Model& model) { return model.CreateMultiModalProcessor(); });
@@ -445,14 +447,18 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<Model&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
-      .def("compute_logits", &PyGenerator::ComputeLogits)
       .def("get_input", &PyGenerator::GetInput)
       .def("get_output", &PyGenerator::GetOutput)
+      .def("append_tokens", &PyGenerator::AppendTokens)
       .def("get_logits", &PyGenerator::GetLogits)
       .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
+      .def("rewind_to", &PyGenerator::RewindToLength)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
-      .def("get_sequence", &PyGenerator::GetSequence);
+      .def("get_sequence", &PyGenerator::GetSequence)
+      .def("set_active_adapter", [](PyGenerator& generator, Adapters* adapters, const std::string& adapter_name) {
+        generator.SetActiveAdapter(adapters, adapter_name);
+      });
 
   pybind11::class_<Images>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {
@@ -534,11 +540,18 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return processor.tokenizer_->Decode(ToSpan(tokens));
       });
 
+  pybind11::class_<Adapters, std::shared_ptr<Adapters>>(m, "Adapters")
+      .def(pybind11::init([](Model& model) {
+        return std::make_shared<Adapters>(&model);
+      }))
+      .def("load", &Adapters::LoadAdapter);
+
   m.def("set_log_options", &SetLogOptions);
 
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });
   m.def("is_rocm_available", []() { return USE_ROCM != 0; });
+  m.def("is_webgpu_available", []() { return USE_WEBGPU != 0; });
 
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });

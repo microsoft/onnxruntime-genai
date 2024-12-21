@@ -1,6 +1,4 @@
 parameters:
-  - name: StepName
-    type: string
   - name: WorkingDirectory
     type: string
   - name: HuggingFaceRepo
@@ -20,16 +18,20 @@ steps:
         python -m pip install "huggingface_hub[cli]"
         huggingface-cli login --token $HF_TOKEN
         huggingface-cli download ${{ parameters.HuggingFaceRepo }} --include ${{ parameters.RepoFolder }}/* --local-dir ${{ parameters.LocalFolder }} --local-dir-use-symlinks False
-      displayName: ${{ parameters.StepName }}
+      displayName: Download ${{ parameters.HuggingFaceRepo }} from HuggingFace
       workingDirectory: ${{ parameters.WorkingDirectory }}
       env:
         HF_TOKEN: ${{ parameters.HuggingFaceToken }}
+      condition: succeededOrFailed() # Run this even if previous tasks failed.
+
   - ${{ if eq(parameters.os, 'win') }}:
     - powershell: |
         python -m pip install "huggingface_hub[cli]"
         huggingface-cli login --token $env:HF_TOKEN
-        huggingface-cli download ${{ parameters.HuggingFaceRepo }} --include ${{ parameters.RepoFolder }}/* --local-dir ${{ parameters.LocalFolder }} --local-dir-use-symlinks False
-      displayName: ${{ parameters.StepName }}
+        # Use maximum path length for Windows... otherwises hits the path character limit
+        huggingface-cli download ${{ parameters.HuggingFaceRepo }} --include ${{ parameters.RepoFolder }}/* --local-dir "\\?\${{ parameters.WorkingDirectory }}\\${{ parameters.LocalFolder }}" --local-dir-use-symlinks False
+      displayName: Download ${{ parameters.HuggingFaceRepo }} from HuggingFace
       workingDirectory: ${{ parameters.WorkingDirectory }}
       env:
         HF_TOKEN: ${{ parameters.HuggingFaceToken }}
+      condition: succeededOrFailed() # Run this even if previous tasks failed.

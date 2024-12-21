@@ -6,16 +6,17 @@ namespace Generators {
 namespace cuda {
 
 template <typename T>
-void Launch_UpdatePositionIds(T* positions, int batch_beam_size, cudaStream_t stream);
+void Launch_UpdatePositionIds(T* positions, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream);
 template <typename T>
-void Launch_UpdateAttentionMask(T* mask_data, const T* old_mask_data, int batch_beam_size, int current_length,
-                                int max_length, bool update_only, cudaStream_t stream);
+void Launch_UpdateAttentionMask(T* mask_data, const T* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream);
 
 void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream);
 
 void LaunchFp16ToFp32(const uint16_t* fp16, float* fp32, int count, cudaStream_t stream);
 void LaunchFp32ToFp16(const float* fp32, uint16_t* fp16, int count, cudaStream_t stream);
 void LaunchInt32ToInt64(const int32_t* src, int64_t* dst, int count, cudaStream_t stream);
+void LaunchExpandAndInt32ToInt64(const int32_t* src, int64_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream);
+void LaunchExpand(const int32_t* src, int32_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream);
 
 template <typename T>
 void BufferExpansionKernelLauncher(const T* input, T* output, int batch_size, int beam_width, int chunk_size, cudaStream_t stream);

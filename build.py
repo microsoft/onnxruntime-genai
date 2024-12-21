@@ -126,6 +126,8 @@ def _parse_args():
 
     parser.add_argument("--use_rocm", action="store_true", help="Whether to use ROCm. Default is to not use rocm.")
 
+    parser.add_argument("--use_webgpu", action="store_true", help="Whether to use WebGpu. Default is to not use WebGpu.")
+
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
@@ -451,7 +453,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
             is_x64_host = platform.machine() == "AMD64"
             if is_x64_host:
-                toolset_options += ["host=x64"]
+                pass
 
             if args.use_cuda:
                 toolset_options += ["cuda=" + str(args.cuda_home)]
@@ -471,6 +473,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
         f"-DUSE_ROCM={'ON' if args.use_rocm else 'OFF'}",
+        f"-DUSE_WEBGPU={'ON' if args.use_webgpu else 'OFF'}",
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
@@ -497,9 +500,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     if args.ios or args.macos:
         platform_name = "macabi" if args.macos == "Catalyst" else args.apple_sysroot
         command += [
-            "-DENABLE_PYTHON=OFF",
-            "-DENABLE_TESTS=OFF",
-            "-DENABLE_MODEL_BENCHMARK=OFF",
+            "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + args.apple_deploy_target,
             f"-DBUILD_APPLE_FRAMEWORK={'ON' if args.build_apple_framework else 'OFF'}",
             "-DPLATFORM_NAME=" + platform_name,
         ]
@@ -530,6 +531,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             f"-DIPHONEOS_DEPLOYMENT_TARGET={args.apple_deploy_target}",
             # The following arguments are specific to the OpenCV toolchain file
             f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file()}",
+            "-DENABLE_PYTHON=OFF",
+            "-DENABLE_TESTS=OFF",
+            "-DENABLE_MODEL_BENCHMARK=OFF",
         ]
 
     if args.macos == "Catalyst":
@@ -548,6 +552,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             f"-DCMAKE_CC_FLAGS=--target={macabi_target}",
             f"-DCMAKE_CC_FLAGS_RELEASE=-O3 -DNDEBUG --target={macabi_target}",
             "-DMAC_CATALYST=1",
+            "-DENABLE_PYTHON=OFF",
+            "-DENABLE_TESTS=OFF",
+            "-DENABLE_MODEL_BENCHMARK=OFF",
         ]
 
     if args.arm64:
@@ -602,6 +609,11 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     Run the tests.
     """
     lib_dir = args.build_dir / "test"
+    if util.is_windows():
+        # On Windows, the unit test executable is found inside a directory named after the configuration
+        # (e.g. Debug, Release, etc.) within the test directory.
+        # Whereas on as on platforms, the executable is directly under the test directory.
+        lib_dir = lib_dir / args.config
     if not args.ort_home:
         _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
     else:
@@ -615,6 +627,10 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         csharp_test_command = [dotnet, "test"]
         csharp_test_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_test_command, env=env, cwd=str(REPO_ROOT / "test" / "csharp"))
+
+    if args.build_java:
+        ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
+        util.run(ctest_cmd, cwd=str(args.build_dir / "src" / "java"))
 
     if args.android:
         _run_android_tests(args)

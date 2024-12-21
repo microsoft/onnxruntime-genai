@@ -3,32 +3,38 @@
  */
 package ai.onnxruntime.genai;
 
-public class NamedTensors implements AutoCloseable{
-    private long nativeHandle;
+/** This class is a list of tensors with names that match up with model input names. */
+public class NamedTensors implements AutoCloseable {
+  private long nativeHandle;
 
-    public NamedTensors(long handle) {
-        nativeHandle = handle;
+  /**
+   * Construct a NamedTensor from native handle.
+   *
+   * @param handle The native handle.
+   */
+  public NamedTensors(long handle) {
+    nativeHandle = handle;
+  }
+
+  @Override
+  public void close() {
+    if (nativeHandle != 0) {
+      destroyNamedTensors(nativeHandle);
+      nativeHandle = 0;
     }
+  }
 
-    @Override
-    public void close() {
-        if (nativeHandle != 0) {
-            destroyNamedTensors(nativeHandle);
-            nativeHandle = 0;
-        }
+  long nativeHandle() {
+    return nativeHandle;
+  }
+
+  static {
+    try {
+      GenAI.init();
+    } catch (Exception e) {
+      throw new RuntimeException("Failed to load onnxruntime-genai native libraries", e);
     }
+  }
 
-    long nativeHandle() {
-        return nativeHandle;
-    }
-
-    static {
-        try {
-          GenAI.init();
-        } catch (Exception e) {
-          throw new RuntimeException("Failed to load onnxruntime-genai native libraries", e);
-        }
-    }
-
-    private native void destroyNamedTensors(long handle);
+  private native void destroyNamedTensors(long handle);
 }

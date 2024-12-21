@@ -6,6 +6,7 @@
 #include "utils.h"
 #include "prompt_image_processor.h"
 #include "audio_processor.h"
+#include "adapters.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -27,31 +28,42 @@ void CheckResult(extError_t error);
 
 struct State {
   State(const GeneratorParams& params, const Model& model_);
-  virtual ~State() = default;
+  virtual ~State();
 
-  virtual RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices = {}) = 0;
+  virtual DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
   virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
   virtual void Finalize(int current_length) {}
 
+  void SetTerminate();
+  void UnsetTerminate();
+  mutable bool session_terminated_{};
+
+  virtual void RewindTo(size_t index) { (void)index; };
   virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
 
   void ClearIO();  // Clear all inputs/outputs
 
+  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
   RoamingArray<float> MakeDummy() { return RoamingArray<float>(); }
 
   const Model& model_;
+
   std::shared_ptr<const GeneratorParams> params_;
 
   std::vector<const char*> input_names_, output_names_;
+  std::vector<std::string> adapter_names_;
   std::vector<OrtValue*> inputs_, outputs_;
 
  protected:
-  void Run(OrtSession& session, OrtRunOptions& run_options, int new_batch_size);  // Uses the inputs below to run
+  void Run(OrtSession& session, int new_batch_size);  // Uses the inputs below to run
   bool first_run_{true};
+
+  std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
   int current_batch_size_{0};
+  std::shared_ptr<Adapters> adapters_;
 };
 
 struct TokenizerStream : LeakChecked<TokenizerStream> {
@@ -122,7 +134,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
 
   std::shared_ptr<MultiModalProcessor> CreateMultiModalProcessor() const;
 
-  virtual std::unique_ptr<State> CreateState(RoamingArray<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
+  virtual std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 
@@ -132,12 +144,13 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
-  std::unique_ptr<OrtRunOptions> run_options_;
 
-  cuda_stream_holder cuda_stream_;
+  cudaStream_t cuda_stream_{};
+  DeviceInterface* p_device_{};
   DeviceType device_type_{DeviceType::CPU};
   Ort::Allocator& allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()};
-  Ort::Allocator* allocator_device_{};  // Can be CUDA or CPU based on the DeviceType in the model
+  Ort::Allocator* allocator_device_{};   // Can be CUDA or CPU based on the DeviceType in the model
+  Ort::Allocator* allocator_kvcache_{};  // keep allocator for kv_cache seperate to allow that only kv_cache is on device
 
   std::unique_ptr<SessionInfo> session_info_;
 
@@ -168,9 +181,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   std::unique_ptr<DmlExecutionContext> dml_execution_context_;
   std::unique_ptr<DmlReadbackHeap> dml_readback_heap_;
   ComPtr<IDMLDevice> dml_device_;
-  std::unique_ptr<Ort::Allocator> dml_owned_allocator_;
-  std::unique_ptr<OrtMemoryInfo> memory_info_device_;
 #endif
+
+  std::unique_ptr<Ort::Allocator> owned_allocator_device_{};  // nullptr if n/a
+  std::unique_ptr<OrtMemoryInfo> memory_info_device_{};       // nullptr if n/a
 
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;

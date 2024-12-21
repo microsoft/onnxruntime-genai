@@ -34,6 +34,7 @@ def parse_args():
         "-e",
         "--execution_provider",
         default="cuda",
+        choices=["cpu", "cuda", "dml"],
         help="Target execution provider to apply quantization (e.g. dml, cuda)",
     )
 
@@ -65,7 +66,15 @@ def quantize_model(args):
     print(f'Model is quantized and saved at "{args.quant_path}"')
 
 def run_model(args):
-    model = og.Model(args.output_path)
+    # Load model
+    print("Loading model...")
+    config = og.Config(args.output_path)
+    config.clear_providers()
+    if args.execution_provider != "cpu":
+        print(f"Setting model to {args.execution_provider}")
+        config.append_provider(args.execution_provider)
+    model = og.Model(config)
+    print("Model loaded")
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
 
@@ -88,16 +97,15 @@ def run_model(args):
 
         params = og.GeneratorParams(model)
         params.set_search_options(**search_options)
-        params.input_ids = input_tokens
 
         generator = og.Generator(model, params)
+        generator.append_tokens(input_tokens)
 
         print()
         print("Output: ", end='', flush=True)
 
         try:
             while not generator.is_done():
-                generator.compute_logits()
                 generator.generate_next_token()
 
                 new_token = generator.get_next_tokens()[0]
@@ -130,9 +138,11 @@ def main():
 
     create_model(model_name, input_folder, output_folder, precision, execution_provider, cache_dir, **extra_options)
 
+    if args.execution_provider == "dml":
+        if og.__id__ != "onnxruntime-genai-directml":
+            raise ValueError(f"onnxruntime-genai-directml is required to be installed. Please uninstall all ORT GenAI packages with `pip uninstall -y onnxruntime-genai onnxruntime-genai-cuda onnxruntime-genai-directml` and only install the DML version with `pip install onnxruntime-genai-directml`.")
     # Run ONNX model
-    if args.execution_provider != "dml":
-        run_model(args)
+    run_model(args)
 
 if __name__ == "__main__":
     main()

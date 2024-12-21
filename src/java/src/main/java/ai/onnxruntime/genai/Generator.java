@@ -62,20 +62,55 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
-   * Computes the logits for the next token in the sequence.
+   * Appends tokens to the generator.
    *
+   * @param inputIDs The tokens to append.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
-  public void computeLogits() throws GenAIException {
+  public void appendTokens(int[] inputIDs) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
 
-    computeLogitsNative(nativeHandle);
+    appendTokens(nativeHandle, inputIDs);
   }
 
   /**
-   * Generates the next token in the sequence.
+   * Appends token sequences to the generator.
+   *
+   * @param sequences The sequences to append.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void appendTokenSequences(Sequences sequences) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    if (sequences.nativeHandle() == 0) {
+      throw new IllegalArgumentException("sequences has been freed and is invalid");
+    }
+
+    appendTokenSequences(nativeHandle, sequences.nativeHandle());
+  }
+
+  /**
+   * Rewinds the generator to the given length. This is useful when the user wants to rewind the
+   * generator to a specific length and continue generating from that point.
+   *
+   * @param newLength The desired length in tokens after rewinding.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void rewindTo(int newLength) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    rewindTo(nativeHandle, newLength);
+  }
+
+  /**
+   * Computes the logits from the model based on the input ids and the past state. The computed
+   * logits are stored in the generator.
    *
    * @throws GenAIException If the call to the GenAI native API fails.
    */
@@ -117,6 +152,33 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
     return getSequenceLastToken(nativeHandle, sequenceIndex);
   }
 
+  /**
+   * Returns a copy of the model output identified by the given name as a Tensor.
+   *
+   * @param name The name of the output needed.
+   * @return The tensor.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public Tensor getOutput(String name) throws GenAIException {
+    long tensorHandle = getOutputNative(nativeHandle, name);
+    return new Tensor(tensorHandle);
+  }
+
+  /**
+   * Sets the adapter with the given adapter name as active.
+   *
+   * @param adapters The Adapters container.
+   * @param adapterName The adapter name that was previously loaded.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void setActiveAdapter(Adapters adapters, String adapterName) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    setActiveAdapter(nativeHandle, adapters.nativeHandle(), adapterName);
+  }
+
   /** Closes the Generator and releases any associated resources. */
   @Override
   public void close() {
@@ -136,7 +198,6 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
     @Override
     public Integer next() {
       try {
-        computeLogits();
         generateNextToken();
         return getLastTokenInSequence(0);
       } catch (GenAIException e) {
@@ -160,7 +221,12 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
   private native boolean isDone(long nativeHandle);
 
-  private native void computeLogitsNative(long nativeHandle) throws GenAIException;
+  private native void appendTokens(long nativeHandle, int[] tokens) throws GenAIException;
+
+  private native void appendTokenSequences(long nativeHandle, long sequencesHandle)
+      throws GenAIException;
+
+  private native void rewindTo(long nativeHandle, int newLength) throws GenAIException;
 
   private native void generateNextTokenNative(long nativeHandle) throws GenAIException;
 
@@ -169,4 +235,9 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
   private native int getSequenceLastToken(long nativeHandle, long sequenceIndex)
       throws GenAIException;
+
+  private native void setActiveAdapter(
+      long nativeHandle, long adaptersNativeHandle, String adapterName) throws GenAIException;
+
+  private native long getOutputNative(long nativeHandle, String outputName) throws GenAIException;
 }

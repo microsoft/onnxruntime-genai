@@ -12,7 +12,7 @@ configuration:
           - payloadType: Issues
           - isOpen
           - titleContains:
-              pattern: /\bcuda\b/i
+              pattern: (?i)\bcuda\b
               isRegex: True
         then:
           - addLabel:
