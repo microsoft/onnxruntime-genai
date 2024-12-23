@@ -31,12 +31,12 @@ def change_model_listener(new_model_name):
     if "vision" in new_model_name:
         print("Configuring for multi-modal model")
         interface = MultiModal_ONNXModel(
-            model_path=d["model_dir"]
+            model_path=d["model_dir"], execution_provider=d["provider"],
         )
     else:
         print("Configuring for language-only model")
         interface = ONNXModel(
-            model_path=d["model_dir"]
+            model_path=d["model_dir"], execution_provider=d["provider"],
         )
 
     # interface.initialize()
@@ -74,15 +74,26 @@ def interface_retry(*args):
     yield from res
 
 
+def get_ep_name(name):
+    new_name = name.lower().replace("directml", "dml")
+    if "cpu" in new_name:
+        return "cpu"
+    elif "cuda" in new_name:
+        return "cuda"
+    elif "dml" in new_name:
+        return "dml"
+    raise ValueError(f"{new_name} is not recognized.")
+
+
 def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_path: str = ""):
     if os.path.exists(optimized_directory):
         for ep_name in os.listdir(optimized_directory):
             sub_optimized_directory = os.path.join(optimized_directory, ep_name)
             for model_name in os.listdir(sub_optimized_directory):
-                available_models[model_name] = {"model_dir": os.path.join(sub_optimized_directory, model_name)}
+                available_models[model_name] = {"model_dir": os.path.join(sub_optimized_directory, model_name), "provider": get_ep_name(ep_name)}
 
     if model_path:
-        available_models[model_name] = {"model_dir": model_path}
+        available_models[model_name] = {"model_dir": model_path, "provider": get_ep_name(model_path)}
 
     with gr.Blocks(css=custom_css, theme=small_and_beautiful_theme) as demo:
         history = gr.State([])
