@@ -356,8 +356,13 @@ void Generator::GenerateNextToken() {
   // TODO: Extend the solution to make it work for batch size > 1 and num beams > 1
   // Phi3 model switches from short factor to long factor at 4097 (original_max_position_embeddings+1) token, needs Recomputation of Position IDs and KV Cache
   // at this stage which is achieved by rewinding to zero and appending the current sequence
-  if (model_->config_->model.type == "phi3" && search_->params_->search.batch_size == 1 && search_->params_->search.num_beams == 1) {
-    if (search_->GetSequenceLength() == 4097) {
+  if (search_->params_->search.batch_size == 1 && search_->params_->search.num_beams == 1) {
+    if ((search_->GetSequenceLength() == 4097) && (model_->config_->model.type == "phi3" || model_->config_->model.type == "phimoe")) {
+      auto current_seq = cpu_span<int32_t>(GetSequence(0).CpuSpan());
+      RewindToLength(0);
+      AppendTokens(current_seq);
+    }
+    if ((search_->GetSequenceLength() == 8197) && (model_->config_->model.type == "phi3small")) {
       auto current_seq = cpu_span<int32_t>(GetSequence(0).CpuSpan());
       RewindToLength(0);
       AppendTokens(current_seq);
