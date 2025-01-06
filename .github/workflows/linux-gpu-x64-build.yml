@@ -119,7 +119,7 @@ jobs:
           docker run \
             --gpus all \
             --rm \
-            --volume /data/ortgenai_pytorch_models:/data/ortgenai_pytorch_models \
+            --volume /data/ortgenai/pytorch:/data/ortgenai/pytorch \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -e HF_TOKEN=$HF_TOKEN \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
@@ -146,6 +146,6 @@ jobs:
           docker run \
             --gpus all \
             --rm \
-            --volume /data/ortgenai_pytorch_models:/data/ortgenai_pytorch_models \
+            --volume /data/ortgenai/pytorch:/data/ortgenai/pytorch \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c "ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/unit_tests"

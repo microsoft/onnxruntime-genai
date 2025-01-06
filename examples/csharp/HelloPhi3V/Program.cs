@@ -33,6 +33,8 @@ void PrintUsage()
     Console.WriteLine("Usage:");
     Console.WriteLine("  -m model_path");
     Console.WriteLine("\t\t\t\tPath to the model");
+    Console.WriteLine("  -e execution_provider");
+    Console.WriteLine("\t\t\t\tExecution provider for the model");
     Console.WriteLine("  --image_paths");
     Console.WriteLine("\t\t\t\tPath to the images");
     Console.WriteLine("  --non-interactive (optional), mainly for CI usage");
@@ -49,6 +51,7 @@ if (args.Length < 1)
 
 bool interactive = true;
 string modelPath = string.Empty;
+string executionProvider = string.Empty;
 List<string> imagePaths = new List<string>();
 
 uint i_arg = 0;
@@ -66,6 +69,13 @@ while (i_arg < args.Length)
             modelPath = Path.Combine(args[i_arg+1]);
         }
     }
+    else if (arg == "-e")
+    {
+        if (i_arg + 1 < args.Length)
+        {
+            executionProvider = Path.Combine(args[i_arg+1]);
+        }
+    }
     else if (arg == "--image_paths")
     {
         if (i_arg + 1 < args.Length)
@@ -76,14 +86,32 @@ while (i_arg < args.Length)
     i_arg++;
 }
 
+if (string.IsNullOrEmpty(modelPath))
+{
+    throw new Exception("Model path must be specified");
+}
+if (string.IsNullOrEmpty(executionProvider))
+{
+    throw new Exception("Execution provider must be specified");
+}
+
 Console.WriteLine("--------------------");
 Console.WriteLine("Hello, Phi-3-Vision!");
 Console.WriteLine("--------------------");
 
 Console.WriteLine("Model path: " + modelPath);
+Console.WriteLine("Execution provider: " + executionProvider);
 Console.WriteLine("Interactive: " + interactive);
 
-using Model model = new Model(modelPath);
+using Config config = new Config(modelPath);
+config.ClearProviders();
+if (executionProvider != "cpu") {
+    config.AppendProvider(executionProvider);
+    if (executionProvider == "cuda") {
+        config.SetProviderOption(executionProvider, "enable_cuda_graph", "0");
+    }
+}
+using Model model = new Model(config);
 using MultiModalProcessor processor = new MultiModalProcessor(model);
 using var tokenizerStream = processor.CreateStream();
 
@@ -141,7 +169,6 @@ do
     var watch = System.Diagnostics.Stopwatch.StartNew();
     while (!generator.IsDone())
     {
-        generator.ComputeLogits();
         generator.GenerateNextToken();
         Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
     }

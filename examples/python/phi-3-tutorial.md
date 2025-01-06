@@ -1,4 +1,4 @@
-# Run the Phi-3 models with the ONNX Runtime generate() API
+# Run the Phi-3 models with ONNX Runtime GenAI
 
 ## Steps
 1. [Setup](#setup)
@@ -56,7 +56,7 @@ Are you on a Windows machine with GPU?
    This command downloads the model into a folder called `directml`.
 
 
-2. Install the generate() API
+2. Install ONNX Runtime GenAI
 
    ```bash
    pip install onnxruntime-genai-directml
@@ -97,7 +97,7 @@ Are you on a Windows machine with GPU?
 
    This command downloads the model into a folder called `cuda`.
 
-2. Install the generate() API
+2. Install ONNX Runtime GenAI
 
    ```bash
    pip install onnxruntime-genai-cuda
@@ -130,7 +130,7 @@ Are you on a Windows machine with GPU?
 
    This command downloads the model into a folder called `cpu_and_mobile`
 
-2. Install the generate() API for CPU
+2. Install ONNX Runtime GenAI
    
    ```bash
    pip install onnxruntime-genai
