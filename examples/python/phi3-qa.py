@@ -8,7 +8,7 @@ def main(args):
         started_timestamp = 0
         first_token_timestamp = 0
 
-    config = og.Config(args.model)
+    config = og.Config(args.model_path)
     config.clear_providers()
     if args.execution_provider != "cpu":
         if args.verbose: print(f"Setting model to {args.execution_provider}")

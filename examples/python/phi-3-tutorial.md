@@ -70,7 +70,7 @@ Are you on a Windows machine with GPU?
 
    ```bash
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
-   python phi3-qa.py -m directml\directml-int4-awq-block-128
+   python phi3-qa.py -m directml\directml-int4-awq-block-128 -e dml
    ```
 
    Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
@@ -109,7 +109,7 @@ Are you on a Windows machine with GPU?
 
    ```bash
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
-   python phi3-qa.py -m cuda/cuda-int4-rtn-block-32 
+   python phi3-qa.py -m cuda/cuda-int4-rtn-block-32 -e cuda
    ```
 
       Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
@@ -142,7 +142,7 @@ Are you on a Windows machine with GPU?
 
    ```bash
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
-   python phi3-qa.py -m cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4
+   python phi3-qa.py -m cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4 -e cpu
    ```
 
    Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
