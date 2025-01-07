@@ -647,9 +647,6 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
 def test_preset_extra_inputs(device, phi2_for, extra_inputs):
     def _prepare_model(extra_inputs_model_path):
         phi2_model_path = phi2_for(device)
-        if os.path.exists(extra_inputs_model_path):
-            shutil.rmtree(extra_inputs_model_path)
-
         shutil.copytree(phi2_model_path, extra_inputs_model_path)
 
         # Create the model with the extra inputs

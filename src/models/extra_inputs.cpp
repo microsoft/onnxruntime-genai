@@ -34,7 +34,7 @@ void PresetExtraInputs::Add() {
       extra_inputs_.push_back(it->second());
       state_.input_names_.push_back(extra_input_names_.back().c_str());
       state_.inputs_.push_back(extra_inputs_.back().get());
-    } else if (std::string prefix("onnx::Neg_"); std::mismatch(prefix.begin(), prefix.end(), input_name.begin()).first == prefix.end()) {
+    } else if (input_name.rfind("onnx::Neg_", 0) == 0) {
       // The unclaimed input has a prefix of onnx::Neg_, which is a special case
       // We treat this as an alias to num_logits_to_keep
       extra_input_names_.push_back(input_name);
