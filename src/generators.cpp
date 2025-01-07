@@ -358,9 +358,8 @@ void Generator::GenerateNextToken() {
   // at this stage which is achieved by rewinding to zero and appending the current sequence
   // Scenarios where this solution works: Batch size = 1, Num beams = 1, decoder model, EP is either CPU or CUDA
   // Scenarios where it doesn't work: Batch size > 1 OR Num beams > 1 OR Multimodal model (like phi3 vision) OR EP is DML
-  if (search_->params_->search.batch_size == 1 && search_->params_->search.num_beams == 1) {
+  if (search_->params_->BatchBeamSize() == 1) {
     if (((search_->GetSequenceLength() == 4097) && (model_->config_->model.type == "phi3" || model_->config_->model.type == "phimoe")) || ((search_->GetSequenceLength() == 8197) && (model_->config_->model.type == "phi3small"))) {
-      // auto current_seq = cpu_span<int32_t>(GetSequence(0).CpuSpan());
       auto current_seq = cpu_span<int32_t>(GetSequence(0).CopyDeviceToCpu());
       RewindToLength(0);
       AppendTokens(current_seq);
