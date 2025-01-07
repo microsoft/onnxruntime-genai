@@ -10,8 +10,8 @@ PresetExtraInputs::PresetExtraInputs(State& state)
       registry_{
           {"num_logits_to_keep", [&state = state_]() -> std::unique_ptr<OrtValue> {
              std::vector<int64_t> shape{1};
-             auto num_logits_to_keep = OrtValue::CreateTensor(state.model_.allocator_cpu_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64);
-             *num_logits_to_keep->GetTensorMutableData<int32_t>() = 0;
+             auto num_logits_to_keep = OrtValue::CreateTensor<int64_t>(state.model_.allocator_cpu_, shape);
+             *num_logits_to_keep->GetTensorMutableData<int64_t>() = 0;
              return num_logits_to_keep;
            }}} {}
 
