@@ -671,7 +671,7 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
         model.graph.input.append(extra_input)
 
         cast_node = onnx.helper.make_node(
-            "Cast", [extra_input_name], [f"{extra_input_name}_cast"], to=onnx.TensorProto.FLOAT
+            "Cast", [extra_input_name], [f"{extra_input_name}_cast"], to=onnx.TensorProto.FLOAT if device == "cpu" else onnx.TensorProto.FLOAT16
         )
         add_node = onnx.helper.make_node(
             "Add", [f"{extra_input_name}_cast", "logits_0"], ["logits"], name="add_to_logits"
