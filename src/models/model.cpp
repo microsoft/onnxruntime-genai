@@ -284,6 +284,14 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
   return result->second;
 }
 
+std::vector<std::string> SessionInfo::GetInputNames() const {
+  std::vector<std::string> names;
+  names.reserve(inputs_.size());
+  for (const auto& input : inputs_)
+    names.push_back(input.first);
+  return names;
+}
+
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
 }
