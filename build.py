@@ -505,6 +505,13 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             "-DPLATFORM_NAME=" + platform_name,
         ]
 
+        if args.ios or args.macos == "Catalyst" or args.build_apple_framework:
+            command += [
+                "-DENABLE_PYTHON=OFF",
+                "-DENABLE_TESTS=OFF",
+                "-DENABLE_MODEL_BENCHMARK=OFF",
+            ]
+
     if args.macos:
         command += [
             f"-DCMAKE_OSX_SYSROOT={args.apple_sysroot}",
@@ -531,9 +538,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             f"-DIPHONEOS_DEPLOYMENT_TARGET={args.apple_deploy_target}",
             # The following arguments are specific to the OpenCV toolchain file
             f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file()}",
-            "-DENABLE_PYTHON=OFF",
-            "-DENABLE_TESTS=OFF",
-            "-DENABLE_MODEL_BENCHMARK=OFF",
         ]
 
     if args.macos == "Catalyst":
@@ -552,9 +556,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             f"-DCMAKE_CC_FLAGS=--target={macabi_target}",
             f"-DCMAKE_CC_FLAGS_RELEASE=-O3 -DNDEBUG --target={macabi_target}",
             "-DMAC_CATALYST=1",
-            "-DENABLE_PYTHON=OFF",
-            "-DENABLE_TESTS=OFF",
-            "-DENABLE_MODEL_BENCHMARK=OFF",
         ]
 
     if args.arm64:

@@ -79,6 +79,7 @@ if(ENABLE_TESTS)
   endif()
 endif()
 
+find_package(Threads REQUIRED)
 
 if(WIN32)
   add_library(onnxruntime-genai SHARED ${generator_srcs} "${GENERATORS_ROOT}/dll/onnxruntime-genai.rc")
@@ -104,6 +105,8 @@ target_include_directories(onnxruntime-genai-static PUBLIC ${onnxruntime_extensi
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
+target_link_libraries(onnxruntime-genai PRIVATE Threads::Threads)
+target_link_libraries(onnxruntime-genai-static PUBLIC Threads::Threads)
 
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.

@@ -1,6 +1,6 @@
-# Generate() API Python Examples
+# ONNX Runtime GenAI Python Examples
 
-## Install the onnxruntime-genai library
+## Install ONNX Runtime GenAI
 
 Install the python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install).
 
@@ -12,19 +12,15 @@ If you bring your own model, you need to provide the configuration. See the [con
 
 To generate the model with model builder:
 
-1. Install the model builder script dependencies
+1. Install the model builder's dependencies
 
    ```bash
    pip install numpy transformers torch onnx onnxruntime
    ```
 
-2. Choose a model. Examples of supported ones are:
-   - Phi-2
-   - Mistral
-   - Gemma 2B IT
-   - LLama 7B
+2. Choose a model. Examples of supported ones are listed on the repo's main README.
 
-3. Run the model builder script to export, optimize, and quantize the model. More details can be found [here](../../src/python/py/models/README.md)
+3. Run the model builder to export, optimize, and quantize the model. More details can be found [here](../../src/python/py/models/README.md)
 
    ```bash
    cd examples/python
@@ -41,6 +37,6 @@ The `model-qa` script streams the output text token by token.
 
 To run the python examples...
 ```bash
-python model-generate.py -m {path to model folder} -pr {input prompt}
-python model-qa.py -m {path to model folder}
+python model-generate.py -m {path to model folder} -e {execution provider} -pr {input prompt}
+python model-qa.py -m {path to model folder} -e {execution provider}
 ```
