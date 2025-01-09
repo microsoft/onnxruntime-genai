@@ -33,6 +33,7 @@ The tool currently supports the following model architectures.
 
 - ChatGLM
 - Gemma
+- Granite
 - LLaMA
 - Mistral
 - Nemotron
