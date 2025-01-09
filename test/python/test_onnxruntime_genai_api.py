@@ -8,7 +8,6 @@ import sys
 import sysconfig
 from pathlib import Path
 import shutil
-import tempfile
 import onnxruntime
 
 import numpy as np
