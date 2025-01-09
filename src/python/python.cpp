@@ -495,7 +495,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return std::make_shared<Images>(std::move(image_raw_data), image_datas.size());
       });
 
-  pybind11::class_<Audios, std::shared_ptr<Images>>(m, "Audios")
+  pybind11::class_<Audios, std::shared_ptr<Audios>>(m, "Audios")
       .def_static("open", [](pybind11::args audio_paths) {
         if (audio_paths.empty())
           throw std::runtime_error("No audios provided");
@@ -510,7 +510,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           audio_paths_vector.push_back(audio_paths_string.back().c_str());
         }
 
-        return std::make_shared<Audios>(LoadAudios(audio_paths_vector));
+        return std::shared_ptr<Audios>(LoadAudios(audio_paths_vector));
       });
 
   pybind11::class_<PyNamedTensors, std::shared_ptr<PyNamedTensors>>(m, "NamedTensors");
