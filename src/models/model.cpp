@@ -3,6 +3,8 @@
 //
 // Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
 #include <algorithm>
+#include <set>
+#include <string>
 #include <thread>
 
 #include "../generators.h"
@@ -280,6 +282,14 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
   if (result == outputs_.end())
     throw std::runtime_error("Model output was not found: " + name);
   return result->second;
+}
+
+std::vector<std::string> SessionInfo::GetInputNames() const {
+  std::vector<std::string> names;
+  names.reserve(inputs_.size());
+  for (const auto& input : inputs_)
+    names.push_back(input.first);
+  return names;
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
@@ -580,9 +590,10 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  std::set<std::string> llm_types = {"chatglm", "decoder", "gemma", "gemma2", "granite", "llama", "mistral", "nemotron", "phi", "phimoe", "phi3", "phi3small", "qwen2"};
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small" || config->model.type == "phimoe" || config->model.type == "qwen2" || config->model.type == "nemotron" || config->model.type == "chatglm")
+  if (llm_types.find(config->model.type) != llm_types.end())
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);

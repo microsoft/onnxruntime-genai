@@ -1,15 +1,10 @@
-ARG BASEIMAGE=onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_ubi8_gcc12:20240610.1
+ARG BASEIMAGE=onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_ubi8_gcc12:20250109.1
 
 FROM $BASEIMAGE
 ADD scripts /tmp/scripts
 
-RUN if [ "$(echo $CUDA_VERSION | cut -d. -f1)" -ge 12 ]; then \
-    echo "Using GCC 12 because CUDA version is greater than or equal to 12"; \
-    cd /tmp/scripts && /tmp/scripts/install_centos_gcc12.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts; \
-else \
-    echo "Using default gcc because CUDA version is less than 12"; \
-    cd /tmp/scripts && /tmp/scripts/install_centos.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts; \
-fi
+RUN cd /tmp/scripts && /tmp/scripts/install_centos.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts
+
 ARG BUILD_UID=1001
 ARG BUILD_USER=onnxruntimedev
 RUN adduser --uid $BUILD_UID $BUILD_USER
