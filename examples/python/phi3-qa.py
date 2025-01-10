@@ -32,7 +32,11 @@ def main(args):
 
     # Keep asking for input prompts in a loop
     while True:
-        text = input("Input: ")
+        file = input("Input text file: ")
+        with open(file, 'r') as f:
+            text = f.read()
+
+        # text = input("Input: ")
         if not text:
             print("Error, input cannot be empty")
             continue
@@ -43,6 +47,7 @@ def main(args):
         prompt = f'{chat_template.format(input=text)}'
 
         input_tokens = tokenizer.encode(prompt)
+        print("Len Input tokens:", len(input_tokens))
 
         params = og.GeneratorParams(model)
         params.set_search_options(**search_options)
