@@ -46,6 +46,16 @@ void DefaultInputIDs::Add() {
 }
 
 void DefaultInputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
+  // There are three scopes involved when the Update function is called:
+  // 1. A new Generator state has been just created. This is a prompt stage, and value_ is a nullptr.
+  //    i.e. this is the very first time ever that Update is being called for this Generator.
+  // 2. We move to the token generation stage. value_ has already been previously created in the prompt stage.
+  //    Update is called on every new token generated.
+  // 3. We move from the token generation stage back to the prompt stage (e.g. in continous decoding). value_ is already created.
+
+  // For instances where the value_ is not created, we need handle graph capture correctly.
+  // For subsequent prompt stages, the limiting factor is that the subsequent prompts can not
+  // be larger than the first prompt (when graph capture is enabled).
   if (!value_) {
     shape_[1] = static_cast<int64_t>(new_tokens.size()) / shape_[0];
 
