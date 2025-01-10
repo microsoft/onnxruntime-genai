@@ -1093,16 +1093,13 @@ class Model:
         cos_cache, sin_cache = emb.cos() * self.rotemb_attrs["mscale"], emb.sin() * self.rotemb_attrs["mscale"]
         return cos_cache, sin_cache
 
-    def make_rotary_embedding_caches(self, rotemb, **kwargs):
+    def make_rotary_embedding_caches(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
         sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
 
         if self.rotemb_attrs["create_rotary_embedding_caches"]:
-            if not hasattr(rotemb, "cos_cached"):
-                # Create cos/sin caches if not already created
-                cos_cache, sin_cache = self.make_rotary_embedding_caches_from_scratch()
-            else:
-                cos_cache, sin_cache = rotemb.cos_cached, rotemb.sin_cached
+            # Create cos/sin caches if not already created
+            cos_cache, sin_cache = self.make_rotary_embedding_caches_from_scratch()
 
             # Reshape cos/sin cache from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
@@ -1123,8 +1120,8 @@ class Model:
 
         return cos_cache_name, sin_cache_name
 
-    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
-        cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(rotemb)
+    def make_rotary_embedding(self, name, root_input, **kwargs):
+        cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
 
         inputs = [root_input, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
         output = f"{name}/output_0"
@@ -1132,8 +1129,6 @@ class Model:
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * (self.num_kv_heads if "k_rotary" in name else self.num_attn_heads)])
 
     def make_rotary_embedding_multi_cache(self):
-        # Create dummy rotary embedding class
-        rotemb = type("RotaryEmbedding", (object,), {'content':{}})()
         if_cos_cache_output, if_sin_cache_output = "cos_cache", "sin_cache"
 
         # Create caches for when sequence_length > self.original_context_length
@@ -1143,20 +1138,20 @@ class Model:
 
         # DML doesn't support dynamic selection of the cos/sin cache, so we always use the biggest one
         if self.ep == "dml":
-            self.make_rotary_embedding_caches(rotemb)
+            self.make_rotary_embedding_caches()
             self.make_value_info(if_cos_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
             self.make_value_info(if_sin_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
             return
 
         cos_cache_large_name, sin_cache_large_name = "cos_cache_large", "sin_cache_large"
-        cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches(rotemb, cos_cache_name=cos_cache_large_name, sin_cache_name=sin_cache_large_name)
+        cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_large_name, sin_cache_name=sin_cache_large_name)
 
         # Create caches for when sequence_length <= self.original_context_length
         self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
         self.rotemb_attrs["cache_length"] = self.original_context_length
         self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["short_mscale"]
         cos_cache_small_name, sin_cache_small_name = "cos_cache_small", "sin_cache_small"
-        cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(rotemb, cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
+        cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
 
         self.rotemb_attrs["create_rotary_embedding_caches"] = False
 
@@ -1530,13 +1525,13 @@ class Model:
         # Make RotaryEmbedding nodes
         cos_cache_name, sin_cache_name = "", ""
         if self.attention_attrs["use_rotemb_in_attn"]:
-            cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(attention.rotary_emb)
+            cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
         else:
             q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
-            self.make_rotary_embedding(attention.rotary_emb, q_rotary_name, root_input=self.attention_attrs["q_path"], position_ids=kwargs.get("position_ids", "position_ids"))
+            self.make_rotary_embedding(q_rotary_name, root_input=self.attention_attrs["q_path"], position_ids=kwargs.get("position_ids", "position_ids"))
             self.attention_attrs["q_path"] = f"{q_rotary_name}/output_0"
             k_rotary_name = f"/model/layers.{layer_id}/attn/k_rotary/RotaryEmbedding"
-            self.make_rotary_embedding(attention.rotary_emb, k_rotary_name, root_input=self.attention_attrs["k_path"], position_ids=kwargs.get("position_ids", "position_ids"))
+            self.make_rotary_embedding(k_rotary_name, root_input=self.attention_attrs["k_path"], position_ids=kwargs.get("position_ids", "position_ids"))
             self.attention_attrs["k_path"] = f"{k_rotary_name}/output_0"
 
         # Make repeat KV nodes (Note: `repeat_kv` needs to be kept since GroupQueryAttention isn't supported for FP32 CUDA)
@@ -2618,8 +2613,8 @@ class PhiModel(Model):
         self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
         self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = False, True
 
-    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
-        super().make_rotary_embedding(rotemb, name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
+    def make_rotary_embedding(self, name, root_input, **kwargs):
+        super().make_rotary_embedding(name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
 
     def make_layer(self, layer_id, layer):
         # Each Phi decoder layer is defined as:
@@ -2743,27 +2738,23 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
 
         return add_1_name
         
-    def make_rotary_embedding_caches(self, rotemb, **kwargs):
+    def make_rotary_embedding_caches(self, **kwargs):
         if self.ep != "dml":
-            cos_cache_name, sin_cache_name = super().make_rotary_embedding_caches(rotemb, **kwargs)
+            cos_cache_name, sin_cache_name = super().make_rotary_embedding_caches(**kwargs)
             return cos_cache_name, sin_cache_name
 
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
         sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
 
         if self.rotemb_attrs["create_rotary_embedding_caches"]:
-            if not hasattr(rotemb, "cos_cached"):
-                # Create cos/sin caches if not already created
-                # concate 4k and 128k cos/sin caches for phi3/phi3.5 and dml EP only
-                cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches_from_scratch()
-                self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
-                self.rotemb_attrs["cache_length"] = self.original_context_length
-                self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["short_mscale"]
-                cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches_from_scratch()
-                cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
-                sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
-            else:
-                cos_cache, sin_cache = rotemb.cos_cached, rotemb.sin_cached
+            # Concat 4k and 128k cos/sin caches for DML EP only
+            cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches_from_scratch()
+            self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
+            self.rotemb_attrs["cache_length"] = self.original_context_length
+            self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["short_mscale"]
+            cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches_from_scratch()
+            cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
+            sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
 
             # Reshape cos/sin cache from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
@@ -3055,13 +3046,9 @@ class NemotronModel(LlamaModel):
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
 
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
-        return super().make_attention(layer_id, attention, root_input, **kwargs)
-
-    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
+    def make_rotary_embedding(self, name, root_input, **kwargs):
         num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
-        super().make_rotary_embedding(rotemb, name, root_input, num_heads=num_heads, rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
+        super().make_rotary_embedding(name, root_input, num_heads=num_heads, rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
 
 
 class ChatGLMModel(Model):
@@ -3072,14 +3059,8 @@ class ChatGLMModel(Model):
         self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
         self.rotemb_attrs["interleaved"] = 1
 
-    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
-        super().make_rotary_embedding(rotemb, name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
-
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        if self.quant_type is None:
-            # Add dummy rotary_emb attribute
-            attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
-        return super().make_attention(layer_id, attention, root_input, **kwargs)
+    def make_rotary_embedding(self, name, root_input, **kwargs):
+        super().make_rotary_embedding(name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
 
     def make_layer(self, layer_id, layer):
         layer.self_attn = layer.self_attn if hasattr(layer, 'self_attn') else layer.self_attention
@@ -3093,11 +3074,6 @@ class GraniteModel(MistralModel):
         self.attention_attrs["scale"] = config.attention_multiplier
         self.lm_head_attrs["scale"] = 1 / config.logits_scaling
         self.residual_scale = config.residual_multiplier
-
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        # Add dummy rotary_emb attribute
-        attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
-        return super().make_attention(layer_id, attention, root_input, **kwargs)
 
     def make_layer(self, layer_id, layer):
         # Each Granite decoder layer is defined as:
