@@ -171,6 +171,7 @@ class Model:
         # RotaryEmbedding-specific variables
         position_scale = config.rope_position_scale if hasattr(config, "rope_position_scale") else 1
         partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
+        rotemb_dim = int(self.head_size * partial_rotary_factor) if partial_rotary_factor != 1.0 else 0
         rope_theta = config.rope_theta if hasattr(config, "rope_theta") else config.rope_embedding_base if hasattr(config, "rope_embedding_base") else 10000
         self.rotemb_attrs = {
             "create_rotary_embedding_caches": True,          # Create cos/sin caches for rotary embeddings
@@ -178,8 +179,7 @@ class Model:
             "theta": rope_theta,                             # Base value if calculating cos/sin caches from scratch
             "partial_rotary_factor": partial_rotary_factor,  # Factor for partial rotary embeddings
             "interleaved": 0,                                # Interleave the rotary embeddings (e.g. [0, 0, 0, 1, 1, 1] to [0, 1, 0, 1, 0, 1], RotaryEmbedding kernel expects a default value of 0)
-            "num_heads": 0,                                  # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
-            "rotary_embedding_dim": 0,                       # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
+            "rotary_embedding_dim": rotemb_dim,              # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
             "rescale_factors": 1,                            # Rescale factors when calculating `inv_freq` in rotary embeddings
             "t_dtype": torch.int64,                          # Torch dtype when calculating `t` in rotary embeddings
             "position_scale": position_scale,                # Scale value when calculating `t` in rotary embeddings
@@ -1101,12 +1101,17 @@ class Model:
             # Create cos/sin caches if not already created
             cos_cache, sin_cache = self.make_rotary_embedding_caches_from_scratch()
 
-            # Reshape cos/sin cache from (M, H) to (M, H/2)
+            # Slice cos/sin caches from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
             cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
             cos_cache = cos_cache.astype(self.to_numpy_dtype[self.io_dtype])
             sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
             sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
+
+            # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
+            if self.rotemb_attrs["partial_rotary_factor"] != 1.0:
+                cos_cache = cos_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
+                sin_cache = sin_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
 
             if "cos_cache_name" not in kwargs and "sin_cache_name" not in kwargs:
                 # Save cos/sin caches to disk
@@ -1122,11 +1127,16 @@ class Model:
 
     def make_rotary_embedding(self, name, root_input, **kwargs):
         cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
+        num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
 
         inputs = [root_input, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
         output = f"{name}/output_0"
-        self.make_node("RotaryEmbedding", inputs=inputs, outputs=[output], name=name, domain="com.microsoft", interleaved=self.rotemb_attrs["interleaved"], **kwargs)
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * (self.num_kv_heads if "k_rotary" in name else self.num_attn_heads)])
+        self.make_node(
+            "RotaryEmbedding", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
+            interleaved=self.rotemb_attrs["interleaved"], num_heads=(0 if self.rotemb_attrs["partial_rotary_factor"] == 1.0 else num_heads),  # default is 0 in RotaryEmbedding kernel
+            rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"],
+        )
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * num_heads])
 
     def make_rotary_embedding_multi_cache(self):
         if_cos_cache_output, if_sin_cache_output = "cos_cache", "sin_cache"
@@ -2609,12 +2619,7 @@ class PhiModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
-        self.rotemb_attrs["num_heads"] = self.num_attn_heads
-        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
         self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = False, True
-
-    def make_rotary_embedding(self, name, root_input, **kwargs):
-        super().make_rotary_embedding(name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
 
     def make_layer(self, layer_id, layer):
         # Each Phi decoder layer is defined as:
@@ -2747,7 +2752,7 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
         sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
 
         if self.rotemb_attrs["create_rotary_embedding_caches"]:
-            # Concat 4k and 128k cos/sin caches for DML EP only
+            # Concat 4K and 128K cos/sin caches for DML EP only
             cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches_from_scratch()
             self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
             self.rotemb_attrs["cache_length"] = self.original_context_length
@@ -2756,12 +2761,17 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
             sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
 
-            # Reshape cos/sin cache from (M, H) to (M, H/2)
+            # Slice cos/sin caches from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
             cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
             cos_cache = cos_cache.astype(self.to_numpy_dtype[self.io_dtype])
             sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
             sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
+
+            # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
+            if self.rotemb_attrs["partial_rotary_factor"] != 1.0:
+                cos_cache = cos_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
+                sin_cache = sin_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
 
             if "cos_cache_name" not in kwargs and "sin_cache_name" not in kwargs:
                 # Save cos/sin caches to disk
@@ -3004,7 +3014,7 @@ class Phi3MoE128KModel(MistralModel):
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
-        # input_layernorm --> attention --> MLP --> output_layernorm
+        # input_layernorm --> attention --> output_layernorm --> MoE
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
         self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
@@ -3021,7 +3031,6 @@ class NemotronModel(LlamaModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
         self.layernorm_attrs["add_offset"] = 1
-        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
 
     def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
@@ -3046,21 +3055,14 @@ class NemotronModel(LlamaModel):
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
 
-    def make_rotary_embedding(self, name, root_input, **kwargs):
-        num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
-        super().make_rotary_embedding(name, root_input, num_heads=num_heads, rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
-
 
 class ChatGLMModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.rotemb_attrs["partial_rotary_factor"] = 0.5  # Line 755 of modeling_chatglm.py check self.rotary_pos_emb declaration
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
-        self.rotemb_attrs["partial_rotary_factor"] = 0.5 # Line 755 of modeling_chatglm.py check self.rotary_pos_emb declaration
         self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
         self.rotemb_attrs["interleaved"] = 1
-
-    def make_rotary_embedding(self, name, root_input, **kwargs):
-        super().make_rotary_embedding(name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
 
     def make_layer(self, layer_id, layer):
         layer.self_attn = layer.self_attn if hasattr(layer, 'self_attn') else layer.self_attention
