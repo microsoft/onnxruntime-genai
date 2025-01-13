@@ -28,16 +28,14 @@ def _complete(text, state):
 
 def run(args: argparse.Namespace):
     print("Loading model...")
-    if hasattr(og, 'Config'):
-        config = og.Config(args.model_path)
-        config.clear_providers()
-        if args.provider != "cpu":
-            print(f"Setting model to {args.provider}...")
-            config.append_provider(args.provider)
-        model = og.Model(config)
-    else:
-        model = og.Model(args.model_path)
+    config = og.Config(args.model_path)
+    config.clear_providers()
+    if args.execution_provider != "cpu":
+        print(f"Setting model to {args.execution_provider}...")
+        config.append_provider(args.execution_provider)
+    model = og.Model(config)
     print("Model loaded")
+
     processor = model.create_multimodal_processor()
     tokenizer_stream = processor.create_stream()
 
@@ -125,7 +123,7 @@ if __name__ == "__main__":
         "-m", "--model_path", type=str, required=True, help="Path to the folder containing the model"
     )
     parser.add_argument(
-        "-p", "--provider", type=str, required=True, help="Provider to run model"
+        "-e", "--execution_provider", type=str, required=True, choices=["cpu", "cuda", "dml"], help="Execution provider to run model"
     )
     parser.add_argument(
         "--image_paths", nargs='*', type=str, required=False, help="Path to the images, mainly for CI usage"

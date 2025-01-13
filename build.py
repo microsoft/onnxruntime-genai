@@ -500,13 +500,17 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     if args.ios or args.macos:
         platform_name = "macabi" if args.macos == "Catalyst" else args.apple_sysroot
         command += [
-            "-DENABLE_PYTHON=OFF",
-            "-DENABLE_TESTS=OFF",
-            "-DENABLE_MODEL_BENCHMARK=OFF",
             "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + args.apple_deploy_target,
             f"-DBUILD_APPLE_FRAMEWORK={'ON' if args.build_apple_framework else 'OFF'}",
             "-DPLATFORM_NAME=" + platform_name,
         ]
+
+        if args.ios or args.macos == "Catalyst" or args.build_apple_framework:
+            command += [
+                "-DENABLE_PYTHON=OFF",
+                "-DENABLE_TESTS=OFF",
+                "-DENABLE_MODEL_BENCHMARK=OFF",
+            ]
 
     if args.macos:
         command += [
