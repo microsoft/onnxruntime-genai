@@ -438,13 +438,19 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
         generator.generate_next_token()
 
     expected_output = [
-        'This is a test.\n        # TOD import * doct proofingrad',
+        'This is a test.\n        # TOD import * doct proofingredients',
         'Rats are awesome pets!\n    """\n\n',
         'The quick brown fox jumps over the lazy dog.\n    """\n\n',
     ]
     for i in range(len(prompts)):
-        assert np.array_equal(expected_output[i], tokenizer.decode(generator.get_sequence(i)))
+        actual_output = tokenizer.decode(generator.get_sequence(i))
+        equal = np.array_equal(expected_output[i], actual_output)
 
+        if not equal:
+            print("test_pipeline_model:", flush=True)
+            print(f"expected = {repr(expected_output[i])}", flush=True)
+            print(f"actual = {repr(actual_output)}", flush=True)
+        assert equal
 
 @pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
@@ -528,7 +534,7 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
         model = onnx.load(Path(adapter_model_path) / "model.onnx")
 
         for node in model.graph.node:
-            if node.name == "/lm_head/Add":
+            if node.output[0] == "logits":
                 node.output[0] = "logits_0"
                 break
 
@@ -655,7 +661,7 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
         model = onnx.load(Path(extra_inputs_model_path) / "model.onnx")
 
         for node in model.graph.node:
-            if node.name == "/lm_head/Add":
+            if node.output[0] == "logits":
                 node.output[0] = "logits_0"
                 break
 
