@@ -35,6 +35,9 @@ steps:
         python -m pip install -r test/python/directml/torch/requirements.txt
         python -m pip install -r test/python/directml/ort/requirements.txt
       }
+      elseif ("$(arch)" -eq "arm64") {
+        python -m pip install onnxruntime-qnn
+      }
       else {
         python -m pip install -r test/python/cpu/torch/requirements.txt
         python -m pip install -r test/python/cpu/ort/requirements.txt
