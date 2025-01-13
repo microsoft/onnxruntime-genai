@@ -367,7 +367,7 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
 // Copy present state to past state reordered by the beam_indices
 template <typename ScoreType>
 void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
-  std::span<int32_t> beam_indices = beam_indices_device.Span();
+  std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
   auto block_size_per_beam = shape_[1] * shape_[2] * shape_[3];
   auto element_count = shape_[0] * block_size_per_beam;
 
