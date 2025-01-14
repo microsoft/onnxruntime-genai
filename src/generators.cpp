@@ -59,21 +59,29 @@ OrtGlobals::OrtGlobals()
   env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
 }
 
+static std::unique_ptr<OrtGlobals> g_globals;
+static std::mutex g_globals_mutex;
+
 // Ensure Shutdown() has been called before process exit
 struct ValidateShutdown {
   ~ValidateShutdown() {
-    if (GetOrtGlobals()) {
+    if (g_globals) {
       std::cerr << "OGA Error: Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
       std::abort();
     }
   }
-};
+} g_shutdown;  // This struct should stay immediately after the g_globals and g_globals_mutex
 
 std::unique_ptr<OrtGlobals>&
 GetOrtGlobals() {
-  static auto globals = std::make_unique<OrtGlobals>();
-  static auto validate = std::make_unique<ValidateShutdown>();  // Must be after the above line so the destructor runs before the above destructor
-  return globals;
+  // Initialize g_globals using the g_globals_mutex
+  if (!g_globals) {
+    std::lock_guard<std::mutex> lock(g_globals_mutex);
+    if (!g_globals)  // Now that we're in the mutex, double check
+      g_globals = std::make_unique<OrtGlobals>();
+  }
+
+  return g_globals;
 }
 
 // Used by Shutdown() to display the counts and types of any leaked objects
@@ -89,7 +97,7 @@ void Shutdown() {
     std::abort();
   }
 
-  GetOrtGlobals().reset();  // Delete now because on process exit is too late
+  g_globals.reset();
 }
 
 OrtEnv& GetOrtEnv() {
@@ -387,6 +395,8 @@ void Generator::SetLogits(DeviceSpan<float> logits) {
 }
 
 void Generator::GenerateNextToken() {
+  if (search_->IsDone())
+    throw std::runtime_error("Search is already done, can't generate next token");
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");
