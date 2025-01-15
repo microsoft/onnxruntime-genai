@@ -23,9 +23,22 @@ std::string trim(const std::string& str) {
 
 // C++ API Example
 
-void CXX_API(const char* model_path) {
+void CXX_API(const char* model_path, const char* execution_provider) {
+  std::cout << "Creating config..." << std::endl;
+  auto config = OgaConfig::Create(model_path);
+
+  config->ClearProviders();
+  std::string provider(execution_provider);
+  if (provider.compare("cpu") != 0) {
+    config->AppendProvider(execution_provider);
+    if (provider.compare("cuda") == 0) {
+      config->SetProviderOption(execution_provider, "enable_cuda_graph", "0");
+    }
+  }
+
   std::cout << "Creating model..." << std::endl;
-  auto model = OgaModel::Create(model_path);
+  auto model = OgaModel::Create(*config);
+
   std::cout << "Creating multimodal processor..." << std::endl;
   auto processor = OgaMultiModalProcessor::Create(*model);
 
@@ -98,10 +111,22 @@ void CheckResult(OgaResult* result) {
   }
 }
 
-void C_API(const char* model_path) {
+void C_API(const char* model_path, const char* execution_provider) {
+  OgaConfig* config;
+  std::cout << "Creating config..." << std::endl;
+  CheckResult(OgaCreateConfig(model_path, &config));
+
+  CheckResult(OgaConfigClearProviders(config));
+  if (strcmp(execution_provider, "cpu") != 0) {
+    CheckResult(OgaConfigAppendProvider(config, execution_provider));
+    if (strcmp(execution_provider, "cuda") == 0) {
+      CheckResult(OgaConfigSetProviderOption(config, execution_provider, "enable_cuda_graph", "0"));
+    }
+  }
+
   OgaModel* model;
   std::cout << "Creating model..." << std::endl;
-  CheckResult(OgaCreateModel(model_path, &model));
+  CheckResult(OgaCreateModelFromConfig(config, &model));
 
   OgaMultiModalProcessor* processor;
   std::cout << "Creating multimodal processor..." << std::endl;
@@ -184,11 +209,13 @@ void C_API(const char* model_path) {
 }
 
 static void print_usage(int /*argc*/, char** argv) {
-  std::cerr << "usage: " << argv[0] << " <model_path>" << std::endl;
+  std::cerr << "usage: " << argv[0] << std::endl;
+  std::cerr << "model_path = " << argv[1] << std::endl;
+  std::cerr << "execution_provider = " << argv[2] << std::endl;
 }
 
 int main(int argc, char** argv) {
-  if (argc != 2) {
+  if (argc != 3) {
     print_usage(argc, argv);
     return -1;
   }
@@ -199,10 +226,10 @@ int main(int argc, char** argv) {
 
 #ifdef USE_CXX
   std::cout << "C++ API" << std::endl;
-  CXX_API(argv[1]);
+  CXX_API(argv[1], argv[2]);
 #else
   std::cout << "C API" << std::endl;
-  C_API(argv[1]);
+  C_API(argv[1], argv[2]);
 #endif
 
   return 0;

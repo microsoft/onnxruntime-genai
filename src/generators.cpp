@@ -3,6 +3,7 @@
 
 #include "generators.h"
 #include "sequences.h"
+#include "models/env_utils.h"
 #include "models/model.h"
 #include "models/decoder_only.h"
 #include "search.h"
@@ -38,8 +39,14 @@ namespace Generators {
 
 static bool _ = (Ort::InitApi(), false);
 
+static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
+  bool ort_verbose_logging = false;
+  GetEnvironmentVariable("ORTGENAI_ORT_VERBOSE_LOGGING", ort_verbose_logging);
+  return ort_verbose_logging ? OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE : OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR;
+}
+
 OrtGlobals::OrtGlobals()
-    : env_{OrtEnv::Create(OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR)} {
+    : env_{OrtEnv::Create(GetDefaultOrtLoggingLevel())} {
   auto arena_config = OrtArenaCfg::Create(0, -1, -1, -1);
   Ort::Allocator& allocator_cpu{Ort::Allocator::GetWithDefaultOptions()};
   env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
@@ -155,6 +162,8 @@ std::string to_string(DeviceType device_type) {
       return "DirectML";
     case DeviceType::WEBGPU:
       return "WebGpu";
+    case DeviceType::QNN:
+      return "QnnWithSharedMemory";
   }
   throw std::runtime_error("Unknown device type");
 }
@@ -248,19 +257,41 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
   // Temporary solution for multimodal and whisper models
   if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
-    AppendTokens(params.aux_input_ids);
+    AuxAppendTokens(params.aux_input_ids);
   }
 }
 
-DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(const cpu_span<int32_t>& input_ids) {
-  auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(input_ids.size());
+DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
+  size_t padded_input_ids_size = input_ids.size();
+  if (model_->config_->model.decoder.sliding_window.has_value()) {
+    // If the model has a sliding window, pad the input_ids to the next multiple of the window size
+    // so that the input_ids can be divided into window size chunks.
+    const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
+    padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
+  }
+  auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
-  std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
+  std::fill_n(cpu_span.begin(), padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
+  std::copy_backward(input_ids.begin(), input_ids.end(), cpu_span.end());
   input_ids_device.CopyCpuToDevice();
   return input_ids_device;
 }
 
-void Generator::AppendTokens(const cpu_span<int32_t>& input_ids) {
+// TODO(aciddelgado): Remove this function once SetInputs is moved to generator
+void Generator::AuxAppendTokens(cpu_span<const int32_t> input_ids) {
+  ThrowErrorIfSessionTerminated(state_->session_terminated_);
+  if (input_ids.size() == 0)
+    throw std::runtime_error("input_ids is empty");
+  if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
+    throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
+
+  auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
+  search_->AppendTokens(input_ids_device);
+  computed_logits_ = false;
+  ComputeLogits(input_ids_device);
+}
+
+void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
@@ -269,14 +300,24 @@ void Generator::AppendTokens(const cpu_span<int32_t>& input_ids) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
+  constexpr std::array<DeviceType, 2> devices_supporting_continuous_decoding{DeviceType::CPU, DeviceType::CUDA};
+  if (search_->GetSequenceLength() != 0 &&
+      std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
+                   [this](DeviceType device_type) { return device_type == state_->params_->device_type; }))
+    throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->params_->device_type) +
+                             "). Please recreate the generator instance to avoid using continuous decoding.");
+
+  if (last_action_ == Action::generated) {
+    ComputeLogits(search_->GetNextTokens());
+  }
+
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->AppendTokens(input_ids_device);
-
   computed_logits_ = false;
   ComputeLogits(input_ids_device);
 }
 
-void Generator::ComputeLogits(DeviceSpan<int32_t>& next_tokens) {
+void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
@@ -287,7 +328,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t>& next_tokens) {
     stream << std::endl;
   }
   SetLogits(logits);
-  just_rewinded_ = false;
+  last_action_ = Action::standard;
   computed_logits_ = true;
 }
 
@@ -335,9 +376,23 @@ void Generator::GenerateNextToken() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");
+
+  // TODO: Extend the solution to make it work for batch size > 1, num beams > 1, multimodal and DML
+  // Phi3 model switches from short factor to long factor at 4097 (original_max_position_embeddings+1) token, needs Recomputation of Position IDs and KV Cache
+  // at this stage which is achieved by rewinding to zero and appending the current sequence
+  // Scenarios where this solution works: Batch size = 1, Num beams = 1, decoder model, EP is either CPU or CUDA
+  // Scenarios where it doesn't work: Batch size > 1 OR Num beams > 1 OR Multimodal model (like phi3 vision) OR EP is DML
+  if (search_->params_->BatchBeamSize() == 1) {
+    if (((search_->GetSequenceLength() == 4097) && (model_->config_->model.type == "phi3" || model_->config_->model.type == "phimoe")) || ((search_->GetSequenceLength() == 8197) && (model_->config_->model.type == "phi3small"))) {
+      auto current_seq = cpu_span<int32_t>(GetSequence(0).CopyDeviceToCpu());
+      RewindToLength(0);
+      AppendTokens(current_seq);
+    }
+  }
+
   if (!computed_logits_) {
     auto next_tokens = search_->GetNextTokens();
-    if (just_rewinded_)
+    if (last_action_ == Action::rewound)
       search_->AppendTokens(next_tokens);
     ComputeLogits(next_tokens);
   }
@@ -356,6 +411,7 @@ void Generator::GenerateNextToken() {
            << std::endl;
   }
 
+  last_action_ = Action::generated;
   if (!search.do_sample || search.top_k == 1) {
     search_->SelectTop();
     return;
@@ -394,13 +450,12 @@ void Generator::RewindToLength(size_t new_length) {
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
   computed_logits_ = false;
-  just_rewinded_ = true;
+  last_action_ = Action::rewound;
 }
 
 DeviceSpan<float> Generator::GetLogits() {
   if (!computed_logits_) {
-    auto next_tokens = search_->GetNextTokens();
-    ComputeLogits(next_tokens);
+    ComputeLogits(search_->GetNextTokens());
   }
   return search_->GetLogits();
 }

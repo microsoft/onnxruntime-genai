@@ -90,7 +90,7 @@ class SimpleTest {
         // the test model requires manual input as the token ids have to be < 1000 but the configured tokenizer
         // has a larger vocab size and the input ids it generates are not valid.
         val model = Model(newModelPath)
-        val params = model.createGeneratorParams()
+        val params = GeneratorParams(model)
 
         val sequenceLength = 4
         val batchSize = 2

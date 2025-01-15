@@ -5,17 +5,22 @@
 package ai.onnxruntime.genai;
 
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 
 /**
- * The `GeneratorParams` class represents the parameters used for generating sequences with a model.
- * Set the prompt using setInput, and any other search options using setSearchOption.
+ * Represents the parameters used for generating sequences with a model. Set the prompt using
+ * setInput, and any other search options using setSearchOption.
  */
 public final class GeneratorParams implements AutoCloseable {
   private long nativeHandle = 0;
   private ByteBuffer tokenIdsBuffer;
 
-  GeneratorParams(Model model) throws GenAIException {
+  /**
+   * Creates a GeneratorParams from the given model.
+   *
+   * @param model The model to use.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public GeneratorParams(Model model) throws GenAIException {
     if (model.nativeHandle() == 0) {
       throw new IllegalStateException("model has been freed and is invalid");
     }
@@ -23,6 +28,13 @@ public final class GeneratorParams implements AutoCloseable {
     nativeHandle = createGeneratorParams(model.nativeHandle());
   }
 
+  /**
+   * Set seach option with double value.
+   *
+   * @param optionName The option name.
+   * @param value The option value.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
   public void setSearchOption(String optionName, double value) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
@@ -31,6 +43,13 @@ public final class GeneratorParams implements AutoCloseable {
     setSearchOptionNumber(nativeHandle, optionName, value);
   }
 
+  /**
+   * Set search option with boolean value.
+   *
+   * @param optionName The option name.
+   * @param value The option value.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
   public void setSearchOption(String optionName, boolean value) throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
@@ -44,7 +63,7 @@ public final class GeneratorParams implements AutoCloseable {
    *
    * @param name Name of the model input the tensor will provide.
    * @param tensor Tensor to add.
-   * @throws GenAIException
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void setInput(String name, Tensor tensor) throws GenAIException {
     if (nativeHandle == 0) {
@@ -62,7 +81,7 @@ public final class GeneratorParams implements AutoCloseable {
    * Add a NamedTensors as a model input.
    *
    * @param namedTensors NamedTensors to add.
-   * @throws GenAIException
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public void setInputs(NamedTensors namedTensors) throws GenAIException {
     if (nativeHandle == 0) {
@@ -108,7 +127,6 @@ public final class GeneratorParams implements AutoCloseable {
 
   private native void setModelInput(long nativeHandle, String inputName, long tensorHandle)
       throws GenAIException;
-  
-  private native void setInputs(long nativeHandle, long namedTensorsHandle)
-      throws GenAIException;
+
+  private native void setInputs(long nativeHandle, long namedTensorsHandle) throws GenAIException;
 }

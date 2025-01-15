@@ -111,6 +111,8 @@ struct SessionInfo {
   ONNXTensorElementDataType GetInputDataType(const std::string& name) const;
   ONNXTensorElementDataType GetOutputDataType(const std::string& name) const;
 
+  std::vector<std::string> GetInputNames() const;
+
  private:
   std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;
 };
@@ -153,8 +155,9 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
                                       bool is_primary_session_options,
                                       bool disable_graph_capture);
 
-#if USE_WEBGPU
-  std::unique_ptr<OrtIoBinding> webgpu_io_binding_;
+#endif
+#if USE_DML || USE_WEBGPU
+  std::unique_ptr<OrtMemoryInfo> memory_info_device_;
 #endif
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;

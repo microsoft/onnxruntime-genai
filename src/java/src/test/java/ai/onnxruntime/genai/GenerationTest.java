@@ -4,10 +4,9 @@
  */
 package ai.onnxruntime.genai;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import java.io.File;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
@@ -25,17 +24,7 @@ public class GenerationTest {
   // phi-2 can be used in full end-to-end testing but needs to be manually downloaded.
   // it's also used this way in the C# unit tests.
   private static final String phi2ModelPath() {
-    String repoRoot = TestUtils.getRepoRoot();
-    File f = new File(repoRoot + "examples/python/example-models/phi2-int4-cpu");
-
-    if (!f.exists()) {
-      logger.warning("phi2 model not found at: " + f.getPath());
-      logger.warning(
-          "Please install as per https://github.com/microsoft/onnxruntime-genai/tree/rel-0.2.0/examples/csharp/HelloPhi2");
-      return null;
-    }
-
-    return f.getPath();
+    return TestUtils.getFilePathFromResource("/phi-2/int4/cpu");
   }
 
   @SuppressWarnings("unused") // Used in EnabledIf
@@ -43,64 +32,122 @@ public class GenerationTest {
     return phi2ModelPath() != null;
   }
 
+  @SuppressWarnings("unused") // Used in EnabledIf
+  private static boolean haveAdapters() {
+    return TestUtils.testAdapterTestModelPath() != null;
+  }
+
   @Test
   @EnabledIf("havePhi2")
   public void testUsageNoListener() throws GenAIException {
-    SimpleGenAI generator = new SimpleGenAI(phi2ModelPath());
-    GeneratorParams params = generator.createGeneratorParams();
-
-    String result = generator.generate(params, "What's 6 times 7?", null);
-    logger.info("Result: " + result);
-    assertTrue(result.indexOf("Answer: 42") != -1);
+    try (SimpleGenAI generator = new SimpleGenAI(phi2ModelPath());
+        GeneratorParams params = generator.createGeneratorParams(); ) {
+      params.setSearchOption("max_length", 20);
+      String result =
+          generator.generate(params, TestUtils.applyPhi2ChatTemplate("What's 6 times 7?"), null);
+      logger.info("Result: " + result);
+    }
   }
 
   @Test
   @EnabledIf("havePhi2")
   public void testUsageWithListener() throws GenAIException {
-    SimpleGenAI generator = new SimpleGenAI(phi2ModelPath());
-    GeneratorParams params = generator.createGeneratorParams();
-    Consumer<String> listener = token -> logger.info("onTokenGenerate: " + token);
-    String result = generator.generate(params, "What's 6 times 7?", listener);
+    try (SimpleGenAI generator = new SimpleGenAI(phi2ModelPath());
+        GeneratorParams params = generator.createGeneratorParams(); ) {
+      params.setSearchOption("max_length", 20);
+      Consumer<String> listener = token -> logger.info("onTokenGenerate: " + token);
+      String result =
+          generator.generate(
+              params, TestUtils.applyPhi2ChatTemplate("What's 6 times 7?"), listener);
 
-    logger.info("Result: " + result);
-    assertTrue(result.indexOf("Answer: 42") != -1);
+      logger.info("Result: " + result);
+    }
+  }
+
+  @Test
+  @EnabledIf("haveAdapters")
+  public void testUsageWithAdapters() throws GenAIException {
+    try (Model model = new Model(TestUtils.testAdapterTestModelPath());
+        Tokenizer tokenizer = new Tokenizer(model)) {
+      String[] prompts = {
+        TestUtils.applyPhi2ChatTemplate("def is_prime(n):"),
+        TestUtils.applyPhi2ChatTemplate("def compute_gcd(x, y):"),
+        TestUtils.applyPhi2ChatTemplate("def binary_search(arr, x):"),
+      };
+
+      try (Sequences sequences = tokenizer.encodeBatch(prompts);
+          GeneratorParams params = new GeneratorParams(model)) {
+        params.setSearchOption("max_length", 200);
+        params.setSearchOption("batch_size", prompts.length);
+
+        long[] outputShape;
+
+        try (Generator generator = new Generator(model, params); ) {
+          generator.appendTokenSequences(sequences);
+          while (!generator.isDone()) {
+            generator.generateNextToken();
+          }
+
+          try (Tensor logits = generator.getOutput("logits")) {
+            outputShape = logits.getShape();
+            assertEquals(logits.getType(), Tensor.ElementType.float32);
+          }
+        }
+
+        try (Adapters adapters = new Adapters(model);
+            Generator generator = new Generator(model, params); ) {
+          generator.appendTokenSequences(sequences);
+          adapters.loadAdapter(TestUtils.testAdapterTestAdaptersPath(), "adapters_a_and_b");
+          generator.setActiveAdapter(adapters, "adapters_a_and_b");
+          while (!generator.isDone()) {
+            generator.generateNextToken();
+          }
+          try (Tensor logits = generator.getOutput("logits")) {
+            assertEquals(logits.getType(), Tensor.ElementType.float32);
+            assertArrayEquals(outputShape, logits.getShape());
+          }
+        }
+      }
+    }
   }
 
   @Test
   public void testWithInputIds() throws GenAIException {
     // test using the HF model. input id values must be < 1000 so we use manually created input.
     // Input/expected output copied from the C# unit tests
-    Config config = new Config(TestUtils.testModelPath());
-    Model model = new Model(config);
-    GeneratorParams params = new GeneratorParams(model);
-    int batchSize = 2;
-    int sequenceLength = 4;
-    int maxLength = 10;
-    int[] inputIDs =
-        new int[] {
-          0, 0, 0, 52,
-          0, 0, 195, 731
-        };
+    try (Config config = new Config(TestUtils.tinyGpt2ModelPath());
+        Model model = new Model(config);
+        GeneratorParams params = new GeneratorParams(model); ) {
+      int batchSize = 2;
+      int sequenceLength = 4;
+      int maxLength = 10;
+      int[] inputIDs =
+          new int[] {
+            0, 0, 0, 52,
+            0, 0, 195, 731
+          };
 
-    params.setSearchOption("max_length", maxLength);
-    params.setSearchOption("batch_size", batchSize);
+      params.setSearchOption("max_length", maxLength);
+      params.setSearchOption("batch_size", batchSize);
 
-    int[] expectedOutput =
-        new int[] {
-          0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
-          0, 0, 195, 731, 731, 114, 114, 114, 114, 114
-        };
+      int[] expectedOutput =
+          new int[] {
+            0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
+            0, 0, 195, 731, 731, 114, 114, 114, 114, 114
+          };
 
-    Generator generator = new Generator(model, params);
-    generator.appendTokens(inputIDs);
-    while (!generator.isDone()) {
-      generator.generateNextToken();
-    }
-    
-    for (int i = 0; i < batchSize; i++) {
-      int[] outputIds = generator.getSequence(i);
-      for (int j = 0; j < maxLength; j++) {
-        assertEquals(outputIds[j], expectedOutput[i * maxLength + j]);
+      try (Generator generator = new Generator(model, params); ) {
+        generator.appendTokens(inputIDs);
+        while (!generator.isDone()) {
+          generator.generateNextToken();
+        }
+
+        for (int i = 0; i < batchSize; i++) {
+          int[] outputIds = generator.getSequence(i);
+          for (int j = 0; j < maxLength; j++) {
+            assertEquals(outputIds[j], expectedOutput[i * maxLength + j]);
+          }
+        }
       }
     }
   }

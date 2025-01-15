@@ -3,6 +3,8 @@
 //
 // Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
 #include <algorithm>
+#include <set>
+#include <string>
 #include <thread>
 
 #include "../generators.h"
@@ -277,6 +279,14 @@ ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name
   return result->second;
 }
 
+std::vector<std::string> SessionInfo::GetInputNames() const {
+  std::vector<std::string> names;
+  names.reserve(inputs_.size());
+  for (const auto& input : inputs_)
+    names.push_back(input.first);
+  return names;
+}
+
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
 }
@@ -449,6 +459,15 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       for (auto& option : provider_options.options) {
         opts.emplace(option.first, option.second);
       }
+
+      // TODO set device_type_ in a less hacky way.
+      // now, all QNN EP enable_htp_shared_memory_allocator option values had better be consistent...
+      // on the other hand, not sure if is_primary_session_options is the right thing to check here.
+      if (const auto opt_it = opts.find("enable_htp_shared_memory_allocator");
+          opt_it != opts.end() && opt_it->second == "1") {
+        device_type_ = DeviceType::QNN;
+      }
+
       session_options.AppendExecutionProvider("QNN", opts);
     } else if (provider_options.name == "webgpu") {
       device_type_ = DeviceType::WEBGPU;
@@ -512,9 +531,10 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  std::set<std::string> llm_types = {"chatglm", "decoder", "gemma", "gemma2", "granite", "llama", "mistral", "nemotron", "phi", "phimoe", "phi3", "phi3small", "qwen2"};
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (config->model.type == "llama" || config->model.type == "gemma" || config->model.type == "gemma2" || config->model.type == "mistral" || config->model.type == "phi" || config->model.type == "phi3" || config->model.type == "phi3small" || config->model.type == "phimoe" || config->model.type == "qwen2" || config->model.type == "nemotron" || config->model.type == "chatglm")
+  if (llm_types.find(config->model.type) != llm_types.end())
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);

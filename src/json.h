@@ -9,17 +9,29 @@
 //
 namespace JSON {
 struct unknown_value_error : std::exception {};  // Throw this from any Element callback to throw a std::runtime error reporting the unknown value name
+struct type_mismatch {                           // When a file has one type, but we're expecting another type. "seen" & "expected" are indices into the Value std::variant below
+  size_t seen, expected;
+};
+
+using Value = std::variant<std::string_view, double, bool, std::nullptr_t>;
+
+// To see descriptive errors when types don't match, use this instead of std::get
+template <typename T>
+T Get(Value& var) {
+  try {
+    return std::get<T>(var);
+  } catch (const std::bad_variant_access&) {
+    throw type_mismatch{var.index(), Value{T{}}.index()};
+  }
+}
 
 struct Element {
   virtual void OnComplete(bool empty) {}  // Called when parsing for this element is finished (empty is true when it's an empty element)
 
-  virtual void OnString(std::string_view name, std::string_view value) { throw unknown_value_error{}; }
-  virtual void OnNumber(std::string_view name, double value) { throw unknown_value_error{}; }
-  virtual void OnBool(std::string_view name, bool value) { throw unknown_value_error{}; }
-  virtual void OnNull(std::string_view name) { throw unknown_value_error{}; }
+  virtual void OnValue(std::string_view name, Value value) { throw unknown_value_error{}; }
 
-  virtual Element& OnArray(std::string_view name);
-  virtual Element& OnObject(std::string_view name);
+  virtual Element& OnArray(std::string_view name) { throw unknown_value_error{}; }
+  virtual Element& OnObject(std::string_view name) { throw unknown_value_error{}; }
 };
 
 void Parse(Element& element, std::string_view document);

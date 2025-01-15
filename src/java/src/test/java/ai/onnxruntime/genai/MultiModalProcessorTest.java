@@ -4,33 +4,28 @@
  */
 package ai.onnxruntime.genai;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
+import java.util.logging.Logger;
 import org.junit.jupiter.api.Test;
 
 // NOTE: Typical usage is covered in GenerationTest.java so we are just filling test gaps here.
 public class MultiModalProcessorTest {
-    @Test
-    public void testBatchEncodeDecode() throws GenAIException {
-        try (Model model = new Model(TestUtils.testModelPath());
-        MultiModalProcessor multiModalProcessor = new MultiModalProcessor(model)) {
-            TokenizerStream stream = multiModalProcessor.createStream();
-            GeneratorParams generatorParams = model.createGeneratorParams();
-            String inputs = new String("This is a test");
-            Images image = new Images("/src/java/src/test/java/ai/onnxruntime/genai/landscape.jpg");
-            NamedTensors processed = multiModalProcessor.processImages(inputs, image);
-            generatorParams.setInputs(processed);
+  private static final Logger logger = Logger.getLogger(MultiModalProcessorTest.class.getName());
 
-            Generator generator = new Generator(model, generatorParams);
-
-            String fullAnswer = new String();
-            while (!generator.isDone()) {
-                generator.generateNextToken();
-                 
-                int token = generator.getLastTokenInSequence(0);
-                 
-                fullAnswer += stream.decode(token);
-            }
-        }
+  @Test
+  public void testBatchEncodeDecode() throws GenAIException {
+    try (Model model = new Model(TestUtils.testVisionModelPath());
+        MultiModalProcessor multiModalProcessor = new MultiModalProcessor(model);
+        TokenizerStream stream = multiModalProcessor.createStream();
+        GeneratorParams generatorParams = new GeneratorParams(model)) {
+      String inputs =
+          new String(
+              "<|user|>\n<|image_1|>\n Can you convert the table to markdown format?\n<|end|>\n<|assistant|>\n");
+      try (Images image = new Images(TestUtils.getFilePathFromResource("/images/sheet.png"));
+          NamedTensors processed = multiModalProcessor.processImages(inputs, image); ) {
+        assertNotNull(processed);
+      }
     }
+  }
 }

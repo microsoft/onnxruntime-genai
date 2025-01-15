@@ -24,15 +24,15 @@ struct DecoderOnly_State : State {
   void RewindTo(size_t index) override;
 
  private:
-  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int total_length);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length);
 
   const DecoderOnly_Model& model_;
   CapturedGraphInfoPtr captured_graph_info_;
 
-  InputIDs input_ids_{*this};
+  DefaultInputIDs input_ids_{*this};
   Logits logits_{*this};
-  KV_Cache kv_cache_{*this};
-  PositionInputs position_inputs_;
+  DefaultKeyValueCache kv_cache_{*this};
+  DefaultPositionInputs position_inputs_;
   ExtraInputs extra_inputs_{*this};
 };
 

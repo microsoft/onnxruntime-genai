@@ -453,7 +453,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
             is_x64_host = platform.machine() == "AMD64"
             if is_x64_host:
-                toolset_options += ["host=x64"]
+                pass
 
             if args.use_cuda:
                 toolset_options += ["cuda=" + str(args.cuda_home)]
@@ -500,12 +500,17 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     if args.ios or args.macos:
         platform_name = "macabi" if args.macos == "Catalyst" else args.apple_sysroot
         command += [
-            "-DENABLE_PYTHON=OFF",
-            "-DENABLE_TESTS=OFF",
-            "-DENABLE_MODEL_BENCHMARK=OFF",
+            "-DCMAKE_OSX_DEPLOYMENT_TARGET=" + args.apple_deploy_target,
             f"-DBUILD_APPLE_FRAMEWORK={'ON' if args.build_apple_framework else 'OFF'}",
             "-DPLATFORM_NAME=" + platform_name,
         ]
+
+        if args.ios or args.macos == "Catalyst" or args.build_apple_framework:
+            command += [
+                "-DENABLE_PYTHON=OFF",
+                "-DENABLE_TESTS=OFF",
+                "-DENABLE_MODEL_BENCHMARK=OFF",
+            ]
 
     if args.macos:
         command += [
@@ -623,6 +628,10 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         csharp_test_command = [dotnet, "test"]
         csharp_test_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_test_command, env=env, cwd=str(REPO_ROOT / "test" / "csharp"))
+
+    if args.build_java:
+        ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
+        util.run(ctest_cmd, cwd=str(args.build_dir / "src" / "java"))
 
     if args.android:
         _run_android_tests(args)

@@ -1,0 +1,22 @@
+parameters:
+- name: ort_version
+  displayName: 'OnnxRuntime version'
+  type: string
+  default: '1.20.0'
+
+- name: build_config
+  displayName: 'Build Configuration'
+  type: string
+  default: 'Release'
+  values:
+  - 'Debug'
+  - 'RelWithDebInfo'
+  - 'Release'
+  - 'MinSizeRel'
+
+trigger: none
+stages:
+- template: stages/macos-ios-cocoapods-packaging-stage.yml
+  parameters:
+    ort_version: ${{ parameters.ort_version }}
+    build_config: ${{ parameters.build_config }}

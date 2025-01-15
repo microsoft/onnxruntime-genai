@@ -7,6 +7,7 @@ package ai.onnxruntime.genai;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
+/** Currently wraps an ORT Tensor. */
 public final class Tensor implements AutoCloseable {
   private long nativeHandle = 0;
   private final ElementType elementType;
@@ -17,6 +18,7 @@ public final class Tensor implements AutoCloseable {
 
   // The values in this enum must match ONNX values
   // https://github.com/onnx/onnx/blob/159fa47b7c4d40e6d9740fcf14c36fff1d11ccd8/onnx/onnx.proto#L499-L544
+  /** Element types that correspond to OnnxRuntime supported element types. */
   public enum ElementType {
     undefined,
     float32,
@@ -40,7 +42,7 @@ public final class Tensor implements AutoCloseable {
    * @param data The data for the Tensor. Must be a direct ByteBuffer with native byte order.
    * @param shape The shape of the Tensor.
    * @param elementType The type of elements in the Tensor.
-   * @throws GenAIException
+   * @throws GenAIException If the call to the GenAI native API fails.
    */
   public Tensor(ByteBuffer data, long[] shape, ElementType elementType) throws GenAIException {
     if (data == null || shape == null || elementType == ElementType.undefined) {
@@ -62,9 +64,38 @@ public final class Tensor implements AutoCloseable {
 
     this.elementType = elementType;
     this.shape = shape;
-    this.dataBuffer = data;  // save a reference so the owning buffer will stay around.
+    this.dataBuffer = data; // save a reference so the owning buffer will stay around.
 
     nativeHandle = createTensor(data, shape, elementType.ordinal());
+  }
+
+  /**
+   * Construct a Tensor from native handle.
+   *
+   * @param handle The native tensor handle.
+   */
+  Tensor(long handle) {
+    nativeHandle = handle;
+    elementType = ElementType.values()[getTensorType(handle)];
+    shape = getTensorShape(handle);
+  }
+
+  /**
+   * Get the element type.
+   *
+   * @return The element type.
+   */
+  public ElementType getType() {
+    return this.elementType;
+  }
+
+  /**
+   * Get the tensor shape.
+   *
+   * @return The tensor type.
+   */
+  public long[] getShape() {
+    return this.shape;
   }
 
   @Override
@@ -91,4 +122,8 @@ public final class Tensor implements AutoCloseable {
       throws GenAIException;
 
   private native void destroyTensor(long tensorHandle);
+
+  private native int getTensorType(long tensorHandle);
+
+  private native long[] getTensorShape(long tensorHandle);
 }

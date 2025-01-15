@@ -3,48 +3,28 @@
  */
 package ai.onnxruntime.genai;
 
+/** An ORT GenAI model. */
 public final class Model implements AutoCloseable {
   private long nativeHandle;
 
+  /**
+   * Construct a Model from folder path.
+   *
+   * @param modelPath The path of the GenAI model.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
   public Model(String modelPath) throws GenAIException {
     nativeHandle = createModel(modelPath);
   }
 
+  /**
+   * Construct a Model from the given Config.
+   *
+   * @param config The config to use.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
   public Model(Config config) throws GenAIException {
     nativeHandle = createModelFromConfig(config.nativeHandle());
-  }
-
-  /**
-   * Creates a Tokenizer instance for this model. The model contains the configuration information
-   * that determines the tokenizer to use.
-   *
-   * @return The Tokenizer instance.
-   * @throws GenAIException If the call to the GenAI native API fails.
-   */
-  public Tokenizer createTokenizer() throws GenAIException {
-    if (nativeHandle == 0) {
-      throw new IllegalStateException("Instance has been freed and is invalid");
-    }
-
-    return new Tokenizer(this);
-  }
-
-  // NOTE: Having model.createGeneratorParams is still under discussion.
-  // model.createTokenizer is consistent with the python setup at least and agreed upon.
-
-  /**
-   * Creates a GeneratorParams instance for executing the model. NOTE: GeneratorParams internally
-   * uses the Model, so the Model instance must remain valid
-   *
-   * @return The GeneratorParams instance.
-   * @throws GenAIException If the call to the GenAI native API fails.
-   */
-  public GeneratorParams createGeneratorParams() throws GenAIException {
-    if (nativeHandle == 0) {
-      throw new IllegalStateException("Instance has been freed and is invalid");
-    }
-
-    return new GeneratorParams(this);
   }
 
   @Override
@@ -68,6 +48,7 @@ public final class Model implements AutoCloseable {
   }
 
   private native long createModel(String modelPath) throws GenAIException;
+
   private native long createModelFromConfig(long configHandle) throws GenAIException;
 
   private native void destroyModel(long modelHandle);

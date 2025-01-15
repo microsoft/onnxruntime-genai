@@ -10,10 +10,17 @@ class MultiModal_ONNXModel():
 
     """A wrapper for ONNXRuntime GenAI to run ONNX Multimodal model"""
 
-    def __init__(self, model_path):
+    def __init__(self, model_path, execution_provider):
         self.og = og
-        logging.info("Loading model ...")
-        self.model = og.Model(f'{model_path}')
+
+        logging.info("Loading model...")
+        self.config = og.Config(model_path)
+        self.config.clear_providers()
+        if execution_provider != "cpu":
+            self.config.append_provider(execution_provider)
+        self.model = og.Model(self.config)
+        logging.info("Loaded model ...")
+
         self.processor = self.model.create_multimodal_processor()
         self.tokenizer = self.processor.create_stream()
 
@@ -23,7 +30,6 @@ class MultiModal_ONNXModel():
         self.chat_template = "<|user|>\n{tags}\n{input}<|end|>\n<|assistant|>\n"
 
     def generate_prompt_with_history(self, images, history, text=default_prompt, max_length=3072):
-
         prompt = ""
 
         for dialog in history[-self.enable_history_max:]:
@@ -43,16 +49,14 @@ class MultiModal_ONNXModel():
         self.images = og.Images.open(*images)
 
         logging.info("Preprocessing images and prompt ...")
-        input_ids = self.processor(prompt, images=self.images)
+        inputs = self.processor(prompt, images=self.images)
+        return inputs
 
-        return input_ids
 
-
-    def search(self, input_ids, max_length: int = 3072, token_printing_step: int = 1):
-
+    def search(self, inputs, max_length: int = 3072, token_printing_step: int = 1):
         output = ""
         params = og.GeneratorParams(self.model)
-        params.set_inputs(input_ids)
+        params.set_inputs(inputs)
 
         search_options = {"max_length": max_length}
         params.set_search_options(**search_options)
@@ -61,7 +65,6 @@ class MultiModal_ONNXModel():
         idx = 0
         while not generator.is_done():
             idx += 1
-            generator.compute_logits()
             generator.generate_next_token()
             next_token = generator.get_next_tokens()[0]
             output += self.tokenizer.decode(next_token)
@@ -74,18 +77,18 @@ class MultiModal_ONNXModel():
             yield chatbot, history, "Empty context"
             return
 
-        input_ids = self.generate_prompt_with_history(
-                text=text,
-                history=history,
-                images=args[0],
-                max_length=max_context_length_tokens
+        inputs = self.generate_prompt_with_history(
+            text=text,
+            history=history,
+            images=args[0],
+            max_length=max_context_length_tokens
         )
 
         sentence = self.search(
-                input_ids,
-                max_length=max_length_tokens,
-                token_printing_step=token_printing_step,
-            )
+            inputs,
+            max_length=max_length_tokens,
+            token_printing_step=token_printing_step,
+        )
 
         sentence = sentence.strip()
         a, b = [[y[0], convert_to_markdown(y[1])] for y in history] + [[text, convert_to_markdown(sentence)]], [
@@ -103,7 +106,7 @@ class MultiModal_ONNXModel():
             except Exception as e:
                 print(type(e).__name__, e)
 
-        del input_ids
+        del inputs
         gc.collect()
 
         try:

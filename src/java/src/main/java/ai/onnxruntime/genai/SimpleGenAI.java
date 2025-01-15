@@ -25,13 +25,19 @@ import java.util.function.Consumer;
  * Create a class that implements the TokenUpdateListener interface and provide an instance of that
  * class as the `listener` argument.
  */
-public class SimpleGenAI {
+public class SimpleGenAI implements AutoCloseable {
   private Model model;
   private Tokenizer tokenizer;
 
+  /**
+   * Construct a SimpleGenAI instance from model path.
+   *
+   * @param modelPath The path to the GenAI model.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
   public SimpleGenAI(String modelPath) throws GenAIException {
     model = new Model(modelPath);
-    tokenizer = model.createTokenizer();
+    tokenizer = new Tokenizer(model);
   }
 
   /**
@@ -42,7 +48,7 @@ public class SimpleGenAI {
    * @throws GenAIException on failure
    */
   public GeneratorParams createGeneratorParams() throws GenAIException {
-    return model.createGeneratorParams();
+    return new GeneratorParams(model);
   }
 
   /**
@@ -98,5 +104,17 @@ public class SimpleGenAI {
     }
 
     return result;
+  }
+
+  @Override
+  public void close() {
+    if (tokenizer != null) {
+      tokenizer.close();
+      tokenizer = null;
+    }
+    if (model != null) {
+      model.close();
+      model = null;
+    }
   }
 }
