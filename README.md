@@ -32,7 +32,7 @@ See documentation at https://onnxruntime.ai/docs/genai.
 
 ## Installation
 
-See https://onnxruntime.ai/docs/genai/howto/install
+See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install) or [build from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html)
 
 ## Sample code for Phi-3 in Python
 

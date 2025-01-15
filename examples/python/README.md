@@ -2,11 +2,11 @@
 
 ## Install ONNX Runtime GenAI
 
-Install the python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install).
+Install the python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install) or [build from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html).
 
 ## Get the model
 
-You can generate the model using the model builder with this library, or bring your own model.
+You can generate the model using the model builder with this library, download the model from huggingface ([example](https://github.com/microsoft/onnxruntime-genai?tab=readme-ov-file#sample-code-for-phi-3-in-python)), or bring your own model.
 
 If you bring your own model, you need to provide the configuration. See the [config reference](https://onnxruntime.ai/docs/genai/reference/config).
 
@@ -18,7 +18,7 @@ To generate the model with model builder:
    pip install numpy transformers torch onnx onnxruntime
    ```
 
-2. Choose a model. Examples of supported ones are listed on the repo's main README.
+2. Choose a model. Examples of supported ones are listed on the repo's main [README](../../README.md).
 
 3. Run the model builder to export, optimize, and quantize the model. More details can be found [here](../../src/python/py/models/README.md)
 
