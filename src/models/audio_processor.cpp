@@ -30,7 +30,7 @@ std::unique_ptr<OrtValue> ProcessMel(ort_extensions::OrtxObjectPtr<OrtxTensor>& 
         allocator.GetInfo(),
         std::span<float>(const_cast<float*>(mel_data), input_features_value->GetTensorTypeAndShapeInfo()->GetElementCount()),
         shape_span);
-    ConvertFp32ToFp16(allocator, *input_features_fp32, input_features_value, DeviceType::CPU, nullptr);
+    Cast(*input_features_fp32, input_features_value, *GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<Ort::Float16_t>);
   }
 
   return input_features_value;

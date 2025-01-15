@@ -23,16 +23,10 @@
 #include <unordered_set>
 #include <variant>
 #include <vector>
-#if USE_CUDA
-#include <cuda_runtime.h>
-#else
-// If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
-using cudaStream_t = void*;
-#endif
 
 #include "leakcheck.h"
-#include "smartptrs.h"
 #include "models/onnxruntime_api.h"
+#include "smartptrs.h"
 #include "models/debugging.h"
 #include "config.h"
 #include "logging.h"
@@ -94,7 +88,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   DeviceInterface* p_device{};
   DeviceType device_type{DeviceType::CPU};
-  cudaStream_t cuda_stream{};
 
   cpu_span<int32_t> aux_input_ids{};  // Intermediate solution to be used with SetInputs function for multimodal and whisper models
 

@@ -108,21 +108,13 @@ void KV_Cache_Combined::RewindPastTensorsTo(size_t index) {
   for (int i = 0; i < layer_count_; i++) {
     OrtValue& present = *presents_[i];
     std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+    auto present_span = WrapTensor<T>(*model_.p_device_, present);
+    auto past_span = WrapTensor<T>(*model_.p_device_, *past);
+
     for (int j = 0; j < 2 * batch_x_num_heads; j++) {
-      auto present_data = present.GetTensorData<T>() + j * old_length_x_head_size;
-      auto past_data = past->GetTensorMutableData<T>() + j * new_length_x_head_size;
-#if USE_CUDA
-      if (model_.device_type_ == DeviceType::CUDA) {
-        cudaMemcpyAsync(past_data, present_data, new_length_x_head_size * sizeof(T), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
-      } else
-#elif USE_DML
-      if (model_.device_type_ == DeviceType::DML) {
-        // TODO: Implement DML version
-      } else
-#endif
-      {
-        copy(std::span<const T>(present_data, new_length_x_head_size), std::span<T>(past_data, new_length_x_head_size));
-      }
+      auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
+      auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
+      past_data.CopyFrom(present_data);
     }
     pasts_[i] = std::move(past);
     state_.inputs_[input_index_ + i] = pasts_[i].get();
@@ -135,38 +127,22 @@ void KV_Cache_Combined::PickPastState(DeviceSpan<int32_t> beam_indices_device, i
   std::span<const int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
   auto block_size_per_beam = shape_[2] * shape_[3] * shape_[4];
   auto past_key_size = shape_[1] * block_size_per_beam;
-  auto element_count = shape_[0] * past_key_size;
 
-  const OrtValue& present = *presents_[index];
+  OrtValue& present = *presents_[index];
   std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<ScoreType>(*model_.allocator_kvcache_, shape_);
-  auto past_span = std::span<ScoreType>(past->GetTensorMutableData<ScoreType>(), element_count);
-  auto present_span = std::span<const ScoreType>(present.GetTensorData<ScoreType>(), element_count);
 
-#if USE_CUDA
-  if (model_.device_type_ == DeviceType::CUDA) {
-    for (size_t j = 0; j < beam_indices.size(); j++) {
-      int32_t beam_index = beam_indices[j];
-      auto present_key = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
-      auto present_value = present_span.subspan(past_key_size + beam_index * block_size_per_beam, block_size_per_beam);
+  auto past_span = WrapTensor<ScoreType>(*model_.p_device_, *past);
+  auto present_span = WrapTensor<ScoreType>(*model_.p_device_, present);
 
-      auto past_key = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
-      auto past_value = past_span.subspan(past_key_size + j * block_size_per_beam, block_size_per_beam);
-      cudaMemcpyAsync(past_key.data(), present_key.data(), present_key.size_bytes(), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
-      cudaMemcpyAsync(past_value.data(), present_value.data(), present_value.size_bytes(), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
-    }
-  } else
-#endif
-  {
-    for (size_t j = 0; j < beam_indices.size(); j++) {
-      int32_t const beam_index = beam_indices[j];
-      auto present_key = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
-      auto present_value = present_span.subspan(past_key_size + beam_index * block_size_per_beam, block_size_per_beam);
+  for (size_t j = 0; j < beam_indices.size(); j++) {
+    int32_t beam_index = beam_indices[j];
+    auto present_key = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
+    auto present_value = present_span.subspan(past_key_size + beam_index * block_size_per_beam, block_size_per_beam);
 
-      auto past_key = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
-      auto past_value = past_span.subspan(past_key_size + j * block_size_per_beam, block_size_per_beam);
-      copy(present_key, past_key);
-      copy(present_value, past_value);
-    }
+    auto past_key = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
+    auto past_value = past_span.subspan(past_key_size + j * block_size_per_beam, block_size_per_beam);
+    past_key.CopyFrom(present_key);
+    past_value.CopyFrom(present_value);
   }
 
   pasts_[index] = std::move(past);
@@ -325,21 +301,14 @@ void KV_Cache::RewindPastTensorsTo(size_t index) {
   for (int i = 0; i < layer_count_ * 2; i++) {
     OrtValue& present = *presents_[i];
     std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+
+    auto past_span = WrapTensor<T>(*model_.p_device_, *past);
+    auto present_span = WrapTensor<T>(*model_.p_device_, present);
+
     for (int j = 0; j < batch_x_num_heads; j++) {
-      auto present_data = present.GetTensorData<T>() + j * old_length_x_head_size;
-      auto past_data = past->GetTensorMutableData<T>() + j * new_length_x_head_size;
-#if USE_CUDA
-      if (model_.device_type_ == DeviceType::CUDA) {
-        cudaMemcpyAsync(past_data, present_data, new_length_x_head_size * sizeof(T), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
-      } else
-#elif USE_DML
-      if (model_.device_type_ == DeviceType::DML) {
-        // TODO: Implement DML copy
-      } else
-#endif
-      {
-        copy(std::span<const T>(present_data, new_length_x_head_size), std::span<T>(past_data, new_length_x_head_size));
-      }
+      auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
+      auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
+      past_data.CopyFrom(present_data);
     }
     pasts_[i] = std::move(past);
     state_.inputs_[input_index_ + i] = pasts_[i].get();
@@ -351,32 +320,20 @@ template <typename ScoreType>
 void KV_Cache::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
   std::span<int32_t> beam_indices = beam_indices_device.Span();
   auto block_size_per_beam = shape_[1] * shape_[2] * shape_[3];
-  auto element_count = shape_[0] * block_size_per_beam;
 
-  const OrtValue& present_value = *presents_[index];
+  OrtValue& present_value = *presents_[index];
   std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(*model_.allocator_kvcache_, shape_);
-  auto past_span = std::span<ScoreType>(past_value->GetTensorMutableData<ScoreType>(), element_count);
-  auto present_span = std::span<const ScoreType>(present_value.GetTensorData<ScoreType>(), element_count);
 
-#if USE_CUDA
-  if (model_.device_type_ == DeviceType::CUDA) {
-    for (size_t j = 0; j < beam_indices.size(); j++) {
-      int32_t beam_index = beam_indices[j];
-      auto present = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
-      auto past = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
-      cudaMemcpyAsync(past.data(), present.data(), present.size_bytes(), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
-    }
-  } else
-#endif
-  {
-    for (size_t j = 0; j < beam_indices.size(); j++) {
-      int32_t const beam_index = beam_indices[j];
-      auto present = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
-      auto past = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
-      copy(present, past);
-    }
+  auto past_span = WrapTensor<ScoreType>(*model_.p_device_, *past_value);
+  auto present_span = WrapTensor<ScoreType>(*model_.p_device_, present_value);
+
+  for (size_t j = 0; j < beam_indices.size(); j++) {
+    int32_t beam_index = beam_indices[j];
+    auto present = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
+    auto past = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
+    past.CopyFrom(present);
   }
-
+  
   pasts_[index] = std::move(past_value);
 }
 

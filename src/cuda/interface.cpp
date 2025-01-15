@@ -6,7 +6,7 @@
 #include "interface.h"
 #include "../search.h"
 #include "search_cuda.h"
-#include "../models/kernels.h"
+#include "kernels.h"
 #include <cstdarg>
 
 namespace Generators {
@@ -15,10 +15,13 @@ GenaiInterface* gp_genai{};
 Ort::Allocator* ort_allocator_{};
 const char* label_cuda = "cuda";
 
+cuda_stream_holder g_stream;
+cudaStream_t GetStream() { return g_stream.get(); }
+
 struct GpuMemory final : DeviceBuffer {
   GpuMemory(size_t size) : owned_{true} {
     size_in_bytes_ = size;
-    ::cudaMalloc(&p_device_, size);
+    p_device_ = static_cast<uint8_t*>(ort_allocator_->Alloc(size));
   }
 
   GpuMemory(void* p, size_t size) : owned_{false} {
@@ -28,7 +31,7 @@ struct GpuMemory final : DeviceBuffer {
 
   ~GpuMemory() override {
     if (owned_)
-      ::cudaFree(p_device_);
+      ort_allocator_->Free(p_device_);
     if (p_cpu_)
       ::cudaFreeHost(p_cpu_);
   }
@@ -65,17 +68,21 @@ struct GpuMemory final : DeviceBuffer {
   bool owned_;  // If we own the memory, we delete it on destruction
 };
 
-struct CudaInterfaceImpl : CudaInterface {
+struct CudaInterfaceImpl final : DeviceInterface {
   CudaInterfaceImpl() {
-    cuda_stream_.Create();
   }
 
   ~CudaInterfaceImpl() {
   }
 
-  void InitAllocator(Ort::Allocator& allocator) override {
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
+    Ort::api = &api;
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
+  }
+
+  Ort::Allocator& GetAllocator() override {
+    return *ort_allocator_;
   }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
@@ -95,85 +102,78 @@ struct CudaInterfaceImpl : CudaInterface {
   }
 
   void Synchronize() override {
-    ::cudaStreamSynchronize(cuda_stream_.get());
+    ::cudaStreamSynchronize(GetStream());
   }
 
-  cudaStream_t GetCudaStream() override {
-    return cuda_stream_.get();
+  void* GetCudaStream() override {
+    return GetStream();
   }
 
-  void Int32ToInt64(const int32_t* input, int64_t* output, int count, cudaStream_t stream) override {
-    cuda::LaunchInt32ToInt64(input, output, count, stream);
+  bool Cast(OrtValue& input, OrtValue& output) override {
+    auto input_info = input.GetTensorTypeAndShapeInfo();
+    auto output_info = output.GetTensorTypeAndShapeInfo();
+
+    auto input_type = input_info->GetElementType();
+    auto output_type = output_info->GetElementType();
+
+    auto input_data = input.GetTensorRawData();
+    auto output_data = output.GetTensorMutableRawData();
+
+    auto element_count = input_info->GetElementCount();
+    if (element_count != output_info->GetElementCount())
+      throw std::runtime_error("Cast - input and output element counts do not match");
+    if (input_type == output_type)
+      throw std::runtime_error("Cast - input and output types are the same");
+
+    if (input_type == Ort::TypeToTensorType<float> && output_type == Ort::TypeToTensorType<Ort::Float16_t>) {
+      cuda::LaunchFp32ToFp16(reinterpret_cast<const float*>(input_data), reinterpret_cast<uint16_t*>(output_data), static_cast<int>(element_count), GetStream());
+    } else if (input_type == Ort::TypeToTensorType<Ort::Float16_t> && output_type == Ort::TypeToTensorType<float>) {
+      cuda::LaunchFp16ToFp32(reinterpret_cast<const uint16_t*>(input_data), reinterpret_cast<float*>(output_data), static_cast<int>(element_count), GetStream());
+    } else if (input_type == Ort::TypeToTensorType<int32_t> && output_type == Ort::TypeToTensorType<int64_t>) {
+      cuda::LaunchInt32ToInt64(reinterpret_cast<const int32_t*>(input_data), reinterpret_cast<int64_t*>(output_data), static_cast<int>(element_count), GetStream());
+    } else
+      return false;
+    return true;
   }
 
-  void Fp16ToFp32(const uint16_t* input, float* output, int count, cudaStream_t stream) override {
-    cuda::LaunchFp16ToFp32(input, output, count, stream);
+  void UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
+    if (type == Ort::TypeToTensorType<int32_t>)
+      cuda::Launch_UpdatePositionIds(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length, GetStream());
+    else
+      cuda::Launch_UpdatePositionIds(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length, GetStream());
   }
 
-  void Fp32ToFp16(const float* input, uint16_t* output, int count, cudaStream_t stream) override {
-    cuda::LaunchFp32ToFp16(input, output, count, stream);
+  void UpdateAttentionMask(void* mask_data, const void* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
+    if (type == Ort::TypeToTensorType<int32_t>)
+      cuda::Launch_UpdateAttentionMask(static_cast<int32_t*>(mask_data), static_cast<const int32_t*>(old_data), batch_beam_size, new_kv_length, total_length, max_length, update_only, GetStream());
+    else
+      cuda::Launch_UpdateAttentionMask(static_cast<int64_t*>(mask_data), static_cast<const int64_t*>(old_data), batch_beam_size, new_kv_length, total_length, max_length, update_only, GetStream());
   }
 
-  void LaunchExpandAndInt32ToInt64(const int32_t* src, int64_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) override {
-    cuda::LaunchExpandAndInt32ToInt64(src, dst, num_beams, batch_size, sequence_length, stream);
+  void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count) override {
+    cuda::LaunchHandleEOSArray(batch_logits, batch_beam_size, vocab_size, eos_token_ids, eos_token_ids_count, GetStream());
   }
 
-  void LaunchExpand(const int32_t* src, int32_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) override {
-    cuda::LaunchExpand(src, dst, num_beams, batch_size, sequence_length, stream);
+  void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache, const int32_t* src_indir_cache, const int32_t* beam_ids, int batch_size, int beam_width, int input_seq_length, int max_seq_length, int current_length) override {
+    cuda::UpdateCacheIndirectionKernelLauncher(tgt_indir_cache, src_indir_cache, beam_ids, batch_size, beam_width, input_seq_length, max_seq_length, current_length, GetStream());
   }
 
-  void Launch_UpdatePositionIds(int32_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) override {
-    cuda::Launch_UpdatePositionIds(position_ids, batch_beam_size, total_length, new_kv_length, stream);
+  void ReorderPastStatesKernelLauncher(void* out_buffer, const void* in_buffer, int batch_size, int num_heads, int max_length, int head_size, int chunk_size) override {
+    cuda::ReorderPastStatesKernelLauncher(out_buffer, in_buffer, batch_size, num_heads, max_length, head_size, chunk_size, GetStream());
   }
 
-  void Launch_UpdatePositionIds(int64_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) override {
-    cuda::Launch_UpdatePositionIds(position_ids, batch_beam_size, total_length, new_kv_length, stream);
+  void LaunchCopyCrossQKSingleDecodeStep(float* cross_qk_buffer_data, float** qk_layer_pointers, int token_index, int batch_beam_size, int num_layers, int num_heads, int num_alignment_heads, const int* alignment_heads, int frames, int max_length) override {
+    cuda::LaunchCopyCrossQKSingleDecodeStep(GetStream(), cross_qk_buffer_data, qk_layer_pointers, token_index, batch_beam_size, num_layers, num_heads, num_alignment_heads, alignment_heads, frames, max_length);
   }
 
-  void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream) override {
-    cuda::Launch_UpdateAttentionMask(mask_data, old_data, batch_beam_size, new_kv_length, total_length, max_length, update_only, stream);
+  void LaunchFinalizeCrossQK(int iteration_number, int context_decoding_len, int batch_size, int num_beams, int max_length, int num_alignment_heads, int frames_of_k, const float* cross_qk_buffer_data, float* cross_qk_output, int num_return_sequences, const int* cache_indir_data) override {
+    cuda::LaunchFinalizeCrossQK(GetStream(), iteration_number, context_decoding_len, batch_size, num_beams, max_length, num_alignment_heads, frames_of_k, cross_qk_buffer_data, cross_qk_output, num_return_sequences, cache_indir_data);
   }
-
-  void Launch_UpdateAttentionMask(int64_t* mask_data, const int64_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream) override {
-    cuda::Launch_UpdateAttentionMask(mask_data, old_data, batch_beam_size, new_kv_length, total_length, max_length, update_only, stream);
-  }
-
-  void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) override {
-    cuda::LaunchHandleEOSArray(batch_logits, batch_beam_size, vocab_size, eos_token_ids, eos_token_ids_count, stream);
-  }
-
-  void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache, const int32_t* src_indir_cache, const int32_t* beam_ids, int batch_size, int beam_width, int input_seq_length, int max_seq_length, int current_length, cudaStream_t stream) override {
-    cuda::UpdateCacheIndirectionKernelLauncher(tgt_indir_cache, src_indir_cache, beam_ids, batch_size, beam_width, input_seq_length, max_seq_length, current_length, stream);
-  }
-
-  void ReorderPastStatesKernelLauncher(void* out_buffer, const void* in_buffer, int batch_size, int num_heads, int max_length, int head_size, int chunk_size, cudaStream_t stream) override {
-    cuda::ReorderPastStatesKernelLauncher(out_buffer, in_buffer, batch_size, num_heads, max_length, head_size, chunk_size, stream);
-  }
-
-  void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream, float* cross_qk_buffer_data, float** qk_layer_pointers, int token_index, int batch_beam_size, int num_layers, int num_heads, int num_alignment_heads, const int* alignment_heads, int frames, int max_length) override {
-    cuda::LaunchCopyCrossQKSingleDecodeStep(stream, cross_qk_buffer_data, qk_layer_pointers, token_index, batch_beam_size, num_layers, num_heads, num_alignment_heads, alignment_heads, frames, max_length);
-  }
-
-  void LaunchFinalizeCrossQK(cudaStream_t stream, int iteration_number, int context_decoding_len, int batch_size, int num_beams, int max_length, int num_alignment_heads, int frames_of_k, const float* cross_qk_buffer_data, float* cross_qk_output, int num_return_sequences, const int* cache_indir_data) override {
-    cuda::LaunchFinalizeCrossQK(stream, iteration_number, context_decoding_len, batch_size, num_beams, max_length, num_alignment_heads, frames_of_k, cross_qk_buffer_data, cross_qk_output, num_return_sequences, cache_indir_data);
-  }
-
-  cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream) override {
-    return ::cudaMemcpyAsync(dst, src, count, kind, stream);
-  }
-
-  cudaError_t cudaMemsetAsync(void* ptr, int value, size_t count, cudaStream_t stream) override {
-    return ::cudaMemsetAsync(ptr, value, count, stream);
-  }
-
- private:
-  cuda_stream_holder cuda_stream_;
 };
 
-std::unique_ptr<CudaInterface> g_cuda_device;
+std::unique_ptr<DeviceInterface> g_cuda_device;
 
 DeviceInterface& GetCudaDeviceInterface() { return *g_cuda_device; }
-cudaStream_t GetStream() { return g_cuda_device->GetCudaStream(); }
 
 LogItems& GetLogItems() { return gp_genai->GetLogItems(); }
 std::ostream& operator<<(std::ostream& stream, SGR sgr_code) { return gp_genai->operator_leftshift(stream, sgr_code); }
@@ -212,7 +212,7 @@ void operator delete(void* p, size_t /*size*/) noexcept { Generators::gp_genai->
 #endif
 
 extern "C" {
-Generators::CudaInterface* GetInterface(GenaiInterface* p_genai) {
+Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai) {
   Generators::gp_genai = p_genai;
   Generators::g_cuda_device = std::make_unique<Generators::CudaInterfaceImpl>();
   return Generators::g_cuda_device.get();

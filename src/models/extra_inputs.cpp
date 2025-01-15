@@ -1,7 +1,6 @@
 #include "../generators.h"
 #include "model.h"
 #include "extra_inputs.h"
-#include "kernels.h"
 
 namespace Generators {
 

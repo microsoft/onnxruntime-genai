@@ -14,7 +14,7 @@ struct InputIDs {
   void Add();
   // Resize input_ids based on size of next_tokens.
   // Update value with next_tokens.
-  void Update(DeviceSpan<int32_t>& next_tokens);
+  void Update(DeviceSpan<int32_t> next_tokens);
 
   auto& GetShape() const { return shape_; }
   const char* name_;
@@ -31,6 +31,7 @@ struct InputIDs {
   std::array<int64_t, 2> shape_{};
   ONNXTensorElementDataType type_;
   std::unique_ptr<OrtValue> value_;
+  std::unique_ptr<OrtValue> cast_value_;
 
   // Used for decoding runs with cuda graphs.
   StaticBuffer* sb_input_ids_{};

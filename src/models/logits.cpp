@@ -3,10 +3,6 @@
 #include "../generators.h"
 #include "model.h"
 #include "logits.h"
-#if USE_CUDA
-#include "../cuda/cuda_common.h"
-#include "kernels.h"
-#endif
 
 namespace Generators {
 
@@ -25,14 +21,12 @@ Logits::Logits(State& state)
     }
   }
 
-#if USE_CUDA
   if (model_.device_type_ == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
     auto& cpu_ids = model_.config_->model.eos_token_ids;
     cuda_eos_token_ids_ = state_.params_->p_device->Allocate<int32_t>(cpu_ids.size());
     copy(std::span<const int32_t>{cpu_ids}, cuda_eos_token_ids_.CpuSpan());
     cuda_eos_token_ids_.CopyCpuToDevice();
   }
-#endif
 
   input_sequence_lengths.resize(state_.params_->search.batch_size);
 }
@@ -79,26 +73,23 @@ DeviceSpan<float> Logits::Get() {
 
   // Convert from float16 to float32 if necessary
   if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
-      ConvertFp16ToFp32(*model_.allocator_device_, *logits_of_last_token, logits_of_last_token_fp32_, model_.device_type_, model_.cuda_stream_);
-      logits_of_last_token = logits_of_last_token_fp32_.get();
+    Cast(*logits_of_last_token, logits_of_last_token_fp32_, *model_.p_device_, Ort::TypeToTensorType<float>);
+    logits_of_last_token = logits_of_last_token_fp32_.get();
   }
 
   if (logits_.empty() || logits_of_last_token->GetTensorMutableRawData() != logits_.Span().data())
     logits_ = WrapTensor<float>(*state_.params_->p_device, *logits_of_last_token);
 
-#if USE_CUDA
   if (model_.device_type_ == DeviceType::CUDA) {
     if (!cuda_eos_token_ids_.empty())
-      cuda::LaunchHandleEOSArray(
+      model_.p_device_->LaunchHandleEOSArray(
           logits_.Span().data(),
           static_cast<int>(shape_[0]) /* batch_beam_size*/,
           static_cast<int>(shape_[2]) /* vocab_size */,
           cuda_eos_token_ids_.Span().data(),
-          static_cast<int>(cuda_eos_token_ids_.size()),
-          model_.cuda_stream_);
+          static_cast<int>(cuda_eos_token_ids_.size()));
     return logits_;
   }
-#endif
 
   HandleEOSArray(logits_.Span());
   return logits_;

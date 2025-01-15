@@ -116,7 +116,8 @@ struct DmlInterfaceImpl : DeviceInterface {
     Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&dml_api_)));
   }
 
-  void InitAllocator(Ort::Allocator& allocator) override {
+  void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
+    Ort::api = &api;
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
 
@@ -129,6 +130,10 @@ struct DmlInterfaceImpl : DeviceInterface {
 
     dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
     dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
+  }
+
+  Ort::Allocator& GetAllocator() override {
+    return *ort_allocator_;
   }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
@@ -146,6 +151,58 @@ struct DmlInterfaceImpl : DeviceInterface {
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override {
     return GetCpuInterface()->CreateBeam(params);
   }
+
+#if 0
+  void UpdatePositionIDs() {
+    ComPtr<ID3D12Resource> target_resource;
+    Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, position_ids_->GetTensorMutableRawData(), &target_resource));
+
+    dml_update_position_ids_kernel_ = DmlIncrementValuesKernel(
+        model_.GetD3D12Device(),
+        model_.GetDmlExecutionContext(),
+        static_cast<uint32_t>(position_ids_shape_[0]),
+        type_,
+        target_resource.Get());
+
+    // Execute the cached command list
+    ComPtr<ID3D12Fence> fence;
+    uint64_t completion_value;
+    model_.GetDmlExecutionContext()->ExecuteCommandList(dml_update_position_ids_kernel_->GetCommandList(), &fence, &completion_value);
+  }
+
+  void UpdateAttentionMask(int total_length) {
+    ComPtr<ID3D12Resource> attention_mask_resource;
+    Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_->GetTensorMutableRawData(), &attention_mask_resource));
+    ComPtr<ID3D12Resource> attention_mask_next_resource;
+    Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, attention_mask_next_->GetTensorMutableRawData(), &attention_mask_next_resource));
+    if (is_first_mask_update_) {
+      dml_update_mask_kernel_ = DmlUpdateMaskKernel(
+          model_.GetD3D12Device(),
+          model_.GetDmlExecutionContext(),
+          static_cast<uint32_t>(attention_mask_shape_[0]),
+          static_cast<uint32_t>(attention_mask_shape_[1]),
+          type_,
+          total_length,
+          attention_mask_resource.Get(),
+          attention_mask_next_resource.Get());
+      is_second_mask_update_ = true;
+    } else if (is_second_mask_update_) {
+      dml_update_mask_kernel_ = DmlUpdateMaskKernel(
+          model_.GetD3D12Device(),
+          model_.GetDmlExecutionContext(),
+          static_cast<uint32_t>(attention_mask_shape_[0]),
+          static_cast<uint32_t>(attention_mask_shape_[1]),
+          type_,
+          1,
+          attention_mask_resource.Get(),
+          attention_mask_next_resource.Get());
+      is_second_mask_update_ = false;
+    }
+    ComPtr<ID3D12Fence> fence;
+    uint64_t completion_value;
+    model_.GetDmlExecutionContext()->ExecuteCommandList(dml_update_mask_kernel_->GetCommandList(), &fence, &completion_value);
+  }
+#endif
 
   void Synchronize() override {
   }
@@ -165,7 +222,6 @@ void SetDmlProvider(OrtSessionOptions& session_options) {
 }
 
 DeviceInterface* GetDmlInterface() {
-  assert(g_dml_device);
   return g_dml_device.get();
 }
 

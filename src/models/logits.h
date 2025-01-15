@@ -43,9 +43,7 @@ struct Logits {
   StaticBuffer* sb_logits32_{};
   StaticBuffer* sb_logits16_{};
 
-#if USE_CUDA
   DeviceSpan<int32_t> cuda_eos_token_ids_;  // eos_token_ids from params, but in cuda accessible memory
-#endif
 };
 
 }  // namespace Generators

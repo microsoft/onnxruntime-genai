@@ -1,7 +1,6 @@
 #include "../generators.h"
 #include "model.h"
 #include "input_ids.h"
-#include "kernels.h"
 
 namespace Generators {
 
@@ -49,7 +48,7 @@ void InputIDs::Add() {
   }
 }
 
-void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
+void InputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   auto new_tokens_cpu = new_tokens.CopyDeviceToCpu();
 
   const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids, int32_t pad_token_id) {
@@ -77,69 +76,32 @@ void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
   if (static_cast<size_t>(shape_[1]) != sequence_length) {
     shape_[1] = sequence_length;
     if (!sb_input_ids_) {
-      value_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+      value_ = OrtValue::CreateTensor<int32_t>(*model_.allocator_device_, shape_);
     } else {
-      value_ = sb_input_ids_->CreateTensorOnStaticBuffer(shape_, type_);
+      value_ = sb_input_ids_->CreateTensorOnStaticBuffer(shape_, Ort::TypeToTensorType<int32_t>);
     }
 
     state_.inputs_[input_index_] = value_.get();
   }
 
-  // Update input_ids with next tokens, converting from 32-bit to 64-bit
-  if (type_ == Ort::TypeToTensorType<int64_t>) {
-    switch (model_.device_type_) {
-      case DeviceType::CUDA: {
-#if USE_CUDA
-        auto* data = value_->GetTensorMutableData<int64_t>();
-        auto next_tokens = new_tokens.Span();
-        // For beam search
-        if (is_prompt_ && state_.params_->search.num_beams > 1)
-          cuda::LaunchExpandAndInt32ToInt64(next_tokens.data(), data, state_.params_->search.num_beams, state_.params_->search.batch_size, static_cast<int>(sequence_length), model_.cuda_stream_);
-        else
-          cuda::LaunchInt32ToInt64(next_tokens.data(), data, static_cast<int>(next_tokens.size()), model_.cuda_stream_);
-#endif
-      } break;
+  // Update input_ids with next tokens
+  auto data_span = WrapTensor<int32_t>(*model_.p_device_, *value_); 
 
-      default: {
-        // CPU, DML, WEBGPU
-        auto* data = value_->GetTensorMutableData<int64_t>();
-        auto next_tokens = new_tokens.Span();
-        for (int b = 0; b < shape_[0]; b++) {
-          for (int i = 0; i < shape_[1]; i++) {
-            // For beam search
-            int32_t next_token;
-            if (is_prompt_ && state_.params_->search.num_beams > 1)
-              next_token = next_tokens[(b / state_.params_->search.num_beams) * shape_[1] + i];
-            else
-              next_token = next_tokens[b * shape_[1] + i];
-            data[b * shape_[1] + i] = next_token;
-          }
-        }
-      }
+  // For beam search
+  if (is_prompt_ && state_.params_->search.num_beams > 1) {
+    int row_size = static_cast<int>(shape_[1]);
+    for (int b = 0; b < shape_[0]; b++) {
+      int in_offset = (b / state_.params_->search.num_beams) * row_size;
+      int out_offset = b * row_size;
+      data_span.subspan(out_offset, row_size).CopyFrom(new_tokens.subspan(in_offset, row_size));
     }
   } else {
-    auto* data = value_->GetTensorMutableData<int32_t>();
-#if USE_CUDA
-    if (model_.device_type_ == DeviceType::CUDA) {
-      if (is_prompt_ && state_.params_->search.num_beams > 1) {
-        cuda::LaunchExpand(new_tokens.Span().data(), data, state_.params_->search.num_beams, state_.params_->search.batch_size, static_cast<int>(sequence_length), model_.cuda_stream_);
-      } else {
-        cudaMemcpyAsync(data, new_tokens.Span().data(), shape_[0] * shape_[1] * sizeof(int32_t), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
-      }
-    } else
-#endif
-    {
-      // For beam search
-      if (is_prompt_ && state_.params_->search.num_beams > 1) {
-        for (int b = 0; b < shape_[0]; b++) {
-          int in_offset = (b / state_.params_->search.num_beams) * static_cast<int>(shape_[1]);
-          int out_offset = b * static_cast<int>(shape_[1]);
-          memcpy(data + out_offset, new_tokens.Span().data() + in_offset, shape_[1] * sizeof(int32_t));
-        }
-      } else {
-        memcpy(data, new_tokens.Span().data(), shape_[0] * shape_[1] * sizeof(int32_t));
-      }
-    }
+    data_span.CopyFrom(new_tokens);
+  }
+
+  if (type_ == Ort::TypeToTensorType<int64_t>) {
+    Cast(*value_, cast_value_, *model_.p_device_, type_);
+    state_.inputs_[input_index_] = cast_value_.get();
   }
 
   is_prompt_ = false;

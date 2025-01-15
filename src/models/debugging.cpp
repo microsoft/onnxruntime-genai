@@ -89,41 +89,9 @@ void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool 
       auto device_span = model.p_device_->WrapMemory<uint8_t>(tensor_span);
       DumpValues(stream, type, device_span.CopyDeviceToCpu().data(), element_count);
       break;
-#if 0
-#if USE_CUDA
-      auto type = type_info->GetElementType();
-      size_t element_size = SizeOf(type);
-      auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
-      CudaCheck() == cudaMemcpy(cpu_copy.get(), value->GetTensorRawData(), element_size * element_count, cudaMemcpyDeviceToHost);
-      DumpValues(stream, type, cpu_copy.get(), element_count);
-#elif USE_DML
-      auto type = type_info->GetElementType();
-      size_t element_size = SizeOf(type);
-      auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
-
-      if (value->GetTensorMutableRawData()) {
-        ComPtr<ID3D12Resource> gpu_resource;
-        Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
-            model.allocator_device_,
-            value->GetTensorMutableRawData(),
-            &gpu_resource));
-
-        model.GetDmlReadbackHeap()->ReadbackFromGpu(
-            std::span(cpu_copy.get(), element_size * element_count),
-            gpu_resource.Get(),
-            0,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-      }
-
-      DumpValues(stream, type, cpu_copy.get(), element_count);
-#else
-      stream << "Unexpected, using GPU memory but not compiled with CUDA or DML?";
-#endif
-#endif
-      break;
     }
     default:
-      stream << "Unhandled device type";
+      stream << "Unhandled device type: " << static_cast<int>(memory_info.GetDeviceType()) << "\r\n";
       break;
   }
 }

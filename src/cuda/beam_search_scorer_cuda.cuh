@@ -1,3 +1,4 @@
+#include "models/onnxruntime_api.h"
 #include "smartptrs.h"
 
 namespace Generators {

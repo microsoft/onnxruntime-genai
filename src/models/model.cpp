@@ -11,7 +11,6 @@
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
-#include "kernels.h"
 #include "multi_modal_vision_model.h"
 #include "decoder_only_pipeline.h"
 #if USE_DML
@@ -228,7 +227,7 @@ Ort::Allocator* GetDeviceAllocator(OrtSession& session, DeviceType type) {
     static const char* device_type_names[static_cast<int>(DeviceType::MAX)] = {"CPU", "Cuda", "DML", "WebGPU Buffer"};
     auto memory_info = OrtMemoryInfo::Create(device_type_names[static_cast<int>(type)], OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
     device = Ort::Allocator::Create(session, *memory_info);
-    GetDeviceInterface(type)->InitAllocator(*device);
+    GetDeviceInterface(type)->InitOrt(*Ort::api, *device);
   }
   return device.get();
 }
@@ -284,9 +283,9 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
 Model::~Model() = default;
 
-void Model::InitDeviceAllocator([[maybe_unused]] OrtSession& session) {
+void Model::InitDeviceAllocator(OrtSession& session) {
   allocator_device_ = &allocator_cpu_;
-  if (device_type_== DeviceType::CUDA)
+  if (device_type_ == DeviceType::CUDA)
     allocator_device_ = GetDeviceAllocator(session, device_type_);
 
   allocator_kvcache_ = allocator_device_;
@@ -400,8 +399,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         p_device_ = GetDeviceInterface(device_type_);
 
         // Create and set our cudaStream_t
-        cuda_stream_ = p_device_->GetCudaStream();
-        ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_);
+        ort_provider_options->UpdateValue("user_compute_stream", p_device_->GetCudaStream());
       }
 
       session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
@@ -419,7 +417,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       session_options.AppendExecutionProvider_ROCM(ort_provider_options);
 #if USE_DML
     } else if (provider_options.name == "dml") {
-      if (!p_dml_api_) {
+      if (!GetDmlInterface()) {
         LUID device_luid{};
         LUID* p_device_luid{};
         for (const auto& [name, value] : provider_options.options) {
@@ -537,80 +535,17 @@ std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config) {
   return std::make_shared<GeneratorParams>(config);
 }
 
-void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream) {
-  auto shape_info = in.GetTensorTypeAndShapeInfo();
-  auto shape = shape_info->GetShape();
-  assert(shape_info->GetElementType() == Ort::TypeToTensorType<Ort::Float16_t>);
+void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType output_type) {
+  auto input_info = input.GetTensorTypeAndShapeInfo();
+  auto shape = input_info->GetShape();
 
-  bool allocate_p_out = p_out == nullptr;
-  if (p_out) {
-    auto out_shape_info = p_out->GetTensorTypeAndShapeInfo();
-    auto out_shape = out_shape_info->GetShape();
-    allocate_p_out = shape != out_shape;
-  }
+  if (output && shape != output->GetTensorTypeAndShapeInfo()->GetShape())
+    output = nullptr;
+  if (!output)
+    output = OrtValue::CreateTensor(device.GetAllocator(), shape, output_type);
 
-  if (allocate_p_out)
-    p_out = OrtValue::CreateTensor<float>(allocator, shape);
-
-  int count = static_cast<int>(shape_info->GetElementCount());
-  auto* fp16 = in.GetTensorData<uint16_t>();
-  auto* fp32 = p_out->GetTensorMutableData<float>();
-
-  switch (device_type) {
-    case DeviceType::WEBGPU:
-    case DeviceType::DML:
-      // DML, WebGpu doesn't currently support on-device scoring, so we fall back to the CPU
-    case DeviceType::CPU:
-      for (int i = 0; i < count; i++)
-        fp32[i] = FastFloat16ToFloat32(fp16[i]);
-      break;
-
-#if USE_CUDA
-    case DeviceType::CUDA:
-      cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
-      break;
-#endif
-
-    default:
-      throw std::runtime_error("ConvertFp16ToFp32 - Unsupported device type");
-  }
-}
-
-void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out,
-                       DeviceType device_type, cudaStream_t stream) {
-  auto shape_info = in.GetTensorTypeAndShapeInfo();
-  auto shape = shape_info->GetShape();
-  assert(shape_info->GetElementType() == Ort::TypeToTensorType<float>);
-
-  bool allocate_p_out = p_out == nullptr;
-  if (p_out) {
-    auto out_shape_info = p_out->GetTensorTypeAndShapeInfo();
-    auto out_shape = out_shape_info->GetShape();
-    allocate_p_out = shape != out_shape;
-  }
-
-  if (allocate_p_out)
-    p_out = OrtValue::CreateTensor<float>(allocator, shape);
-
-  int count = static_cast<int>(shape_info->GetElementCount());
-  auto* fp32 = in.GetTensorData<float>();
-  auto* fp16 = p_out->GetTensorMutableData<uint16_t>();
-
-  switch (device_type) {
-    case DeviceType::DML:
-    case DeviceType::CPU:
-      for (int i = 0; i < count; i++)
-        fp16[i] = FastFloat32ToFloat16(fp32[i]);
-      break;
-
-#if USE_CUDA
-    case DeviceType::CUDA:
-      cuda::LaunchFp32ToFp16(fp32, fp16, count, stream);
-#endif
-
-    default:
-      throw std::runtime_error("ConvertFp32ToFp16 - Unsupported device type");
-  }
+  if(!device.Cast(input, *output))
+    GetDeviceInterface(DeviceType::CPU)->Cast(input, *output);
 }
 
 std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const {
@@ -625,44 +560,21 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
   auto input_type_info = input->GetTensorTypeAndShapeInfo();
   auto element_type = input_type_info->GetElementType();
-  auto element_size = SizeOf(element_type);
   auto input_shape = input_type_info->GetShape();
   const int64_t batch_size = input_shape[0];
-  const int64_t data_size_bytes = input_type_info->GetElementCount() * element_size / batch_size;
+  const int64_t data_size_bytes = input_type_info->GetElementCount() * SizeOf(element_type) / batch_size;
 
   input_shape[0] *= num_beams;
 
   auto& allocator = device_type_ == DeviceType::DML ? allocator_cpu_ : *allocator_device_;
   auto expanded = OrtValue::CreateTensor(allocator, input_shape, element_type);
-  const auto* input_data = reinterpret_cast<const uint8_t*>(input->GetTensorRawData());
-  auto* expanded_data = reinterpret_cast<uint8_t*>(expanded->GetTensorMutableRawData());
-  auto* target = expanded_data;
+  auto input_span = ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *input);
+  auto expanded_span = ByteWrapTensor(*p_device_, *expanded);
 
-  switch (device_type_) {
-    case DeviceType::WEBGPU:
-    case DeviceType::DML:
-      // DML and WebGpu doesn't currently support on-device scoring, so we use the CPU for non-cache inputs/outputs
-    case DeviceType::CPU:
-      for (int i = 0; i < batch_size; i++) {
-        for (int j = 0; j < num_beams; j++) {
-          memcpy(target, input_data + i * data_size_bytes, data_size_bytes);
-          target += data_size_bytes;
-        }
-      }
-      break;
-
-#if USE_CUDA
-    case DeviceType::CUDA:
-      for (int i = 0; i < batch_size; i++) {
-        for (int j = 0; j < num_beams; j++) {
-          cudaMemcpyAsync(target, input_data + i * data_size_bytes, data_size_bytes, cudaMemcpyHostToDevice, cuda_stream_);
-          target += data_size_bytes;
-        }
-      }
-      break;
-#endif
-    default:
-      throw std::runtime_error("ExpandInputs - Unsupported device type");
+  for (int i = 0; i < batch_size; i++) {
+    for (int j = 0; j < num_beams; j++) {
+      expanded_span.subspan((i * num_beams + j) * data_size_bytes, data_size_bytes).CopyFrom(input_span.subspan(i * data_size_bytes, data_size_bytes));
+    }
   }
   return expanded;
 }

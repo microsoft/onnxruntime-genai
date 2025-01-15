@@ -1,11 +1,5 @@
 #pragma once
-
 #include "static_buffer.h"
-
-#if USE_DML
-#include "../dml/dml_update_mask_kernel.h"
-#include "../dml/dml_increment_values_kernel.h"
-#endif
 
 namespace Generators {
 
@@ -39,18 +33,7 @@ struct PositionInputs {
   template <typename T>
   void UpdateAttentionMaskImpl(int total_length);
 
-#if USE_CUDA || USE_DML
-  void CopyNextPositionIDsToCurrent();
-#endif
-
-#if USE_DML
-  void UpdatePositionIDsImplDML();
-  void UpdateAttentionMaskImplDML(int total_length);
-#endif
-
-#if USE_CUDA
   void RewindMask(size_t index);
-#endif
 
   const Model& model_;
   State& state_;
@@ -77,13 +60,6 @@ struct PositionInputs {
 
   bool is_first_mask_update_{true};
   bool is_first_update_{true};
-
-#if USE_DML
-  std::optional<DmlUpdateMaskKernel> dml_update_mask_kernel_;
-  StaticBuffer* sb_attention_mask_next_{};
-  std::optional<DmlIncrementValuesKernel> dml_update_position_ids_kernel_;
-  bool is_second_mask_update_{};
-#endif
 };
 
 }  // namespace Generators
