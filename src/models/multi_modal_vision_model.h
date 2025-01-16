@@ -27,12 +27,14 @@ struct MultiModalVisionModel : Model {
 };
 
 struct EmbeddingState : State {
-  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens);
+  EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params/*, const int64_t num_image_tokens*/);
   EmbeddingState(const EmbeddingState&) = delete;
   EmbeddingState& operator=(const EmbeddingState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices = {}) override;
+  void SetNumImageTokens(int64_t num_image_tokens) { num_image_tokens_ = num_image_tokens; }
+
 
  private:
   friend struct MultiModalPipelineState;
@@ -51,15 +53,18 @@ struct EmbeddingState : State {
 };
 
 struct VisionState : State {
-  VisionState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens);
+  VisionState(const MultiModalVisionModel& model, const GeneratorParams& params/*, const int64_t num_image_tokens*/);
   VisionState(const VisionState&) = delete;
   VisionState& operator=(const VisionState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices = {}) override;
+  void SetNumImageTokens(int64_t num_image_tokens) { num_image_tokens_ = num_image_tokens; }
 
  private:
   friend struct MultiModalPipelineState;
+
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens);
 
   const MultiModalVisionModel& model_;
   int64_t num_image_tokens_;

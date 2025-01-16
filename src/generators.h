@@ -63,6 +63,11 @@ enum struct DeviceType {
   QNN,
 };
 
+struct Input {
+  std::string name;
+  std::shared_ptr<Tensor> tensor;
+};
+
 std::string to_string(DeviceType device_type);
 DeviceInterface* GetDeviceInterface(DeviceType type);
 
@@ -81,8 +86,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   DeviceType device_type{DeviceType::CPU};
   cudaStream_t cuda_stream{};
 
-  cpu_span<int32_t> aux_input_ids{};  // Intermediate solution to be used with SetInputs function for multimodal and whisper models
-
   struct Whisper {
     std::shared_ptr<Tensor> input_features;   // float32 [batch_size, number_of_mels, number_of_frames]
     std::shared_ptr<Tensor> alignment_heads;  // int32 [num_alignment_heads, 2]
@@ -92,17 +95,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   std::shared_ptr<GeneratorParams> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
-  struct Input {
-    std::string name;
-    std::shared_ptr<Tensor> tensor;
-  };
-
-  // A list of extra model inputs that will be matched at runtime based on name
-  std::vector<Input> extra_inputs;
-
   void TryGraphCapture(int max_bs);
-
-  void SetInputs(const NamedTensors& inputs);
 
  private:
   bool is_cuda_graph_enabled_{};
@@ -112,7 +105,8 @@ struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
-  void AppendTokens(cpu_span<const int32_t> input_ids);
+  void SetInputs(const NamedTensors& inputs);
+  void AppendTokens(cpu_span<const int32_t> input_ids, bool api_call=true);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
   DeviceSpan<float> GetLogits();
@@ -129,12 +123,13 @@ struct Generator : LeakChecked<Generator> {
 
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
-  void AuxAppendTokens(cpu_span<const int32_t> input_ids);
+  // void AuxAppendTokens(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   enum Action { standard,   // Default, set in any other case
                 generated,  // Set after GenerateNextToken
                 rewound };  // Set after RewindToLength
   Action last_action_{standard};
+
 };
 
 struct OrtGlobals {

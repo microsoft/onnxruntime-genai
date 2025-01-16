@@ -19,6 +19,7 @@
 namespace Generators {
 
 struct Tokenizer;
+struct Input;
 
 void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream);
 
@@ -54,6 +55,16 @@ struct State {
   std::vector<const char*> input_names_, output_names_;
   std::vector<std::string> adapter_names_;
   std::vector<OrtValue*> inputs_, outputs_;
+
+  // struct Input {
+  //   std::string name;
+  //   std::shared_ptr<Tensor> tensor;
+  // };
+  // A list of extra model inputs that will be matched at runtime based on name
+  std::vector<Input> extra_inputs_;
+
+  // void SetExtraInputs(std::vector<Input>&& inputs);
+
 
  protected:
   void Run(OrtSession& session, int new_batch_size);  // Uses the inputs below to run

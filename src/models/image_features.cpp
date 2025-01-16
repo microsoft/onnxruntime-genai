@@ -8,7 +8,7 @@ namespace Generators {
 
 ImageFeatures::ImageFeatures(State& state, ImageFeatures::Mode mode, const std::string& name, int64_t num_image_tokens)
     : state_{state},
-      shape_{num_image_tokens, model_.config_->model.decoder.hidden_size},
+      shape_{0, model_.config_->model.decoder.hidden_size},
       type_{mode == ImageFeatures::Mode::Input
                 ? model_.session_info_->GetInputDataType(name)
                 : model_.session_info_->GetOutputDataType(name)},
@@ -45,10 +45,14 @@ void ImageFeatures::Add() {
   }
 }
 
-void ImageFeatures::Update(bool is_prompt) {
+void ImageFeatures::Update(bool is_prompt, int num_image_tokens) {
   // Initialize empty image_features tensor for after-prompt input scenarios
   // num_image_tokens will be 0 when no image is provided
-  if (!is_prompt && shape_[0] > 0) {  // if num_image_tokens > 0
+  if (is_prompt) {
+    shape_[0] = num_image_tokens;
+    image_features_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    state_.inputs_[index_] = image_features_.get();
+  } else if (!is_prompt && shape_[0] > 0) {  // if num_image_tokens > 0
     shape_[0] = 0;
     image_features_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
     state_.inputs_[index_] = image_features_.get();

@@ -254,9 +254,9 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetModelInput(this, name, &tensor));
   }
 
-  void SetInputs(OgaNamedTensors& named_tensors) {
-    OgaCheckResult(OgaGeneratorParamsSetInputs(this, &named_tensors));
-  }
+  // void SetInputs(OgaNamedTensors& named_tensors) {
+  //   OgaCheckResult(OgaGeneratorParamsSetInputs(this, &named_tensors));
+  // }
 
   void TryGraphCaptureWithMaxBatchSize(int max_batch_size) {
     OgaCheckResult(OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(this, max_batch_size));
@@ -282,6 +282,10 @@ struct OgaGenerator : OgaAbstract {
 
   void AppendTokens(const int32_t* input_ids, size_t input_ids_count) {
     OgaCheckResult(OgaGenerator_AppendTokens(this, input_ids, input_ids_count));
+  }
+
+  void SetInputs(const OgaNamedTensors& named_tensors) {
+    OgaCheckResult(OgaGenerator_SetInputs(this, &named_tensors));
   }
 
   bool IsSessionTerminated() const {

@@ -19,6 +19,7 @@ struct PresetExtraInputs {
 struct ExtraInputs {
   ExtraInputs(State& state);
   void Add();
+  void Update();
 
  private:
   State& state_;

@@ -28,7 +28,8 @@ Whisper_State::Whisper_State(const Whisper_Model& model, DeviceSpan<int32_t> seq
       model_{model} {
   auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
 
-  for (const auto& [name, value] : params.extra_inputs) {
+  // TODO(aciddelgado): this breaks
+  for (const auto& [name, value] : extra_inputs_) {
     if (name == "encoder_input_ids") {
       encoder_input_ids_ = model_.ExpandInputs(value->ort_tensor_, params_->search.num_beams);
     }

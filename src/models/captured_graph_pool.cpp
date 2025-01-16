@@ -23,10 +23,12 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
     return nullptr;
   }
 
-  // Multiple generators can reserve graphs in parallel, so we need to make it thread saf
+  // Multiple generators can reserve graphs in parallel, so we need to make it thread safe
   std::unique_lock lock(captured_graph_mutex_);
 
-  auto key = std::make_unique<CapturedGraphKey>(params.max_batch_size, params.search.max_length, params.search.num_beams, params.extra_inputs);
+  // TODO(aciddelgado): no more params.extra_inputs, how to continue?
+  std::vector<Input> temp_empty_extra_inputs;
+  auto key = std::make_unique<CapturedGraphKey>(params.max_batch_size, params.search.max_length, params.search.num_beams, temp_empty_extra_inputs);
   auto& captured_graphs = captured_graphs_map_[*key];
 
   // If no graphs are available, create a graph with a new ID
@@ -90,7 +92,7 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
     }
 
     // Create the extra inputs
-    for (const auto& extra_input : params.extra_inputs) {
+    for (const auto& extra_input : temp_empty_extra_inputs) {
       auto first_dim = extra_input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0];
       new_captured_graph->sb_extra_inputs_[extra_input.name] = std::make_unique<StaticBuffer>(allocator_device_, first_dim);
     }

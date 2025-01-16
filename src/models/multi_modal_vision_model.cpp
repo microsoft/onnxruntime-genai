@@ -8,7 +8,7 @@ namespace Generators {
 
 namespace {
 
-int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
+int64_t GetNumImageTokens(const std::vector<Input>& extra_inputs,
                           const std::string& pixel_values_name,
                           const std::string& image_sizes_name) {
   std::shared_ptr<Tensor> pixel_values;
@@ -75,10 +75,10 @@ std::unique_ptr<State> MultiModalVisionModel::CreateState(DeviceSpan<int32_t> se
   return std::make_unique<MultiModalPipelineState>(*this, sequence_lengths, params);
 }
 
-EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens)
+EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const GeneratorParams& params/*, const int64_t num_image_tokens*/)
     : State{params, model},
-      model_{model},
-      num_image_tokens_{num_image_tokens} {
+      model_{model} {
+      // num_image_tokens_{num_image_tokens} {
   input_ids_.Add();
   image_features_.Add();
   inputs_embeds_.Add();
@@ -86,7 +86,7 @@ EmbeddingState::EmbeddingState(const MultiModalVisionModel& model, const Generat
 
 void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool is_prompt) {
   input_ids_.Update(next_tokens);
-  image_features_.Update(is_prompt);
+  image_features_.Update(is_prompt, num_image_tokens_);
 }
 
 DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -96,12 +96,17 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
   return {};
 }
 
-VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens)
+VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorParams& params/*, const int64_t num_image_tokens*/)
     : State{params, model},
-      model_{model},
-      num_image_tokens_{num_image_tokens} {
+      model_{model} {
+      // num_image_tokens_{num_image_tokens} {
   extra_inputs_.Add();
   image_features_.Add();
+}
+
+void VisionState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens) {
+  extra_inputs_.Update();
+  image_features_.Update(true, num_image_tokens_);
 }
 
 DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -142,10 +147,10 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& mo
                                                  const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      num_image_tokens_{GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.pixel_values, model_.config_->model.vision.inputs.image_sizes)},
+      // num_image_tokens_{GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.pixel_values, model_.config_->model.vision.inputs.image_sizes)},
       captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)} {
-  embedding_state_ = std::make_unique<EmbeddingState>(model, params, num_image_tokens_);
-  vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
+  embedding_state_ = std::make_unique<EmbeddingState>(model, params);
+  vision_state_ = std::make_unique<VisionState>(model_, params);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths_unk, params, captured_graph_info_.get());
 }
 
@@ -159,12 +164,24 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   // Generation stage:
   //   - input_ids, image_features -> |embeddings_model| -> inputs_embeds
   //   - inputs_embeds -> |decoder_model| -> logits
-
+  
+  // Create these at runtime as that is when we have image inputs
+  if (is_prompt_) {
+    num_image_tokens_ = GetNumImageTokens(extra_inputs_, model_.config_->model.vision.inputs.pixel_values, model_.config_->model.vision.inputs.image_sizes);
+    embedding_state_->SetNumImageTokens(num_image_tokens_);
+    vision_state_->SetNumImageTokens(num_image_tokens_);
+  } else {
+    num_image_tokens_ = 0;
+  }
+  // embedding_state_ = std::make_unique<EmbeddingState>(model, params, num_image_tokens_);
+  // vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
+  
   embedding_state_->UpdateInputsOutputs(next_tokens, is_prompt_);
   decoder_state_->UpdateInputsOutputs(next_tokens, current_length, next_indices);
 
   if (is_prompt_) {
     if (num_image_tokens_ > 0) {
+      vision_state_->UpdateInputsOutputs(next_tokens);
       vision_state_->Run(current_length, next_tokens, next_indices);
     }
     embedding_state_->image_features_.ReuseImageFeaturesBuffer(vision_state_->image_features_);

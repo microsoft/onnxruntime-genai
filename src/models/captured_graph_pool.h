@@ -5,6 +5,7 @@
 #include <mutex>
 #include <unordered_map>
 #include "static_buffer.h"
+// #include "model.h"
 #include "../generators.h"
 
 // From boost http://www.boost.org/doc/libs/1_35_0/doc/html/hash/combine.html
@@ -29,7 +30,7 @@ struct InputKey {
 };
 
 struct CapturedGraphKey {
-  CapturedGraphKey(int max_batch_size, int max_length, int num_beams, const std::vector<Generators::GeneratorParams::Input>& extra_inputs)
+  CapturedGraphKey(int max_batch_size, int max_length, int num_beams, const std::vector<Generators::Input>& extra_inputs)
       : max_batch_size_(max_batch_size),
         max_length_(max_length),
         num_beams_(num_beams) {
@@ -100,6 +101,7 @@ struct CapturedGraphInfo;
 struct Config;
 struct SessionInfo;
 struct Model;
+struct State;
 
 struct CapturedGraphInfoRecycler {
   void operator()(CapturedGraphInfo* captured_graph_info);

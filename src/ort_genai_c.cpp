@@ -233,21 +233,11 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGen
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* oga_params, const OgaNamedTensors* p_named_tensors) {
-  OGA_TRY
-  auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
-  auto& named_tensors = *reinterpret_cast<const Generators::NamedTensors*>(p_named_tensors);
-
-  params.SetInputs(named_tensors);
-
-  return nullptr;
-  OGA_CATCH
-}
-
+// TODO(aciddelgado): this broken... who knew it existed
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* oga_params, const char* name, OgaTensor* tensor) {
   OGA_TRY
   auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
-  params.extra_inputs.push_back({std::string{name}, reinterpret_cast<Generators::Tensor*>(tensor)->shared_from_this()});
+  // params.extra_inputs.push_back({std::string{name}, reinterpret_cast<Generators::Tensor*>(tensor)->shared_from_this()});
   return nullptr;
   OGA_CATCH
 }
@@ -301,6 +291,17 @@ OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* oga_generator, c
   OGA_TRY
   auto& generator = *reinterpret_cast<Generators::Generator*>(oga_generator);
   generator.AppendTokens(Generators::cpu_span<const int32_t>(input_ids, input_ids_count));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_SetInputs(OgaGenerator* oga_generator, const OgaNamedTensors* p_named_tensors) {
+  OGA_TRY
+  auto& generator = *reinterpret_cast<Generators::Generator*>(oga_generator);
+  auto& named_tensors = *reinterpret_cast<const Generators::NamedTensors*>(p_named_tensors);
+
+  generator.SetInputs(named_tensors);
+
   return nullptr;
   OGA_CATCH
 }

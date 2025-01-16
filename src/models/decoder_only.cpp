@@ -45,6 +45,7 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
   position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
   kv_cache_.Update(beam_indices, total_length);
   logits_.Update(next_tokens, new_length);
+  extra_inputs_.Update();
 }
 
 }  // namespace Generators

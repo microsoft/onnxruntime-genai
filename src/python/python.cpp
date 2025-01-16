@@ -241,14 +241,14 @@ struct PyGeneratorParams {
   }
 
   void SetModelInput(const std::string& name, pybind11::array& value) {
-    params_->extra_inputs.push_back({name, std::make_shared<Tensor>(ToOrtValue(value))});
+    // params_->extra_inputs.push_back({name, std::make_shared<Tensor>(ToOrtValue(value))});
     refs_.emplace_back(value);
   }
 
-  void SetInputs(std::shared_ptr<PyNamedTensors> named_tensors) {
-    params_->SetInputs(*named_tensors->named_tensors_);
-    named_tensors_ = named_tensors;
-  }
+  // void SetInputs(std::shared_ptr<PyNamedTensors> named_tensors) {
+  //   generator_->SetInputs(*named_tensors->named_tensors_);
+  //   named_tensors_ = named_tensors;
+  // }
 
   void SetSearchOptions(const pybind11::kwargs& dict) {
     for (auto& entry : dict) {
@@ -307,6 +307,14 @@ struct PyGenerator {
     generator_->AppendTokens(ToSpan(tokens));
   }
 
+  void SetInputs(std::shared_ptr<PyNamedTensors> named_tensors) {
+    if (!named_tensors || !named_tensors->named_tensors_)
+      throw std::runtime_error("No inputs provided.");
+
+    generator_->SetInputs(*named_tensors->named_tensors_);
+    named_tensors_ = named_tensors;
+  }
+
   pybind11::array_t<float> GetLogits() {
     py_logits_ = generator_->GetLogits();
     return py_logits_.GetNumpy();
@@ -343,6 +351,7 @@ struct PyGenerator {
   PyDeviceMemorySpan<int32_t> py_tokens_;
   PyDeviceMemorySpan<int32_t> py_sequence_;
   PyDeviceMemorySpan<float> py_logits_;
+  std::shared_ptr<PyNamedTensors> named_tensors_;  // Ensure the model inputs don't get garbage collected
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {
@@ -393,12 +402,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       // TODO(baijumeswani): Rename/redesign the whisper_input_features to be more generic
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def_readwrite("alignment_heads", &PyGeneratorParams::py_alignment_heads_)
-      .def("set_inputs", [](PyGeneratorParams& generator_params, std::shared_ptr<PyNamedTensors> named_tensors) {
-        if (!named_tensors || !named_tensors->named_tensors_)
-          throw std::runtime_error("No inputs provided.");
+      // .def("set_inputs", [](PyGeneratorParams& generator_params, std::shared_ptr<PyNamedTensors> named_tensors) {
+      //   if (!named_tensors || !named_tensors->named_tensors_)
+      //     throw std::runtime_error("No inputs provided.");
 
-        generator_params.SetInputs(named_tensors);
-      })
+      //   generator_params.SetInputs(named_tensors);
+      // })
       .def("set_model_input", &PyGeneratorParams::SetModelInput)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)                                     // See config.h 'struct Search' for the options
       .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize)  // will be deprecated
@@ -452,6 +461,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("is_done", &PyGenerator::IsDone)
       .def("get_output", &PyGenerator::GetOutput)
       .def("append_tokens", &PyGenerator::AppendTokens)
+      .def("set_inputs", &PyGenerator::SetInputs)
       .def("get_logits", &PyGenerator::GetLogits)
       .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)

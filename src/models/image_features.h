@@ -16,7 +16,7 @@ struct ImageFeatures {
   ImageFeatures& operator=(const ImageFeatures&) = delete;
 
   void Add();
-  void Update(bool is_prompt);
+  void Update(bool is_prompt, int num_image_tokens);
   void ReuseImageFeaturesBuffer(ImageFeatures& other);
 
   auto& GetShape() const { return shape_; }
