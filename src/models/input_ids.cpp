@@ -81,7 +81,7 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   }
 
   // Update input_ids with next tokens
-  auto data_span = WrapTensor<int32_t>(*model_.p_device_, *value_); 
+  auto data_span = WrapTensor<int32_t>(*model_.p_device_, *value_);
 
   // For beam search
   if (is_prompt_ && state_.params_->search.num_beams > 1) {

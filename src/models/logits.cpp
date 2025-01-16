@@ -12,7 +12,6 @@ Logits::Logits(State& state)
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
-
   if (model_.device_type_ == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
     auto& cpu_ids = model_.config_->model.eos_token_ids;
     cuda_eos_token_ids_ = state_.params_->p_device->Allocate<int32_t>(cpu_ids.size());
@@ -52,7 +51,6 @@ DeviceSpan<float> Logits::Get() {
       // Find the first non pad token from the end
       size_t token_index = input_sequence_lengths[batch_index] - 1;
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
-
         auto target = logits_last_tokens.subspan(vocab_index * element_size, vocab_size * element_size);
         auto source = logits_raw.subspan((vocab_index * seq_length + token_index * vocab_size) * element_size, vocab_size * element_size);
         target.CopyFrom(source);

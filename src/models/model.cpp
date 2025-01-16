@@ -564,7 +564,7 @@ void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& d
   if (!output)
     output = OrtValue::CreateTensor(device.GetAllocator(), shape, output_type);
 
-  if(!device.Cast(input, *output))
+  if (!device.Cast(input, *output))
     GetDeviceInterface(DeviceType::CPU)->Cast(input, *output);
 }
 

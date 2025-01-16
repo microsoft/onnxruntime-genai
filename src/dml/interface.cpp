@@ -17,7 +17,7 @@
 std::string CurrentModulePath();
 
 namespace Generators {
-namespace Dml { // If this was in a shared library it wouldn't need to be in its own namespace
+namespace Dml {  // If this was in a shared library it wouldn't need to be in its own namespace
 
 Ort::Allocator* ort_allocator_{};
 const char* label_dml = "dml";
@@ -95,7 +95,6 @@ struct GpuMemory final : DeviceBuffer {
 };
 
 struct DmlInterfaceImpl : DeviceInterface {
-
   DmlInterfaceImpl(LUID* p_device_luid) {
     Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&dml_api_)));
     if (!dml_api_) {

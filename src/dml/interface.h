@@ -8,4 +8,4 @@ void SetDmlProvider(OrtSessionOptions& options);
 
 DeviceInterface* GetDmlInterface();
 
-}
+}  // namespace Generators

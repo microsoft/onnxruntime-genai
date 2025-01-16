@@ -50,10 +50,10 @@ DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
 
 DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value);
 
-template<typename T>
+template <typename T>
 struct OrtTensor {
   OrtTensor(std::unique_ptr<OrtValue> ort_value, DeviceInterface& device)
-    : ort_value_{std::move(ort_value)}, device_span_{WrapTensor<T>(device, *ort_value_)} {}
+      : ort_value_{std::move(ort_value)}, device_span_{WrapTensor<T>(device, *ort_value_)} {}
 
   operator OrtValue*() { return ort_value_.get(); }
 
@@ -151,6 +151,7 @@ struct OrtGlobals {
 
   std::unique_ptr<OrtEnv> env_;
   std::unique_ptr<Ort::Allocator> allocator_device_[static_cast<int>(DeviceType::MAX)];
+
  private:
   OrtGlobals(const OrtGlobals&) = delete;
   void operator=(const OrtGlobals&) = delete;

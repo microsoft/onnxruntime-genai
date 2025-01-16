@@ -341,7 +341,7 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device
     auto past = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
     past.CopyFrom(present);
   }
-  
+
   pasts_[index] = std::move(past_value);
 }
 
