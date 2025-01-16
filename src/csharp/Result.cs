@@ -6,7 +6,7 @@ using System.Runtime.CompilerServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    class Result
+    internal class Result
     {
         private static string GetErrorMessage(IntPtr nativeResult)
         {

@@ -6,7 +6,10 @@ using System.Diagnostics;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    // The values in this enum must match ONNX Runtime's type values 
+    /// <summary>
+    /// Element types that correspond to OnnxRuntime supported element types.
+    /// </summary>
+    /// The values in this enum must match ONNX Runtime's type values
     public enum ElementType : long
     {
         undefined,
@@ -25,11 +28,23 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         uint64,
     }
 
+    ///<summary>
+    /// Currently wraps an ORT Tensor.
+    ///</summary>
     public class Tensor : IDisposable
     {
         private IntPtr _tensorHandle;
         private bool _disposed = false;
 
+        /// <summary>
+        /// Constructs a Tensor with the given data pointer, shape and element type.
+        /// </summary>
+        /// <param name="data">The data pointer.</param>
+        /// <param name="shape">The shape of the Tensor.</param>
+        /// <param name="type">The type of elements in the Tensor.</param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public Tensor(IntPtr data, Int64[] shape, ElementType type)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateTensorFromBuffer(data, shape, (UIntPtr)shape.Length, type, out _tensorHandle));
@@ -48,12 +63,31 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             Dispose(false);
         }
+
+        /// <summary>
+        /// Get the element type.
+        /// </summary>
+        /// <returns>
+        /// The element type.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public ElementType Type()
         {
             Result.VerifySuccess(NativeMethods.OgaTensorGetType(_tensorHandle, out ElementType element_type));
             return element_type;
         }
 
+        /// <summary>
+        /// Get the tensor shape.
+        /// </summary>
+        /// <returns>
+        /// The shape.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public Int64[] Shape()
         {
             Result.VerifySuccess(NativeMethods.OgaTensorGetShapeRank(_tensorHandle, out UIntPtr size));
@@ -81,7 +115,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// <summary>
         /// Computes and returns number of elements in the tensor
         /// </summary>
-        /// <returns></returns>
+        /// <returns>The number of elements.</returns>
         public Int64 NumElements()
         {
             return ElementsFromShape(Shape());
@@ -93,6 +127,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// </summary>
         /// <typeparam name="T"></typeparam>
         /// <returns>read only span</returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public ReadOnlySpan<T> GetData<T>()
         {
             var elements = NumElements();
@@ -120,6 +157,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         }
     }
 
+    /// <summary>
+    /// This class is a list of tensors with names that match up with model input names.
+    /// </summary>
     public class NamedTensors : IDisposable
     {
         private IntPtr _namedTensorsHandle;
