@@ -365,7 +365,7 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
     throw std::runtime_error("Unexpected error. Trying to access DML memory but the project is not compiled with DML.");
 #endif
   } else {
-    throw std::runtime_error("Unsupported device type: " + static_cast<int>(device_type));
+    throw std::runtime_error("Unsupported device type: " + std::to_string(static_cast<int>(device_type)));
   }
 
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
