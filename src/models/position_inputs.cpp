@@ -113,7 +113,7 @@ void DefaultPositionInputs::AddPositionIDs() {
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.position_ids.c_str());
 }
 
-void PositionInputs::CreateNextPositionIDsTensor() {
+void DefaultPositionInputs::CreateNextPositionIDsTensor() {
   if (!sb_position_ids_) {
     if (position_ids_shape_[1] == 1 && position_ids_next_) {
       position_ids_ = std::move(position_ids_next_);
@@ -142,20 +142,11 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
     state_.inputs_[posid_input_index_] = position_ids_.get();
   }
 
-  switch (model_.device_type_) {
-    case DeviceType::WEBGPU:
-    case DeviceType::DML:
-    case DeviceType::CPU: {
-      type_ == Ort::TypeToTensorType<int32_t> ? UpdatePositionIDsImpl<int32_t>(total_length, new_kv_length)
-                                              : UpdatePositionIDsImpl<int64_t>(total_length, new_kv_length);
-      break;
-    }
-    case DeviceType::CUDA: {
-      model_.p_device_->UpdatePositionIds(position_ids_->GetTensorMutableRawData(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
-      break;
-    }
-    default:
-      throw std::runtime_error("PositionIDs::Update - Unsupported device type");
+  if (model_.device_type_ == DeviceType::CUDA)
+    model_.p_device_->UpdatePositionIds(position_ids_->GetTensorMutableRawData(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
+  else {
+    type_ == Ort::TypeToTensorType<int32_t> ? UpdatePositionIDsImpl<int32_t>(total_length, new_kv_length)
+                                            : UpdatePositionIDsImpl<int64_t>(total_length, new_kv_length);
   }
 }
 
@@ -181,31 +172,20 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
   CreateNextAttentionMaskTensor(total_length);
   state_.inputs_[mask_input_index_] = attention_mask_.get();
 
-  switch (model_.device_type_) {
-    case DeviceType::WEBGPU:
-    case DeviceType::DML:
-    case DeviceType::QNN:
-    case DeviceType::CPU: {
-      type_ == Ort::TypeToTensorType<int32_t> ? UpdateAttentionMaskImpl<int32_t>(total_length)
-                                              : UpdateAttentionMaskImpl<int64_t>(total_length);
-      break;
-    }
-    case DeviceType::CUDA: {
-        int max_length = sb_attention_mask_ ? state_.params_->search.max_length : total_length;
-      bool update_only = sb_attention_mask_ && !is_first_mask_update_;
-      model_.p_device_->UpdateAttentionMask(attention_mask_next_->GetTensorMutableRawData(),
-                                            attention_mask_->GetTensorRawData(),
-                                            static_cast<int>(attention_mask_shape_[0]),
-                                            new_kv_length,
-                                            total_length,
-                                            max_length,
-                                            update_only,
-                                            type_);
-      break;
-    }
-
-    default:
-      throw std::runtime_error("DefaultPositionInputs::Update - Unsupported device type");
+  if (model_.device_type_ == DeviceType::CUDA) {
+    int max_length = sb_attention_mask_ ? state_.params_->search.max_length : total_length;
+    bool update_only = sb_attention_mask_ && !is_first_mask_update_;
+    model_.p_device_->UpdateAttentionMask(attention_mask_next_->GetTensorMutableRawData(),
+                                          attention_mask_->GetTensorRawData(),
+                                          static_cast<int>(attention_mask_shape_[0]),
+                                          new_kv_length,
+                                          total_length,
+                                          max_length,
+                                          update_only,
+                                          type_);
+  } else {
+    type_ == Ort::TypeToTensorType<int32_t> ? UpdateAttentionMaskImpl<int32_t>(total_length)
+                                            : UpdateAttentionMaskImpl<int64_t>(total_length);
   }
 
   attention_mask_ = std::move(attention_mask_next_);
@@ -307,7 +287,7 @@ void DefaultPositionInputs::UpdateAttentionMaskImpl(int total_length) {
   }
 }
 
-void PositionInputs::RewindMask(size_t index) {
+void DefaultPositionInputs::RewindMask(size_t index) {
   if (sb_attention_mask_ && !is_first_mask_update_) {
     throw std::runtime_error("PositionInputs::RewindMask - Static buffer is not supported for continuous decoding.");
 #if 0  // TODO: Fix implementation, cudaMemsetAsync of 1 is setting bytes of 1 vs int32's of 1

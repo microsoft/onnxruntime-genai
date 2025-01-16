@@ -155,10 +155,6 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
                                       bool is_primary_session_options,
                                       bool disable_graph_capture);
 
-#endif
-#if USE_DML || USE_WEBGPU
-  std::unique_ptr<OrtMemoryInfo> memory_info_device_;
-#endif
   std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };

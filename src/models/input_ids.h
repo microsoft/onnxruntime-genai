@@ -8,7 +8,7 @@ struct InputIDs {
   virtual ~InputIDs() = default;
   virtual void Add() = 0;
   virtual std::array<int64_t, 2> GetShape() const = 0;
-  virtual void Update(DeviceSpan<int32_t>& next_tokens) = 0;
+  virtual void Update(DeviceSpan<int32_t> next_tokens) = 0;
 };
 
 struct DefaultInputIDs : InputIDs {
@@ -60,7 +60,7 @@ struct WindowedInputIDs : public InputIDs {
   WindowedInputIDs& operator=(const WindowedInputIDs&) = delete;
 
   void Add() override;
-  void Update(DeviceSpan<int32_t>& next_tokens) override;
+  void Update(DeviceSpan<int32_t> next_tokens) override;
   std::array<int64_t, 2> GetShape() const override { return shape_; }
 
  private:

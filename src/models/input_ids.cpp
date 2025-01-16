@@ -44,7 +44,7 @@ void DefaultInputIDs::Add() {
   }
 }
 
-void InputIDs::Update(DeviceSpan<int32_t> new_tokens) {
+void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   auto new_tokens_cpu = new_tokens.CopyDeviceToCpu();
 
   const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids, int32_t pad_token_id) {
@@ -130,7 +130,7 @@ void WindowedInputIDs::Add() {
   state_.input_names_.push_back(name_);
 }
 
-void WindowedInputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
+void WindowedInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   if (window_index_ == 0) {
     num_windows_ = (new_tokens.size() + window_size_ - 1) / window_size_;
 

@@ -339,6 +339,13 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
   auto copy_span = Generators::ByteWrapTensor(*Generators::GetDeviceInterface(Generators::DeviceType::CPU), *ortvalue_clone);
   copy_span.CopyFrom(output_span);
 
+  auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
+  tensor->external_owner_ = tensor;
+  *out = reinterpret_cast<OgaTensor*>(tensor.get());
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* oga_generator, OgaTensor** out) {
   OGA_TRY
   auto generator = reinterpret_cast<Generators::Generator*>(oga_generator);
