@@ -163,7 +163,7 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
     std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
     std::vector<float> top_k_scores(k);
     for (int i = 0; i < k; i++)
-      top_k_scores.push_back(scores[indices[i]]);
+      top_k_scores[i] = scores[indices[i]];
     // Sample a token from the top K
     std::discrete_distribution<> dis(top_k_scores.begin(), top_k_scores.end());
     SetNextToken(batch_id, indices[dis(gen_)]);
@@ -212,15 +212,12 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
     std::vector<int> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);
     std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
-    std::vector<float> top_k_scores(k);
-    for (int i = 0; i < k; i++)
-      top_k_scores.push_back(scores[indices[i]]);
     // Sample a probability threshold
     float threshold = dis(gen_);
     int32_t token = indices[k - 1];
     // Find the first token where the cumulative probability exceeds the threshold
     for (int i = 0; i < k; i++) {
-      threshold -= top_k_scores[indices[i]];
+      threshold -= scores[indices[i]];
       if (threshold > 0) {
         continue;
       }
