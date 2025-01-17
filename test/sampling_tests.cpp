@@ -454,7 +454,6 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
   std::random_device rd;
   std::mt19937 engine(rd());
   std::vector<int> indices(vocab_size);
-  std::vector<float> logits_cpu(vocab_size * batch_size);
   const int num_iter = 100;
   std::map<float, int> logit_to_count;
 
