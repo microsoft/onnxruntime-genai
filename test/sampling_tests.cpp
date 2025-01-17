@@ -220,11 +220,11 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
     auto generator = Generators::CreateGenerator(*model, *params);
     logits_cpu = std::vector<float>(vocab_size * batch_size, 0.0f);
     // Shuffle integers 1 to k randomly into logits_cpu
-    for (int i = 0; i < batch_size; i++) {
+    for (int b = 0; b < batch_size; i++) {
       std::iota(indices.begin(), indices.end(), 0);
       std::shuffle(indices.begin(), indices.end(), engine);
       for (int j = 0; j < k; j++)
-        logits_cpu[indices[j] + vocab_size * i] = float(k - j);
+        logits_cpu[indices[j] + vocab_size * b] = float(k - j);
     }
     // Set logits and get generated token
     auto logits_copy = logits_cpu;
@@ -463,11 +463,11 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
     Generators::DeviceSpan<float> logits_gpu = params->p_device->Allocate<float>(vocab_size * batch_size);
     auto cpu_span = logits_gpu.CpuSpan();
     // Shuffle integers 1 to k randomly into cpu_span
-    for (int i = 0; i < batch_size; i++) {
+    for (int b = 0; b < batch_size; b++) {
       std::iota(indices.begin(), indices.end(), 0);
       std::shuffle(indices.begin(), indices.end(), engine);
       for (int j = 0; j < k; j++)
-        cpu_span[indices[j] + vocab_size * i] = float(k - j);
+        cpu_span[indices[j] + vocab_size * b] = float(k - j);
     }
     // Copy logits onto device, set logits, and get generated token
     logits_gpu.CopyCpuToDevice();
