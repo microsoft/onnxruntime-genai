@@ -21,7 +21,7 @@ struct DefaultInputIDs : InputIDs {
   void Add() override;
   // Resize input_ids based on size of next_tokens.
   // Update value with next_tokens.
-  void Update(DeviceSpan<int32_t> next_tokens);
+  void Update(DeviceSpan<int32_t> next_tokens) override;
 
   std::array<int64_t, 2> GetShape() const override { return shape_; }
   const char* name_;

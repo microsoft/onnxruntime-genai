@@ -164,8 +164,9 @@ std::string to_string(DeviceType device_type) {
       return "WebGpu";
     case DeviceType::QNN:
       return "QnnWithSharedMemory";
+    default:
+      throw std::runtime_error("Unknown device type");
   }
-  throw std::runtime_error("Unknown device type");
 }
 
 DeviceInterface* GetDeviceInterface(DeviceType type) {

@@ -15,9 +15,7 @@
 #include "whisper.h"
 #include "multi_modal_vision_model.h"
 #include "decoder_only_pipeline.h"
-#if USE_DML
 #include "../dml/interface.h"
-#endif
 
 namespace Generators {
 
@@ -425,7 +423,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
       Ort::ThrowOnError(Ort::api->UpdateROCMProviderOptions(&ort_provider_options, keys.data(), values.data(), keys.size()));
       session_options.AppendExecutionProvider_ROCM(ort_provider_options);
-#if USE_DML
     } else if (provider_options.name == "dml") {
       if (!GetDmlInterface()) {
         LUID device_luid{};
@@ -452,7 +449,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
       if (is_primary_session_options)
         device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
-#endif
+
     } else if (provider_options.name == "qnn") {
       session_options.AddConfigEntry("ep.share_ep_contexts", "1");
       std::unordered_map<std::string, std::string> opts;
