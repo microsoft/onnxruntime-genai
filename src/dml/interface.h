@@ -3,8 +3,8 @@
 
 #ifndef _WIN32
 typedef struct _LUID {
-  DWORD LowPart;
-  LONG HighPart;
+  uint32_t LowPart;
+  int32_t HighPart;
 } LUID, *PLUID;
 #endif
 
