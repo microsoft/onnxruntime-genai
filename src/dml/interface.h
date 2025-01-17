@@ -2,7 +2,10 @@
 // Licensed under the MIT License.
 
 #ifndef _WIN32
-using LUID = void;
+typedef struct _LUID {
+  DWORD LowPart;
+  LONG HighPart;
+} LUID, *PLUID;
 #endif
 
 namespace Generators {
