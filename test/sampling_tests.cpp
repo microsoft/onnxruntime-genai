@@ -461,7 +461,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
   // Run test
   for (int i = 0; i < num_iter; i++) {
     auto generator = Generators::CreateGenerator(*model, *params);
-    Generators::DeviceSpan<float> logits_gpu = params->p_device->Allocate<float>(config.model.vocab_size * batch_size);
+    Generators::DeviceSpan<float> logits_gpu = params->p_device->Allocate<float>(vocab_size * batch_size);
     auto cpu_span = logits_gpu.CpuSpan();
     // Shuffle integers 1 to k randomly into cpu_span
     for (int i = 0; i < batch_size; i++) {
