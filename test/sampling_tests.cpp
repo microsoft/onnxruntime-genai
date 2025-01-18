@@ -195,7 +195,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
   const int k = 5;
 
   Generators::Config config;
-  const int vocab_size = 13;  // vocab size of llama
+  const int vocab_size = 17;  // vocab size of llama
   config.model.vocab_size = vocab_size;  // vocab size of llama
 
   // Create a generator
@@ -438,7 +438,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
   const int k = 5;
 
   Generators::Config config;
-  const int vocab_size = 13;  // vocab size of llama
+  const int vocab_size = 17;  // vocab size of llama
   config.model.vocab_size = vocab_size;  // vocab size of llama
 
   // Create a generator
