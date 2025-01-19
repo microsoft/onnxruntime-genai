@@ -8,6 +8,7 @@
 #include "span.h"
 #include "beam_search_topk.h"
 #include "cuda_sampling.cuh"
+#include "models/onnxruntime_api.h"
 #include "smartptrs.h"
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
@@ -297,22 +298,22 @@ __global__ void SoftmaxBlockForward(outscalar_t* output, scalar_t* input, int cl
 }
 
 template <bool is_log_softmax>
-void DispatchBlockwiseSoftmaxForward(cudaStream_t* stream, float* output, const float* input, int softmax_elements,
+void DispatchBlockwiseSoftmaxForward(cudaStream_t stream, float* output, const float* input, int softmax_elements,
                                      int input_stride, int output_stride, int batch_count, float temperature) {
   dim3 grid(batch_count);
   constexpr int ILP = sizeof(float4) / sizeof(float);
   dim3 block = SoftmaxGetBlockSize(ILP, softmax_elements);
   if (is_log_softmax) {
     SoftmaxBlockForward<ILP, float, float, float, LogSoftmaxForwardEpilogue>
-        <<<grid, block, block.x * sizeof(float), *stream>>>(output, const_cast<float*>(input),
+        <<<grid, block, block.x * sizeof(float), stream>>>(output, const_cast<float*>(input),
                                                             softmax_elements, input_stride, output_stride, temperature);
   } else {
     SoftmaxBlockForward<ILP, float, float, float, SoftmaxForwardEpilogue>
-        <<<grid, block, block.x * sizeof(float), *stream>>>(output, const_cast<float*>(input),
+        <<<grid, block, block.x * sizeof(float), stream>>>(output, const_cast<float*>(input),
                                                             softmax_elements, input_stride, output_stride, temperature);
   }
 }
-template void DispatchBlockwiseSoftmaxForward<true>(cudaStream_t*, float*, const float*, int, int, int, int, float);
+template void DispatchBlockwiseSoftmaxForward<true>(cudaStream_t, float*, const float*, int, int, int, int, float);
 
 // Populate Kernels and Launchers
 
@@ -521,7 +522,7 @@ void LaunchSampleKernel(SamplingData* data, cudaStream_t stream, float* scores, 
 void SoftmaxAndSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, float temperature) {
   // Softmax scores
   std::span<float> scores{data->scores_softmaxed.get(), static_cast<size_t>(vocab_size * batch_size)};
-  DispatchBlockwiseSoftmaxForward<false>(&stream, scores.data(), const_cast<const float*>(scores_in), vocab_size, vocab_size, vocab_size, batch_size, temperature);
+  DispatchBlockwiseSoftmaxForward<false>(stream, scores.data(), const_cast<const float*>(scores_in), vocab_size, vocab_size, vocab_size, batch_size, temperature);
   // Sort indices by scores
   std::span<int> offsets_gpu{data->offsets.get(), static_cast<size_t>(batch_size + 1)};
   LaunchPopulateOffsets(offsets_gpu.data(), vocab_size, batch_size, stream);
@@ -550,7 +551,7 @@ void LaunchGetTopKSubsetFullSort(SamplingData* data, cudaStream_t stream, float*
 void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
   // Softmax scores
   std::span<float> scores_softmaxed{data->scores_softmaxed.get(), static_cast<size_t>(vocab_size * batch_size)};
-  DispatchBlockwiseSoftmaxForward<false>(&stream, scores_softmaxed.data(), const_cast<const float*>(scores_in), vocab_size, vocab_size, vocab_size, batch_size, temperature);
+  DispatchBlockwiseSoftmaxForward<false>(stream, scores_softmaxed.data(), const_cast<const float*>(scores_in), vocab_size, vocab_size, vocab_size, batch_size, temperature);
 // Get top k subset
 #define GetTopK(max_k)                                \
   LaunchGetTopKSubset<max_k>(stream,                  \

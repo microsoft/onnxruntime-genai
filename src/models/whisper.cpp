@@ -3,10 +3,6 @@
 #include "../generators.h"
 #include "whisper.h"
 #include <vector>
-#include "kernels.h"
-#if USE_CUDA
-#include "../cuda/cuda_common.h"
-#endif
 
 namespace Generators {
 
@@ -42,7 +38,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, DeviceSpan<int32_t> seq
   }
 
   if (inputs.alignment_heads != nullptr) {
-#if USE_CUDA
+#if 0  // USE_CUDA
     auto alignment_heads_type_and_shape_info = inputs.alignment_heads->ort_tensor_->GetTensorTypeAndShapeInfo();
     auto alignment_heads_type = alignment_heads_type_and_shape_info->GetElementType();  // ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32
     auto alignment_heads_shape = alignment_heads_type_and_shape_info->GetShape();
@@ -101,7 +97,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, DeviceSpan<int32_t> seq
   }
 }
 
-#if USE_CUDA
+#if 0  // USE_CUDA
 template <typename T>
 void TransposeKCacheForDMMHA(T* dest_data,
                              T* temp_buffer,
@@ -147,7 +143,7 @@ DeviceSpan<float> Whisper_State::Run(int current_length, DeviceSpan<int32_t>& ne
 
       const auto copy_data_size_all = src_shape_info->GetElementCount() * SizeOf(src_shape_info->GetElementType());
 
-#if USE_CUDA
+#if 0  // USE_CUDA
       const auto src_dims = src_shape_info->GetShape();
       const auto src_element_type = src_shape_info->GetElementType();
       const auto src_element_size = SizeOf(src_element_type);
@@ -187,7 +183,7 @@ DeviceSpan<float> Whisper_State::Run(int current_length, DeviceSpan<int32_t>& ne
         auto dest_data = presents_[i]->GetTensorMutableRawData();
 
         switch (model_.device_type_) {
-#if USE_CUDA
+#if 0  // USE_CUDA
           case DeviceType::CUDA:
             if (self_attn_kv_cache_element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
               // CUDA EP + FP16 precision == `DecoderMaskedMultiHeadAttention` op is used
@@ -228,7 +224,7 @@ DeviceSpan<float> Whisper_State::Run(int current_length, DeviceSpan<int32_t>& ne
         }
       }
 
-#if USE_CUDA
+#if 0  // USE_CUDA
       if (self_attn_kv_cache_element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 && model_.device_type_ == DeviceType::CUDA) {
         // Transpose cross attention K caches for `DecoderMaskedMultiHeadAttention`
 
@@ -272,16 +268,12 @@ DeviceSpan<float> Whisper_State::Run(int current_length, DeviceSpan<int32_t>& ne
       }
 
       if (model_.session_info_->HasInput("cache_indirection")) {
-#if USE_CUDA
         cache_indirection_ = OrtValue::CreateTensor<int32_t>(*model_.allocator_device_, std::array<int64_t, 3>{params_->search.batch_size, params_->search.num_beams, params_->search.max_length});
         cache_indirection_index_ = inputs_.size();
         input_names_.push_back("cache_indirection");
         inputs_.push_back(cache_indirection_.get());
 
-        auto data = gpu_span<int32_t>{cache_indirection_->GetTensorMutableData<int32_t>(),
-                                      static_cast<size_t>(params_->BatchBeamSize()) * params_->search.max_length};
-        CudaCheck() == cudaMemsetAsync(data.data(), 0, data.size_bytes(), params_->cuda_stream);
-#endif
+        ByteWrapTensor(*model_.p_device_, *cache_indirection_).Zero();
       }
 
       if (model_.session_info_->HasOutput("output_cross_qk_0")) {
@@ -335,7 +327,7 @@ void Whisper_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, Device
   }
 
   if (cache_indirection_) {
-#if USE_CUDA
+#if 0  // USE_CUDA
     auto beam_indices_gpu = gpu_span<int32_t>{beam_indices.Span()};
     if (beam_indices_gpu.empty()) {
       auto beam_indices_cpu = beam_indices.CpuSpan();
@@ -363,7 +355,7 @@ void Whisper_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, Device
   }
 
   if (output_cross_qk_.size() && alignment_heads_) {
-#if USE_CUDA
+#if 0  // USE_CUDA
     // Collect a GPU array of float* pointers from the vector of OrtValues to pass to the kernel
     auto output_cross_qk_ptrs = cross_qk_ptrs_gpu_.CpuSpan();
     assert(output_cross_qk_ptrs.size() == output_cross_qk_.size());
@@ -394,7 +386,7 @@ void Whisper_State::Initialize(DeviceSpan<int32_t>& next_tokens, int total_lengt
 
 void Whisper_State::Finalize() {
   if (output_cross_qk_.size() && alignment_heads_) {
-#if USE_CUDA
+#if 0  // USE_CUDA
     int decoded_length = *(past_sequence_length_->GetTensorMutableData<int32_t>()) + 1;
     auto output_cross_qk_dims = output_cross_qk_[0]->GetTensorTypeAndShapeInfo()->GetShape();
 
