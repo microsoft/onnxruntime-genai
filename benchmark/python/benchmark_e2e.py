@@ -241,8 +241,17 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         tokens = np.random.randint(100, size=(batch_size, prompt_length))
         prompt = [tokenizer.decode(tokens[0])] * batch_size
     elif args.use_prompt_set:
-        prompt = get_prompt_by_length(prompt_length)
+        prompt = [get_prompt_by_length(prompt_length)] * batch_size
         tokens = tokenizer.encode_batch(prompt)
+
+        if len(tokens) > max_length:
+            # Shorten the inputs from (batch_size, tokenized_length) to (batch_size, requested_length)
+            tokens = tokens[:, :max_length]
+        elif len(tokens) < max_length:
+            # Lengthen the inputs from (batch_size, tokenized_length) to (batch_size, requested_length)
+            tokens_first_col = tokens[:, 0].unsqueeze(0).T
+            for _ in range(max_length - len(tokens)):
+                tokens = np.hstack((tokens_first_col, tokens))
     else:
         prompt = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
         tokens = tokenizer.encode_batch(prompt)
