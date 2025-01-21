@@ -146,13 +146,7 @@ TEST(CAPITests, MaxLength) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids_0.data(), input_ids_0.size());
-
-  try {
-    generator->AppendTokens(input_ids_1.data(), input_ids_1.size());
-    ASSERT_TRUE(false); // Should not reach here
-  } catch (const std::runtime_error& e) {
-    std::cout << "Caught expected exception: " << e.what() << std::endl;
-  }
+  EXPECT_THROW(generator->AppendTokens(input_ids_1.data(), input_ids_1.size()));
 
   // Batch size 3 case
   std::vector<int32_t> input_ids_2{1, 2, 3, 5, 8,
@@ -168,13 +162,7 @@ TEST(CAPITests, MaxLength) {
 
   generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids_2.data(), input_ids_2.size());
-
-  try {
-    generator->AppendTokens(input_ids_3.data(), input_ids_3.size());
-    ASSERT_TRUE(false); // Should not reach here
-  } catch (const std::runtime_error& e) {
-    std::cout << "Caught expected exception: " << e.what() << std::endl;
-  }
+  EXPECT_THROW(generator->AppendTokens(input_ids_3.data(), input_ids_3.size()));
 }
 
 TEST(CAPITests, EndToEndPhiBatch) {
