@@ -433,7 +433,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([](const std::string& config_path) { return OgaConfig::Create(config_path.c_str()); }))
       .def("append_provider", &OgaConfig::AppendProvider)
       .def("set_provider_option", &OgaConfig::SetProviderOption)
-      .def("clear_providers", &OgaConfig::ClearProviders);
+      .def("clear_providers", &OgaConfig::ClearProviders)
+      .def("get_model_type", &OgaConfig::GetModelType);
 
   pybind11::class_<Model, std::shared_ptr<Model>>(m, "Model")
       .def(pybind11::init([](const OgaConfig& config) {

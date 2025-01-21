@@ -38,6 +38,7 @@ def test_config(test_data_path):
     config.set_provider_option("cuda", "infinite_clock", "1")
     config.set_provider_option("quantum", "break_universe", "true")
     config.append_provider("slide rule")
+    assert(config.get_model_type(), "gpt2")
 
 @pytest.mark.parametrize(
     "relative_model_path",
