@@ -166,9 +166,9 @@ OgaResult* OGA_API_CALL OgaConfigClearProviders(OgaConfig* config) {
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaConfigGetModelType(OgaConfig* config) {
+OgaResult* OGA_API_CALL OgaConfigGetModelType(OgaConfig* config, std::string& name) {
   OGA_TRY
-  Generators::GetModelType(*reinterpret_cast<Generators::Config*>(config));
+  name = Generators::GetModelType(*reinterpret_cast<Generators::Config*>(config));
   return nullptr;
   OGA_CATCH
 }
