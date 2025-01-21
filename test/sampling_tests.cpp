@@ -190,6 +190,7 @@ void SoftMax(std::span<float> scores, float temperature) {
 }
 
 TEST(SamplingTests, RandomizedSamplingTopKCpu) {
+  std::cout << "Iteration " << i << std::endl;
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   const int batch_size = 5;
   const int k = 5;
@@ -459,6 +460,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
 
   // Run test
   for (int i = 0; i < num_iter; i++) {
+    std::cout << "Iteration " << i << std::endl;
     auto generator = Generators::CreateGenerator(*model, *params);
     Generators::DeviceSpan<float> logits_gpu = params->p_device->Allocate<float>(vocab_size * batch_size);
     auto cpu_span = logits_gpu.CpuSpan();
