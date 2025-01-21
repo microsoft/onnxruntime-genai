@@ -201,6 +201,13 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateConfig(const char* config_path, OgaC
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearProviders(OgaConfig* config);
 
 /**
+ * \brief Get the Model Type in the given config
+ * \param[in] config The config to get the model type from
+ * \return OgaResult containing the error message if the clearing of the providers failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigGetModelType(OgaConfig* config);
+
+/**
  * \brief Add the provider at the end of the list of providers in the given config if it doesn't already exist
  * if it already exists, does nothing.
  * \param[in] config The config to set the provider on.

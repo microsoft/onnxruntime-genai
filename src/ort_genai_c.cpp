@@ -166,6 +166,13 @@ OgaResult* OGA_API_CALL OgaConfigClearProviders(OgaConfig* config) {
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaConfigGetModelType(OgaConfig* config) {
+  OGA_TRY
+  Generators::GetModelType(*reinterpret_cast<Generators::Config*>(config));
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaConfigAppendProvider(OgaConfig* config, const char* provider) {
   OGA_TRY
   Generators::SetProviderOption(*reinterpret_cast<Generators::Config*>(config), provider, {}, {});
