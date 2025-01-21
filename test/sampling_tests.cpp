@@ -190,7 +190,6 @@ void SoftMax(std::span<float> scores, float temperature) {
 }
 
 TEST(SamplingTests, RandomizedSamplingTopKCpu) {
-  std::cout << "Iteration " << i << std::endl;
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   const int batch_size = 5;
   const int k = 5;
@@ -218,6 +217,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
   
   // Run test
   for (int i = 0; i < num_iter; i++) {
+    std::cout << "Iteration " << i << std::endl;
     auto generator = Generators::CreateGenerator(*model, *params);
     logits_cpu = std::vector<float>(vocab_size * batch_size, 0.0f);
     // Shuffle integers 1 to k randomly into logits_cpu
