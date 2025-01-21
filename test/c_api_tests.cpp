@@ -128,6 +128,30 @@ TEST(CAPITests, AppendTokensToSequence) {
 #endif
 }
 
+TEST(CAPITests, MaxLength) {
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  const char* input_string = "This is a test.";
+
+  auto input_sequence = OgaSequences::Create();
+  for (auto& string : input_strings)
+    tokenizer->Encode(string, *input_sequence);
+  std::cout << "Input sequence count:" << input_sequence->SequenceCount(0) << std::endl;
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 8);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*input_sequences);
+
+  try {
+    generator->AppendTokenSequences(*input_sequences);
+    ASSERT_TRUE(false); // Should not reach here
+  } catch (const std::runtime_error& e) {
+    std::cout << "Caught expected exception: " << e.what() << std::endl;
+  }
+}
+
 TEST(CAPITests, EndToEndPhiBatch) {
 #if TEST_PHI2
   auto model = OgaModel::Create(PHI2_PATH);
