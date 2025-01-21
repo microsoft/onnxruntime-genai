@@ -146,7 +146,7 @@ TEST(CAPITests, MaxLength) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids_0.data(), input_ids_0.size());
-  EXPECT_THROW(generator->AppendTokens(input_ids_1.data(), input_ids_1.size()));
+  EXPECT_THROW(generator->AppendTokens(input_ids_1.data(), input_ids_1.size()), std::runtime_error);
 
   // Batch size 3 case
   std::vector<int32_t> input_ids_2{1, 2, 3, 5, 8,
@@ -162,7 +162,7 @@ TEST(CAPITests, MaxLength) {
 
   generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids_2.data(), input_ids_2.size());
-  EXPECT_THROW(generator->AppendTokens(input_ids_3.data(), input_ids_3.size()));
+  EXPECT_THROW(generator->AppendTokens(input_ids_3.data(), input_ids_3.size()), std::runtime_error);
 }
 
 TEST(CAPITests, EndToEndPhiBatch) {
