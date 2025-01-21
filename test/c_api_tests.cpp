@@ -129,6 +129,7 @@ TEST(CAPITests, AppendTokensToSequence) {
 }
 
 TEST(CAPITests, MaxLength) {
+  // Batch size 1 case
   std::vector<int32_t> input_ids_0{1, 2, 3, 5, 8};
   std::vector<int32_t> input_ids_1{13, 21, 34, 55, 89};
 
@@ -148,6 +149,28 @@ TEST(CAPITests, MaxLength) {
 
   try {
     generator->AppendTokens(input_ids_1.data(), input_ids_1.size());
+    ASSERT_TRUE(false); // Should not reach here
+  } catch (const std::runtime_error& e) {
+    std::cout << "Caught expected exception: " << e.what() << std::endl;
+  }
+
+  // Batch size 3 case
+  std::vector<int32_t> input_ids_2{1, 2, 3, 5, 8,
+                                   0, 0, 0, 52, 104,
+                                   0, 0, 195, 731, 731};
+  std::vector<int32_t> input_ids_3{13, 21, 34, 55, 89,
+                                   52, 53, 54, 55, 56,
+                                   195, 64, 45, 23, 12};
+
+  params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", 3);
+
+  generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids_2.data(), input_ids_2.size());
+
+  try {
+    generator->AppendTokens(input_ids_3.data(), input_ids_3.size());
     ASSERT_TRUE(false); // Should not reach here
   } catch (const std::runtime_error& e) {
     std::cout << "Caught expected exception: " << e.what() << std::endl;

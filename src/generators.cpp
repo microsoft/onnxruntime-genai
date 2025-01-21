@@ -237,7 +237,7 @@ void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
       aux_input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
                                         tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
-      if (aux_input_ids.size() > search.max_length)
+      if (aux_input_ids.size() / search.batch_size > search.max_length)
         throw std::runtime_error("input_ids size (" + std::to_string(aux_input_ids.size()) + ") exceeds max length (" + std::to_string(search.max_length) + ")");
       else if (aux_input_ids.size() == 0)
         throw std::runtime_error("input_ids is empty");
@@ -313,7 +313,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
-  if (input_ids.size() + search_->GetSequenceLength() > state_->params_->search.max_length)
+  if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
     throw std::runtime_error("input_ids size (" + std::to_string(input_ids.size()) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
   if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v")
     throw std::runtime_error("Please use params.SetInputs for " + model_->config_->model.type + ". AppendTokens is not supported for this model type.");
