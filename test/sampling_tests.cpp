@@ -195,7 +195,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
   const int k = 5;
 
   Generators::Config config;
-  const int vocab_size = 17;  // vocab size of llama
+  const int vocab_size = 13;  // vocab size of llama
   config.model.vocab_size = vocab_size;  // vocab size of llama
 
   // Create a generator
@@ -224,9 +224,12 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
     std::cout << "Shuffling logits" << std::endl;
     for (int b = 0; b < batch_size; i++) {
       std::iota(indices.begin(), indices.end(), 0);
+      std::cout << "iota done" << std::endl;
       std::shuffle(indices.begin(), indices.end(), engine);
+      std::cout << "shuffle done" << std::endl;
       for (int j = 0; j < k; j++)
         logits_cpu[indices[j] + vocab_size * b] = float(k - j);
+      std::cout << "batch " << b << " done" << std::endl;
     }
     // Set logits and get generated token
     std::cout << "Generating next token" << std::endl;
