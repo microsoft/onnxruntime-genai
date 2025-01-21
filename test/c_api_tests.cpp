@@ -129,11 +129,9 @@ TEST(CAPITests, AppendTokensToSequence) {
 }
 
 TEST(CAPITests, MaxLength) {
-    std::vector<int64_t> input_ids_shape{1, 4};
   std::vector<int32_t> input_ids_0{1, 2, 3, 5, 8};
   std::vector<int32_t> input_ids_1{13, 21, 34, 55, 89};
 
-  int batch_size = static_cast<int>(input_ids_shape[0]);
   int max_length = 7;
 
   // To generate this file:
@@ -144,7 +142,6 @@ TEST(CAPITests, MaxLength) {
 
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", max_length);
-  params->SetSearchOption("batch_size", batch_size);
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids_0.data(), input_ids_0.size());
