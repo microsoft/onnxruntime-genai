@@ -622,7 +622,7 @@ void ClearProviders(Config& config) {
 }
 
 std::string GetModelType(Config& config) {
-  return config.mode.type;
+  return config.model.type;
 }
 
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
