@@ -40,9 +40,6 @@ struct DefaultInputIDs : InputIDs {
   std::unique_ptr<OrtValue> value_;
   std::unique_ptr<OrtValue> cast_value_;
 
-  // Used for decoding runs with cuda graphs.
-  StaticBuffer* sb_input_ids_{};
-
   std::unique_ptr<OrtValue> current_sequence_length_;
   std::unique_ptr<OrtValue> past_sequence_length_;
 };

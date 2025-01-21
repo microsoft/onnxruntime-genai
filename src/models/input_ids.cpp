@@ -7,7 +7,7 @@ namespace Generators {
 DefaultInputIDs::DefaultInputIDs(State& state)
     : state_{state} {
   name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
-  shape_ = {state_.params_->search.batch_size, 0};
+  shape_ = {state_.params_->BatchBeamSize(), 0};
   type_ = model_.session_info_->GetInputDataType(name_);
 
   if (model_.session_info_->HasInput(model_.config_->model.decoder.inputs.current_sequence_length) &&
@@ -71,12 +71,7 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
 
   if (static_cast<size_t>(shape_[1]) != sequence_length) {
     shape_[1] = sequence_length;
-    if (!sb_input_ids_) {
-      value_ = OrtValue::CreateTensor<int32_t>(*model_.allocator_device_, shape_);
-    } else {
-      value_ = sb_input_ids_->CreateTensorOnStaticBuffer(shape_, Ort::TypeToTensorType<int32_t>);
-    }
-
+    value_ = OrtValue::CreateTensor<int32_t>(*model_.allocator_device_, shape_);
     state_.inputs_[input_index_] = value_.get();
   }
 
