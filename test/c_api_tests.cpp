@@ -142,10 +142,10 @@ TEST(CAPITests, MaxLength) {
   params->SetSearchOption("max_length", 8);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokenSequences(*input_sequences);
+  generator->AppendTokenSequences(*input_sequence);
 
   try {
-    generator->AppendTokenSequences(*input_sequences);
+    generator->AppendTokenSequences(*input_sequence);
     ASSERT_TRUE(false); // Should not reach here
   } catch (const std::runtime_error& e) {
     std::cout << "Caught expected exception: " << e.what() << std::endl;
