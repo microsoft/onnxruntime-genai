@@ -129,23 +129,28 @@ TEST(CAPITests, AppendTokensToSequence) {
 }
 
 TEST(CAPITests, MaxLength) {
+    std::vector<int64_t> input_ids_shape{1, 4};
+  std::vector<int32_t> input_ids_0{1, 2, 3, 5, 8};
+  std::vector<int32_t> input_ids_1{13, 21, 34, 55, 89};
+
+  int batch_size = static_cast<int>(input_ids_shape[0]);
+  int max_length = 7;
+
+  // To generate this file:
+  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
+  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
+
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  auto tokenizer = OgaTokenizer::Create(*model);
 
-  const char* input_string = "This is a test.";
-
-  auto input_sequence = OgaSequences::Create();
-  for (auto& string : input_strings)
-    tokenizer->Encode(string, *input_sequence);
-  std::cout << "Input sequence count:" << input_sequence->SequenceCount(0) << std::endl;
   auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 8);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokenSequences(*input_sequence);
+  generator->AppendTokens(input_ids_0.data(), input_ids_0.size());
 
   try {
-    generator->AppendTokenSequences(*input_sequence);
+    generator->AppendTokens(input_ids_1.data(), input_ids_1.size());
     ASSERT_TRUE(false); // Should not reach here
   } catch (const std::runtime_error& e) {
     std::cout << "Caught expected exception: " << e.what() << std::endl;
