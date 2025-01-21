@@ -27,7 +27,6 @@ def main(args):
 
     if args.verbose: print(search_options)
     
-    model_type = 'test'
     model_type = config.get_model_type()
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
