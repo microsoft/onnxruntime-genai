@@ -161,8 +161,11 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
     std::vector<int> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);
     std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
+    std::vector<float> top_k_scores(k);
+    for (int i = 0; i < k; i++)
+      top_k_scores[i] = scores[indices[i]];
     // Sample a token from the top K
-    std::discrete_distribution<> dis(scores.begin(), scores.begin() + k);
+    std::discrete_distribution<> dis(top_k_scores.begin(), top_k_scores.end());
     SetNextToken(batch_id, indices[dis(gen_)]);
   }
   AppendNextTokensToSequences();
