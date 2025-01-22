@@ -8,10 +8,11 @@ using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using Xunit;
 using Xunit.Abstractions;
+using Microsoft.ML.OnnxRuntimeGenAI;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
-    public class OnnxRuntimeGenAITests
+    public class OnnxRuntimeGenAITests : IDisposable
     {
         private readonly ITestOutputHelper output;
 
@@ -86,11 +87,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         });
 
         private static string _adaptersPath => _lazyAdaptersPath.Value;
-
+        private OgaHandle ogaHandle;
 
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
+            this.ogaHandle = new OgaHandle();
             this.output = o;
+        }
+        public void Dispose()
+        {
+            ogaHandle?.Dispose();
         }
 
         private class IgnoreOnModelAbsenceFact : FactAttribute
