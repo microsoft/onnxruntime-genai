@@ -12,7 +12,7 @@ using Microsoft.ML.OnnxRuntimeGenAI;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
-    public class OnnxRuntimeGenAITests : IDisposable
+    public class OnnxRuntimeGenAITests
     {
         private readonly ITestOutputHelper output;
 
@@ -87,16 +87,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         });
 
         private static string _adaptersPath => _lazyAdaptersPath.Value;
-        private OgaHandle ogaHandle;
+        private static OgaHandle ogaHandle;
 
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
-            this.ogaHandle = new OgaHandle();
+            ogaHandle = new OgaHandle();
+            AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
             this.output = o;
-        }
-        public void Dispose()
-        {
-            ogaHandle?.Dispose();
         }
 
         private class IgnoreOnModelAbsenceFact : FactAttribute
