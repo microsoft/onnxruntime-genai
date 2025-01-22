@@ -40,8 +40,7 @@ def main(args):
         elif model.type.startswith("llama"):
             args.chat_template = '<|start_header_id|>user<|end_header_id|>{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
         else:
-            print("Chat Template is unknown for model type:", model.type, "and it can result in erroneous results, please specify --chat_template flag for better output, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
-            exit(1)
+            raise ValueError(f"Chat Template for model type {model.type} is not known. Please provide chat template using --chat_template")
 
     if args.verbose:
         print("Model type is:", model.type)
@@ -50,6 +49,7 @@ def main(args):
     params = og.GeneratorParams(model)
     params.set_search_options(**search_options)
     generator = og.Generator(model, params)
+    if args.verbose: print("Generator created")
 
     # Set system prompt
     system_prompt = args.system_prompt
@@ -74,7 +74,6 @@ def main(args):
         input_tokens = tokenizer.encode(prompt)
         
         generator.append_tokens(input_tokens)
-        if args.verbose: print("Generator created")
 
         if args.verbose: print("Running generation loop ...")
         if args.timings:
