@@ -60,7 +60,7 @@ def main(args):
     elif model.type.startswith('phi4'):
         system_prompt = f"<|im_start|>system<|im_sep|>\n{args.system_prompt}<|im_end|>"
     elif model.type.startswith("llama3"):
-        system = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{args.system_prompt}<|eot_id|>"
+        system_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{args.system_prompt}<|eot_id|>"
     elif model.type.startswith("llama2"):
         system_prompt = f"<s>[INST] <<SYS>>\n{args.system_prompt}\n<</SYS>>"
     else:
