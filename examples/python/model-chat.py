@@ -37,11 +37,11 @@ def main(args):
         elif model.model_type.startswith("llama"):
             args.chat_template = '<|start_header_id|>user<|end_header_id|>{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
         else:
-            print("Chat Template is unknown for model type:", model_type, "and it can result in erroneous results, please specify --chat_template flag for better output, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
+            print("Chat Template is unknown for model type:", model.model_type, "and it can result in erroneous results, please specify --chat_template flag for better output, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
             exit(1)
 
     if args.verbose:
-        print("Model type is:", model_type)
+        print("Model type is:", model.model_type)
         print("Chat Template is:", args.chat_template)
 
     params = og.GeneratorParams(model)
