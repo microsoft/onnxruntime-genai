@@ -434,7 +434,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("append_provider", &OgaConfig::AppendProvider)
       .def("set_provider_option", &OgaConfig::SetProviderOption)
       .def("clear_providers", &OgaConfig::ClearProviders)
-      .def("get_model_type", &OgaConfig::GetModelType);
 
   pybind11::class_<Model, std::shared_ptr<Model>>(m, "Model")
       .def(pybind11::init([](const OgaConfig& config) {
@@ -444,6 +443,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([](const std::string& config_path) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
+      .def_property_readonly("model_type", [](const Model& v) { return v.config_->model.type; })
       .def_property_readonly(
           "device_type", [](const Model& model) { return to_string(model.device_type_); }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const Model& model) { return model.CreateMultiModalProcessor(); });

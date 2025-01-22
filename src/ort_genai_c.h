@@ -205,7 +205,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearProviders(OgaConfig* config);
  * \param[in] config The config to get the model type from
  * \return OgaResult containing the error message if the clearing of the providers failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigGetModelType(OgaConfig* config, std::string& name);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigGetModelType(OgaConfig* config, char* model_type);
 
 /**
  * \brief Add the provider at the end of the list of providers in the given config if it doesn't already exist

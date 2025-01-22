@@ -27,15 +27,14 @@ def main(args):
 
     if args.verbose: print(search_options)
     
-    model_type = config.get_model_type()
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
             print("Error, chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
             exit(1)
     else:
-        if model_type.startswith("phi"):
+        if model.model_type.startswith("phi"):
             args.chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
-        elif model_type.startswith("llama"):
+        elif model.model_type.startswith("llama"):
             args.chat_template = '<|start_header_id|>user<|end_header_id|>{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
         else:
             print("Chat Template is unknown for model type:", model_type, "and it can result in erroneous results, please specify --chat_template flag for better output, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")

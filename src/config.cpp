@@ -621,10 +621,6 @@ void ClearProviders(Config& config) {
   config.model.decoder.session_options.provider_options.clear();
 }
 
-std::string GetModelType(Config& config) {
-  return config.model.type;
-}
-
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
   std::ostringstream json;
   json << R"({")" << provider_name << R"(":{)";

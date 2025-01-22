@@ -92,12 +92,6 @@ struct OgaConfig : OgaAbstract {
     OgaCheckResult(OgaConfigClearProviders(this));
   }
 
-  std::string GetModelType() {
-    std::string name;
-    OgaCheckResult(OgaConfigGetModelType(this, name));
-    return name;
-  }
-
   void AppendProvider(const char* provider) {
     OgaCheckResult(OgaConfigAppendProvider(this, provider));
   }
