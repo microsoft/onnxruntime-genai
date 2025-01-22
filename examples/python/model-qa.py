@@ -29,8 +29,7 @@ def main(args):
     
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
-            print("Error, chat template must have exactly one pair of curly braces, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
-            exit(1)
+            raise ValueError("Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
 
     params = og.GeneratorParams(model)
     params.set_search_options(**search_options)
