@@ -317,14 +317,12 @@ void Model::InitDeviceAllocator(OrtSession& session) {
   }
 #endif
 
-#if USE_WEBGPU
   if (device_type_ == DeviceType::WEBGPU) {
     // for webgpu we only use device memory for kv_cache
     memory_info_device_ = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
     owned_allocator_device_ = Ort::Allocator::Create(session, *memory_info_device_);
     allocator_kvcache_ = owned_allocator_device_.get();
   }
-#endif
 
   if (device_type_ == DeviceType::QNN) {
     memory_info_device_ = OrtMemoryInfo::Create("QnnHtpShared", OrtAllocatorType::OrtDeviceAllocator, 0,

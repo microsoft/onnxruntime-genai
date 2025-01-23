@@ -553,7 +553,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });
   m.def("is_rocm_available", []() { return USE_ROCM != 0; });
-  m.def("is_webgpu_available", []() { return USE_WEBGPU != 0; });
+  m.def("is_webgpu_available", []() { return true; });
+  m.def("is_qnn_available", []() { return true; });
 
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });

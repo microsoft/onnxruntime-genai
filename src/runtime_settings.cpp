@@ -7,7 +7,6 @@ std::unique_ptr<RuntimeSettings> CreateRuntimeSettings() {
 }
 
 std::string RuntimeSettings::GenerateConfigOverlay() const {
-  // #if USE_WEBGPU
   constexpr std::string_view webgpu_overlay_pre = R"({
   "model": {
     "decoder": {
