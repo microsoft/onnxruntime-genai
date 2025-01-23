@@ -50,6 +50,8 @@ OrtGlobals::OrtGlobals()
   auto arena_config = OrtArenaCfg::Create(0, -1, -1, -1);
   Ort::Allocator& allocator_cpu{Ort::Allocator::GetWithDefaultOptions()};
   env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
+
+  std::cerr << "OrtGlobals::OrtGlobals completed" << std::endl;
 }
 
 // Ensure Shutdown() has been called before process exit

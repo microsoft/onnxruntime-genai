@@ -225,9 +225,12 @@ Ort::Allocator* GetDeviceAllocator(OrtSession& session, DeviceType type) {
   auto& device = GetOrtGlobals()->allocator_device_[static_cast<int>(type)];
   if (!device) {
     static const char* device_type_names[static_cast<int>(DeviceType::MAX)] = {"CPU", "Cuda", "DML", "WebGPU Buffer"};
+    std::cerr << "GetDeviceAllocator: Creating device allocator for " << device_type_names[static_cast<int>(type)] << std::endl;
+
     auto memory_info = OrtMemoryInfo::Create(device_type_names[static_cast<int>(type)], OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
     device = Ort::Allocator::Create(session, *memory_info);
-    GetDeviceInterface(type)->InitOrt(*Ort::api, *device);
+    GetDeviceInterface(type)->InitOrt(*Ort::api, *device); // Necessary for any shared library providers so they can access Ort::api
+    std::cerr << "GetDeviceAllocator: Device created" << std::endl;
   }
   return device.get();
 }
