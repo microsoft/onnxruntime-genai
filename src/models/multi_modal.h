@@ -18,8 +18,7 @@ int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_input
                           const std::string& image_sizes_name);
 
 int64_t GetNumAudioTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
-                          const std::string& audio_embeds_name,
-                          const std::string& audio_sizes_name);
+                          const std::string& input_ids_name);
 
 struct MultiModalLanguageModel : Model {
   MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech);

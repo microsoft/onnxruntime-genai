@@ -46,11 +46,25 @@ int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_input
   return num_image_tokens;
 }
 
+// This is technically calculating the number of input tokens (where the input can be any
+// modality). Since the output of this function is used to create the shape of audio_features,
+// however, the function is named as getting the number of audio tokens.
 int64_t GetNumAudioTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
-                          const std::string& audio_embeds_name,
-                          const std::string& audio_sizes_name) {
-  // TODO: implement
-  return 0;
+                          const std::string& input_ids_name) {
+  std::shared_ptr<Tensor> input_ids;
+  for (size_t i = 0; i < extra_inputs.size(); ++i) {
+    if (extra_inputs[i].name == input_ids_name) {
+      input_ids = extra_inputs[i].tensor;
+    }
+  }
+
+  if (!input_ids || !input_ids->ort_tensor_) {
+    // This prompt does not have any audios.
+    return 0;
+  }
+
+  int64_t num_audio_tokens = input_ids->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[1];
+  return num_audio_tokens;
 }
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
@@ -173,10 +187,18 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
     : State{params, model},
       model_{model},
       num_image_tokens_{GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.pixel_values, model_.config_->model.vision.inputs.image_sizes)},
-      num_audio_tokens_{GetNumAudioTokens(params_->extra_inputs, model_.config_->model.speech.inputs.audio_embeds, model_.config_->model.speech.inputs.audio_sizes)},
+      num_audio_tokens_{GetNumAudioTokens(params_->extra_inputs, model_.config_->model.embedding.inputs.input_ids)},
       captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)} {
-  if (model_.vision_session_ != nullptr) vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
-  if (model_.speech_session_ != nullptr) speech_state_ = std::make_unique<SpeechState>(model_, params, num_audio_tokens_);
+  if (model_.vision_session_ != nullptr) {
+    vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
+  } else {
+    vision_state_ = nullptr;
+  }
+  if (model_.speech_session_ != nullptr) {
+    speech_state_ = std::make_unique<SpeechState>(model_, params, num_audio_tokens_);
+  } else {
+    speech_state_ = nullptr;
+  }
   embedding_state_ = std::make_unique<EmbeddingState>(model, params, num_image_tokens_, num_audio_tokens_);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params, captured_graph_info_.get());
 }
