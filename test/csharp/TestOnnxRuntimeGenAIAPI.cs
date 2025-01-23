@@ -91,8 +91,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
-            ogaHandle = new OgaHandle();
-            AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
             this.output = o;
         }
 

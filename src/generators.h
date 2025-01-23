@@ -170,6 +170,5 @@ std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorPa
 void CopyThroughCpu(DeviceBuffer& dest, size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes);
 
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
-void top_k_indices(std::span<int32_t> top_k, std::span<const float> inputs);
 
 }  // namespace Generators
