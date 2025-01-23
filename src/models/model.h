@@ -4,7 +4,7 @@
 #include "ortx_tokenizer.h"
 #include "captured_graph_pool.h"
 #include "utils.h"
-#include "prompt_image_processor.h"
+#include "image_processing.h"
 #include "audio_processor.h"
 #include "adapters.h"
 

@@ -14,7 +14,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "kernels.h"
-#include "multi_modal_vision_model.h"
+#include "multi_modal.h"
 #include "decoder_only_pipeline.h"
 #if USE_DML
 #include <wil/wrl.h>
@@ -598,9 +598,11 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (config->model.type == "whisper")
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);
   if (config->model.type == "phi3v")
-    return std::make_shared<MultiModalVisionModel>(std::move(config), ort_env);
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (config->model.type == "decoder-pipeline")
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
+  if (config->model.type == "phio" || config->model.type == "phi4mm")
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }
