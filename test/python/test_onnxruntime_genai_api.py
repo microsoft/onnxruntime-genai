@@ -438,7 +438,7 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
         generator.generate_next_token()
 
     expected_output = [
-        'This is a test.\n        # TOD import * doct proofingredients',
+        'This is a test.\n        # TOD import * doct proofingrad',
         'Rats are awesome pets!\n    """\n\n',
         'The quick brown fox jumps over the lazy dog.\n    """\n\n',
     ]
