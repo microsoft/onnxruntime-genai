@@ -86,10 +86,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         });
 
         private static string _adaptersPath => _lazyAdaptersPath.Value;
-
+        private static OgaHandle ogaHandle;
 
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
+            // Initialize GenAI and register a handler to dispose it on process exit
+            ogaHandle = new OgaHandle();
+            AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
+
             this.output = o;
         }
 
