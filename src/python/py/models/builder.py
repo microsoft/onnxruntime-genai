@@ -326,7 +326,8 @@ class Model:
         })
         if "hidden_states" in outputs:
             # Remove 'hidden_states' from 'outputs' entry in config since ORT GenAI doesn't use it
-            del outputs["hidden_states"]
+            # del outputs["hidden_states"]
+            pass
 
         genai_config = {
             "model": {
