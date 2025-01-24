@@ -297,10 +297,10 @@ OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* oga_gene
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* oga_generator, int32_t* input_ids, size_t input_ids_count) {
+OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* oga_generator, const int32_t* input_ids, size_t input_ids_count) {
   OGA_TRY
   auto& generator = *reinterpret_cast<Generators::Generator*>(oga_generator);
-  generator.AppendTokens(Generators::cpu_span<int32_t>(input_ids, input_ids_count));
+  generator.AppendTokens(Generators::cpu_span<const int32_t>(input_ids, input_ids_count));
   return nullptr;
   OGA_CATCH
 }
@@ -337,11 +337,18 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
   // Copy data to ortvalue_clone
   auto element_size = Generators::SizeOf(type_info->GetElementType());
   auto data_size = type_info->GetElementCount() * element_size;
-  if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && generator.model_->device_type_ == Generators::DeviceType::CUDA) {
+  const auto device_type = ortvalue_output->GetTensorMemoryInfo().GetDeviceType();
+  if (device_type == OrtMemoryInfoDeviceType_CPU) {
+    std::copy(static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()),
+              static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()) + data_size,
+              static_cast<uint8_t*>(ortvalue_clone->GetTensorMutableRawData()));
+  } else if (device_type == OrtMemoryInfoDeviceType_GPU) {
 #if USE_CUDA
     cudaMemcpy(ortvalue_clone->GetTensorMutableRawData(), ortvalue_output->GetTensorMutableRawData(), data_size, cudaMemcpyDeviceToHost);
+#else
+    throw std::runtime_error("Unexpected error. Trying to access GPU memory but the project is not compiled with CUDA.");
 #endif
-  } else if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && generator.model_->device_type_ == Generators::DeviceType::DML) {
+  } else if (static_cast<int>(device_type) == 4) {
 #if USE_DML
     ComPtr<ID3D12Resource> gpu_resource;
     Ort::ThrowOnError(generator.model_->GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
@@ -354,13 +361,11 @@ OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator
         gpu_resource.Get(),
         0,
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+#else
+    throw std::runtime_error("Unexpected error. Trying to access DML memory but the project is not compiled with DML.");
 #endif
-  } else if (ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
-    std::copy(static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()),
-              static_cast<uint8_t*>(ortvalue_output->GetTensorMutableRawData()) + data_size,
-              static_cast<uint8_t*>(ortvalue_clone->GetTensorMutableRawData()));
   } else {
-    throw std::runtime_error("Unsupported Device type: " + std::to_string(ortvalue_output->GetTensorMemoryInfo().GetDeviceType()));
+    throw std::runtime_error("Unsupported device type: " + std::to_string(static_cast<int>(device_type)));
   }
 
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));

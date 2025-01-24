@@ -58,7 +58,7 @@ class Model:
         self.ep_attrs = {
             "cpu": {},
             "cuda": {
-                "enable_cuda_graph": extra_options.get("enable_cuda_graph", "0"),        # "1" if the model is able to enable cuda graph, "0" otherwise
+                "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",        # "1" if the model is able to enable cuda graph, "0" otherwise
             },
             "rocm": {
                 "tunable_op_enable": "1",
@@ -86,7 +86,7 @@ class Model:
             "past_key_values.key": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],    # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": ["batch_size", self.num_kv_heads, "past_sequence_length", self.head_size],  # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
         }
-        self.exclude_embeds = "exclude_embeds" in extra_options
+        self.exclude_embeds = extra_options.get("exclude_embeds", False)
         if self.exclude_embeds:
             self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
 
@@ -104,9 +104,12 @@ class Model:
             "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
             "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
-        self.exclude_lm_head = "exclude_lm_head" in extra_options
+        self.exclude_lm_head = extra_options.get("exclude_lm_head", False)
+        self.include_hidden_states = extra_options.get("include_hidden_states", False)
         if self.exclude_lm_head:
             self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
+        elif self.include_hidden_states:
+            self.output_names = ["hidden_states"] + self.output_names
 
         # Store names of nodes already created
         self.node_names = set()
@@ -168,6 +171,7 @@ class Model:
         # RotaryEmbedding-specific variables
         position_scale = config.rope_position_scale if hasattr(config, "rope_position_scale") else 1
         partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
+        rotemb_dim = int(self.head_size * partial_rotary_factor) if partial_rotary_factor != 1.0 else 0
         rope_theta = config.rope_theta if hasattr(config, "rope_theta") else config.rope_embedding_base if hasattr(config, "rope_embedding_base") else 10000
         self.rotemb_attrs = {
             "create_rotary_embedding_caches": True,          # Create cos/sin caches for rotary embeddings
@@ -175,8 +179,7 @@ class Model:
             "theta": rope_theta,                             # Base value if calculating cos/sin caches from scratch
             "partial_rotary_factor": partial_rotary_factor,  # Factor for partial rotary embeddings
             "interleaved": 0,                                # Interleave the rotary embeddings (e.g. [0, 0, 0, 1, 1, 1] to [0, 1, 0, 1, 0, 1], RotaryEmbedding kernel expects a default value of 0)
-            "num_heads": 0,                                  # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
-            "rotary_embedding_dim": 0,                       # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
+            "rotary_embedding_dim": rotemb_dim,              # For partial rotary embeddings (RotaryEmbedding kernel expects a default value of 0)
             "rescale_factors": 1,                            # Rescale factors when calculating `inv_freq` in rotary embeddings
             "t_dtype": torch.int64,                          # Torch dtype when calculating `t` in rotary embeddings
             "position_scale": position_scale,                # Scale value when calculating `t` in rotary embeddings
@@ -297,7 +300,7 @@ class Model:
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
             },
-            "use_qdq": False,           # Use QDQ format
+            "use_qdq": extra_options.get("use_qdq", False),           # Use QDQ format
         }
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
@@ -310,14 +313,24 @@ class Model:
             config = GenerationConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
         except:
             config = AutoConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+
         inputs = dict(zip(self.input_names, self.input_names))
         inputs.update({
             "past_key_names": "past_key_values.%d.key",
             "past_value_names": "past_key_values.%d.value",
         })
+        outputs = dict(zip(self.output_names, self.output_names))
+        outputs.update({
+            "present_key_names": "present.%d.key",
+            "present_value_names": "present.%d.value",
+        })
+        if "hidden_states" in outputs:
+            # Remove 'hidden_states' from 'outputs' entry in config since ORT GenAI doesn't use it
+            del outputs["hidden_states"]
+
         genai_config = {
             "model": {
-                "bos_token_id": config.bos_token_id if hasattr(config, "bos_token_id") else 1,  # config.bos_token_id not present in ChatGLM model configs.
+                "bos_token_id": config.bos_token_id if hasattr(config, "bos_token_id") and config.bos_token_id != None else 1,  # config.bos_token_id not present in ChatGLM model configs.
                 "context_length": self.context_length,
                 "decoder": {
                     "session_options" : {
@@ -328,11 +341,7 @@ class Model:
                     "head_size": self.head_size,
                     "hidden_size": self.hidden_size,
                     "inputs": inputs,
-                    "outputs": {
-                        "logits": "logits",
-                        "present_key_names": "present.%d.key",
-                        "present_value_names": "present.%d.value",
-                    },
+                    "outputs": outputs,
                     "num_attention_heads": self.num_attn_heads,
                     "num_hidden_layers": self.num_layers,
                     "num_key_value_heads": self.num_kv_heads,
@@ -364,7 +373,7 @@ class Model:
             ep_options = { self.ep : self.ep_attrs[self.ep] }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
-        if self.extra_options.get("prompt_templates", "0") == "1":
+        if self.extra_options.get("include_prompt_templates", False):
             prompt_templates = self._get_prompt_templates(model_name_or_path, extra_kwargs)
             if prompt_templates is not None:
                 genai_config["model"]["prompt_templates"] = prompt_templates
@@ -1012,7 +1021,7 @@ class Model:
 
         output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
         output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
-        if self.layernorm_attrs["last_layernorm"] and self.exclude_lm_head:
+        if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
             output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
 
@@ -1084,23 +1093,25 @@ class Model:
         cos_cache, sin_cache = emb.cos() * self.rotemb_attrs["mscale"], emb.sin() * self.rotemb_attrs["mscale"]
         return cos_cache, sin_cache
 
-    def make_rotary_embedding_caches(self, rotemb, **kwargs):
+    def make_rotary_embedding_caches(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
         sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
 
         if self.rotemb_attrs["create_rotary_embedding_caches"]:
-            if not hasattr(rotemb, "cos_cached"):
-                # Create cos/sin caches if not already created
-                cos_cache, sin_cache = self.make_rotary_embedding_caches_from_scratch()
-            else:
-                cos_cache, sin_cache = rotemb.cos_cached, rotemb.sin_cached
+            # Create cos/sin caches if not already created
+            cos_cache, sin_cache = self.make_rotary_embedding_caches_from_scratch()
 
-            # Reshape cos/sin cache from (M, H) to (M, H/2)
+            # Slice cos/sin caches from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
             cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
             cos_cache = cos_cache.astype(self.to_numpy_dtype[self.io_dtype])
             sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
             sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
+
+            # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
+            if self.rotemb_attrs["partial_rotary_factor"] != 1.0:
+                cos_cache = cos_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
+                sin_cache = sin_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
 
             if "cos_cache_name" not in kwargs and "sin_cache_name" not in kwargs:
                 # Save cos/sin caches to disk
@@ -1114,17 +1125,20 @@ class Model:
 
         return cos_cache_name, sin_cache_name
 
-    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
-        cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(rotemb)
+    def make_rotary_embedding(self, name, root_input, **kwargs):
+        cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
+        num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
 
         inputs = [root_input, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
         output = f"{name}/output_0"
-        self.make_node("RotaryEmbedding", inputs=inputs, outputs=[output], name=name, domain="com.microsoft", interleaved=self.rotemb_attrs["interleaved"], **kwargs)
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * (self.num_kv_heads if "k_rotary" in name else self.num_attn_heads)])
+        self.make_node(
+            "RotaryEmbedding", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
+            interleaved=self.rotemb_attrs["interleaved"], num_heads=(0 if self.rotemb_attrs["partial_rotary_factor"] == 1.0 else num_heads),  # default is 0 in RotaryEmbedding kernel
+            rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"],
+        )
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * num_heads])
 
     def make_rotary_embedding_multi_cache(self):
-        # Create dummy rotary embedding class
-        rotemb = type("RotaryEmbedding", (object,), {'content':{}})()
         if_cos_cache_output, if_sin_cache_output = "cos_cache", "sin_cache"
 
         # Create caches for when sequence_length > self.original_context_length
@@ -1134,20 +1148,20 @@ class Model:
 
         # DML doesn't support dynamic selection of the cos/sin cache, so we always use the biggest one
         if self.ep == "dml":
-            self.make_rotary_embedding_caches(rotemb)
+            self.make_rotary_embedding_caches()
             self.make_value_info(if_cos_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
             self.make_value_info(if_sin_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
             return
 
         cos_cache_large_name, sin_cache_large_name = "cos_cache_large", "sin_cache_large"
-        cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches(rotemb, cos_cache_name=cos_cache_large_name, sin_cache_name=sin_cache_large_name)
+        cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_large_name, sin_cache_name=sin_cache_large_name)
 
         # Create caches for when sequence_length <= self.original_context_length
         self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
         self.rotemb_attrs["cache_length"] = self.original_context_length
         self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["short_mscale"]
         cos_cache_small_name, sin_cache_small_name = "cos_cache_small", "sin_cache_small"
-        cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(rotemb, cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
+        cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
 
         self.rotemb_attrs["create_rotary_embedding_caches"] = False
 
@@ -1473,6 +1487,9 @@ class Model:
         #                    |
         #                  O_Add
 
+        # Unpack attention weights if needed
+        self.make_attention_unpacked(layer_id, attention, root_input, **kwargs)
+
         # Make MatMul nodes
         if self.attention_attrs["use_packed_matmul"]:
             # Combine 3 MatMuls into 1 packed MatMul
@@ -1518,13 +1535,13 @@ class Model:
         # Make RotaryEmbedding nodes
         cos_cache_name, sin_cache_name = "", ""
         if self.attention_attrs["use_rotemb_in_attn"]:
-            cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches(attention.rotary_emb)
+            cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
         else:
             q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
-            self.make_rotary_embedding(attention.rotary_emb, q_rotary_name, root_input=self.attention_attrs["q_path"], position_ids=kwargs.get("position_ids", "position_ids"))
+            self.make_rotary_embedding(q_rotary_name, root_input=self.attention_attrs["q_path"], position_ids=kwargs.get("position_ids", "position_ids"))
             self.attention_attrs["q_path"] = f"{q_rotary_name}/output_0"
             k_rotary_name = f"/model/layers.{layer_id}/attn/k_rotary/RotaryEmbedding"
-            self.make_rotary_embedding(attention.rotary_emb, k_rotary_name, root_input=self.attention_attrs["k_path"], position_ids=kwargs.get("position_ids", "position_ids"))
+            self.make_rotary_embedding(k_rotary_name, root_input=self.attention_attrs["k_path"], position_ids=kwargs.get("position_ids", "position_ids"))
             self.attention_attrs["k_path"] = f"{k_rotary_name}/output_0"
 
         # Make repeat KV nodes (Note: `repeat_kv` needs to be kept since GroupQueryAttention isn't supported for FP32 CUDA)
@@ -1562,8 +1579,10 @@ class Model:
         self.layernorm_attrs["skip_input"] = f"{o_matmul_name if not o_bias_exists else o_add_name}/output_0"
 
     def make_attention_unpacked(self, layer_id, attention, root_input, **kwargs):
-        qkv_proj = 'qkv_proj' if hasattr(attention, 'qkv_proj') else 'query_key_value'
-        qkv_linear = eval(f"attention.{qkv_proj}")
+        qkv_linear = getattr(attention, "qkv_proj", None) or getattr(attention, "query_key_value", None)
+        if qkv_linear is None:
+            # Return early if there's nothing to unpack
+            return
 
         if hasattr(qkv_linear, "base_layer"):
             # For LoRA packed `MatMul`
@@ -1572,12 +1591,8 @@ class Model:
             # For regular packed `MatMul`
             return self.make_attention_unpacked_regular(layer_id, attention, qkv_linear, root_input, **kwargs)
 
-        # Delete original packed weights and any references to them (e.g. `del qkv_linear` isn't sufficient)
+        # Delete original packed weights
         del qkv_linear
-        if hasattr(attention, 'qkv_proj'):
-            del attention.qkv_proj
-        else:
-            del attention.query_key_value
 
     def make_attention_unpacked_lora(self, layer_id, attention, qkv_linear, root_input, **kwargs):
         from peft.tuners.lora.layer import LoraLayer
@@ -1646,6 +1661,9 @@ class Model:
         attention.v_proj.bias = None if qkv_linear.bias is None else torch.nn.Parameter(qkv_linear.bias[q_size + kv_size :], requires_grad=False)
 
     def make_mlp(self, layer_id, mlp, root_input):
+        # Unpack MLP weights if needed
+        self.make_mlp_unpacked(layer_id, mlp, root_input)
+
         if self.mlp_attrs["use_proj"]:
             self.make_mlp_proj(layer_id, mlp, root_input)
         elif self.mlp_attrs["use_fc"]:
@@ -1654,6 +1672,11 @@ class Model:
             raise NotImplementedError(f"The MLP layer type is not set.")
 
     def make_mlp_unpacked(self, layer_id, mlp, root_input):
+        gate_up_linear = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
+        if gate_up_linear is None:
+            # Return early if there's nothing to unpack
+            return
+
         if hasattr(mlp, "base_layer"):
             # For LoRA packed `MatMul`
             return self.make_mlp_unpacked_lora(layer_id, mlp, root_input)
@@ -1661,65 +1684,97 @@ class Model:
             # For regular packed `MatMul`
             return self.make_mlp_unpacked_regular(layer_id, mlp, root_input)
 
+        # Delete original packed weights
+        del gate_up_linear
+
     def make_mlp_unpacked_lora(self, layer_id, mlp, root_input):
         from peft.tuners.lora.layer import LoraLayer
+        gate_up_linear = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
 
         # Create GateProj/UpProj base layers
         gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        gate_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[ : self.intermediate_size, :], requires_grad=False)
+        gate_proj.weight = torch.nn.Parameter(gate_up_linear.weight[ : self.intermediate_size, :], requires_grad=False)
+        gate_proj.bias = None if gate_up_linear.bias is None else torch.nn.Parameter(gate_up_linear.bias[: self.intermediate_size], requires_grad=False)
 
         up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        up_proj.weight = torch.nn.Parameter(mlp.gate_up_proj.weight[self.intermediate_size :, :], requires_grad=False)
+        up_proj.weight = torch.nn.Parameter(gate_up_linear.weight[self.intermediate_size :, :], requires_grad=False)
+        up_proj.bias = None if gate_up_linear.bias is None else torch.nn.Parameter(gate_up_linear.bias[self.intermediate_size :], requires_grad=False)
 
         # Create GateProj/UpProj lora_B layers
         lora_B = mlp.lora_B.default
 
         gate_proj_lora_B = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
         gate_proj_lora_B.weight = torch.nn.Parameter(lora_B.weight[ : self.intermediate_size, :], requires_grad=False)
+        gate_proj_lora_B.bias = None if lora_B.bias is None else torch.nn.Parameter(lora_B.bias[: self.intermediate_size], requires_grad=False)
 
         up_proj_lora_B = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
         up_proj_lora_B.weight = torch.nn.Parameter(lora_B.weight[self.intermediate_size :, :], requires_grad=False)
+        up_proj_lora_B.bias = None if lora_B.bias is None else torch.nn.Parameter(lora_B.bias[self.intermediate_size :], requires_grad=False)
 
         # Create GateProj/UpProj LoRA layers
         mlp.gate_proj = LoraLayer(q_proj)
-        mlp.gate_proj.lora_A = mlp.gate_up_proj.lora_A
+        mlp.gate_proj.lora_A = gate_up_linear.lora_A
         mlp.gate_proj.lora_B.default = gate_proj_lora_B
-        mlp.gate_proj.scaling = mlp.gate_up_proj.scaling
+        mlp.gate_proj.scaling = gate_up_linear.scaling
 
         mlp.up_proj = LoraLayer(k_proj)
-        mlp.up_proj.lora_A = mlp.gate_up_proj.lora_A
+        mlp.up_proj.lora_A = gate_up_linear.lora_A
         mlp.up_proj.lora_B.default = up_proj_lora_B
-        mlp.up_proj.scaling = mlp.gate_up_proj.scaling
+        mlp.up_proj.scaling = gate_up_linear.scaling
 
     def make_mlp_unpacked_regular(self, layer_id, mlp, root_input):
-        packed_proj = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
+        gate_up_linear = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
+
         mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        mlp.gate_proj.weight = torch.nn.Parameter(packed_proj.weight[: self.intermediate_size, :])
+        mlp.gate_proj.weight = torch.nn.Parameter(gate_up_linear.weight[: self.intermediate_size, :], requires_grad=False)
+        mlp.gate_proj.bias = None if gate_up_linear.bias is None else torch.nn.Parameter(gate_up_linear.bias[: self.intermediate_size], requires_grad=False)
 
         mlp.up_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
-        mlp.up_proj.weight = torch.nn.Parameter(packed_proj.weight[self.intermediate_size :, :])
-
-        # Delete original packed weights
-        del packed_proj
+        mlp.up_proj.weight = torch.nn.Parameter(gate_up_linear.weight[self.intermediate_size :, :])
+        mlp.up_proj.bias = None if gate_up_linear.bias is None else torch.nn.Parameter(gate_up_linear.bias[self.intermediate_size :], requires_grad=False)
 
     def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
         #
-        #           root_input
-        #          /          \
+        #            root_input
+        #           /          \
+        #          /            \
         #   UpProjMatMul    GateProjMatMul
-        #          \          |
-        #           \     ActFunc
-        #            \   /
-        #             Mul
-        #              |
-        #        DownProjMatMul
+        #         |              |
+        #     UpProjAdd     GateProjAdd
+        #          \             |
+        #           \         ActFunc
+        #            \       /
+        #             \     /
+        #              \   /
+        #               Mul
+        #                |
+        #          DownProjMatMul
+        #                |
+        #           DownProjAdd
 
-        # Make MatMul nodes
-        gate_basename = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
-        gate_name = self.make_matmul(mlp.gate_proj, gate_basename, root_input)
-        up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
-        up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
+        # Check if Add nodes need to be made (if bias exists)
+        gate_bias_exists = mlp.gate_proj.bias is not None and torch.count_nonzero(mlp.gate_proj.bias) > 0
+        up_bias_exists = mlp.up_proj.bias is not None and torch.count_nonzero(mlp.up_proj.bias) > 0
+        down_bias_exists = mlp.down_proj.bias is not None and torch.count_nonzero(mlp.down_proj.bias) > 0
+
+        # Make Gate proj nodes
+        gate_matmul_basename = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
+        gate_matmul_name = self.make_matmul(mlp.gate_proj, gate_matmul_basename, root_input)
+        gate_name = gate_matmul_name
+        if gate_bias_exists:
+            gate_add_name = f"/model/layers.{layer_id}/mlp/gate_proj/Add"
+            self.make_add_bias(mlp.gate_proj.bias.detach().numpy(), gate_add_name, root_input=f"{gate_name}/output_0")
+            gate_name = gate_add_name
+
+        # Make Up proj nodes
+        up_matmul_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
+        up_matmul_name = self.make_matmul(mlp.up_proj, up_matmul_basename, root_input)
+        up_name = up_matmul_name
+        if up_bias_exists:
+            up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
+            self.make_add_bias(mlp.up_proj.bias.detach().numpy(), up_add_name, root_input=f"{up_name}/output_0")
+            up_name = up_add_name
 
         # Make activation node(s)
         act_fn_name = self.make_activation(layer_id, root_input=f"{gate_name}/output_0")
@@ -1731,8 +1786,13 @@ class Model:
 
         # Make output MatMul node
         down_proj = getattr(mlp, "down_proj", None) or getattr(mlp, "dense_4h_to_h", None)
-        down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
-        down_name = self.make_matmul(down_proj, down_basename, f"{mul_name}/output_0")
+        down_matmul_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
+        down_matmul_name = self.make_matmul(down_proj, down_matmul_basename, f"{mul_name}/output_0")
+        down_name = down_matmul_name
+        if down_bias_exists:
+            down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
+            self.make_add_bias(mlp.down_proj.bias.detach().numpy(), down_add_name, root_input=f"{down_name}/output_0")
+            down_name = down_add_name
 
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
@@ -1752,23 +1812,33 @@ class Model:
         #              |
         #           FC2_Add
 
+        # Check if Add nodes need to be made (if bias exists)
+        fc1_bias_exists = mlp.fc1.bias is not None and torch.count_nonzero(mlp.fc1.bias) > 0
+        fc2_bias_exists = mlp.fc2.bias is not None and torch.count_nonzero(mlp.fc2.bias) > 0
+
         # Make first layer of fully connected nodes (FC1)
         fc1_matmul_basename = f"/model/layers.{layer_id}/mlp/fc1/MatMul"
         fc1_matmul_name = self.make_matmul(mlp.fc1, fc1_matmul_basename, root_input)
-        fc1_add_name = f"/model/layers.{layer_id}/mlp/fc1/Add"
-        self.make_add_bias(mlp.fc1.bias.detach().numpy(), fc1_add_name, root_input=f"{fc1_matmul_name}/output_0")
+        fc1_name = fc1_matmul_name
+        if fc1_bias_exists:
+            fc1_add_name = f"/model/layers.{layer_id}/mlp/fc1/Add"
+            self.make_add_bias(mlp.fc1.bias.detach().numpy(), fc1_add_name, root_input=f"{fc1_name}/output_0")
+            fc1_name = fc1_add_name
 
         # Make activation function
-        act_fn_name = self.make_activation(layer_id, root_input=f"{fc1_add_name}/output_0")
+        act_fn_name = self.make_activation(layer_id, root_input=f"{fc1_name}/output_0")
 
         # Make second layer of fully connected nodes (FC2)
         fc2_matmul_basename = f"/model/layers.{layer_id}/mlp/fc2/MatMul"
         fc2_matmul_name = self.make_matmul(mlp.fc2, fc2_matmul_basename, root_input=f"{act_fn_name}/output_0")
-        fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
-        self.make_add_bias(mlp.fc2.bias.detach().numpy(), fc2_add_name, root_input=f"{fc2_matmul_name}/output_0")
+        fc2_name = fc2_matmul_name
+        if fc2_bias_exists:
+            fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
+            self.make_add_bias(mlp.fc2.bias.detach().numpy(), fc2_add_name, root_input=f"{fc2_name}/output_0")
+            fc2_name = fc2_add_name
 
         # Assign output 0 of MLP layer as output of last layer
-        self.mlp_attrs["output_0"] = f"{fc2_add_name}/output_0"
+        self.mlp_attrs["output_0"] = f"{fc2_name}/output_0"
 
     def make_block_sparse_moe(self, layer_id, bsm, root_input):
         # Make nodes for the QMoE subgraph
@@ -1959,24 +2029,28 @@ class Model:
         return output_name
 
     def make_lm_head(self, lm_head):
+        # Check if there are ops to insert after MatMul
         bias_exists = lm_head.bias is not None
         scale_exists = self.lm_head_attrs["scale"] != 1
         mask_exists = self.lm_head_attrs["mask"] is not None
 
         matmul_basename = "/lm_head/MatMul"
         root_input = self.layernorm_attrs["output_0"]
-        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not bias_exists and not scale_exists)
+        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not(bias_exists or scale_exists or mask_exists))
+        lm_name = matmul_name
 
         if bias_exists:
             add_name = "/lm_head/Add"
-            self.make_add_bias(lm_head.bias.detach().numpy(), add_name, root_input=f"{matmul_name}/output_0", logits=not scale_exists)
+            self.make_add_bias(lm_head.bias.detach().numpy(), add_name, root_input=f"{lm_name}/output_0", logits=not(scale_exists or mask_exists))
+            lm_name = add_name
 
         if scale_exists:
             mul_name = "/lm_head/Mul"
-            mul_inputs = [f"{matmul_name if not bias_exists else add_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
+            mul_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
             mul_output = "logits" if not mask_exists else f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
             self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
+            lm_name = mul_name
 
         if mask_exists:
             # Save logits mask as initializer
@@ -1984,10 +2058,11 @@ class Model:
             self.make_external_tensor(self.lm_head_attrs["mask"].detach().numpy(), logits_mask_name)
 
             where_name = "/lm_head/Where"
-            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{mul_name}/output_0"]
+            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{lm_name}/output_0"]
             where_output = "logits"
             self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
             self.make_value_info(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
+            lm_name = where_name
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
@@ -2026,17 +2101,7 @@ class Model:
                 from onnxruntime_genai.models.quantized_model import QuantModel
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
-            model = QuantModel.from_pretrained(
-                self.quant_type,
-                input_path,
-                self.quant_attrs["bits"],
-                self.quant_attrs["group_size"],
-                self.quant_attrs["use_g_idx"],
-                q_size,
-                kv_size,
-                self.intermediate_size,
-                self.num_layers,
-            )
+            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"], q_size, kv_size, self.intermediate_size, self.num_layers)
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
@@ -2095,7 +2160,7 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
-        if self.ep_attrs["cuda"]["enable_cuda_graph"] == "1" or self.ep == "dml":
+        if self.extra_options.get("enable_cuda_graph", False) or self.ep == "dml":
             # ORT does not allow nodes to be placed on mulitple execution providers
             # with cuda graph enabled. We've only verified it works with GQA and with
             # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded
@@ -2553,14 +2618,8 @@ class QwenModel(MistralModel):
 class PhiModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        # self.input_shapes["position_ids"] = [1]  # Note: This is optional and only needed if you want position_ids to be an int instead of a 2D tensor
         self.layernorm_attrs["simple"] = False
-        self.rotemb_attrs["num_heads"] = self.num_attn_heads
-        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
         self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = False, True
-
-    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
-        super().make_rotary_embedding(rotemb, name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
 
     def make_layer(self, layer_id, layer):
         # Each Phi decoder layer is defined as:
@@ -2651,59 +2710,12 @@ class Gemma2Model(GemmaModel):
         self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
 
-class Phi3Mini4KModel(MistralModel):
+class Phi3MiniModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        if self.quant_type is None:
-            super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
-        super().make_attention(layer_id, attention, root_input, **kwargs)
 
-    def make_mlp_proj(self, layer_id, mlp, root_input):
-        if self.quant_type is None:
-            super().make_mlp_unpacked(layer_id, mlp, root_input)
-        super().make_mlp_proj(layer_id, mlp, root_input)
-
-class NemotronModel(LlamaModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.layernorm_attrs["simple"] = False
-        self.layernorm_attrs["add_offset"] = 1
-        self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
-
-    def make_mlp_proj(self, layer_id, mlp, root_input):
-        # Make nodes for the MLP subgraph
-        #
-        #          root_input
-        #              |
-        #         UpProjMatMul
-        #              |
-        #           ActFunc
-        #              |
-        #         DownProjMatMul
-
-        up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
-        up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
-
-        act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")
-
-        # Make output MatMul node
-        down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
-        down_name = self.make_matmul(mlp.down_proj, down_basename, f"{act_fn_name}/output_0")
-
-        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
-        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
-
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
-        return super().make_attention(layer_id, attention, root_input, **kwargs)
-
-    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
-        num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
-        super().make_rotary_embedding(rotemb, name, root_input, num_heads=num_heads, rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
-
-class Phi3Mini128KModel(Phi3Mini4KModel):
+class Phi3MiniLongRoPEModel(Phi3MiniModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
@@ -2731,34 +2743,35 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
 
         return add_1_name
         
-    def make_rotary_embedding_caches(self, rotemb, **kwargs):
+    def make_rotary_embedding_caches(self, **kwargs):
         if self.ep != "dml":
-            cos_cache_name, sin_cache_name = super().make_rotary_embedding_caches(rotemb, **kwargs)
+            cos_cache_name, sin_cache_name = super().make_rotary_embedding_caches(**kwargs)
             return cos_cache_name, sin_cache_name
 
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
         sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
 
         if self.rotemb_attrs["create_rotary_embedding_caches"]:
-            if not hasattr(rotemb, "cos_cached"):
-                # Create cos/sin caches if not already created
-                # concate 4k and 128k cos/sin caches for phi3/phi3.5 and dml EP only
-                cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches_from_scratch()
-                self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
-                self.rotemb_attrs["cache_length"] = self.original_context_length
-                self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["short_mscale"]
-                cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches_from_scratch()
-                cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
-                sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
-            else:
-                cos_cache, sin_cache = rotemb.cos_cached, rotemb.sin_cached
+            # Concat 4K and 128K cos/sin caches for DML EP only
+            cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches_from_scratch()
+            self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
+            self.rotemb_attrs["cache_length"] = self.original_context_length
+            self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["short_mscale"]
+            cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches_from_scratch()
+            cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
+            sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
 
-            # Reshape cos/sin cache from (M, H) to (M, H/2)
+            # Slice cos/sin caches from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
             cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
             cos_cache = cos_cache.astype(self.to_numpy_dtype[self.io_dtype])
             sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
             sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
+
+            # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
+            if self.rotemb_attrs["partial_rotary_factor"] != 1.0:
+                cos_cache = cos_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
+                sin_cache = sin_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
 
             if "cos_cache_name" not in kwargs and "sin_cache_name" not in kwargs:
                 # Save cos/sin caches to disk
@@ -2772,7 +2785,8 @@ class Phi3Mini128KModel(Phi3Mini4KModel):
 
         return cos_cache_name, sin_cache_name
 
-class Phi3Small8KModel(Model):
+
+class Phi3SmallModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
@@ -2971,18 +2985,18 @@ class Phi3Small8KModel(Model):
         self.layernorm_attrs["skip_input"] = f"{down_add_name}/output_0"
 
 
-class Phi3Small128KModel(Phi3Small8KModel):
+class Phi3SmallLongRoPEModel(Phi3SmallModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
 
 
-class Phi3VModel(Phi3Mini128KModel):
+class Phi3VModel(Phi3MiniLongRoPEModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
 
-class Phi3MoE128KModel(MistralModel):
+class Phi3MoELongRoPEModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         assert io_dtype == TensorProto.FLOAT16, "This model only supports float16 io type."
@@ -2994,13 +3008,13 @@ class Phi3MoE128KModel(MistralModel):
         self.moe_attrs["activation_type"] = "silu"
         self.moe_attrs["normalize_routing_weights"] = 0
         self.moe_attrs["use_sparse_mixer"] = 1
-        self.moe_attrs["use_int4"] = 0 if "use_8bits_moe" in extra_options and extra_options["use_8bits_moe"] == "1" else 1
+        self.moe_attrs["use_int4"] = 0 if extra_options.get("use_8bits_moe", False) else 1
 
         self.make_rotary_embedding_multi_cache()
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
-        # input_layernorm --> attention --> MLP --> output_layernorm
+        # input_layernorm --> attention --> output_layernorm --> MoE
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
         self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
@@ -3012,43 +3026,105 @@ class Phi3MoE128KModel(MistralModel):
             self.layernorm_attrs["last_layernorm"] = True
 
 
+class NemotronModel(LlamaModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.layernorm_attrs["simple"] = False
+        self.layernorm_attrs["add_offset"] = 1
+
+    def make_mlp_proj(self, layer_id, mlp, root_input):
+        # Make nodes for the MLP subgraph
+        #
+        #          root_input
+        #              |
+        #         UpProjMatMul
+        #              |
+        #           ActFunc
+        #              |
+        #         DownProjMatMul
+
+        up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
+        up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
+
+        act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")
+
+        # Make output MatMul node
+        down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
+        down_name = self.make_matmul(mlp.down_proj, down_basename, f"{act_fn_name}/output_0")
+
+        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
+
+
 class ChatGLMModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.rotemb_attrs["partial_rotary_factor"] = 0.5  # Line 755 of modeling_chatglm.py check self.rotary_pos_emb declaration
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
-        self.rotemb_attrs["partial_rotary_factor"] = 0.5 # Line 755 of modeling_chatglm.py check self.rotary_pos_emb declaration
         self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
         self.rotemb_attrs["interleaved"] = 1
-
-    def make_rotary_embedding(self, rotemb, name, root_input, **kwargs):
-        super().make_rotary_embedding(rotemb, name, root_input, num_heads=self.rotemb_attrs["num_heads"], rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"], **kwargs)
-
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        if self.quant_type is None:
-            super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
-            # Add dummy rotary_emb attribute
-            attention.rotary_emb = type("RotaryEmbedding", (object,), {'content':{}})()
-        return super().make_attention(layer_id, attention, root_input, **kwargs)
-
-
-    def make_mlp_proj(self, layer_id, mlp, root_input):
-        if self.quant_type is None:
-            super().make_mlp_unpacked(layer_id, mlp, root_input)
-        super().make_mlp_proj(layer_id, mlp, root_input)
 
     def make_layer(self, layer_id, layer):
         layer.self_attn = layer.self_attn if hasattr(layer, 'self_attn') else layer.self_attention
         super().make_layer(layer_id, layer)
 
+class OLMoModel(Model):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
+        layernorm.weight = torch.ones(self.hidden_size)
+        layernorm.bias = torch.zeros(self.hidden_size)
+        super().make_layernorm(layer_id, layernorm, skip, simple, location)
+
+class GraniteModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.embed_attrs["scale"] = config.embedding_multiplier
+        self.attention_attrs["scale"] = config.attention_multiplier
+        self.lm_head_attrs["scale"] = 1 / config.logits_scaling
+        self.residual_scale = config.residual_multiplier
+
+    def make_layer(self, layer_id, layer):
+        # Each Granite decoder layer is defined as:
+        # input_layernorm --> attention --> Mul --> output_layernorm --> MLP --> Mul
+        self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
+        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
+
+        residual_mul_1_name = f"/model/layers.{layer_id}/residual_mul/Mul_1"
+        residual_mul_1_inputs = [self.layernorm_attrs["skip_input"], f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.residual_scale}"]
+        self.make_mul(residual_mul_1_name, residual_mul_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        # Assign output 0 of previous output node as skip input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{residual_mul_1_name}/output_0"
+
+        self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
+        self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
+
+        residual_mul_2_name = f"/model/layers.{layer_id}/residual_mul/Mul_2"
+        residual_mul_2_inputs = [self.layernorm_attrs["skip_input"], f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.residual_scale}"]
+        self.make_mul(residual_mul_2_name, residual_mul_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        # Assign output 0 of previous output node as skip input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{residual_mul_2_name}/output_0"
+
+        self.layernorm_attrs["first_layernorm"] = False
+        if layer_id == self.num_layers - 1:
+            # Norm after last decoder layer of model (last layer --> norm)
+            self.layernorm_attrs["last_layernorm"] = True
+
+
 def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
     """
-    if "int4_is_symmetric" in kv_pairs:
-        if kv_pairs["int4_is_symmetric"] in {"false", "False", "0"}:
-            kv_pairs["int4_is_symmetric"] = False
-        elif kv_pairs["int4_is_symmetric"] in {"true", "True", "1"}:
-            kv_pairs["int4_is_symmetric"] = True
+    bools = ["int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "use_8bits_moe", "use_qdq", "include_prompt_templates"]
+    for key in bools:
+        if key in kv_pairs:
+            if kv_pairs[key] in {"false", "False", "0"}:
+                kv_pairs[key] = False
+            elif kv_pairs[key] in {"true", "True", "1"}:
+                kv_pairs[key] = True
+            else:
+                raise ValueError(f"{key} must be false/False/0 or true/True/1.")
     
     if "int4_op_types_to_quantize" in kv_pairs:
         op_types_to_quantize = ()
@@ -3056,11 +3132,10 @@ def check_extra_options(kv_pairs):
             op_types_to_quantize += (op_type, )
         kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
 
-    if "use_8bits_moe" in kv_pairs:
-        assert(kv_pairs["use_8bits_moe"] == "1" or kv_pairs["use_8bits_moe"] == "0"), "use_8bits_moe must be 0 or 1."
-
-    if "enable_cuda_graph" in kv_pairs:
-        assert(kv_pairs["enable_cuda_graph"] == "1" or kv_pairs["enable_cuda_graph"] == "0"), "enable_cuda_graph must be 0 or 1."
+    if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
+        # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
+        # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
+        raise ValueError(f"Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
 
 def parse_extra_options(kv_items):
@@ -3117,42 +3192,46 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     if "config_only" not in extra_options:
         # List architecture options in alphabetical order
-        if config.architectures[0] == "GemmaForCausalLM":
+        if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
+            # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
+            config.hidden_act = "swiglu"
+            onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "GemmaForCausalLM":
             onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
             onnx_model = Gemma2Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "GraniteForCausalLM":
+            onnx_model = GraniteModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "LlamaForCausalLM":
             onnx_model = LlamaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "MistralForCausalLM":
             onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "NemotronForCausalLM":
+            onnx_model = NemotronModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "OlmoForCausalLM":
+            onnx_model = OLMoModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiForCausalLM":
             onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 4096:
-            onnx_model = Phi3Mini4KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == 131072:
-            onnx_model = Phi3Mini128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings == 131072:
+        elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+            onnx_model = Phi3MiniModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+            onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
             print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
             print("WARNING: This model currently only supports quantized version. Setting `--precision int4` by default.")
             execution_provider = "cuda"
             precision = "int4"
-            onnx_model = Phi3MoE128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 8192:
-            onnx_model = Phi3Small8KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == 131072:
-            onnx_model = Phi3Small128KModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3MoELongRoPEModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+            onnx_model = Phi3SmallModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+            onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3VForCausalLM":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             extra_options["exclude_embeds"] = True
             onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen2ForCausalLM":
             onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "NemotronForCausalLM":
-            onnx_model = NemotronModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
-            # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
-            config.hidden_act = "swiglu"
-            onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
@@ -3250,21 +3329,31 @@ def get_args():
                     The filename for each component will be '<filename>_<component-name>.onnx' (ex: '<filename>_encoder.onnx', '<filename>_decoder.onnx').
                 config_only = Generate config and pre/post processing files only.
                     Use this option when you already have your optimized and/or quantized ONNX model.
+                hf_token = false/token: Use this to manage authentication with Hugging Face.
+                    Default behavior is to use the authentication token stored by `huggingface-cli login`.
+                    If false, authentication with Hugging Face will be disabled.
+                    If token, you can provide a custom authentication token that differs from the one stored in your environment.
+                    If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
                 exclude_embeds = Remove embedding layer from your ONNX model.
                     Use this option when you want to remove the embedding layer from within your ONNX model.
                     Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
-                enable_cuda_graph = 1: The model can use CUDA graph capture for CUDA execution provider. If enabled, all nodes being placed on the CUDA EP
-                    is the prerequisite for the CUDA graph to be used correctly. It is not guaranteed that cuda graph be enabled as it depends on the model
-                    and the graph structure.
-                use_8bits_moe = 1: Use 8-bit quantization for MoE layers. Default is using 4-bit quantization.
-                hf_token = false/token: Use this to disable authentication with Hugging Face or provide a custom authentication token that differs from the one stored in your environment. Default behavior is to use the authentication token stored by `huggingface-cli login`.
-                    If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
-                use_qdq = 1: Use the QDQ decomposition for quantized MatMul instead of the MatMulNBits operator.
+                include_hidden_states = Include hidden states as output from your ONNX model.
+                    Use this option when you want to have the hidden states as an output from your ONNX model.
+                    In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
+                enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
+                    If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
+                    It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
+                use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
+                    If true, the QMoE op will use 4-bit quantization. If false, the QMoE op will use 8-bits quantization.
+                use_qdq = Use the QDQ decomposition for ops.
+                    Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
-                prompt_templates = 1: Include per-role prompt templates in the GenAI config file. Default is 0 (not to include).
+                    Use this option for LoRA models.
+                include_prompt_templates = Include prompt templates in the GenAI config file. Default is false.
+                    Use this option to include per-role prompt templates in the `genai_config.json` file.
             """),
     )
 

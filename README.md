@@ -1,20 +1,21 @@
-# ONNX Runtime generate() API
+# ONNX Runtime GenAI
+
+## *Main branch contains new API changes and examples in main branch reflect these changes. For example scripts compatible with current release (0.5.2), [see release branch](https://github.com/microsoft/onnxruntime-genai/tree/rel-0.5.2).*
+
 
 [![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed/absoluteLatest)
 
-Run Llama, Phi, Gemma, Mistral with ONNX Runtime.
+Run generative AI models with ONNX Runtime.
 
 This API gives you an easy, flexible and performant way of running LLMs on device. 
 
 It implements the generative AI loop for ONNX models, including pre and post processing, inference with ONNX Runtime, logits processing, search and sampling, and KV cache management.
 
-You can call a high level `generate()` method to generate all of the output at once, or stream the output one token at a time.
-
 See documentation at https://onnxruntime.ai/docs/genai.
 
 |Support matrix|Supported now|Under development|On the roadmap|
-|-|-|-|-|
-|Model architectures|  Gemma <br/> Llama * <br/> Mistral + <br/>Phi (language + vision)<br/>Qwen <br/>Nemotron <br/>|Whisper|Stable diffusion|
+| -------------- | ------------- | ----------------- | -------------- |
+| Model architectures | Gemma <br/> Llama * <br/> Mistral + <br/> Phi (language + vision) <br/> Qwen <br/> Nemotron <br/> Granite <br/> AMD OLMo | Whisper | Stable diffusion |
 |API| Python <br/>C# <br/>C/C++ <br/> Java ^ |Objective-C||
 |Platform| Linux <br/> Windows <br/>Mac ^ <br/>Android ^  ||iOS |||
 |Architecture|x86 <br/> x64 <br/> Arm64 ~ ||||
@@ -31,7 +32,7 @@ See documentation at https://onnxruntime.ai/docs/genai.
 
 ## Installation
 
-See https://onnxruntime.ai/docs/genai/howto/install
+See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install) or [build from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html)
 
 ## Sample code for Phi-3 in Python
 
@@ -50,7 +51,7 @@ See https://onnxruntime.ai/docs/genai/howto/install
 
 3. Run the model
 
-   ## Build from source / Next release (0.6.0)
+   ### Build from source / Next release (0.6.0)
 
    ```python
    import onnxruntime_genai as og
@@ -96,7 +97,7 @@ See https://onnxruntime.ai/docs/genai/howto/install
    del generator
    ```
 
-   ## Current release (until 0.5.x)
+   ### Current release (until 0.5.x)
 
    ```python
    import onnxruntime_genai as og

@@ -5,21 +5,11 @@
 
 namespace Generators {
 
-InputIDs::InputIDs(State& state)
+DefaultInputIDs::DefaultInputIDs(State& state)
     : state_{state} {
   name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
-  shape_ = {state_.params_->BatchBeamSize(), 0};
+  shape_ = {state_.params_->search.batch_size, 0};
   type_ = model_.session_info_->GetInputDataType(name_);
-
-  if (state_.GetCapturedGraphInfo()) {
-    sb_input_ids_ = state_.GetCapturedGraphInfo()->sb_input_ids_.get();
-
-#if USE_DML
-    if (model_.device_type_ == DeviceType::DML) {
-      sb_input_ids_int32_ = state_.GetCapturedGraphInfo()->sb_input_ids_int32_.get();
-    }
-#endif
-  }
 
   if (model_.session_info_->HasInput(model_.config_->model.decoder.inputs.current_sequence_length) &&
       model_.session_info_->HasInput(model_.config_->model.decoder.inputs.past_sequence_length)) {
@@ -36,12 +26,12 @@ InputIDs::InputIDs(State& state)
     current_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, current_sequence_length_shape, model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.current_sequence_length));
     *current_sequence_length_->GetTensorMutableData<int32_t>() = 0;
 
-    past_sequence_length_ = OrtValue::CreateTensor(*model_.allocator_device_, past_sequence_length_shape, model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length));
+    past_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, past_sequence_length_shape, model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length));
     *past_sequence_length_->GetTensorMutableData<int32_t>() = -1;
   }
 }
 
-void InputIDs::Add() {
+void DefaultInputIDs::Add() {
   input_index_ = state_.inputs_.size();
 
   state_.inputs_.push_back(value_.get());
@@ -55,7 +45,52 @@ void InputIDs::Add() {
   }
 }
 
-void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
+void DefaultInputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
+  // There are three scopes involved when the Update function is called:
+  // 1. A new Generator state has been just created. This is a prompt stage, and value_ is a nullptr.
+  //    i.e. this is the very first time ever that Update is being called for this Generator.
+  // 2. We move to the token generation stage. value_ has already been previously created in the prompt stage.
+  //    Update is called on every new token generated.
+  // 3. We move from the token generation stage back to the prompt stage (e.g. in continous decoding). value_ is already created.
+
+  // For instances where the value_ is not created, we need handle graph capture correctly.
+  // For subsequent prompt stages, the limiting factor is that the subsequent prompts can not
+  // be larger than the first prompt (when graph capture is enabled).
+  if (!value_) {
+    shape_[1] = static_cast<int64_t>(new_tokens.size()) / shape_[0];
+
+    // If 64-bit, convert from 32-bit to 64-bit
+    auto input_ids = new_tokens.CopyDeviceToCpu();
+    if (type_ == Ort::TypeToTensorType<int64_t>) {
+      value_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape_, type_);
+      auto* p_data = value_->GetTensorMutableData<int64_t>();
+      for (auto v : input_ids) {
+        *p_data++ = v;
+      }
+    } else {
+      if (type_ != Ort::TypeToTensorType<int32_t>)
+        throw std::runtime_error("InputIDs must be int64 or int32");
+      value_ = OrtValue::CreateTensor<int32_t>(model_.allocator_cpu_.GetInfo(), input_ids, shape_);
+    }
+
+    value_ = model_.ExpandInputs(value_, state_.params_->search.num_beams);
+    shape_[0] *= state_.params_->search.num_beams;
+
+    if (state_.GetCapturedGraphInfo()) {
+      sb_input_ids_ = state_.GetCapturedGraphInfo()->sb_input_ids_.get();
+
+#if USE_DML
+      if (model_.device_type_ == DeviceType::DML) {
+        sb_input_ids_int32_ = state_.GetCapturedGraphInfo()->sb_input_ids_int32_.get();
+      }
+#endif
+    }
+
+    is_prompt_ = false;
+    state_.inputs_[input_index_] = value_.get();
+    return;
+  }
+
   const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids,
                                                int32_t pad_token_id) {
     int32_t seq_length = 0;
@@ -189,6 +224,73 @@ void InputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
   }
 
   is_prompt_ = false;
+}
+
+WindowedInputIDs::WindowedInputIDs(State& state) : state_{state} {
+  name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
+
+  if (!model_.config_->model.decoder.sliding_window.has_value()) {
+    throw std::runtime_error("Sliding a window over input_ids requires sliding_window to be set in the genai_config.json.");
+  }
+
+  if (state_.params_->BatchBeamSize() != 1) {
+    throw std::runtime_error("Batch beam size must be 1 for sliding a window over input_ids.");
+  }
+
+  window_size_ = model_.config_->model.decoder.sliding_window->window_size;
+  shape_ = {1, model_.config_->model.decoder.sliding_window->window_size};
+  type_ = model_.session_info_->GetInputDataType(name_);
+
+  if (type_ != Ort::TypeToTensorType<int32_t>) {
+    throw std::runtime_error("WindowedInputIDs only supports int32_t input_ids.");
+  }
+}
+
+void WindowedInputIDs::Add() {
+  input_index_ = state_.inputs_.size();
+
+  state_.inputs_.push_back(value_.get());
+  state_.input_names_.push_back(name_);
+}
+
+void WindowedInputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
+  if (window_index_ == 0) {
+    num_windows_ = (new_tokens.size() + window_size_ - 1) / window_size_;
+
+    value_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape_, type_);
+
+    // new_tokens will always be padded so that it's size is a multiple of window_size_
+    // new_tokens -> [0, a, b, c, d, e]
+    // window_size = 3, num_windows = 2, pad_token = 0
+    // window_index = 0, value_ -> [0, a, b]
+    std::copy_n(new_tokens.Span().begin(), window_size_, value_->GetTensorMutableData<int32_t>());
+  } else if (window_index_ < num_windows_) {
+    // new_tokens -> [a, b, c, d, e]
+    // window_size = 3, num_windows = 2
+    // window_index = 1, value_ -> [c, d, e]
+    std::copy_n(new_tokens.Span().begin() + window_index_ * window_size_, window_size_, value_->GetTensorMutableData<int32_t>());
+  } else {
+    // All prompt token chunks have been processed. Now we process the tokens generated by the model.
+    // new_tokens -> [f]
+    assert(new_tokens.size() == 1);
+    if (shape_[1] != 1) {
+      shape_[1] = 1;
+      value_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape_, type_);
+    }
+
+    value_->GetTensorMutableData<int32_t>()[0] = new_tokens.Span()[0];
+  }
+
+  state_.inputs_[input_index_] = value_.get();
+  window_index_++;
+}
+
+std::unique_ptr<InputIDs> CreateInputIDs(State& state) {
+  if (state.model_.config_->model.decoder.sliding_window.has_value()) {
+    return std::make_unique<WindowedInputIDs>(state);
+  } else {
+    return std::make_unique<DefaultInputIDs>(state);
+  }
 }
 
 }  // namespace Generators

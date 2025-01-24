@@ -8,8 +8,15 @@ def main(args):
         started_timestamp = 0
         first_token_timestamp = 0
 
-    model = og.Model(f'{args.model}')
+    config = og.Config(args.model_path)
+    config.clear_providers()
+    if args.execution_provider != "cpu":
+        if args.verbose: print(f"Setting model to {args.execution_provider}")
+        config.append_provider(args.execution_provider)
+    model = og.Model(config)
+
     if args.verbose: print("Model loaded")
+    
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
     if args.verbose: print("Tokenizer created")
@@ -22,8 +29,7 @@ def main(args):
     
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
-            print("Error, chat template must have exactly one pair of curly braces, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
-            exit(1)
+            raise ValueError("Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
 
     params = og.GeneratorParams(model)
     params.set_search_options(**search_options)
@@ -89,7 +95,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")
-    parser.add_argument('-m', '--model', type=str, required=True, help='Onnx model folder path (must contain config.json and model.onnx)')
+    parser.add_argument('-m', '--model_path', type=str, required=True, help='Onnx model folder path (must contain genai_config.json and model.onnx)')
+    parser.add_argument('-e', '--execution_provider', type=str, required=True, choices=["cpu", "cuda", "dml"], help="Execution provider to run ONNX model with")
     parser.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, help='Max number of tokens to generate including the prompt')
     parser.add_argument('-ds', '--do_random_sampling', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
@@ -100,7 +107,7 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
     parser.add_argument('-c', '--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}')
-    parser.add_argument('-s', '--system_prompt', type=str, default='You are a helpful assistant. You are friendly, courteous, and professional. All your responses must end with an exclamation point!', help='System prompt to use for the prompt.')
+    parser.add_argument('-s', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the prompt.')
     parser.add_argument('-r', '--rewind', action='store_true', default=False, help='Rewind to the system prompt after each generation. Defaults to false')
     args = parser.parse_args()
     main(args)

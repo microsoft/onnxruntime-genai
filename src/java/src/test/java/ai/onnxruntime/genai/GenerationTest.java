@@ -68,7 +68,7 @@ public class GenerationTest {
   @EnabledIf("haveAdapters")
   public void testUsageWithAdapters() throws GenAIException {
     try (Model model = new Model(TestUtils.testAdapterTestModelPath());
-        Tokenizer tokenizer = model.createTokenizer()) {
+        Tokenizer tokenizer = new Tokenizer(model)) {
       String[] prompts = {
         TestUtils.applyPhi2ChatTemplate("def is_prime(n):"),
         TestUtils.applyPhi2ChatTemplate("def compute_gcd(x, y):"),
@@ -76,7 +76,7 @@ public class GenerationTest {
       };
 
       try (Sequences sequences = tokenizer.encodeBatch(prompts);
-          GeneratorParams params = model.createGeneratorParams()) {
+          GeneratorParams params = new GeneratorParams(model)) {
         params.setSearchOption("max_length", 200);
         params.setSearchOption("batch_size", prompts.length);
 
@@ -97,7 +97,7 @@ public class GenerationTest {
         try (Adapters adapters = new Adapters(model);
             Generator generator = new Generator(model, params); ) {
           generator.appendTokenSequences(sequences);
-          adapters.loadAdapters(TestUtils.testAdapterTestAdaptersPath(), "adapters_a_and_b");
+          adapters.loadAdapter(TestUtils.testAdapterTestAdaptersPath(), "adapters_a_and_b");
           generator.setActiveAdapter(adapters, "adapters_a_and_b");
           while (!generator.isDone()) {
             generator.generateNextToken();

@@ -9,6 +9,5 @@ dnf install -y \
   glibc-langpack-\* glibc-locale-source which redhat-lsb-core \
   expat-devel tar unzip zlib-devel make bzip2 bzip2-devel \
   java-11-openjdk-devel graphviz \
-  gcc-toolset-12-binutils gcc-toolset-12-gcc gcc-toolset-12-gcc-c++ gcc-toolset-12-gcc-gfortran \
   git
 locale

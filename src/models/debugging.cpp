@@ -39,15 +39,18 @@ std::ostream& operator<<(std::ostream& stream, Ort::BFloat16_t v) {
 
 template <typename T>
 void DumpSpan(std::ostream& stream, std::span<const T> values) {
+  // If type is uint8_t or int8_t cast to int so it displays as an int vs a char
+  using DisplayType = std::conditional_t<std::is_same_v<T, uint8_t> || std::is_same_v<T, int8_t>, int, T>;
+
   if (values.size() <= c_value_count) {
     for (auto v : values)
-      stream << v << ' ';
+      stream << static_cast<DisplayType>(v) << ' ';
   } else {
     for (size_t i = 0; i < c_value_count / 2; i++)
-      stream << values[i] << ' ';
+      stream << static_cast<DisplayType>(values[i]) << ' ';
     stream << "... ";
     for (size_t i = values.size() - c_value_count / 2; i < values.size(); i++)
-      stream << values[i] << ' ';
+      stream << static_cast<DisplayType>(values[i]) << ' ';
   }
 }
 
@@ -85,47 +88,48 @@ void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool 
   stream << SGR::Fg_Green << " Location: " << SGR::Reset;
 
   const auto& memory_info = value->GetTensorMemoryInfo();
-  switch (memory_info.GetDeviceType()) {
-    case OrtMemoryInfoDeviceType_CPU:
-      stream << "CPU\r\n";
-      DumpValues(stream, type_info->GetElementType(), value->GetTensorRawData(), element_count);
-      break;
-    case OrtMemoryInfoDeviceType_GPU: {
-      stream << "GPU\r\n";
+  auto device_type = memory_info.GetDeviceType();
+  if (device_type == OrtMemoryInfoDeviceType_CPU) {
+    stream << "CPU\r\n";
+    DumpValues(stream, type_info->GetElementType(), value->GetTensorRawData(), element_count);
+  } else if (device_type == OrtMemoryInfoDeviceType_GPU) {
+    stream << "GPU\r\n";
 #if USE_CUDA
-      auto type = type_info->GetElementType();
-      size_t element_size = SizeOf(type);
-      auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
-      CudaCheck() == cudaMemcpy(cpu_copy.get(), value->GetTensorRawData(), element_size * element_count, cudaMemcpyDeviceToHost);
-      DumpValues(stream, type, cpu_copy.get(), element_count);
-#elif USE_DML
-      auto type = type_info->GetElementType();
-      size_t element_size = SizeOf(type);
-      auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
-
-      if (value->GetTensorMutableRawData()) {
-        ComPtr<ID3D12Resource> gpu_resource;
-        Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
-            model.allocator_device_,
-            value->GetTensorMutableRawData(),
-            &gpu_resource));
-
-        model.GetDmlReadbackHeap()->ReadbackFromGpu(
-            std::span(cpu_copy.get(), element_size * element_count),
-            gpu_resource.Get(),
-            0,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-      }
-
-      DumpValues(stream, type, cpu_copy.get(), element_count);
+    auto type = type_info->GetElementType();
+    size_t element_size = SizeOf(type);
+    auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
+    CudaCheck() == cudaMemcpy(cpu_copy.get(), value->GetTensorRawData(), element_size * element_count, cudaMemcpyDeviceToHost);
+    DumpValues(stream, type, cpu_copy.get(), element_count);
 #else
-      stream << "Unexpected, using GPU memory but not compiled with CUDA or DML?";
+    throw std::runtime_error("Unexpected error. Trying to access GPU memory but the project is not compiled with CUDA.");
 #endif
-      break;
+  } else if (static_cast<int>(device_type) == 4) {
+    stream << "DML\r\n";
+#if USE_DML
+    auto type = type_info->GetElementType();
+    size_t element_size = SizeOf(type);
+    auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
+
+    if (value->GetTensorMutableRawData()) {
+      ComPtr<ID3D12Resource> gpu_resource;
+      Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
+          model.allocator_device_,
+          value->GetTensorMutableRawData(),
+          &gpu_resource));
+
+      model.GetDmlReadbackHeap()->ReadbackFromGpu(
+          std::span(cpu_copy.get(), element_size * element_count),
+          gpu_resource.Get(),
+          0,
+          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     }
-    default:
-      stream << "Unhandled device type";
-      break;
+
+    DumpValues(stream, type, cpu_copy.get(), element_count);
+#else
+    throw std::runtime_error("Unexpected error. Trying to access DML memory but the project is not compiled with DML.");
+#endif
+  } else {
+    stream << "Unhandled device type: " << static_cast<int>(device_type) << "\r\n";
   }
 }
 

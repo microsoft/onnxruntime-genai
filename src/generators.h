@@ -60,6 +60,7 @@ enum struct DeviceType {
   CUDA,
   DML,
   WEBGPU,
+  QNN,
 };
 
 std::string to_string(DeviceType device_type);
@@ -111,7 +112,7 @@ struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
-  void AppendTokens(const cpu_span<int32_t> input_ids);
+  void AppendTokens(cpu_span<const int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
   DeviceSpan<float> GetLogits();
@@ -127,7 +128,8 @@ struct Generator : LeakChecked<Generator> {
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
 
  private:
-  DeviceSpan<int32_t> AllocateInputIdsOnDevice(const cpu_span<int32_t> input_ids);
+  DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
+  void AuxAppendTokens(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   enum Action { standard,   // Default, set in any other case
                 generated,  // Set after GenerateNextToken
@@ -159,6 +161,5 @@ std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  /
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
 
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
-void top_k_indices(std::span<int32_t> top_k, std::span<const float> inputs);
 
 }  // namespace Generators
