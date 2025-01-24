@@ -424,6 +424,13 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
   for (auto& provider_options : config_session_options.provider_options) {
     if (provider_options.name == "cuda") {
+      if (is_primary_session_options) {
+        device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
+        p_device_ = GetDeviceInterface(device_type_);
+        if (p_device_ == nullptr) {
+          throw std::runtime_error("CUDA device not found");
+        }
+      }
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
       std::vector<const char*> keys, values;
       for (auto& option : provider_options.options) {
@@ -435,9 +442,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       // Device type determines the scoring device.
       // Only use the primary session options to determine the device type
       if (is_primary_session_options) {
-        device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
-        p_device_ = GetDeviceInterface(device_type_);
-
         // Create and set our cudaStream_t
         cuda_stream_ = p_device_->GetCudaStream();
         ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_);
