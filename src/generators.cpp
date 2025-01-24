@@ -37,6 +37,11 @@ void ThrowErrorIfSessionTerminated(bool is_session_terminated) {
 
 namespace Generators {
 
+static bool _1 = []() {
+  std::cerr << "OrtGlobals::OrtGlobals started" << std::endl;
+  return false;
+}();
+
 static bool _ = (Ort::InitApi(), false);
 
 static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
@@ -47,6 +52,9 @@ static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
 
 OrtGlobals::OrtGlobals()
     : env_{OrtEnv::Create(GetDefaultOrtLoggingLevel())} {
+  std::cerr << "OrtGlobals::OrtGlobals started" << std::endl;
+
+
   auto arena_config = OrtArenaCfg::Create(0, -1, -1, -1);
   Ort::Allocator& allocator_cpu{Ort::Allocator::GetWithDefaultOptions()};
   env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
