@@ -8,7 +8,6 @@ using System.Runtime.InteropServices;
 using System.Runtime.CompilerServices;
 using Xunit;
 using Xunit.Abstractions;
-using Microsoft.ML.OnnxRuntimeGenAI;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
@@ -96,6 +95,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             ogaHandle = new OgaHandle();
             AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
             this.output = o;
+            Console.WriteLine("**** OnnxRuntimeGenAI constructor completed");
         }
 
         private class IgnoreOnModelAbsenceFact : FactAttribute
