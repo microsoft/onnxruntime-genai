@@ -5,16 +5,36 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
+    /// <summary>
+    /// The Tokenizer class is responsible for converting between text and token ids.
+    /// <summary>
     public class Tokenizer : IDisposable
     {
         private IntPtr _tokenizerHandle;
         private bool _disposed = false;
 
+        /// <summary>
+        /// Creates a Tokenizer from the given model.
+        /// </summary>
+        /// <param name="model">The model to use.</param>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public Tokenizer(Model model)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateTokenizer(model.Handle, out _tokenizerHandle));
         }
 
+        /// <summary>
+        /// Encodes an array of strings into a sequence of token ids for each input.
+        /// </summary>
+        /// <param name="strings">The collection of strings to encode as token ids.</param>
+        /// <returns>
+        /// A Sequences object with one sequence per input string.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public Sequences EncodeBatch(string[] strings)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateSequences(out IntPtr nativeSequences));
@@ -34,6 +54,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        /// <summary>
+        /// Decodes a batch of sequences of token ids into text.
+        /// </summary>
+        /// <param name="sequences"> A Sequences object with one or more sequences of token ids.</param>
+        /// <returns>
+        /// An array of strings with the text representation of each sequence.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public string[] DecodeBatch(Sequences sequences)
         {
             string[] result = new string[sequences.NumSequences];
@@ -45,6 +75,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return result;
         }
 
+        /// <summary>
+        /// Encodes an array of strings into a sequence of token ids for each input.
+        /// </summary>
+        /// <param name="str">The text to encode as token ids.</param>
+        /// <returns>
+        /// A Sequences object with a single sequence.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public Sequences Encode(string str)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateSequences(out IntPtr nativeSequences));
@@ -60,6 +100,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        /// <summary>
+        /// Decodes a sequence of token ids into text.
+        /// </summary>
+        /// <param name="sequence">The token ids.</param>
+        /// <returns>
+        /// The text representation of the sequence.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public string Decode(ReadOnlySpan<int> sequence)
         {
             IntPtr outStr = IntPtr.Zero;
@@ -80,6 +130,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        /// <summary>
+        /// Creates a TokenizerStream object for streaming tokenization. This is used with Generator class
+        /// to provide each token as it is generated.
+        /// </summary>
+        /// <returns>
+        /// The new TokenizerStream instance.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public TokenizerStream CreateStream()
         {
             IntPtr tokenizerStreamHandle = IntPtr.Zero;
