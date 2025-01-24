@@ -41,8 +41,6 @@ include(cmake/check_cuda.cmake)
 include(cmake/check_rocm.cmake)
 # Checking if DML is supported
 include(cmake/check_dml.cmake)
-# Checking if WebGpu is supported
-include(cmake/check_webgpu.cmake)
 
 include(cmake/cxx_standard.cmake)
 
