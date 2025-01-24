@@ -246,6 +246,15 @@ void Logits::Add() {
 
   state_.output_names_.push_back(model_.config_->model.decoder.outputs.logits.c_str());
   state_.outputs_.push_back(output_raw_.get());
+
+  const char* hidden_states_name = model_.config_->model.decoder.outputs.hidden_states.c_str();
+  if (hidden_states_name && strlen(hidden_states_name) > 0) {
+    state_.output_names_.push_back(hidden_states_name);
+    std::array<int64_t, 3> hidden_states_shape {static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.decoder.hidden_size};
+    ONNXTensorElementDataType hidden_states_type {model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.hidden_states)};
+    hidden_states_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, hidden_states_shape, hidden_states_type);
+    state_.outputs_.push_back(hidden_states_raw_.get());
+  }
 }
 
 }  // namespace Generators

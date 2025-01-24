@@ -173,6 +173,8 @@ struct Outputs_Element : JSON::Element {
       v_.cross_present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "cross_present_value_names") {
       v_.cross_present_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
     } else
       throw JSON::unknown_value_error{};
   }
