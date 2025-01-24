@@ -219,6 +219,13 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   }
 
   state_.outputs_[output_index_] = output_raw_.get();
+
+  // The 2 early returns apply to hidden_states, as it has same size as logits in axis 1
+  if (hidden_states_index_ != ~0U) {
+    hidden_states_shape_[1] = new_kv_length;
+    hidden_states_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, hidden_states_shape_, hidden_states_type_);
+    state_.outputs_[hidden_states_index_] = hidden_states_raw_.get();
+  }
 }
 
 void Logits::HandleEOSArray(std::span<float> batched_logits) {
@@ -249,10 +256,11 @@ void Logits::Add() {
 
   const char* hidden_states_name = model_.config_->model.decoder.outputs.hidden_states.c_str();
   if (hidden_states_name && strlen(hidden_states_name) > 0) {
+    hidden_states_index_ = state_.outputs_.size();
+    hidden_states_type_ = model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.hidden_states);
     state_.output_names_.push_back(hidden_states_name);
-    std::array<int64_t, 3> hidden_states_shape {static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.decoder.hidden_size};
-    ONNXTensorElementDataType hidden_states_type {model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.hidden_states)};
-    hidden_states_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, hidden_states_shape, hidden_states_type);
+    hidden_states_shape_ = {static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.decoder.hidden_size};
+    hidden_states_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, hidden_states_shape_, hidden_states_type_);
     state_.outputs_.push_back(hidden_states_raw_.get());
   }
 }
