@@ -37,11 +37,6 @@ void ThrowErrorIfSessionTerminated(bool is_session_terminated) {
 
 namespace Generators {
 
-static bool _1 = []() {
-  std::cerr << "OrtGlobals::OrtGlobals started" << std::endl;
-  return false;
-}();
-
 static bool _ = (Ort::InitApi(), false);
 
 static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
@@ -52,14 +47,12 @@ static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
 
 OrtGlobals::OrtGlobals()
     : env_{OrtEnv::Create(GetDefaultOrtLoggingLevel())} {
-  std::cerr << "OrtGlobals::OrtGlobals started" << std::endl;
-
-
   auto arena_config = OrtArenaCfg::Create(0, -1, -1, -1);
   Ort::Allocator& allocator_cpu{Ort::Allocator::GetWithDefaultOptions()};
   env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
 
-  std::cerr << "OrtGlobals::OrtGlobals completed" << std::endl;
+  // Init the CPU device (special case because it always exists, and its allocator is special
+  GetDeviceInterface(DeviceType::CPU)->InitOrt(*Ort::api, allocator_cpu);
 }
 
 // Ensure Shutdown() has been called before process exit

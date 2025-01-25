@@ -222,15 +222,17 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
 Ort::Allocator* GetDeviceAllocator(OrtSession& session, DeviceType type) {
+  // CPU Allocator is a special case, so don't try to create it
+  if (type == DeviceType::CPU)
+    return &GetDeviceInterface(DeviceType::CPU)->GetAllocator();
+
   auto& device = GetOrtGlobals()->allocator_device_[static_cast<int>(type)];
   if (!device) {
-    static const char* device_type_names[static_cast<int>(DeviceType::MAX)] = {"CPU", "Cuda", "DML", "WebGPU Buffer"};
-    std::cerr << "GetDeviceAllocator: Creating device allocator for " << device_type_names[static_cast<int>(type)] << std::endl;
+    static const char* device_type_names[static_cast<int>(DeviceType::MAX)] = {"CPU - SEE ABOVE", "Cuda", "DML", "WebGPU Buffer"};
 
     auto memory_info = OrtMemoryInfo::Create(device_type_names[static_cast<int>(type)], OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
     device = Ort::Allocator::Create(session, *memory_info);
-    GetDeviceInterface(type)->InitOrt(*Ort::api, *device); // Necessary for any shared library providers so they can access Ort::api
-    std::cerr << "GetDeviceAllocator: Device created" << std::endl;
+    GetDeviceInterface(type)->InitOrt(*Ort::api, *device);  // Necessary for any shared library providers so they can access Ort::api
   }
   return device.get();
 }

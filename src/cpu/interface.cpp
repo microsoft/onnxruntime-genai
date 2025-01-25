@@ -44,7 +44,6 @@ struct CpuMemory final : DeviceBuffer {
 
 struct CpuInterface : DeviceInterface {
   CpuInterface() {
-    InitOrt(*Ort::api, Ort::Allocator::GetWithDefaultOptions());
   }
 
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
@@ -101,8 +100,11 @@ struct CpuInterface : DeviceInterface {
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
 
   void Synchronize() override {}  // Nothing to do as CPU is always in sync with itself
-} g_cpu;
+};
 
-DeviceInterface* GetCpuInterface() { return &g_cpu; }
+DeviceInterface* GetCpuInterface() {
+  static std::unique_ptr<CpuInterface> g_cpu = std::make_unique<CpuInterface>();
+  return g_cpu.get();
+}
 
 }  // namespace Generators
