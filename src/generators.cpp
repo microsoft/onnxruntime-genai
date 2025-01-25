@@ -133,7 +133,7 @@ DeviceInterface* GetCudaInterface() {
 #if defined(_WIN32)
   static std::unique_ptr<void, void (*)(void*)> cuda_library{LoadLibrary((CurrentModulePath() + "onnxruntime-genai-cuda.dll").c_str()),
                                                              [](void* h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
   static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen((Ort::GetCurrentModuleDir() + "/libonnxruntime-genai-cuda.so").c_str(), RTLD_NOW | RTLD_DEEPBIND),
                                                              [](void* h) { dlclose(h); }};
 #else
@@ -148,7 +148,7 @@ DeviceInterface* GetCudaInterface() {
   static DeviceInterface* cuda_interface{[] {
 #if defined(_WIN32)
     auto get_cuda_fn = reinterpret_cast<decltype(&GetInterface)>(GetProcAddress(reinterpret_cast<HMODULE>(cuda_library.get()), "GetInterface"));
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
     auto get_cuda_fn = reinterpret_cast<decltype(&GetInterface)>(dlsym(cuda_library.get(), "GetInterface"));
 #else
     auto get_cuda_fn = [](GenaiInterface*) { return nullptr; };
