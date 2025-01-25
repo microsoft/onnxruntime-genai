@@ -146,10 +146,12 @@ DeviceInterface* GetCudaInterface() {
 
   Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai);
   static DeviceInterface* cuda_interface{[] {
-#ifdef _WIN32
+#if defined(_WIN32)
     auto get_cuda_fn = reinterpret_cast<decltype(&GetInterface)>(GetProcAddress(reinterpret_cast<HMODULE>(cuda_library.get()), "GetInterface"));
-#else
+#elif defined(__linux__)
     auto get_cuda_fn = reinterpret_cast<decltype(&GetInterface)>(dlsym(cuda_library.get(), "GetInterface"));
+#else
+    auto get_cuda_fn = [](GenaiInterface*) { return nullptr; };
 #endif
     return get_cuda_fn(&g_genai);
   }()};
