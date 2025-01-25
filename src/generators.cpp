@@ -11,7 +11,7 @@
 #include "cuda/interface.h"
 #include "dml/interface.h"
 
-#if _WIN32
+#if defined(_WIN32)
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
 std::string CurrentModulePath() {
@@ -130,12 +130,14 @@ DeviceInterface* GetCudaInterface() {
 // Load the shared library onnxruntime-genai-cuda.dll
 // This is a workaround to avoid linking the CUDA library to the generator library
 // The CUDA library is only needed for the CUDA allocator
-#ifdef _WIN32
+#if defined(_WIN32)
   static std::unique_ptr<void, void (*)(void*)> cuda_library{LoadLibrary((CurrentModulePath() + "onnxruntime-genai-cuda.dll").c_str()),
                                                              [](void* h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};
-#else
+#elif defined(__linux__)
   static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen((Ort::GetCurrentModuleDir() + "/libonnxruntime-genai-cuda.so").c_str(), RTLD_NOW | RTLD_DEEPBIND),
                                                              [](void* h) { dlclose(h); }};
+#else
+  static std::unique_ptr<void, void (*)(void*)> cuda_library{nullptr, [](void* h) {}};
 #endif
 
   if (!cuda_library) {
