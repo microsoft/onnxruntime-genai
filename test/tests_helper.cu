@@ -74,13 +74,13 @@ void LaunchPopulateIndices(int* indices, int size, int batch_size, cudaStream_t 
   PopulateIndices<<<grid, block, 0, stream>>>(indices, size, batch_size);
 }
 
-void LaunchFisherYatesKernel(float* logits, int* indices_buffer, int vocab_size, int batch_size, cudaStream_t stream) {
+void LaunchFisherYatesKernel(float* logits, int* indices_buffer, int vocab_size, int batch_size, void* stream) {
   int num_threads = 256;
   int num_blocks = batch_size;
   curandState *random_states;
   cudaMalloc((void **)&random_states, num_threads * sizeof(curandState));
   std::span<float> logits_span{logits, static_cast<size_t>(vocab_size * batch_size)};
   std::span<int32_t> indices{indices_buffer, static_cast<size_t>(vocab_size * batch_size)};
-  LaunchPopulateIndices(indices.data(), vocab_size, batch_size, stream);
-  FisherYatesKernel<<<num_blocks, num_threads, 0, stream>>>(logits_span.data(), indices.data(), vocab_size, random_states);
+  LaunchPopulateIndices(indices.data(), vocab_size, batch_size, static_cast<cudaStream_t>(stream));
+  FisherYatesKernel<<<num_blocks, num_threads, 0, static_cast<cudaStream_t>(stream)>>>(logits_span.data(), indices.data(), vocab_size, random_states);
 }
