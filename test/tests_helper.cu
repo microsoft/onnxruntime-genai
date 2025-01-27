@@ -21,10 +21,10 @@ __global__ void GeometricDecayKernel(float* logits, int vocab_size, int num_larg
   }
 }
 
-void LaunchGeometricDecayKernel(float* logits, int vocab_size, int batch_size, int num_large, float large_val, cudaStream_t stream) {
+void LaunchGeometricDecayKernel(float* logits, int vocab_size, int batch_size, int num_large, float large_val, void* stream) {
   int num_threads = 256;
   int num_blocks = batch_size;
-  GeometricDecayKernel<<<num_blocks, num_threads, 0, stream>>>(logits, vocab_size, num_large, large_val);
+  GeometricDecayKernel<<<num_blocks, num_threads, 0, static_cast<cudaStream_t>(stream)>>>(logits, vocab_size, num_large, large_val);
 }
 
 __global__ void FisherYatesKernel(float* logits, int* indices, int vocab_size, curandState* states) {

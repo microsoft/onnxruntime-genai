@@ -13,9 +13,6 @@
 #define MODEL_PATH "../../test/test_models/"
 #endif
 
-#undef USE_CUDA
-#define USE_CUDA 0
-
 template<typename T>
 auto AllocateFromCpuMem(Generators::DeviceInterface& device, std::span<const T> cpu_memory) {
   auto memory = device.Allocate<float>(cpu_memory.size());

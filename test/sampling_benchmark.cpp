@@ -14,9 +14,6 @@
 #define MODEL_PATH "../../test/test_models/"
 #endif
 
-#undef USE_CUDA
-#define USE_CUDA 0
-
 // Defined in sampling_tests.cpp
 void CreateRandomLogits(float* logits, int num_large, int vocab_size, int batch_size, std::mt19937& engine);
 

@@ -31,10 +31,6 @@ TEST(CAPITests, Config) {
   config->AppendProvider("cuda");
 #endif
 }
-
-#undef USE_CUDA
-#define USE_CUDA 0
-
 TEST(CAPITests, TokenizerCAPI) {
 #if TEST_PHI2
   auto config = OgaConfig::Create(PHI2_PATH);
