@@ -587,28 +587,28 @@ OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor* 
   OGA_TRY
   auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
   auto* audios = reinterpret_cast<const Generators::Audios*>(audios_p);
-  auto* images = images_p ? reinterpret_cast<const Generators::Images*>(images_p) : nullptr;
 
   if (!processor.processor_)
     throw std::runtime_error("Audio processor not available for this model.");
 
-  auto named_tensors = processor.Process(std::string(), images, audios);
+  auto named_tensors = processor.Process(std::string(), nullptr, audios);
   *input_tensors = reinterpret_cast<OgaNamedTensors*>(named_tensors.release());
 
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images_p,
+OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor* processor_p, const char* prompt, const OgaImages* images_p,
                                                            const OgaAudios* audios_p, OgaNamedTensors** input_tensors) {
   OGA_TRY
-  auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
+  auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(processor_p);
   auto* audios = reinterpret_cast<const Generators::Audios*>(audios_p);
+  auto* images = images_p ? reinterpret_cast<const Generators::Images*>(images_p) : nullptr;
 
   if (!processor.processor_)
     throw std::runtime_error("Audio processor not available for this model.");
 
-  auto named_tensors = processor.Process(std::string(), nullptr, audios);
+  auto named_tensors = processor.Process(prompt, images, audios);
   *input_tensors = reinterpret_cast<OgaNamedTensors*>(named_tensors.release());
 
   return nullptr;
