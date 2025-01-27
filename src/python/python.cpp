@@ -483,17 +483,21 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         if (image_datas.empty())
           throw std::runtime_error("No images provided");
 
-        std::unique_ptr<ort_extensions::ImageRawData[]> image_raw_data = std::make_unique<ort_extensions::ImageRawData[]>(image_datas.size());
+        std::vector<const void*> image_raw_data(image_datas.size());
+        std::vector<int64_t> image_sizes(image_datas.size());
         for (size_t i = 0; i < image_datas.size(); ++i) {
           if (!pybind11::isinstance<pybind11::bytes>(image_datas[i]))
             throw std::runtime_error("Image data must be bytes.");
           auto bytes = image_datas[i].cast<pybind11::bytes>();
           pybind11::buffer_info info(pybind11::buffer(bytes).request());
-          uint8_t* data = reinterpret_cast<uint8_t*>(info.ptr);
-          image_raw_data[i] = ort_extensions::ImageRawData(data, data + info.size);
+          image_raw_data[i] = reinterpret_cast<void*>(info.ptr);
+          image_sizes[i] = info.size;
         }
 
-        return std::make_shared<Images>(std::move(image_raw_data), image_datas.size());
+        ort_extensions::OrtxObjectPtr<OrtxRawImages> images;
+        CheckResult(OrtxCreateRawImages(images.ToBeAssigned(), image_raw_data.data(), image_sizes.data(), image_datas.size()));
+
+        return std::make_shared<Images>(std::move(images), image_datas.size());
       });
 
   pybind11::class_<Audios, std::shared_ptr<Audios>>(m, "Audios")
@@ -520,7 +524,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(
           "__call__", [](MultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) -> std::shared_ptr<PyNamedTensors> {
             if (kwargs.contains("images")) {
-              if (processor.image_processor_ == nullptr) {
+              if (!processor.processor_) {
                 throw std::runtime_error("Image processor is not available for this model.");
               }
               const Images* images = kwargs["images"].cast<const Images*>();
@@ -528,11 +532,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
                 throw std::runtime_error("Prompt is required for processing the image.");
               }
               return std::make_shared<PyNamedTensors>(
-                  processor.image_processor_->Process(*processor.tokenizer_, *prompt, images));
+                  processor.Process(*prompt, images, nullptr));
             } else if (kwargs.contains("audios")) {
+              if (!processor.processor_) {
+                throw std::runtime_error("Audio processor is not available for this model.");
+              }
               const Audios* audios = kwargs["audios"].cast<const Audios*>();
               return std::make_shared<PyNamedTensors>(
-                  processor.audio_processor_->Process(audios));
+                  processor.Process(std::string(), nullptr, audios));
             } else {
               throw std::runtime_error("Nothing to process.");
             }

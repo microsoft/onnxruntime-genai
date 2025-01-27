@@ -574,10 +574,10 @@ OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* 
   OGA_TRY
   auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
   auto* images = images_p ? reinterpret_cast<const Generators::Images*>(images_p) : nullptr;
-  if (processor.image_processor_ == nullptr)
+  if (!processor.processor_)
     throw std::runtime_error("Image processor is not available for this model.");
 
-  auto named_tensors = processor.image_processor_->Process(*processor.tokenizer_, prompt, images);
+  auto named_tensors = processor.Process(prompt, images, nullptr);
   *input_tensors = reinterpret_cast<OgaNamedTensors*>(named_tensors.release());
   return nullptr;
   OGA_CATCH
@@ -587,11 +587,28 @@ OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor* 
   OGA_TRY
   auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
   auto* audios = reinterpret_cast<const Generators::Audios*>(audios_p);
+  auto* images = images_p ? reinterpret_cast<const Generators::Images*>(images_p) : nullptr;
 
-  if (!processor.audio_processor_)
+  if (!processor.processor_)
     throw std::runtime_error("Audio processor not available for this model.");
 
-  auto named_tensors = processor.audio_processor_->Process(audios);
+  auto named_tensors = processor.Process(std::string(), images, audios);
+  *input_tensors = reinterpret_cast<OgaNamedTensors*>(named_tensors.release());
+
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images_p,
+                                                           const OgaAudios* audios_p, OgaNamedTensors** input_tensors) {
+  OGA_TRY
+  auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
+  auto* audios = reinterpret_cast<const Generators::Audios*>(audios_p);
+
+  if (!processor.processor_)
+    throw std::runtime_error("Audio processor not available for this model.");
+
+  auto named_tensors = processor.Process(std::string(), nullptr, audios);
   *input_tensors = reinterpret_cast<OgaNamedTensors*>(named_tensors.release());
 
   return nullptr;

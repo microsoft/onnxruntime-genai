@@ -750,12 +750,18 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
     : tokenizer_{std::make_shared<Tokenizer>(config)} {
   if (config.model.type == "phi3v") {
-    image_processor_ = std::make_shared<ImageProcessor>(config, session_info);
+    processor_ = std::make_shared<PhiImageProcessor>(config, session_info);
   } else if (config.model.type == "whisper") {
-    audio_processor_ = std::make_shared<AudioProcessor>(config, session_info);
+    processor_ = std::make_shared<WhisperProcessor>(config, session_info);
+  } else if (config.model.type == "phio") {
+    processor_ = std::make_shared<PhiOProcessor>(config, session_info);
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. Expected a multimodal model. Actual: " + config.model.type);
   }
 }
 
+std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& prompt, const Images* images, const Audios* audios) const {
+  Payload payload{.prompt = prompt, .images = images, .audios = audios};
+  return processor_->Process(*tokenizer_, payload);
+}
 }  // namespace Generators
