@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include "models/onnxruntime_api.h"
 #include "smartptrs.h"
 

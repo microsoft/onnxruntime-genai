@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include <gtest/gtest.h>
 #include <generators.h>
 #include <search.h>
@@ -31,6 +34,7 @@ TEST(CAPITests, Config) {
   config->AppendProvider("cuda");
 #endif
 }
+
 TEST(CAPITests, TokenizerCAPI) {
 #if TEST_PHI2
   auto config = OgaConfig::Create(PHI2_PATH);

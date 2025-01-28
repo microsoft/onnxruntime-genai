@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include "generators.h"
 #include "search.h"
 #include "search_cuda.h"
