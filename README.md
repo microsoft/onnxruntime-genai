@@ -13,14 +13,14 @@ It implements the generative AI loop for ONNX models, including pre and post pro
 
 See documentation at https://onnxruntime.ai/docs/genai.
 
-| Support matrix | Supported now | Under development | On the roadmap |
+|Support matrix|Supported now|Under development|On the roadmap|
 | -------------- | ------------- | ----------------- | -------------- |
 | Model architectures | Gemma <br/> Llama * <br/> Mistral + <br/> Phi (language + vision) <br/> Qwen <br/> Nemotron <br/> Granite <br/> AMD OLMo | Whisper | Stable diffusion |
-| API | Python <br/> C# <br/> C/C++ <br/> Java ^ | Objective-C | |
-| Platform | Linux <br/> Windows <br/> Mac ^ <br/> Android ^ | | iOS |
-| Architecture | x86 <br/> x64 <br/> Arm64 ~ | | |
-| Hardware Acceleration | CUDA <br/> DirectML <br/> | QNN <br/> OpenVINO <br/> ROCm | |
-| Features | | Interactive decoding <br/> Customization (fine-tuning) | Speculative decoding |
+|API| Python <br/>C# <br/>C/C++ <br/> Java ^ |Objective-C||
+|Platform| Linux <br/> Windows <br/>Mac ^ <br/>Android ^  ||iOS |||
+|Architecture|x86 <br/> x64 <br/> Arm64 ~ ||||
+|Hardware Acceleration|CUDA<br/>DirectML<br/>|QNN <br/> OpenVINO <br/> ROCm ||
+|Features|MultiLoRA <br/> Continuous decoding (session continuation)^ | Constrained decoding | Speculative decoding |
 
 \* The Llama model architecture supports similar model families such as CodeLlama, Vicuna, Yi, and more.
 
