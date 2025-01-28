@@ -4,7 +4,6 @@
 #include "logits.h"
 #include "kv_cache.h"
 #include "position_inputs.h"
-#include "extra_inputs.h"
 
 namespace Generators {
 
@@ -33,7 +32,6 @@ struct DecoderOnly_State : State {
   Logits logits_{*this};
   DefaultKeyValueCache kv_cache_{*this};
   DefaultPositionInputs position_inputs_;
-  ExtraInputs extra_inputs_{*this}; // Why does this need to be a member of DecoderOnly_State?
 };
 
 }  // namespace Generators

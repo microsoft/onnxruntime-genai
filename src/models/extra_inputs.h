@@ -19,7 +19,7 @@ struct PresetExtraInputs {
 struct ExtraInputs {
   ExtraInputs(State& state);
   void Add();
-  void Update();
+  void Update(const std::vector<Input>& extra_inputs);
 
  private:
   State& state_;

@@ -48,13 +48,16 @@ void ImageFeatures::Add() {
 void ImageFeatures::Update(bool is_prompt, int num_image_tokens) {
   // Initialize empty image_features tensor for after-prompt input scenarios
   // num_image_tokens will be 0 when no image is provided
+
+  // TODO(aciddelgado): is this correct or are there more scenarios
   if (is_prompt) {
     shape_[0] = num_image_tokens;
     image_features_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
-    state_.inputs_[index_] = image_features_.get();
+    if (mode_ == ImageFeatures::Mode::Output) state_.outputs_[index_] = image_features_.get();
+    else if (mode_ == ImageFeatures::Mode::Input) state_.inputs_[index_] = image_features_.get();
   } else if (!is_prompt && shape_[0] > 0) {  // if num_image_tokens > 0
     shape_[0] = 0;
-    image_features_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    image_features_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);    
     state_.inputs_[index_] = image_features_.get();
   }
 }

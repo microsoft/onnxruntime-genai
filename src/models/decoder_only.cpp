@@ -22,7 +22,6 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
   position_inputs_.Add();
   logits_.Add();
   kv_cache_.Add();
-  extra_inputs_.Add();
 }
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -45,7 +44,6 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
   position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
   kv_cache_.Update(beam_indices, total_length);
   logits_.Update(next_tokens, new_length);
-  extra_inputs_.Update();
 }
 
 }  // namespace Generators

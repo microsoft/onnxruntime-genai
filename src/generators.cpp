@@ -251,11 +251,6 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);  // Search sequence lengths set when creating state
-
-  // // Temporary solution for multimodal and whisper models
-  // if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
-  //   AuxAppendTokens(params.aux_input_ids);
-  // }
 }
 
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
@@ -274,29 +269,14 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
   return input_ids_device;
 }
 
-// TODO(aciddelgado): Remove this function once SetInputs is moved to generator
-// void Generator::AuxAppendTokens(cpu_span<const int32_t> input_ids) {
-//   ThrowErrorIfSessionTerminated(state_->session_terminated_);
-//   if (input_ids.size() == 0)
-//     throw std::runtime_error("input_ids is empty");
-//   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
-//     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
-
-//   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
-//   search_->AppendTokens(input_ids_device);
-//   computed_logits_ = false;
-//   ComputeLogits(input_ids_device);
-// }
-
 void Generator::SetInputs(const NamedTensors& named_tensors) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (model_->config_->model.type == "gpt2" || model_->config_->model.type == "llama" || model_->config_->model.type == "gemma" || model_->config_->model.type == "gemma2" || model_->config_->model.type == "mistral" || model_->config_->model.type == "phi" || model_->config_->model.type == "phi3" || model_->config_->model.type == "phi3small" || model_->config_->model.type == "phimoe" || model_->config_->model.type == "qwen2" || model_->config_->model.type == "decoder-pipeline")
     throw std::runtime_error("Please use generator.AppendTokens for " + model_->config_->model.type + ". SetInputs is not supported for this model type.");
 
   cpu_span<int32_t> aux_input_ids;
-  // std::Vector<Input> extra_inputs;
+  std::vector<Input> extra_inputs;
   for (const auto& [name, tensor] : named_tensors) {
-    // TODO(aciddelgado): Do we want set_inputs to take input_ids?
     if (name == Config::Defaults::InputIdsName) {
       aux_input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
                                         tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
@@ -304,13 +284,12 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
       // If the nominal name is found in the map, use the graph name.
       // Else, use the nominal name as the graph name.
       [[maybe_unused]] const auto [graph_name, found] = model_->config_->GetGraphName(name);
-      state_->extra_inputs_.push_back({graph_name, tensor});
+      extra_inputs.push_back({graph_name, tensor});
     }
   }
-  // state_->SetExtraInputs(extra_inputs);
+  state_->SetExtraInputs(extra_inputs);
   if (aux_input_ids.size() != 0)
     AppendTokens(aux_input_ids, false);
-  state_->extra_inputs_.clear();
 }
 
 void Generator::AppendTokens(cpu_span<const int32_t> input_ids, bool api_call) {

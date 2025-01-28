@@ -162,6 +162,8 @@ TEST(CAPITests, EndToEndPhiBatch) {
 #endif
 }
 
+// TODO(aciddelgado): we need a multimodal vision model test
+
 TEST(CAPITests, Tensor_And_AddExtraInput) {
   // Create a [3 4] shaped tensor
   std::array<float, 12> data{0, 1, 2, 3,

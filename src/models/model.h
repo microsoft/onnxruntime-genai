@@ -56,14 +56,9 @@ struct State {
   std::vector<std::string> adapter_names_;
   std::vector<OrtValue*> inputs_, outputs_;
 
-  // struct Input {
-  //   std::string name;
-  //   std::shared_ptr<Tensor> tensor;
-  // };
-  // A list of extra model inputs that will be matched at runtime based on name
-  std::vector<Input> extra_inputs_;
-
-  // void SetExtraInputs(std::vector<Input>&& inputs);
+  virtual void SetExtraInputs(const std::vector<Input>& extra_inputs) {
+    throw std::runtime_error("SetExtraInputs not implemented");
+  }
 
 
  protected:

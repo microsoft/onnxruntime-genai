@@ -8,7 +8,6 @@
 #include "logits.h"
 #include "kv_cache.h"
 #include "position_inputs.h"
-#include "extra_inputs.h"
 
 namespace Generators {
 
@@ -75,7 +74,6 @@ struct DecoderOnlyPipelineState : State {
   Logits logits_{*this};
   std::unique_ptr<KeyValueCache> key_value_cache_;
   std::unique_ptr<PositionInputs> position_inputs_;
-  ExtraInputs extra_inputs_{*this};
 };
 
 }  // namespace Generators

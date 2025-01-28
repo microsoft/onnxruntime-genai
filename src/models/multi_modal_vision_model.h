@@ -33,8 +33,8 @@ struct EmbeddingState : State {
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices = {}) override;
-  void SetNumImageTokens(int64_t num_image_tokens) { num_image_tokens_ = num_image_tokens; }
 
+  int64_t num_image_tokens_;
 
  private:
   friend struct MultiModalPipelineState;
@@ -53,18 +53,16 @@ struct EmbeddingState : State {
 };
 
 struct VisionState : State {
-  VisionState(const MultiModalVisionModel& model, const GeneratorParams& params/*, const int64_t num_image_tokens*/);
+  VisionState(const MultiModalVisionModel& model, const GeneratorParams& params);
   VisionState(const VisionState&) = delete;
   VisionState& operator=(const VisionState&) = delete;
 
+  void SetExtraInputs(const std::vector<Input>& extra_inputs, int num_image_tokens);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices = {}) override;
-  void SetNumImageTokens(int64_t num_image_tokens) { num_image_tokens_ = num_image_tokens; }
 
  private:
   friend struct MultiModalPipelineState;
-
-  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens);
 
   const MultiModalVisionModel& model_;
   int64_t num_image_tokens_;
@@ -105,6 +103,7 @@ struct MultiModalPipelineState : State {
   MultiModalPipelineState(const MultiModalPipelineState&) = delete;
   MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
 
+  void SetExtraInputs(const std::vector<Input>& extra_inputs) override;
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
 
