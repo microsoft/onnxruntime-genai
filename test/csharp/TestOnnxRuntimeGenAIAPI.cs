@@ -2,12 +2,15 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
-using System.Runtime.CompilerServices;
+using System.Text;
+using System.Threading.Tasks;
 using Xunit;
 using Xunit.Abstractions;
+using Microsoft.Extensions.AI;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
@@ -351,6 +354,33 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                     }
                 }
             }
+        }
+
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestChatClient")]
+        public async Task TestChatClient()
+        {
+            ChatClientConfiguration config = new(
+                ["<|system|>", "<|user|>", "<|assistant|>", "<|end|>"],
+                (IEnumerable<ChatMessage> messages) =>
+                {
+                    StringBuilder prompt = new();
+
+                    foreach (var message in messages)
+                        foreach (var content in message.Contents.OfType<TextContent>())
+                            prompt.Append("<|").Append(message.Role.Value).Append("|>\n").Append(content.Text).Append("<|end|>\n");
+
+                    return prompt.Append("<|assistant|>\n").ToString();
+                });
+
+            using var client = new ChatClient(config, _phi2Path);
+
+            var completion = await client.CompleteAsync("What is 2 + 3?", new()
+            {
+                MaxOutputTokens = 20,
+                Temperature = 0f,
+            });
+
+            Assert.Contains("5", completion.ToString());
         }
 
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
