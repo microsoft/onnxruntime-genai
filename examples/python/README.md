@@ -40,28 +40,3 @@ To run the python examples...
 python model-generate.py -m {path to model folder} -e {execution provider} -pr {input prompt}
 python model-qa.py -m {path to model folder} -e {execution provider}
 ```
-
-## Choosing the Right Examples: Release vs. Main Branch
-
-Due to evolving nature of this project and ongoing feature additions, examples in the `main` branch may not always align with the latest stable release. This section outlines how to ensure compatibility between the examples and the corresponding version. Majority of the above steps would remain same, just the package installation and the model example file would change.
-
-### Stable version
-Install the python package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install). Let's say you installed 0.5.2 version of ONNX Runtime GenAI, so the instructions would look like this:
-
-```bash
-# Clone the repo
-git clone https://github.com/microsoft/onnxruntime-genai.git && cd onnxruntime-genai
-# Checkout the branch for the version you are using
-git checkout v0.5.2
-cd examples/python
-```
-
-
-### Nightly version (Main Branch)
-Build the python package from source using these [instructions](https://onnxruntime.ai/docs/genai/howto/build-from-source.html). Now just go to the folder location where all the examples are present.
-
-```bash
-# Clone the repo
-git clone https://github.com/microsoft/onnxruntime-genai.git && cd onnxruntime-genai
-cd examples/python
-```
