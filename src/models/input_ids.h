@@ -8,7 +8,7 @@ struct InputIDs {
   virtual ~InputIDs() = default;
   virtual void Add() = 0;
   virtual std::array<int64_t, 2> GetShape() const = 0;
-  virtual void Update(DeviceSpan<int32_t>& next_tokens) = 0;
+  virtual void Update(DeviceSpan<int32_t> next_tokens) = 0;
 };
 
 struct DefaultInputIDs : InputIDs {
@@ -21,7 +21,7 @@ struct DefaultInputIDs : InputIDs {
   void Add() override;
   // Resize input_ids based on size of next_tokens.
   // Update value with next_tokens.
-  void Update(DeviceSpan<int32_t>& next_tokens) override;
+  void Update(DeviceSpan<int32_t> next_tokens) override;
 
   std::array<int64_t, 2> GetShape() const override { return shape_; }
   const char* name_;
@@ -38,15 +38,7 @@ struct DefaultInputIDs : InputIDs {
   std::array<int64_t, 2> shape_{};
   ONNXTensorElementDataType type_;
   std::unique_ptr<OrtValue> value_;
-
-  // Used for decoding runs with cuda graphs.
-  StaticBuffer* sb_input_ids_{};
-
-#if USE_DML
-  std::unique_ptr<OrtValue> value_int32_;
-  StaticBuffer* sb_input_ids_int32_{};
-  DmlReusedCommandListState input_ids_cast_command_list_state_{};
-#endif
+  std::unique_ptr<OrtValue> cast_value_;
 
   std::unique_ptr<OrtValue> current_sequence_length_;
   std::unique_ptr<OrtValue> past_sequence_length_;
@@ -65,7 +57,7 @@ struct WindowedInputIDs : public InputIDs {
   WindowedInputIDs& operator=(const WindowedInputIDs&) = delete;
 
   void Add() override;
-  void Update(DeviceSpan<int32_t>& next_tokens) override;
+  void Update(DeviceSpan<int32_t> next_tokens) override;
   std::array<int64_t, 2> GetShape() const override { return shape_; }
 
  private:

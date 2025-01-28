@@ -145,11 +145,6 @@ struct CapturedGraphInfo {
   std::unique_ptr<Generators::StaticBuffer> sb_embeddings_;
   std::unique_ptr<CapturedGraphKey> key_;
 
-#if USE_DML
-  std::unique_ptr<Generators::StaticBuffer> sb_attention_mask_next_;
-  std::unique_ptr<Generators::StaticBuffer> sb_input_ids_int32_;
-#endif
-
   // Generates a unique annotation ID across different captured graph objects. This is necessary because different
   // generators could be alive at the same time and run the same batch size but with different static buffers, so
   // they need to have different annotation IDs.

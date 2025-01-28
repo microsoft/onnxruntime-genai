@@ -1,4 +1,8 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #pragma once
+#include <cuda_runtime.h>
 #include "search_cuda.cuh"
 #include "cuda_sampling.cuh"
 
@@ -12,7 +16,7 @@ struct Search_Cuda : Search {
   DeviceSpan<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
 
   bool IsDone() const {
-    cudaStreamSynchronize(params_->cuda_stream);
+    cudaStreamSynchronize(GetStream());
     return *done_cpu_;
   }  // TODO: Use an event
 
