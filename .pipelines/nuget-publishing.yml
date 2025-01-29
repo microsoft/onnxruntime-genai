@@ -48,6 +48,11 @@ parameters:
   type: boolean
   default: false
 
+- name: enable_win_qnn
+  displayName: 'Whether QNN nuget package should be built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
