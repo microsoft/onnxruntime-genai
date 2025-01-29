@@ -77,16 +77,10 @@ def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
     if use_graph_capture:
         params.try_graph_capture_with_max_batch_size(1)
 
-    print("inside generate_prompt")
     generator=og.Generator(model, params)
     generator.append_tokens(tokens)
-    print("appended tokens")
     while not generator.is_done():
         generator.generate_next_token()
-    output_tokens = generator.get_sequence(0)
-    print("generated tokens")
-    output_prompt = tokenizer.decode(output_tokens)
-    print("generated prompt")
     return tokenizer.decode(generator.get_sequence(0))
 
 # Use prompt length to get pre-defined prompt
@@ -271,7 +265,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     params = og.GeneratorParams(model)
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
-    params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
+    params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length, batch_size=batch_size)
 
     if args.use_graph_capture:
         params.try_graph_capture_with_max_batch_size(batch_size)
