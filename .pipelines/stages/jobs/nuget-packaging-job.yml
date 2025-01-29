@@ -92,7 +92,7 @@ jobs:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.Cuda'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.DirectML'
-    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true) }}:
+    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.QNN'
 
   - name: ort_nuget_package_name
