@@ -21,6 +21,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public ulong NumSequences { get { return _numSequences; } }
 
+        public void Append(int token, ulong sequenceIndex)
+        {
+            if (sequenceIndex >= _numSequences)
+            {
+                throw new ArgumentOutOfRangeException(nameof(sequenceIndex));
+            }
+            Result.VerifySuccess(NativeMethods.OgaAppendTokenToSequence(token, _sequencesHandle, (UIntPtr)sequenceIndex));
+        }
+
         public ReadOnlySpan<int> this[ulong sequenceIndex]
         {
             get

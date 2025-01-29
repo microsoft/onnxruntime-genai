@@ -46,6 +46,27 @@ void DefaultInputIDs::Add() {
 }
 
 void DefaultInputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
+  const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids,
+                                               int32_t pad_token_id) {
+    int32_t seq_length = 0;
+    for (int32_t i = 0; i < input_ids.size(); i++) {
+      if (input_ids[i] == pad_token_id) {
+        break;
+      }
+      seq_length++;
+    }
+    return seq_length;
+  };
+
+  if (current_sequence_length_ && past_sequence_length_) {
+    if (state_.params_->BatchBeamSize() != 1) {
+      throw std::runtime_error("Batch size must be 1 for current_sequence_length and past_sequence_length inputs");
+    }
+    auto new_sequence_length = get_unpadded_sequence_length(new_tokens.CpuSpan(), model_.config_->model.pad_token_id);
+    *current_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
+    *past_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
+  }
+
   // There are three scopes involved when the Update function is called:
   // 1. A new Generator state has been just created. This is a prompt stage, and value_ is a nullptr.
   //    i.e. this is the very first time ever that Update is being called for this Generator.
@@ -89,27 +110,6 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t>& new_tokens) {
     is_prompt_ = false;
     state_.inputs_[input_index_] = value_.get();
     return;
-  }
-
-  const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids,
-                                               int32_t pad_token_id) {
-    int32_t seq_length = 0;
-    for (int32_t i = 0; i < input_ids.size(); i++) {
-      if (input_ids[i] == pad_token_id) {
-        break;
-      }
-      seq_length++;
-    }
-    return seq_length;
-  };
-
-  if (current_sequence_length_ && past_sequence_length_) {
-    if (state_.params_->BatchBeamSize() != 1) {
-      throw std::runtime_error("Batch size must be 1 for current_sequence_length and past_sequence_length inputs");
-    }
-    auto new_sequence_length = get_unpadded_sequence_length(new_tokens.CpuSpan(), model_.config_->model.pad_token_id);
-    *current_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
-    *past_sequence_length_->GetTensorMutableData<int32_t>() += new_sequence_length;
   }
 
   // Resize input_ids shape based on new_tokens
