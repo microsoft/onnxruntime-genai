@@ -102,3 +102,4 @@ stages:
           enable_macos_cpu: false
           enable_android: false
           enable_apple_framework: false
+          enable_win_qnn: true
