@@ -96,13 +96,13 @@ jobs:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.QNN'
 
   - name: ort_nuget_package_name
-    ${{ if eq(parameters.ep, 'cpu') }}:
+    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
       value: 'Microsoft.ML.OnnxRuntime'
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: 'Microsoft.ML.OnnxRuntime.Gpu'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntime.DirectML'
-    ${{ if eq(parameters.ep, 'qnn') }}:
+    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
       value: 'Microsoft.ML.OnnxRuntime.QNN'
 
   steps:
