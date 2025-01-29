@@ -228,10 +228,14 @@ Ort::Allocator* GetDeviceAllocator(OrtSession& session, DeviceType type) {
 
   auto& device = GetOrtGlobals()->allocator_device_[static_cast<int>(type)];
   if (!device) {
-    static const char* device_type_names[static_cast<int>(DeviceType::MAX)] = {"CPU - SEE ABOVE", "Cuda", "DML", "WebGPU Buffer"};
+    static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QNN (Not used, uses CPU memory)"};
+    static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
-    auto memory_info = OrtMemoryInfo::Create(device_type_names[static_cast<int>(type)], OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+    auto name = device_type_names[static_cast<int>(type)];
+    auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
     device = Ort::Allocator::Create(session, *memory_info);
+    if (!device)
+      throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
     GetDeviceInterface(type)->InitOrt(*Ort::api, *device);  // Necessary for any shared library providers so they can access Ort::api
   }
   return device.get();
