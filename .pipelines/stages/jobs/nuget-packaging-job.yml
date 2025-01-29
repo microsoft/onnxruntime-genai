@@ -60,7 +60,7 @@ parameters:
   default: 'release'
 
 jobs:
-- job: nuget_${{ parameters.ep }}_packaging
+- job: nuget_${{ parameters.ep }}_packaging_${{ parameters.enable_win_qnn }}
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
   - name: ep
