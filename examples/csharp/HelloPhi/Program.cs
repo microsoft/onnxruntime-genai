@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using Microsoft.ML.OnnxRuntimeGenAI;
+using System.Runtime.InteropServices;
 
 void PrintUsage()
 {
@@ -100,47 +101,80 @@ do
     {
         continue;
     }
-    var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
+    var sequences = tokenizer.Encode($"<|user|>\n{prompt} <|end|>\n<|assistant|>");
+    var sequenceLength = sequences[0].Length;
+    var maxSequenceLength = 512;
+    var paddingLength = maxSequenceLength - sequenceLength;
 
-    using GeneratorParams generatorParams = new GeneratorParams(model);
-    generatorParams.SetSearchOption("min_length", 50);
-    generatorParams.SetSearchOption("max_length", 200);
-    if (option == 1) // Complete Output
+    for (int idx = 0; idx < paddingLength; ++idx)
     {
-        using var generator = new Generator(model, generatorParams);
-        generator.AppendTokenSequences(sequences);
-        var watch = System.Diagnostics.Stopwatch.StartNew();
-        while (!generator.IsDone())
-        {
-            generator.GenerateNextToken();
-        }
-
-        var outputSequence = generator.GetSequence(0);
-        var outputString = tokenizer.Decode(outputSequence);
-        watch.Stop();
-        var runTimeInSeconds = watch.Elapsed.TotalSeconds;
-        Console.WriteLine("Output:");
-        Console.WriteLine(outputString);
-        var totalTokens = outputSequence.Length;
-        Console.WriteLine($"Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
+        sequences.Append(220, 0);
     }
 
-    else if (option == 2) //Streaming Output
+    float[] attn_mask = new float[maxSequenceLength];
+    for (int idx = 0; idx < sequenceLength; ++idx)
     {
-        using var tokenizerStream = tokenizer.CreateStream();
-        using var generator = new Generator(model, generatorParams);
-        generator.AppendTokenSequences(sequences);
-        var watch = System.Diagnostics.Stopwatch.StartNew();
-        while (!generator.IsDone())
+        attn_mask[idx] = 1.0f;
+    }
+
+    for (int idx = sequenceLength; idx < maxSequenceLength; ++idx)
+    {
+        attn_mask[idx] = 0.0f;
+    }
+    long[] attn_mask_shape = { maxSequenceLength };
+
+    GCHandle handle = GCHandle.Alloc(attn_mask, GCHandleType.Pinned);
+    try
+    {
+        IntPtr data_pointer = handle.AddrOfPinnedObject();
+
+        using var attn_mask_tensor = new Tensor(data_pointer, attn_mask_shape, ElementType.float32);
+
+        using GeneratorParams generatorParams = new GeneratorParams(model);
+        //generatorParams.SetSearchOption("min_length", 50);
+        generatorParams.SetSearchOption("max_length", 1024);
+        generatorParams.SetModelInput("attn_mask", attn_mask_tensor);
+        if (option == 1) // Complete Output
         {
-            generator.GenerateNextToken();
-            Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
+            using var generator = new Generator(model, generatorParams);
+            generator.AppendTokenSequences(sequences);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            while (!generator.IsDone())
+            {
+                generator.GenerateNextToken();
+            }
+
+            var outputSequence = generator.GetSequence(0);
+            var outputString = tokenizer.Decode(outputSequence);
+            watch.Stop();
+            var runTimeInSeconds = watch.Elapsed.TotalSeconds;
+            Console.WriteLine("Output:");
+            Console.WriteLine(outputString);
+            var totalTokens = outputSequence.Length;
+            Console.WriteLine($"Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
         }
-        Console.WriteLine();
-        watch.Stop();
-        var runTimeInSeconds = watch.Elapsed.TotalSeconds;
-        var outputSequence = generator.GetSequence(0);
-        var totalTokens = outputSequence.Length;
-        Console.WriteLine($"Streaming Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
+
+        else if (option == 2) //Streaming Output
+        {
+            using var tokenizerStream = tokenizer.CreateStream();
+            using var generator = new Generator(model, generatorParams);
+            generator.AppendTokenSequences(sequences);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            while (!generator.IsDone())
+            {
+                generator.GenerateNextToken();
+                Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
+            }
+            Console.WriteLine();
+            watch.Stop();
+            var runTimeInSeconds = watch.Elapsed.TotalSeconds;
+            var outputSequence = generator.GetSequence(0);
+            var totalTokens = outputSequence.Length;
+            Console.WriteLine($"Streaming Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
+        }
+    }
+    finally
+    {
+        handle.Free();
     }
 } while (interactive);
