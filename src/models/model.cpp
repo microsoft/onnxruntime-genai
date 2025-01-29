@@ -317,14 +317,12 @@ void Model::InitDeviceAllocator(OrtSession& session) {
   }
 #endif
 
-#if USE_WEBGPU
   if (device_type_ == DeviceType::WEBGPU) {
     // for webgpu we only use device memory for kv_cache
     memory_info_device_ = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
     owned_allocator_device_ = Ort::Allocator::Create(session, *memory_info_device_);
     allocator_kvcache_ = owned_allocator_device_.get();
   }
-#endif
 
   if (device_type_ == DeviceType::QNN) {
     memory_info_device_ = OrtMemoryInfo::Create("QnnHtpShared", OrtAllocatorType::OrtDeviceAllocator, 0,
@@ -590,7 +588,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
-  std::set<std::string> llm_types = {"chatglm", "decoder", "gemma", "gemma2", "granite", "llama", "mistral", "nemotron", "phi", "phimoe", "phi3", "phi3small", "qwen2"};
+  std::set<std::string> llm_types = {"chatglm", "decoder", "gemma", "gemma2", "granite", "llama", "mistral", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2"};
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (llm_types.find(config->model.type) != llm_types.end())

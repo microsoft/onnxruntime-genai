@@ -128,6 +128,38 @@ TEST(CAPITests, AppendTokensToSequence) {
 #endif
 }
 
+TEST(CAPITests, MaxLength) {
+  // Batch size 1 case
+  std::vector<int32_t> input_ids_0{1, 2, 3, 5, 8};
+  std::vector<int32_t> input_ids_1{13, 21, 34, 55, 89};
+
+  int max_length = 7;
+
+  // To generate this file:
+  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
+  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
+
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids_0.data(), input_ids_0.size());
+  EXPECT_THROW(generator->AppendTokens(input_ids_1.data(), input_ids_1.size()), std::runtime_error);
+
+  // Batch size 3 case
+  std::vector<int32_t> input_ids_2{1, 2, 3, 5, 8, 13, 21, 34, 55, 89,
+                                   0, 0, 0, 52, 104, 52, 53, 54, 55, 56,
+                                   0, 0, 195, 731, 731, 195, 64, 45, 23, 12};
+  params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", 3);
+
+  generator = OgaGenerator::Create(*model, *params);
+  EXPECT_THROW(generator->AppendTokens(input_ids_2.data(), input_ids_2.size()), std::runtime_error);
+}
+
 TEST(CAPITests, EndToEndPhiBatch) {
 #if TEST_PHI2
   auto model = OgaModel::Create(PHI2_PATH);

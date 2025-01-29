@@ -16,15 +16,6 @@ Logits::Logits(State& state)
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
 
-  if (state_.GetCapturedGraphInfo()) {
-    if (type_ == Ort::TypeToTensorType<float>) {
-      sb_logits32_ = state_.GetCapturedGraphInfo()->sb_logits32_.get();
-    }
-    if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
-      sb_logits16_ = state_.GetCapturedGraphInfo()->sb_logits16_.get();
-    }
-  }
-
 #if USE_CUDA
   if (model_.device_type_ == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
     auto& cpu_ids = model_.config_->model.eos_token_ids;
@@ -215,6 +206,18 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t> ? sb_logits16_ : sb_logits32_;
   output_raw_ = !sb_logits ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
                            : sb_logits->CreateTensorOnStaticBuffer(shape_, type_);
+
+  if (state_.GetCapturedGraphInfo()) {
+    if (!sb_logits16_ && !sb_logits32_) {
+      if (type_ == Ort::TypeToTensorType<float>) {
+        sb_logits32_ = state_.GetCapturedGraphInfo()->sb_logits32_.get();
+      }
+      if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
+        sb_logits16_ = state_.GetCapturedGraphInfo()->sb_logits16_.get();
+      }
+    }
+  }
+
   state_.outputs_[output_index_] = output_raw_.get();
 }
 
