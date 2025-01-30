@@ -575,11 +575,10 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   // Input shape (batch_size, sequence_length). The input is required with data type T.
   // Output shape (batch_size * num_beams, sequence_length)
 
-  // If we're on CUDA, we still want to do the copy to move the data over to CUDA memory where we will read from it later.
-  // DML doesn't currently support on-device scoring, so we go the same route as the CPU
-  if (num_beams == 1 && (device_type_ == DeviceType::CPU || device_type_ == DeviceType::DML || device_type_ == DeviceType::WEBGPU)) {
+  // When num_beams == 1, we don't need to expand the input, but the expand has a side effect of copying from
+  // CPU memory to device memory, so we can skip if the p_device_inputs_ is the CPU device
+  if (num_beams == 1 && p_device_inputs_ == GetDeviceInterface(DeviceType::CPU))
     return std::move(input);
-  }
 
   auto input_type_info = input->GetTensorTypeAndShapeInfo();
   auto element_type = input_type_info->GetElementType();

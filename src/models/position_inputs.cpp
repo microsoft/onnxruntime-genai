@@ -166,8 +166,6 @@ void DefaultPositionInputs::CreateNextAttentionMaskTensor(int total_length) {
 void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
   if (position_ids_shape_[0] != 1 && !(total_length == 0 || new_kv_length == 1))
     throw std::runtime_error("DefaultPositionInputs::UpdatePositionIDs - batch_size must be 1 for continuous decoding.");
-  if (DeviceType::DML == model_.device_type_ && !(total_length == 0 || new_kv_length == 1))
-    throw std::runtime_error("DefaultPositionInputs::UpdatePositionIDs - DML does not support continuous decoding.");
 
   CreateNextAttentionMaskTensor(total_length);
   state_.inputs_[mask_input_index_] = attention_mask_.get();
