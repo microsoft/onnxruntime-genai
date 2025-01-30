@@ -176,13 +176,13 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
     int max_length = sb_attention_mask_ ? state_.params_->search.max_length : total_length;
     bool update_only = sb_attention_mask_ && !is_first_mask_update_;
     model_.p_device_inputs_->UpdateAttentionMask(attention_mask_next_->GetTensorMutableRawData(),
-                                          attention_mask_->GetTensorRawData(),
-                                          static_cast<int>(attention_mask_shape_[0]),
-                                          new_kv_length,
-                                          total_length,
-                                          max_length,
-                                          update_only,
-                                          type_);
+                                                 attention_mask_->GetTensorRawData(),
+                                                 static_cast<int>(attention_mask_shape_[0]),
+                                                 new_kv_length,
+                                                 total_length,
+                                                 max_length,
+                                                 update_only,
+                                                 type_);
   } else {
     type_ == Ort::TypeToTensorType<int32_t> ? UpdateAttentionMaskImpl<int32_t>(total_length)
                                             : UpdateAttentionMaskImpl<int64_t>(total_length);

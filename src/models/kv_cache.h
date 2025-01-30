@@ -122,7 +122,6 @@ struct WindowedKeyValueCache : KeyValueCache {
   }
 
  private:
-
   DeviceInterface& Device() { return *model_.p_device_kvcache_; }
   Ort::Allocator& Allocator() { return model_.p_device_kvcache_->GetAllocator(); }
 
