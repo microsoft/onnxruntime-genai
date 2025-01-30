@@ -80,6 +80,9 @@ struct WindowedInputIDs : public InputIDs {
   ONNXTensorElementDataType type_;
 
   std::unique_ptr<OrtValue> value_;
+  std::unique_ptr<OrtValue> total_sequence_length_;
+  std::unique_ptr<OrtValue> past_sequence_length_;
+  int32_t initial_num_tokens_{};
 };
 
 std::unique_ptr<InputIDs> CreateInputIDs(State& state);

@@ -110,6 +110,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
 void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
                                            DeviceSpan<int32_t> next_indices) {
   for (auto& pipeline_state : pipeline_states_) {
+    // std::cout << "Running pipeline state " << model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id << std::endl;
     if (first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_prompt) {
       continue;
     } else if (!first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
