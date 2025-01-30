@@ -14,6 +14,8 @@
 #ifndef PHI2_PATH
 #if USE_CUDA
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cuda"
+#elif USE_DML
+#define PHI2_PATH MODEL_PATH "phi-2/int4/dml"
 #else
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
 #endif
@@ -148,6 +150,7 @@ TEST(CAPITests, MaxLength) {
   generator->AppendTokens(input_ids_0.data(), input_ids_0.size());
   EXPECT_THROW(generator->AppendTokens(input_ids_1.data(), input_ids_1.size()), std::runtime_error);
 
+#if !USE_DML
   // Batch size 3 case
   std::vector<int32_t> input_ids_2{1, 2, 3, 5, 8, 13, 21, 34, 55, 89,
                                    0, 0, 0, 52, 104, 52, 53, 54, 55, 56,
@@ -158,8 +161,10 @@ TEST(CAPITests, MaxLength) {
 
   generator = OgaGenerator::Create(*model, *params);
   EXPECT_THROW(generator->AppendTokens(input_ids_2.data(), input_ids_2.size()), std::runtime_error);
+#endif
 }
-
+// DML doesn't support batch_size > 1
+#if !USE_DML
 TEST(CAPITests, EndToEndPhiBatch) {
 #if TEST_PHI2
   auto model = OgaModel::Create(PHI2_PATH);
@@ -191,6 +196,62 @@ TEST(CAPITests, EndToEndPhiBatch) {
     auto out_string = tokenizer->Decode(generator->GetSequenceData(i), generator->GetSequenceCount(i));
     std::cout << "Decoded string:" << out_string << std::endl;
   }
+
+  // std::cout << "Print output tokens" << std::endl;
+  // for (size_t i = 0; i < 3; i++) {
+  //   auto out_array = generator->GetSequenceData(i);
+  //   for (size_t j = 0; j < generator->GetSequenceCount(i); j++) {
+  //     std::cout << out_array[j] << ", ";
+  //   }
+  // std::cout << std::endl;
+  }
+#endif
+}
+#endif
+
+TEST(CAPITests, EndToEndPhi) {
+#if TEST_PHI2
+  Oga::SetLogBool("enabled", false);
+  Oga::SetLogBool("generate_next_token", true);
+  Oga::SetLogBool("model_input_values", true);
+  Oga::SetLogBool("model_output_values", true);
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  const char* input_strings[] = {
+      "This is a test."
+  };
+
+  auto input_sequences = OgaSequences::Create();
+  for (auto& string : input_strings)
+    tokenizer->Encode(string, *input_sequences);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 40);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*input_sequences);
+
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Decode The Batch
+  for (size_t i = 0; i < 1; i++) {
+    auto out_string = tokenizer->Decode(generator->GetSequenceData(i), generator->GetSequenceCount(i));
+    std::cout << "Decoded string:" << out_string << std::endl;
+  }
+
+  // std::cout << "Print output tokens" << std::endl;
+  // for (size_t i = 0; i < 1; i++) {
+  //   auto out_array = generator->GetSequenceData(i);
+  //   for (size_t j = 0; j < generator->GetSequenceCount(i); j++) {
+  //     std::cout << out_array[j] << ", ";
+  //   }
+  // }
+  // std::cout << std::endl;
+  Oga::SetLogBool("enabled", false);
+
 #endif
 }
 
@@ -443,7 +504,8 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
-#if TEST_PHI2
+// DML Doesn't support batch_size > 1
+#if TEST_PHI2 && !USE_DML
 
 struct Phi2Test {
   Phi2Test() {
@@ -521,12 +583,14 @@ TEST(CAPITests, TopKTopPCAPI) {
   test.Run();
 }
 
-#endif  // TEST_PHI2
+#endif  // TEST_PHI2 && !USE_DML
 
 #if TEST_PHI2
 TEST(CAPITests, AdaptersTest) {
 #ifdef USE_CUDA
   using OutputType = Ort::Float16_t;
+#elif defined(USE_DML)
+  using OutputType = Ort::Float16_t; 
 #else
   using OutputType = float;
 #endif
