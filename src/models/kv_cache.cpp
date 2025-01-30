@@ -46,11 +46,11 @@ CombinedKeyValueCache::CombinedKeyValueCache(State& state)
   // Derive the KV data type from the KV input 0
   type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
 
-  empty_past_ = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+  empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
   shape_[3] = 0;
 
   for (int i = 0; i < layer_count_; ++i) {
-    presents_.push_back(OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_));
+    presents_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
   }
 }
 
@@ -82,7 +82,7 @@ void CombinedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_l
 
   shape_[3] = total_length;
   for (int i = 0; i < layer_count_; i++) {
-    presents_[i] = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+    presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
     state_.outputs_[output_index_ + i] = presents_[i].get();
   }
 
@@ -119,9 +119,9 @@ void CombinedKeyValueCache::RewindPastTensorsTo(size_t index) {
 
   for (int i = 0; i < layer_count_; i++) {
     OrtValue& present = *presents_[i];
-    std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
-    auto present_span = WrapTensor<T>(*model_.p_device_, present);
-    auto past_span = WrapTensor<T>(*model_.p_device_, *past);
+    std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
+    auto present_span = WrapTensor<T>(Device(), present);
+    auto past_span = WrapTensor<T>(Device(), *past);
 
     for (int j = 0; j < 2 * batch_x_num_heads; j++) {
       auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
@@ -141,10 +141,10 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_devic
   auto past_key_size = shape_[1] * block_size_per_beam;
 
   OrtValue& present = *presents_[index];
-  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<ScoreType>(*model_.allocator_kvcache_, shape_);
+  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<ScoreType>(Allocator(), shape_);
 
-  auto past_span = WrapTensor<ScoreType>(*model_.p_device_, *past);
-  auto present_span = WrapTensor<ScoreType>(*model_.p_device_, present);
+  auto past_span = WrapTensor<ScoreType>(Device(), *past);
+  auto present_span = WrapTensor<ScoreType>(Device(), present);
 
   for (size_t j = 0; j < beam_indices.size(); j++) {
     int32_t beam_index = beam_indices[j];
@@ -190,7 +190,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   // Derive the KV data type from the KV input 0
   type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
 
-  empty_past_ = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+  empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
   // Set the size after empty_past_ has been created with 0 for this field
   if (past_present_share_buffer_) {
@@ -207,10 +207,10 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   try {
     for (int i = 0; i < layer_count_ * 2; ++i) {
       presents_.push_back(
-          sb_kv_caches_.empty() ? OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_)
+          sb_kv_caches_.empty() ? OrtValue::CreateTensor(Allocator(), shape_, type_)
                                 : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
       // Zero the memory so we don't leak any data from the previous run
-      ByteWrapTensor(*model_.p_device_, *presents_.back()).Zero();
+      ByteWrapTensor(Device(), *presents_.back()).Zero();
     }
   } catch (const Ort::Exception&) {
     std::ostringstream oss;
@@ -269,7 +269,7 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
 
   shape_[2] = total_length;
   for (int i = 0; i < layer_count_ * 2; i++) {
-    presents_[i] = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+    presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
     state_.outputs_[output_index_ + i] = presents_[i].get();
   }
 
@@ -308,10 +308,10 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
 
   for (int i = 0; i < layer_count_ * 2; i++) {
     OrtValue& present = *presents_[i];
-    std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+    std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
-    auto past_span = WrapTensor<T>(*model_.p_device_, *past);
-    auto present_span = WrapTensor<T>(*model_.p_device_, present);
+    auto past_span = WrapTensor<T>(Device(), *past);
+    auto present_span = WrapTensor<T>(Device(), present);
 
     for (int j = 0; j < batch_x_num_heads; j++) {
       auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
@@ -330,10 +330,10 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device
   auto block_size_per_beam = shape_[1] * shape_[2] * shape_[3];
 
   OrtValue& present_value = *presents_[index];
-  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(*model_.allocator_kvcache_, shape_);
+  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(Allocator(), shape_);
 
-  auto past_span = WrapTensor<ScoreType>(*model_.p_device_, *past_value);
-  auto present_span = WrapTensor<ScoreType>(*model_.p_device_, present_value);
+  auto past_span = WrapTensor<ScoreType>(Device(), *past_value);
+  auto present_span = WrapTensor<ScoreType>(Device(), present_value);
 
   for (size_t j = 0; j < beam_indices.size(); j++) {
     int32_t beam_index = beam_indices[j];
@@ -371,8 +371,8 @@ CrossCache::CrossCache(State& state)
   type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
 
   for (int i = 0; i < layer_count_; ++i) {
-    values_.push_back(OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_));
-    values_.push_back(OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_));
+    values_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
+    values_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
   }
 }
 
@@ -422,21 +422,21 @@ WindowedKeyValueCache::WindowedKeyValueCache(State& state)
 
   for (int i = 0; i < layer_count_; ++i) {
     key_caches_in_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, key_cache_shape_in_, type_));
+        OrtValue::CreateTensor(Allocator(), key_cache_shape_in_, type_));
     std::fill_n(key_caches_in_[i]->GetTensorMutableData<uint8_t>(),
                 ElementCountFromShape(key_cache_shape_in_),
                 static_cast<uint8_t>(model_.config_->model.decoder.sliding_window->pad_value));
 
     value_caches_in_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, value_cache_shape_in_, type_));
+        OrtValue::CreateTensor(Allocator(), value_cache_shape_in_, type_));
     std::fill_n(value_caches_in_[i]->GetTensorMutableData<uint8_t>(),
                 ElementCountFromShape(value_cache_shape_in_),
                 static_cast<uint8_t>(model_.config_->model.decoder.sliding_window->pad_value));
 
     key_caches_out_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, key_cache_shape_out_, type_));
+        OrtValue::CreateTensor(Allocator(), key_cache_shape_out_, type_));
     value_caches_out_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, value_cache_shape_out_, type_));
+        OrtValue::CreateTensor(Allocator(), value_cache_shape_out_, type_));
   }
 }
 
@@ -548,7 +548,7 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current
 
   ThreadPool thread_pool{static_cast<size_t>(layer_count_)};
   thread_pool.Compute([&](size_t layer_idx) {
-    std::unique_ptr<OrtValue> key_cache = OrtValue::CreateTensor(*model_.allocator_device_, updated_key_cache_shape_in, type_);
+    std::unique_ptr<OrtValue> key_cache = OrtValue::CreateTensor(Allocator(), updated_key_cache_shape_in, type_);
 
     uint8_t* key_cache_data = key_cache->GetTensorMutableData<uint8_t>();
     uint8_t* key_cache_in_data = key_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
@@ -574,9 +574,9 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current
     }
 
     key_caches_in_[layer_idx] = std::move(key_cache);
-    key_caches_out_[layer_idx] = OrtValue::CreateTensor(*model_.allocator_device_, updated_key_cache_shape_out, type_);
+    key_caches_out_[layer_idx] = OrtValue::CreateTensor(Allocator(), updated_key_cache_shape_out, type_);
 
-    std::unique_ptr<OrtValue> value_cache = OrtValue::CreateTensor(*model_.allocator_device_, updated_value_cache_shape_in, type_);
+    std::unique_ptr<OrtValue> value_cache = OrtValue::CreateTensor(Allocator(), updated_value_cache_shape_in, type_);
 
     uint8_t* value_cache_data = value_cache->GetTensorMutableData<uint8_t>();
     uint8_t* value_cache_in_data = value_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
@@ -602,7 +602,7 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current
     }
 
     value_caches_in_[layer_idx] = std::move(value_cache);
-    value_caches_out_[layer_idx] = OrtValue::CreateTensor(*model_.allocator_device_, updated_value_cache_shape_out, type_);
+    value_caches_out_[layer_idx] = OrtValue::CreateTensor(Allocator(), updated_value_cache_shape_out, type_);
   });
 
   window_size_ = 1;

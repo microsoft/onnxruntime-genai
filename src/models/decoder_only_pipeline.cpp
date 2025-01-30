@@ -12,7 +12,7 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
     sessions_.emplace_back(OrtSession::Create(ort_env, (config_->config_path / fs::path(model.filename)).c_str(),
                                               GetSessionOptions(model.model_id)));
 
-    if (!allocator_device_ && model.session_options.has_value()) {
+    if (!p_device_inputs_ && model.session_options.has_value()) {
       const auto& provider_options = (*model.session_options).provider_options;
       if (std::any_of(provider_options.begin(), provider_options.end(),
                       [](const auto& elem) { return !elem.name.empty(); })) {
@@ -21,7 +21,7 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
     }
   }
 
-  if (!allocator_device_) {
+  if (!p_device_inputs_) {
     // If the device allocator has not been created, it implies all
     // sessions are configured to run on CPU.
     // Pick any session to create the device allocator.

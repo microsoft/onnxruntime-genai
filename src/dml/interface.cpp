@@ -20,7 +20,7 @@ namespace Generators {
 namespace Dml {  // If this was in a shared library it wouldn't need to be in its own namespace
 
 Ort::Allocator* ort_allocator_{};
-const char* label_dml = "dml";
+const char* device_label = "dml";
 
 wil::unique_hmodule smart_directml_dll_;
 DmlObjects dml_objects_;
@@ -50,7 +50,7 @@ struct GpuMemory final : DeviceBuffer {
       free(p_cpu_);
   }
 
-  const char* GetType() const override { return label_dml; }
+  const char* GetType() const override { return device_label; }
 
   void AllocateCpu() override {
     if (!p_cpu_)
@@ -69,7 +69,7 @@ struct GpuMemory final : DeviceBuffer {
   }
 
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
-    if (source.GetType() == label_dml) {
+    if (source.GetType() == device_label) {
       auto& source_gpu = dynamic_cast<GpuMemory&>(source);
       dml_execution_context_->CopyBufferRegion(
           gpu_resource_.Get(),
@@ -94,8 +94,8 @@ struct GpuMemory final : DeviceBuffer {
   bool owned_;  // If we own the memory, we delete it on destruction
 };
 
-struct DmlInterfaceImpl : DeviceInterface {
-  DmlInterfaceImpl(LUID* p_device_luid) {
+struct InterfaceImpl : DeviceInterface {
+  InterfaceImpl(LUID* p_device_luid) {
     Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&dml_api_)));
     if (!dml_api_) {
       throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
@@ -209,11 +209,11 @@ struct DmlInterfaceImpl : DeviceInterface {
 
 }  // namespace Dml
 
-std::unique_ptr<Dml::DmlInterfaceImpl> g_dml_device;
+std::unique_ptr<Dml::InterfaceImpl> g_dml_device;
 
 void InitDmlInterface(LUID* p_device_luid) {
   if (!g_dml_device)
-    g_dml_device = std::make_unique<Dml::DmlInterfaceImpl>(p_device_luid);
+    g_dml_device = std::make_unique<Dml::InterfaceImpl>(p_device_luid);
 }
 
 void SetDmlProvider(OrtSessionOptions& session_options) {

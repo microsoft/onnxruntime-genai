@@ -10,11 +10,11 @@ Logits::Logits(State& state)
     : state_{state},
       shape_{static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
-  output_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+  output_raw_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
 
   if (model_.device_type_ == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
     auto& cpu_ids = model_.config_->model.eos_token_ids;
-    cuda_eos_token_ids_ = state_.params_->p_device->Allocate<int32_t>(cpu_ids.size());
+    cuda_eos_token_ids_ = model_.p_device_->Allocate<int32_t>(cpu_ids.size());
     copy(std::span<const int32_t>{cpu_ids}, cuda_eos_token_ids_.CpuSpan());
     cuda_eos_token_ids_.CopyCpuToDevice();
   }
@@ -34,18 +34,18 @@ DeviceSpan<float> Logits::Get() {
     const size_t num_beams = state_.params_->search.num_beams;
 
     // create new OrtValue for logits_of_last_token and use output_last_tokens_ to hold it
-    output_last_tokens_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_last, type_);
+    output_last_tokens_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_last, type_);
 
     if (type_ == Ort::TypeToTensorType<Ort::Float16_t>)
-      logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(*model_.allocator_device_, shape_);
+      logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(model_.p_device_inputs_->GetAllocator(), shape_);
 
     logits_of_last_token = output_last_tokens_.get();
 
     size_t element_size = SizeOf(type_);
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
-    auto logits_raw = ByteWrapTensor(*state_.params_->p_device, *output_raw_);
-    auto logits_last_tokens = ByteWrapTensor(*state_.params_->p_device, *logits_of_last_token);
+    auto logits_raw = ByteWrapTensor(*model_.p_device_inputs_, *output_raw_);
+    auto logits_last_tokens = ByteWrapTensor(*model_.p_device_inputs_, *logits_of_last_token);
 
     for (int batch_index = 0; batch_index < state_.params_->search.batch_size; batch_index++) {
       // Find the first non pad token from the end
@@ -63,12 +63,12 @@ DeviceSpan<float> Logits::Get() {
 
   // Convert from float16 to float32 if necessary
   if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
-    Cast(*logits_of_last_token, logits_of_last_token_fp32_, *model_.p_device_, Ort::TypeToTensorType<float>);
+    Cast(*logits_of_last_token, logits_of_last_token_fp32_, *model_.p_device_inputs_, Ort::TypeToTensorType<float>);
     logits_of_last_token = logits_of_last_token_fp32_.get();
   }
 
   if (logits_.empty() || logits_of_last_token->GetTensorMutableRawData() != logits_.Span().data())
-    logits_ = WrapTensor<float>(*state_.params_->p_device, *logits_of_last_token);
+    logits_ = WrapTensor<float>(*model_.p_device_inputs_, *logits_of_last_token);
 
   if (model_.device_type_ == DeviceType::CUDA) {
     if (!cuda_eos_token_ids_.empty())
@@ -108,7 +108,7 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
 
   shape_[1] = new_kv_length;
   StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t> ? sb_logits16_ : sb_logits32_;
-  output_raw_ = !sb_logits ? OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_)
+  output_raw_ = !sb_logits ? OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_)
                            : sb_logits->CreateTensorOnStaticBuffer(shape_, type_);
 
   if (state_.GetCapturedGraphInfo()) {

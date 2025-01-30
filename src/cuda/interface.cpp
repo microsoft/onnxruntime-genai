@@ -13,7 +13,7 @@ namespace Generators {
 
 GenaiInterface* gp_genai{};
 Ort::Allocator* ort_allocator_{};
-const char* label_cuda = "cuda";
+const char* device_label = "cuda";
 
 cuda_stream_holder g_stream;
 cudaStream_t GetStream() { return g_stream.get(); }
@@ -36,7 +36,7 @@ struct GpuMemory final : DeviceBuffer {
       ::cudaFreeHost(p_cpu_);
   }
 
-  const char* GetType() const override { return label_cuda; }
+  const char* GetType() const override { return device_label; }
 
   void AllocateCpu() override {
     if (!p_cpu_)
@@ -55,7 +55,7 @@ struct GpuMemory final : DeviceBuffer {
   }
 
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
-    if (source.GetType() == label_cuda)
+    if (source.GetType() == device_label)
       ::cudaMemcpyAsync(p_device_ + begin_dest, source.p_device_ + begin_source, size_in_bytes, ::cudaMemcpyDeviceToDevice, GetStream());
     else
       gp_genai->CopyThroughCpu(*this, begin_dest, source, begin_source, size_in_bytes);

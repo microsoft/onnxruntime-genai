@@ -221,24 +221,24 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-Ort::Allocator* GetDeviceAllocator(OrtSession& session, DeviceType type) {
-  // CPU Allocator is a special case, so don't try to create it
+void EnsureDeviceOrtInit(OrtSession& session, DeviceType type) {
+  // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
   if (type == DeviceType::CPU)
-    return &GetDeviceInterface(DeviceType::CPU)->GetAllocator();
+    return;
 
   auto& device = GetOrtGlobals()->allocator_device_[static_cast<int>(type)];
-  if (!device) {
-    static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QNN (Not used, uses CPU memory)"};
-    static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
+  if (device)
+    return;
 
-    auto name = device_type_names[static_cast<int>(type)];
-    auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    device = Ort::Allocator::Create(session, *memory_info);
-    if (!device)
-      throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
-    GetDeviceInterface(type)->InitOrt(*Ort::api, *device);  // Necessary for any shared library providers so they can access Ort::api
-  }
-  return device.get();
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared"};
+  static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
+
+  auto name = device_type_names[static_cast<int>(type)];
+  auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+  device = Ort::Allocator::Create(session, *memory_info);
+  if (!device)
+    throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
+  GetDeviceInterface(type)->InitOrt(*Ort::api, *device);  // Necessary for any shared library providers so they can access Ort::api
 }
 
 SessionInfo::SessionInfo(OrtSession& session) {
@@ -301,18 +301,19 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 Model::~Model() = default;
 
 void Model::InitDeviceAllocator(OrtSession& session) {
-  allocator_device_ = &allocator_cpu_;
-  if (device_type_ == DeviceType::CUDA)
-    allocator_device_ = GetDeviceAllocator(session, device_type_);
+  EnsureDeviceOrtInit(session, device_type_);
 
-  allocator_kvcache_ = allocator_device_;
-  if (device_type_ == DeviceType::WEBGPU || device_type_ == DeviceType::DML) {
-    // for dml and webgpu we only use device memory for kv_cache
-    allocator_kvcache_ = GetDeviceAllocator(session, device_type_);
-  }
+  // Only CUDA does every input on the device
+  if (device_type_ == DeviceType::CUDA)
+    p_device_inputs_ = p_device_;
+  else
+    p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
+
+  // The kvcache is always allocated in device memory
+  p_device_kvcache_ = p_device_;
 
   session_info_ = std::make_unique<SessionInfo>(session);
-  captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), allocator_device_);
+  captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), &p_device_->GetAllocator());
 }
 
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
@@ -487,7 +488,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
 
-  // If no device is set, create it, default to CPU
   if (!p_device_) {
     p_device_ = GetDeviceInterface(device_type_);
   }
@@ -495,10 +495,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
-#if 0
-  ClearProviders(*config_);
-  SetProviderOption(*config_, "dml", {}, {});
-#endif
 
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true, false);
 
@@ -593,10 +589,9 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
   input_shape[0] *= num_beams;
 
-  auto& allocator = device_type_ == DeviceType::DML ? allocator_cpu_ : *allocator_device_;
-  auto expanded = OrtValue::CreateTensor(allocator, input_shape, element_type);
   auto input_span = ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *input);
-  auto expanded_span = ByteWrapTensor(*p_device_, *expanded);
+  auto expanded = OrtValue::CreateTensor(p_device_inputs_->GetAllocator(), input_shape, element_type);
+  auto expanded_span = ByteWrapTensor(*p_device_inputs_, *expanded);
 
   for (int i = 0; i < batch_size; i++) {
     for (int j = 0; j < num_beams; j++) {

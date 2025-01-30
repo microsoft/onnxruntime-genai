@@ -119,13 +119,13 @@ void DefaultPositionInputs::CreateNextPositionIDsTensor() {
       position_ids_ = std::move(position_ids_next_);
       position_ids_next_ = nullptr;
     } else {
-      position_ids_ = OrtValue::CreateTensor(*model_.allocator_device_, position_ids_shape_, type_);
+      position_ids_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), position_ids_shape_, type_);
     }
   } else {
     position_ids_ = sb_position_ids_->CreateTensorOnStaticBuffer(position_ids_shape_, type_);
     if (position_ids_shape_[1] == 1) {
-      auto position_ids_span = ByteWrapTensor(*model_.p_device_, *position_ids_);
-      auto position_ids_next_span = ByteWrapTensor(*model_.p_device_, *position_ids_next_);
+      auto position_ids_span = ByteWrapTensor(*model_.p_device_inputs_, *position_ids_);
+      auto position_ids_next_span = ByteWrapTensor(*model_.p_device_inputs_, *position_ids_next_);
       position_ids_span.CopyFrom(position_ids_next_span);
     }
   }
@@ -143,7 +143,7 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
   }
 
   if (model_.device_type_ == DeviceType::CUDA)
-    model_.p_device_->UpdatePositionIds(position_ids_->GetTensorMutableRawData(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
+    model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetTensorMutableRawData(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
   else {
     type_ == Ort::TypeToTensorType<int32_t> ? UpdatePositionIDsImpl<int32_t>(total_length, new_kv_length)
                                             : UpdatePositionIDsImpl<int64_t>(total_length, new_kv_length);
@@ -153,12 +153,12 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
 void DefaultPositionInputs::CreateNextAttentionMaskTensor(int total_length) {
   if (!sb_attention_mask_) {
     attention_mask_shape_[1] = total_length;
-    attention_mask_next_ = OrtValue::CreateTensor(*model_.allocator_device_, attention_mask_shape_, type_);
+    attention_mask_next_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), attention_mask_shape_, type_);
   } else {
     attention_mask_shape_[1] = state_.params_->search.max_length;
     attention_mask_next_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
     if (is_first_mask_update_) {
-      ByteWrapTensor(*model_.p_device_, *attention_mask_next_).Zero();
+      ByteWrapTensor(*model_.p_device_inputs_, *attention_mask_next_).Zero();
     }
   }
 }
@@ -175,7 +175,7 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
   if (model_.device_type_ == DeviceType::CUDA) {
     int max_length = sb_attention_mask_ ? state_.params_->search.max_length : total_length;
     bool update_only = sb_attention_mask_ && !is_first_mask_update_;
-    model_.p_device_->UpdateAttentionMask(attention_mask_next_->GetTensorMutableRawData(),
+    model_.p_device_inputs_->UpdateAttentionMask(attention_mask_next_->GetTensorMutableRawData(),
                                           attention_mask_->GetTensorRawData(),
                                           static_cast<int>(attention_mask_shape_[0]),
                                           new_kv_length,

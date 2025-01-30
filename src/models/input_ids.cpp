@@ -71,12 +71,12 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
 
   if (static_cast<size_t>(shape_[1]) != sequence_length) {
     shape_[1] = sequence_length;
-    value_ = OrtValue::CreateTensor<int32_t>(*model_.allocator_device_, shape_);
+    value_ = OrtValue::CreateTensor<int32_t>(model_.p_device_inputs_->GetAllocator(), shape_);
     state_.inputs_[input_index_] = value_.get();
   }
 
   // Update input_ids with next tokens
-  auto data_span = WrapTensor<int32_t>(*model_.p_device_, *value_);
+  auto data_span = WrapTensor<int32_t>(*model_.p_device_inputs_, *value_);
 
   // For beam search
   if (is_prompt_ && state_.params_->search.num_beams > 1) {
@@ -91,7 +91,7 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   }
 
   if (type_ == Ort::TypeToTensorType<int64_t>) {
-    Cast(*value_, cast_value_, *model_.p_device_, type_);
+    Cast(*value_, cast_value_, *model_.p_device_inputs_, type_);
     state_.inputs_[input_index_] = cast_value_.get();
   }
 

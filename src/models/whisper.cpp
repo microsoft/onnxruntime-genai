@@ -63,7 +63,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, DeviceSpan<int32_t> seq
 
   auto hidden_states_type = model_.session_info_->GetOutputDataType("encoder_hidden_states");
   auto encoder_hidden_states_shape = std::array<int64_t, 3>{decoder_input_ids_.GetShape()[0], 1500, static_cast<int64_t>(model_.config_->model.decoder.num_attention_heads) * model_.config_->model.decoder.head_size};
-  encoder_hidden_states_ = OrtValue::CreateTensor(*model_.allocator_device_, encoder_hidden_states_shape, hidden_states_type);
+  encoder_hidden_states_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), encoder_hidden_states_shape, hidden_states_type);
 
   auto sequence_lengths = sequence_lengths_unk.CpuSpan();
   for (int i = 0; i < decoder_input_ids_.GetShape()[0]; i++) {
@@ -90,7 +90,7 @@ Whisper_State::Whisper_State(const Whisper_Model& model, DeviceSpan<int32_t> seq
     auto type = model_.session_info_->GetOutputDataType(output_names_[kv_cache_indices]);
 
     for (int i = 0; i < layer_count * 2; i++) {
-      init_presents_.emplace_back(OrtValue::CreateTensor(*model_.allocator_device_, shape, type));
+      init_presents_.emplace_back(OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape, type));
       presents_.emplace_back(outputs_[kv_cache_indices + i]);
       outputs_[kv_cache_indices + i] = init_presents_.back().get();
     }
@@ -268,7 +268,7 @@ DeviceSpan<float> Whisper_State::Run(int current_length, DeviceSpan<int32_t>& ne
       }
 
       if (model_.session_info_->HasInput("cache_indirection")) {
-        cache_indirection_ = OrtValue::CreateTensor<int32_t>(*model_.allocator_device_, std::array<int64_t, 3>{params_->search.batch_size, params_->search.num_beams, params_->search.max_length});
+        cache_indirection_ = OrtValue::CreateTensor<int32_t>(model_.p_device_->GetAllocator(), std::array<int64_t, 3>{params_->search.batch_size, params_->search.num_beams, params_->search.max_length});
         cache_indirection_index_ = inputs_.size();
         input_names_.push_back("cache_indirection");
         inputs_.push_back(cache_indirection_.get());
@@ -284,7 +284,7 @@ DeviceSpan<float> Whisper_State::Run(int current_length, DeviceSpan<int32_t>& ne
           char string[64];
           snprintf(string, std::size(string), "output_cross_qk_%d", i);
           output_cross_qk_names_.emplace_back(string);
-          output_cross_qk_.emplace_back(OrtValue::CreateTensor(*model_.allocator_device_, shape, type));
+          output_cross_qk_.emplace_back(OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape, type));
 
           output_names_.emplace_back(output_cross_qk_names_.back().c_str());
           outputs_.emplace_back(output_cross_qk_.back().get());

@@ -17,7 +17,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             // define the library name required for iOS
             internal const string DllName = "__Internal";
 #else
-            internal const string DllName = "onnxruntime-genai";
+//          internal const string DllName = "C:\\code\\onnxruntime-genai2\\build\\Windows\\Debug\\Debug\\onnxruntime-genai";
+            internal const string DllName = "C:\\code\\onnxruntime-genai2\\build\\Windows\\RelWithDebInfo\\RelWithDebInfo\\onnxruntime-genai";
 #endif
         }
 

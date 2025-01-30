@@ -10,6 +10,8 @@
 #include "cpu/interface.h"
 #include "cuda/interface.h"
 #include "dml/interface.h"
+#include "qnn/interface.h"
+#include "webgpu/interface.h"
 
 #if defined(_WIN32)
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
@@ -187,6 +189,10 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
     case DeviceType::DML:
       return GetDmlInterface();
 #endif
+    case DeviceType::WEBGPU:
+      return GetWebGPUInterface();
+    case DeviceType::QNN:
+      return GetQNNInterface();
   }
 }
 
