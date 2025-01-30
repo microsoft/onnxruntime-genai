@@ -1677,7 +1677,7 @@ class Model:
             # Return early if there's nothing to unpack
             return
 
-        if hasattr(mlp, "base_layer"):
+        if hasattr(gate_up_linear, "base_layer"):
             # For LoRA packed `MatMul`
             return self.make_mlp_unpacked_lora(layer_id, mlp, root_input)
         else:
