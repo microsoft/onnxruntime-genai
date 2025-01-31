@@ -203,8 +203,7 @@ GeneratorParams::GeneratorParams(const Config& config)
 
 GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
-      p_device{model.p_device_},
-      device_type{model.device_type_},
+      p_device{model.p_device_inputs_},
       is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
   use_cuda_graph = is_cuda_graph_enabled_;
   if (use_cuda_graph) {
@@ -213,12 +212,12 @@ GeneratorParams::GeneratorParams(const Model& model)
 }
 
 void GeneratorParams::TryGraphCapture(int max_bs) {
-  if (!is_cuda_graph_enabled_ || device_type == DeviceType::CPU) {
+  if (!is_cuda_graph_enabled_ || p_device->GetType() == DeviceType::CPU) {
     // no-op
     return;
   }
 
-  if (DeviceType::CUDA == device_type || DeviceType::DML == device_type) {
+  if (DeviceType::CUDA == p_device->GetType() || DeviceType::DML == p_device->GetType()) {
     if (max_bs == 0) {
       throw std::runtime_error("Graph capture is enabled, but max_batch_size is not set.");
     }
@@ -323,8 +322,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   constexpr std::array<DeviceType, 3> devices_supporting_continuous_decoding{DeviceType::CPU, DeviceType::CUDA, DeviceType::WEBGPU};
   if (search_->GetSequenceLength() != 0 &&
       std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
-                   [this](DeviceType device_type) { return device_type == state_->params_->device_type; }))
-    throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->params_->device_type) +
+                   [this](DeviceType device_type) { return device_type == state_->params_->p_device->GetType(); }))
+    throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->params_->p_device->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
   if (last_action_ == Action::generated) {

@@ -75,6 +75,8 @@ struct CudaInterfaceImpl final : DeviceInterface {
   ~CudaInterfaceImpl() {
   }
 
+  DeviceType GetType() const override { return DeviceType::CUDA; }
+
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     Ort::api = &api;
     assert(!ort_allocator_);

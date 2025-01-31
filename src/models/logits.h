@@ -39,10 +39,6 @@ struct Logits {
   // OrtValue wrapped in a DeviceMemory object to make it universal
   DeviceSpan<float> logits_;
 
-  // Used for decoding runs with cuda graphs.
-  StaticBuffer* sb_logits32_{};
-  StaticBuffer* sb_logits16_{};
-
   DeviceSpan<int32_t> cuda_eos_token_ids_;  // eos_token_ids from params, but in cuda accessible memory
 };
 

@@ -115,6 +115,8 @@ struct InterfaceImpl : DeviceInterface {
     Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&dml_api_)));
   }
 
+  DeviceType GetType() const override { return DeviceType::DML; }
+
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     Ort::api = &api;
     assert(!ort_allocator_);

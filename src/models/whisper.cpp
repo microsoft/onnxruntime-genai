@@ -182,7 +182,7 @@ DeviceSpan<float> Whisper_State::Run(int current_length, DeviceSpan<int32_t>& ne
         auto src_data = init_presents_[i]->GetTensorRawData();
         auto dest_data = presents_[i]->GetTensorMutableRawData();
 
-        switch (model_.device_type_) {
+        switch (model_.p_device_inputs_->GetType()) {
 #if 0  // USE_CUDA
           case DeviceType::CUDA:
             if (self_attn_kv_cache_element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {

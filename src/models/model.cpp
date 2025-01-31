@@ -301,10 +301,10 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 Model::~Model() = default;
 
 void Model::InitDeviceAllocator(OrtSession& session) {
-  EnsureDeviceOrtInit(session, device_type_);
+  EnsureDeviceOrtInit(session, p_device_->GetType());
 
   // Only CUDA does every input on the device
-  if (device_type_ == DeviceType::CUDA)
+  if (p_device_->GetType() == DeviceType::CUDA)
     p_device_inputs_ = p_device_;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
@@ -413,8 +413,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       // Device type determines the scoring device.
       // Only use the primary session options to determine the device type
       if (is_primary_session_options) {
-        device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
-        p_device_ = GetDeviceInterface(device_type_);
+        p_device_ = GetDeviceInterface(DeviceType::CUDA);
 
         // Create and set our cudaStream_t
         ort_provider_options->UpdateValue("user_compute_stream", p_device_->GetCudaStream());
@@ -451,15 +450,10 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         InitDmlInterface(p_device_luid);
       }
 
-      if (!disable_graph_capture) {
-        session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
-        session_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
-      }
-
       SetDmlProvider(session_options);
 
       if (is_primary_session_options)
-        device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
+        p_device_ = GetDeviceInterface(DeviceType::DML);  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
     } else if (provider_options.name == "qnn") {
       session_options.AddConfigEntry("ep.share_ep_contexts", "1");
@@ -473,12 +467,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       // on the other hand, not sure if is_primary_session_options is the right thing to check here.
       if (const auto opt_it = opts.find("enable_htp_shared_memory_allocator");
           opt_it != opts.end() && opt_it->second == "1") {
-        device_type_ = DeviceType::QNN;
+        p_device_ = GetDeviceInterface(DeviceType::QNN);
       }
 
       session_options.AppendExecutionProvider("QNN", opts);
     } else if (provider_options.name == "webgpu") {
-      device_type_ = DeviceType::WEBGPU;
+      p_device_ = GetDeviceInterface(DeviceType::WEBGPU);
       std::unordered_map<std::string, std::string> opts;
       for (auto& option : provider_options.options) {
         opts.emplace(option.first, option.second);
@@ -488,9 +482,9 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
 
-  if (!p_device_) {
-    p_device_ = GetDeviceInterface(device_type_);
-  }
+  // Fallback to CPU if no provider specific interface was set
+  if (!p_device_)
+    p_device_ = GetDeviceInterface(DeviceType::CPU);
 }
 
 void Model::CreateSessionOptions() {

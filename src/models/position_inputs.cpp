@@ -142,7 +142,7 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
     state_.inputs_[posid_input_index_] = position_ids_.get();
   }
 
-  if (model_.device_type_ == DeviceType::CUDA)
+  if (model_.p_device_inputs_->GetType() == DeviceType::CUDA)
     model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetTensorMutableRawData(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
   else {
     type_ == Ort::TypeToTensorType<int32_t> ? UpdatePositionIDsImpl<int32_t>(total_length, new_kv_length)
@@ -170,7 +170,7 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
   CreateNextAttentionMaskTensor(total_length);
   state_.inputs_[mask_input_index_] = attention_mask_.get();
 
-  if (model_.device_type_ == DeviceType::CUDA) {
+  if (model_.p_device_inputs_->GetType() == DeviceType::CUDA) {
     int max_length = sb_attention_mask_ ? state_.params_->search.max_length : total_length;
     bool update_only = sb_attention_mask_ && !is_first_mask_update_;
     model_.p_device_inputs_->UpdateAttentionMask(attention_mask_next_->GetTensorMutableRawData(),

@@ -83,8 +83,19 @@ struct DeviceSpan {
   friend struct DeviceSpan;  // All DeviceSpans are friends
 };
 
+enum struct DeviceType {
+  CPU,
+  CUDA,
+  DML,
+  WEBGPU,
+  QNN,
+  MAX
+};
+
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
+
+  virtual DeviceType GetType() const = 0;
   virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
   virtual Ort::Allocator& GetAllocator() = 0;
 

@@ -46,6 +46,8 @@ struct CpuInterface : DeviceInterface {
   CpuInterface() {
   }
 
+  DeviceType GetType() const override { return DeviceType::CPU; }
+
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;

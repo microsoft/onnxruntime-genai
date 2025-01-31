@@ -19,7 +19,7 @@ void CapturedGraphInfoRecycler::operator()(CapturedGraphInfo* captured_graph_inf
 }
 
 CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model, const GeneratorParams& params) const {
-  if (!params.use_cuda_graph || (model.device_type_ != DeviceType::CUDA)) {
+  if (!params.use_cuda_graph || (model.p_device_->GetType() != DeviceType::CUDA)) {
     return nullptr;
   }
 

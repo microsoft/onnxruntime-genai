@@ -64,15 +64,6 @@ struct OrtTensor {
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
 
-enum struct DeviceType {
-  CPU,
-  CUDA,
-  DML,
-  WEBGPU,
-  QNN,
-  MAX
-};
-
 std::string to_string(DeviceType device_type);
 DeviceInterface* GetDeviceInterface(DeviceType type);
 
@@ -87,8 +78,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   bool use_cuda_graph{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
-  DeviceInterface* p_device{};
-  DeviceType device_type{DeviceType::CPU};
+  DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
 
   cpu_span<int32_t> aux_input_ids{};  // Intermediate solution to be used with SetInputs function for multimodal and whisper models
 

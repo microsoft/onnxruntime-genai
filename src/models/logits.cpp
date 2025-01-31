@@ -12,7 +12,7 @@ Logits::Logits(State& state)
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
 
-  if (model_.device_type_ == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
+  if (model_.p_device_inputs_->GetType() == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
     auto& cpu_ids = model_.config_->model.eos_token_ids;
     cuda_eos_token_ids_ = model_.p_device_->Allocate<int32_t>(cpu_ids.size());
     copy(std::span<const int32_t>{cpu_ids}, cuda_eos_token_ids_.CpuSpan());
@@ -70,9 +70,9 @@ DeviceSpan<float> Logits::Get() {
   if (logits_.empty() || logits_of_last_token->GetTensorMutableRawData() != logits_.Span().data())
     logits_ = WrapTensor<float>(*model_.p_device_inputs_, *logits_of_last_token);
 
-  if (model_.device_type_ == DeviceType::CUDA) {
+  if (model_.p_device_inputs_->GetType() == DeviceType::CUDA) {
     if (!cuda_eos_token_ids_.empty())
-      model_.p_device_->LaunchHandleEOSArray(
+      model_.p_device_inputs_->LaunchHandleEOSArray(
           logits_.Span().data(),
           static_cast<int>(shape_[0]) /* batch_beam_size*/,
           static_cast<int>(shape_[2]) /* vocab_size */,
@@ -107,21 +107,7 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   }
 
   shape_[1] = new_kv_length;
-  StaticBuffer* sb_logits = type_ == Ort::TypeToTensorType<Ort::Float16_t> ? sb_logits16_ : sb_logits32_;
-  output_raw_ = !sb_logits ? OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_)
-                           : sb_logits->CreateTensorOnStaticBuffer(shape_, type_);
-
-  if (state_.GetCapturedGraphInfo()) {
-    if (!sb_logits16_ && !sb_logits32_) {
-      if (type_ == Ort::TypeToTensorType<float>) {
-        sb_logits32_ = state_.GetCapturedGraphInfo()->sb_logits32_.get();
-      }
-      if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
-        sb_logits16_ = state_.GetCapturedGraphInfo()->sb_logits16_.get();
-      }
-    }
-  }
-
+  output_raw_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
   state_.outputs_[output_index_] = output_raw_.get();
 }
 
