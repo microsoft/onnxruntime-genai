@@ -42,23 +42,19 @@ def main(args):
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
             raise ValueError("Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
-    
-        if "<|" in args.chat_template and "|>" in args.chat_template:
-            # User-provided chat template already has tags
-            pass
+    else:
+        if model_type.startswith("phi2") or model_type.startswith("phi3"):
+            args.chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
+        elif model_type.startswith("phi4"):
+            args.chat_template = '<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>'
+        elif model_type.startswith("llama3"):
+            args.chat_template = '<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
+        elif model_type.startswith("llama2"):
+            args.chat_template = '<s>{input}'
+        elif model_type.startswith("qwen2"):
+            args.chat_template = '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
         else:
-            if model_type.startswith("phi2") or model_type.startswith("phi3"):
-                args.chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
-            elif model_type.startswith("phi4"):
-                args.chat_template = '<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>'
-            elif model_type.startswith("llama3"):
-                args.chat_template = '<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
-            elif model_type.startswith("llama2"):
-                args.chat_template = '<s>{input}'
-            elif model_type.startswith("qwen2"):
-                args.chat_template = '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
-            else:
-                raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
+            raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
 
     params = og.GeneratorParams(model)
     params.set_search_options(**search_options)
