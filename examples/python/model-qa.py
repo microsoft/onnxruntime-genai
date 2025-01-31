@@ -38,6 +38,7 @@ def main(args):
             genai_config = json.load(f)
             model_type = genai_config["model"]["type"]
     
+    # Set chat template
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
             raise ValueError("Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
@@ -50,6 +51,8 @@ def main(args):
             args.chat_template = '<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
         elif model_type.startswith("llama2"):
             args.chat_template = '<s>{input}'
+        elif model_type.startswith("qwen2"):
+            args.chat_template = '<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n'
         else:
             raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
 
@@ -66,6 +69,9 @@ def main(args):
         system_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{args.system_prompt}<|eot_id|>"
     elif model_type.startswith("llama2"):
         system_prompt = f"<s>[INST] <<SYS>>\n{args.system_prompt}\n<</SYS>>"
+    elif model_type.startswith("qwen2"):
+        qwen_system_prompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+        system_prompt = f"<|im_start|>system\n{qwen_system_prompt}<|im_end|>\n"
     else:
         system_prompt = args.system_prompt
 
