@@ -35,7 +35,7 @@ def main(args):
     if hasattr(model, "type"):
         model_type = model.type
     else:
-        import json
+        import json, os
 
         genai_config = json.load(os.path.join(args.model_path, "genai_config.json"))
         model_type = genai_config["model"]["type"]
