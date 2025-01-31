@@ -26,34 +26,44 @@ def main(args):
     search_options['batch_size'] = 1
 
     if args.verbose: print(search_options)
+
+    # Get model type
+    model_type = None
+    if hasattr(model, "type"):
+        model_type = model.type
+    else:
+        import json
+
+        genai_config = json.load(os.path.join(args.model_path, "genai_config.json"))
+        model_type = genai_config["model"]["type"]
     
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
             raise ValueError("Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
     else:
-        if model.type.startswith("phi2") or model.type.startswith("phi3"):
+        if model_type.startswith("phi2") or model_type.startswith("phi3"):
             args.chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
-        elif model.type.startswith("phi4"):
+        elif model_type.startswith("phi4"):
             args.chat_template = '<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>'
-        elif model.type.startswith("llama3"):
+        elif model_type.startswith("llama3"):
             args.chat_template = '<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
-        elif model.type.startswith("llama2"):
+        elif model_type.startswith("llama2"):
             args.chat_template = '<s>{input}'
         else:
-            raise ValueError(f"Chat Template for model type {model.type} is not known. Please provide chat template using --chat_template")
+            raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
 
     params = og.GeneratorParams(model)
     params.set_search_options(**search_options)
     generator = og.Generator(model, params)
 
     # Set system prompt
-    if model.type.startswith('phi2') or model.type.startswith('phi3'):
+    if model_type.startswith('phi2') or model_type.startswith('phi3'):
         system_prompt = f"<|system|>\n{args.system_prompt}<|end|>"
-    elif model.type.startswith('phi4'):
+    elif model_type.startswith('phi4'):
         system_prompt = f"<|im_start|>system<|im_sep|>\n{args.system_prompt}<|im_end|>"
-    elif model.type.startswith("llama3"):
+    elif model_type.startswith("llama3"):
         system_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{args.system_prompt}<|eot_id|>"
-    elif model.type.startswith("llama2"):
+    elif model_type.startswith("llama2"):
         system_prompt = f"<s>[INST] <<SYS>>\n{args.system_prompt}\n<</SYS>>"
     else:
         system_prompt = args.system_prompt
