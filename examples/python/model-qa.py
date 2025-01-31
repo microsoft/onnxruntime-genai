@@ -61,7 +61,7 @@ def main(args):
     generator = og.Generator(model, params)
 
     # Set system prompt
-    if "<|" in args.system_prompt and "|>" in args.chat_template:
+    if "<|" in args.system_prompt and "|>" in args.system_prompt:
         # User-provided system template already has tags
         system_prompt = args.system_prompt
     else:
