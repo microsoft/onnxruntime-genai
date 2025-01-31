@@ -37,8 +37,9 @@ def main(args):
     else:
         import json, os
 
-        genai_config = json.load(os.path.join(args.model_path, "genai_config.json"))
-        model_type = genai_config["model"]["type"]
+        with open(os.path.join(args.model_path, "genai_config.json"), "r") as f:
+            genai_config = json.load(f)
+            model_type = genai_config["model"]["type"]
     
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
