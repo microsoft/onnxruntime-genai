@@ -59,7 +59,7 @@ def main(args):
             elif model_type.startswith("llama2"):
                 args.chat_template = '<s>{input}'
             elif model_type.startswith("qwen2"):
-                args.chat_template = '<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n'
+                args.chat_template = '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
             else:
                 raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
 
