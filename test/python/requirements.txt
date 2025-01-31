@@ -6,5 +6,5 @@ protobuf==5.27
 sympy
 pytest
 onnx
-transformers
+transformers<4.48.2
 huggingface_hub[cli]
