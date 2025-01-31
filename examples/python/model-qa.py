@@ -91,11 +91,7 @@ def main(args):
 
         if args.timings: started_timestamp = time.time()
 
-        # If there is a chat template, use it
-        prompt = text
-        if args.chat_template:
-            prompt = f'{args.chat_template.format(input=text)}'
-
+        prompt = f'{args.chat_template.format(input=text)}'
         input_tokens = tokenizer.encode(prompt)
         
         generator.append_tokens(input_tokens)
