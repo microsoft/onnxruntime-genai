@@ -42,10 +42,11 @@ def main(args):
             model_type = genai_config["model"]["type"]
     
     # Set chat template
+    default_chat_template = ""
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
             raise ValueError("Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
-    else:
+    elif args.chat_template == default_chat_template:
         if model_type.startswith("phi2") or model_type.startswith("phi3"):
             args.chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
         elif model_type.startswith("phi4"):
@@ -69,19 +70,21 @@ def main(args):
     if args.verbose: print("Generator created")
 
     # Set system prompt
-    if model_type.startswith('phi2') or model_type.startswith('phi3'):
-        system_prompt = f"<|system|>\n{args.system_prompt}<|end|>"
-    elif model_type.startswith('phi4'):
-        system_prompt = f"<|im_start|>system<|im_sep|>\n{args.system_prompt}<|im_end|>"
-    elif model_type.startswith("llama3"):
-        system_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{args.system_prompt}<|eot_id|>"
-    elif model_type.startswith("llama2"):
-        system_prompt = f"<s>[INST] <<SYS>>\n{args.system_prompt}\n<</SYS>>"
-    elif model_type.startswith("qwen2"):
-        qwen_system_prompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
-        system_prompt = f"<|im_start|>system\n{qwen_system_prompt}<|im_end|>\n"
-    else:
-        system_prompt = args.system_prompt
+    default_system_prompt = "You are a helpful assistant."
+    if args.system_prompt == default_system_prompt:
+        if model_type.startswith('phi2') or model_type.startswith('phi3'):
+            system_prompt = f"<|system|>\n{args.system_prompt}<|end|>"
+        elif model_type.startswith('phi4'):
+            system_prompt = f"<|im_start|>system<|im_sep|>\n{args.system_prompt}<|im_end|>"
+        elif model_type.startswith("llama3"):
+            system_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{args.system_prompt}<|eot_id|>"
+        elif model_type.startswith("llama2"):
+            system_prompt = f"<s>[INST] <<SYS>>\n{args.system_prompt}\n<</SYS>>"
+        elif model_type.startswith("qwen2"):
+            qwen_system_prompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+            system_prompt = f"<|im_start|>system\n{qwen_system_prompt}<|im_end|>\n"
+        else:
+            system_prompt = args.system_prompt
 
     system_tokens = tokenizer.encode(system_prompt)
     generator.append_tokens(system_tokens)
