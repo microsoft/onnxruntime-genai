@@ -6,8 +6,90 @@
 #include "kv_cache.h"
 
 #include <future>
+#include <thread>
 
 namespace Generators {
+
+class WorkerThread {
+ public:
+  using Task = std::packaged_task<void()>;
+
+ public:
+  ~WorkerThread() {
+    Stop();
+  }
+
+  void Stop() {
+    if (!thread_.joinable()) {
+      return;
+    }
+
+    {
+      std::scoped_lock l{sync_state_.m};
+      sync_state_.stop_requested = true;
+    }
+
+    sync_state_.notify_worker_cv.notify_all();
+
+    thread_.join();
+  }
+
+  void EnqueueTask(Task&& task) {
+    bool work_queue_was_empty{};
+    {
+      std::scoped_lock l{sync_state_.m};
+      work_queue_was_empty = sync_state_.work_queue.empty();
+      sync_state_.work_queue.push(std::move(task));
+    }
+
+    if (work_queue_was_empty) {
+      sync_state_.notify_worker_cv.notify_one();
+    }
+  }
+
+  template<typename Fn>
+  std::future<void> Enqueue(Fn&& fn) {
+    Task task{std::forward<Fn>(fn)};
+    auto future = task.get_future();
+    EnqueueTask(std::move(task));
+    return future;
+  }
+
+ private:
+  struct SynchronizedState {
+    std::mutex m{};
+    std::condition_variable notify_worker_cv{};
+    bool stop_requested{false};
+    std::queue<Task> work_queue{};
+  };
+
+ private:
+  static void WorkerLoop(SynchronizedState& sync_state) {
+    while (true) {
+      std::unique_lock l{sync_state.m};
+      sync_state.notify_worker_cv.wait(l, [&sync_state]() { return sync_state.stop_requested || !sync_state.work_queue.empty(); });
+
+      // stop?
+      if (sync_state.stop_requested) {
+        break;
+      }
+
+      // get work item
+      Task work_item = std::move(sync_state.work_queue.front());
+      sync_state.work_queue.pop();
+
+      l.unlock();
+
+      // do work item
+      work_item();
+    }
+  }
+
+ private:
+  SynchronizedState sync_state_{};
+
+  std::thread thread_{&WorkerThread::WorkerLoop, std::ref(sync_state_)};
+};
 
 struct WindowedKeyValueCache : KeyValueCache {
   WindowedKeyValueCache(State& state);
@@ -16,6 +98,8 @@ struct WindowedKeyValueCache : KeyValueCache {
   void AddEncoder() override {
     throw std::runtime_error("WindowedKeyValueCache does not support AddEncoder.");
   };
+
+  std::future<void> EnqueueSlideTask(std::span<size_t> layer_indices);
 
   void Update(DeviceSpan<int32_t> beam_indices, int current_length) override;
 
@@ -43,6 +127,8 @@ struct WindowedKeyValueCache : KeyValueCache {
   std::vector<std::string> input_name_strings_, output_name_strings_;
 
   bool is_first_update_{true};
+
+  WorkerThread worker_thread_{};
 };
 
 }  // namespace Generators

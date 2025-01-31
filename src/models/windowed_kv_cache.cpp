@@ -141,7 +141,10 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int c
     is_first_update_ = false;
     window_index_++;
     return;
-  } else if (window_size_ == 1 || window_index_ < num_windows_) {
+  } else if (window_size_ == 1) {
+    // Slide();
+    return;
+  } else if (window_index_ < num_windows_) {
     Slide();
     window_index_++;
     return;
@@ -245,6 +248,61 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int c
     state_.outputs_[output_index_ + 2 * layer_idx] = key_caches_out_[layer_idx].get();
     state_.outputs_[output_index_ + 2 * layer_idx + 1] = value_caches_out_[layer_idx].get();
   }
+}
+
+std::future<void> WindowedKeyValueCache::EnqueueSlideTask(std::span<size_t> layer_indices_span) {
+  auto slide_task_fn = [this,
+                        layer_indices = std::vector<size_t>{layer_indices_span.begin(), layer_indices_span.end()}]() {
+    ThreadPool thread_pool{static_cast<size_t>(layer_indices.size())};
+    thread_pool.Compute([&](size_t idx) {
+      const size_t layer_idx = layer_indices[idx];
+
+      uint8_t* key_cache_in_data = key_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
+      uint8_t* key_cache_out_data = key_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
+
+      int64_t num_key_cache_chunks = key_cache_shape_in_[0] * key_cache_shape_in_[2];
+      for (int64_t j = 0; j < num_key_cache_chunks; ++j) {
+        {
+          cpu_span<uint8_t> key_cache_dst(key_cache_in_data + j * key_cache_shape_in_[3],
+                                          key_cache_shape_in_[3] - window_size_);
+          cpu_span<uint8_t> key_cache_src(key_cache_in_data + j * key_cache_shape_in_[3] + window_size_,
+                                          key_cache_shape_in_[3] - window_size_);
+          std::copy(key_cache_src.begin(), key_cache_src.end(), key_cache_dst.begin());
+        }
+        {
+          cpu_span<uint8_t> key_cache_dst(key_cache_in_data + j * key_cache_shape_in_[3] + key_cache_shape_in_[3] - window_size_,
+                                          window_size_);
+          cpu_span<uint8_t> key_cache_src(key_cache_out_data + j * key_cache_shape_out_[3],
+                                          window_size_);
+          std::copy(key_cache_src.begin(), key_cache_src.end(), key_cache_dst.begin());
+        }
+      }
+
+      uint8_t* value_cache_in_data = value_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
+      uint8_t* value_cache_out_data = value_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
+
+      for (int64_t j = 0; j < value_cache_shape_in_[0]; ++j) {
+        {
+          cpu_span<uint8_t> value_cache_dst(value_cache_in_data + (j * value_cache_shape_in_[2] * value_cache_shape_in_[3]),
+                                            (value_cache_shape_in_[2] - window_size_) * value_cache_shape_in_[3]);
+          cpu_span<uint8_t> value_cache_src(value_cache_in_data + (j * value_cache_shape_in_[2] * value_cache_shape_in_[3]) +
+                                                (window_size_ * value_cache_shape_in_[3]),
+                                            (value_cache_shape_in_[2] - window_size_) * value_cache_shape_in_[3]);
+          std::copy(value_cache_src.begin(), value_cache_src.end(), value_cache_dst.begin());
+        }
+        {
+          cpu_span<uint8_t> value_cache_dst(value_cache_in_data + (j * value_cache_shape_in_[2] * value_cache_shape_in_[3]) +
+                                                ((value_cache_shape_in_[2] - window_size_) * value_cache_shape_in_[3]),
+                                            window_size_ * value_cache_shape_in_[3]);
+          cpu_span<uint8_t> value_cache_src(value_cache_out_data + (j * value_cache_shape_out_[2] * value_cache_shape_out_[3]),
+                                            window_size_ * value_cache_shape_out_[3]);
+          std::copy(value_cache_src.begin(), value_cache_src.end(), value_cache_dst.begin());
+        }
+      }
+    });
+  };
+
+  return worker_thread_.Enqueue(std::move(slide_task_fn));
 }
 
 }  // namespace Generators

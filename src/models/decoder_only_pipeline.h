@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <future>
+
 #include "model.h"
 #include "input_ids.h"
 #include "logits.h"
@@ -67,6 +69,13 @@ struct DecoderOnlyPipelineState : State {
 
   const DecoderOnlyPipelineModel& model_;
   std::vector<std::unique_ptr<IntermediatePipelineState>> pipeline_states_;
+
+  struct OverlappedKeyValueCacheUpdateRecord {
+    std::vector<size_t> layer_indices{};     // indicates which layers of the KV cache are to be updated
+    std::future<void> outstanding_update{};  // valid while there is an outstanding update task in progress
+  };
+
+  std::vector<std::optional<OverlappedKeyValueCacheUpdateRecord>> pipeline_overlapped_kv_cache_update_records_;
 
   // Stores all the outputs from the previous pipeline state(s)
   std::unordered_map<std::string, std::unique_ptr<OrtValue>> ortvalue_store_;

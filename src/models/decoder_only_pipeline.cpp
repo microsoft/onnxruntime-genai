@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "decoder_only_pipeline.h"
+#include "windowed_kv_cache.h"
 
 namespace Generators {
 
@@ -82,8 +83,31 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
   State::Run(*model_.sessions_[id_], params_->BatchBeamSize());
-
   return {};
+}
+
+using NameToLayerIdxMap = std::unordered_map<std::string, size_t>;
+
+static NameToLayerIdxMap GeneratePastKeyNameToLayerIdxMap(const Config& config) {
+  const size_t num_layers = config.model.decoder.num_hidden_layers;
+  const std::string& past_key_name_template = config.model.decoder.inputs.past_key_names;
+  std::unordered_map<std::string, size_t> m{};
+  for (size_t i = 0; i < num_layers; ++i) {
+    m.emplace(ComposeKeyValueName(past_key_name_template, static_cast<int>(i)), i);
+  }
+  return m;
+}
+
+static std::vector<size_t> DetectLayerIndicesFromPastKeyNameInputs(
+    const NameToLayerIdxMap& past_key_name_to_layer_idx, std::span<const std::string> inputs) {
+  std::vector<size_t> detected_layer_indices{};
+  for (const auto& input_name : inputs) {
+    const auto it = past_key_name_to_layer_idx.find(input_name);
+    if (it != past_key_name_to_layer_idx.end()) {
+      detected_layer_indices.push_back(it->second);
+    }
+  }
+  return detected_layer_indices;
 }
 
 DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineModel& model,
@@ -102,14 +126,32 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   }
   extra_inputs_.Add();
 
-  for ([[maybe_unused]] const auto& pipeline_model : model_.config_->model.decoder.pipeline) {
-    pipeline_states_.emplace_back(std::make_unique<IntermediatePipelineState>(model_, params, pipeline_states_.size()));
+  const auto past_key_name_to_layer_idx = GeneratePastKeyNameToLayerIdxMap(*model_.config_);
+
+  for (const auto& pipeline_model : model_.config_->model.decoder.pipeline) {
+    auto pipeline_model_state = std::make_unique<IntermediatePipelineState>(model_, params, pipeline_states_.size());
+    std::optional<OverlappedKeyValueCacheUpdateRecord> overlapped_kv_cache_update_record{};
+
+    const bool token_gen_only = !pipeline_model.run_on_prompt && pipeline_model.run_on_token_gen;
+    if (token_gen_only) {
+      auto layer_indices = DetectLayerIndicesFromPastKeyNameInputs(past_key_name_to_layer_idx, pipeline_model.inputs);
+      if (!layer_indices.empty()) {
+        // token generation model with KV cache tensors - we should overlap KV cache update
+        overlapped_kv_cache_update_record = OverlappedKeyValueCacheUpdateRecord{};
+        overlapped_kv_cache_update_record->layer_indices = std::move(layer_indices);
+      }
+    }
+
+    pipeline_states_.emplace_back(std::move(pipeline_model_state));
+    pipeline_overlapped_kv_cache_update_records_.emplace_back(std::move(overlapped_kv_cache_update_record));
   }
 }
 
 void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
                                            DeviceSpan<int32_t> next_indices) {
-  for (auto& pipeline_state : pipeline_states_) {
+  for (size_t pipeline_model_idx = 0; pipeline_model_idx < pipeline_states_.size(); ++pipeline_model_idx) {
+    const auto& pipeline_state = pipeline_states_[pipeline_model_idx];
+
     if (first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_prompt) {
       continue;
     } else if (!first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
@@ -198,8 +240,20 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
       }
     }
 
+    auto& overlapped_kv_update_record = pipeline_overlapped_kv_cache_update_records_[pipeline_model_idx];
+    if (overlapped_kv_update_record.has_value() && overlapped_kv_update_record->outstanding_update.valid()) {
+      overlapped_kv_update_record->outstanding_update.get();  // wait for it to be done
+    }
+
     // Run the intermediate pipeline state
     pipeline_state->Run(total_length, next_tokens, next_indices);
+
+    if (overlapped_kv_update_record.has_value()) {
+      auto* windowed_kv_cache = static_cast<WindowedKeyValueCache*>(key_value_cache_.get());  // TODO this cast is... not great
+      // enqueue the next KV cache update
+      auto update_future = windowed_kv_cache->EnqueueSlideTask(overlapped_kv_update_record->layer_indices);
+      overlapped_kv_update_record->outstanding_update = std::move(update_future);
+    }
 
     // Transfer ownership of all the non-managed outputs from the current pipeline state to the ortvalue store.
     // All non managed outputs are assumed to be on CPU
