@@ -39,31 +39,36 @@ def main(args):
             model_type = genai_config["model"]["type"]
     
     # Set chat template
-    default_chat_template = ""
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
             raise ValueError("Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
-    elif args.chat_template == default_chat_template:
-        if model_type.startswith("phi2") or model_type.startswith("phi3"):
-            args.chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
-        elif model_type.startswith("phi4"):
-            args.chat_template = '<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>'
-        elif model_type.startswith("llama3"):
-            args.chat_template = '<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
-        elif model_type.startswith("llama2"):
-            args.chat_template = '<s>{input}'
-        elif model_type.startswith("qwen2"):
-            args.chat_template = '<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n'
+    
+        if "<|" in args.chat_template and "|>" in args.chat_template:
+            # User-provided chat template already has tags
+            pass
         else:
-            raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
+            if model_type.startswith("phi2") or model_type.startswith("phi3"):
+                args.chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
+            elif model_type.startswith("phi4"):
+                args.chat_template = '<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>'
+            elif model_type.startswith("llama3"):
+                args.chat_template = '<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
+            elif model_type.startswith("llama2"):
+                args.chat_template = '<s>{input}'
+            elif model_type.startswith("qwen2"):
+                args.chat_template = '<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n'
+            else:
+                raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
 
     params = og.GeneratorParams(model)
     params.set_search_options(**search_options)
     generator = og.Generator(model, params)
 
     # Set system prompt
-    default_system_prompt = "You are a helpful assistant."
-    if args.system_prompt == default_system_prompt:
+    if "<|" in args.system_prompt and "|>" in args.chat_template:
+        # User-provided system template already has tags
+        system_prompt = args.system_prompt
+    else:
         if model_type.startswith('phi2') or model_type.startswith('phi3'):
             system_prompt = f"<|system|>\n{args.system_prompt}<|end|>"
         elif model_type.startswith('phi4'):
@@ -73,8 +78,7 @@ def main(args):
         elif model_type.startswith("llama2"):
             system_prompt = f"<s>[INST] <<SYS>>\n{args.system_prompt}\n<</SYS>>"
         elif model_type.startswith("qwen2"):
-            qwen_system_prompt = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
-            system_prompt = f"<|im_start|>system\n{qwen_system_prompt}<|im_end|>\n"
+            system_prompt = f"<|im_start|>system\n{args.system_prompt}<|im_end|>\n"
         else:
             system_prompt = args.system_prompt
 
