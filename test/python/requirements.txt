@@ -7,4 +7,4 @@ sympy
 pytest
 onnx
 transformers
-huggingface_hub[cli]<0.28.1
+huggingface_hub[cli]

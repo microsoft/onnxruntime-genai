@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Linux&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
@@ -108,10 +109,6 @@ jobs:
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
               /usr/bin/cmake --build --preset linux_gcc_cuda_release"
-
-      - name: Use Dummy HuggingFace Token
-        run: |
-          echo "HF_TOKEN=12345" >> $GITHUB_ENV
 
       - name: Install the onnxruntime-genai Python wheel and run python test
         run: |
