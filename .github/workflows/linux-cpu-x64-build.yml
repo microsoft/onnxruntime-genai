@@ -10,6 +10,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
@@ -83,10 +84,6 @@ jobs:
           python3 -m pip install -r test/python/cpu/torch/requirements.txt --user
           python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
           python3 -m pip install --user --no-index --no-deps --find-links build/cpu/wheel onnxruntime_genai
-
-      - name: Use Dummy HuggingFace Token
-        run: |
-          echo "HF_TOKEN=12345" >> $GITHUB_ENV
 
       - name: Verify Build Artifacts
         if: always()
