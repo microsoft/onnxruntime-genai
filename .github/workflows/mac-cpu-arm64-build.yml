@@ -10,6 +10,7 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 jobs:
@@ -86,7 +87,6 @@ jobs:
       - name: Run the python tests
         run: |
           source genai-macos-venv/bin/activate
-          export HF_TOKEN="12345"
           export ORTGENAI_LOG_ORT_LIB=1
           python3 -m pip install requests
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models
