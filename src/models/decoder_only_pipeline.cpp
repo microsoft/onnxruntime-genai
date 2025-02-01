@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #include "../generators.h"
+#include "../logging.h"
+#include "../timer.h"
 #include "decoder_only_pipeline.h"
 #include "windowed_kv_cache.h"
 
@@ -82,7 +84,10 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 
 DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
+  Timer timer{};
   State::Run(*model_.sessions_[id_], params_->BatchBeamSize());
+  const auto elapsed = timer.Elapsed();
+  LogTiming(MakeString("IntermediatePipelineState::Run[", id_, "]"), elapsed);
   return {};
 }
 
@@ -275,6 +280,8 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
 
 DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                 DeviceSpan<int32_t> next_indices) {
+  Timer timer{};
+
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
   size_t num_chunks{1};
@@ -308,6 +315,8 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
   }
 
   first_run_ = false;
+
+  LogTiming("DecoderOnlyPipelineState::Run", timer.Elapsed());
 
   return logits_.Get();
 }

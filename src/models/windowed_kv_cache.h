@@ -47,7 +47,7 @@ class WorkerThread {
     }
   }
 
-  template<typename Fn>
+  template <typename Fn>
   std::future<void> Enqueue(Fn&& fn) {
     Task task{std::forward<Fn>(fn)};
     auto future = task.get_future();
@@ -108,7 +108,8 @@ struct WindowedKeyValueCache : KeyValueCache {
   }
 
  private:
-  void Slide();
+  void SlideForLayer(size_t layer_idx);
+  void SlideForAllLayers();
 
   State& state_;
   const Model& model_{state_.model_};

@@ -7,6 +7,9 @@
 #include "windowed_kv_cache.h"
 
 #include "../generators.h"
+#include "../logging.h"
+#include "../timer.h"
+#include "../make_string.h"
 #include "model.h"
 #include "threadpool.h"
 
@@ -87,52 +90,56 @@ void WindowedKeyValueCache::Add() {
   }
 }
 
-void WindowedKeyValueCache::Slide() {
+void WindowedKeyValueCache::SlideForLayer(size_t layer_idx) {
+  assert(layer_idx < layer_count_);
+
+  uint8_t* key_cache_in_data = key_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
+  uint8_t* key_cache_out_data = key_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
+
+  int64_t num_key_cache_chunks = key_cache_shape_in_[0] * key_cache_shape_in_[2];
+  for (int64_t j = 0; j < num_key_cache_chunks; ++j) {
+    {
+      cpu_span<uint8_t> key_cache_dst(key_cache_in_data + j * key_cache_shape_in_[3],
+                                      key_cache_shape_in_[3] - window_size_);
+      cpu_span<uint8_t> key_cache_src(key_cache_in_data + j * key_cache_shape_in_[3] + window_size_,
+                                      key_cache_shape_in_[3] - window_size_);
+      std::copy(key_cache_src.begin(), key_cache_src.end(), key_cache_dst.begin());
+    }
+    {
+      cpu_span<uint8_t> key_cache_dst(key_cache_in_data + j * key_cache_shape_in_[3] + key_cache_shape_in_[3] - window_size_,
+                                      window_size_);
+      cpu_span<uint8_t> key_cache_src(key_cache_out_data + j * key_cache_shape_out_[3],
+                                      window_size_);
+      std::copy(key_cache_src.begin(), key_cache_src.end(), key_cache_dst.begin());
+    }
+  }
+
+  uint8_t* value_cache_in_data = value_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
+  uint8_t* value_cache_out_data = value_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
+
+  for (int64_t j = 0; j < value_cache_shape_in_[0]; ++j) {
+    {
+      cpu_span<uint8_t> value_cache_dst(value_cache_in_data + (j * value_cache_shape_in_[2] * value_cache_shape_in_[3]),
+                                        (value_cache_shape_in_[2] - window_size_) * value_cache_shape_in_[3]);
+      cpu_span<uint8_t> value_cache_src(value_cache_in_data + (j * value_cache_shape_in_[2] * value_cache_shape_in_[3]) +
+                                            (window_size_ * value_cache_shape_in_[3]),
+                                        (value_cache_shape_in_[2] - window_size_) * value_cache_shape_in_[3]);
+      std::copy(value_cache_src.begin(), value_cache_src.end(), value_cache_dst.begin());
+    }
+    {
+      cpu_span<uint8_t> value_cache_dst(value_cache_in_data + (j * value_cache_shape_in_[2] * value_cache_shape_in_[3]) +
+                                            ((value_cache_shape_in_[2] - window_size_) * value_cache_shape_in_[3]),
+                                        window_size_ * value_cache_shape_in_[3]);
+      cpu_span<uint8_t> value_cache_src(value_cache_out_data + (j * value_cache_shape_out_[2] * value_cache_shape_out_[3]),
+                                        window_size_ * value_cache_shape_out_[3]);
+      std::copy(value_cache_src.begin(), value_cache_src.end(), value_cache_dst.begin());
+    }
+  }
+}
+
+void WindowedKeyValueCache::SlideForAllLayers() {
   ThreadPool thread_pool{static_cast<size_t>(layer_count_)};
-  thread_pool.Compute([&](size_t layer_idx) {
-    uint8_t* key_cache_in_data = key_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
-    uint8_t* key_cache_out_data = key_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
-
-    int64_t num_key_cache_chunks = key_cache_shape_in_[0] * key_cache_shape_in_[2];
-    for (int64_t j = 0; j < num_key_cache_chunks; ++j) {
-      {
-        cpu_span<uint8_t> key_cache_dst(key_cache_in_data + j * key_cache_shape_in_[3],
-                                        key_cache_shape_in_[3] - window_size_);
-        cpu_span<uint8_t> key_cache_src(key_cache_in_data + j * key_cache_shape_in_[3] + window_size_,
-                                        key_cache_shape_in_[3] - window_size_);
-        std::copy(key_cache_src.begin(), key_cache_src.end(), key_cache_dst.begin());
-      }
-      {
-        cpu_span<uint8_t> key_cache_dst(key_cache_in_data + j * key_cache_shape_in_[3] + key_cache_shape_in_[3] - window_size_,
-                                        window_size_);
-        cpu_span<uint8_t> key_cache_src(key_cache_out_data + j * key_cache_shape_out_[3],
-                                        window_size_);
-        std::copy(key_cache_src.begin(), key_cache_src.end(), key_cache_dst.begin());
-      }
-    }
-
-    uint8_t* value_cache_in_data = value_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
-    uint8_t* value_cache_out_data = value_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
-
-    for (int64_t j = 0; j < value_cache_shape_in_[0]; ++j) {
-      {
-        cpu_span<uint8_t> value_cache_dst(value_cache_in_data + (j * value_cache_shape_in_[2] * value_cache_shape_in_[3]),
-                                          (value_cache_shape_in_[2] - window_size_) * value_cache_shape_in_[3]);
-        cpu_span<uint8_t> value_cache_src(value_cache_in_data + (j * value_cache_shape_in_[2] * value_cache_shape_in_[3]) +
-                                              (window_size_ * value_cache_shape_in_[3]),
-                                          (value_cache_shape_in_[2] - window_size_) * value_cache_shape_in_[3]);
-        std::copy(value_cache_src.begin(), value_cache_src.end(), value_cache_dst.begin());
-      }
-      {
-        cpu_span<uint8_t> value_cache_dst(value_cache_in_data + (j * value_cache_shape_in_[2] * value_cache_shape_in_[3]) +
-                                              ((value_cache_shape_in_[2] - window_size_) * value_cache_shape_in_[3]),
-                                          window_size_ * value_cache_shape_in_[3]);
-        cpu_span<uint8_t> value_cache_src(value_cache_out_data + (j * value_cache_shape_out_[2] * value_cache_shape_out_[3]),
-                                          window_size_ * value_cache_shape_out_[3]);
-        std::copy(value_cache_src.begin(), value_cache_src.end(), value_cache_dst.begin());
-      }
-    }
-  });
+  thread_pool.Compute([this](size_t layer_idx) { SlideForLayer(layer_idx); });
 }
 
 void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int current_length) {
@@ -142,10 +149,10 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int c
     window_index_++;
     return;
   } else if (window_size_ == 1) {
-    // Slide();
+    // For token generation, KV cache update will be overlapped with pipeline model execution via EnqueueSlideTask().
     return;
   } else if (window_index_ < num_windows_) {
-    Slide();
+    SlideForAllLayers();
     window_index_++;
     return;
   }
@@ -253,53 +260,16 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int c
 std::future<void> WindowedKeyValueCache::EnqueueSlideTask(std::span<size_t> layer_indices_span) {
   auto slide_task_fn = [this,
                         layer_indices = std::vector<size_t>{layer_indices_span.begin(), layer_indices_span.end()}]() {
+    Timer timer{};
+
     ThreadPool thread_pool{static_cast<size_t>(layer_indices.size())};
     thread_pool.Compute([&](size_t idx) {
       const size_t layer_idx = layer_indices[idx];
-
-      uint8_t* key_cache_in_data = key_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
-      uint8_t* key_cache_out_data = key_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
-
-      int64_t num_key_cache_chunks = key_cache_shape_in_[0] * key_cache_shape_in_[2];
-      for (int64_t j = 0; j < num_key_cache_chunks; ++j) {
-        {
-          cpu_span<uint8_t> key_cache_dst(key_cache_in_data + j * key_cache_shape_in_[3],
-                                          key_cache_shape_in_[3] - window_size_);
-          cpu_span<uint8_t> key_cache_src(key_cache_in_data + j * key_cache_shape_in_[3] + window_size_,
-                                          key_cache_shape_in_[3] - window_size_);
-          std::copy(key_cache_src.begin(), key_cache_src.end(), key_cache_dst.begin());
-        }
-        {
-          cpu_span<uint8_t> key_cache_dst(key_cache_in_data + j * key_cache_shape_in_[3] + key_cache_shape_in_[3] - window_size_,
-                                          window_size_);
-          cpu_span<uint8_t> key_cache_src(key_cache_out_data + j * key_cache_shape_out_[3],
-                                          window_size_);
-          std::copy(key_cache_src.begin(), key_cache_src.end(), key_cache_dst.begin());
-        }
-      }
-
-      uint8_t* value_cache_in_data = value_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
-      uint8_t* value_cache_out_data = value_caches_out_[layer_idx]->GetTensorMutableData<uint8_t>();
-
-      for (int64_t j = 0; j < value_cache_shape_in_[0]; ++j) {
-        {
-          cpu_span<uint8_t> value_cache_dst(value_cache_in_data + (j * value_cache_shape_in_[2] * value_cache_shape_in_[3]),
-                                            (value_cache_shape_in_[2] - window_size_) * value_cache_shape_in_[3]);
-          cpu_span<uint8_t> value_cache_src(value_cache_in_data + (j * value_cache_shape_in_[2] * value_cache_shape_in_[3]) +
-                                                (window_size_ * value_cache_shape_in_[3]),
-                                            (value_cache_shape_in_[2] - window_size_) * value_cache_shape_in_[3]);
-          std::copy(value_cache_src.begin(), value_cache_src.end(), value_cache_dst.begin());
-        }
-        {
-          cpu_span<uint8_t> value_cache_dst(value_cache_in_data + (j * value_cache_shape_in_[2] * value_cache_shape_in_[3]) +
-                                                ((value_cache_shape_in_[2] - window_size_) * value_cache_shape_in_[3]),
-                                            window_size_ * value_cache_shape_in_[3]);
-          cpu_span<uint8_t> value_cache_src(value_cache_out_data + (j * value_cache_shape_out_[2] * value_cache_shape_out_[3]),
-                                            window_size_ * value_cache_shape_out_[3]);
-          std::copy(value_cache_src.begin(), value_cache_src.end(), value_cache_dst.begin());
-        }
-      }
+      SlideForLayer(layer_idx);
     });
+
+    const auto elapsed = timer.Elapsed();
+    LogTiming(MakeString("WindowedKeyValueCache slide ", layer_indices.size(), " layers"), elapsed);
   };
 
   return worker_thread_.Enqueue(std::move(slide_task_fn));
