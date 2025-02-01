@@ -13,7 +13,7 @@ pip install requests numpy --pre onnxruntime-genai-cuda "olive-ai[gpu]"
 ## 2. Acquire model
 
 ```bash
-huggingface-cli download onnxruntime/DeepSeek-R1-Distill-ONNX --include "deepseek-r1-distill-qwen-1.5B/*" --local-dir .
+huggingface-cli download onnxruntime/DeepSeek-R1-Distill-ONNX --include 'deepseek-r1-distill-qwen-1.5B/*' --local-dir .
 ```
 OR choose your model and convert to ONNX
 
