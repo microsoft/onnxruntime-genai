@@ -1,5 +1,4 @@
-## 1. Pre-Requisites Make venv and install ort genai
-
+## 1. Pre-Requisites: Make venv and install ort genai
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install requests numpy --pre onnxruntime-genai
