@@ -193,6 +193,7 @@ jobs:
   - powershell: |
       dotnet --info
       dotnet workload install android
+      dotnet workload install ios
     displayName: 'Install dependencies'
     workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
 
