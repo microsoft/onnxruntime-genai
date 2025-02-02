@@ -194,6 +194,8 @@ jobs:
       dotnet --info
       dotnet workload install android
       dotnet workload install ios
+      dotnet workload install maccatalyst
+      dotnet workload install macos
     displayName: 'Install dependencies'
     workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
 
