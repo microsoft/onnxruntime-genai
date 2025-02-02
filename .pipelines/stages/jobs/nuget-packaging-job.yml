@@ -192,6 +192,12 @@ jobs:
 
   - powershell: |
       dotnet --info
+      dotnet workload install android
+    displayName: 'Install dependencies'
+    workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
+
+  - powershell: |
+      dotnet --info
       dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:IncludeMobileTargets=true --verbosity normal
     displayName: 'Build CSharp'
     workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
