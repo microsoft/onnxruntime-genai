@@ -114,13 +114,14 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
 void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
                                            DeviceSpan<int32_t> next_indices) {
   for (auto& pipeline_state : pipeline_states_) {
-    if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx != -1) {
-      (const_cast<DecoderOnlyPipelineModel*>(&model_))->sessions_[model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx].reset();
-    }
     if (first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_prompt) {
       continue;
     } else if (!first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
       continue;
+    }
+
+    if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx != -1) {
+      (const_cast<DecoderOnlyPipelineModel*>(&model_))->sessions_[model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx].reset();
     }
 
     // Clear the intermediate pipeline state outputs from the previous runs.
