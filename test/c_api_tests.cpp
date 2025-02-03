@@ -163,10 +163,10 @@ TEST(CAPITests, MaxLength) {
   EXPECT_THROW(generator->AppendTokens(input_ids_2.data(), input_ids_2.size()), std::runtime_error);
 #endif
 }
+
 // DML doesn't support batch_size > 1
-#if !USE_DML
 TEST(CAPITests, EndToEndPhiBatch) {
-#if TEST_PHI2
+#if TEST_PHI2 && !USE_DML
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
 
@@ -197,24 +197,26 @@ TEST(CAPITests, EndToEndPhiBatch) {
     std::cout << "Decoded string:" << out_string << std::endl;
   }
 
-  // std::cout << "Print output tokens" << std::endl;
-  // for (size_t i = 0; i < 3; i++) {
-  //   auto out_array = generator->GetSequenceData(i);
-  //   for (size_t j = 0; j < generator->GetSequenceCount(i); j++) {
-  //     std::cout << out_array[j] << ", ";
-  //   }
-  // std::cout << std::endl;
+  // Verify outputs match expected outputs
+  std::vector<int32_t> expected_output{
+      1212, 318, 257, 1332, 13, 50256, 50256, 50256, 50256, 50256, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278, 6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417, 6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974,
+      49, 1381, 389, 7427, 17252, 0, 50256, 50256, 50256, 50256, 198, 50284, 37811, 628, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256,
+      464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13, 198, 50284, 37811, 628, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256};
+  
+  for (size_t i = 0; i < 3; i++) {
+    const auto sequence_length = generator->GetSequenceCount(i);
+    const auto* sequence_data = generator->GetSequenceData(i);
+
+    ASSERT_LE(sequence_length, 40);
+
+    const auto* expected_output_start = &expected_output[i * 40];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
   }
 #endif
 }
-#endif
 
 TEST(CAPITests, EndToEndPhi) {
 #if TEST_PHI2
-  Oga::SetLogBool("enabled", false);
-  Oga::SetLogBool("generate_next_token", true);
-  Oga::SetLogBool("model_input_values", true);
-  Oga::SetLogBool("model_output_values", true);
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
 
@@ -237,21 +239,22 @@ TEST(CAPITests, EndToEndPhi) {
   }
 
   // Decode The Batch
-  for (size_t i = 0; i < 1; i++) {
-    auto out_string = tokenizer->Decode(generator->GetSequenceData(i), generator->GetSequenceCount(i));
-    std::cout << "Decoded string:" << out_string << std::endl;
-  }
+  auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
+  std::cout << "Decoded string:" << out_string << std::endl;
 
-  // std::cout << "Print output tokens" << std::endl;
-  // for (size_t i = 0; i < 1; i++) {
-  //   auto out_array = generator->GetSequenceData(i);
-  //   for (size_t j = 0; j < generator->GetSequenceCount(i); j++) {
-  //     std::cout << out_array[j] << ", ";
-  //   }
-  // }
-  // std::cout << std::endl;
-  Oga::SetLogBool("enabled", false);
+  // Verify outputs match expected outputs
+  std::vector<int32_t> expected_output{
+      1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278, 
+      6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417, 
+      6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974, 82, 1039, 889, 263, 3684};
 
+  const auto sequence_length = generator->GetSequenceCount(0);
+  const auto* sequence_data = generator->GetSequenceData(0);
+
+  ASSERT_LE(sequence_length, 40);
+
+  const auto* expected_output_start = &expected_output[0];
+  EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 #endif
 }
 

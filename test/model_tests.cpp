@@ -279,7 +279,6 @@ Print all primes between 1 and n
 #endif
 
 #if USE_DML && TEST_PHI2
-
 TEST(ModelTests, TestApiDml) {
 
   auto prompt = R"(
@@ -312,8 +311,6 @@ Print all primes between 1 and n
 }
 
 TEST(ModelTests, TestTopKDml) {
-#if TEST_PHI2
-
   auto prompt = R"(
 def print_prime(n):
 '''
@@ -342,7 +339,5 @@ Print all primes between 1 and n
   auto result = generator->GetSequence(0);
 
   std::cout << tokenizer->Decode(result.CopyDeviceToCpu()) << "\r\n";
-#endif
 }
-
 #endif
