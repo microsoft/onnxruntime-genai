@@ -24,7 +24,7 @@ olive auto-opt --model_name_or_path deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B --
 
 ```bash
 curl -s https://raw.githubusercontent.com/microsoft/onnxruntime-genai/refs/heads/main/examples/python/model-chat.py
-python model-chat.py -m deepseek-r1-distill-qwen-1.5B -e gpu --chat_template "<|begin▁of▁sentence|><|User|>{input}<|Assistant|>"
+python model-chat.py -m deepseek-r1-distill-qwen-1.5B -e cuda --chat_template "<|begin▁of▁sentence|><|User|>{input}<|Assistant|>"
 ```
 
 ```bash
