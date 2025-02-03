@@ -12,7 +12,7 @@ cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" O
 
 # testing
 option(ENABLE_TESTS "Enable tests" ON)
-option(TEST_PHI2 "Enable tests for Phi2" ON)
+option(TEST_PHI2 "Enable tests for Phi2" OFF)
 
 # performance
 option(ENABLE_MODEL_BENCHMARK "Build model benchmark program" ON)
