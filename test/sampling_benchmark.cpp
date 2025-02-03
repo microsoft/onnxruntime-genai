@@ -2,12 +2,14 @@
 // Licensed under the MIT License.
 
 #include <gtest/gtest.h>
-#include <generators.h>
-#include <search.h>
-#include <models/model.h>
+
+#include <chrono>
 #include <iostream>
 #include <random>
-#include <chrono>
+
+#include "generators.h"
+#include "models/model.h"
+#include "search.h"
 
 // Our working directory is generators/build so one up puts us in the root directory:
 #ifndef MODEL_PATH
