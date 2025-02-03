@@ -35,12 +35,12 @@ huggingface-cli download onnxruntime/DeepSeek-R1-Distill-ONNX --include 'deepsee
 ## 3. Play with your model on device!
 ```bash
 #CPU Chat inference. If you pulled the model from huggingface, adjust the model directory (-m) accordingly 
-curl -s https://raw.githubusercontent.com/microsoft/onnxruntime-genai/refs/heads/main/examples/python/model-chat.py
+curl -o https://raw.githubusercontent.com/microsoft/onnxruntime-genai/refs/heads/main/examples/python/model-chat.py
 python model-chat.py -m deepseek-r1-distill-qwen-1.5B -e cpu --chat_template "<|begin▁of▁sentence|><|User|>{input}<|Assistant|>"
 ```
 
 ```bash
 #GPU Chat inference. If you pulled the model from huggingface, adjust the model directory (-m) accordingly 
-curl -s https://raw.githubusercontent.com/microsoft/onnxruntime-genai/refs/heads/main/examples/python/model-chat.py
+curl -o https://raw.githubusercontent.com/microsoft/onnxruntime-genai/refs/heads/main/examples/python/model-chat.py
 python model-chat.py -m deepseek-r1-distill-qwen-1.5B -e cpu --chat_template "<|begin▁of▁sentence|><|User|>{input}<|Assistant|>"
 ```
