@@ -1677,7 +1677,7 @@ class Model:
             # Return early if there's nothing to unpack
             return
 
-        if hasattr(mlp, "base_layer"):
+        if hasattr(gate_up_linear, "base_layer"):
             # For LoRA packed `MatMul`
             return self.make_mlp_unpacked_lora(layer_id, mlp, root_input)
         else:
@@ -1701,7 +1701,7 @@ class Model:
         up_proj.bias = None if gate_up_linear.bias is None else torch.nn.Parameter(gate_up_linear.bias[self.intermediate_size :], requires_grad=False)
 
         # Create GateProj/UpProj lora_B layers
-        lora_B = mlp.lora_B.default
+        lora_B = gate_up_linear.lora_B.default
 
         gate_proj_lora_B = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
         gate_proj_lora_B.weight = torch.nn.Parameter(lora_B.weight[ : self.intermediate_size, :], requires_grad=False)
@@ -1712,12 +1712,12 @@ class Model:
         up_proj_lora_B.bias = None if lora_B.bias is None else torch.nn.Parameter(lora_B.bias[self.intermediate_size :], requires_grad=False)
 
         # Create GateProj/UpProj LoRA layers
-        mlp.gate_proj = LoraLayer(q_proj)
+        mlp.gate_proj = LoraLayer(gate_proj)
         mlp.gate_proj.lora_A = gate_up_linear.lora_A
         mlp.gate_proj.lora_B.default = gate_proj_lora_B
         mlp.gate_proj.scaling = gate_up_linear.scaling
 
-        mlp.up_proj = LoraLayer(k_proj)
+        mlp.up_proj = LoraLayer(up_proj)
         mlp.up_proj.lora_A = gate_up_linear.lora_A
         mlp.up_proj.lora_B.default = up_proj_lora_B
         mlp.up_proj.scaling = gate_up_linear.scaling
