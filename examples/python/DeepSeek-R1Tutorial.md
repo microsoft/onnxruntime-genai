@@ -28,6 +28,6 @@ python model-chat.py -m deepseek-r1-distill-qwen-1.5B -e cuda --chat_template "<
 ```
 
 ```bash
-curl -s <https://raw.githubusercontent.com/microsoft/onnxruntime-genai/refs/heads/main/examples/python/model-chat.py>
+curl -s https://raw.githubusercontent.com/microsoft/onnxruntime-genai/refs/heads/main/examples/python/model-chat.py
 python model-chat.py -m deepseek-r1-distill-qwen-1.5B/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/ -e cpu
 ```
