@@ -48,6 +48,11 @@ parameters:
   type: boolean
   default: false
 
+- name: enable_win_qnn
+  displayName: 'Whether QNN nuget package should be built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
@@ -122,6 +127,7 @@ stages:
     ort_cuda_version: ${{ parameters.ort_cuda_version }}
     ort_dml_version: ${{ parameters.ort_dml_version }}
     build_config: ${{ parameters.build_config }}
+    enable_win_qnn: ${{ parameters.enable_win_qnn }}
 
 - ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
   - template: stages/nuget-validation-stage.yml
