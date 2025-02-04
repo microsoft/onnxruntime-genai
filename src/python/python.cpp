@@ -443,6 +443,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([](const std::string& config_path) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
+      .def_property_readonly("type", [](const Model& model) { return model.config_->model.type; })
       .def_property_readonly(
           "device_type", [](const Model& model) { return to_string(model.device_type_); }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const Model& model) { return model.CreateMultiModalProcessor(); });
@@ -553,7 +554,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });
   m.def("is_rocm_available", []() { return USE_ROCM != 0; });
-  m.def("is_webgpu_available", []() { return USE_WEBGPU != 0; });
+  m.def("is_webgpu_available", []() { return true; });
+  m.def("is_qnn_available", []() { return true; });
 
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });

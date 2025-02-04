@@ -1,4 +1,7 @@
-﻿import onnxruntime_genai as og
+# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License.
+
+import onnxruntime_genai as og
 import argparse
 import time
 
@@ -56,6 +59,15 @@ def main(args):
         else:
             raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
 
+    if args.verbose:
+        print("Model type is:", model_type)
+        print("Chat Template is:", args.chat_template)
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(**search_options)
+    generator = og.Generator(model, params)
+    if args.verbose: print("Generator created")
+
     # Set system prompt
     if "<|" in args.system_prompt and "|>" in args.system_prompt:
         # User-provided system template already has tags
@@ -75,6 +87,7 @@ def main(args):
             system_prompt = args.system_prompt
 
     system_tokens = tokenizer.encode(system_prompt)
+    generator.append_tokens(system_tokens)
     system_prompt_length = len(system_tokens)
 
     # Keep asking for input prompts in a loop
@@ -88,15 +101,8 @@ def main(args):
 
         prompt = f'{args.chat_template.format(input=text)}'
         input_tokens = tokenizer.encode(prompt)
-
-        params = og.GeneratorParams(model)
-        params.set_search_options(**search_options)
-        generator = og.Generator(model, params)
-        # Append system tokens to the generator
-        generator.append_tokens(system_tokens)
         
         generator.append_tokens(input_tokens)
-        if args.verbose: print("Generator created")
 
         if args.verbose: print("Running generation loop ...")
         if args.timings:
@@ -122,14 +128,14 @@ def main(args):
         print()
         print()
 
-        # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
-
-        del generator
-
         if args.timings:
             prompt_time = first_token_timestamp - started_timestamp
             run_time = time.time() - first_token_timestamp
             print(f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens)/prompt_time:.2f} tps, New tokens per second: {len(new_tokens)/run_time:.2f} tps")
+        
+        # Rewind the generator to the system prompt, this will erase all the memory of the model.
+        if args.rewind:
+            generator.rewind_to(system_prompt_length)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")
@@ -145,6 +151,7 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
     parser.add_argument('-c', '--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}')
-    parser.add_argument('-s', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the prompt.')
+    parser.add_argument('-s', '--system_prompt', type=str, default='You are a helpful assistant.', help='System prompt to use for the prompt.')
+    parser.add_argument('-r', '--rewind', action='store_true', default=False, help='Rewind to the system prompt after each generation. Defaults to false')
     args = parser.parse_args()
     main(args)

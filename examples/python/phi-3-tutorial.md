@@ -66,10 +66,11 @@ Are you on a Windows machine with GPU?
 
 3. Run the model
 
-   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py).
+   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py). If you are using a stable version of ONNX Runtime GenAI then you need to download from the release branch (example for v0.5.2 is given below).
 
    ```bash
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
+   # For stable release v0.5.2: curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/v0.5.2/examples/python/phi3-qa.py -o phi3-qa.py
    python phi3-qa.py -m directml\directml-int4-awq-block-128 -e dml
    ```
 
@@ -105,10 +106,11 @@ Are you on a Windows machine with GPU?
 
 3. Run the model
 
-   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py).
+   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py). If you are using a stable version of ONNX Runtime GenAI then you need to download from the release branch (example for v0.5.2 is given below).
 
    ```bash
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
+   # For stable release v0.5.2: curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/v0.5.2/examples/python/phi3-qa.py -o phi3-qa.py
    python phi3-qa.py -m cuda/cuda-int4-rtn-block-32 -e cuda
    ```
 
@@ -138,10 +140,11 @@ Are you on a Windows machine with GPU?
 
 3. Run the model
 
-   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py).
+   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py). If you are using a stable version of ONNX Runtime GenAI then you need to download from the release branch (example for v0.5.2 is given below).
 
    ```bash
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
+   # For stable release v0.5.2: curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/v0.5.2/examples/python/phi3-qa.py -o phi3-qa.py
    python phi3-qa.py -m cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4 -e cpu
    ```
 

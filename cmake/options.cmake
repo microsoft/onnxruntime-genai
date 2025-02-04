@@ -4,7 +4,6 @@ include(CMakeDependentOption)
 option(USE_CUDA "Build with CUDA support" ON)
 option(USE_ROCM "Build with ROCm support" ON)
 option(USE_DML "Build with DML support" OFF)
-option(USE_WEBGPU "Build with WEBGPU support" ON)
 
 # bindings
 option(ENABLE_JAVA "Build the Java API." OFF)

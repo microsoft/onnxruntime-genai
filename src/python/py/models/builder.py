@@ -330,7 +330,7 @@ class Model:
 
         genai_config = {
             "model": {
-                "bos_token_id": config.bos_token_id if hasattr(config, "bos_token_id") else 1,  # config.bos_token_id not present in ChatGLM model configs.
+                "bos_token_id": config.bos_token_id if hasattr(config, "bos_token_id") and config.bos_token_id != None else 1,  # config.bos_token_id not present in ChatGLM model configs.
                 "context_length": self.context_length,
                 "decoder": {
                     "session_options" : {
@@ -1677,7 +1677,7 @@ class Model:
             # Return early if there's nothing to unpack
             return
 
-        if hasattr(mlp, "base_layer"):
+        if hasattr(gate_up_linear, "base_layer"):
             # For LoRA packed `MatMul`
             return self.make_mlp_unpacked_lora(layer_id, mlp, root_input)
         else:
@@ -1701,7 +1701,7 @@ class Model:
         up_proj.bias = None if gate_up_linear.bias is None else torch.nn.Parameter(gate_up_linear.bias[self.intermediate_size :], requires_grad=False)
 
         # Create GateProj/UpProj lora_B layers
-        lora_B = mlp.lora_B.default
+        lora_B = gate_up_linear.lora_B.default
 
         gate_proj_lora_B = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
         gate_proj_lora_B.weight = torch.nn.Parameter(lora_B.weight[ : self.intermediate_size, :], requires_grad=False)
@@ -1712,12 +1712,12 @@ class Model:
         up_proj_lora_B.bias = None if lora_B.bias is None else torch.nn.Parameter(lora_B.bias[self.intermediate_size :], requires_grad=False)
 
         # Create GateProj/UpProj LoRA layers
-        mlp.gate_proj = LoraLayer(q_proj)
+        mlp.gate_proj = LoraLayer(gate_proj)
         mlp.gate_proj.lora_A = gate_up_linear.lora_A
         mlp.gate_proj.lora_B.default = gate_proj_lora_B
         mlp.gate_proj.scaling = gate_up_linear.scaling
 
-        mlp.up_proj = LoraLayer(k_proj)
+        mlp.up_proj = LoraLayer(up_proj)
         mlp.up_proj.lora_A = gate_up_linear.lora_A
         mlp.up_proj.lora_B.default = up_proj_lora_B
         mlp.up_proj.scaling = gate_up_linear.scaling
@@ -3068,6 +3068,14 @@ class ChatGLMModel(Model):
         layer.self_attn = layer.self_attn if hasattr(layer, 'self_attn') else layer.self_attention
         super().make_layer(layer_id, layer)
 
+class OLMoModel(Model):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
+        layernorm.weight = torch.ones(self.hidden_size)
+        layernorm.bias = torch.zeros(self.hidden_size)
+        super().make_layernorm(layer_id, layernorm, skip, simple, location)
 
 class GraniteModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -3200,6 +3208,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "NemotronForCausalLM":
             onnx_model = NemotronModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "OlmoForCausalLM":
+            onnx_model = OLMoModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiForCausalLM":
             onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
