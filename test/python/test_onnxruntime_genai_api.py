@@ -723,6 +723,9 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
 
         return extra_inputs_model_path, valid
 
+    if device == "dml":
+        pytest.skip("EP DML does not support preset extra inputs")
+
     model_path, valid_model = _prepare_model(test_data_path)
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
