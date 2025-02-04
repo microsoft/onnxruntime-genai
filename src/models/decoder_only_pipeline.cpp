@@ -159,6 +159,12 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
     pipeline_states_.emplace_back(std::move(pipeline_model_state));
     pipeline_overlapped_kv_cache_update_records_.emplace_back(std::move(overlapped_kv_cache_update_record));
   }
+
+  if (std::any_of(pipeline_overlapped_kv_cache_update_records_.begin(),
+                  pipeline_overlapped_kv_cache_update_records_.end(),
+                  [](const auto& record) { return record.has_value(); })) {
+    key_value_cache_update_worker_thread_.emplace();
+  }
 }
 
 void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
@@ -261,10 +267,13 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
 
     if (overlapped_kv_update_record.has_value()) {
       assert(windowed_key_value_cache_ != nullptr);
+      assert(key_value_cache_update_worker_thread_.has_value());
       // enqueue the next KV cache update
-      auto update_future =
-          windowed_key_value_cache_->EnqueueSlideLayersTask(overlapped_kv_update_record->layer_indices);
-      overlapped_kv_update_record->outstanding_update = std::move(update_future);
+      auto update_fn = [&windowed_key_value_cache = *windowed_key_value_cache_,
+                        layer_indices = overlapped_kv_update_record->layer_indices]() {
+        windowed_key_value_cache.SlideLayers(layer_indices);
+      };
+      overlapped_kv_update_record->outstanding_update = key_value_cache_update_worker_thread_->Enqueue(update_fn);
     }
 
     // Transfer ownership of all the non-managed outputs from the current pipeline state to the ortvalue store.

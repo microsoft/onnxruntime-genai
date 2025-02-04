@@ -4,6 +4,7 @@
 #pragma once
 
 #include <future>
+#include <optional>
 
 #include "model.h"
 #include "input_ids.h"
@@ -86,6 +87,7 @@ struct DecoderOnlyPipelineState : State {
 
   std::unique_ptr<KeyValueCache> key_value_cache_;
   WindowedKeyValueCache* windowed_key_value_cache_ = nullptr;  // set if key_value_cache_ is a WindowedKeyValueCache
+  std::optional<WorkerThread> key_value_cache_update_worker_thread_{};
 
   std::unique_ptr<PositionInputs> position_inputs_;
   ExtraInputs extra_inputs_{*this};

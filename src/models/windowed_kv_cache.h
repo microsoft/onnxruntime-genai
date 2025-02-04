@@ -18,9 +18,8 @@ struct WindowedKeyValueCache : KeyValueCache {
     throw std::runtime_error("WindowedKeyValueCache does not support AddEncoder.");
   };
 
-  std::future<void> EnqueueSlideLayersTask(std::span<const size_t> layer_indices);
-
   void Update(DeviceSpan<int32_t> beam_indices, int current_length) override;
+  void SlideLayers(std::span<const size_t> layer_indices);
 
   void RewindTo(size_t index) override {
     throw std::runtime_error("WindowedKeyValueCache does not support RewindTo.");
@@ -47,8 +46,6 @@ struct WindowedKeyValueCache : KeyValueCache {
   std::vector<std::string> input_name_strings_, output_name_strings_;
 
   bool is_first_update_{true};
-
-  WorkerThread worker_thread_{};
 };
 
 }  // namespace Generators

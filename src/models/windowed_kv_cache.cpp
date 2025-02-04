@@ -133,13 +133,22 @@ void WindowedKeyValueCache::SlideLayer(size_t layer_idx) {
 
 void WindowedKeyValueCache::SlideAllLayers() {
   ThreadPool thread_pool{static_cast<size_t>(layer_count_)};
-  thread_pool.Compute([this](size_t layer_idx) { SlideLayer(layer_idx); });
+  thread_pool.Compute([this](size_t layer_idx) {
+    SlideLayer(layer_idx);
+  });
+}
+
+void WindowedKeyValueCache::SlideLayers(std::span<const size_t> layer_indices) {
+  ThreadPool thread_pool{layer_indices.size()};
+  thread_pool.Compute([&](size_t idx) {
+    const size_t layer_idx = layer_indices[idx];
+    SlideLayer(layer_idx);
+  });
 }
 
 void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int current_length) {
   if (window_size_ == 1) {
-    // For token generation, KV cache update will be overlapped with pipeline model execution via
-    // EnqueueSlideLayersTask().
+    // For token generation, incremental KV cache update will be done with SlideLayers().
     return;
   }
 
@@ -252,19 +261,6 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int c
     state_.outputs_[output_index_ + 2 * layer_idx] = key_caches_out_[layer_idx].get();
     state_.outputs_[output_index_ + 2 * layer_idx + 1] = value_caches_out_[layer_idx].get();
   }
-}
-
-std::future<void> WindowedKeyValueCache::EnqueueSlideLayersTask(std::span<const size_t> layer_indices_span) {
-  auto slide_task_fn = [this,
-                        layer_indices = std::vector<size_t>{layer_indices_span.begin(), layer_indices_span.end()}]() {
-    ThreadPool thread_pool{layer_indices.size()};
-    thread_pool.Compute([&](size_t idx) {
-      const size_t layer_idx = layer_indices[idx];
-      SlideLayer(layer_idx);
-    });
-  };
-
-  return worker_thread_.Enqueue(std::move(slide_task_fn));
 }
 
 }  // namespace Generators
