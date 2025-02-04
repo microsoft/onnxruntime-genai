@@ -12,14 +12,9 @@
 #include "../make_string.h"
 #include "model.h"
 #include "threadpool.h"
+#include "utils.h"
 
 namespace Generators {
-
-namespace {
-int64_t ElementCountFromShape(const std::array<int64_t, 4>& shape) {
-  return std::accumulate(shape.begin(), shape.end(), int64_t{1}, std::multiplies<int64_t>());
-}
-}  // namespace
 
 WindowedKeyValueCache::WindowedKeyValueCache(State& state)
     : state_{state},
@@ -90,7 +85,7 @@ void WindowedKeyValueCache::Add() {
   }
 }
 
-void WindowedKeyValueCache::SlideForLayer(size_t layer_idx) {
+void WindowedKeyValueCache::SlideLayer(size_t layer_idx) {
   assert(layer_idx < layer_count_);
 
   uint8_t* key_cache_in_data = key_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
@@ -137,22 +132,25 @@ void WindowedKeyValueCache::SlideForLayer(size_t layer_idx) {
   }
 }
 
-void WindowedKeyValueCache::SlideForAllLayers() {
+void WindowedKeyValueCache::SlideAllLayers() {
   ThreadPool thread_pool{static_cast<size_t>(layer_count_)};
-  thread_pool.Compute([this](size_t layer_idx) { SlideForLayer(layer_idx); });
+  thread_pool.Compute([this](size_t layer_idx) { SlideLayer(layer_idx); });
 }
 
 void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int current_length) {
+  if (window_size_ == 1) {
+    // For token generation, KV cache update will be overlapped with pipeline model execution via
+    // EnqueueSlideLayersTask().
+    return;
+  }
+
   if (is_first_update_) {
     num_windows_ = (current_length + window_size_ - 1) / window_size_;
     is_first_update_ = false;
     window_index_++;
     return;
-  } else if (window_size_ == 1) {
-    // For token generation, KV cache update will be overlapped with pipeline model execution via EnqueueSlideTask().
-    return;
   } else if (window_index_ < num_windows_) {
-    SlideForAllLayers();
+    SlideAllLayers();
     window_index_++;
     return;
   }
@@ -257,15 +255,15 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int c
   }
 }
 
-std::future<void> WindowedKeyValueCache::EnqueueSlideTask(std::span<size_t> layer_indices_span) {
+std::future<void> WindowedKeyValueCache::EnqueueSlideLayersTask(std::span<const size_t> layer_indices_span) {
   auto slide_task_fn = [this,
                         layer_indices = std::vector<size_t>{layer_indices_span.begin(), layer_indices_span.end()}]() {
     Timer timer{};
 
-    ThreadPool thread_pool{static_cast<size_t>(layer_indices.size())};
+    ThreadPool thread_pool{layer_indices.size()};
     thread_pool.Compute([&](size_t idx) {
       const size_t layer_idx = layer_indices[idx];
-      SlideForLayer(layer_idx);
+      SlideLayer(layer_idx);
     });
 
     const auto elapsed = timer.Elapsed();

@@ -72,7 +72,7 @@ struct DecoderOnlyPipelineState : State {
 
   struct OverlappedKeyValueCacheUpdateRecord {
     std::vector<size_t> layer_indices{};     // indicates which layers of the KV cache are to be updated
-    std::future<void> outstanding_update{};  // valid while there is an outstanding update task in progress
+    std::future<void> outstanding_update{};  // future for an outstanding update task
   };
 
   std::vector<std::optional<OverlappedKeyValueCacheUpdateRecord>> pipeline_overlapped_kv_cache_update_records_;
@@ -82,7 +82,10 @@ struct DecoderOnlyPipelineState : State {
 
   std::unique_ptr<InputIDs> input_ids_;
   Logits logits_{*this};
+
   std::unique_ptr<KeyValueCache> key_value_cache_;
+  WindowedKeyValueCache* windowed_key_value_cache_ = nullptr;  // set if key_value_cache_ is a WindowedKeyValueCache
+
   std::unique_ptr<PositionInputs> position_inputs_;
   ExtraInputs extra_inputs_{*this};
 };

@@ -122,6 +122,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
       model_{model},
       input_ids_{CreateInputIDs(*this)},
       key_value_cache_{CreateKeyValueCache(*this)},
+      windowed_key_value_cache_{dynamic_cast<WindowedKeyValueCache*>(key_value_cache_.get())},
       position_inputs_{CreatePositionInputs(*this, sequence_lengths)} {
   input_ids_->Add();
   position_inputs_->Add();
@@ -131,21 +132,33 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   }
   extra_inputs_.Add();
 
-  const auto past_key_name_to_layer_idx = GeneratePastKeyNameToLayerIdxMap(*model_.config_);
+  const auto past_key_name_to_layer_idx = [this]() -> std::optional<NameToLayerIdxMap> {
+    if (windowed_key_value_cache_ != nullptr) {
+      return GeneratePastKeyNameToLayerIdxMap(*model_.config_);
+    }
+    return std::nullopt;
+  }();
 
   for (const auto& pipeline_model : model_.config_->model.decoder.pipeline) {
     auto pipeline_model_state = std::make_unique<IntermediatePipelineState>(model_, params, pipeline_states_.size());
-    std::optional<OverlappedKeyValueCacheUpdateRecord> overlapped_kv_cache_update_record{};
 
-    const bool token_gen_only = !pipeline_model.run_on_prompt && pipeline_model.run_on_token_gen;
-    if (token_gen_only) {
-      auto layer_indices = DetectLayerIndicesFromPastKeyNameInputs(past_key_name_to_layer_idx, pipeline_model.inputs);
-      if (!layer_indices.empty()) {
-        // token generation model with KV cache tensors - we should overlap KV cache update
-        overlapped_kv_cache_update_record = OverlappedKeyValueCacheUpdateRecord{};
-        overlapped_kv_cache_update_record->layer_indices = std::move(layer_indices);
+    auto overlapped_kv_cache_update_record =
+        [this, &pipeline_model, &past_key_name_to_layer_idx]() -> std::optional<OverlappedKeyValueCacheUpdateRecord> {
+      if (windowed_key_value_cache_ != nullptr) {
+        const bool token_gen_only = !pipeline_model.run_on_prompt && pipeline_model.run_on_token_gen;
+        if (token_gen_only) {
+          auto layer_indices = DetectLayerIndicesFromPastKeyNameInputs(*past_key_name_to_layer_idx,
+                                                                       pipeline_model.inputs);
+          if (!layer_indices.empty()) {
+            // token generation model with KV cache tensors - we should overlap KV cache update
+            auto record = OverlappedKeyValueCacheUpdateRecord{};
+            record.layer_indices = std::move(layer_indices);
+            return record;
+          }
+        }
       }
-    }
+      return std::nullopt;
+    }();
 
     pipeline_states_.emplace_back(std::move(pipeline_model_state));
     pipeline_overlapped_kv_cache_update_records_.emplace_back(std::move(overlapped_kv_cache_update_record));
@@ -179,13 +192,11 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
     for (const auto& input_name : input_names_) {
       if (pipeline_state->HasInput(input_name)) {
         if (!pipeline_state->SupportsPrimaryDevice()) {
-          std::ostringstream oss;
-          oss << "Managed input " << input_name << " resides on the primary device type ("
-              << to_string(model_.device_type_) << "). "
-              << "But the pipeline model "
-              << model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id
-              << " is expecting it to reside elsewhere.";
-          throw std::runtime_error(oss.str());
+          throw std::runtime_error(
+              MakeString("Managed input ", input_name, " resides on the primary device type (",
+                         model_.device_type_, "). But the pipeline model ",
+                         model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id,
+                         " is expecting it to reside elsewhere."));
         }
         pipeline_state->input_names_.push_back(input_name);
         pipeline_state->inputs_.push_back(State::GetInput(input_name));
@@ -204,13 +215,11 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
     for (const auto& output_name : output_names_) {
       if (pipeline_state->HasOutput(output_name)) {
         if (!pipeline_state->SupportsPrimaryDevice()) {
-          std::ostringstream oss;
-          oss << "Managed output " << output_name << " resides on the primary device type ("
-              << to_string(model_.device_type_) << "). "
-              << "But the pipeline model "
-              << model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id
-              << " is expecting it to reside elsewhere.";
-          throw std::runtime_error(oss.str());
+          throw std::runtime_error(
+              MakeString("Managed output ", output_name, " resides on the primary device type (",
+                         model_.device_type_, "). But the pipeline model ",
+                         model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id,
+                         " is expecting it to reside elsewhere."));
         }
         pipeline_state->output_names_.push_back(output_name);
         pipeline_state->outputs_.push_back(State::GetOutput(output_name));
@@ -223,13 +232,11 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
     for (const auto& input_name : input_names_) {
       if (pipeline_state->HasOutput(input_name)) {
         if (!pipeline_state->SupportsPrimaryDevice()) {
-          std::ostringstream oss;
-          oss << "Managed input " << input_name << " resides on the primary device type ("
-              << to_string(model_.device_type_) << "). "
-              << "But the pipeline model "
-              << model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id
-              << " is expecting it to reside elsewhere.";
-          throw std::runtime_error(oss.str());
+          throw std::runtime_error(
+              MakeString("Managed input ", input_name, " resides on the primary device type (",
+                         model_.device_type_, "). But the pipeline model ",
+                         model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id,
+                         " is expecting it to reside elsewhere."));
         }
         pipeline_state->output_names_.push_back(input_name);
         pipeline_state->outputs_.push_back(State::GetInput(input_name));
@@ -246,17 +253,21 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
     }
 
     auto& overlapped_kv_update_record = pipeline_overlapped_kv_cache_update_records_[pipeline_model_idx];
-    if (overlapped_kv_update_record.has_value() && overlapped_kv_update_record->outstanding_update.valid()) {
-      overlapped_kv_update_record->outstanding_update.get();  // wait for it to be done
+    if (overlapped_kv_update_record.has_value()) {
+      // wait for any outstanding KV cache update to finish
+      if (overlapped_kv_update_record->outstanding_update.valid()) {
+        overlapped_kv_update_record->outstanding_update.get();
+      }
     }
 
     // Run the intermediate pipeline state
     pipeline_state->Run(total_length, next_tokens, next_indices);
 
     if (overlapped_kv_update_record.has_value()) {
-      auto* windowed_kv_cache = static_cast<WindowedKeyValueCache*>(key_value_cache_.get());  // TODO this cast is... not great
+      assert(windowed_key_value_cache_ != nullptr);
       // enqueue the next KV cache update
-      auto update_future = windowed_kv_cache->EnqueueSlideTask(overlapped_kv_update_record->layer_indices);
+      auto update_future =
+          windowed_key_value_cache_->EnqueueSlideLayersTask(overlapped_kv_update_record->layer_indices);
       overlapped_kv_update_record->outstanding_update = std::move(update_future);
     }
 
