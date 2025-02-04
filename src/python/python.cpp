@@ -131,8 +131,16 @@ std::unique_ptr<OrtValue> ToOrtValue(pybind11::array& v) {
   for (pybind11::ssize_t i = 0; i < v.ndim(); i++)
     shape[i] = v.shape()[i];
 
-  auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
-  return OrtValue::CreateTensor(*p_memory_info, v.mutable_data(), v.nbytes(), shape, type);
+  // Check if v is contiguous
+  if ((v.flags() & (pybind11::array::c_style | pybind11::array::f_style)) == 0)
+    throw std::runtime_error("Array must be contiguous");
+
+  // Copy data into ort_value
+  auto ort_value = OrtValue::CreateTensor(Ort::Allocator::GetWithDefaultOptions(), shape, type);
+  auto ort_data = ort_value->GetTensorMutableData<uint8_t>();
+  auto python_data = reinterpret_cast<const uint8_t*>(v.data());
+  std::copy(python_data, python_data + v.nbytes(), ort_data);
+  return ort_value;
 }
 
 pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
