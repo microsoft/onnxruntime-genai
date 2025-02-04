@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #include <iostream>
-#include <string>
+#include <cstring>
 #include <fstream>
 #include <memory>
 
