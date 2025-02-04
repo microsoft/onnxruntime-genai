@@ -92,7 +92,7 @@ using NameToLayerIdxMap = std::unordered_map<std::string, size_t>;
 static NameToLayerIdxMap GeneratePastKeyNameToLayerIdxMap(const Config& config) {
   const size_t num_layers = config.model.decoder.num_hidden_layers;
   const std::string& past_key_name_template = config.model.decoder.inputs.past_key_names;
-  std::unordered_map<std::string, size_t> m{};
+  NameToLayerIdxMap m{};
   for (size_t i = 0; i < num_layers; ++i) {
     m.emplace(ComposeKeyValueName(past_key_name_template, static_cast<int>(i)), i);
   }
