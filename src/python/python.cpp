@@ -133,7 +133,7 @@ std::unique_ptr<OrtValue> ToOrtValue(pybind11::array& v) {
 
   // Check if v is contiguous
   if ((v.flags() & (pybind11::array::c_style | pybind11::array::f_style)) == 0)
-    throw std::runtime_error("Array must be contiguous");
+    throw std::runtime_error("Array must be contiguous. Please use NumPy's 'ascontiguousarray' method on the value.");
 
   // Copy data into ort_value
   auto ort_value = OrtValue::CreateTensor(Ort::Allocator::GetWithDefaultOptions(), shape, type);
