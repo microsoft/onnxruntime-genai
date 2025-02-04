@@ -194,7 +194,7 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
         if (!pipeline_state->SupportsPrimaryDevice()) {
           throw std::runtime_error(
               MakeString("Managed input ", input_name, " resides on the primary device type (",
-                         model_.device_type_, "). But the pipeline model ",
+                         static_cast<int>(model_.device_type_), "). But the pipeline model ",
                          model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id,
                          " is expecting it to reside elsewhere."));
         }
@@ -217,7 +217,7 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
         if (!pipeline_state->SupportsPrimaryDevice()) {
           throw std::runtime_error(
               MakeString("Managed output ", output_name, " resides on the primary device type (",
-                         model_.device_type_, "). But the pipeline model ",
+                         static_cast<int>(model_.device_type_), "). But the pipeline model ",
                          model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id,
                          " is expecting it to reside elsewhere."));
         }
@@ -234,7 +234,7 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
         if (!pipeline_state->SupportsPrimaryDevice()) {
           throw std::runtime_error(
               MakeString("Managed input ", input_name, " resides on the primary device type (",
-                         model_.device_type_, "). But the pipeline model ",
+                         static_cast<int>(model_.device_type_), "). But the pipeline model ",
                          model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id,
                          " is expecting it to reside elsewhere."));
         }

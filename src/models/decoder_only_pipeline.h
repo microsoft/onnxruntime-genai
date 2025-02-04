@@ -9,6 +9,7 @@
 #include "input_ids.h"
 #include "logits.h"
 #include "kv_cache.h"
+#include "windowed_kv_cache.h"
 #include "position_inputs.h"
 #include "extra_inputs.h"
 
