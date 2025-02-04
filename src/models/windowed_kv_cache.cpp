@@ -8,7 +8,6 @@
 
 #include "../generators.h"
 #include "../logging.h"
-#include "../timer.h"
 #include "../make_string.h"
 #include "model.h"
 #include "threadpool.h"
@@ -258,16 +257,11 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int c
 std::future<void> WindowedKeyValueCache::EnqueueSlideLayersTask(std::span<const size_t> layer_indices_span) {
   auto slide_task_fn = [this,
                         layer_indices = std::vector<size_t>{layer_indices_span.begin(), layer_indices_span.end()}]() {
-    Timer timer{};
-
     ThreadPool thread_pool{layer_indices.size()};
     thread_pool.Compute([&](size_t idx) {
       const size_t layer_idx = layer_indices[idx];
       SlideLayer(layer_idx);
     });
-
-    const auto elapsed = timer.Elapsed();
-    LogTiming(MakeString("WindowedKeyValueCache slide ", layer_indices.size(), " layers"), elapsed);
   };
 
   return worker_thread_.Enqueue(std::move(slide_task_fn));
