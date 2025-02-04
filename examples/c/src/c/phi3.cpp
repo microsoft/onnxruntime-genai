@@ -147,6 +147,13 @@ void C_API(const char* model_path, const char* execution_provider) {
   std::cout << "Creating tokenizer..." << std::endl;
   CheckResult(OgaCreateTokenizer(model, &tokenizer));
 
+  OgaGeneratorParams* params;
+  CheckResult(OgaCreateGeneratorParams(model, &params));
+  CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 1024));
+
+  OgaGenerator* generator;
+  CheckResult(OgaCreateGenerator(model, params, &generator));
+
   OgaTokenizerStream* tokenizer_stream;
   CheckResult(OgaCreateTokenizerStream(tokenizer, &tokenizer_stream));
 
@@ -173,12 +180,6 @@ void C_API(const char* model_path, const char* execution_provider) {
     CheckResult(OgaTokenizerEncode(tokenizer, prompt.c_str(), sequences));
 
     std::cout << "Generating response..." << std::endl;
-    OgaGeneratorParams* params;
-    CheckResult(OgaCreateGeneratorParams(model, &params));
-    CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 1024));
-
-    OgaGenerator* generator;
-    CheckResult(OgaCreateGenerator(model, params, &generator));
     CheckResult(OgaGenerator_AppendTokenSequences(generator, sequences));
 
     std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call_C, &catch_terminate, generator));
