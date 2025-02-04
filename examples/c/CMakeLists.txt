@@ -63,11 +63,6 @@ if(PHI3)
   endif()
 endif()
 
-if(PHI3)
-  add_executable(phi3 ${CMAKE_SOURCE_DIR}/src/phi3.cpp)
-  prepare_executable(phi3)
-endif()
-
 if(PHI3V)
   add_executable(phi3v ${CMAKE_SOURCE_DIR}/src/phi3v.cpp)
   prepare_executable(phi3v)
