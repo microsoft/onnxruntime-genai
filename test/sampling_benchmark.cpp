@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <gtest/gtest.h>
-
 #include <chrono>
 #include <iostream>
 #include <random>
+
+#include <gtest/gtest.h>
 
 #include "generators.h"
 #include "models/model.h"
