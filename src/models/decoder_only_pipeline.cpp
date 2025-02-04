@@ -169,9 +169,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
 
 void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
                                            DeviceSpan<int32_t> next_indices) {
-  for (size_t pipeline_model_idx = 0; pipeline_model_idx < pipeline_states_.size(); ++pipeline_model_idx) {
-    const auto& pipeline_state = pipeline_states_[pipeline_model_idx];
-
+  for (auto& pipeline_state : pipeline_states_) {
     if (first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_prompt) {
       continue;
     } else if (!first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
@@ -254,7 +252,7 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
       }
     }
 
-    auto& overlapped_kv_update_record = pipeline_overlapped_kv_cache_update_records_[pipeline_model_idx];
+    auto& overlapped_kv_update_record = pipeline_overlapped_kv_cache_update_records_[pipeline_state->id_];
     if (overlapped_kv_update_record.has_value()) {
       // wait for any outstanding KV cache update to finish
       if (overlapped_kv_update_record->outstanding_update.valid()) {
