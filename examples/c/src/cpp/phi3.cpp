@@ -98,20 +98,6 @@ class TerminateSession {
       cv.wait_for(lock, timeout, [this] { return stopFlag; });
     }
   }
-
-  void Generator_SetTerminate_Call_C(OgaGenerator* generator) {
-    std::unique_lock<std::mutex> lock(mtx);
-    while (!OgaGenerator_IsDone(generator)) {
-      if (stopFlag) {
-        OgaGenerator_SetRuntimeOption(generator, "terminate_session", "1");
-        stopFlag = false;
-        break;
-      }
-      // Wait for stopflag to become true or it will timeout after 1000 ms
-      auto timeout = std::chrono::milliseconds(1000);
-      cv.wait_for(lock, timeout, [this] { return stopFlag; });
-    }
-  }
 };
 
 static TerminateSession catch_terminate;
@@ -140,6 +126,13 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   auto tokenizer = OgaTokenizer::Create(*model);
   auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
 
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 1024);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call, &catch_terminate, generator.get()));
+
+
   while (true) {
     signal(SIGINT, signalHandlerWrapper);
     std::string text;
@@ -162,11 +155,6 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     tokenizer->Encode(prompt.c_str(), *sequences);
 
     std::cout << "Generating response..." << std::endl;
-    auto params = OgaGeneratorParams::Create(*model);
-    params->SetSearchOption("max_length", 1024);
-
-    auto generator = OgaGenerator::Create(*model, *params);
-    std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call, &catch_terminate, generator.get()));
     generator->AppendTokenSequences(*sequences);
 
     try {
