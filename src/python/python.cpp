@@ -131,8 +131,16 @@ std::unique_ptr<OrtValue> ToOrtValue(pybind11::array& v) {
   for (pybind11::ssize_t i = 0; i < v.ndim(); i++)
     shape[i] = v.shape()[i];
 
-  auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
-  return OrtValue::CreateTensor(*p_memory_info, v.mutable_data(), v.nbytes(), shape, type);
+  // Check if v is contiguous
+  if ((v.flags() & (pybind11::array::c_style | pybind11::array::f_style)) == 0)
+    throw std::runtime_error("Array must be contiguous. Please use NumPy's 'ascontiguousarray' method on the value.");
+
+  // Copy data into ort_value
+  auto ort_value = OrtValue::CreateTensor(Ort::Allocator::GetWithDefaultOptions(), shape, type);
+  auto ort_data = ort_value->GetTensorMutableData<uint8_t>();
+  auto python_data = reinterpret_cast<const uint8_t*>(v.data());
+  std::copy(python_data, python_data + v.nbytes(), ort_data);
+  return ort_value;
 }
 
 pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
@@ -215,6 +223,13 @@ struct PyDeviceMemorySpan {
   pybind11::array_t<T> py_cpu_array_;
 };
 
+struct PyNamedTensors {
+  PyNamedTensors(std::unique_ptr<NamedTensors> named_tensors) : named_tensors_{std::move(named_tensors)} {
+  }
+
+  std::unique_ptr<NamedTensors> named_tensors_;
+};
+
 struct PyGeneratorParams {
   PyGeneratorParams(const Model& model) : params_{std::make_shared<GeneratorParams>(model)} {
   }
@@ -236,6 +251,11 @@ struct PyGeneratorParams {
   void SetModelInput(const std::string& name, pybind11::array& value) {
     params_->extra_inputs.push_back({name, std::make_shared<Tensor>(ToOrtValue(value))});
     refs_.emplace_back(value);
+  }
+
+  void SetInputs(std::shared_ptr<PyNamedTensors> named_tensors) {
+    params_->SetInputs(*named_tensors->named_tensors_);
+    named_tensors_ = named_tensors;
   }
 
   void SetSearchOptions(const pybind11::kwargs& dict) {
@@ -268,14 +288,8 @@ struct PyGeneratorParams {
   pybind11::array py_audio_features_;
   pybind11::array_t<int32_t> py_alignment_heads_;
 
-  std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
-};
-
-struct PyNamedTensors {
-  PyNamedTensors(std::unique_ptr<NamedTensors> named_tensors) : named_tensors_{std::move(named_tensors)} {
-  }
-
-  std::unique_ptr<NamedTensors> named_tensors_;
+  std::vector<pybind11::object> refs_;             // References to data we want to ensure doesn't get garbage collected
+  std::shared_ptr<PyNamedTensors> named_tensors_;  // Ensure the model inputs don't get garbage collected
 };
 
 struct PyGenerator {
@@ -390,11 +404,11 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->config.model.vocab_size; })
       .def_readwrite("audio_features", &PyGeneratorParams::py_audio_features_)
       .def_readwrite("alignment_heads", &PyGeneratorParams::py_alignment_heads_)
-      .def("set_inputs", [](PyGeneratorParams& generator_params, PyNamedTensors* named_tensors) {
+      .def("set_inputs", [](PyGeneratorParams& generator_params, std::shared_ptr<PyNamedTensors> named_tensors) {
         if (!named_tensors || !named_tensors->named_tensors_)
           throw std::runtime_error("No inputs provided.");
 
-        generator_params.params_->SetInputs(*named_tensors->named_tensors_);
+        generator_params.SetInputs(named_tensors);
       })
       .def("set_model_input", &PyGeneratorParams::SetModelInput)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)                                     // See config.h 'struct Search' for the options
@@ -440,6 +454,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([](const std::string& config_path) {
         return CreateModel(GetOrtEnv(), config_path.c_str());
       }))
+      .def_property_readonly("type", [](const Model& model) { return model.config_->model.type; })
       .def_property_readonly(
           "device_type", [](const Model& model) { return to_string(model.device_type_); }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const Model& model) { return model.CreateMultiModalProcessor(); });
@@ -460,8 +475,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         generator.SetActiveAdapter(adapters, adapter_name);
       });
 
-  pybind11::class_<Images>(m, "Images")
-      .def_static("open", [](pybind11::args image_paths) {
+  pybind11::class_<Images, std::shared_ptr<Images>>(m, "Images")
+      .def_static("open", [](pybind11::args image_paths) -> std::shared_ptr<Images> {
         if (image_paths.empty())
           throw std::runtime_error("No images provided");
 
@@ -474,7 +489,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           image_paths_vector.push_back(image_paths_string.back().c_str());
         }
 
-        return LoadImages(image_paths_vector);
+        return std::shared_ptr<Images>(LoadImages(image_paths_vector));
       })
       .def_static("open_bytes", [](pybind11::args image_datas) {
         if (image_datas.empty())
@@ -490,10 +505,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           image_raw_data[i] = ort_extensions::ImageRawData(data, data + info.size);
         }
 
-        return std::make_unique<Images>(std::move(image_raw_data), image_datas.size());
+        return std::make_shared<Images>(std::move(image_raw_data), image_datas.size());
       });
 
-  pybind11::class_<Audios>(m, "Audios")
+  pybind11::class_<Audios, std::shared_ptr<Audios>>(m, "Audios")
       .def_static("open", [](pybind11::args audio_paths) {
         if (audio_paths.empty())
           throw std::runtime_error("No audios provided");
@@ -508,14 +523,14 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           audio_paths_vector.push_back(audio_paths_string.back().c_str());
         }
 
-        return LoadAudios(audio_paths_vector);
+        return std::shared_ptr<Audios>(LoadAudios(audio_paths_vector));
       });
 
-  pybind11::class_<PyNamedTensors>(m, "NamedTensors");
+  pybind11::class_<PyNamedTensors, std::shared_ptr<PyNamedTensors>>(m, "NamedTensors");
 
   pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
       .def(
-          "__call__", [](MultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) -> std::unique_ptr<PyNamedTensors> {
+          "__call__", [](MultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) -> std::shared_ptr<PyNamedTensors> {
             if (kwargs.contains("images")) {
               if (processor.image_processor_ == nullptr) {
                 throw std::runtime_error("Image processor is not available for this model.");
@@ -524,11 +539,11 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
               if (!prompt.has_value()) {
                 throw std::runtime_error("Prompt is required for processing the image.");
               }
-              return std::make_unique<PyNamedTensors>(
+              return std::make_shared<PyNamedTensors>(
                   processor.image_processor_->Process(*processor.tokenizer_, *prompt, images));
             } else if (kwargs.contains("audios")) {
               const Audios* audios = kwargs["audios"].cast<const Audios*>();
-              return std::make_unique<PyNamedTensors>(
+              return std::make_shared<PyNamedTensors>(
                   processor.audio_processor_->Process(audios));
             } else {
               throw std::runtime_error("Nothing to process.");
@@ -551,7 +566,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });
   m.def("is_rocm_available", []() { return USE_ROCM != 0; });
-  m.def("is_webgpu_available", []() { return USE_WEBGPU != 0; });
+  m.def("is_webgpu_available", []() { return true; });
+  m.def("is_qnn_available", []() { return true; });
 
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });

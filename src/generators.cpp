@@ -237,6 +237,10 @@ void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
       aux_input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
                                         tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
+      if (aux_input_ids.size() / search.batch_size > search.max_length)
+        throw std::runtime_error("input_ids size (" + std::to_string(aux_input_ids.size()) + ") exceeds max length (" + std::to_string(search.max_length) + ")");
+      else if (aux_input_ids.size() == 0)
+        throw std::runtime_error("input_ids is empty");
     } else {
       // If the nominal name is found in the map, use the graph name.
       // Else, use the nominal name as the graph name.
@@ -309,16 +313,19 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
+  if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
+    throw std::runtime_error("input_ids size (" + std::to_string(input_ids.size()) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
   if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v")
     throw std::runtime_error("Please use params.SetInputs for " + model_->config_->model.type + ". AppendTokens is not supported for this model type.");
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
-  constexpr std::array<DeviceType, 2> devices_supporting_continuous_decoding{DeviceType::CPU, DeviceType::CUDA};
+  constexpr std::array<DeviceType, 3> devices_supporting_continuous_decoding{DeviceType::CPU, DeviceType::CUDA, DeviceType::WEBGPU};
   if (search_->GetSequenceLength() != 0 &&
       std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
                    [this](DeviceType device_type) { return device_type == state_->params_->device_type; }))
-    throw std::runtime_error("Continuous decoding is not supported on the selected device type: " + to_string(state_->params_->device_type));
+    throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->params_->device_type) +
+                             "). Please recreate the generator instance to avoid using continuous decoding.");
 
   if (last_action_ == Action::generated) {
     ComputeLogits(search_->GetNextTokens());
@@ -389,6 +396,20 @@ void Generator::GenerateNextToken() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");
+
+  // TODO: Extend the solution to make it work for batch size > 1, num beams > 1, multimodal and DML
+  // Phi3 model switches from short factor to long factor at 4097 (original_max_position_embeddings+1) token, needs Recomputation of Position IDs and KV Cache
+  // at this stage which is achieved by rewinding to zero and appending the current sequence
+  // Scenarios where this solution works: Batch size = 1, Num beams = 1, decoder model, EP is either CPU or CUDA
+  // Scenarios where it doesn't work: Batch size > 1 OR Num beams > 1 OR Multimodal model (like phi3 vision) OR EP is DML
+  if (search_->params_->BatchBeamSize() == 1) {
+    if (((search_->GetSequenceLength() == 4097) && (model_->config_->model.type == "phi3" || model_->config_->model.type == "phimoe")) || ((search_->GetSequenceLength() == 8197) && (model_->config_->model.type == "phi3small"))) {
+      auto current_seq = cpu_span<int32_t>(GetSequence(0).CopyDeviceToCpu());
+      RewindToLength(0);
+      AppendTokens(current_seq);
+    }
+  }
+
   if (!computed_logits_) {
     auto next_tokens = search_->GetNextTokens();
     if (last_action_ == Action::rewound)
@@ -425,6 +446,8 @@ void Generator::GenerateNextToken() {
     throw std::runtime_error("top_p must be between 0.0 and 1.0");
   if (search.top_k < 0)
     throw std::runtime_error("top_k must be 0 or greater");
+  if (search.temperature <= 0.0f)
+    throw std::runtime_error("temperature must be greater than 0");
 
   if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1) {
     search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);

@@ -443,8 +443,14 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
         'The quick brown fox jumps over the lazy dog.\n    """\n\n',
     ]
     for i in range(len(prompts)):
-        assert np.array_equal(expected_output[i], tokenizer.decode(generator.get_sequence(i)))
+        actual_output = tokenizer.decode(generator.get_sequence(i))
+        equal = np.array_equal(expected_output[i], actual_output)
 
+        if not equal:
+            print("test_pipeline_model:", flush=True)
+            print(f"expected = {repr(expected_output[i])}", flush=True)
+            print(f"actual = {repr(actual_output)}", flush=True)
+        assert equal
 
 @pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
@@ -528,7 +534,7 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
         model = onnx.load(Path(adapter_model_path) / "model.onnx")
 
         for node in model.graph.node:
-            if node.name == "/lm_head/Add":
+            if node.output[0] == "logits":
                 node.output[0] = "logits_0"
                 break
 
@@ -628,8 +634,6 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=20, batch_size=len(prompts))
 
-    print(len(adapter_paths))
-
     generator = og.Generator(model, params)
     for i in range(len(adapter_paths)):
         generator.set_active_adapter(adapters, f"adapter_{i}")
@@ -637,6 +641,79 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
+
+
+@pytest.mark.parametrize("device", devices)
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64"),
+    reason="ONNX is not available on ARM64",
+)
+@pytest.mark.parametrize("extra_inputs", [("num_logits_to_keep", True), ("onnx::Neg_67", True), ("abcde", False)])
+def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
+    def _prepare_model(test_data_path):
+        phi2_model_path = phi2_for(device)
+        relative_model_path = "preset_extra_inputs"
+        extra_inputs_model_path = os.fspath(Path(test_data_path) / relative_model_path)
+
+        shutil.copytree(phi2_model_path, extra_inputs_model_path, dirs_exist_ok=True)
+
+        # Create the model with the extra inputs
+        model = onnx.load(Path(extra_inputs_model_path) / "model.onnx")
+
+        for node in model.graph.node:
+            if node.output[0] == "logits":
+                node.output[0] = "logits_0"
+                break
+
+        extra_input_name, valid = extra_inputs
+        extra_input = onnx.helper.make_tensor_value_info(
+            extra_input_name,
+            onnx.TensorProto.INT64,
+            [],
+        )
+
+        model.graph.input.append(extra_input)
+
+        cast_node = onnx.helper.make_node(
+            "Cast", [extra_input_name], [f"{extra_input_name}_cast"], to=onnx.TensorProto.FLOAT if device == "cpu" else onnx.TensorProto.FLOAT16
+        )
+        add_node = onnx.helper.make_node(
+            "Add", [f"{extra_input_name}_cast", "logits_0"], ["logits"], name="add_to_logits"
+        )
+        model.graph.node.extend([cast_node, add_node])
+
+        onnx.save(
+            model,
+            Path(extra_inputs_model_path) / "model.onnx",
+            save_as_external_data=True,
+            location="model.data",
+        )
+
+        return extra_inputs_model_path, valid
+
+    model_path, valid_model = _prepare_model(test_data_path)
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+    prompts = [
+        "This is a test.",
+        "Rats are awesome pets!",
+        "The quick brown fox jumps over the lazy dog.",
+    ]
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=20, batch_size=len(prompts))
+
+    generator = og.Generator(model, params)
+    if not valid_model:
+        with pytest.raises(og.OrtException) as exc_info:
+            generator.append_tokens(tokenizer.encode_batch(prompts))
+
+        assert f"Missing Input: {extra_inputs[0]}" in str(exc_info.value)
+    else:
+        generator.append_tokens(tokenizer.encode_batch(prompts))
+
+        while not generator.is_done():
+            generator.generate_next_token()
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])

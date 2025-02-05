@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
   AZCOPY_AUTO_LOGIN_TYPE: MSI
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
@@ -79,10 +80,6 @@ jobs:
         python -m pip install -r test\python\cuda\torch\requirements.txt
         python -m pip install -r test\python\cuda\ort\requirements.txt
         python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
-
-    - name: Use Dummy HuggingFace Token
-      run: |
-        Add-Content -Path $env:GITHUB_ENV -Value "HF_TOKEN=12345"
 
     - name: Run the Python Tests
       run: |

@@ -8,7 +8,7 @@ def main(args):
         started_timestamp = 0
         first_token_timestamp = 0
 
-    config = og.Config(args.model)
+    config = og.Config(args.model_path)
     config.clear_providers()
     if args.execution_provider != "cpu":
         if args.verbose: print(f"Setting model to {args.execution_provider}")
@@ -30,6 +30,10 @@ def main(args):
 
     chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
 
+    params = og.GeneratorParams(model)
+    params.set_search_options(**search_options)
+    generator = og.Generator(model, params)
+
     # Keep asking for input prompts in a loop
     while True:
         text = input("Input: ")
@@ -44,9 +48,6 @@ def main(args):
 
         input_tokens = tokenizer.encode(prompt)
 
-        params = og.GeneratorParams(model)
-        params.set_search_options(**search_options)
-        generator = og.Generator(model, params)
         generator.append_tokens(input_tokens)
         if args.verbose: print("Generator created")
 
@@ -73,9 +74,6 @@ def main(args):
             print("  --control+c pressed, aborting generation--")
         print()
         print()
-
-        # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
-        del generator
 
         if args.timings:
             prompt_time = first_token_timestamp - started_timestamp
