@@ -4,9 +4,6 @@
 #pragma once
 
 #include "kv_cache.h"
-#include "../worker_thread.h"
-
-#include <future>
 
 namespace Generators {
 
