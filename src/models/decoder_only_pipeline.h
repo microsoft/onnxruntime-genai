@@ -6,6 +6,7 @@
 #include <future>
 #include <optional>
 
+#include "../worker_thread.h"
 #include "model.h"
 #include "input_ids.h"
 #include "logits.h"
@@ -86,7 +87,7 @@ struct DecoderOnlyPipelineState : State {
   Logits logits_{*this};
 
   std::unique_ptr<KeyValueCache> key_value_cache_;
-  WindowedKeyValueCache* windowed_key_value_cache_ = nullptr;  // set if key_value_cache_ is a WindowedKeyValueCache
+  const bool do_key_value_cache_partial_token_generation_update_;
   std::optional<WorkerThread> key_value_cache_update_worker_thread_{};
 
   std::unique_ptr<PositionInputs> position_inputs_;

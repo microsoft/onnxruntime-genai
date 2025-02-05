@@ -118,7 +118,8 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
       model_{model},
       input_ids_{CreateInputIDs(*this)},
       key_value_cache_{CreateKeyValueCache(*this)},
-      windowed_key_value_cache_{dynamic_cast<WindowedKeyValueCache*>(key_value_cache_.get())},
+      do_key_value_cache_partial_token_generation_update_{
+          key_value_cache_ && key_value_cache_->IsPartialTokenGenerationUpdateSupported()},
       position_inputs_{CreatePositionInputs(*this, sequence_lengths)} {
   input_ids_->Add();
   position_inputs_->Add();
@@ -128,8 +129,8 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   }
   extra_inputs_.Add();
 
-  const auto past_key_name_to_layer_idx = [this]() -> std::optional<NameToLayerIdxMap> {
-    if (windowed_key_value_cache_ != nullptr) {
+  const auto past_key_name_to_layer_idx = [&]() -> std::optional<NameToLayerIdxMap> {
+    if (do_key_value_cache_partial_token_generation_update_) {
       return GeneratePastKeyNameToLayerIdxMap(*model_.config_);
     }
     return std::nullopt;
@@ -138,9 +139,8 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   for (const auto& pipeline_model : model_.config_->model.decoder.pipeline) {
     auto pipeline_model_state = std::make_unique<IntermediatePipelineState>(model_, params, pipeline_states_.size());
 
-    auto overlapped_kv_cache_update_record =
-        [this, &pipeline_model, &past_key_name_to_layer_idx]() -> std::optional<OverlappedKeyValueCacheUpdateRecord> {
-      if (windowed_key_value_cache_ != nullptr) {
+    auto overlapped_kv_cache_update_record = [&]() -> std::optional<OverlappedKeyValueCacheUpdateRecord> {
+      if (do_key_value_cache_partial_token_generation_update_) {
         const bool token_gen_only = !pipeline_model.run_on_prompt && pipeline_model.run_on_token_gen;
         if (token_gen_only) {
           auto layer_indices = DetectLayerIndicesFromPastKeyNameInputs(*past_key_name_to_layer_idx,
@@ -264,12 +264,12 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
     pipeline_state->Run(total_length, next_tokens, next_indices);
 
     if (overlapped_kv_update_record.has_value()) {
-      assert(windowed_key_value_cache_ != nullptr);
       assert(key_value_cache_update_worker_thread_.has_value());
       // enqueue the next KV cache update
-      auto update_fn = [&windowed_key_value_cache = *windowed_key_value_cache_,
-                        layer_indices = overlapped_kv_update_record->layer_indices]() {
-        windowed_key_value_cache.SlideLayers(layer_indices);
+      auto update_fn = [&key_value_cache = *key_value_cache_.get(),
+                        layer_indices = overlapped_kv_update_record->layer_indices,
+                        next_indices, total_length]() {
+        key_value_cache.PartialTokenGenerationUpdate(next_indices, total_length, layer_indices);
       };
       overlapped_kv_update_record->outstanding_update = key_value_cache_update_worker_thread_->Enqueue(update_fn);
     }
@@ -308,7 +308,7 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
     if (model_.config_->model.decoder.sliding_window.has_value() && i < num_chunks - 1) {
       // Sliding the window over the input_ids, key_cache, and value_cache, position_ids, and attention_mask
       input_ids_->Update(next_tokens);
-      key_value_cache_->Update(next_indices, total_length);
+      if (key_value_cache_) key_value_cache_->Update(next_indices, total_length);
       position_inputs_->Update(next_tokens, total_length, static_cast<int>(input_ids_->GetShape()[1]));
     }
   }
@@ -336,7 +336,23 @@ void DecoderOnlyPipelineState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tok
   input_ids_->Update(next_tokens);
   size_t new_length = input_ids_->GetShape()[1];
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
-  if (key_value_cache_) key_value_cache_->Update(beam_indices, total_length);
+
+  if (key_value_cache_) {
+    const bool outstanding_key_value_cache_partial_token_generation_update =
+        do_key_value_cache_partial_token_generation_update_ &&
+        std::any_of(pipeline_overlapped_kv_cache_update_records_.rbegin(),
+                    pipeline_overlapped_kv_cache_update_records_.rend(),
+                    [](const std::optional<OverlappedKeyValueCacheUpdateRecord>& record) {
+                      return record.has_value() && record->outstanding_update.valid();
+                    });
+
+    if (outstanding_key_value_cache_partial_token_generation_update) {
+      // If there is any outstanding partial KV cache update, don't update the KV cache here.
+    } else {
+      key_value_cache_->Update(beam_indices, total_length);
+    }
+  }
+
   logits_.Update(next_tokens, new_length);
 }
 

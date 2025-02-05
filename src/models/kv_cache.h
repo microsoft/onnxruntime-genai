@@ -7,10 +7,25 @@ namespace Generators {
 
 struct KeyValueCache {
   virtual ~KeyValueCache() = default;
+
   virtual void Add() = 0;
+
   virtual void AddEncoder() = 0;
+
   virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) = 0;
+
   virtual void RewindTo(size_t index) = 0;
+
+  // Note: PartialTokenGenerationUpdate() is mainly for supporting DecoderOnlyPipelineState usage where we update
+  // part of the KV cache after running part of the pipeline.
+  // An alternative may be to have a dedicated KV cache per IntermediatePipelineState.
+
+  virtual bool IsPartialTokenGenerationUpdateSupported() const { return false; }
+
+  virtual void PartialTokenGenerationUpdate(DeviceSpan<int32_t> beam_indices, int total_length,
+                                            std::span<const size_t> layer_indices_to_update) {
+    throw std::runtime_error("PartialTokenGenerationUpdate is not supported.");
+  }
 };
 
 struct CombinedKeyValueCache : KeyValueCache {

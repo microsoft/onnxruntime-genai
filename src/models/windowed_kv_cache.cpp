@@ -147,17 +147,12 @@ void WindowedKeyValueCache::SlideLayers(std::span<const size_t> layer_indices) {
 }
 
 void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int current_length) {
-  if (window_size_ == 1) {
-    // For token generation, incremental KV cache update will be done with SlideLayers().
-    return;
-  }
-
   if (is_first_update_) {
     num_windows_ = (current_length + window_size_ - 1) / window_size_;
     is_first_update_ = false;
     window_index_++;
     return;
-  } else if (window_index_ < num_windows_) {
+  } else if (window_size_ == 1 || window_index_ < num_windows_) {
     SlideAllLayers();
     window_index_++;
     return;
@@ -261,6 +256,12 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int c
     state_.outputs_[output_index_ + 2 * layer_idx] = key_caches_out_[layer_idx].get();
     state_.outputs_[output_index_ + 2 * layer_idx + 1] = value_caches_out_[layer_idx].get();
   }
+}
+
+void WindowedKeyValueCache::PartialTokenGenerationUpdate(DeviceSpan<int32_t> /* beam_indices */, int /* total_length */,
+                                                         std::span<const size_t> layer_indices_to_update) {
+  assert(window_size_ == 1);
+  SlideLayers(layer_indices_to_update);
 }
 
 }  // namespace Generators
