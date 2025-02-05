@@ -73,11 +73,14 @@ ExtraInputs::ExtraInputs(State& state)
 #pragma warning(disable : 4189)  // local variable is initialized but not referenced
 #pragma warning(disable : 4702)  // unreachable code
 
-void ExtraInputs::Add() {
+void ExtraInputs::Add(const std::vector<std::string>& required_input_names) {
+  std::unordered_set<std::string> required_input_names_set(required_input_names.begin(), required_input_names.end());
   // Add extra user inputs
   for (int i = 0; i < state_.params_->extra_inputs.size(); ++i) {
-    state_.input_names_.push_back(state_.params_->extra_inputs[i].name.c_str());
-    state_.inputs_.push_back(extra_inputs_[i]);
+    if (required_input_names_set.empty() || required_input_names_set.count(state_.params_->extra_inputs[i].name)) {
+      state_.input_names_.push_back(state_.params_->extra_inputs[i].name.c_str());
+      state_.inputs_.push_back(extra_inputs_[i]);
+    }
   }
 
   // Copy the data from the CPU-backed ORT value to the static buffers

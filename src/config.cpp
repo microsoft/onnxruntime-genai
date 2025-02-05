@@ -611,6 +611,9 @@ struct Model_Element : JSON::Element {
     if (name == "prompt_templates") {
       return prompt_templates_;
     }
+    if (name == "speech") {
+      return speech_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -622,6 +625,7 @@ struct Model_Element : JSON::Element {
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   PromptTemplates_Element prompt_templates_{v_.prompt_templates};
+  Speech_Element speech_{v_.speech};
 };
 
 struct Search_Element : JSON::Element {

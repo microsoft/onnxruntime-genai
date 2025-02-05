@@ -6,7 +6,7 @@
 #include "utils.h"
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
-#include "phio_processor.h"
+#include "phi_multimodal_processor.h"
 #include "adapters.h"
 
 #if USE_DML

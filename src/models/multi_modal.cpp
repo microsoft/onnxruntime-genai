@@ -72,7 +72,7 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
     auto vision_session_options = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *vision_session_options, true, true);    
+    CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *vision_session_options, true, true);
     vision_session_ = OrtSession::Create(
         ort_env, (config_->config_path / fs::path(config_->model.vision.filename)).c_str(), vision_session_options.get());
   } else {
@@ -110,7 +110,7 @@ VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorPa
     : State{params, model},
       model_{model},
       num_image_tokens_{num_image_tokens} {
-  extra_inputs_.Add();
+  extra_inputs_.Add(model_.vision_session_->GetInputNames());
   image_features_.Add();
 }
 
@@ -124,7 +124,7 @@ SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorPa
     : State{params, model},
       model_{model},
       num_audio_tokens_{num_audio_tokens} {
-  extra_inputs_.Add();
+  extra_inputs_.Add(model_.speech_session_->GetInputNames());
   audio_features_.Add();
 }
 

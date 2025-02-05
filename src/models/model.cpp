@@ -601,7 +601,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (config->model.type == "decoder-pipeline")
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
-  if (config->model.type == "phio" || config->model.type == "phi4mm")
+  if (config->model.type == "phi4mm")
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
@@ -753,8 +753,8 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
     processor_ = std::make_shared<PhiImageProcessor>(config, session_info);
   } else if (config.model.type == "whisper") {
     processor_ = std::make_shared<WhisperProcessor>(config, session_info);
-  } else if (config.model.type == "phio") {
-    processor_ = std::make_shared<PhiOProcessor>(config, session_info);
+  } else if (config.model.type == "phi4mm") {
+    processor_ = std::make_shared<PhiMultiModalProcessor>(config, session_info);
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. Expected a multimodal model. Actual: " + config.model.type);
   }

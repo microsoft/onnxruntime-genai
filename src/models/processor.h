@@ -45,6 +45,9 @@ struct Payload {
 template <typename T>
 std::unique_ptr<OrtValue> ProcessTensor(OrtxTensor* tensor, Ort::Allocator& allocator);
 
+template <typename SrcT, typename DstT>
+std::unique_ptr<OrtValue> ProcessTensor(OrtxTensor* tensor, Ort::Allocator& allocator);
+
 struct Processor {
   Processor() = default;
   Processor(const Processor&) = delete;

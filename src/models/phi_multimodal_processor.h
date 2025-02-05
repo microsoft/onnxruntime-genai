@@ -6,8 +6,8 @@
 
 namespace Generators {
 
-struct PhiOProcessor : Processor {
-  PhiOProcessor(Config& config, const SessionInfo& session_info);
+struct PhiMultiModalProcessor : Processor {
+  PhiMultiModalProcessor(Config& config, const SessionInfo& session_info);
 
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 
@@ -16,7 +16,9 @@ struct PhiOProcessor : Processor {
   ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor> audio_processor_;
 
   ONNXTensorElementDataType pixel_values_type_;
+  ONNXTensorElementDataType attention_mask_type_;
   ONNXTensorElementDataType audio_features_type_;
+  ONNXTensorElementDataType audio_sizes_type_;
 };
 
 }  // namespace Generators

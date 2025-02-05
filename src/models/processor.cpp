@@ -66,8 +66,47 @@ std::unique_ptr<OrtValue> ProcessTensor<Ort::Float16_t>(OrtxTensor* tensor, Ort:
   return tensor_value;
 }
 
+template <>
+std::unique_ptr<OrtValue> ProcessTensor<int64_t, float>(OrtxTensor* tensor, Ort::Allocator& allocator) {
+  const int64_t* tensor_data{};
+  const int64_t* tensor_shape{};
+  size_t tensor_num_dims;
+  CheckResult(OrtxGetTensorData(tensor, reinterpret_cast<const void**>(&tensor_data),
+                                &tensor_shape, &tensor_num_dims));
+  const int64_t tensor_num_elements = std::accumulate(tensor_shape,
+                                                      tensor_shape + tensor_num_dims,
+                                                      1LL, std::multiplies<int64_t>());
+  auto tensor_value = OrtValue::CreateTensor<float>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
+  std::transform(tensor_data, tensor_data + tensor_num_elements,
+                 tensor_value->GetTensorMutableData<float>(),
+                 [](int64_t value) { return static_cast<float>(value); });
+  return tensor_value;
+}
+
+template <>
+std::unique_ptr<OrtValue> ProcessTensor<int64_t, Ort::Float16_t>(OrtxTensor* tensor, Ort::Allocator& allocator) {
+  const int64_t* tensor_data{};
+  const int64_t* tensor_shape{};
+  size_t tensor_num_dims;
+  CheckResult(OrtxGetTensorData(tensor, reinterpret_cast<const void**>(&tensor_data),
+                                &tensor_shape, &tensor_num_dims));
+  const int64_t tensor_num_elements = std::accumulate(tensor_shape,
+                                                      tensor_shape + tensor_num_dims,
+                                                      1LL, std::multiplies<int64_t>());
+  auto tensor_value = OrtValue::CreateTensor<Ort::Float16_t>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
+  auto tensor_value_fp32 = OrtValue::CreateTensor<float>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
+  std::transform(tensor_data, tensor_data + tensor_num_elements,
+                 tensor_value_fp32->GetTensorMutableData<float>(),
+                 [](int64_t value) { return static_cast<float>(value); });
+  ConvertFp32ToFp16(allocator, *tensor_value_fp32, tensor_value, DeviceType::CPU, nullptr);
+  return tensor_value;
+}
+
 template std::unique_ptr<OrtValue> ProcessTensor<float>(OrtxTensor* tensor, Ort::Allocator& allocator);
 template std::unique_ptr<OrtValue> ProcessTensor<Ort::Float16_t>(OrtxTensor* tensor, Ort::Allocator& allocator);
 template std::unique_ptr<OrtValue> ProcessTensor<int64_t>(OrtxTensor* tensor, Ort::Allocator& allocator);
+
+template std::unique_ptr<OrtValue> ProcessTensor<int64_t, float>(OrtxTensor* tensor, Ort::Allocator& allocator);
+template std::unique_ptr<OrtValue> ProcessTensor<int64_t, Ort::Float16_t>(OrtxTensor* tensor, Ort::Allocator& allocator);
 
 }  // namespace Generators

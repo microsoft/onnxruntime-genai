@@ -9,6 +9,8 @@ from pathlib import Path
 
 import onnxruntime_genai as og
 
+og.set_log_options(enabled=True, model_input_values=True)
+
 
 def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
     curr_path = Path(current_dir).absolute()
@@ -26,7 +28,7 @@ def _complete(text, state):
     return (glob.glob(text + "*") + [None])[state]
 
 
-def get_paths(modality, user_provided_paths, default_paths):
+def get_paths(modality, user_provided_paths, default_paths, interactive):
     paths = None
 
     if interactive:
@@ -71,12 +73,15 @@ def run(args: argparse.Namespace):
             modality="image",
             user_provided_paths=args.image_paths,
             default_paths=[str(_find_dir_contains_sub_dir(Path(__file__).parent, "test") / "test_models" / "images" / "australia.jpg")],
+            interactive=interactive
         )
         audio_paths = get_paths(
             modality="audio",
             user_provided_paths=args.audio_paths,
             default_paths=[str(_find_dir_contains_sub_dir(Path(__file__).parent, "test") / "test_models" / "audios" / "1272-141231-0002.mp3")],
+            interactive=interactive
         )
+        # audio_paths = []
 
         images = None
         audios = None
@@ -116,6 +121,30 @@ def run(args: argparse.Namespace):
         
         print("Processing inputs...")
         inputs = processor(prompt, images=images, audios=audios)
+
+        print("Input IDs:")
+        print(inputs["input_ids"].shape)
+        import numpy as np
+        np.save("input_ids_oga.npy", inputs["input_ids"])
+        print("Audio projection mode:")
+        print(inputs["audio_projection_mode"])
+        np.save("audio_projection_mode_oga.npy", inputs["audio_projection_mode"])
+        print("Image attention mask:")
+        print(inputs["attention_mask"])
+        np.save("attention_mask_oga.npy", inputs["attention_mask"])
+        print("Pixel values:")
+        print(inputs["pixel_values"])
+        print(inputs["pixel_values"].shape)
+        np.save("pixel_values_oga.npy", inputs["pixel_values"])
+        print("Audio values:")
+        print(inputs["audio_embeds"])
+        print(inputs["audio_sizes"])
+        print(inputs["image_sizes"])
+        print(inputs["image_sizes"].shape)
+        np.save("image_sizes_oga.npy", inputs["image_sizes"])
+        # exit()
+
+        print("Processor complete.")
 
         print("Generating response...")
         params = og.GeneratorParams(model)

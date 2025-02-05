@@ -135,6 +135,38 @@ std::unique_ptr<OrtValue> ToOrtValue(pybind11::array& v) {
   return OrtValue::CreateTensor(*p_memory_info, v.mutable_data(), v.nbytes(), shape, type);
 }
 
+pybind11::array ToNumpy(OrtValue* ort_value) {
+  if (ort_value == nullptr || ort_value->IsTensor() == false)
+    throw std::runtime_error("Cannot convert non-tensor to numpy array.");
+  if (ort_value->GetTensorMemoryInfo().GetDeviceType() != OrtMemoryInfoDeviceType_CPU)
+    throw std::runtime_error("Cannot query non-CPU memory.");
+  auto type_info = ort_value->GetTensorTypeAndShapeInfo();
+  auto shape = type_info->GetShape();
+  auto type = type_info->GetElementType();
+  auto element_size = Generators::SizeOf(type);
+  auto data = ort_value->GetTensorMutableRawData();
+
+  std::vector<int64_t> strides(shape.size());
+  {
+    auto size = Generators::SizeOf(type);
+    for (size_t i = strides.size(); i-- > 0;) {
+      strides[i] = size;
+      size *= shape[i];
+    }
+  }
+
+  pybind11::buffer_info bufinfo{
+      data,                                          // Pointer to memory buffer
+      static_cast<pybind11::ssize_t>(element_size),  // Size of underlying scalar type
+      ToFormatDescriptor(type),                      // Python struct-style format descriptor
+      static_cast<pybind11::ssize_t>(shape.size()),  // Number of dimensions
+      shape,                                         // Buffer dimensions
+      strides                                        // Strides (in bytes) for each index
+  };
+
+  return pybind11::array{bufinfo};
+}
+
 pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
   if (!v)
     return {};
@@ -518,31 +550,34 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return std::shared_ptr<Audios>(LoadAudios(audio_paths_vector));
       });
 
-  pybind11::class_<PyNamedTensors, std::shared_ptr<PyNamedTensors>>(m, "NamedTensors");
+  pybind11::class_<PyNamedTensors, std::shared_ptr<PyNamedTensors>>(m, "NamedTensors")
+      .def("__getitem__", [](PyNamedTensors& named_tensors, const std::string& name) {
+        auto tensor = named_tensors.named_tensors_->find(name);
+        if (tensor == named_tensors.named_tensors_->end())
+          throw std::runtime_error("Tensor with name: " + name + " not found.");
+
+        return ToNumpy(tensor->second->ort_tensor_.get());
+      });
 
   pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
       .def(
           "__call__", [](MultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) -> std::shared_ptr<PyNamedTensors> {
-            if (kwargs.contains("images")) {
-              if (!processor.processor_) {
-                throw std::runtime_error("Image processor is not available for this model.");
-              }
-              const Images* images = kwargs["images"].cast<const Images*>();
-              if (!prompt.has_value()) {
-                throw std::runtime_error("Prompt is required for processing the image.");
-              }
-              return std::make_shared<PyNamedTensors>(
-                  processor.Process(*prompt, images, nullptr));
-            } else if (kwargs.contains("audios")) {
-              if (!processor.processor_) {
-                throw std::runtime_error("Audio processor is not available for this model.");
-              }
-              const Audios* audios = kwargs["audios"].cast<const Audios*>();
-              return std::make_shared<PyNamedTensors>(
-                  processor.Process(std::string(), nullptr, audios));
-            } else {
-              throw std::runtime_error("Nothing to process.");
+            Images* images = nullptr;
+            Audios* audios = nullptr;
+            if (!processor.processor_) {
+              throw pybind11::key_error("Processor is not available for this model.");
             }
+
+            if (kwargs.contains("images")) {
+              images = kwargs["images"].cast<Images*>();
+            }
+
+            if (kwargs.contains("audios")) {
+              audios = kwargs["audios"].cast<Audios*>();
+            }
+
+            return std::make_shared<PyNamedTensors>(
+                processor.Process(prompt.value_or(""), images, audios));
           },
           pybind11::arg("prompt") = pybind11::none())
       .def("create_stream", [](MultiModalProcessor& processor) { return processor.tokenizer_->CreateStream(); })
