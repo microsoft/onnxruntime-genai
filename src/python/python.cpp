@@ -135,39 +135,7 @@ std::unique_ptr<OrtValue> ToOrtValue(pybind11::array& v) {
   return OrtValue::CreateTensor(*p_memory_info, v.mutable_data(), v.nbytes(), shape, type);
 }
 
-pybind11::array ToNumpy(OrtValue* ort_value) {
-  if (ort_value == nullptr || ort_value->IsTensor() == false)
-    throw std::runtime_error("Cannot convert non-tensor to numpy array.");
-  if (ort_value->GetTensorMemoryInfo().GetDeviceType() != OrtMemoryInfoDeviceType_CPU)
-    throw std::runtime_error("Cannot query non-CPU memory.");
-  auto type_info = ort_value->GetTensorTypeAndShapeInfo();
-  auto shape = type_info->GetShape();
-  auto type = type_info->GetElementType();
-  auto element_size = Generators::SizeOf(type);
-  auto data = ort_value->GetTensorMutableRawData();
-
-  std::vector<int64_t> strides(shape.size());
-  {
-    auto size = Generators::SizeOf(type);
-    for (size_t i = strides.size(); i-- > 0;) {
-      strides[i] = size;
-      size *= shape[i];
-    }
-  }
-
-  pybind11::buffer_info bufinfo{
-      data,                                          // Pointer to memory buffer
-      static_cast<pybind11::ssize_t>(element_size),  // Size of underlying scalar type
-      ToFormatDescriptor(type),                      // Python struct-style format descriptor
-      static_cast<pybind11::ssize_t>(shape.size()),  // Number of dimensions
-      shape,                                         // Buffer dimensions
-      strides                                        // Strides (in bytes) for each index
-  };
-
-  return pybind11::array{bufinfo};
-}
-
-pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
+pybind11::array ToNumpy(OrtValue* v, const Generators::Model* model = nullptr) {
   if (!v)
     return {};
 
@@ -179,34 +147,36 @@ pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
 
   std::unique_ptr<uint8_t[]> cpu_copy;
 
+  if (model != nullptr) {
 #if USE_DML
-  // TODO: DML version of this
-  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model.device_type_ == Generators::DeviceType::DML) {
-    auto data_size = type_info->GetElementCount() * element_size;
-    cpu_copy = std::make_unique<uint8_t[]>(data_size);
+    // TODO: DML version of this
+    if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model->device_type_ == Generators::DeviceType::DML) {
+      auto data_size = type_info->GetElementCount() * element_size;
+      cpu_copy = std::make_unique<uint8_t[]>(data_size);
 
-    ComPtr<ID3D12Resource> gpu_resource;
-    Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
-        model.allocator_device_,
-        data,
-        &gpu_resource));
+      ComPtr<ID3D12Resource> gpu_resource;
+      Ort::ThrowOnError(model->GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
+          model->allocator_device_,
+          data,
+          &gpu_resource));
 
-    model.GetDmlReadbackHeap()->ReadbackFromGpu(
-        std::span(reinterpret_cast<uint8_t*>(cpu_copy.get()), data_size),
-        gpu_resource.Get(),
-        0,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    data = cpu_copy.get();
-  }
+      model->GetDmlReadbackHeap()->ReadbackFromGpu(
+          std::span(reinterpret_cast<uint8_t*>(cpu_copy.get()), data_size),
+          gpu_resource.Get(),
+          0,
+          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+      data = cpu_copy.get();
+    }
 #endif
 #if USE_CUDA
-  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model.device_type_ == Generators::DeviceType::CUDA) {
-    auto data_size = type_info->GetElementCount() * element_size;
-    cpu_copy = std::make_unique<uint8_t[]>(data_size);
-    Generators::CudaCheck() == cudaMemcpy(cpu_copy.get(), data, data_size, cudaMemcpyDeviceToHost);
-    data = cpu_copy.get();
-  }
+    if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model->device_type_ == Generators::DeviceType::CUDA) {
+      auto data_size = type_info->GetElementCount() * element_size;
+      cpu_copy = std::make_unique<uint8_t[]>(data_size);
+      Generators::CudaCheck() == cudaMemcpy(cpu_copy.get(), data, data_size, cudaMemcpyDeviceToHost);
+      data = cpu_copy.get();
+    }
 #endif
+  }
 
   std::vector<int64_t> strides(shape.size());
   {
@@ -332,7 +302,7 @@ struct PyGenerator {
   }
 
   pybind11::array GetOutput(const std::string& name) {
-    return ToNumpy(generator_->state_->GetOutput(name.c_str()), *(generator_->model_));
+    return ToNumpy(generator_->state_->GetOutput(name.c_str()), generator_->model_.get());
   }
 
   void AppendTokens(pybind11::array_t<int32_t> tokens) {
@@ -557,6 +527,32 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           throw std::runtime_error("Tensor with name: " + name + " not found.");
 
         return ToNumpy(tensor->second->ort_tensor_.get());
+      })
+      .def("__setitem__", [](PyNamedTensors& named_tensors, const std::string& name, pybind11::array& value) {
+        auto tensor = std::make_shared<Tensor>(ToOrtValue(value));
+        (*named_tensors.named_tensors_)[name] = tensor;
+      })
+      .def("__contains__", [](PyNamedTensors& named_tensors, const std::string& name) {
+        return named_tensors.named_tensors_->find(name) != named_tensors.named_tensors_->end();
+      })
+      .def("keys", [](PyNamedTensors& named_tensors) {
+        std::vector<std::string> keys;
+        for (const auto& tensor : *named_tensors.named_tensors_) {
+          keys.push_back(tensor.first);
+        }
+        return keys;
+      })
+      .def("__iter__", [](PyNamedTensors& named_tensors) {
+        return pybind11::make_key_iterator(named_tensors.named_tensors_->begin(), named_tensors.named_tensors_->end());
+      })
+      .def("__len__", [](PyNamedTensors& named_tensors) { return named_tensors.named_tensors_->size(); })
+      .def("__repr__", [](PyNamedTensors& named_tensors) {
+        std::string result = "{";
+        for (const auto& tensor : *named_tensors.named_tensors_) {
+          result += tensor.first + ": Tensor(" + ToFormatDescriptor(tensor.second->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementType()) + "), ";
+        }
+        result += "}";
+        return result;
       });
 
   pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
