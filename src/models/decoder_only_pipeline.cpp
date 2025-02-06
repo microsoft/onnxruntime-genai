@@ -12,7 +12,7 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
     sessions_.emplace_back(OrtSession::Create(ort_env, (config_->config_path / fs::path(model.filename)).c_str(),
                                               GetSessionOptions(model.model_id)));
 
-    if (!allocator_device_ && model.session_options.has_value()) {
+    if (!p_device_inputs_ && model.session_options.has_value()) {
       const auto& provider_options = (*model.session_options).provider_options;
       if (std::any_of(provider_options.begin(), provider_options.end(),
                       [](const auto& elem) { return !elem.name.empty(); })) {
@@ -21,7 +21,7 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
     }
   }
 
-  if (!allocator_device_) {
+  if (!p_device_inputs_) {
     // If the device allocator has not been created, it implies all
     // sessions are configured to run on CPU.
     // Pick any session to create the device allocator.
@@ -58,9 +58,9 @@ bool IntermediatePipelineState::HasOutput(std::string_view name) const {
 }
 
 bool IntermediatePipelineState::SupportsPrimaryDevice() const {
-  if (model_.device_type_ == DeviceType::CPU || model_.device_type_ == DeviceType::QNN) {
+  if (model_.p_device_->GetType() == DeviceType::CPU || model_.p_device_->GetType() == DeviceType::QNN) {
     return true;
-  } else if (model_.device_type_ == DeviceType::CUDA) {
+  } else if (model_.p_device_->GetType() == DeviceType::CUDA) {
     if (!model_.config_->model.decoder.pipeline[id_].session_options.has_value()) {
       // No session options, so this session uses the default session options.
       // Default session options supports the cuda device type.
@@ -134,7 +134,7 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
         if (!pipeline_state->SupportsPrimaryDevice()) {
           std::ostringstream oss;
           oss << "Managed input " << input_name << " resides on the primary device type ("
-              << to_string(model_.device_type_) << "). "
+              << to_string(model_.p_device_->GetType()) << "). "
               << "But the pipeline model "
               << model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id
               << " is expecting it to reside elsewhere.";
@@ -159,7 +159,7 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
         if (!pipeline_state->SupportsPrimaryDevice()) {
           std::ostringstream oss;
           oss << "Managed output " << output_name << " resides on the primary device type ("
-              << to_string(model_.device_type_) << "). "
+              << to_string(model_.p_device_->GetType()) << "). "
               << "But the pipeline model "
               << model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id
               << " is expecting it to reside elsewhere.";
@@ -178,7 +178,7 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
         if (!pipeline_state->SupportsPrimaryDevice()) {
           std::ostringstream oss;
           oss << "Managed input " << input_name << " resides on the primary device type ("
-              << to_string(model_.device_type_) << "). "
+              << to_string(model_.p_device_->GetType()) << "). "
               << "But the pipeline model "
               << model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id
               << " is expecting it to reside elsewhere.";

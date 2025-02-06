@@ -90,11 +90,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
+            Console.WriteLine("**** Running OnnxRuntimeGenAITests constructor");
             // Initialize GenAI and register a handler to dispose it on process exit
             ogaHandle = new OgaHandle();
             AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
-
             this.output = o;
+            Console.WriteLine("**** OnnxRuntimeGenAI constructor completed");
         }
 
         private class IgnoreOnModelAbsenceFact : FactAttribute
@@ -578,6 +579,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnAdaptersAbsentFact(DisplayName = "TestAdapters")]
         public void TestAdapters()
         {
+            Console.WriteLine("**** Running TestAdapters");
+
             string modelPath = _adaptersPath;
             string adapterPath = Path.Combine(modelPath, "adapters.onnx_adapter");
 

@@ -42,11 +42,11 @@ CombinedKeyValueCache::CombinedKeyValueCache(State& state)
   // Derive the KV data type from the KV input 0
   type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
 
-  empty_past_ = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+  empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
   shape_[3] = 0;
 
   for (int i = 0; i < layer_count_; ++i) {
-    presents_.push_back(OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_));
+    presents_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
   }
 }
 
@@ -78,7 +78,7 @@ void CombinedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_l
 
   shape_[3] = total_length;
   for (int i = 0; i < layer_count_; i++) {
-    presents_[i] = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+    presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
     state_.outputs_[output_index_ + i] = presents_[i].get();
   }
 
@@ -115,22 +115,14 @@ void CombinedKeyValueCache::RewindPastTensorsTo(size_t index) {
 
   for (int i = 0; i < layer_count_; i++) {
     OrtValue& present = *presents_[i];
-    std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+    std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
+    auto present_span = WrapTensor<T>(Device(), present);
+    auto past_span = WrapTensor<T>(Device(), *past);
+
     for (int j = 0; j < 2 * batch_x_num_heads; j++) {
-      auto present_data = present.GetTensorData<T>() + j * old_length_x_head_size;
-      auto past_data = past->GetTensorMutableData<T>() + j * new_length_x_head_size;
-#if USE_CUDA
-      if (model_.device_type_ == DeviceType::CUDA) {
-        cudaMemcpyAsync(past_data, present_data, new_length_x_head_size * sizeof(T), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
-      } else
-#elif USE_DML
-      if (model_.device_type_ == DeviceType::DML) {
-        // TODO: Implement DML version
-      } else
-#endif
-      {
-        copy(std::span<const T>(present_data, new_length_x_head_size), std::span<T>(past_data, new_length_x_head_size));
-      }
+      auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
+      auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
+      past_data.CopyFrom(present_data);
     }
     pasts_[i] = std::move(past);
     state_.inputs_[input_index_ + i] = pasts_[i].get();
@@ -143,38 +135,22 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_devic
   std::span<const int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
   auto block_size_per_beam = shape_[2] * shape_[3] * shape_[4];
   auto past_key_size = shape_[1] * block_size_per_beam;
-  auto element_count = shape_[0] * past_key_size;
 
-  const OrtValue& present = *presents_[index];
-  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<ScoreType>(*model_.allocator_kvcache_, shape_);
-  auto past_span = std::span<ScoreType>(past->GetTensorMutableData<ScoreType>(), element_count);
-  auto present_span = std::span<const ScoreType>(present.GetTensorData<ScoreType>(), element_count);
+  OrtValue& present = *presents_[index];
+  std::unique_ptr<OrtValue> past = OrtValue::CreateTensor<ScoreType>(Allocator(), shape_);
 
-#if USE_CUDA
-  if (model_.device_type_ == DeviceType::CUDA) {
-    for (size_t j = 0; j < beam_indices.size(); j++) {
-      int32_t beam_index = beam_indices[j];
-      auto present_key = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
-      auto present_value = present_span.subspan(past_key_size + beam_index * block_size_per_beam, block_size_per_beam);
+  auto past_span = WrapTensor<ScoreType>(Device(), *past);
+  auto present_span = WrapTensor<ScoreType>(Device(), present);
 
-      auto past_key = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
-      auto past_value = past_span.subspan(past_key_size + j * block_size_per_beam, block_size_per_beam);
-      cudaMemcpyAsync(past_key.data(), present_key.data(), present_key.size_bytes(), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
-      cudaMemcpyAsync(past_value.data(), present_value.data(), present_value.size_bytes(), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
-    }
-  } else
-#endif
-  {
-    for (size_t j = 0; j < beam_indices.size(); j++) {
-      int32_t const beam_index = beam_indices[j];
-      auto present_key = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
-      auto present_value = present_span.subspan(past_key_size + beam_index * block_size_per_beam, block_size_per_beam);
+  for (size_t j = 0; j < beam_indices.size(); j++) {
+    int32_t beam_index = beam_indices[j];
+    auto present_key = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
+    auto present_value = present_span.subspan(past_key_size + beam_index * block_size_per_beam, block_size_per_beam);
 
-      auto past_key = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
-      auto past_value = past_span.subspan(past_key_size + j * block_size_per_beam, block_size_per_beam);
-      copy(present_key, past_key);
-      copy(present_value, past_value);
-    }
+    auto past_key = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
+    auto past_value = past_span.subspan(past_key_size + j * block_size_per_beam, block_size_per_beam);
+    past_key.CopyFrom(present_key);
+    past_value.CopyFrom(present_value);
   }
 
   pasts_[index] = std::move(past);
@@ -210,7 +186,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   // Derive the KV data type from the KV input 0
   type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
 
-  empty_past_ = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+  empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
   // Set the size after empty_past_ has been created with 0 for this field
   if (past_present_share_buffer_) {
@@ -224,23 +200,13 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     }
   }
 
-  auto kv_cache_size_bytes = SizeOf(type_) * shape_[0] * shape_[1] * shape_[2] * shape_[3];
   try {
     for (int i = 0; i < layer_count_ * 2; ++i) {
       presents_.push_back(
-          sb_kv_caches_.empty() ? OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_)
+          sb_kv_caches_.empty() ? OrtValue::CreateTensor(Allocator(), shape_, type_)
                                 : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
-#if USE_CUDA
-      if (model_.device_type_ == DeviceType::CUDA) {
-        cudaMemsetAsync(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes, model_.cuda_stream_);
-      } else
-#endif
-      {
-        if (model_.device_type_ == DeviceType::CPU) {
-          // FIXME: this is a device tensor and we can only use memset for cpu. Revisit for other EPs.
-          memset(presents_.back()->GetTensorMutableRawData(), 0, kv_cache_size_bytes);
-        }
-      }
+      // Zero the memory so we don't leak any data from the previous run
+      ByteWrapTensor(Device(), *presents_.back()).Zero();
     }
   } catch (const Ort::Exception&) {
     std::ostringstream oss;
@@ -299,7 +265,7 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
 
   shape_[2] = total_length;
   for (int i = 0; i < layer_count_ * 2; i++) {
-    presents_[i] = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+    presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
     state_.outputs_[output_index_ + i] = presents_[i].get();
   }
 
@@ -338,22 +304,15 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
 
   for (int i = 0; i < layer_count_ * 2; i++) {
     OrtValue& present = *presents_[i];
-    std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(*model_.allocator_kvcache_, shape_, type_);
+    std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
+
+    auto past_span = WrapTensor<T>(Device(), *past);
+    auto present_span = WrapTensor<T>(Device(), present);
+
     for (int j = 0; j < batch_x_num_heads; j++) {
-      auto present_data = present.GetTensorData<T>() + j * old_length_x_head_size;
-      auto past_data = past->GetTensorMutableData<T>() + j * new_length_x_head_size;
-#if USE_CUDA
-      if (model_.device_type_ == DeviceType::CUDA) {
-        cudaMemcpyAsync(past_data, present_data, new_length_x_head_size * sizeof(T), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
-      } else
-#elif USE_DML
-      if (model_.device_type_ == DeviceType::DML) {
-        // TODO: Implement DML copy
-      } else
-#endif
-      {
-        copy(std::span<const T>(present_data, new_length_x_head_size), std::span<T>(past_data, new_length_x_head_size));
-      }
+      auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
+      auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
+      past_data.CopyFrom(present_data);
     }
     pasts_[i] = std::move(past);
     state_.inputs_[input_index_ + i] = pasts_[i].get();
@@ -365,30 +324,18 @@ template <typename ScoreType>
 void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
   std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
   auto block_size_per_beam = shape_[1] * shape_[2] * shape_[3];
-  auto element_count = shape_[0] * block_size_per_beam;
 
-  const OrtValue& present_value = *presents_[index];
-  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(*model_.allocator_kvcache_, shape_);
-  auto past_span = std::span<ScoreType>(past_value->GetTensorMutableData<ScoreType>(), element_count);
-  auto present_span = std::span<const ScoreType>(present_value.GetTensorData<ScoreType>(), element_count);
+  OrtValue& present_value = *presents_[index];
+  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(Allocator(), shape_);
 
-#if USE_CUDA
-  if (model_.device_type_ == DeviceType::CUDA) {
-    for (size_t j = 0; j < beam_indices.size(); j++) {
-      int32_t beam_index = beam_indices[j];
-      auto present = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
-      auto past = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
-      cudaMemcpyAsync(past.data(), present.data(), present.size_bytes(), cudaMemcpyDeviceToDevice, model_.cuda_stream_);
-    }
-  } else
-#endif
-  {
-    for (size_t j = 0; j < beam_indices.size(); j++) {
-      int32_t const beam_index = beam_indices[j];
-      auto present = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
-      auto past = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
-      copy(present, past);
-    }
+  auto past_span = WrapTensor<ScoreType>(Device(), *past_value);
+  auto present_span = WrapTensor<ScoreType>(Device(), present_value);
+
+  for (size_t j = 0; j < beam_indices.size(); j++) {
+    int32_t beam_index = beam_indices[j];
+    auto present = present_span.subspan(beam_index * block_size_per_beam, block_size_per_beam);
+    auto past = past_span.subspan(j * block_size_per_beam, block_size_per_beam);
+    past.CopyFrom(present);
   }
 
   pasts_[index] = std::move(past_value);
@@ -404,6 +351,7 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int i
 
 CrossCache::CrossCache(State& state, int sequence_length) {
   const Model& model = state.model_;
+  auto& allocator = model_.p_device_kvcache_->GetAllocator();
   layer_count_ = model.config_->model.decoder.num_hidden_layers;
   shape_ = std::array<int64_t, 4>{state.params_->BatchBeamSize(), model.config_->model.decoder.num_attention_heads, sequence_length, model.config_->model.decoder.head_size};
   values_.reserve(layer_count_ * 2);
@@ -420,8 +368,8 @@ CrossCache::CrossCache(State& state, int sequence_length) {
   type_ = model.session_info_->GetOutputDataType(output_name_strings_[0]);
 
   for (int i = 0; i < layer_count_; ++i) {
-    values_.push_back(OrtValue::CreateTensor(*model.allocator_device_, shape_, type_));
-    values_.push_back(OrtValue::CreateTensor(*model.allocator_device_, shape_, type_));
+    values_.push_back(OrtValue::CreateTensor(allocator, shape_, type_));
+    values_.push_back(OrtValue::CreateTensor(allocator, shape_, type_));
   }
 }
 
@@ -471,21 +419,21 @@ WindowedKeyValueCache::WindowedKeyValueCache(State& state)
 
   for (int i = 0; i < layer_count_; ++i) {
     key_caches_in_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, key_cache_shape_in_, type_));
+        OrtValue::CreateTensor(Allocator(), key_cache_shape_in_, type_));
     std::fill_n(key_caches_in_[i]->GetTensorMutableData<uint8_t>(),
                 ElementCountFromShape(key_cache_shape_in_),
                 static_cast<uint8_t>(model_.config_->model.decoder.sliding_window->pad_value));
 
     value_caches_in_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, value_cache_shape_in_, type_));
+        OrtValue::CreateTensor(Allocator(), value_cache_shape_in_, type_));
     std::fill_n(value_caches_in_[i]->GetTensorMutableData<uint8_t>(),
                 ElementCountFromShape(value_cache_shape_in_),
                 static_cast<uint8_t>(model_.config_->model.decoder.sliding_window->pad_value));
 
     key_caches_out_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, key_cache_shape_out_, type_));
+        OrtValue::CreateTensor(Allocator(), key_cache_shape_out_, type_));
     value_caches_out_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, value_cache_shape_out_, type_));
+        OrtValue::CreateTensor(Allocator(), value_cache_shape_out_, type_));
   }
 }
 
@@ -597,7 +545,7 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current
 
   ThreadPool thread_pool{static_cast<size_t>(layer_count_)};
   thread_pool.Compute([&](size_t layer_idx) {
-    std::unique_ptr<OrtValue> key_cache = OrtValue::CreateTensor(*model_.allocator_device_, updated_key_cache_shape_in, type_);
+    std::unique_ptr<OrtValue> key_cache = OrtValue::CreateTensor(Allocator(), updated_key_cache_shape_in, type_);
 
     uint8_t* key_cache_data = key_cache->GetTensorMutableData<uint8_t>();
     uint8_t* key_cache_in_data = key_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
@@ -623,9 +571,9 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current
     }
 
     key_caches_in_[layer_idx] = std::move(key_cache);
-    key_caches_out_[layer_idx] = OrtValue::CreateTensor(*model_.allocator_device_, updated_key_cache_shape_out, type_);
+    key_caches_out_[layer_idx] = OrtValue::CreateTensor(Allocator(), updated_key_cache_shape_out, type_);
 
-    std::unique_ptr<OrtValue> value_cache = OrtValue::CreateTensor(*model_.allocator_device_, updated_value_cache_shape_in, type_);
+    std::unique_ptr<OrtValue> value_cache = OrtValue::CreateTensor(Allocator(), updated_value_cache_shape_in, type_);
 
     uint8_t* value_cache_data = value_cache->GetTensorMutableData<uint8_t>();
     uint8_t* value_cache_in_data = value_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
@@ -651,7 +599,7 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current
     }
 
     value_caches_in_[layer_idx] = std::move(value_cache);
-    value_caches_out_[layer_idx] = OrtValue::CreateTensor(*model_.allocator_device_, updated_value_cache_shape_out, type_);
+    value_caches_out_[layer_idx] = OrtValue::CreateTensor(Allocator(), updated_value_cache_shape_out, type_);
   });
 
   window_size_ = 1;

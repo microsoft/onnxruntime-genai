@@ -1,8 +1,14 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "../generators.h"
+#include "utils.h"
 
 namespace Generators {
+
+DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value) {
+  auto info = value.GetTensorTypeAndShapeInfo();
+  return device.WrapMemory(std::span<uint8_t>{value.GetTensorMutableData<uint8_t>(), info->GetElementCount() * SizeOf(info->GetElementType())});
+}
 
 size_t SizeOf(ONNXTensorElementDataType type) {
   switch (type) {

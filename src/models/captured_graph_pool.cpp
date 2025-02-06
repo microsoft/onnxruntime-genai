@@ -19,7 +19,7 @@ void CapturedGraphInfoRecycler::operator()(CapturedGraphInfo* captured_graph_inf
 }
 
 CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model, const GeneratorParams& params) const {
-  if (!params.use_cuda_graph || (model.device_type_ != DeviceType::CUDA && model.device_type_ != DeviceType::DML)) {
+  if (!params.use_cuda_graph || (model.p_device_->GetType() != DeviceType::CUDA)) {
     return nullptr;
   }
 
@@ -48,12 +48,6 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
     size_t max_beam_batch_size = static_cast<size_t>(params.search.num_beams) * params.max_batch_size;
     new_captured_graph->sb_input_ids_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
 
-#if USE_DML
-    if (model.device_type_ == DeviceType::DML) {
-      new_captured_graph->sb_input_ids_int32_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
-    }
-#endif
-
     // Create the static buffers for the cache
     int layer_count = config_->model.decoder.num_hidden_layers;
     new_captured_graph->sb_kv_caches_.reserve(layer_count * 2);
@@ -70,13 +64,6 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
     // Create the static buffer for the attention mask, if needed
     if (session_info_->HasInput(config_->model.decoder.inputs.attention_mask)) {
       new_captured_graph->sb_attention_mask_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
-
-#if USE_DML
-      // DML currently needs an additional static buffer for the mask
-      if (model.device_type_ == DeviceType::DML) {
-        new_captured_graph->sb_attention_mask_next_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
-      }
-#endif
     }
 
     auto output_type = session_info_->GetOutputDataType(config_->model.decoder.outputs.logits);

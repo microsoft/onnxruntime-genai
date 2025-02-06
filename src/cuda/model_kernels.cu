@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
@@ -135,36 +136,6 @@ void LaunchInt32ToInt64(const int32_t* src, int64_t* dst, int count, cudaStream_
   int block_size = 256;
   int num_blocks = (count + block_size - 1) / block_size;
   ConvertInt32ToInt64<<<num_blocks, block_size, 0, stream>>>(src, dst, count);
-}
-
-__global__ void ExpandAndConvertInt32ToInt64(const int32_t* src, int64_t* dst, int num_beams, int batch_size, int sequence_length) {
-  int idx = threadIdx.x + blockIdx.x * blockDim.x;
-  if (idx < num_beams * batch_size * sequence_length) {
-    int batch_id = idx / (num_beams * sequence_length);
-    int seq_id = idx % sequence_length;
-    dst[idx] = (int64_t)src[batch_id * sequence_length + seq_id];
-  }
-}
-
-void LaunchExpandAndInt32ToInt64(const int32_t* src, int64_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) {
-  int block_size = 256;
-  int num_blocks = (num_beams * batch_size * sequence_length + block_size - 1) / block_size;
-  ExpandAndConvertInt32ToInt64<<<num_blocks, block_size, 0, stream>>>(src, dst, num_beams, batch_size, sequence_length);
-}
-
-__global__ void Expand(const int32_t* src, int32_t* dst, int num_beams, int batch_size, int sequence_length) {
-  int idx = threadIdx.x + blockIdx.x * blockDim.x;
-  if (idx < num_beams * batch_size * sequence_length) {
-    int batch_id = idx / (num_beams * sequence_length);
-    int seq_id = idx % sequence_length;
-    dst[idx] = src[batch_id * sequence_length + seq_id];
-  }
-}
-
-void LaunchExpand(const int32_t* src, int32_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) {
-  int block_size = 256;
-  int num_blocks = (num_beams * batch_size * sequence_length + block_size - 1) / block_size;
-  Expand<<<num_blocks, block_size, 0, stream>>>(src, dst, num_beams, batch_size, sequence_length);
 }
 
 namespace {

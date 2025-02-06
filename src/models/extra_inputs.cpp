@@ -1,7 +1,6 @@
 #include "../generators.h"
 #include "model.h"
 #include "extra_inputs.h"
-#include "kernels.h"
 
 namespace Generators {
 
@@ -68,11 +67,6 @@ ExtraInputs::ExtraInputs(State& state)
   }
 }
 
-#pragma warning(push)
-#pragma warning(disable : 4065)  // switch statement contains 'default' but no 'case' labels
-#pragma warning(disable : 4189)  // local variable is initialized but not referenced
-#pragma warning(disable : 4702)  // unreachable code
-
 void ExtraInputs::Add() {
   // Add extra user inputs
   for (int i = 0; i < state_.params_->extra_inputs.size(); ++i) {
@@ -82,46 +76,13 @@ void ExtraInputs::Add() {
 
   // Copy the data from the CPU-backed ORT value to the static buffers
   for (int i = 0; i < sb_extra_inputs_.size(); ++i) {
-    auto type_and_shape_info = extra_inputs_[i]->GetTensorTypeAndShapeInfo();
-    auto shape = type_and_shape_info->GetShape();
-    auto element_count = std::accumulate(shape.begin(), shape.end(), 1LL, std::multiplies<int64_t>());
-    auto copy_size_in_bytes = element_count * SizeOf(type_and_shape_info->GetElementType());
-
-    switch (model_.device_type_) {
-#if USE_DML
-      case DeviceType::DML: {
-        ComPtr<ID3D12Resource> target_resource;
-        Ort::ThrowOnError(model_.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(model_.allocator_device_, extra_inputs_[i]->GetTensorMutableRawData(), &target_resource));
-
-        auto source = std::span(state_.params_->extra_inputs[i].tensor->ort_tensor_->GetTensorData<const uint8_t>(), copy_size_in_bytes);
-
-        model_.GetDmlUploadHeap()->BeginUploadToGpu(
-            target_resource.Get(),
-            0,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-            source);
-      } break;
-#endif
-
-#if USE_CUDA
-      case DeviceType::CUDA: {
-        cudaMemcpyAsync(
-            extra_inputs_[i]->GetTensorMutableRawData(),
-            state_.params_->extra_inputs[i].tensor->ort_tensor_->GetTensorMutableRawData(),
-            copy_size_in_bytes,
-            cudaMemcpyHostToDevice,
-            model_.cuda_stream_);
-      } break;
-#endif
-
-      default:
-        throw std::runtime_error("Unsupported device for graph capture");
-    }
+    auto tensor = ByteWrapTensor(*model_.p_device_, *extra_inputs_[i]);
+    auto source = std::span{state_.params_->extra_inputs[i].tensor->ort_tensor_->GetTensorData<uint8_t>(), tensor.size()};
+    copy(source, tensor.CpuSpan());
+    tensor.CopyCpuToDevice();
   }
 
   registrar_.Add();
 }
-
-#pragma warning(pop)
 
 }  // namespace Generators
