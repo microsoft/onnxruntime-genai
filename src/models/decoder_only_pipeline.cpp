@@ -2,7 +2,9 @@
 // Licensed under the MIT License.
 
 #include "../generators.h"
+#include "../logging.h"
 #include "decoder_only_pipeline.h"
+#include "windowed_kv_cache.h"
 
 namespace Generators {
 
@@ -82,8 +84,31 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
   State::Run(*model_.sessions_[id_], params_->BatchBeamSize());
-
   return {};
+}
+
+using NameToLayerIdxMap = std::unordered_map<std::string, size_t>;
+
+static NameToLayerIdxMap GeneratePastKeyNameToLayerIdxMap(const Config& config) {
+  const size_t num_layers = config.model.decoder.num_hidden_layers;
+  const std::string& past_key_name_template = config.model.decoder.inputs.past_key_names;
+  NameToLayerIdxMap m{};
+  for (size_t i = 0; i < num_layers; ++i) {
+    m.emplace(ComposeKeyValueName(past_key_name_template, static_cast<int>(i)), i);
+  }
+  return m;
+}
+
+static std::vector<size_t> DetectLayerIndicesFromPastKeyNameInputs(
+    const NameToLayerIdxMap& past_key_name_to_layer_idx, std::span<const std::string> inputs) {
+  std::vector<size_t> detected_layer_indices{};
+  for (const auto& input_name : inputs) {
+    const auto it = past_key_name_to_layer_idx.find(input_name);
+    if (it != past_key_name_to_layer_idx.end()) {
+      detected_layer_indices.push_back(it->second);
+    }
+  }
+  return detected_layer_indices;
 }
 
 DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineModel& model,
@@ -93,6 +118,8 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
       model_{model},
       input_ids_{CreateInputIDs(*this)},
       key_value_cache_{CreateKeyValueCache(*this)},
+      do_key_value_cache_partial_token_generation_update_{
+          key_value_cache_ && key_value_cache_->IsPartialTokenGenerationUpdateSupported()},
       position_inputs_{CreatePositionInputs(*this, sequence_lengths)} {
   input_ids_->Add();
   position_inputs_->Add();
@@ -102,8 +129,41 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   }
   extra_inputs_.Add();
 
-  for ([[maybe_unused]] const auto& pipeline_model : model_.config_->model.decoder.pipeline) {
-    pipeline_states_.emplace_back(std::make_unique<IntermediatePipelineState>(model_, params, pipeline_states_.size()));
+  const auto past_key_name_to_layer_idx = [&]() -> std::optional<NameToLayerIdxMap> {
+    if (do_key_value_cache_partial_token_generation_update_) {
+      return GeneratePastKeyNameToLayerIdxMap(*model_.config_);
+    }
+    return std::nullopt;
+  }();
+
+  for (const auto& pipeline_model : model_.config_->model.decoder.pipeline) {
+    auto pipeline_model_state = std::make_unique<IntermediatePipelineState>(model_, params, pipeline_states_.size());
+
+    auto overlapped_kv_cache_update_record = [&]() -> std::optional<OverlappedKeyValueCacheUpdateRecord> {
+      if (do_key_value_cache_partial_token_generation_update_) {
+        const bool token_gen_only = !pipeline_model.run_on_prompt && pipeline_model.run_on_token_gen;
+        if (token_gen_only) {
+          auto layer_indices = DetectLayerIndicesFromPastKeyNameInputs(*past_key_name_to_layer_idx,
+                                                                       pipeline_model.inputs);
+          if (!layer_indices.empty()) {
+            // token generation model with KV cache tensors - we should overlap KV cache update
+            auto record = OverlappedKeyValueCacheUpdateRecord{};
+            record.layer_indices = std::move(layer_indices);
+            return record;
+          }
+        }
+      }
+      return std::nullopt;
+    }();
+
+    pipeline_states_.emplace_back(std::move(pipeline_model_state));
+    pipeline_overlapped_kv_cache_update_records_.emplace_back(std::move(overlapped_kv_cache_update_record));
+  }
+
+  if (std::any_of(pipeline_overlapped_kv_cache_update_records_.begin(),
+                  pipeline_overlapped_kv_cache_update_records_.end(),
+                  [](const auto& record) { return record.has_value(); })) {
+    key_value_cache_update_worker_thread_.emplace();
   }
 }
 
@@ -132,13 +192,11 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
     for (const auto& input_name : input_names_) {
       if (pipeline_state->HasInput(input_name)) {
         if (!pipeline_state->SupportsPrimaryDevice()) {
-          std::ostringstream oss;
-          oss << "Managed input " << input_name << " resides on the primary device type ("
-              << to_string(model_.device_type_) << "). "
-              << "But the pipeline model "
-              << model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id
-              << " is expecting it to reside elsewhere.";
-          throw std::runtime_error(oss.str());
+          throw std::runtime_error(
+              MakeString("Managed input ", input_name, " resides on the primary device type (",
+                         static_cast<int>(model_.device_type_), "). But the pipeline model ",
+                         model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id,
+                         " is expecting it to reside elsewhere."));
         }
         pipeline_state->input_names_.push_back(input_name);
         pipeline_state->inputs_.push_back(State::GetInput(input_name));
@@ -157,13 +215,11 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
     for (const auto& output_name : output_names_) {
       if (pipeline_state->HasOutput(output_name)) {
         if (!pipeline_state->SupportsPrimaryDevice()) {
-          std::ostringstream oss;
-          oss << "Managed output " << output_name << " resides on the primary device type ("
-              << to_string(model_.device_type_) << "). "
-              << "But the pipeline model "
-              << model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id
-              << " is expecting it to reside elsewhere.";
-          throw std::runtime_error(oss.str());
+          throw std::runtime_error(
+              MakeString("Managed output ", output_name, " resides on the primary device type (",
+                         static_cast<int>(model_.device_type_), "). But the pipeline model ",
+                         model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id,
+                         " is expecting it to reside elsewhere."));
         }
         pipeline_state->output_names_.push_back(output_name);
         pipeline_state->outputs_.push_back(State::GetOutput(output_name));
@@ -176,13 +232,11 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
     for (const auto& input_name : input_names_) {
       if (pipeline_state->HasOutput(input_name)) {
         if (!pipeline_state->SupportsPrimaryDevice()) {
-          std::ostringstream oss;
-          oss << "Managed input " << input_name << " resides on the primary device type ("
-              << to_string(model_.device_type_) << "). "
-              << "But the pipeline model "
-              << model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id
-              << " is expecting it to reside elsewhere.";
-          throw std::runtime_error(oss.str());
+          throw std::runtime_error(
+              MakeString("Managed input ", input_name, " resides on the primary device type (",
+                         static_cast<int>(model_.device_type_), "). But the pipeline model ",
+                         model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id,
+                         " is expecting it to reside elsewhere."));
         }
         pipeline_state->output_names_.push_back(input_name);
         pipeline_state->outputs_.push_back(State::GetInput(input_name));
@@ -198,8 +252,27 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
       }
     }
 
+    auto& overlapped_kv_update_record = pipeline_overlapped_kv_cache_update_records_[pipeline_state->id_];
+    if (overlapped_kv_update_record.has_value()) {
+      // wait for any outstanding KV cache update to finish
+      if (overlapped_kv_update_record->outstanding_update.valid()) {
+        overlapped_kv_update_record->outstanding_update.get();
+      }
+    }
+
     // Run the intermediate pipeline state
     pipeline_state->Run(total_length, next_tokens, next_indices);
+
+    if (overlapped_kv_update_record.has_value()) {
+      assert(key_value_cache_update_worker_thread_.has_value());
+      // enqueue the next KV cache update
+      auto update_fn = [&key_value_cache = *key_value_cache_.get(),
+                        layer_indices = overlapped_kv_update_record->layer_indices,
+                        next_indices, total_length]() {
+        key_value_cache.PartialTokenGenerationUpdate(next_indices, total_length, layer_indices);
+      };
+      overlapped_kv_update_record->outstanding_update = key_value_cache_update_worker_thread_->Enqueue(update_fn);
+    }
 
     // Transfer ownership of all the non-managed outputs from the current pipeline state to the ortvalue store.
     // All non managed outputs are assumed to be on CPU
@@ -235,7 +308,7 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
     if (model_.config_->model.decoder.sliding_window.has_value() && i < num_chunks - 1) {
       // Sliding the window over the input_ids, key_cache, and value_cache, position_ids, and attention_mask
       input_ids_->Update(next_tokens);
-      key_value_cache_->Update(next_indices, total_length);
+      if (key_value_cache_) key_value_cache_->Update(next_indices, total_length);
       position_inputs_->Update(next_tokens, total_length, static_cast<int>(input_ids_->GetShape()[1]));
     }
   }
@@ -263,7 +336,23 @@ void DecoderOnlyPipelineState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tok
   input_ids_->Update(next_tokens);
   size_t new_length = input_ids_->GetShape()[1];
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
-  if (key_value_cache_) key_value_cache_->Update(beam_indices, total_length);
+
+  if (key_value_cache_) {
+    const bool outstanding_key_value_cache_partial_token_generation_update =
+        do_key_value_cache_partial_token_generation_update_ &&
+        std::any_of(pipeline_overlapped_kv_cache_update_records_.rbegin(),
+                    pipeline_overlapped_kv_cache_update_records_.rend(),
+                    [](const std::optional<OverlappedKeyValueCacheUpdateRecord>& record) {
+                      return record.has_value() && record->outstanding_update.valid();
+                    });
+
+    if (outstanding_key_value_cache_partial_token_generation_update) {
+      // If there is any outstanding partial KV cache update, don't update the KV cache here.
+    } else {
+      key_value_cache_->Update(beam_indices, total_length);
+    }
+  }
+
   logits_.Update(next_tokens, new_length);
 }
 

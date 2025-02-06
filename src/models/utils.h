@@ -4,6 +4,8 @@
 
 #include "ortx_utils.h"
 
+#include "../span.h"
+
 namespace Generators {
 
 template <typename T>
@@ -20,6 +22,8 @@ struct OrtxPtr {
 };
 
 size_t SizeOf(ONNXTensorElementDataType type);
+
+int64_t ElementCountFromShape(std::span<const int64_t> shape);
 
 // Slower fp16 to fp32 conversion that handles NaN and Inf (useful for debugging vs runtime conversion)
 float Float16ToFloat32(uint16_t v);
