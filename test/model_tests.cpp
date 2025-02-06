@@ -1,13 +1,16 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <gtest/gtest.h>
-#include <generators.h>
-#include <search.h>
-#include <models/model.h>
 #include <iostream>
 #include <random>
-#include <smartptrs.h>
+
+#include <gtest/gtest.h>
+
+#include "generators.h"
+#include "models/model.h"
+#include "search.h"
+#include "smartptrs.h"
+
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
