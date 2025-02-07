@@ -44,7 +44,6 @@ void State::Run(OrtSession& session, int new_batch_size) {
     for (const auto& output_name : all_output_names_) {
       if (std::none_of(output_names_.begin(), output_names_.end(),
                        [&](const std::string& elem) { return elem == output_name; })) {
-        std::cout << "Adding output: " << output_name << std::endl;
         output_names_.push_back(output_name.c_str());
         outputs_.push_back(nullptr);
       }
