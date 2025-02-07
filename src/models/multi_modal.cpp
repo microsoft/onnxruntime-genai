@@ -11,19 +11,17 @@ namespace {
 int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
                           const std::string& pixel_values_name,
                           const std::string& image_sizes_name) {
-  std::shared_ptr<Tensor> num_image_tokens;
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
-    if (extra_inputs[i].name == "NumImageTokens") {
-      num_image_tokens = extra_inputs[i].tensor;
+    if (extra_inputs[i].name == Config::Defaults::NumImageTokens) {
+      assert(extra_inputs[i].tensor->ort_tensor_);
+      const int64_t* num_image_tokens_data = extra_inputs[i].tensor->ort_tensor_->GetTensorData<int64_t>();
+      return std::accumulate(num_image_tokens_data,
+                             num_image_tokens_data + extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount(),
+                             0LL);
     }
   }
 
-  if (!num_image_tokens || !num_image_tokens->ort_tensor_) {
-    // This prompt does not have any images.
-    return 0;
-  }
-
-  return num_image_tokens->ort_tensor_->GetTensorMutableData<int64_t>()[0];
+  return 0LL;
 }
 
 // This is technically calculating the number of input tokens (where the input can be any
