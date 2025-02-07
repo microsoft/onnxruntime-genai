@@ -219,7 +219,6 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   }
 
   state_.outputs_[output_index_] = output_raw_.get();
-
 }
 
 void Logits::HandleEOSArray(std::span<float> batched_logits) {
@@ -247,16 +246,6 @@ void Logits::Add() {
 
   state_.output_names_.push_back(model_.config_->model.decoder.outputs.logits.c_str());
   state_.outputs_.push_back(output_raw_.get());
-
-  // const char* hidden_states_name = model_.config_->model.decoder.outputs.hidden_states.c_str();
-  // if (hidden_states_name && strlen(hidden_states_name) > 0) {
-  //   hidden_states_index_ = state_.outputs_.size();
-  //   hidden_states_type_ = model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.hidden_states);
-  //   state_.output_names_.push_back(hidden_states_name);
-  //   hidden_states_shape_ = {static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.decoder.hidden_size};
-  //   hidden_states_raw_ = OrtValue::CreateTensor(*model_.allocator_device_, hidden_states_shape_, hidden_states_type_);
-  //   state_.outputs_.push_back(hidden_states_raw_.get());
-  // }
 }
 
 }  // namespace Generators
