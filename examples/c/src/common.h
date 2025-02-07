@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <iostream>
+#include <fstream>
 
 using Clock = std::chrono::high_resolution_clock;
 using TimePoint = std::chrono::time_point<Clock>;

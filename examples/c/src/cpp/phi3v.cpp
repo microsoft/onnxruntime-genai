@@ -1,9 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <iostream>
 #include <cstring>
-#include <fstream>
 #include <memory>
 #include "../common.h"
 #include "ort_genai.h"

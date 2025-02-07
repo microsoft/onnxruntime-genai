@@ -3,7 +3,6 @@
 
 #include <iostream>
 #include <cstring>
-#include <fstream>
 #include <memory>
 #include "../common.h"
 #include "ort_genai.h"
