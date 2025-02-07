@@ -13,13 +13,6 @@
 
 namespace Generators {
 
-int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
-                          const std::string& pixel_values_name,
-                          const std::string& image_sizes_name);
-
-int64_t GetNumAudioTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
-                          const std::string& input_ids_name);
-
 struct MultiModalLanguageModel : Model {
   MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech);
   MultiModalLanguageModel(const MultiModalLanguageModel&) = delete;
@@ -45,14 +38,14 @@ struct VisionState : State {
 
   const MultiModalLanguageModel& model_;
   int64_t num_image_tokens_;
-  ExtraInputs extra_inputs_{*this};                                                        // Model inputs
-  MultiModalFeatures image_features_{*this, MultiModalFeatures::Mode::Output,              // Model output
+  ExtraInputs extra_inputs_{*this};                                            // Model inputs
+  MultiModalFeatures image_features_{*this, MultiModalFeatures::Mode::Output,  // Model output
                                      model_.config_->model.vision.outputs.image_features,
                                      num_image_tokens_};
 };
 
 struct SpeechState : State {
-  SpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params, const int64_t num_image_tokens);
+  SpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params, const int64_t num_audio_tokens);
   SpeechState(const SpeechState&) = delete;
   SpeechState& operator=(const SpeechState&) = delete;
 
@@ -63,8 +56,8 @@ struct SpeechState : State {
 
   const MultiModalLanguageModel& model_;
   int64_t num_audio_tokens_;
-  ExtraInputs extra_inputs_{*this};                                                        // Model inputs
-  MultiModalFeatures audio_features_{*this, MultiModalFeatures::Mode::Output,              // Model output
+  ExtraInputs extra_inputs_{*this};                                            // Model inputs
+  MultiModalFeatures audio_features_{*this, MultiModalFeatures::Mode::Output,  // Model output
                                      model_.config_->model.speech.outputs.audio_features,
                                      num_audio_tokens_};
 };
@@ -85,14 +78,14 @@ struct EmbeddingState : State {
   int64_t num_image_tokens_;
   int64_t num_audio_tokens_;
 
-  DefaultInputIDs input_ids_{*this};                                                         // Model input
-  MultiModalFeatures image_features_{*this, MultiModalFeatures::Mode::Input,                 // Optional model input
+  DefaultInputIDs input_ids_{*this};                                          // Model input
+  MultiModalFeatures image_features_{*this, MultiModalFeatures::Mode::Input,  // Optional model input
                                      model_.config_->model.embedding.inputs.image_features,
                                      num_image_tokens_};
-  MultiModalFeatures audio_features_{*this, MultiModalFeatures::Mode::Input,                 // Optional model input
+  MultiModalFeatures audio_features_{*this, MultiModalFeatures::Mode::Input,  // Optional model input
                                      model_.config_->model.embedding.inputs.audio_features,
                                      num_audio_tokens_};
-  Embeddings inputs_embeds_{*this, Embeddings::Mode::Output,                                 // Model output
+  Embeddings inputs_embeds_{*this, Embeddings::Mode::Output,  // Model output
                             model_.config_->model.embedding.outputs.embeddings};
 };
 
@@ -113,11 +106,11 @@ struct DecoderState : State {
 
   const MultiModalLanguageModel& model_;
   const CapturedGraphInfo* captured_graph_info_;
-  Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,                    // Model input
+  Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
-  DefaultPositionInputs position_inputs_;                                      // Model input
-  DefaultKeyValueCache kv_cache_{*this};                                       // Model input
-  Logits logits_{*this};                                                       // Model output
+  DefaultPositionInputs position_inputs_;  // Model input
+  DefaultKeyValueCache kv_cache_{*this};   // Model input
+  Logits logits_{*this};                   // Model output
 };
 
 struct MultiModalPipelineState : State {
@@ -143,7 +136,11 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<SpeechState> speech_state_;
   std::unique_ptr<EmbeddingState> embedding_state_;
   std::unique_ptr<DecoderState> decoder_state_;
+  std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
+
+  const std::string vision_adapter_name_{"vision"};
+  const std::string speech_adapter_name_{"speech"};
 };
 
 }  // namespace Generators

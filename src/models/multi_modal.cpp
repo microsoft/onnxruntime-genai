@@ -6,66 +6,56 @@
 
 namespace Generators {
 
+namespace {
+
 int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
                           const std::string& pixel_values_name,
                           const std::string& image_sizes_name) {
-  std::shared_ptr<Tensor> pixel_values;
-  std::shared_ptr<Tensor> image_sizes;
+  std::shared_ptr<Tensor> num_image_tokens;
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
-    if (extra_inputs[i].name == pixel_values_name) {
-      pixel_values = extra_inputs[i].tensor;
-    } else if (extra_inputs[i].name == image_sizes_name) {
-      image_sizes = extra_inputs[i].tensor;
+    if (extra_inputs[i].name == "NumImageTokens") {
+      num_image_tokens = extra_inputs[i].tensor;
     }
   }
 
-  if (!image_sizes || !image_sizes->ort_tensor_) {
+  if (!num_image_tokens || !num_image_tokens->ort_tensor_) {
     // This prompt does not have any images.
     return 0;
   }
 
-  auto image_sizes_shape = image_sizes->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
-  auto num_images = pixel_values->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[0];
-  if (image_sizes_shape != std::vector<int64_t>{num_images, 2}) {
-    std::string wrong_image_sizes_shape = "(";
-    for (int i = 0; i < image_sizes_shape.size(); i++) {
-      wrong_image_sizes_shape += std::to_string(image_sizes_shape[i]);
-      std::string eos = (i != image_sizes_shape.size() - 1) ? ", " : ")";
-      wrong_image_sizes_shape += eos;
-    }
-    throw std::runtime_error("image_sizes tensor must be of shape (num_images, 2), got " + wrong_image_sizes_shape);
-  }
-
-  auto image_sizes_data = image_sizes->ort_tensor_->GetTensorMutableData<int64_t>();
-  int64_t num_image_tokens = 0;
-  for (int i = 0; i < num_images; i++) {
-    int64_t h = image_sizes_data[i * num_images] / 336;
-    int64_t w = image_sizes_data[i * num_images + 1] / 336;
-    num_image_tokens += ((h * w + 1) * 144) + 1 + ((h + 1) * 12);
-  }
-  return num_image_tokens;
+  return num_image_tokens->ort_tensor_->GetTensorMutableData<int64_t>()[0];
 }
 
 // This is technically calculating the number of input tokens (where the input can be any
 // modality). Since the output of this function is used to create the shape of audio_features,
 // however, the function is named as getting the number of audio tokens.
 int64_t GetNumAudioTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
-                          const std::string& input_ids_name) {
-  std::shared_ptr<Tensor> input_ids;
+                          const std::string& audio_sizes_name) {
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
-    if (extra_inputs[i].name == input_ids_name) {
-      input_ids = extra_inputs[i].tensor;
+    if (extra_inputs[i].name == audio_sizes_name) {
+      assert(extra_inputs[i].tensor->ort_tensor_);
+      auto type_and_shape_info = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
+      const auto element_count = type_and_shape_info->GetElementCount();
+      if (type_and_shape_info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+        const float* audio_sizes_data = extra_inputs[i].tensor->ort_tensor_->GetTensorData<float>();
+        return std::accumulate(audio_sizes_data, audio_sizes_data + element_count, 0LL, [](int64_t a, float b) {
+          return a + static_cast<int64_t>(b + 0.5f);
+        });
+      } else if (type_and_shape_info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+        const uint16_t* audio_sizes_data = extra_inputs[i].tensor->ort_tensor_->GetTensorData<uint16_t>();
+        return std::accumulate(audio_sizes_data, audio_sizes_data + element_count, 0LL, [](int64_t a, uint16_t b) {
+          return a + static_cast<int64_t>(FastFloat16ToFloat32(b) + 0.5f);
+        });
+      } else {
+        throw std::runtime_error("Unsupported data type for audio_sizes tensor.");
+      }
     }
   }
 
-  if (!input_ids || !input_ids->ort_tensor_) {
-    // This prompt does not have any audios.
-    return 0;
-  }
-
-  int64_t num_audio_tokens = input_ids->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape()[1];
-  return num_audio_tokens;
+  return 0;
 }
+
+}  // namespace
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
@@ -187,8 +177,9 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
     : State{params, model},
       model_{model},
       num_image_tokens_{GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.pixel_values, model_.config_->model.vision.inputs.image_sizes)},
-      num_audio_tokens_{GetNumAudioTokens(params_->extra_inputs, model_.config_->model.embedding.inputs.input_ids)},
-      captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)} {
+      num_audio_tokens_{GetNumAudioTokens(params_->extra_inputs, model_.config_->model.speech.inputs.audio_sizes)},
+      captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)},
+      adapters_{std::make_shared<Adapters>(&model_)} {
   if (model_.vision_session_ != nullptr) {
     vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
   } else {
@@ -201,6 +192,16 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
   }
   embedding_state_ = std::make_unique<EmbeddingState>(model, params, num_image_tokens_, num_audio_tokens_);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params, captured_graph_info_.get());
+
+  if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value()) {
+    const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.vision.adapter_filename));
+    adapters_->LoadAdapter(lora_adapter.c_str(), vision_adapter_name_);
+    decoder_state_->SetActiveAdapter(adapters_.get(), vision_adapter_name_);
+  } else if (speech_state_ != nullptr && model_.config_->model.speech.adapter_filename.has_value()) {
+    const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.speech.adapter_filename));
+    adapters_->LoadAdapter(lora_adapter.c_str(), speech_adapter_name_);
+    decoder_state_->SetActiveAdapter(adapters_.get(), speech_adapter_name_);
+  }
 }
 
 DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {

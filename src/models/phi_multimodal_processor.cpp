@@ -12,7 +12,7 @@ namespace {
 
 std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
-                        OrtxTensor* num_img_tokens, OrtxTensor* audio_embed_sizes,
+                        OrtxTensor* num_img_tokens, OrtxTensor* audio_sizes,
                         Ort::Allocator& allocator) {
   constexpr size_t audio_start_input_id = -10000;
 
@@ -29,15 +29,15 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
                                  1LL, std::multiplies<int64_t>());
   }
 
-  const int64_t* audio_embed_sizes_data{};
+  const float* audio_sizes_data{};
   int64_t num_audios = 0LL;
-  if (audio_embed_sizes) {
-    const int64_t* audio_embed_sizes_shape{};
-    size_t audio_embed_sizes_num_dims;
-    CheckResult(OrtxGetTensorData(audio_embed_sizes, reinterpret_cast<const void**>(&audio_embed_sizes_data),
-                                  &audio_embed_sizes_shape, &audio_embed_sizes_num_dims));
-    num_audios = std::accumulate(audio_embed_sizes_shape,
-                                 audio_embed_sizes_shape + audio_embed_sizes_num_dims,
+  if (audio_sizes) {
+    const int64_t* audio_sizes_shape{};
+    size_t audio_sizes_num_dims;
+    CheckResult(OrtxGetTensorData(audio_sizes, reinterpret_cast<const void**>(&audio_sizes_data),
+                                  &audio_sizes_shape, &audio_sizes_num_dims));
+    num_audios = std::accumulate(audio_sizes_shape,
+                                 audio_sizes_shape + audio_sizes_num_dims,
                                  1LL, std::multiplies<int64_t>());
   }
 
@@ -122,7 +122,7 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
                                               std::to_string(num_audios) + ". Actual value: " + std::to_string(audio_ids[audio_id]);
             throw std::runtime_error(error_message);
           }
-          for (int64_t j = 0; j < audio_embed_sizes_data[audio_ids[audio_id] - 1]; ++j) {
+          for (int64_t j = 0; j < static_cast<int64_t>(audio_sizes_data[audio_ids[audio_id] - 1] + 0.5f); ++j) {
             input_ids.push_back(-audio_ids[audio_id] + audio_start_input_id + 1);
           }
           ++audio_id;
@@ -145,12 +145,10 @@ PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo
       attention_mask_type_{session_info.GetInputDataType(config.model.vision.inputs.attention_mask)},
       audio_features_type_{session_info.GetInputDataType(config.model.speech.inputs.audio_embeds)},
       audio_sizes_type_{session_info.GetInputDataType(config.model.speech.inputs.audio_sizes)} {
-  const std::string image_processor_file_name = "vision_processor.json";
-  const auto image_processor_config = (config.config_path / fs::path(image_processor_file_name)).string();
+  const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
 
-  const std::string audio_processor_file_name = "audio_feature_extension.json";
-  const auto audio_processor_config = (config.config_path / fs::path(audio_processor_file_name)).string();
+  const auto audio_processor_config = (config.config_path / fs::path(config.model.speech.config_filename)).string();
   CheckResult(OrtxCreateSpeechFeatureExtractor(audio_processor_.ToBeAssigned(), audio_processor_config.c_str()));
 
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.embedding.inputs.input_ids);
@@ -179,15 +177,15 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
   }
 
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> audio_result;
-  OrtxTensor *audio_embeds{}, *audio_embed_sizes{};
+  OrtxTensor *audio_embeds{}, *audio_sizes{};
   if (payload.audios) {
     CheckResult(OrtxFeatureExtraction(audio_processor_.get(), payload.audios->audios_.get(), audio_result.ToBeAssigned()));
 
     CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, &audio_embeds));
-    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 1, &audio_embed_sizes));
+    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 1, &audio_sizes));
   }
 
-  auto [input_ids, audio_projection_mode] = ProcessImageAudioPrompt(tokenizer, payload.prompt, num_img_tokens, audio_embed_sizes, allocator);
+  auto [input_ids, audio_projection_mode] = ProcessImageAudioPrompt(tokenizer, payload.prompt, num_img_tokens, audio_sizes, allocator);
   named_tensors->emplace(Config::Defaults::InputIdsName, std::make_shared<Tensor>(std::move(input_ids)));
   named_tensors->emplace(Config::Defaults::AudioProjectionModeName, std::make_shared<Tensor>(std::move(audio_projection_mode)));
 
@@ -206,9 +204,12 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
       named_tensors->emplace(std::string(Config::Defaults::AttentionMaskName),
                              std::make_shared<Tensor>(ProcessTensor<float>(image_attention_mask, allocator)));
     } else {
-      named_tensors->emplace(std::string(Config::Defaults::AttentionMaskName),
+      named_tensors->emplace(std::string(Config::Defaults::ImageAttentionMaskName),
                              std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(image_attention_mask, allocator)));
     }
+
+    named_tensors->emplace(Config::Defaults::NumImageTokens,
+                           std::make_shared<Tensor>(ProcessTensor<int64_t>(num_img_tokens, allocator)));
   }
 
   if (payload.audios) {
@@ -222,10 +223,10 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
 
     if (audio_sizes_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
       named_tensors->emplace(std::string(Config::Defaults::AudioSizesName),
-                             std::make_shared<Tensor>(ProcessTensor<float>(audio_embed_sizes, allocator)));
+                             std::make_shared<Tensor>(ProcessTensor<float>(audio_sizes, allocator)));
     } else {
       named_tensors->emplace(std::string(Config::Defaults::AudioSizesName),
-                             std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(audio_embed_sizes, allocator)));
+                             std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(audio_sizes, allocator)));
     }
   }
 

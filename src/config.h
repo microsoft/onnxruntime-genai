@@ -30,6 +30,8 @@ struct Config {
     static constexpr std::string_view PixelValuesName = "pixel_values";
     static constexpr std::string_view ImageSizesName = "image_sizes";
     static constexpr std::string_view ImageFeaturesName = "image_features";
+    static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
+    static constexpr std::string_view NumImageTokens = "num_image_tokens";
 
     // Speech names
     static constexpr std::string_view InputFeaturesName = "encoder_input_ids";
@@ -105,11 +107,13 @@ struct Config {
 
     struct Vision {
       std::string filename;
+      std::string config_filename{"processor_config.json"};
+      std::optional<std::string> adapter_filename{};
 
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
         std::string image_sizes{Defaults::ImageSizesName};
-        std::string attention_mask{Defaults::AttentionMaskName};  // image attention mask
+        std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
       } inputs;
 
       struct Outputs {
@@ -119,6 +123,8 @@ struct Config {
 
     struct Speech {
       std::string filename;
+      std::string config_filename{"audio_processor_config.json"};
+      std::optional<std::string> adapter_filename{};
 
       struct Inputs {
         std::string audio_embeds{Defaults::AudioEmbedsName};
