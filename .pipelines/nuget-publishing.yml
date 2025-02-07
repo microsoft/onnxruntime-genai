@@ -85,6 +85,14 @@ parameters:
   - 'relwithdebinfo'
   - 'debug'
 
+- name: 'nuget_version_type'
+  displayName: 'Nuget version - stable uses VERSION_INFO, dev appends date, build_id and commit-ish, e.g. 1.21.0-dev-20250205-1932-8f6ddf3bd5'
+  type: string
+  default: dev
+  values:
+  - dev
+  - stable
+
 resources:
   repositories:
   - repository: manylinux
@@ -128,6 +136,7 @@ stages:
     ort_dml_version: ${{ parameters.ort_dml_version }}
     build_config: ${{ parameters.build_config }}
     enable_win_qnn: ${{ parameters.enable_win_qnn }}
+    nuget_version_type: ${{ parameters.nuget_version_type }}
 
 - ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
   - template: stages/nuget-validation-stage.yml
