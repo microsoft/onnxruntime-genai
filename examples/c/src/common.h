@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#pragma once
 #include <cassert>
 #include <chrono>
 #include <condition_variable>
@@ -8,6 +9,7 @@
 #include <iostream>
 #include <fstream>
 #include <iomanip>
+#include "ort_genai.h"
 
 using Clock = std::chrono::high_resolution_clock;
 using TimePoint = std::chrono::time_point<Clock>;
