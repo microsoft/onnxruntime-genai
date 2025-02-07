@@ -99,15 +99,15 @@ def run(args: argparse.Namespace):
             images = og.Images.open(*image_paths)
 
         # Get audios
-        if len(audio_paths) == 0:
-            print("No audio provided")
-        else:
-            for i, audio_path in enumerate(audio_paths):
-                if not os.path.exists(audio_path):
-                    raise FileNotFoundError(f"Audio file not found: {audio_path}")
-                print(f"Using audio: {audio_path}")
-                prompt += f"<|audio_{i+1}|>\n"
-            audios = og.Audios.open(*audio_paths)
+        # if len(audio_paths) == 0:
+        #     print("No audio provided")
+        # else:
+        #     for i, audio_path in enumerate(audio_paths):
+        #         if not os.path.exists(audio_path):
+        #             raise FileNotFoundError(f"Audio file not found: {audio_path}")
+        #         print(f"Using audio: {audio_path}")
+        #         prompt += f"<|audio_{i+1}|>\n"
+        #     audios = og.Audios.open(*audio_paths)
 
 
         if interactive:
@@ -125,10 +125,10 @@ def run(args: argparse.Namespace):
         print("Input IDs:")
         print(inputs["input_ids"].shape)
         import numpy as np
-        np.save("input_ids_oga.npy", inputs["input_ids"])
+        # np.save("input_ids_oga.npy", inputs["input_ids"])
         print("Audio projection mode:")
         print(inputs["audio_projection_mode"])
-        np.save("audio_projection_mode_oga.npy", inputs["audio_projection_mode"])
+        # np.save("audio_projection_mode_oga.npy", inputs["audio_projection_mode"])
         print("Image attention mask:")
         print(inputs["attention_mask"])
         np.save("attention_mask_oga.npy", inputs["attention_mask"])
@@ -136,13 +136,31 @@ def run(args: argparse.Namespace):
         print(inputs["pixel_values"])
         print(inputs["pixel_values"].shape)
         np.save("pixel_values_oga.npy", inputs["pixel_values"])
-        print("Audio values:")
-        print(inputs["audio_embeds"])
-        print(inputs["audio_sizes"])
+        # print("Audio values:")
+        # print(inputs["audio_embeds"])
+        # print(inputs["audio_sizes"])
+        print("Image sizes:")
         print(inputs["image_sizes"])
         print(inputs["image_sizes"].shape)
         np.save("image_sizes_oga.npy", inputs["image_sizes"])
-        # exit()
+
+        
+        import requests
+        from PIL import Image
+        from transformers import AutoProcessor
+
+        pt_processor = AutoProcessor.from_pretrained("/path/to/folder/containing/hf_version/", cache_dir="/path/to/cache_dir/", trust_remote_code=True)
+        pt_inputs = pt_processor(prompt, images=[Image.open(requests.get("https://www.ilankelman.org/stopsigns/australia.jpg", stream=True).raw)], audios=audios)
+
+        # inputs["attention_mask"] = pt_inputs["image_attention_mask"].half().detach().cpu().numpy()
+        # inputs["pixel_values"] = pt_inputs["input_image_embeds"].half().detach().cpu().numpy()
+        # inputs["image_sizes"] = pt_inputs["image_sizes"].detach().cpu().numpy()
+
+        print(np.max(np.abs(pt_inputs["image_attention_mask"].detach().cpu().numpy() - inputs["attention_mask"])))
+        print(np.max(np.abs(pt_inputs["input_image_embeds"].detach().cpu().numpy() - inputs["pixel_values"])))
+        print(np.max(np.abs(pt_inputs["image_sizes"].detach().cpu().numpy() - inputs["image_sizes"])))
+
+        exit()
 
         print("Processor complete.")
 

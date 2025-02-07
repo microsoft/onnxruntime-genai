@@ -11,8 +11,10 @@
 
 Please ensure you have the following Python packages installed to create the ONNX models.
 
+- `backoff`
 - `huggingface_hub[cli]`
 - `numpy`
+    - Please ensure that your `numpy` version is less than 2.0.0 after installing all of the pre-requisite packages. If it is greater than or equal to 2.0.0, please uninstall `numpy` with `pip uninstall -y numpy` and install an older version (e.g. `pip install numpy==1.26.4`).
 - `onnx`
 - `onnxruntime` and `onnxruntime-genai`
     - ONNX Runtime: Please install the latest nightly version. To ensure the right version is installed, please install ONNX Runtime GenAI first. Then you can uninstall the stable version of ONNX Runtime that gets auto-installed as a dependency.
@@ -63,9 +65,10 @@ Please ensure you have the following Python packages installed to create the ONN
     pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime-directml
     ```
 - `onnxscript`
-    - Please install the latest nightly version with `pip install onnxscript`
+- `peft`
 - `pillow`
 - `requests`
+- `scipy`
 - `soundfile`
 - `torch`
     - Please install the latest nightly version. You can install torch by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torch with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
