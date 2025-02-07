@@ -1,9 +1,11 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <gtest/gtest.h>
-#include <generators.h>
 #include <iostream>
+
+#include <gtest/gtest.h>
+
+#include "generators.h"
 
 int main(int argc, char** argv) {
   std::cout << "Generators Utility Library" << std::endl;
@@ -19,6 +21,6 @@ int main(int argc, char** argv) {
     return result;
   } catch (const std::exception& e) {
     std::cerr << "Error: " << e.what() << std::endl;
-    return 0;
+    return 1;
   }
 }
