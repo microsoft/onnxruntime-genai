@@ -74,6 +74,8 @@ void State::Run(OrtSession& session, int new_batch_size) {
 
   for (size_t i = unmanaged_outputs_start; i < output_names_.size(); ++i) {
     output_ortvalue_store_[output_names_[i]] = std::unique_ptr<OrtValue>(outputs_[i]);
+    // reset extra output ortvalues to nullptr to avoid shape mismatch across runs
+    outputs_[i] = nullptr;
   }
 
   if (g_log.enabled && g_log.model_output_values) {
