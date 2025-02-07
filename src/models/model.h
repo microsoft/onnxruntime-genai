@@ -64,6 +64,10 @@ struct State {
  private:
   int current_batch_size_{0};
   std::shared_ptr<Adapters> adapters_;
+
+  // manage output ortvalues not specified in output_names_ before first State::Run()
+  std::unordered_map<std::string, std::unique_ptr<OrtValue>> output_ortvalue_store_;
+  std::vector<std::string> all_output_names_;  // keep output strings in scope
 };
 
 struct TokenizerStream : LeakChecked<TokenizerStream> {

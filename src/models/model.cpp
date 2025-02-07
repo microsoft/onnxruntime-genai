@@ -33,11 +33,23 @@ State::State(const GeneratorParams& params, const Model& model)
 
 void State::Run(OrtSession& session, int new_batch_size) {
   auto captured_graph_info = GetCapturedGraphInfo();
+  size_t unmanaged_outputs_start = output_names_.size();
 
   if (first_run_) {
     if (captured_graph_info) {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
+
+    all_output_names_ = session.GetOutputNames();
+    for (const auto& output_name : all_output_names_) {
+      if (std::none_of(output_names_.begin(), output_names_.end(),
+                       [&](const std::string& elem) { return elem == output_name; })) {
+        std::cout << "Adding output: " << output_name << std::endl;
+        output_names_.push_back(output_name.c_str());
+        outputs_.push_back(nullptr);
+      }
+    }
+
     first_run_ = false;
   } else if (captured_graph_info && new_batch_size != current_batch_size_) {
     current_batch_size_ = new_batch_size;
@@ -59,6 +71,10 @@ void State::Run(OrtSession& session, int new_batch_size) {
 
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
+
+  for (size_t i = unmanaged_outputs_start; i < output_names_.size(); ++i) {
+    output_ortvalue_store_[output_names_[i]] = std::unique_ptr<OrtValue>(outputs_[i]);
+  }
 
   if (g_log.enabled && g_log.model_output_values) {
     auto& stream = Log("model_output_values");
@@ -93,6 +109,9 @@ OrtValue* State::GetOutput(const char* name) {
     if (std::strcmp(output_names_[i], name) == 0) {
       return outputs_[i];
     }
+  }
+  if (auto iter = output_ortvalue_store_.find(name); iter != output_ortvalue_store_.end()) {
+    return iter->second.get();
   }
   return nullptr;
 }
