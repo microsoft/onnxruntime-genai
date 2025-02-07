@@ -68,6 +68,7 @@ struct State {
   // manage output ortvalues not specified in output_names_ before first State::Run()
   std::unordered_map<std::string, std::unique_ptr<OrtValue>> output_ortvalue_store_;
   std::vector<std::string> all_output_names_;  // keep output strings in scope
+  size_t extra_outputs_start = std::numeric_limits<size_t>::max();
 };
 
 struct TokenizerStream : LeakChecked<TokenizerStream> {

@@ -33,7 +33,6 @@ State::State(const GeneratorParams& params, const Model& model)
 
 void State::Run(OrtSession& session, int new_batch_size) {
   auto captured_graph_info = GetCapturedGraphInfo();
-  size_t unmanaged_outputs_start = output_names_.size();
 
   if (first_run_) {
     if (captured_graph_info) {
@@ -41,6 +40,7 @@ void State::Run(OrtSession& session, int new_batch_size) {
     }
 
     all_output_names_ = session.GetOutputNames();
+    extra_outputs_start = output_names_.size();
     for (const auto& output_name : all_output_names_) {
       if (std::none_of(output_names_.begin(), output_names_.end(),
                        [&](const std::string& elem) { return elem == output_name; })) {
@@ -71,7 +71,7 @@ void State::Run(OrtSession& session, int new_batch_size) {
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
 
-  for (size_t i = unmanaged_outputs_start; i < output_names_.size(); ++i) {
+  for (size_t i = extra_outputs_start; i < output_names_.size(); ++i) {
     output_ortvalue_store_[output_names_[i]] = std::unique_ptr<OrtValue>(outputs_[i]);
     // reset extra output ortvalues to nullptr to avoid shape mismatch across runs
     outputs_[i] = nullptr;
@@ -105,14 +105,14 @@ OrtValue* State::GetInput(const char* name) {
 }
 
 OrtValue* State::GetOutput(const char* name) {
+  if (auto iter = output_ortvalue_store_.find(name); iter != output_ortvalue_store_.end()) {
+    return iter->second.get();
+  }
   ThrowErrorIfSessionTerminated(session_terminated_);
   for (size_t i = 0; i < output_names_.size(); i++) {
     if (std::strcmp(output_names_[i], name) == 0) {
       return outputs_[i];
     }
-  }
-  if (auto iter = output_ortvalue_store_.find(name); iter != output_ortvalue_store_.end()) {
-    return iter->second.get();
   }
   return nullptr;
 }
