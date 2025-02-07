@@ -26,7 +26,7 @@ steps:
 
       $version = switch ($nuget_version_type)
       {
-        'dev' { "$version_info-$build_id-$date-$commit" }
+        'dev' { "$version_info-$date-$build_id-$commit" }
         'stable' { "$version_info" }
         default { 'unknown' }
       }
