@@ -23,12 +23,9 @@ struct Logits {
   State& state_;
   const Model& model_{state_.model_};
   size_t output_index_{~0U};
-  size_t hidden_states_index_{~0U};
 
   std::array<int64_t, 3> shape_{};
-  std::array<int64_t, 3> hidden_states_shape_{};
   ONNXTensorElementDataType type_;
-  ONNXTensorElementDataType hidden_states_type_;
 
   // Tensor to keep the logits of the last tokens. It is used in the 2 cases below. Otherwhise, it is not used.
   // 1. prompt: store the last tokens logits from output_raw_
@@ -36,8 +33,7 @@ struct Logits {
   std::unique_ptr<OrtValue> output_last_tokens_;
   std::unique_ptr<OrtValue> logits_of_last_token_fp32_;
 
-  std::unique_ptr<OrtValue> output_raw_;         // Raw logits output from model
-  std::unique_ptr<OrtValue> hidden_states_raw_;  // Raw hidden states from model for embedding
+  std::unique_ptr<OrtValue> output_raw_;  // Raw logits output from model
 
   std::vector<int> input_sequence_lengths;
   // OrtValue wrapped in a DeviceMemory object to make it universal
