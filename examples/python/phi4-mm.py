@@ -9,9 +9,6 @@ from pathlib import Path
 
 import onnxruntime_genai as og
 
-og.set_log_options(enabled=True, model_input_values=True)
-
-
 def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
     curr_path = Path(current_dir).absolute()
     target_dir = glob.glob(target_dir_name, root_dir=curr_path)
@@ -49,7 +46,7 @@ def get_paths(modality, user_provided_paths, default_paths, interactive):
     else:
         paths = user_provided_paths if user_provided_paths else default_paths
 
-    paths = [path for path in paths]
+    paths = [path for path in paths if path]
     return paths
 
 
@@ -81,7 +78,6 @@ def run(args: argparse.Namespace):
             default_paths=[str(_find_dir_contains_sub_dir(Path(__file__).parent, "test") / "test_models" / "audios" / "1272-141231-0002.mp3")],
             interactive=interactive
         )
-        # audio_paths = []
 
         images = None
         audios = None
@@ -99,15 +95,15 @@ def run(args: argparse.Namespace):
             images = og.Images.open(*image_paths)
 
         # Get audios
-        # if len(audio_paths) == 0:
-        #     print("No audio provided")
-        # else:
-        #     for i, audio_path in enumerate(audio_paths):
-        #         if not os.path.exists(audio_path):
-        #             raise FileNotFoundError(f"Audio file not found: {audio_path}")
-        #         print(f"Using audio: {audio_path}")
-        #         prompt += f"<|audio_{i+1}|>\n"
-        #     audios = og.Audios.open(*audio_paths)
+        if len(audio_paths) == 0:
+            print("No audio provided")
+        else:
+            for i, audio_path in enumerate(audio_paths):
+                if not os.path.exists(audio_path):
+                    raise FileNotFoundError(f"Audio file not found: {audio_path}")
+                print(f"Using audio: {audio_path}")
+                prompt += f"<|audio_{i+1}|>\n"
+            audios = og.Audios.open(*audio_paths)
 
 
         if interactive:
@@ -116,52 +112,11 @@ def run(args: argparse.Namespace):
             if args.prompt:
                 text = args.prompt
             else:
-                text = "Does the audio summarize what is in the picture? If not, what is different?"
+                text = "Does the audio summarize what is shown in the image? If not, what is different?"
         prompt += f"{text}<|end|>\n<|assistant|>\n"
         
         print("Processing inputs...")
         inputs = processor(prompt, images=images, audios=audios)
-
-        print("Input IDs:")
-        print(inputs["input_ids"].shape)
-        import numpy as np
-        # np.save("input_ids_oga.npy", inputs["input_ids"])
-        print("Audio projection mode:")
-        print(inputs["audio_projection_mode"])
-        # np.save("audio_projection_mode_oga.npy", inputs["audio_projection_mode"])
-        print("Image attention mask:")
-        print(inputs["attention_mask"])
-        np.save("attention_mask_oga.npy", inputs["attention_mask"])
-        print("Pixel values:")
-        print(inputs["pixel_values"])
-        print(inputs["pixel_values"].shape)
-        np.save("pixel_values_oga.npy", inputs["pixel_values"])
-        # print("Audio values:")
-        # print(inputs["audio_embeds"])
-        # print(inputs["audio_sizes"])
-        print("Image sizes:")
-        print(inputs["image_sizes"])
-        print(inputs["image_sizes"].shape)
-        np.save("image_sizes_oga.npy", inputs["image_sizes"])
-
-        
-        import requests
-        from PIL import Image
-        from transformers import AutoProcessor
-
-        pt_processor = AutoProcessor.from_pretrained("/path/to/folder/containing/hf_version/", cache_dir="/path/to/cache_dir/", trust_remote_code=True)
-        pt_inputs = pt_processor(prompt, images=[Image.open(requests.get("https://www.ilankelman.org/stopsigns/australia.jpg", stream=True).raw)], audios=audios)
-
-        # inputs["attention_mask"] = pt_inputs["image_attention_mask"].half().detach().cpu().numpy()
-        # inputs["pixel_values"] = pt_inputs["input_image_embeds"].half().detach().cpu().numpy()
-        # inputs["image_sizes"] = pt_inputs["image_sizes"].detach().cpu().numpy()
-
-        print(np.max(np.abs(pt_inputs["image_attention_mask"].detach().cpu().numpy() - inputs["attention_mask"])))
-        print(np.max(np.abs(pt_inputs["input_image_embeds"].detach().cpu().numpy() - inputs["pixel_values"])))
-        print(np.max(np.abs(pt_inputs["image_sizes"].detach().cpu().numpy() - inputs["image_sizes"])))
-
-        exit()
-
         print("Processor complete.")
 
         print("Generating response...")

@@ -8,9 +8,7 @@ namespace Generators {
 
 namespace {
 
-int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
-                          const std::string& pixel_values_name,
-                          const std::string& image_sizes_name) {
+int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_inputs) {
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
     if (extra_inputs[i].name == Config::Defaults::NumImageTokens) {
       assert(extra_inputs[i].tensor->ort_tensor_);
@@ -24,11 +22,20 @@ int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_input
   return 0LL;
 }
 
-// This is technically calculating the number of input tokens (where the input can be any
-// modality). Since the output of this function is used to create the shape of audio_features,
-// however, the function is named as getting the number of audio tokens.
 int64_t GetNumAudioTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
                           const std::string& audio_sizes_name) {
+  // TODO: Uncomment the following code snippet when the speech model outputs [input_ids.shape[1], 3072]
+  /*
+  for (size_t i = 0; i < extra_inputs.size(); ++i) {
+    if (extra_inputs[i].name == Config::Defaults::NumAudioTokens) {
+      assert(extra_inputs[i].tensor->ort_tensor_);
+      return extra_inputs[i].tensor->ort_tensor_->GetTensorData<int64_t>()[0];
+    }
+  }
+
+  return 0;
+  */
+
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
     if (extra_inputs[i].name == audio_sizes_name) {
       assert(extra_inputs[i].tensor->ort_tensor_);
@@ -174,7 +181,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
 MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      num_image_tokens_{GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.pixel_values, model_.config_->model.vision.inputs.image_sizes)},
+      num_image_tokens_{GetNumImageTokens(params_->extra_inputs)},
       num_audio_tokens_{GetNumAudioTokens(params_->extra_inputs, model_.config_->model.speech.inputs.audio_sizes)},
       captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)},
       adapters_{std::make_shared<Adapters>(&model_)} {
@@ -191,11 +198,11 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
   embedding_state_ = std::make_unique<EmbeddingState>(model, params, num_image_tokens_, num_audio_tokens_);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params, captured_graph_info_.get());
 
-  if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value()) {
+  if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
     const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.vision.adapter_filename));
     adapters_->LoadAdapter(lora_adapter.c_str(), vision_adapter_name_);
     decoder_state_->SetActiveAdapter(adapters_.get(), vision_adapter_name_);
-  } else if (speech_state_ != nullptr && model_.config_->model.speech.adapter_filename.has_value()) {
+  } else if (speech_state_ != nullptr && model_.config_->model.speech.adapter_filename.has_value() && num_audio_tokens_ > 0) {
     const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.speech.adapter_filename));
     adapters_->LoadAdapter(lora_adapter.c_str(), speech_adapter_name_);
     decoder_state_->SetActiveAdapter(adapters_.get(), speech_adapter_name_);

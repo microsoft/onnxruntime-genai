@@ -39,6 +39,7 @@ struct Config {
     static constexpr std::string_view AudioSizesName = "audio_sizes";
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
+    static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
   };
 
   fs::path config_path;  // Path of the config directory

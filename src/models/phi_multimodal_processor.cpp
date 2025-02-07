@@ -186,6 +186,7 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
   }
 
   auto [input_ids, audio_projection_mode] = ProcessImageAudioPrompt(tokenizer, payload.prompt, num_img_tokens, audio_sizes, allocator);
+  int64_t num_audio_tokens = input_ids->GetTensorTypeAndShapeInfo()->GetShape()[1];
   named_tensors->emplace(Config::Defaults::InputIdsName, std::make_shared<Tensor>(std::move(input_ids)));
   named_tensors->emplace(Config::Defaults::AudioProjectionModeName, std::make_shared<Tensor>(std::move(audio_projection_mode)));
 
@@ -228,6 +229,10 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
       named_tensors->emplace(std::string(Config::Defaults::AudioSizesName),
                              std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(audio_sizes, allocator)));
     }
+
+    auto num_audio_tokens_tensor = named_tensors->emplace(Config::Defaults::NumAudioTokens,
+                                                          std::make_shared<Tensor>(OrtValue::CreateTensor<int64_t>(allocator, std::vector<int64_t>({1}))));
+    num_audio_tokens_tensor.first->second->ort_tensor_->GetTensorMutableData<int64_t>()[0] = num_audio_tokens;
   }
 
   return named_tensors;
