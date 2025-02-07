@@ -152,4 +152,5 @@ stages:
       ort_cuda_version: ${{ parameters.ort_cuda_version }}
       ort_dml_version: ${{ parameters.ort_dml_version }}
       cuda_version: ${{ parameters.cuda_version }}
+      nuget_version_type: ${{ parameters.nuget_version_type }}
       SpecificArtifact: false
