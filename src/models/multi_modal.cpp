@@ -19,23 +19,11 @@ int64_t GetNumImageTokens(const std::vector<GeneratorParams::Input>& extra_input
     }
   }
 
-  return 0LL;
+  return 0;
 }
 
 int64_t GetNumAudioTokens(const std::vector<GeneratorParams::Input>& extra_inputs,
                           const std::string& audio_sizes_name) {
-  // TODO: Uncomment the following code snippet when the speech model outputs [input_ids.shape[1], 3072]
-  /*
-  for (size_t i = 0; i < extra_inputs.size(); ++i) {
-    if (extra_inputs[i].name == Config::Defaults::NumAudioTokens) {
-      assert(extra_inputs[i].tensor->ort_tensor_);
-      return extra_inputs[i].tensor->ort_tensor_->GetTensorData<int64_t>()[0];
-    }
-  }
-
-  return 0;
-  */
-
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
     if (extra_inputs[i].name == audio_sizes_name) {
       assert(extra_inputs[i].tensor->ort_tensor_);
