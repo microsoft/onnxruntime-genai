@@ -227,12 +227,43 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     temperature = 1.0
 
     # Get tokenizer, and model
+    if args.verbose: print("Getting config")
+    config = og.Config(f'{args.input_folder}')
+    config.clear_providers()
     if args.verbose: print("Loading model... ")
-    model=og.Model(f'{args.input_folder}')
+    model = og.Model(config)
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
 
- 
+    # Get model type
+    model_type = None
+    if hasattr(model, "type"):
+        model_type = model.type
+    else:
+        import json, os
+
+        with open(os.path.join(args.input_folder, "genai_config.json"), "r") as f:
+            genai_config = json.load(f)
+            model_type = genai_config["model"]["type"]
+
+    # Set chat template
+    if args.chat_template:
+        if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
+            raise ValueError("Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
+    else:
+        if model_type.startswith("phi2") or model_type.startswith("phi3"):
+            args.chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
+        elif model_type.startswith("phi4"):
+            args.chat_template = '<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>'
+        elif model_type.startswith("llama"):
+            args.chat_template = '<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
+        elif model_type.startswith("llama2"):
+            args.chat_template = '<s>{input}'
+        elif model_type.startswith("qwen2"):
+            args.chat_template = '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
+        else:
+            raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
+
     # Generate prompt
     tokens, prompt = None, None
     if args.use_random_tokens:
@@ -241,7 +272,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         prompt = [tokenizer.decode(tokens[0])] * batch_size
     elif args.use_prompt_set:
         prompt = [get_prompt_by_length(prompt_length)] * batch_size
-        tokens = tokenizer.encode_batch(prompt)
+        tokens = tokenizer.encode(prompt)
 
         if len(tokens) > max_length:
             # Shorten the inputs from (batch_size, tokenized_length) to (batch_size, requested_length)
@@ -252,8 +283,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             for _ in range(max_length - len(tokens)):
                 tokens = np.hstack((tokens_first_col, tokens))
     else:
-        prompt = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
-        tokens = tokenizer.encode_batch(prompt)
+        text = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
+        prompt = f'{args.chat_template.format(input=text)}'
+        tokens = tokenizer.encode(prompt)
 
     params = og.GeneratorParams(model)
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
@@ -283,7 +315,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
         # Measure tokenization
         tokenize_start_time = time.perf_counter()
-        tokens = tokenizer.encode_batch(prompt)
+        tokens = tokenizer.encode(prompt)
         tokenize_end_time = time.perf_counter()
         tokenize_times.append(tokenize_end_time - tokenize_start_time)
 
@@ -437,6 +469,8 @@ if __name__ == "__main__":
     parser.add_argument('-pr', '--precision', type=str, default='fp16', help='Model precision for metrics info')
     parser.add_argument('--use_random_tokens', action='store_true', help='Use random tokens instead of generating a prompt')
     parser.add_argument('--use_prompt_set', action='store_true', help='Use pre-generated prompt set instead of generating a prompt')
+    parser.add_argument('--chat_template', type=str, default='', help='chat template')
+    parser.add_argument('--execution_provider', type=str, default='cpu', help='execution provider')
     args = parser.parse_args()
 
     # check max_lengths
