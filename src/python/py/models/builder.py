@@ -3068,6 +3068,7 @@ class ChatGLMModel(Model):
         layer.self_attn = layer.self_attn if hasattr(layer, 'self_attn') else layer.self_attention
         super().make_layer(layer_id, layer)
 
+
 class OLMoModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
@@ -3076,6 +3077,7 @@ class OLMoModel(Model):
         layernorm.weight = torch.ones(self.hidden_size)
         layernorm.bias = torch.zeros(self.hidden_size)
         super().make_layernorm(layer_id, layernorm, skip, simple, location)
+
 
 class GraniteModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
