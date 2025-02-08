@@ -27,7 +27,7 @@ This example uses the [Phi-3.5 mini model](https://huggingface.co/microsoft/Phi-
 You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the Hugging Face CLI.
 
 ```bash
-huggingface-cli download microsoft/Phi-3.5-mini-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
+huggingface-cli download microsoft/Phi-3.5-mini-instruct-onnx --include cpu_and_mobile/cpu-int4-awq-block-128-acc-level-4/* --local-dir .
 ```
 
 ### Windows x64 CPU
@@ -69,7 +69,7 @@ cmake --build . --config Release
 
 ```bash
 cd Release
-.\phi3.exe path_to_model
+.\phi3.exe <path_to_model> <execution_provider>
 ```
 
 ### Windows x64 DirectML
@@ -114,7 +114,7 @@ cmake --build . --config Release
 
 ```bash
 cd Release
-.\phi3.exe path_to_model
+.\phi3.exe <path_to_model> <execution_provider>
 ```
 
 ### Windows arm64 CPU
@@ -156,7 +156,7 @@ cmake --build . --config Release
 
 ```bash
 cd Release
-.\phi3.exe path_to_model
+.\phi3.exe <path_to_model> <execution_provider>
 ```
 
 ### Windows arm64 DirectML
@@ -201,7 +201,7 @@ cmake --build . --config Release
 
 ```bash
 cd Release
-.\phi3.exe path_to_model
+.\phi3.exe <path_to_model> <execution_provider>
 ```
 
 ### Linux
@@ -216,8 +216,8 @@ Change into the onnxruntime-genai directory.
    cd examples/c
    curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz -o onnxruntime-linux-x64-1.20.1.tgz
    tar xvzf onnxruntime-linux-x64-1.20.1.tgz
-   cp onnxruntime-linux-x64-1.20.1/include/* include
-   cp onnxruntime-linux-x64-1.20.1/lib/* lib
+   cp -r onnxruntime-linux-x64-1.20.1/include/* include
+   cp -r onnxruntime-linux-x64-1.20.1/lib/* lib
    cd ../..
    ```
 
@@ -257,7 +257,8 @@ cmake --build . --config Release
 #### Run the sample
 
 ```bash
-./phi3 path_to_model
+./phi3 <path_to_model> <execution_provider>
+# Example for CPU: ./phi3 ../cpu_and_mobile/cpu-int4-awq-block-128-acc-level-4/ cpu
 ```
 
 ## Phi-3.5 vision
@@ -314,7 +315,7 @@ cmake --build . --config Release
 
 ```bash
 cd Release
-.\phi3v.exe path_to_model
+.\phi3v.exe <path_to_model> <execution_provider>
 ```
 
 ### Run on Linux
@@ -329,8 +330,8 @@ Change into the onnxruntime-genai directory.
    cd examples/c
    curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz -o onnxruntime-linux-x64-1.20.1.tgz
    tar xvzf onnxruntime-linux-x64-1.20.1.tgz
-   cp onnxruntime-linux-x64-1.20.1/include/* include
-   cp onnxruntime-linux-x64-1.20.1/lib/* lib
+   cp -r onnxruntime-linux-x64-1.20.1/include/* include
+   cp -r onnxruntime-linux-x64-1.20.1/lib/* lib
    cd ../..
    ```
 
@@ -369,5 +370,5 @@ cmake --build . --config Release
 
 ```bash
 cd build/Release
-./phi3v path_to_model
+./phi3v <path_to_model> <execution_provider>
 ```
