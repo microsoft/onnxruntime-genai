@@ -88,9 +88,9 @@ std::string SLMEngine::complete(const char *user_prompt) {
     auto params = OgaGeneratorParams::Create(*m_onnx_model);
     params->SetSearchOption("max_length", input_parameters.MaxGeneratedTokens);
     params->SetSearchOption("temperature", input_parameters.Temperature);
-    params->SetInputSequences(*sequences);
 
     auto generator = OgaGenerator::Create(*m_onnx_model, *params);
+    generator->AppendTokenSequences(*sequences);
     bool is_first_token = true;
     auto time_count = 0;
 
@@ -113,7 +113,6 @@ std::string SLMEngine::complete(const char *user_prompt) {
     std::ostringstream response;
     bool stop_token_found = false;
     while (!generator->IsDone()) {
-        generator->ComputeLogits();
         generator->GenerateNextToken();
 
         const auto num_tokens = generator->GetSequenceCount(0);
