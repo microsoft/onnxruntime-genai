@@ -1785,9 +1785,8 @@ class Model:
         self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         # Make output MatMul node
-        down_proj = getattr(mlp, "down_proj", None) or getattr(mlp, "dense_4h_to_h", None)
         down_matmul_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
-        down_matmul_name = self.make_matmul(down_proj, down_matmul_basename, f"{mul_name}/output_0")
+        down_matmul_name = self.make_matmul(mlp.down_proj, down_matmul_basename, f"{mul_name}/output_0")
         down_name = down_matmul_name
         if down_bias_exists:
             down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
@@ -3063,6 +3062,12 @@ class ChatGLMModel(Model):
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
         self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
         self.rotemb_attrs["interleaved"] = 1
+
+    def make_mlp(self, layer_id, mlp, root_input):
+        if not hasattr(mlp, 'down_proj'):
+            # Attribute does not exist for original PyTorch model only
+            mlp.down_proj = mlp.dense_4h_to_h
+        super().make_mlp(layer_id, mlp, root_input)
 
     def make_layer(self, layer_id, layer):
         layer.self_attn = layer.self_attn if hasattr(layer, 'self_attn') else layer.self_attention
