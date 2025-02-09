@@ -130,5 +130,6 @@ int main(int argc, char** argv) {
         verbose = true;
     }
 
-    return run_server(model_path, model_family, port_number, verbose);
+    run_server(model_path, model_family, port_number, verbose);
+    OgaShutdown();
 }

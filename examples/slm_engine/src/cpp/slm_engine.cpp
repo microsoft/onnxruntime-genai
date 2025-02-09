@@ -7,6 +7,9 @@
     #include <sys/resource.h>
     #include <sys/time.h>
     #include <unistd.h>
+#else
+    #include <windows.h>
+    #include <psapi.h>
 #endif 
 
 #include <chrono>
@@ -335,6 +338,12 @@ std::string SLMEngine::format_input(
 
 uint32_t SLMEngine::GetMemoryUsage() {
 #if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS_EX pmc;
+    if (GetProcessMemoryInfo(
+        GetCurrentProcess(), 
+        (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc))) {
+            return pmc.WorkingSetSize / (1024*1024);
+    }
     return 0;
 #else
 #if defined(__ANDROID__)
