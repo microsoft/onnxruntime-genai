@@ -24,7 +24,7 @@ def main():
     # Adding arguments
     parser.add_argument("--android", action="store_true", help="Build for Android")
     parser.add_argument("--android_ndk_path", type=str, help="Path to ANDROID NDK")
-    parser.add_argument("--build_type", type=str, help="{Release|RelWithDebInfo|Debug}")
+    parser.add_argument("--build_type", type=str, default="Release", help="{Release|RelWithDebInfo|Debug}")
 
     # Parsing arguments
     args = parser.parse_args()
@@ -42,10 +42,6 @@ def main():
         TOPLEVEL_DIR,
         f"-DARTIFACTS_DIR={artifacts_dir}",
     ]
-    if args.build_type is not None:
-        cmake_options.extend([f"-DCMAKE_BUILD_TYPE={args.build_type}"])
-    else:
-        cmake_options.extend(["-DCMAKE_BUILD_TYPE=Release"])
 
     # We keep the build directory prefix as same as that's returned by the
     # platform.system() call which maps 1:1 with the Linux uname -s command.
@@ -72,7 +68,15 @@ def main():
     result = subprocess.call(cmake_options)
     if result != 0:
         raise Exception("CMake error!")
-    result = subprocess.call(["cmake", "--build", ".", "--", f"-j{os.cpu_count()}"])
+    #result = subprocess.call(["cmake", "--build", ".", "--", f"-j{os.cpu_count()}"])
+    result = subprocess.call(
+        [
+            "cmake", 
+            "--build", ".",
+            "--config",
+            args.build_type,
+        ]
+    )
     if result != 0:
         raise Exception("Build error!")
 

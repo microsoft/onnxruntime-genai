@@ -68,6 +68,7 @@ class SLMEngine {
             case SupportedModelType::Llama3_2:
                 return "llama3.2";
             case SupportedModelType::UNKNOWN:
+            default:
                 return "unknown";
         }
     }

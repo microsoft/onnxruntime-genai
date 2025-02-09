@@ -34,6 +34,8 @@ elseif( (${CMAKE_SYSTEM_NAME} STREQUAL "Android") OR (${CMAKE_SYSTEM_NAME} STREQ
     if (${CMAKE_SYSTEM_NAME} STREQUAL "Linux")
         set(CMAKE_INSTALL_RPATH "\$ORIGIN")
     endif()
+elseif (${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
+    set(LIB_EXT "lib")
 else()
     message(FATAL_ERROR "Unsupported OS: ${CMAKE_SYSTEM_NAME}")
 endif()
@@ -51,23 +53,27 @@ set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
 set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
+if (NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
+    set(LIBNAME_PREFIX lib)
+endif()
+
 # Import the onnxruntime
 add_library(ort SHARED IMPORTED)
 set_target_properties(
     ort 
     PROPERTIES 
-    IMPORTED_LOCATION 
-    ${ARTIFACTS}/${SYS_TARGET_ID}/lib/libonnxruntime${LIB_VERSION_ORT}.${LIB_EXT})
+    IMPORTED_IMPLIB 
+    ${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime${LIB_VERSION_ORT}.${LIB_EXT})
 
 file(GLOB_RECURSE ORT_LIBS
-    "${ARTIFACTS}/${SYS_TARGET_ID}/lib/libonnxruntime*")
+    "${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime*")
 
 list(APPEND IMPORTED_LIB_LIST ${ORT_LIBS})
 if (${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
 #     list(APPEND IMPORTED_LIB_LIST ${ORT_LIBS})
 # else()
     list(APPEND IMPORTED_LIB_LIST 
-        ${ARTIFACTS}/${SYS_TARGET_ID}/lib/libonnxruntime${LIB_VERSION_ORT}.${LIB_EXT})
+        ${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime${LIB_VERSION_ORT}.${LIB_EXT})
 endif() 
 
 # Import ONNXRT-GenAI stuff
@@ -75,11 +81,11 @@ add_library(ort-genai SHARED IMPORTED)
 set_target_properties(
     ort-genai 
     PROPERTIES 
-    IMPORTED_LOCATION 
-    ${ARTIFACTS}/${SYS_TARGET_ID}/lib/libonnxruntime-genai.${LIB_EXT})
+    IMPORTED_IMPLIB 
+    ${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime-genai.${LIB_EXT})
 
 list(APPEND IMPORTED_LIB_LIST 
-${ARTIFACTS}/${SYS_TARGET_ID}/lib/libonnxruntime-genai.${LIB_EXT})
+${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime-genai.${LIB_EXT})
 
 set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/install/")
 install(FILES ${IMPORTED_LIB_LIST} DESTINATION bin)

@@ -3,9 +3,11 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <sys/resource.h>
-#include <sys/time.h>
-#include <unistd.h>
+#if !defined(_WIN32)
+    #include <sys/resource.h>
+    #include <sys/time.h>
+    #include <unistd.h>
+#endif 
 
 #include <chrono>
 #include <fstream>
@@ -332,6 +334,9 @@ std::string SLMEngine::format_input(
 }
 
 uint32_t SLMEngine::GetMemoryUsage() {
+#if defined(_WIN32)
+    return 0;
+#else
 #if defined(__ANDROID__)
     // Read the /proc/self/status file to get the memory usage
     std::ifstream status_file("/proc/self/status");
@@ -362,6 +367,7 @@ uint32_t SLMEngine::GetMemoryUsage() {
 #endif
     return current_memory;
 #endif
+#endif 
 }
 
 }  // namespace aias

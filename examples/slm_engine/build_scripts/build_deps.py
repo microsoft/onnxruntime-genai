@@ -153,8 +153,9 @@ def build_ort(args):
     print("Building ONNX Runtime")
     os.chdir("src/onnxruntime")
 
-    print(f"Running build.sh with args: {cmd_args}")
-    result = subprocess.call(["./build.sh"] + cmd_args)
+    build_script = "build.bat" if platform.system() == "Windows" else "build.sh"
+    print(f"Running {build_script} with args: {cmd_args}")
+    result = subprocess.call([build_script] + cmd_args)
     if result != 0:
         raise Exception("Failed to build ONNX Runtime")
 
@@ -184,7 +185,7 @@ def build_ort(args):
     if result != 0:
         raise Exception("Failed to install ONNX Runtime")
 
-    # Now create the symbolic links only if Android
+    # Now create the symbolic links only if Android Build
     if args.android:
         os.chdir(ort_home)
         # Create the symbolic links only in doesn't exist
@@ -242,7 +243,7 @@ def build_ort(args):
             ]
         )
 
-    print(f"Running build.sh with args: {cmd_args}")
+    print(f"Running build.py with args: {cmd_args}")
     result = subprocess.call(["python", "build.py"] + cmd_args)
     if result != 0:
         raise Exception("Failed to build ORT-GenAI")
@@ -270,7 +271,11 @@ def build_ort(args):
 
     # Now copy the ORT Libs to the ORT-GenAI directory installation location
     dest_dir = f"{build_dir_name}/install/lib"
-    copy_files_keeping_symlinks(glob.glob(f"{ort_home}/lib/libonnxruntime*"), dest_dir)
+    copy_files_keeping_symlinks(glob.glob(f"{ort_home}/lib/*onnxruntime*"), dest_dir)
+
+    # For Windows build, the .dll files are stored in the bin directory. 
+    # For Linux/Mac this is a no-op
+    copy_files_keeping_symlinks(glob.glob(f"{ort_home}/bin/*onnxruntime*"), dest_dir)
 
     # The "current_dir" is the "build_scripts" directory. Need to
     os.chdir(current_dir)
@@ -287,6 +292,9 @@ def build_ort(args):
 
     copy_files_keeping_symlinks(
         glob.glob(f"{build_dir_name}/install/lib/*"), f"{artifacts_dir}/lib"
+    )
+    copy_files_keeping_symlinks(
+        glob.glob(f"{build_dir_name}/install/bin/*"), f"{artifacts_dir}/lib"
     )
 
     copy_files_keeping_symlinks(
