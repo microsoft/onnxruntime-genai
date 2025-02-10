@@ -44,6 +44,11 @@ parameters:
   type: boolean
   default: true
 
+- name: enable_win_qnn
+  displayName: Whether QNN nuget package should be built.'
+  type: boolean
+  default: true
+
 - name: ort_version
   type: string
 - name: ort_cuda_version
@@ -85,3 +90,16 @@ stages:
           build_config: ${{ parameters.build_config }}
           enable_win_dml: ${{ parameters.enable_win_dml }}
           enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+    - ${{ if eq(parameters.enable_win_qnn, true) }}:
+      - template: jobs/nuget-packaging-job.yml
+        parameters:
+          ep: 'cpu'
+          ort_version: ${{ parameters.ort_version }}
+          build_config: ${{ parameters.build_config }}
+          enable_linux_cpu: false
+          enable_win_cpu: false
+          enable_win_arm64: true
+          enable_macos_cpu: false
+          enable_android: false
+          enable_apple_framework: false
+          enable_win_qnn: true
