@@ -49,9 +49,6 @@ jobs:
         Python312:
           PyDotVer: '3.12'
           PyNoDotVer: '312'
-        Python313:
-          PyDotVer: '3.13'
-          PyNoDotVer: '313'
     ${{ else }}:
       matrix:
         Python310:
@@ -98,17 +95,6 @@ jobs:
     value: '7982ae20-ed19-4a35-a362-a96ac99897b7'
 
   steps:
-  - script: |
-      MKDIR $(Agent.ToolsDirectory)\Python\3.13\arm64
-      XCOPY /s /y /h /e /c /q "C:\Python\Python313\*.*" $(Agent.ToolsDirectory)\Python\3.13\arm64\
-      COPY NUL $(Agent.ToolsDirectory)\Python\3.13\arm64.complete
-      DIR $(Agent.ToolsDirectory)\Python
-      DIR $(Agent.ToolsDirectory)\Python\3.13
-      DIR $(Agent.ToolsDirectory)\Python\3.13\arm64
-      DIR "C:\Python"
-    displayName: Copy python 3.13 version to agent tools directory
-    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.13'))
-  
   - script: |
       MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
       XCOPY /s /y /h /e /c /q "C:\Python\Python312\*.*" $(Agent.ToolsDirectory)\Python\3.12.3\arm64\
