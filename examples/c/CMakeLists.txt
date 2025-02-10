@@ -32,7 +32,6 @@ elseif(CMAKE_SYSTEM_NAME MATCHES "AIX")
 else()
   set(ONNXRUNTIME_GENAI_LIB "libonnxruntime-genai.so")
   set(ONNXRUNTIME_GENAI_DEPENDENCY "*.so")
-  endif()
 endif()
 
 file(GLOB ort_genai_libs "${CMAKE_SOURCE_DIR}/lib/${ONNXRUNTIME_GENAI_DEPENDENCY}")
