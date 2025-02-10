@@ -31,11 +31,13 @@ peak_gpu_memory = 0.0
 peak_memory_lock = threading.Lock()
 stop_monitoring = False
 
-try:
-    subprocess.run(["nvidia-smi"], check=True)
-    IS_NVIDIA_SYSTEM = True
-except Exception:
-    IS_NVIDIA_SYSTEM = False
+IS_NVIDIA_SYSTEM = False
+if og.is_cuda_available():
+    try:
+        subprocess.run(["nvidia-smi"], check=True)
+        IS_NVIDIA_SYSTEM = True
+    except Exception:
+        IS_NVIDIA_SYSTEM = False
 
 # Monitor the GPU memory usage
 def monitor_gpu_memory():
@@ -68,15 +70,15 @@ def monitor_cpu_memory():
 
 # Use input model to generate prompt
 def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
-    prompt = "a"
+    prompt = "a " # tokens must be of length > 1 due to DML GQA operator bug
     tokens = tokenizer.encode(prompt)
-    params=og.GeneratorParams(model)
+    params = og.GeneratorParams(model)
     params.set_search_options(max_length=prompt_length, min_length=prompt_length)
 
     if use_graph_capture:
         params.try_graph_capture_with_max_batch_size(1)
 
-    generator=og.Generator(model, params)
+    generator = og.Generator(model, params)
     generator.append_tokens(tokens)
     while not generator.is_done():
         generator.generate_next_token()
@@ -231,7 +233,6 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     model=og.Model(f'{args.input_folder}')
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
-
  
     # Generate prompt
     tokens, prompt = None, None
@@ -428,7 +429,7 @@ if __name__ == "__main__":
     parser.add_argument('-w', '--warmup', type=int, default=5, help='Number of warmup runs before benchmarking')
     parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
     parser.add_argument('-p', '--top_p', type=float, default=1.0, help='Top p probability to sample with')
-    parser.add_argument('-o', '--output', type=str, default='genai_e2e', help='Output CSV file name or path (with .csv extension)')
+    parser.add_argument('-o', '--output', type=str, default='genai_e2e.csv', help='Output CSV file name or path (with .csv extension)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print extra information')
     parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
     parser.add_argument('-pm', '--print_memory_usage', default=False, help='Print memory footprint')
