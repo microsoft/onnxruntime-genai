@@ -153,7 +153,7 @@ def build_ort(args):
     print("Building ONNX Runtime")
     os.chdir("src/onnxruntime")
 
-    build_script = "build.bat" if platform.system() == "Windows" else "build.sh"
+    build_script = "build.bat" if platform.system() == "Windows" else "./build.sh"
     print(f"Running {build_script} with args: {cmd_args}")
     result = subprocess.call([build_script] + cmd_args)
     if result != 0:
@@ -273,7 +273,7 @@ def build_ort(args):
     dest_dir = f"{build_dir_name}/install/lib"
     copy_files_keeping_symlinks(glob.glob(f"{ort_home}/lib/*onnxruntime*"), dest_dir)
 
-    # For Windows build, the .dll files are stored in the bin directory. 
+    # For Windows build, the .dll files are stored in the bin directory.
     # For Linux/Mac this is a no-op
     copy_files_keeping_symlinks(glob.glob(f"{ort_home}/bin/*onnxruntime*"), dest_dir)
 
