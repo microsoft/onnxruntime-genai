@@ -1,0 +1,40 @@
+#include "../generators.h"
+#include "model.h"
+#include "extra_outputs.h"
+
+
+namespace Generators {
+
+ExtraOutputs::ExtraOutputs(State& state)
+    : state_{state} {}
+
+void ExtraOutputs::Add() {
+    // Add() should be called after all the outputs managed by GenAI are initialized
+    all_output_names_ = state_.model_.session_info_->GetOutputNames();
+    extra_outputs_start_ = state_.output_names_.size();
+    for (const auto& output_name : all_output_names_) {
+        if (std::none_of(state_.output_names_.begin(), state_.output_names_.end(),
+                        [&](const std::string& elem) { return elem == output_name; })) {
+            state_.output_names_.push_back(output_name.c_str());
+            state_.outputs_.push_back(nullptr);
+        }
+    }
+}
+
+void ExtraOutputs::Update() {
+    for (size_t i = extra_outputs_start_; i < state_.output_names_.size(); ++i) {
+        output_ortvalue_store_[state_.output_names_[i]] = std::unique_ptr<OrtValue>(state_.outputs_[i]);
+        // reset extra output ortvalues to nullptr to avoid shape mismatch across runs
+        state_.outputs_[i] = nullptr;
+    }
+}
+
+OrtValue* ExtraOutputs::GetOutput(const char* name) {
+    if (auto iter = output_ortvalue_store_.find(name); iter != output_ortvalue_store_.end()) {
+      return iter->second.get();
+    } else {
+        return nullptr;
+    }
+}
+
+}  // namespace Generators

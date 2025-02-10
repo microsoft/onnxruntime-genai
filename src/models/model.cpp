@@ -29,7 +29,8 @@ namespace Generators {
 State::State(const GeneratorParams& params, const Model& model)
     : model_{model},
       params_{params.shared_from_this()},
-      run_options_{OrtRunOptions::Create()} {}
+      run_options_{OrtRunOptions::Create()},
+      extra_outputs_{*this} {}
 
 void State::Run(OrtSession& session, int new_batch_size) {
   auto captured_graph_info = GetCapturedGraphInfo();
@@ -38,17 +39,7 @@ void State::Run(OrtSession& session, int new_batch_size) {
     if (captured_graph_info) {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
-
-    all_output_names_ = session.GetOutputNames();
-    extra_outputs_start = output_names_.size();
-    for (const auto& output_name : all_output_names_) {
-      if (std::none_of(output_names_.begin(), output_names_.end(),
-                       [&](const std::string& elem) { return elem == output_name; })) {
-        output_names_.push_back(output_name.c_str());
-        outputs_.push_back(nullptr);
-      }
-    }
-
+    extra_outputs_.Add();
     first_run_ = false;
   } else if (captured_graph_info && new_batch_size != current_batch_size_) {
     current_batch_size_ = new_batch_size;
@@ -71,11 +62,7 @@ void State::Run(OrtSession& session, int new_batch_size) {
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
 
-  for (size_t i = extra_outputs_start; i < output_names_.size(); ++i) {
-    output_ortvalue_store_[output_names_[i]] = std::unique_ptr<OrtValue>(outputs_[i]);
-    // reset extra output ortvalues to nullptr to avoid shape mismatch across runs
-    outputs_[i] = nullptr;
-  }
+  extra_outputs_.Update();
 
   if (g_log.enabled && g_log.model_output_values) {
     auto& stream = Log("model_output_values");
@@ -105,8 +92,8 @@ OrtValue* State::GetInput(const char* name) {
 }
 
 OrtValue* State::GetOutput(const char* name) {
-  if (auto iter = output_ortvalue_store_.find(name); iter != output_ortvalue_store_.end()) {
-    return iter->second.get();
+  if (OrtValue* output = extra_outputs_.GetOutput(name); output) {
+    return output;
   }
   ThrowErrorIfSessionTerminated(session_terminated_);
   for (size_t i = 0; i < output_names_.size(); i++) {
@@ -309,6 +296,14 @@ std::vector<std::string> SessionInfo::GetInputNames() const {
   names.reserve(inputs_.size());
   for (const auto& input : inputs_)
     names.push_back(input.first);
+  return names;
+}
+
+std::vector<std::string> SessionInfo::GetOutputNames() const {
+  std::vector<std::string> names;
+  names.reserve(outputs_.size());
+  for (const auto& output : outputs_)
+    names.push_back(output.first);
   return names;
 }
 

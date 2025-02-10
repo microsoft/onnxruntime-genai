@@ -7,6 +7,7 @@
 #include "prompt_image_processor.h"
 #include "audio_processor.h"
 #include "adapters.h"
+#include "extra_outputs.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -64,11 +65,7 @@ struct State {
  private:
   int current_batch_size_{0};
   std::shared_ptr<Adapters> adapters_;
-
-  // manage output ortvalues not specified in output_names_ before first State::Run()
-  std::unordered_map<std::string, std::unique_ptr<OrtValue>> output_ortvalue_store_;
-  std::vector<std::string> all_output_names_;  // keep output strings in scope
-  size_t extra_outputs_start = std::numeric_limits<size_t>::max();
+  ExtraOutputs extra_outputs_;
 };
 
 struct TokenizerStream : LeakChecked<TokenizerStream> {
@@ -128,6 +125,7 @@ struct SessionInfo {
   ONNXTensorElementDataType GetOutputDataType(const std::string& name) const;
 
   std::vector<std::string> GetInputNames() const;
+  std::vector<std::string> GetOutputNames() const;
 
  private:
   std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;
