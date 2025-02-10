@@ -12,19 +12,19 @@ public class TestUtils {
   private static final Logger logger = Logger.getLogger(TestUtils.class.getName());
 
   public static final String testAdapterTestModelPath() {
-    return getFilePathFromResource("/adapters");
+    return getFilePathFromResource(getRepoRoot() + "test/test_models/adapters");
   }
 
   public static final String testAdapterTestAdaptersPath() {
-    return getFilePathFromResource("/adapters/adapters.onnx_adapter");
+    return getFilePathFromResource(getRepoRoot() + "test/test_models/adapters/adapters.onnx_adapter");
   }
 
   public static final String tinyGpt2ModelPath() {
-    return getFilePathFromResource("/hf-internal-testing/tiny-random-gpt2-fp32");
+    return getFilePathFromResource(getRepoRoot() + "test/test_models/hf-internal-testing/tiny-random-gpt2-fp32");
   }
 
   public static final String testVisionModelPath() {
-    return getFilePathFromResource("/vision-preprocessing");
+    return getFilePathFromResource(getRepoRoot() + "test/test_models/vision-preprocessing");
   }
 
   public static final String getRepoRoot() {
