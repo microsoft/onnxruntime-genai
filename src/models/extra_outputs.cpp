@@ -14,7 +14,7 @@ void ExtraOutputs::Add() {
   extra_outputs_start_ = state_.output_names_.size();
   for (const auto& output_name : all_output_names_) {
     if (std::none_of(state_.output_names_.begin(), state_.output_names_.end(),
-                    [&](const std::string& elem) { return elem == output_name; })) {
+                     [&](const std::string& elem) { return elem == output_name; })) {
       state_.output_names_.push_back(output_name.c_str());
       state_.outputs_.push_back(nullptr);
     }
