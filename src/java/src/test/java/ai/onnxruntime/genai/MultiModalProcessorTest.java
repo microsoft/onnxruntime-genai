@@ -22,7 +22,10 @@ public class MultiModalProcessorTest {
       String inputs =
           new String(
               "<|user|>\n<|image_1|>\n Can you convert the table to markdown format?\n<|end|>\n<|assistant|>\n");
-      try (Images image = new Images(TestUtils.getFilePathFromResource("/images/sheet.png"));
+      try (Images image =
+              new Images(
+                  TestUtils.getFilePathFromDisk(
+                      TestUtils.getTestResourcePath("images/sheet.png")));
           NamedTensors processed = multiModalProcessor.processImages(inputs, image); ) {
         assertNotNull(processed);
       }
