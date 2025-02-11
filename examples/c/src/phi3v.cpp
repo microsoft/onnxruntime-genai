@@ -3,7 +3,7 @@
 
 #include <cstring>
 #include <memory>
-#include "../common.h"
+#include "common.h"
 #include "ort_genai.h"
 
 // C++ API Example
