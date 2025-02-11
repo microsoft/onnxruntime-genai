@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include "../generators.h"
 #include "model.h"
 #include "extra_outputs.h"
