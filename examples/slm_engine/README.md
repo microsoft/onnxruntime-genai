@@ -5,7 +5,7 @@ SLM Engine is a C++ based application that uses ONNX Runtime (ORT) genrate() API
 The following diagram illustrates a hugh level architecture of the SLM Engine and it's relationship with the ONNX Runtime libraries.
 
 <div align="center">
-    <img src="doc/SLM-Engine-Arch.png" height="240">
+    <img src="architecture.drawio.png">
     <p>SLM Engine Architecture</p>
 </div>
 
@@ -215,6 +215,26 @@ options:
 
 ```
 
+##### Android Build With QNN Support
+
+The following example illustrates how to cross compile the dependencies for Android CPU from Linux host.
+
+```bash
+$ export ANDROID_SDK_ROOT=<Android SDK Directory>
+$ export NDK_ROOT=$ANDROID_SDK_ROOT/ndk/<Version Number>
+$ export QNN_SDK_ROOT=<qualcomm/qairt/VERSION>
+$ python build_deps.py --android \
+    --android_sdk_path $ANDROID_SDK_ROOT \
+    --android_ndk_path $NDK_ROOT \
+    --qnn_sdk_path $QNN_SDK_ROOT
+...
+
+```
+
+If you are building just for Android CPU, then omit the `qnn_sdk_path`.
+
+After the dependencies are built, it's time to build the SLM Engine as described in the next section.
+
 #### Build SLM Engine
 
 Next step is to build the program itself. For that use the script `build.py` with appropriate command line options as needed for Android build.
@@ -239,6 +259,15 @@ options:
                         {Release|RelWithDebInfo|Debug}
 
 ```
+
+For Android builds - use the following example:
+
+```bash
+$ python build_deps.py --android  --android_ndk_path $NDK_ROOT
+...
+```
+
+Notice that no need to specify any QNN flags as QNN device is handled by the ONNX Runtime via the [Execution Provider](https://onnxruntime.ai/docs/execution-providers/) mechanism.
 
 ## Testing the build
 
