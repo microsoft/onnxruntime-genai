@@ -12,19 +12,23 @@ public class TestUtils {
   private static final Logger logger = Logger.getLogger(TestUtils.class.getName());
 
   public static final String testAdapterTestModelPath() {
-    return getFilePathFromResource("/adapters");
+    return getFilePathFromDisk(getTestResourcePath("adapters"));
   }
 
   public static final String testAdapterTestAdaptersPath() {
-    return getFilePathFromResource("/adapters/adapters.onnx_adapter");
+    return getFilePathFromDisk(getTestResourcePath("adapters/adapters.onnx_adapter"));
   }
 
   public static final String tinyGpt2ModelPath() {
-    return getFilePathFromResource("/hf-internal-testing/tiny-random-gpt2-fp32");
+    return getFilePathFromDisk(getTestResourcePath("hf-internal-testing/tiny-random-gpt2-fp32"));
   }
 
   public static final String testVisionModelPath() {
-    return getFilePathFromResource("/vision-preprocessing");
+    return getFilePathFromDisk(getTestResourcePath("vision-preprocessing"));
+  }
+
+  public static final String getTestResourcePath(String relativeResourcePath) {
+    return getFilePathFromDisk(getRepoRoot() + "test/test_models/" + relativeResourcePath);
   }
 
   public static final String getRepoRoot() {
@@ -57,6 +61,20 @@ public class TestUtils {
     }
 
     File f = new File(url.getFile());
+    return f.getPath();
+  }
+
+  public static final String getFilePathFromDisk(String path) {
+    if (path == null) {
+      logger.warning("Path provided is null");
+      return null;
+    }
+    File f = new File(path);
+    if (!f.exists()) {
+      logger.warning("Model not found at " + path);
+      return null;
+    }
+
     return f.getPath();
   }
 
