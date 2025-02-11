@@ -358,6 +358,10 @@ def test_get_output(test_data_path, relative_model_path):
         logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3
     )
 
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
+)
 @pytest.mark.parametrize(
     "relative_model_path",
     (
