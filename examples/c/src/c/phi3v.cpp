@@ -7,6 +7,8 @@
 #include "../common.h"
 #include "ort_genai.h"
 
+// This an example of how to use the C API, however we strongly encourage users to use the C++ API instead.
+
 // C API Example
 
 void CheckResult(OgaResult* result) {

@@ -10,6 +10,8 @@
 #include <functional>
 #include "../common.h"
 
+// This an example of how to use the C API, however we strongly encourage users to use the C++ API instead.
+
 static TerminateSession catch_terminate;
 
 void signalHandlerWrapper(int signum) {
