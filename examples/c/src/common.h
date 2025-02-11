@@ -14,6 +14,7 @@ using Clock = std::chrono::high_resolution_clock;
 using TimePoint = std::chrono::time_point<Clock>;
 using Duration = std::chrono::duration<double>;
 
+// `Timing` is a utility class for measuring performance metrics.
 class Timing {
  public:
   Timing(const Timing&) = delete;
@@ -50,4 +51,4 @@ bool FileExists(const char* path);
 
 std::string trim(const std::string& str);
 
-static void print_usage(int /*argc*/, char** argv);
+void print_usage(int /*argc*/, char** argv);
