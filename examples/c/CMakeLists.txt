@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 20)
 option(USE_CUDA "Build with CUDA support" OFF)
 option(USE_CXX "Invoke the C++ example" ON)
 option(PHI3 "Build the Phi example" OFF)
-option(PHI3_QA "Build the Phi Q&A example without memory" OFF)
+option(PHI3_QA "Build the Phi Q&A example without multi-turn prompting" OFF)
 option(PHI3V "Build the Phi3v example" OFF)
 option(WHISPER "Build the Whisper example" OFF)
 
