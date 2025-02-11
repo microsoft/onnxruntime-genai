@@ -1,4 +1,3 @@
 builds/
 __pycache__
-deps/src/
-
+deps/
