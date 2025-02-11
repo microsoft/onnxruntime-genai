@@ -69,18 +69,6 @@ void State::Run(OrtSession& session, int new_batch_size) {
     stream << std::endl;
     DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
   }
-
-  // OrtValue* res = GetOutput("hidden_states");
-  // auto shape_info = res->GetTensorTypeAndShapeInfo();
-  // auto shape = shape_info->GetShape();
-  // std::cout << "Shape of 'hidden_states': [";
-  // for (size_t i = 0; i < shape.size(); ++i) {
-  //   std::cout << shape[i];
-  //   if (i < shape.size() - 1) {
-  //     std::cout << ", ";
-  //   }
-  // }
-  // std::cout << "]" << std::endl;
 }
 
 void State::SetTerminate() {
