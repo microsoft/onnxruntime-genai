@@ -3,7 +3,7 @@ import requests
 import pandas as pd
 import json
 
-SLM_ENDPOINT = "http://localhost:8080/completion"
+SLM_ENDPOINT = "http://localhost:8080/completions"
 SYSTEM_PROMPT = (
     "You are a helpful AI Assistant. "
     "Please answer the questions very accurately. "
@@ -42,20 +42,15 @@ def ask_slm_engine(prompt, history, max_tokens, slider_temp):
     response_content = response.json()
 
     # Print the response
-    print(f"\033[32;1mResponse: {json.dumps(response_content, indent=4)}\033[0m")
+    # print(f"\033[32;1mResponse: {json.dumps(response_content, indent=4)}\033[0m")
 
-    ai_response = {
-        "role": "assistant",
-        "content": response_content["response"]["answer"],
-    }
+    ai_response = response_content["choices"][0]["message"]
     history.append(ai_response)
     if len(history) > max_tokens:
         print(f"\033[31;1mResetting History: {len(history)}\033[0m")
         history = None
 
-    return response_content["response"]["answer"], pd.DataFrame(
-        [response_content["response"]["kpi"]]
-    )
+    return ai_response["content"], pd.DataFrame([response_content["kpi"]])
 
 
 with gr.Blocks() as demo:

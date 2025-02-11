@@ -2,6 +2,7 @@ import argparse
 import json
 import requests
 
+BLUE = "\033[34m"
 GREEN = "\033[32m"
 MAGENTA = "\033[35m"
 RED = "\033[31m"
@@ -67,15 +68,15 @@ def run_test(url: str):
     }
     """
     json_message = json.loads(test_message)
-    response = requests.post(url + "/completion", json=json_message)
+    response = requests.post(url + "/completions", json=json_message)
+    if response.status_code != 200:
+        print(f"{RED}Error: {response.status_code}{CLEAR}")
+        raise Exception("Error in the API")
 
     json_response = json.loads(response.text)
-    if json_response["response"]["status"] != "success":
-        print(f"{RED}Error Message: {json_response['response']['message']}{CLEAR}")
-    else:
-        print(f"Question: {json_response['response']['question']}")
-        print(f"Answer: {json_response['response']['answer']}")
-        print(f"{GREEN}KPI: {json_response['response']['kpi']}{CLEAR}")
+    print(f"Question: {json_response['question']}")
+    print(f"Answer: {json_response['choices'][0]['message']['content']}")
+    print(f"{BLUE}KPI: {json_response['kpi']}{CLEAR}")
 
 
 if __name__ == "__main__":

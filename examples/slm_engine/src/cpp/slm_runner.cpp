@@ -34,135 +34,135 @@ using namespace std;
 int run_test(const string& model_path, const string& model_family,
              const string& test_data_file, const string& output_file,
              bool verbose, int wait_between_requests) {
-    // Make sure that the files exist
-    if (!filesystem::exists(model_path)) {
-        cout << "Error! Model path doesn't exist: " << model_path << "\n";
-        return -1;
+  // Make sure that the files exist
+  if (!filesystem::exists(model_path)) {
+    cout << "Error! Model path doesn't exist: " << model_path << "\n";
+    return -1;
+  }
+
+  // Make sure that the files exist
+  if (!filesystem::exists(test_data_file)) {
+    cout << "Error! Test Data file doesn't exist: " << test_data_file
+         << "\n";
+    return -1;
+  }
+
+  cout << "Model: " << model_path << "\n"
+       << "Test File: " << test_data_file << "\n";
+
+  // Create the SLM
+  auto slm_engine = microsoft::aias::SLMEngine::CreateEngine(
+      model_path.c_str(), model_family, verbose);
+  if (!slm_engine) {
+    cout << "Cannot create engine!\n";
+    return -1;
+  }
+
+  ofstream output(output_file);
+  string line;
+  ifstream test_data(test_data_file);
+  while (getline(test_data, line)) {
+    if (line.empty()) {
+      continue;
     }
 
-    // Make sure that the files exist
-    if (!filesystem::exists(test_data_file)) {
-        cout << "Error! Test Data file doesn't exist: " << test_data_file
-             << "\n";
-        return -1;
+    auto response = slm_engine->complete(line.c_str());
+
+    json output_json = json::parse(response);
+    if (!verbose) {
+      cout << BLUE << "Question: " << output_json["question"]
+           << CLEAR << endl;
+      cout << GREEN << "Answer: " << output_json["answer"]
+           << CLEAR << endl;
     }
+    // Save to the file
+    output << output_json.dump() << endl;
 
-    cout << "Model: " << model_path << "\n"
-         << "Test File: " << test_data_file << "\n";
-
-    // Create the SLM
-    auto slm_engine = microsoft::aias::SLMEngine::CreateEngine(
-        model_path.c_str(), model_family, verbose);
-    if (!slm_engine) {
-        cout << "Cannot create engine!\n";
-        return -1;
+    cout << "Prompt Tokens: "
+         << output_json["kpi"]["prompt_toks"] << " "
+         << "TTFT: " << MAGENTA_BOLD
+         << output_json["kpi"]["ttft"].template get<float>() /
+                1000.0f
+         << " sec " << CLEAR << "Generated: "
+         << output_json["kpi"]["generated_toks"] << " "
+         << "Token Rate: " << MAGENTA_BOLD
+         << output_json["kpi"]["tok_rate"] << CLEAR << " "
+         << "Time: "
+         << output_json["kpi"]["total_time"]
+                    .template get<float>() /
+                1000.0f
+         << " sec "
+         << "Memory: " << MAGENTA_BOLD
+         << output_json["kpi"]["memory_usage"] << CLEAR << " MB"
+         << "\n";
+    flush(cout);
+    if (wait_between_requests > 0) {
+      cout << "Waiting for " << wait_between_requests << " ms\n";
+      this_thread::sleep_for(chrono::milliseconds(wait_between_requests));
     }
-
-    ofstream output(output_file);
-    string line;
-    ifstream test_data(test_data_file);
-    while (getline(test_data, line)) {
-        if (line.empty()) {
-            continue;
-        }
-
-        auto response = slm_engine->complete(line.c_str());
-
-        json output_json = json::parse(response);
-        if (!verbose) {
-            cout << BLUE << "Question: " << output_json["response"]["question"]
-                 << CLEAR << endl;
-            cout << GREEN << "Answer: " << output_json["response"]["answer"]
-                 << CLEAR << endl;
-        }
-        // Save to the file
-        output << output_json.dump() << endl;
-
-        cout << "Prompt Tokens: "
-             << output_json["response"]["kpi"]["prompt_toks"] << " "
-             << "TTFT: " << MAGENTA_BOLD
-             << output_json["response"]["kpi"]["ttft"].template get<float>() /
-                    1000.0f
-             << " sec " << CLEAR << "Generated: "
-             << output_json["response"]["kpi"]["generated_toks"] << " "
-             << "Token Rate: " << MAGENTA_BOLD
-             << output_json["response"]["kpi"]["tok_rate"] << CLEAR << " "
-             << "Time: "
-             << output_json["response"]["kpi"]["total_time"]
-                        .template get<float>() /
-                    1000.0f
-             << " sec "
-             << "Memory: " << MAGENTA_BOLD
-             << output_json["response"]["kpi"]["memory_usage"] << CLEAR << " MB"
-             << "\n";
-        flush(cout);
-        if (wait_between_requests > 0) {
-            cout << "Waiting for " << wait_between_requests << " ms\n";
-            this_thread::sleep_for(chrono::milliseconds(wait_between_requests));
-        }
-    }
-    return 0;
+  }
+  return 0;
 }
 
 /// @brief Program entry point
 int main(int argc, char** argv) {
-    argparse::ArgumentParser program("slm_runner", "1.0",
-                                     argparse ::default_arguments::none);
-    string model_path;
-    program.add_argument("-m", "--model_path")
-        .required()
-        .help("Path to the model file")
-        .store_into(model_path);
+  argparse::ArgumentParser program("slm_runner", "1.0",
+                                   argparse ::default_arguments::none);
+  string model_path;
+  program.add_argument("-m", "--model_path")
+      .required()
+      .help("Path to the model file")
+      .store_into(model_path);
 
-    string model_family;
-    program.add_argument("-mf", "--model_family")
-        .required()
-        .help("Model family: phi3 or llama3.2")
-        .store_into(model_family);
+  string model_family;
+  program.add_argument("-mf", "--model_family")
+      .required()
+      .help("Model family: phi3 or llama3.2")
+      .store_into(model_family);
 
-    string test_data_file;
-    program.add_argument("-t", "--test_data_file")
-        .required()
-        .help("Path to the test data file (JSONL)")
-        .store_into(test_data_file);
+  string test_data_file;
+  program.add_argument("-t", "--test_data_file")
+      .required()
+      .help("Path to the test data file (JSONL)")
+      .store_into(test_data_file);
 
-    string output_file;
-    program.add_argument("-o", "--output_file")
-        .required()
-        .help("Path to the output file (JSONL)")
-        .store_into(output_file);
+  string output_file;
+  program.add_argument("-o", "--output_file")
+      .required()
+      .help("Path to the output file (JSONL)")
+      .store_into(output_file);
 
-    int wait_between_requests = 0;
-    program.add_argument("-w", "--wait_between_requests")
-        .help("Wait time between requests in milliseconds")
-        .store_into(wait_between_requests);
+  int wait_between_requests = 0;
+  program.add_argument("-w", "--wait_between_requests")
+      .help("Wait time between requests in milliseconds")
+      .store_into(wait_between_requests);
 
-    program.add_argument("-v", "--verbose")
-        .default_value(false)
-        .implicit_value(true)
-        .help(
-            "If provided, more debugging information printed on standard "
-            "output");
+  program.add_argument("-v", "--verbose")
+      .default_value(false)
+      .implicit_value(true)
+      .help(
+          "If provided, more debugging information printed on standard "
+          "output");
 
-    cout << "SLM Runner Version: " << microsoft::aias::SLMEngine::GetVersion()
-         << endl;
-    try {
-        program.parse_args(argc, argv);
-    } catch (const std::exception& err) {
-        std::cerr << err.what() << std::endl;
-        std::cerr << program;
-        std::exit(-1);
-    }
+  cout << "SLM Runner Version: " << microsoft::aias::SLMEngine::GetVersion()
+       << endl;
+  try {
+    program.parse_args(argc, argv);
+  } catch (const std::exception& err) {
+    std::cerr << err.what() << std::endl;
+    std::cerr << program;
+    std::exit(-1);
+  }
 
-    bool verbose = false;
-    if (program["--verbose"] == true) {
-        verbose = true;
-    }
-    // Responsible for cleaning up the library during shutdown
-    // OgaHandle handle;
+  bool verbose = false;
+  if (program["--verbose"] == true) {
+    verbose = true;
+  }
+  // Responsible for cleaning up the library during shutdown
+  // OgaHandle handle;
 
-    run_test(model_path, model_family, test_data_file, output_file, verbose,
-             wait_between_requests);
+  run_test(model_path, model_family, test_data_file, output_file, verbose,
+           wait_between_requests);
 
-    OgaShutdown();
+  OgaShutdown();
 }

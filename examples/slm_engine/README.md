@@ -21,7 +21,7 @@ To use the SLM Engine in your AI application, use one of the following methods:
 
 OR
 
-- Run the command line program `slm-server` which starts a web server and exposes an API endpoint that accepts OpenAI like text completion API. Then make REST API calls pointing at this endpoint from your application.
+- Run the command line program `slm-server` which starts a web server and exposes an API endpoint that accepts OpenAI like chat completion API. Then make REST API calls pointing at this endpoint from your application.
 
 ### SLM Server
 
@@ -53,7 +53,7 @@ Once the server is running, you can use a HTTP client to send user queries to th
 ### Example cURL
 
 ```bash
-curl -X POST http://localhost:8000/completion -H "Content-Type: application/json" --data '{"messages": [{"role": "system", "content": "You are a helpful AI Assistant. Please answer the questions very accurately. Use emojis and markdown as appropriate"},{"role": "user", "content": "What are the top 5 places to visit in San Diego? Be brief."}], "max_tokens": 1200, "temperature": 0.7}'
+curl -X POST http://localhost:8000/completions -H "Content-Type: application/json" --data '{"messages": [{"role": "system", "content": "You are a helpful AI Assistant. Please answer the questions very accurately. Use emojis and markdown as appropriate"},{"role": "user", "content": "What are the top 5 places to visit in San Diego? Be brief."}], "max_tokens": 1200, "temperature": 0.7}'
 ```
 
 The SLM server supports the following REST APIs (click to expand):
@@ -110,7 +110,7 @@ The SLM server supports the following REST APIs (click to expand):
 > | --------- | ------------------ | ------------- |
 > | `200`     | `application/json` | `JSON Object` |
 
-##### JSON Schema for the Response for /completion (success)
+##### JSON Schema for the Response for /completions (success)
 
 ```json
 {
@@ -131,7 +131,7 @@ The SLM server supports the following REST APIs (click to expand):
 }
 ```
 
-##### JSON Schema for the Response for /completion (error)
+##### JSON Schema for the Response for /completions (error)
 
 ```json
 {
