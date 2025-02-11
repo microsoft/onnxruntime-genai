@@ -87,7 +87,7 @@ std::string trim(const std::string& str) {
   return str.substr(first, (last - first + 1));
 }
 
-static void print_usage(int /*argc*/, char** argv) {
+void print_usage(int /*argc*/, char** argv) {
   std::cerr << "usage: " << argv[0] << std::endl;
   std::cerr << "model_path = " << argv[1] << std::endl;
   std::cerr << "execution_provider = " << argv[2] << std::endl;
