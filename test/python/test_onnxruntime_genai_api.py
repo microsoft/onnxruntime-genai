@@ -342,9 +342,9 @@ def test_get_output(test_data_path, relative_model_path):
     )
     logits = generator.get_output("logits")
     assert np.allclose(logits[:, :, ::200], expected_sampled_logits_prompt, atol=1e-3)
+    generator.generate_next_token()
     hidden_states = generator.get_output("hidden_states")
     assert hidden_states.shape == (2, 4, 768)
-    generator.generate_next_token()
     generator.generate_next_token()
 
     # check for the 1st token generation
