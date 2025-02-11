@@ -125,7 +125,6 @@ struct SessionInfo {
   ONNXTensorElementDataType GetOutputDataType(const std::string& name) const;
 
   std::vector<std::string> GetInputNames() const;
-  std::vector<std::string> GetOutputNames() const;
 
  private:
   std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;

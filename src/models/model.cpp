@@ -300,14 +300,6 @@ std::vector<std::string> SessionInfo::GetInputNames() const {
   return names;
 }
 
-std::vector<std::string> SessionInfo::GetOutputNames() const {
-  std::vector<std::string> names;
-  names.reserve(outputs_.size());
-  for (const auto& output : outputs_)
-    names.push_back(output.first);
-  return names;
-}
-
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
 }
