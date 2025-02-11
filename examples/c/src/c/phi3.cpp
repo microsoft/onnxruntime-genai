@@ -134,6 +134,7 @@ void C_API(const char* model_path, const char* execution_provider) {
   OgaDestroyTokenizerStream(tokenizer_stream);
   OgaDestroyTokenizer(tokenizer);
   OgaDestroyModel(model);
+  OgaDestroyGenerator(generator);
 }
 
 int main(int argc, char** argv) {
