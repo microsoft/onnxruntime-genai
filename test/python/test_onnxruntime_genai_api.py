@@ -342,6 +342,8 @@ def test_get_output(test_data_path, relative_model_path):
     )
     logits = generator.get_output("logits")
     assert np.allclose(logits[:, :, ::200], expected_sampled_logits_prompt, atol=1e-3)
+    hidden_states = generator.get_output("hidden_states")
+    assert hidden_states.shape == (2, 4, 768)
     generator.generate_next_token()
     generator.generate_next_token()
 
@@ -357,6 +359,8 @@ def test_get_output(test_data_path, relative_model_path):
     assert np.allclose(
         logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3
     )
+    hidden_states = generator.get_output("hidden_states")
+    assert hidden_states.shape == (2, 1, 768)
 
 @pytest.mark.skipif(
     not og.is_cuda_available(), reason="Pipeline model uses a mix of CPU and CUDA EP."
