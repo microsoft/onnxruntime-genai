@@ -8,7 +8,7 @@ namespace Generators {
 struct ExtraOutputs {
  public:
   ExtraOutputs(State& state);
-  void Add();
+  void AddOutputs(const std::vector<std::string>& all_output_names);
   void Update();
   OrtValue* GetOutput(const char* name);
 
@@ -19,6 +19,5 @@ struct ExtraOutputs {
   std::vector<std::string> all_output_names_;  // keep output strings in scope
   size_t extra_outputs_start_{std::numeric_limits<size_t>::max()};
 };
-
 
 }  // namespace Generators

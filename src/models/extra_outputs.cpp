@@ -5,15 +5,14 @@
 #include "model.h"
 #include "extra_outputs.h"
 
-
 namespace Generators {
 
 ExtraOutputs::ExtraOutputs(State& state)
     : state_{state} {}
 
-void ExtraOutputs::Add() {
+void ExtraOutputs::AddOutputs(const std::vector<std::string>& all_output_names) {
   // Add() should be called after all the outputs managed by GenAI are initialized
-  all_output_names_ = state_.model_.session_info_->GetOutputNames();
+  all_output_names_ = all_output_names;
   extra_outputs_start_ = state_.output_names_.size();
   for (const auto& output_name : all_output_names_) {
     if (std::none_of(state_.output_names_.begin(), state_.output_names_.end(),
