@@ -2,18 +2,6 @@
 
 Note: ONNX Runtime GenAI needs to be built from source. The headers and shared libraries that are built need to be copied over to the appropriate folders (i.e. the `include` and `lib` folders). Building from source is necessary because these examples have been updated to run with the latest changes. Once the next version of ONNX Runtime GenAI is released, the below instructions will be accurate again.
 
-### C API vs C++ API
-The below instructions are same for C and C++ API, you will need to specify USE_CXX flag during Build step for deciding which API to use.
-```
-# FOR C API: -DUSE_CXX=OFF
-# Build command for linux CPU:
-cmake .. -DPHI3=ON -DUSE_CXX=OFF
-
-# FOR C++ API: -DUSE_CXX=ON
-# Build command for linux CPU:
-cmake .. -DPHI3=ON -DUSE_CXX=ON
-```
-
 ## Setup
 
 Clone this repo and change into the `examples/c` folder.
