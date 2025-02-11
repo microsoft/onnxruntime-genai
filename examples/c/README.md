@@ -44,7 +44,7 @@ huggingface-cli download microsoft/Phi-3.5-mini-instruct-onnx --include cpu_and_
 
 ### Chat vs Question Answering
 
-The below examples are for scenarios where you can have chat with the model (i.e. model retains the previous conversation), but if you want to run just Question Answering (i.e. model does not remember past conversation) use `-DPHI3_QA` instead of `-DPHI3`.
+The below examples are for scenarios where you can have chat with the model (i.e. model retains the previous conversation), but if you want to run just Question Answering (i.e. model does not remember past conversation) use `-DPHI3_QA` instead of `-DPHI3`. Also, the executable name would be `phi3_qa` instead of `phi3`.
 
 ### Windows x64 CPU
 
