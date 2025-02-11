@@ -26,14 +26,14 @@ void ExtraOutputs::Add() {
 
 void ExtraOutputs::Update() {
   for (size_t i = extra_outputs_start_; i < state_.output_names_.size(); ++i) {
-    output_ortvalue_store_[state_.output_names_[i]] = std::unique_ptr<OrtValue>(state_.outputs_[i]);
+    output_ortvalues_[state_.output_names_[i]] = std::unique_ptr<OrtValue>(state_.outputs_[i]);
     // reset extra output ortvalues to nullptr to avoid shape mismatch across runs
     state_.outputs_[i] = nullptr;
   }
 }
 
 OrtValue* ExtraOutputs::GetOutput(const char* name) {
-  if (auto iter = output_ortvalue_store_.find(name); iter != output_ortvalue_store_.end()) {
+  if (auto iter = output_ortvalues_.find(name); iter != output_ortvalues_.end()) {
     return iter->second.get();
   } else {
     return nullptr;

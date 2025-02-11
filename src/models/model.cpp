@@ -92,7 +92,8 @@ OrtValue* State::GetInput(const char* name) {
 }
 
 OrtValue* State::GetOutput(const char* name) {
-  if (OrtValue* output = extra_outputs_.GetOutput(name); output) {
+  OrtValue* output = extra_outputs_.GetOutput(name);
+  if (output) {
     return output;
   }
   ThrowErrorIfSessionTerminated(session_terminated_);
