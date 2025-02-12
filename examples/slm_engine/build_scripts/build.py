@@ -10,13 +10,13 @@ from build_deps import get_machine_type
 def cmake_options_android(ndk_dir):
     if not os.path.exists(ndk_dir):
         raise Exception(f"NDK Directory doesn't exist: {ndk_dir}")
-        return None
-    cmake_option = [
-        f"-DCMAKE_TOOLCHAIN_FILE={ndk_dir}/build/cmake/android.toolchain.cmake",
-        "-DANDROID_PLATFORM=android-33",
-        "-DANDROID_ABI=arm64-v8a",
-    ]
-    return cmake_option
+    else:
+        cmake_option = [
+            f"-DCMAKE_TOOLCHAIN_FILE={ndk_dir}/build/cmake/android.toolchain.cmake",
+            "-DANDROID_PLATFORM=android-33",
+            "-DANDROID_ABI=arm64-v8a",
+        ]
+        return cmake_option
 
 
 def main():
@@ -60,7 +60,7 @@ def main():
         # Check to make sure that the other two options are also defined
         if args.android_ndk_path is None:
             print(f"Need to define android_ndk_path for Android builds")
-            return -1
+            return
         cmake_options.extend(cmake_options_android(args.android_ndk_path))
 
     # Launch build

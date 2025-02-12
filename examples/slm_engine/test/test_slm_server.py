@@ -37,10 +37,11 @@ def launch_server(server_binary: str, model_path: str, model_family: str):
                     f"{MAGENTA}Engine State: {json_response['response']['engine_state']}{CLEAR}"
                 )
                 started = True
-        except:
+        except Exception as ex:
             # Initially the server may not be ready to accept requests
             # We want to ignore and retry
-            pass
+            pass  # Ignore all exceptions
+
         # Sleep for a bit
         import time
 

@@ -1,7 +1,6 @@
 import gradio as gr
 import requests
 import pandas as pd
-import json
 
 SLM_ENDPOINT = "http://localhost:8080/completions"
 SYSTEM_PROMPT = (
@@ -17,7 +16,7 @@ def ask_slm_engine(prompt, history, max_tokens, slider_temp):
     print(f"Token Max: {max_tokens}")
     print(f"Temp: {slider_temp}\033[0m")
 
-    if not history:
+    if not history or len(history) == 0:
         history = [
             {
                 "role": "system",
@@ -48,7 +47,7 @@ def ask_slm_engine(prompt, history, max_tokens, slider_temp):
     history.append(ai_response)
     if len(history) > max_tokens:
         print(f"\033[31;1mResetting History: {len(history)}\033[0m")
-        history = None
+        history = []
 
     return ai_response["content"], pd.DataFrame([response_content["kpi"]])
 
@@ -57,7 +56,6 @@ with gr.Blocks() as demo:
     kpi_grid = gr.Dataframe(
         headers=["KPI", "Value"], datatype=["str", "str"], render=False
     )
-    chatbot = gr.Chatbot(height=300, render=False)
     gr.Markdown("<center><h1>Chat with ONNX SLM Engine</h1></center>")
     with gr.Row():
         with gr.Column():

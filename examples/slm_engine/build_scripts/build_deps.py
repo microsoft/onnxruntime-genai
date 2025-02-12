@@ -103,10 +103,12 @@ def build_ort(args):
         # Clone the ORT Repo
         print("Cloning ONNX Runtime")
         os.chdir("src")
-        result = subprocess.call(
-            ["git", "clone", "https://github.com/microsoft/onnxruntime.git"]
-        )
-        if result != 0:
+        if (
+            subprocess.call(
+                ["git", "clone", "https://github.com/microsoft/onnxruntime.git"]
+            )
+            != 0
+        ):
             raise Exception("Failed to clone ONNX Runtime")
 
         # Now get the dependencies
@@ -114,14 +116,13 @@ def build_ort(args):
 
         # Checkout the correct version
         version = "v1.20.1"
-        result = subprocess.call(["git", "checkout", version])
-        if result != 0:
+        if subprocess.call(["git", "checkout", version]) != 0:
             raise Exception("Failed to checkout ONNX Runtime version")
 
-        result = subprocess.call(
-            ["git", "submodule", "update", "--init", "--recursive"]
-        )
-        if result != 0:
+        if (
+            subprocess.call(["git", "submodule", "update", "--init", "--recursive"])
+            != 0
+        ):
             raise Exception("Failed to  update ONNX Runtime submodules")
 
         # Return to the original directory
@@ -215,7 +216,8 @@ def build_ort(args):
     top_level_dir = f"../../../"
     os.chdir(top_level_dir)
 
-    result = subprocess.call(["git", "submodule", "update", "--init", "--recursive"])
+    if subprocess.call(["git", "submodule", "update", "--init", "--recursive"]) != 0:
+        raise Exception("Failed to update submodules")
 
     # Now build the ORT-GenAI library
     print("Building ORT-GenAI")
