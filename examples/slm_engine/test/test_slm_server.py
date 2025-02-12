@@ -38,6 +38,8 @@ def launch_server(server_binary: str, model_path: str, model_family: str):
                 )
                 started = True
         except:
+            # Initially the server may not be ready to accept requests
+            # We want to ignore and retry
             pass
         # Sleep for a bit
         import time
@@ -105,6 +107,6 @@ if __name__ == "__main__":
         run_test(args.url)
     else:
         # Launch the server and run the
-        pid = launch_server(args.server_binary_path, args.model_path, args.model_family)
+        launch_server(args.server_binary_path, args.model_path, args.model_family)
         url = "http://localhost:8000"
         run_test(url)

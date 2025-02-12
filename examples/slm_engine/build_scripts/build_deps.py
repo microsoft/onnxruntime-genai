@@ -72,7 +72,6 @@ def copy_files_without_hidden(src, dest):
 def copy_files_keeping_symlinks(src_files, dest):
     if not type(src_files) == list:
         raise Exception("src_files must be a list")
-        src_files = [src_files]
 
     for file in src_files:
         # print(f"\033[34;1mFile: {file}\033[0m")
@@ -116,10 +115,14 @@ def build_ort(args):
         # Checkout the correct version
         version = "v1.20.1"
         result = subprocess.call(["git", "checkout", version])
+        if result != 0:
+            raise Exception("Failed to checkout ONNX Runtime version")
 
         result = subprocess.call(
             ["git", "submodule", "update", "--init", "--recursive"]
         )
+        if result != 0:
+            raise Exception("Failed to  update ONNX Runtime submodules")
 
         # Return to the original directory
         os.chdir("../..")

@@ -75,7 +75,7 @@ with gr.Blocks() as demo:
                 scale=7,
                 render=False,
             )
-            chat_interface = gr.ChatInterface(
+            gr.ChatInterface(
                 ask_slm_engine,
                 type="messages",
                 additional_inputs=[slider, slider_temp],
@@ -86,7 +86,7 @@ with gr.Blocks() as demo:
 
             with gr.Column():
                 gr.Markdown("## Reset")
-                reset_button = gr.ClearButton([user_prompt, chatbot])
+                gr.ClearButton([user_prompt, chatbot])
     with gr.Row():
         with gr.Column():
             gr.Markdown("<left><h2>KPI Stats</h2></left>")

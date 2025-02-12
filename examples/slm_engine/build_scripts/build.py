@@ -4,12 +4,13 @@ import argparse
 import platform
 import subprocess
 import pathlib
-from build_deps import get_platform_dirname, get_machine_type
+from build_deps import get_machine_type
 
 
 def cmake_options_android(ndk_dir):
     if not os.path.exists(ndk_dir):
         raise Exception(f"NDK Directory doesn't exist: {ndk_dir}")
+        return None
     cmake_option = [
         f"-DCMAKE_TOOLCHAIN_FILE={ndk_dir}/build/cmake/android.toolchain.cmake",
         "-DANDROID_PLATFORM=android-33",
@@ -24,7 +25,12 @@ def main():
     # Adding arguments
     parser.add_argument("--android", action="store_true", help="Build for Android")
     parser.add_argument("--android_ndk_path", type=str, help="Path to ANDROID NDK")
-    parser.add_argument("--build_type", type=str, default="Release", help="{Release|RelWithDebInfo|Debug}")
+    parser.add_argument(
+        "--build_type",
+        type=str,
+        default="Release",
+        help="{Release|RelWithDebInfo|Debug}",
+    )
 
     # Parsing arguments
     args = parser.parse_args()
@@ -52,7 +58,7 @@ def main():
     build_dir = f"builds/{dir_prefix}-{get_machine_type(args)}"
     if args.android:
         # Check to make sure that the other two options are also defined
-        if args.android_ndk_path == None:
+        if args.android_ndk_path is None:
             print(f"Need to define android_ndk_path for Android builds")
             return -1
         cmake_options.extend(cmake_options_android(args.android_ndk_path))
@@ -68,11 +74,12 @@ def main():
     result = subprocess.call(cmake_options)
     if result != 0:
         raise Exception("CMake error!")
-    #result = subprocess.call(["cmake", "--build", ".", "--", f"-j{os.cpu_count()}"])
+    # result = subprocess.call(["cmake", "--build", ".", "--", f"-j{os.cpu_count()}"])
     result = subprocess.call(
         [
-            "cmake", 
-            "--build", ".",
+            "cmake",
+            "--build",
+            ".",
             "--config",
             args.build_type,
         ]

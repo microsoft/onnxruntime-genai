@@ -1,8 +1,8 @@
 # SLM Engine for running GenAI on the Edge Compute
 
-SLM Engine is a C++ based application that uses ONNX Runtime (ORT) genrate() API library and runs GenAI models on the edge computing resources. The SLM engine is developed to deploy generative AI models (sometimes fine tuned for API function calling specific to certain Edge use cases). Any small language based generative AI model quantized to ONNX can run on SLM engine.
+SLM Engine is a C++ based application that uses ONNX Runtime (ORT) genrate() API library and runs GenAI models on the edge computing resources. The SLM engine is developed to deploy generative AI models (sometimes fine-tuned for API function calling specific to certain Edge use cases). Any small language based generative AI model quantized to ONNX can run on SLM engine.
 
-The following diagram illustrates a hugh level architecture of the SLM Engine and it's relationship with the ONNX Runtime libraries.
+The following diagram illustrates a high level architecture of the SLM Engine and its relationship with the ONNX Runtime libraries.
 
 <div align="center">
     <img src="architecture.drawio.png">
@@ -117,7 +117,13 @@ The SLM server supports the following REST APIs (click to expand):
     "response":
     {
         "status": "success",
-        "answer": "{<SLM Generated text>}",
+        "choices": [
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "<LLM Generated content>"
+            },
+        ]
         "kpi": {
             "generated_toks": <Value>,
             "prompt_toks": <Value>,
@@ -150,7 +156,7 @@ Since this is targeted for various devices running on the Edge we provide a simp
 
 ### Prerequisites
 
-The SLM Engine first builds the `onnxruntime` and `onnxruntime-genai` libraries from source. Therefore any prerequisites that apply to build from source of these two libraries also applicable to SLM Engine. There are no additional requirements for building SLM engine.
+The SLM Engine first builds the `onnxruntime` and `onnxruntime-genai` libraries from source. Therefore, any prerequisites that apply to build from source of these two libraries also applicable to SLM Engine. There are no additional requirements for building SLM engine.
 
 #### Windows Long File Path
 
