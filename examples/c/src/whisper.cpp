@@ -5,21 +5,8 @@
 #include <string>
 #include <fstream>
 #include <memory>
-
+#include "common.h"
 #include "ort_genai.h"
-
-bool FileExists(const char* path) {
-  return static_cast<bool>(std::ifstream(path));
-}
-
-std::string trim(const std::string& str) {
-  const size_t first = str.find_first_not_of(' ');
-  if (std::string::npos == first) {
-    return str;
-  }
-  const size_t last = str.find_last_not_of(' ');
-  return str.substr(first, (last - first + 1));
-}
 
 // C++ API Example
 
@@ -205,14 +192,14 @@ void C_API(const char* model_path, int32_t num_beams) {
   OgaDestroyModel(model);
 }
 
-static void print_usage(int /*argc*/, char** argv) {
+static void print_usage_whisper(int /*argc*/, char** argv) {
   std::cerr << "usage: " << argv[0] << " <model_path>"
             << "<num_beams>" << std::endl;
 }
 
 int main(int argc, char** argv) {
   if (argc != 3) {
-    print_usage(argc, argv);
+    print_usage_whisper(argc, argv);
     return -1;
   }
 
