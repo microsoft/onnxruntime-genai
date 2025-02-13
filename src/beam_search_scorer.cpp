@@ -27,7 +27,7 @@ void BeamHypotheses::Add(std::span<int32_t> hypothesis, float sum_logprobs) {
       return;
     }
   } else {
-    beams_used_++; 
+    beams_used_++;
   }
 
   // Rotate existing elements over while the new element scores higher
