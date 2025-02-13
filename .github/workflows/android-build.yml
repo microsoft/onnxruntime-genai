@@ -15,6 +15,7 @@ env:
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   # ANDROID_ABI: "arm64-v8a"
   ANDROID_ABI: "x86_64"
+  ANDROID_NDK_VERSION: "27.2.12479018"  # LTS version
 jobs:
   android_x64:
     # Note: linux is the only good option for the Android emulator currently.
@@ -49,8 +50,11 @@ jobs:
           ls -l $ANDROID_HOME
 
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
 
-          echo "ANDROID_NDK_HOME=$ANDROID_NDK_HOME"
+          echo "ANDROID_NDK_HOME=${ANDROID_SDK_ROOT}/ndk/${{ env.ANDROID_NDK_VERSION }}" >> $GITHUB_ENV
+          echo "ANDROID_AVD_HOME=${{ runner.temp }}" >> $GITHUB_ENV
+
           echo "ANDROID_NDK_LATEST_HOME=$ANDROID_NDK_LATEST_HOME"
           ls -l $ANDROID_HOME/ndk
 
@@ -76,12 +80,12 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --update
+          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --update
 
       - name: Run Android build
         run: |
           set -e -x
-          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --build
+          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --build
 
       - name: Enable KVM group perms so Android emulator can run
         run: |
@@ -92,4 +96,4 @@ jobs:
       - name: Run Android tests
         run: |
           set -e -x
-          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_LATEST_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --android_run_emulator --test
+          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --android_run_emulator --test
