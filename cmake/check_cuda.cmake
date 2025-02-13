@@ -46,11 +46,6 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     "${GENERATORS_ROOT}/cuda/*.cuh"
   )
 
-  file(GLOB test_cuda_srcs CONFIGURE_DEPENDS
-    "${TESTS_ROOT}/*.cu"
-    "${TESTS_ROOT}/*.cuh"
-  )
-  list(APPEND test_srcs ${test_cuda_srcs})
   add_compile_definitions(USE_CUDA=1)
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 elseif(USE_CUDA)

@@ -7,6 +7,7 @@
 #include "prompt_image_processor.h"
 #include "audio_processor.h"
 #include "adapters.h"
+#include "extra_outputs.h"
 
 #if USE_DML
 #include "dml_provider_factory.h"
@@ -64,6 +65,7 @@ struct State {
  private:
   int current_batch_size_{0};
   std::shared_ptr<Adapters> adapters_;
+  ExtraOutputs extra_outputs_;
 };
 
 struct TokenizerStream : LeakChecked<TokenizerStream> {

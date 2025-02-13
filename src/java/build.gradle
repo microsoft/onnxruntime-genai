@@ -102,11 +102,6 @@ sourceSets.main.java {
 
 // expects
 sourceSets.test {
-	// add test resource files
-	resources.srcDirs += [
-		"../../test/test_models"
-	]
-
 	if (cmakeNativeLibDir != null) {
 		// add compiled native libs
 		resources.srcDirs += [cmakeNativeLibDir]

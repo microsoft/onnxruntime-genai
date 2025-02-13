@@ -37,6 +37,10 @@ size_t SizeOf(ONNXTensorElementDataType type) {
   }
 }
 
+int64_t ElementCountFromShape(std::span<const int64_t> shape) {
+  return std::accumulate(shape.begin(), shape.end(), int64_t{1}, std::multiplies<int64_t>());
+}
+
 // IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
 float Float16ToFloat32(uint16_t v) {
   // Extract sign, exponent, and fraction from numpy.float16
