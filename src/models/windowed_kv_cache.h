@@ -31,6 +31,9 @@ struct WindowedKeyValueCache : KeyValueCache {
   void SlideAllLayers();
   void SlideLayers(std::span<const size_t> layer_indices);
 
+  DeviceInterface& Device() { return *model_.p_device_kvcache_; }
+  Ort::Allocator& Allocator() { return model_.p_device_kvcache_->GetAllocator(); }
+
   State& state_;
   const Model& model_{state_.model_};
   int layer_count_{};

@@ -47,21 +47,21 @@ WindowedKeyValueCache::WindowedKeyValueCache(State& state)
 
   for (int i = 0; i < layer_count_; ++i) {
     key_caches_in_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, key_cache_shape_in_, type_));
+        OrtValue::CreateTensor(Allocator(), key_cache_shape_in_, type_));
     std::fill_n(key_caches_in_[i]->GetTensorMutableData<uint8_t>(),
                 ElementCountFromShape(key_cache_shape_in_),
                 static_cast<uint8_t>(model_.config_->model.decoder.sliding_window->pad_value));
 
     value_caches_in_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, value_cache_shape_in_, type_));
+        OrtValue::CreateTensor(Allocator(), value_cache_shape_in_, type_));
     std::fill_n(value_caches_in_[i]->GetTensorMutableData<uint8_t>(),
                 ElementCountFromShape(value_cache_shape_in_),
                 static_cast<uint8_t>(model_.config_->model.decoder.sliding_window->pad_value));
 
     key_caches_out_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, key_cache_shape_out_, type_));
+        OrtValue::CreateTensor(Allocator(), key_cache_shape_out_, type_));
     value_caches_out_.push_back(
-        OrtValue::CreateTensor(*model_.allocator_device_, value_cache_shape_out_, type_));
+        OrtValue::CreateTensor(Allocator(), value_cache_shape_out_, type_));
   }
 }
 
@@ -187,7 +187,7 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int c
 
   ThreadPool thread_pool{static_cast<size_t>(layer_count_)};
   thread_pool.Compute([&](size_t layer_idx) {
-    std::unique_ptr<OrtValue> key_cache = OrtValue::CreateTensor(*model_.allocator_device_, updated_key_cache_shape_in, type_);
+    std::unique_ptr<OrtValue> key_cache = OrtValue::CreateTensor(Allocator(), updated_key_cache_shape_in, type_);
 
     uint8_t* key_cache_data = key_cache->GetTensorMutableData<uint8_t>();
     uint8_t* key_cache_in_data = key_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
@@ -213,9 +213,9 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int c
     }
 
     key_caches_in_[layer_idx] = std::move(key_cache);
-    key_caches_out_[layer_idx] = OrtValue::CreateTensor(*model_.allocator_device_, updated_key_cache_shape_out, type_);
+    key_caches_out_[layer_idx] = OrtValue::CreateTensor(Allocator(), updated_key_cache_shape_out, type_);
 
-    std::unique_ptr<OrtValue> value_cache = OrtValue::CreateTensor(*model_.allocator_device_, updated_value_cache_shape_in, type_);
+    std::unique_ptr<OrtValue> value_cache = OrtValue::CreateTensor(Allocator(), updated_value_cache_shape_in, type_);
 
     uint8_t* value_cache_data = value_cache->GetTensorMutableData<uint8_t>();
     uint8_t* value_cache_in_data = value_caches_in_[layer_idx]->GetTensorMutableData<uint8_t>();
@@ -241,7 +241,7 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int c
     }
 
     value_caches_in_[layer_idx] = std::move(value_cache);
-    value_caches_out_[layer_idx] = OrtValue::CreateTensor(*model_.allocator_device_, updated_value_cache_shape_out, type_);
+    value_caches_out_[layer_idx] = OrtValue::CreateTensor(Allocator(), updated_value_cache_shape_out, type_);
   });
 
   window_size_ = 1;

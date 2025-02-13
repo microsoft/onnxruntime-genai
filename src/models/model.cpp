@@ -13,16 +13,9 @@
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
-#include "kernels.h"
 #include "multi_modal_vision_model.h"
 #include "decoder_only_pipeline.h"
-#if USE_DML
-#include <wil/wrl.h>
-#include "dml_provider_factory.h"
-#include "../dml/dml_helpers.h"
-
-std::string CurrentModulePath();
-#endif
+#include "../dml/interface.h"
 
 namespace Generators {
 
@@ -231,20 +224,29 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   return token_id;
 }
 
-#if USE_CUDA
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-Ort::Allocator* GetCudaAllocator(OrtSession& session) {
-  auto& globals = *GetOrtGlobals();
-  if (!globals.allocator_cuda_) {
-    globals.memory_info_cuda_ = OrtMemoryInfo::Create("Cuda", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    globals.allocator_cuda_ = Ort::Allocator::Create(session, *globals.memory_info_cuda_);
-  }
-  return globals.allocator_cuda_.get();
+void EnsureDeviceOrtInit(OrtSession& session, DeviceType type) {
+  // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
+  if (type == DeviceType::CPU)
+    return;
+
+  auto& device = GetOrtGlobals()->allocator_device_[static_cast<int>(type)];
+  if (device)
+    return;
+
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared"};
+  static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
+
+  auto name = device_type_names[static_cast<int>(type)];
+  auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+  device = Ort::Allocator::Create(session, *memory_info);
+  if (!device)
+    throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
+  GetDeviceInterface(type)->InitOrt(*Ort::api, *device);  // Necessary for any shared library providers so they can access Ort::api
 }
-#endif
 
 SessionInfo::SessionInfo(OrtSession& session) {
   Add(session);
@@ -306,41 +308,19 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 Model::~Model() = default;
 
 void Model::InitDeviceAllocator(OrtSession& session) {
-  allocator_device_ = &allocator_cpu_;
-  allocator_kvcache_ = &allocator_cpu_;
-#if USE_CUDA
-  if (device_type_ == DeviceType::CUDA) {
-    allocator_device_ = GetCudaAllocator(session);
-    allocator_kvcache_ = allocator_device_;
-  }
-#endif
+  EnsureDeviceOrtInit(session, p_device_->GetType());
 
-#if USE_DML
-  if (device_type_ == DeviceType::DML) {
-    memory_info_device_ = OrtMemoryInfo::Create("DML", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    owned_allocator_device_ = Ort::Allocator::Create(session, *memory_info_device_);
-    allocator_device_ = owned_allocator_device_.get();
-    allocator_kvcache_ = allocator_device_;
-  }
-#endif
+  // Only CUDA does every input on the device
+  if (p_device_->GetType() == DeviceType::CUDA)
+    p_device_inputs_ = p_device_;
+  else
+    p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
 
-  if (device_type_ == DeviceType::WEBGPU) {
-    // for webgpu we only use device memory for kv_cache
-    memory_info_device_ = OrtMemoryInfo::Create("WebGPU_Buffer", OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-    owned_allocator_device_ = Ort::Allocator::Create(session, *memory_info_device_);
-    allocator_kvcache_ = owned_allocator_device_.get();
-  }
-
-  if (device_type_ == DeviceType::QNN) {
-    memory_info_device_ = OrtMemoryInfo::Create("QnnHtpShared", OrtAllocatorType::OrtDeviceAllocator, 0,
-                                                OrtMemType::OrtMemTypeDefault);
-    owned_allocator_device_ = Ort::Allocator::Create(session, *memory_info_device_);
-    allocator_device_ = owned_allocator_device_.get();
-    allocator_kvcache_ = allocator_device_;
-  }
+  // The kvcache is always allocated in device memory
+  p_device_kvcache_ = p_device_;
 
   session_info_ = std::make_unique<SessionInfo>(session);
-  captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), allocator_device_);
+  captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), &p_device_->GetAllocator());
 }
 
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
@@ -440,12 +420,10 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       // Device type determines the scoring device.
       // Only use the primary session options to determine the device type
       if (is_primary_session_options) {
-        device_type_ = DeviceType::CUDA;  // Scoring will use CUDA
-        p_device_ = GetDeviceInterface(device_type_);
+        p_device_ = GetDeviceInterface(DeviceType::CUDA);
 
         // Create and set our cudaStream_t
-        cuda_stream_ = p_device_->GetCudaStream();
-        ort_provider_options->UpdateValue("user_compute_stream", cuda_stream_);
+        ort_provider_options->UpdateValue("user_compute_stream", p_device_->GetCudaStream());
       }
 
       session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
@@ -463,64 +441,26 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       session_options.AppendExecutionProvider_ROCM(ort_provider_options);
 #if USE_DML
     } else if (provider_options.name == "dml") {
-      if (!p_dml_api_) {
-        auto current_module_path = CurrentModulePath();
-
-        bool contains_device_luid = false;
+      if (!GetDmlInterface()) {
         LUID device_luid{};
+        LUID* p_device_luid{};
         for (const auto& [name, value] : provider_options.options) {
           if (name == "luid") {
             if (auto separator_position = value.find(":"); separator_position != std::string::npos) {
               device_luid.HighPart = std::stol(value.substr(0, separator_position));
               device_luid.LowPart = std::stol(value.substr(separator_position + 1));
-              contains_device_luid = true;
+              p_device_luid = &device_luid;
             }
           }
         }
 
-        if (contains_device_luid) {
-          dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path, &device_luid);
-        } else {
-          dml_objects_ = DmlHelpers::CreateDmlObjects(current_module_path);
-        }
-
-        constexpr auto directml_dll = "DirectML.dll";
-        wil::unique_hmodule smart_directml_dll(LoadLibraryEx(directml_dll, nullptr, 0));
-        THROW_LAST_ERROR_IF(!smart_directml_dll);
-
-        if (LoadLibraryEx(directml_dll, nullptr, 0) == NULL) {
-          throw std::runtime_error("DirectML.dll not found");
-        }
-
-        auto dml_create_device1_fn = reinterpret_cast<decltype(&DMLCreateDevice1)>(GetProcAddress(smart_directml_dll.get(), "DMLCreateDevice1"));
-        THROW_LAST_ERROR_IF(!dml_create_device1_fn);
-        THROW_IF_FAILED(dml_create_device1_fn(dml_objects_.d3d12_device.Get(), DML_CREATE_DEVICE_FLAG_NONE, DML_FEATURE_LEVEL_5_0, IID_PPV_ARGS(&dml_device_)));
-
-        Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&p_dml_api_)));
-        if (!p_dml_api_) {
-          throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
-        }
-
-        dml_execution_context_ = std::make_unique<DmlExecutionContext>(
-            dml_objects_.d3d12_device.Get(),
-            dml_device_.Get(),
-            dml_objects_.command_queue.Get(),
-            *allocator_device_,
-            p_dml_api_);
-
-        dml_pooled_upload_heap_ = std::make_unique<DmlPooledUploadHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
-        dml_readback_heap_ = std::make_unique<DmlReadbackHeap>(dml_objects_.d3d12_device.Get(), dml_execution_context_.get());
+        InitDmlInterface(p_device_luid);
       }
 
-      if (!disable_graph_capture) {
-        session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
-        session_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
-      }
-
-      p_dml_api_->SessionOptionsAppendExecutionProvider_DML1(&session_options, dml_device_.Get(), dml_objects_.command_queue.Get());
+      SetDmlProvider(session_options);
 
       if (is_primary_session_options)
-        device_type_ = DeviceType::DML;  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
+        p_device_ = GetDeviceInterface(DeviceType::DML);  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
     } else if (provider_options.name == "qnn") {
       session_options.AddConfigEntry("ep.share_ep_contexts", "1");
@@ -534,12 +474,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       // on the other hand, not sure if is_primary_session_options is the right thing to check here.
       if (const auto opt_it = opts.find("enable_htp_shared_memory_allocator");
           opt_it != opts.end() && opt_it->second == "1") {
-        device_type_ = DeviceType::QNN;
+        p_device_ = GetDeviceInterface(DeviceType::QNN);
       }
 
       session_options.AppendExecutionProvider("QNN", opts);
     } else if (provider_options.name == "webgpu") {
-      device_type_ = DeviceType::WEBGPU;
+      p_device_ = GetDeviceInterface(DeviceType::WEBGPU);
       std::unordered_map<std::string, std::string> opts;
       for (auto& option : provider_options.options) {
         opts.emplace(option.first, option.second);
@@ -549,14 +489,14 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }
 
-  // If no device is set, create it, default to CPU
-  if (!p_device_) {
-    p_device_ = GetDeviceInterface(device_type_);
-  }
+  // Fallback to CPU if no provider specific interface was set
+  if (!p_device_)
+    p_device_ = GetDeviceInterface(DeviceType::CPU);
 }
 
 void Model::CreateSessionOptions() {
   session_options_ = OrtSessionOptions::Create();
+
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *session_options_, true, false);
 
   for (auto& pipeline_model : config_->model.decoder.pipeline) {
@@ -619,133 +559,44 @@ std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config) {
   return std::make_shared<GeneratorParams>(config);
 }
 
-void ConvertFp16ToFp32(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out, DeviceType device_type, cudaStream_t stream) {
-  auto shape_info = in.GetTensorTypeAndShapeInfo();
-  auto shape = shape_info->GetShape();
-  assert(shape_info->GetElementType() == Ort::TypeToTensorType<Ort::Float16_t>);
+void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType output_type) {
+  auto input_info = input.GetTensorTypeAndShapeInfo();
+  auto shape = input_info->GetShape();
 
-  bool allocate_p_out = p_out == nullptr;
-  if (p_out) {
-    auto out_shape_info = p_out->GetTensorTypeAndShapeInfo();
-    auto out_shape = out_shape_info->GetShape();
-    allocate_p_out = shape != out_shape;
-  }
+  if (output && shape != output->GetTensorTypeAndShapeInfo()->GetShape())
+    output = nullptr;
+  if (!output)
+    output = OrtValue::CreateTensor(device.GetAllocator(), shape, output_type);
 
-  if (allocate_p_out)
-    p_out = OrtValue::CreateTensor<float>(allocator, shape);
-
-  int count = static_cast<int>(shape_info->GetElementCount());
-  auto* fp16 = in.GetTensorData<uint16_t>();
-  auto* fp32 = p_out->GetTensorMutableData<float>();
-
-  switch (device_type) {
-    case DeviceType::WEBGPU:
-    case DeviceType::DML:
-      // DML, WebGpu doesn't currently support on-device scoring, so we fall back to the CPU
-    case DeviceType::CPU:
-      for (int i = 0; i < count; i++)
-        fp32[i] = FastFloat16ToFloat32(fp16[i]);
-      break;
-
-#if USE_CUDA
-    case DeviceType::CUDA:
-      cuda::LaunchFp16ToFp32(fp16, fp32, count, stream);
-      break;
-#endif
-
-    default:
-      throw std::runtime_error("ConvertFp16ToFp32 - Unsupported device type");
-  }
-}
-
-void ConvertFp32ToFp16(OrtAllocator& allocator, OrtValue& in, std::unique_ptr<OrtValue>& p_out,
-                       DeviceType device_type, cudaStream_t stream) {
-  auto shape_info = in.GetTensorTypeAndShapeInfo();
-  auto shape = shape_info->GetShape();
-  assert(shape_info->GetElementType() == Ort::TypeToTensorType<float>);
-
-  bool allocate_p_out = p_out == nullptr;
-  if (p_out) {
-    auto out_shape_info = p_out->GetTensorTypeAndShapeInfo();
-    auto out_shape = out_shape_info->GetShape();
-    allocate_p_out = shape != out_shape;
-  }
-
-  if (allocate_p_out)
-    p_out = OrtValue::CreateTensor<float>(allocator, shape);
-
-  int count = static_cast<int>(shape_info->GetElementCount());
-  auto* fp32 = in.GetTensorData<float>();
-  auto* fp16 = p_out->GetTensorMutableData<uint16_t>();
-
-  switch (device_type) {
-    case DeviceType::DML:
-    case DeviceType::CPU:
-      for (int i = 0; i < count; i++)
-        fp16[i] = FastFloat32ToFloat16(fp32[i]);
-      break;
-
-#if USE_CUDA
-    case DeviceType::CUDA:
-      cuda::LaunchFp32ToFp16(fp32, fp16, count, stream);
-#endif
-
-    default:
-      throw std::runtime_error("ConvertFp32ToFp16 - Unsupported device type");
-  }
+  if (!device.Cast(input, *output))
+    GetDeviceInterface(DeviceType::CPU)->Cast(input, *output);
 }
 
 std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const {
   // Input shape (batch_size, sequence_length). The input is required with data type T.
   // Output shape (batch_size * num_beams, sequence_length)
 
-  // If we're on CUDA, we still want to do the copy to move the data over to CUDA memory where we will read from it later.
-  // DML doesn't currently support on-device scoring, so we go the same route as the CPU
-  if (num_beams == 1 && (device_type_ == DeviceType::CPU || device_type_ == DeviceType::DML || device_type_ == DeviceType::WEBGPU)) {
+  // When num_beams == 1, we don't need to expand the input, but the expand has a side effect of copying from
+  // CPU memory to device memory, so we can skip if the p_device_inputs_ is the CPU device
+  if (num_beams == 1 && p_device_inputs_ == GetDeviceInterface(DeviceType::CPU))
     return std::move(input);
-  }
 
   auto input_type_info = input->GetTensorTypeAndShapeInfo();
   auto element_type = input_type_info->GetElementType();
-  auto element_size = SizeOf(element_type);
   auto input_shape = input_type_info->GetShape();
   const int64_t batch_size = input_shape[0];
-  const int64_t data_size_bytes = input_type_info->GetElementCount() * element_size / batch_size;
+  const int64_t data_size_bytes = input_type_info->GetElementCount() * SizeOf(element_type) / batch_size;
 
   input_shape[0] *= num_beams;
 
-  auto& allocator = device_type_ == DeviceType::DML ? allocator_cpu_ : *allocator_device_;
-  auto expanded = OrtValue::CreateTensor(allocator, input_shape, element_type);
-  const auto* input_data = reinterpret_cast<const uint8_t*>(input->GetTensorRawData());
-  auto* expanded_data = reinterpret_cast<uint8_t*>(expanded->GetTensorMutableRawData());
-  auto* target = expanded_data;
+  auto input_span = ByteWrapTensor(*GetDeviceInterface(DeviceType::CPU), *input);
+  auto expanded = OrtValue::CreateTensor(p_device_inputs_->GetAllocator(), input_shape, element_type);
+  auto expanded_span = ByteWrapTensor(*p_device_inputs_, *expanded);
 
-  switch (device_type_) {
-    case DeviceType::WEBGPU:
-    case DeviceType::DML:
-    case DeviceType::QNN:
-      // DML and WebGpu doesn't currently support on-device scoring, so we use the CPU for non-cache inputs/outputs
-    case DeviceType::CPU:
-      for (int i = 0; i < batch_size; i++) {
-        for (int j = 0; j < num_beams; j++) {
-          memcpy(target, input_data + i * data_size_bytes, data_size_bytes);
-          target += data_size_bytes;
-        }
-      }
-      break;
-
-#if USE_CUDA
-    case DeviceType::CUDA:
-      for (int i = 0; i < batch_size; i++) {
-        for (int j = 0; j < num_beams; j++) {
-          cudaMemcpyAsync(target, input_data + i * data_size_bytes, data_size_bytes, cudaMemcpyHostToDevice, cuda_stream_);
-          target += data_size_bytes;
-        }
-      }
-      break;
-#endif
-    default:
-      throw std::runtime_error("ExpandInputs - Unsupported device type");
+  for (int i = 0; i < batch_size; i++) {
+    for (int j = 0; j < num_beams; j++) {
+      expanded_span.subspan((i * num_beams + j) * data_size_bytes, data_size_bytes).CopyFrom(input_span.subspan(i * data_size_bytes, data_size_bytes));
+    }
   }
   return expanded;
 }
