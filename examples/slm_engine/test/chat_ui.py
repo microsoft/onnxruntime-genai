@@ -47,7 +47,7 @@ def ask_slm_engine(prompt, history, max_tokens, slider_temp):
     history.append(ai_response)
     if len(history) > max_tokens:
         print(f"\033[31;1mResetting History: {len(history)}\033[0m")
-        history = []
+        history.clear()
 
     return ai_response["content"], pd.DataFrame([response_content["kpi"]])
 
