@@ -39,12 +39,15 @@ void State::Run(OrtSession& session, int new_batch_size) {
     if (captured_graph_info) {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
-    extra_outputs_.AddOutputs(session.GetOutputNames());
+    extra_outputs_.Add(session.GetOutputNames());
     first_run_ = false;
-  } else if (captured_graph_info && new_batch_size != current_batch_size_) {
-    current_batch_size_ = new_batch_size;
-    auto annotation_id = std::to_string(captured_graph_info->GenerateUniqueAnnotationID(new_batch_size));
-    run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
+  } else {
+    if (captured_graph_info && new_batch_size != current_batch_size_) {
+      current_batch_size_ = new_batch_size;
+      auto annotation_id = std::to_string(captured_graph_info->GenerateUniqueAnnotationID(new_batch_size));
+      run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
+    }
+    extra_outputs_.Update();
   }
 
   if (g_log.enabled && g_log.model_input_values) {
@@ -62,7 +65,7 @@ void State::Run(OrtSession& session, int new_batch_size) {
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
 
-  extra_outputs_.Update();
+  extra_outputs_.RegisterOutputs();
 
   if (g_log.enabled && g_log.model_output_values) {
     auto& stream = Log("model_output_values");
@@ -92,10 +95,6 @@ OrtValue* State::GetInput(const char* name) {
 }
 
 OrtValue* State::GetOutput(const char* name) {
-  OrtValue* output = extra_outputs_.GetOutput(name);
-  if (output) {
-    return output;
-  }
   ThrowErrorIfSessionTerminated(session_terminated_);
   for (size_t i = 0; i < output_names_.size(); i++) {
     if (std::strcmp(output_names_[i], name) == 0) {

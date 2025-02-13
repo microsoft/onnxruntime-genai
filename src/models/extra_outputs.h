@@ -8,9 +8,9 @@ namespace Generators {
 struct ExtraOutputs {
  public:
   ExtraOutputs(State& state);
-  void AddOutputs(const std::vector<std::string>& all_output_names);
+  void Add(const std::vector<std::string>& all_output_names);
   void Update();
-  OrtValue* GetOutput(const char* name);
+  void RegisterOutputs();
 
  private:
   State& state_;

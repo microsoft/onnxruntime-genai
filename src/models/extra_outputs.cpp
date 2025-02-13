@@ -10,7 +10,7 @@ namespace Generators {
 ExtraOutputs::ExtraOutputs(State& state)
     : state_{state} {}
 
-void ExtraOutputs::AddOutputs(const std::vector<std::string>& all_output_names) {
+void ExtraOutputs::Add(const std::vector<std::string>& all_output_names) {
   // Add() should be called after all the outputs managed by GenAI are initialized
   all_output_names_ = all_output_names;
   extra_outputs_start_ = state_.output_names_.size();
@@ -25,17 +25,15 @@ void ExtraOutputs::AddOutputs(const std::vector<std::string>& all_output_names) 
 
 void ExtraOutputs::Update() {
   for (size_t i = extra_outputs_start_; i < state_.output_names_.size(); ++i) {
-    output_ortvalues_[state_.output_names_[i]] = std::unique_ptr<OrtValue>(state_.outputs_[i]);
-    // reset extra output ortvalues to nullptr to avoid shape mismatch across runs
     state_.outputs_[i] = nullptr;
   }
 }
 
-OrtValue* ExtraOutputs::GetOutput(const char* name) {
-  if (auto iter = output_ortvalues_.find(name); iter != output_ortvalues_.end()) {
-    return iter->second.get();
-  } else {
-    return nullptr;
+void ExtraOutputs::RegisterOutputs() {
+  for (size_t i = extra_outputs_start_; i < state_.output_names_.size(); ++i) {
+    auto managed_ortvalue = std::unique_ptr<OrtValue>(state_.outputs_[i]);
+    output_ortvalues_[state_.output_names_[i]] = managed_ortvalue;
+    state_.outputs_[i] = managed_ortvalue.get();
   }
 }
 
