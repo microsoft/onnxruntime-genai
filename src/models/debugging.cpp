@@ -72,6 +72,9 @@ void DumpValues(std::ostream& stream, ONNXTensorElementDataType type, const void
 }
 
 void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool dump_value) {
+  if (!value) {
+    return;
+  }
   auto type_info = value->GetTensorTypeAndShapeInfo();
   auto shape = type_info->GetShape();
   stream << SGR::Fg_Green << "Shape[ " << SGR::Reset;
