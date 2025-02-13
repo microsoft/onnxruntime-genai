@@ -359,6 +359,43 @@ def test_get_output(test_data_path, relative_model_path):
     )
 
 @pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
+)
+@pytest.mark.parametrize(
+    "relative_model_path",
+    (
+        [
+            Path("qwen/int4/cpu"),
+            Path("qwen/int4/cuda"),
+        ]
+        if og.is_cuda_available()
+        else [
+            Path("qwen/int4/cpu"),
+        ]
+    ),
+)
+def test_hidden_states(test_data_path, relative_model_path):
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+
+    model = og.Model(model_path)
+
+    search_params = og.GeneratorParams(model)
+    input_ids = np.array(
+        [[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32
+    )
+    search_params.set_search_options(do_sample=False, max_length=10, batch_size=input_ids.shape[0])
+
+    generator = og.Generator(model, search_params)
+    generator.append_tokens(input_ids)
+    generator.generate_next_token()
+    hidden_states = generator.get_output("hidden_states")
+    assert hidden_states.shape == (2, 4, 896)
+    generator.generate_next_token()
+    hidden_states = generator.get_output("hidden_states")
+    assert hidden_states.shape == (2, 1, 896)
+
+@pytest.mark.skipif(
     not og.is_cuda_available(), reason="Pipeline model uses a mix of CPU and CUDA EP."
 )
 @pytest.mark.parametrize("relative_model_path", [Path("pipeline-model")])
