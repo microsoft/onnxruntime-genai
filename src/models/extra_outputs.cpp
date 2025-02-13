@@ -31,9 +31,7 @@ void ExtraOutputs::Update() {
 
 void ExtraOutputs::RegisterOutputs() {
   for (size_t i = extra_outputs_start_; i < state_.output_names_.size(); ++i) {
-    state_.outputs_[i] = (
-      output_ortvalues_[state_.output_names_[i]] = std::unique_ptr<OrtValue>(state_.outputs_[i])
-    ).get();
+    state_.outputs_[i] = (output_ortvalues_[state_.output_names_[i]] = std::unique_ptr<OrtValue>(state_.outputs_[i])).get();
   }
 }
 
