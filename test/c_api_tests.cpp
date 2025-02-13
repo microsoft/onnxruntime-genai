@@ -1,15 +1,17 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <gtest/gtest.h>
-#include <generators.h>
-#include <search.h>
-#include <models/model.h>
 #include <iostream>
-#include <ort_genai.h>
-#include "../src/span.h"
 #include <thread>
 #include <vector>
+
+#include <gtest/gtest.h>
+
+#include "generators.h"
+#include "models/model.h"
+#include "ort_genai.h"
+#include "search.h"
+#include "span.h"
 
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"

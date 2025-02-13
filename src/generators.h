@@ -25,6 +25,8 @@
 #include <vector>
 
 #include "leakcheck.h"
+#include "make_string.h"
+#include "smartptrs.h"
 #include "models/onnxruntime_api.h"
 #include "smartptrs.h"
 #include "models/debugging.h"

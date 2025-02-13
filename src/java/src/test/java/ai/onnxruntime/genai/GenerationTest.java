@@ -24,7 +24,7 @@ public class GenerationTest {
   // phi-2 can be used in full end-to-end testing but needs to be manually downloaded.
   // it's also used this way in the C# unit tests.
   private static final String phi2ModelPath() {
-    return TestUtils.getFilePathFromResource("/phi-2/int4/cpu");
+    return TestUtils.getTestResourcePath("phi-2/int4/cpu");
   }
 
   @SuppressWarnings("unused") // Used in EnabledIf

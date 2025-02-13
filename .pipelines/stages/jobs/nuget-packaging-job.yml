@@ -47,6 +47,11 @@ parameters:
   type: boolean
   default: false
 
+- name: enable_win_qnn
+  displayName: 'Whether QNN nuget package should be built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   type: string
 
@@ -54,8 +59,11 @@ parameters:
   type: string
   default: 'release'
 
+- name: nuget_version_type
+  type: string
+
 jobs:
-- job: nuget_${{ parameters.ep }}_packaging
+- job: nuget_${{ parameters.ep }}_packaging_dep_qnn_${{ parameters.enable_win_qnn }}
   pool: 'onnxruntime-Win-CPU-2022'
   variables:
   - name: ep
@@ -81,20 +89,24 @@ jobs:
     value: 'onnxruntime-genai-${{ parameters.ep }}'
 
   - name: genai_nuget_package_name
-    ${{ if eq(parameters.ep, 'cpu') }}:
+    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI'
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.Cuda'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.DirectML'
+    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
+      value: 'Microsoft.ML.OnnxRuntimeGenAI.QNN'
 
   - name: ort_nuget_package_name
-    ${{ if eq(parameters.ep, 'cpu') }}:
+    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
       value: 'Microsoft.ML.OnnxRuntime'
     ${{ if eq(parameters.ep, 'cuda') }}:
       value: 'Microsoft.ML.OnnxRuntime.Gpu'
     ${{ if eq(parameters.ep, 'directml') }}:
       value: 'Microsoft.ML.OnnxRuntime.DirectML'
+    ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
+      value: 'Microsoft.ML.OnnxRuntime.QNN'
 
   steps:
   - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.ep, 'cpu')) }}:
@@ -178,8 +190,19 @@ jobs:
     submodules: recursive
 
   - template: steps/utils/set-genai-version.yml
+    parameters:
+      nuget_version_type: ${{ parameters.nuget_version_type }}
 
   - task: NuGetAuthenticate@1
+
+  - powershell: |
+      dotnet --info
+      dotnet workload install android
+      dotnet workload install ios
+      dotnet workload install maccatalyst
+      dotnet workload install macos
+    displayName: 'Install dependencies'
+    workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
 
   - powershell: |
       dotnet --info
