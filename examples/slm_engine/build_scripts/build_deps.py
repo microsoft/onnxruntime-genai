@@ -6,6 +6,11 @@ import platform
 import shutil
 import subprocess
 
+BLUE = "\033[34m"
+MAGENTA = "\033[35m"
+RED = "\033[31m"
+CLEAR = "\033[0m"
+
 
 def cmake_options_android(ndk_dir):
     if not os.path.exists(ndk_dir):
@@ -74,7 +79,6 @@ def copy_files_keeping_symlinks(src_files, dest):
         raise Exception("src_files must be a list")
 
     for file in src_files:
-        # print(f"\033[34;1mFile: {file}\033[0m")
         # Preserve symlinks
         if os.path.islink(file):
             # Get the name of the link without the rest of the path
@@ -82,8 +86,6 @@ def copy_files_keeping_symlinks(src_files, dest):
             linkto = os.path.basename(os.readlink(file))
             if not os.path.exists(linkname):
                 os.symlink(linkto, linkname)
-                # print(f"\033[35;1mCreating symlink: {linkname} -> {linkto}\033[0m")
-                # print(f"\033[35;1mDest Dir: {dest}\033[0m")
         else:
             shutil.copy2(file, dest)
 
@@ -154,11 +156,11 @@ def build_ort(args):
             cmd_args.extend(["--use_qnn", "--qnn_home", args.qnn_sdk_path])
 
     # now build the ORT library
-    print("Building ONNX Runtime")
+    print(f"{BLUE}Building ONNX Runtime{CLEAR}")
     os.chdir("src/onnxruntime")
 
     build_script = "build.bat" if platform.system() == "Windows" else "./build.sh"
-    print(f"Running {build_script} with args: {cmd_args}")
+    print(f"{BLUE}Running {build_script} with args: {cmd_args}{CLEAR}")
     result = subprocess.call([build_script] + cmd_args)
     if result != 0:
         raise Exception("Failed to build ONNX Runtime")
@@ -175,7 +177,7 @@ def build_ort(args):
     os.chdir(build_dir_name)
 
     # Run install
-    print("Running install")
+    print(f"{MAGENTA}Running install{CLEAR}")
     result = subprocess.call(
         [
             "cmake",
@@ -205,11 +207,9 @@ def build_ort(args):
     # Back to the original directory
     os.chdir(current_dir)
     os.chdir("../../../")
-    print(f"Current Directory: {os.getcwd()}")
 
     # Save the current directory
     current_dir = os.getcwd()
-    print(f"Current Directory: {current_dir}")
 
     # Go to the toplevel directory. To determine the top level directory, we need to
     # find the directory of this python file and then go from there
@@ -220,7 +220,7 @@ def build_ort(args):
         raise Exception("Failed to update submodules")
 
     # Now build the ORT-GenAI library
-    print("Building ORT-GenAI")
+    print(f"{BLUE}Building ONNX Runtime-GenAI{CLEAR}")
     # Prepare the command arguments
     cmd_args = [
         "--skip_wheel",
@@ -248,10 +248,10 @@ def build_ort(args):
             ]
         )
 
-    print(f"Running build.py with args: {cmd_args}")
+    print(f"{BLUE}Running build.py with args: {cmd_args}{CLEAR}")
     result = subprocess.call(["python", "build.py"] + cmd_args)
     if result != 0:
-        raise Exception("Failed to build ORT-GenAI")
+        raise Exception(f"{RED}Failed to build ORT-GenAI{CLEAR}")
 
     # Now install the ORT-GenAI library
     build_dir_name = f"build/{get_platform_dirname(args)}/{args.build_type}"
@@ -272,7 +272,8 @@ def build_ort(args):
     )
 
     if result != 0:
-        raise Exception("Failed to install ONNX Runtime")
+        print(f"Current Directory: {os.getcwd()}")
+        raise Exception(f"{RED}Failed to install ONNX Runtime{CLEAR}")
 
     # Now copy the ORT Libs to the ORT-GenAI directory installation location
     dest_dir = f"{build_dir_name}/install/lib"
@@ -284,13 +285,12 @@ def build_ort(args):
 
     # The "current_dir" is the "build_scripts" directory. Need to
     os.chdir(current_dir)
-    print(f"Current Directory: {os.getcwd()}")
 
     # Now copy the artifacts to the artifacts directory
     artifacts_dir = os.path.abspath(
         f"deps/artifacts/{get_platform_dirname(args)}-{get_machine_type(args)}"
     )
-    print(f"\033[35;1mCopying artifacts to {artifacts_dir}\033[0m")
+    print(f"{MAGENTA}Copying artifacts to {artifacts_dir}{CLEAR}")
 
     os.makedirs(f"{artifacts_dir}/include", exist_ok=True)
     os.makedirs(f"{artifacts_dir}/lib", exist_ok=True)
@@ -306,6 +306,9 @@ def build_ort(args):
         glob.glob(f"{build_dir_name}/install/include/*"),
         f"{artifacts_dir}/include",
     )
+
+    print(f"{MAGENTA}ONNX Runtime Built{CLEAR}")
+    print(f"{BLUE}Artifacts are available in: {artifacts_dir}{CLEAR}")
 
 
 def build_header_only(args):
@@ -339,17 +342,17 @@ def build_header_only(args):
 
     # Copy the headers to the artifacts directory
     dest_root_dir = os.path.abspath(f"deps/artifacts/common/include")
-    print(f"\033[35;1mCopying headers to {dest_root_dir}\033[0m")
 
     os.chdir("deps")
     print(f"Current Directory: {os.getcwd()}")
+    os.makedirs("src", exist_ok=True)
 
     for lib in header_only_libs:
         print(f"Building {lib['name']}")
         # Clone the repo
         if not os.path.exists(f"src/{lib['name']}"):
             # Clone the ORT Repo
-            print(f"Cloning {lib['name']}")
+            print(f"{BLUE}Cloning {lib['name']}{CLEAR}")
             os.chdir("src")
             result = subprocess.call(["git", "clone", lib["url"]])
             if result != 0:
@@ -364,12 +367,14 @@ def build_header_only(args):
         os.chdir(lib["name"])
         result = subprocess.call(["git", "fetch", "--tags", "origin"])
         if result != 0:
-            print(f"Failed to get tags for {lib['name']}")
+            print(f"{RED}Failed to get tags for {lib['name']}{CLEAR}")
             return
 
         result = subprocess.call(["git", "checkout", lib["version"]])
         if result != 0:
-            print(f"Failed to checkout version: {lib['version']} {lib['name']}")
+            print(
+                f"{RED}Failed to checkout version: {lib['version']} {lib['name']}{CLEAR}"
+            )
             return
 
         if not os.path.exists(dest_root_dir):
@@ -377,29 +382,22 @@ def build_header_only(args):
 
         # If the files key is defined, then copy the files
         if "files" in lib:
-            print(f"Current Directory: {os.getcwd()}")
-            print(f"Copying files: {lib['files']}")
-            print(f"Destination Directory: {dest_root_dir}")
             for file in lib["files"]:
                 shutil.copy2(file, dest_root_dir)
         elif "directory" in lib:
             os.chdir("..")
-            print(f"Current Directory: {os.getcwd()}")
-            print(f"Copying files: {lib['name']}/{lib['directory']}")
-            print(f"Destination Directory: {dest_root_dir}")
             copy_files_without_hidden(
                 f"{lib['name']}/{lib['directory']}", dest_root_dir
             )
         else:
             # Copy the entire directory
             os.chdir("..")
-            print(f"Current Directory: {os.getcwd()}")
-            print(f"Destination Directory: {dest_root_dir}")
             copy_files_without_hidden(lib["name"], dest_root_dir)
 
         # Return to the original directory
         os.chdir("..")
-        print(f"Current Directory: {os.getcwd()}")
+    print(f"{MAGENTA}Header Only Libraries Built{CLEAR}")
+    print(f"{BLUE}Artifacts are available in: {dest_root_dir}{CLEAR}")
 
 
 def main():
@@ -444,12 +442,13 @@ def main():
 
     if not args.skip_ort_build:
         build_ort(args)
+    else:
+        print(f"{BLUE}Skipping ORT Build{CLEAR}")
 
     build_header_only(args)
 
     # Return to the original directory
     os.chdir("..")
-    print(f"Current Directory: {os.getcwd()}")
 
 
 if __name__ == "__main__":

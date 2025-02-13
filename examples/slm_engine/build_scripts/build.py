@@ -6,10 +6,14 @@ import subprocess
 import pathlib
 from build_deps import get_machine_type
 
+BLUE = "\033[34m"
+RED = "\033[31m"
+CLEAR = "\033[0m"
+
 
 def cmake_options_android(ndk_dir):
     if not os.path.exists(ndk_dir):
-        raise Exception(f"NDK Directory doesn't exist: {ndk_dir}")
+        raise Exception(f"{RED}NDK Directory doesn't exist: {ndk_dir}{CLEAR}")
     else:
         cmake_option = [
             f"-DCMAKE_TOOLCHAIN_FILE={ndk_dir}/build/cmake/android.toolchain.cmake",
@@ -67,33 +71,35 @@ def main():
     print(f"BUILD Dir:", build_dir)
     os.makedirs(build_dir, exist_ok=True)
 
-    print(f"CMAKE Options:", cmake_options)
+    print(f"{BLUE}CMAKE Options: {cmake_options}{CLEAR}")
 
     print(f"Building ...")
     os.chdir(build_dir)
     result = subprocess.call(cmake_options)
     if result != 0:
-        raise Exception("CMake error!")
+        raise Exception(f"{RED}CMake error!{CLEAR}")
     # result = subprocess.call(["cmake", "--build", ".", "--", f"-j{os.cpu_count()}"])
     result = subprocess.call(
         [
             "cmake",
             "--build",
             ".",
+            "--parallel",
             "--config",
             args.build_type,
         ]
     )
     if result != 0:
-        raise Exception("Build error!")
+        raise Exception(f"{RED}Build error!{CLEAR}")
 
     # Now run the installation
     print(f"Installing...")
     result = subprocess.call(["cmake", "--install", "."])
     if result != 0:
-        raise Exception("Installation error!")
+        raise Exception(f"{RED}Installation error!{CLEAR}")
 
-    print("Build complete")
+    print(f"{BLUE}Build complete{CLEAR}")
+    print(f"{BLUE}Artifacts are available here: {artifacts_dir}{CLEAR}")
 
 
 if __name__ == "__main__":
