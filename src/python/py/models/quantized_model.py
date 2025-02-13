@@ -31,7 +31,11 @@ class QuantizedTensorModule:
         self.in_features = 0
         self.out_features = 0
         self.bits = bits
-        self.group_size = group_size
+        self._group_size = group_size
+
+    @property
+    def group_size(self):
+        return self._group_size if self._group_size != -1 else self.in_features
 
     def __str__(self):
         qweight = f"qweight = {self.qweight.shape}, {self.qweight}\n"

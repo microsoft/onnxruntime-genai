@@ -39,16 +39,6 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   auto tokenizer = OgaTokenizer::Create(*model);
   auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
 
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 1024);
-
-  auto generator = OgaGenerator::Create(*model, *params);
-  std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call, &catch_terminate, generator.get()));
-
-  // Define System Prompt
-  const std::string system_prompt = std::string("<|system|>\n") + "You are a helpful AI and give elaborative answers" + "<|end|>";
-  bool include_system_prompt = true;
-
   while (true) {
     signal(SIGINT, signalHandlerWrapper);
     std::string text;
@@ -68,15 +58,14 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     timing.RecordStartTimestamp();
 
     auto sequences = OgaSequences::Create();
-    if (include_system_prompt) {
-      std::string combined = system_prompt + prompt;
-      tokenizer->Encode(combined.c_str(), *sequences);
-      include_system_prompt = false;
-    } else {
-      tokenizer->Encode(prompt.c_str(), *sequences);
-   }
+    tokenizer->Encode(prompt.c_str(), *sequences);
 
     std::cout << "Generating response..." << std::endl;
+
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 1024);
+    auto generator = OgaGenerator::Create(*model, *params);
+    std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call, &catch_terminate, generator.get()));
     generator->AppendTokenSequences(*sequences);
 
     try {
