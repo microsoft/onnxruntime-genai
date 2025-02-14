@@ -89,7 +89,7 @@ std::unique_ptr<OrtValue> ProcessPixelValues(ortc::Tensor<float>* pixel_values, 
         allocator.GetInfo(),
         std::span<float>(const_cast<float*>(pixel_values->Data()), pixel_values->NumberOfElement()),
         pixel_values->Shape());
-    ConvertFp32ToFp16(allocator, *pixel_values_fp32, pixel_values_value, DeviceType::CPU, nullptr);
+    Cast(*pixel_values_fp32, pixel_values_value, *GetDeviceInterface(DeviceType::CPU), Ort::TypeToTensorType<Ort::Float16_t>);
   }
 
   return pixel_values_value;

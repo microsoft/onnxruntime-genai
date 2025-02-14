@@ -34,9 +34,9 @@ void Adapters::LoadAdapter(const char* adapter_file_path, const std::string& ada
   }
 
   adapters_.emplace(adapter_name, std::make_unique<Adapter>(adapter_file_path,
-                                                            model_->allocator_device_ == &model_->allocator_cpu_
-                                                                ? nullptr
-                                                                : model_->allocator_device_));
+                                                            model_->p_device_->GetType() == DeviceType::CUDA
+                                                                ? &model_->p_device_->GetAllocator()
+                                                                : nullptr));
 }
 
 void Adapters::UnloadAdapter(const std::string& adapter_name) {

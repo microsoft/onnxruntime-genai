@@ -71,6 +71,10 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/*.cpp"
   "${GENERATORS_ROOT}/cpu/*.h"
   "${GENERATORS_ROOT}/cpu/*.cpp"
+  "${GENERATORS_ROOT}/qnn/*.h"
+  "${GENERATORS_ROOT}/qnn/*.cpp"
+  "${GENERATORS_ROOT}/webgpu/*.h"
+  "${GENERATORS_ROOT}/webgpu/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
 )

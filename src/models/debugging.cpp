@@ -3,15 +3,7 @@
 #include "../generators.h"
 #include "utils.h"
 #include <cinttypes>
-
-#if USE_CUDA
-#include "../cuda/cuda_common.h"
-#endif
-
-#if USE_DML
-#include "../dml/dml_helpers.h"
 #include "model.h"
-#endif
 
 namespace Generators {
 static constexpr size_t c_value_count = 10;  // Dump this many values from the start of a tensor
@@ -91,48 +83,22 @@ void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool 
   stream << SGR::Fg_Green << " Location: " << SGR::Reset;
 
   const auto& memory_info = value->GetTensorMemoryInfo();
-  auto device_type = memory_info.GetDeviceType();
-  if (device_type == OrtMemoryInfoDeviceType_CPU) {
-    stream << "CPU\r\n";
-    DumpValues(stream, type_info->GetElementType(), value->GetTensorRawData(), element_count);
-  } else if (device_type == OrtMemoryInfoDeviceType_GPU) {
-    stream << "GPU\r\n";
-#if USE_CUDA
-    auto type = type_info->GetElementType();
-    size_t element_size = SizeOf(type);
-    auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
-    CudaCheck() == cudaMemcpy(cpu_copy.get(), value->GetTensorRawData(), element_size * element_count, cudaMemcpyDeviceToHost);
-    DumpValues(stream, type, cpu_copy.get(), element_count);
-#else
-    throw std::runtime_error("Unexpected error. Trying to access GPU memory but the project is not compiled with CUDA.");
-#endif
-  } else if (static_cast<int>(device_type) == 4) {
-    stream << "DML\r\n";
-#if USE_DML
-    auto type = type_info->GetElementType();
-    size_t element_size = SizeOf(type);
-    auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
-
-    if (value->GetTensorMutableRawData()) {
-      ComPtr<ID3D12Resource> gpu_resource;
-      Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
-          model.allocator_device_,
-          value->GetTensorMutableRawData(),
-          &gpu_resource));
-
-      model.GetDmlReadbackHeap()->ReadbackFromGpu(
-          std::span(cpu_copy.get(), element_size * element_count),
-          gpu_resource.Get(),
-          0,
-          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+  switch (memory_info.GetDeviceType()) {
+    case OrtMemoryInfoDeviceType_CPU:
+      stream << "CPU\r\n";
+      DumpValues(stream, type_info->GetElementType(), value->GetTensorRawData(), element_count);
+      break;
+    case OrtMemoryInfoDeviceType_GPU: {
+      stream << "GPU\r\n";
+      auto type = type_info->GetElementType();
+      auto tensor_span = std::span<uint8_t>{const_cast<OrtValue*>(value)->GetTensorMutableData<uint8_t>(), SizeOf(type) * element_count};
+      auto device_span = model.p_device_->WrapMemory<uint8_t>(tensor_span);
+      DumpValues(stream, type, device_span.CopyDeviceToCpu().data(), element_count);
+      break;
     }
-
-    DumpValues(stream, type, cpu_copy.get(), element_count);
-#else
-    throw std::runtime_error("Unexpected error. Trying to access DML memory but the project is not compiled with DML.");
-#endif
-  } else {
-    stream << "Unhandled device type: " << static_cast<int>(device_type) << "\r\n";
+    default:
+      stream << "Unhandled device type: " << static_cast<int>(memory_info.GetDeviceType()) << "\r\n";
+      break;
   }
 }
 

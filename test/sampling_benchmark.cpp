@@ -34,7 +34,6 @@ struct SamplingBenchmark {
     params->search.max_length = 10;
     params->search.batch_size = batch_size_;
     params->p_device = Generators::GetDeviceInterface(device_type_);
-    params->device_type = device_type_;
 
     std::random_device rd;
     std::mt19937 engine(rd());

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include "generators.h"
 #include "interface.h"
 #include "search.h"
@@ -22,7 +25,7 @@ Search_Cuda::Search_Cuda(const GeneratorParams& params)
   sequence_lengths_ = params.p_device->Allocate<int32_t>(batch_beam_size);
 
   eos_meet_buffer_ = CudaMallocArray<bool>(batch_beam_size, &eos_meet_);
-  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_->cuda_stream);
+  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), GetStream());
 
   done_cpu_ = CudaMallocHostArray<bool>(1);
   *done_cpu_ = false;
@@ -31,15 +34,15 @@ Search_Cuda::Search_Cuda(const GeneratorParams& params)
 GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
     : Search_Cuda{params} {
   next_tokens_buffer_ = params.p_device->Allocate<int32_t>(params.search.batch_size);
+  next_tokens_buffer_.Zero();
   next_tokens_ = gpu_span<int32_t>(next_tokens_buffer_.Span());
-  cudaMemsetAsync(next_tokens_.data(), 0, next_tokens_.size_bytes(), params_->cuda_stream);
 
   unsigned long long random_seed;
   if (params_->search.random_seed != -1)
     random_seed = params_->search.random_seed;
   else
     random_seed = std::random_device{}();
-  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params_->search.batch_size, params_->config.model.vocab_size, params_->cuda_stream);
+  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params_->search.batch_size, params_->config.model.vocab_size, GetStream());
 }
 
 BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
@@ -58,7 +61,7 @@ BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
   topk_buffer_ = CudaMallocArray<float>(topk_buffer_size);
   static_assert(sizeof(float) == sizeof(int32_t));  // The topk_buffer assumes these match, fix for float16
 
-  cudaMemsetAsync(topk_buffer_.get(), 0, topk_buffer_size * sizeof(float), params_->cuda_stream);
+  cudaMemsetAsync(topk_buffer_.get(), 0, topk_buffer_size * sizeof(float), GetStream());
 }
 
 BeamSearch_Cuda::~BeamSearch_Cuda() = default;
@@ -84,20 +87,20 @@ DeviceSpan<int32_t> BeamSearch_Cuda::GetNextIndices() {
 }
 
 void BeamSearch_Cuda::SelectTop() {
-  cuda::DispatchBlockwiseSoftmaxForward<true>(const_cast<cudaStream_t*>(&params_->cuda_stream), softmax_buffer_.get(), next_token_scores_.Span().data(), params_->config.model.vocab_size,
+  cuda::DispatchBlockwiseSoftmaxForward<true>(GetStream(), softmax_buffer_.get(), next_token_scores_.Span().data(), params_->config.model.vocab_size,
                                               params_->config.model.vocab_size, params_->config.model.vocab_size, params_->BatchBeamSize());
 
   // Copy next_token_scores to CPU
   auto next_token_scores_cpu = CudaMallocHostArray<float>(params_->BatchBeamSize() * params_->config.model.vocab_size);
-  cudaMemcpyAsync(next_token_scores_cpu.get(), softmax_buffer_.get(), params_->BatchBeamSize() * params_->config.model.vocab_size * sizeof(float), cudaMemcpyDeviceToHost, params_->cuda_stream);
-  CudaCheck() == cudaStreamSynchronize(params_->cuda_stream);
+  cudaMemcpyAsync(next_token_scores_cpu.get(), softmax_buffer_.get(), params_->BatchBeamSize() * params_->config.model.vocab_size * sizeof(float), cudaMemcpyDeviceToHost, GetStream());
+  CudaCheck() == cudaStreamSynchronize(GetStream());
 
   auto beam_scores = beam_scorer_->GetNextScores();
 
   // Add beam score to next token scores. Corresponding python code is like:
   //    next_token_scores = next_token_scores + beam_scores[:, None].expand_as(next_token_scores)
   cuda::LaunchAddProbsKernel(softmax_buffer_.get(), beam_scores.Span().data(),
-                             params_->search.batch_size, params_->search.num_beams, params_->config.model.vocab_size, params_->cuda_stream);
+                             params_->search.batch_size, params_->search.num_beams, params_->config.model.vocab_size, GetStream());
 
   if (params_->search.num_beams <= 32) {
     constexpr size_t max_parts_of_vocab = 128;
@@ -120,11 +123,11 @@ void BeamSearch_Cuda::SelectTop() {
                          topk_next_scores_.get(),
                          topk_next_tokens_.get(),
                          topk_next_indices_.get(),
-                         params_->cuda_stream);
+                         GetStream());
   } else
     assert(false);
 
-  CudaCheck() == cudaStreamSynchronize(params_->cuda_stream);
+  CudaCheck() == cudaStreamSynchronize(GetStream());
 
   size_t size = params_->BatchBeamSize() * 2;
   std::span<float> next_scores{topk_next_scores_.get(), size};
@@ -146,13 +149,13 @@ void BeamSearch_Cuda::SelectTop() {
 void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
   std::span<float> scores = next_token_scores_.Span();
   assert(scores.size() == params_->search.batch_size * params_->config.model.vocab_size);
-  cuda::GetSample(samplingdata_.get(), params_->cuda_stream, next_tokens_.data(), scores.data(), int(scores.size() / params_->search.batch_size),
+  cuda::GetSample(samplingdata_.get(), GetStream(), next_tokens_.data(), scores.data(), int(scores.size() / params_->search.batch_size),
                   params_->search.batch_size, k, p, temperature);
 
   // Check for EOS
   assert(next_tokens_.size() == eos_meet_.size());
   // Don't replace EOS with pad for batch_size == 1 for continuous decoding mode
-  cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_meet_.data(), params_->config.model.eos_token_id, params_->search.batch_size > 1 ? params_->config.model.pad_token_id : params_->config.model.eos_token_id, done_cpu_.get(), params_->cuda_stream);
+  cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_meet_.data(), params_->config.model.eos_token_id, params_->search.batch_size > 1 ? params_->config.model.pad_token_id : params_->config.model.eos_token_id, done_cpu_.get(), GetStream());
 
   // Append tokens
   cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
@@ -207,7 +210,7 @@ std::span<float> Search_Cuda::GetScores() {
 
 // Set user input tokens (batch_beam_size, sequence_length)
 void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
-  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_->cuda_stream);
+  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), GetStream());
   *done_cpu_ = false;
 
   auto next_tokens_gpu = next_tokens.Span();
@@ -221,7 +224,7 @@ void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
     return;
   }
 
-  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_->cuda_stream);
+  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), GetStream());
   *done_cpu_ = false;
 }
 
@@ -234,12 +237,12 @@ void BeamSearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
 }
 
 void GreedySearch_Cuda::RewindTo(size_t index) {
-  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), params_->cuda_stream);
+  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), GetStream());
   *done_cpu_ = false;
   if (index > 0)
     cuda::Launch_GetLastTokens(next_tokens_.data(), sequences_.GetSequences().Span().data(), static_cast<int>(params_->BatchBeamSize()), static_cast<int>(index), sequences_.max_length_, GetStream());
   else
-    cudaMemsetAsync(next_tokens_.data(), 0, params_->search.batch_size * sizeof(int32_t), params_->cuda_stream);
+    cudaMemsetAsync(next_tokens_.data(), 0, params_->search.batch_size * sizeof(int32_t), GetStream());
   sequences_.RewindTo(index);
 }
 
@@ -247,7 +250,7 @@ void Search_Cuda::ApplyMinLength(int min_length) {
   if (sequences_.GetSequenceLength() >= min_length)
     return;
 
-  cuda::LaunchSetScoreProcessor(GetScores().data(), params_->BatchBeamSize(), params_->config.model.vocab_size, params_->config.model.eos_token_id, std::numeric_limits<float>::lowest(), params_->cuda_stream);
+  cuda::LaunchSetScoreProcessor(GetScores().data(), params_->BatchBeamSize(), params_->config.model.vocab_size, params_->config.model.eos_token_id, std::numeric_limits<float>::lowest(), GetStream());
 }
 
 void Search_Cuda::ApplyRepetitionPenalty(float penalty) {
@@ -256,7 +259,7 @@ void Search_Cuda::ApplyRepetitionPenalty(float penalty) {
 
   cuda::LaunchRepetitionPenaltyProcessor(sequences_.GetSequences().Span().data(),
                                          GetScores().data(), params_->search.batch_size, params_->search.num_beams, params_->config.model.vocab_size,
-                                         params_->search.max_length, GetSequenceLength(), penalty, params_->cuda_stream);
+                                         params_->search.max_length, GetSequenceLength(), penalty, GetStream());
 }
 
 }  // namespace Generators
