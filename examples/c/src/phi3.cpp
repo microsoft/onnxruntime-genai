@@ -49,6 +49,8 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   const std::string system_prompt = std::string("<|system|>\n") + "You are a helpful AI and give elaborative answers" + "<|end|>";
   bool include_system_prompt = true;
 
+  std::string prompt_template = "<|user|>\n{input} <|end|>\n<|assistant|>";
+
   while (true) {
     signal(SIGINT, signalHandlerWrapper);
     std::string text;
@@ -61,7 +63,12 @@ void CXX_API(const char* model_path, const char* execution_provider) {
       break;  // Exit the loop
     }
 
-    const std::string prompt = "<|user|>\n" + text + "<|end|>\n<|assistant|>";
+    // const std::string prompt = "<|user|>\n" + text + "<|end|>\n<|assistant|>";
+    std::string prompt = prompt_template;
+    size_t pos = prompt.find("{input}");
+    if (pos != std::string::npos) {
+      prompt.replace(pos, 7, text);
+    }
 
     bool is_first_token = true;
     Timing timing;
