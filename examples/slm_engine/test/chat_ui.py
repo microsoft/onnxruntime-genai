@@ -82,9 +82,6 @@ with gr.Blocks() as demo:
                 additional_outputs=[kpi_grid],
             )
 
-            with gr.Column():
-                gr.Markdown("## Reset")
-                gr.ClearButton([user_prompt, chatbot])
     with gr.Row():
         with gr.Column():
             gr.Markdown("<left><h2>KPI Stats</h2></left>")
