@@ -83,8 +83,9 @@ var option = 2;
 if (interactive)
 {
     Console.WriteLine("Please enter option number:");
-    Console.WriteLine("1. Complete Output");
-    Console.WriteLine("2. Streaming Output");
+    Console.WriteLine("1. Complete Q&A");
+    Console.WriteLine("2. Streaming Q&A");
+    Console.WriteLine("3. Streaming chat (not supported for DirectML and QNN currently)");
     int.TryParse(Console.ReadLine(), out option);
 }
 
@@ -125,7 +126,7 @@ do
         Console.WriteLine($"Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
     }
 
-    else if (option == 2) //Streaming Output
+    else if (option == 2) //Streaming Q&A 
     {
         using var tokenizerStream = tokenizer.CreateStream();
         using var generator = new Generator(model, generatorParams);
@@ -143,4 +144,23 @@ do
         var totalTokens = outputSequence.Length;
         Console.WriteLine($"Streaming Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
     }
+    else if (option == 3) //Streaming Chat
+    {
+        using var tokenizerStream = tokenizer.CreateStream();
+        using var generator = new Generator(model, generatorParams);
+        do
+        {
+            generator.AppendTokenSequences(sequences);
+            while (!generator.IsDone())
+            {
+                generator.GenerateNextToken();
+                Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
+            }
+            Console.WriteLine();
+            Console.WriteLine("Next prompt:");
+            prompt = Console.ReadLine();
+            sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
+        } while (prompt != null);
+    }
+
 } while (interactive);
