@@ -49,7 +49,6 @@ def ask_slm_engine(prompt, history, max_tokens, slider_temp):
     # Print the Response - all of it
     print(json.dumps(response_content, indent=4))
 
-    history = chat_history  # Update global chat history
     return ai_response["content"], pd.DataFrame([response_content["kpi"]])
 
 
