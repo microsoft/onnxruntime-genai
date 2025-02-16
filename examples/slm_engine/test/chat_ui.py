@@ -1,6 +1,7 @@
 import gradio as gr
 import requests
 import pandas as pd
+import json
 
 SLM_ENDPOINT = "http://localhost:8080/completions"
 SYSTEM_PROMPT = (
@@ -9,26 +10,28 @@ SYSTEM_PROMPT = (
     "Use emojis and markdown as appropriate"
 )
 
+# Global variable to store chat history
+chat_history = []
+context_length = 0
+
 
 def ask_slm_engine(prompt, history, max_tokens, slider_temp):
-    print(f"\033[35;1mPrompt: {prompt}")
-    print(f"History: {history}")
-    print(f"Token Max: {max_tokens}")
-    print(f"Temp: {slider_temp}\033[0m")
+    global chat_history
+    global context_length
 
-    if not history or len(history) == 0:
-        history = [
+    if not chat_history or len(chat_history) == 0:
+        chat_history = [
             {
                 "role": "system",
                 "content": f"{SYSTEM_PROMPT}",
             }
         ]
 
-    history.append({"role": "user", "content": prompt})
+    chat_history.append({"role": "user", "content": prompt})
 
     # Format the message as required by your API
     payload = {
-        "messages": history,
+        "messages": chat_history,
         "temperature": slider_temp,
         "max_tokens": max_tokens,
     }
@@ -40,16 +43,20 @@ def ask_slm_engine(prompt, history, max_tokens, slider_temp):
     # Extract the response content
     response_content = response.json()
 
-    # Print the response
-    # print(f"\033[32;1mResponse: {json.dumps(response_content, indent=4)}\033[0m")
-
     ai_response = response_content["choices"][0]["message"]
-    history.append(ai_response)
-    if len(history) > max_tokens:
-        print(f"\033[31;1mResetting History: {len(history)}\033[0m")
-        history.clear()
+    chat_history.append(ai_response)
 
+    # Print the Response - all of it
+    print(json.dumps(response_content, indent=4))
+
+    history = chat_history  # Update global chat history
     return ai_response["content"], pd.DataFrame([response_content["kpi"]])
+
+
+def reset_chat():
+    global chat_history
+    chat_history = []  # Clear the chat history
+    return "", pd.DataFrame(columns=["KPI", "Value"])  # Clear the chat and KPI grid
 
 
 with gr.Blocks() as demo:
@@ -66,9 +73,12 @@ with gr.Blocks() as demo:
                 with gr.Column():
                     gr.Markdown("## Temperature")
                     slider_temp = gr.Slider(0, 1.0, 0.5, label="Temperature")
+                with gr.Column():
+                    gr.Markdown("## Reset Chat")
+                    reset_button = gr.Button("Reset")
             chatbot = gr.Chatbot(height=200, render=False)
             user_prompt = gr.Textbox(
-                placeholder="Ask me a yes or no question",
+                placeholder="Ask me a question",
                 container=False,
                 scale=7,
                 render=False,
@@ -81,6 +91,7 @@ with gr.Blocks() as demo:
                 textbox=user_prompt,
                 additional_outputs=[kpi_grid],
             )
+            reset_button.click(reset_chat, outputs=[chatbot, kpi_grid])
 
     with gr.Row():
         with gr.Column():
