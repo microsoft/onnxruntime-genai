@@ -14,3 +14,6 @@ def is_mac():
 
 def is_linux():
     return sys.platform.startswith("linux")
+
+def is_aix():
+    return sys.platform.startswith("aix")

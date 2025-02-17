@@ -1,3 +1,7 @@
+parameters:
+- name: nuget_version_type
+  type: string
+
 steps:
 - task: PowerShell@2
   displayName: 'Set genai_version variable from VERSION_INFO'
@@ -5,6 +9,27 @@ steps:
     workingDirectory: $(Build.SourcesDirectory)
     targetType: inline
     script: |
-      $version = (Get-Content -Path .\VERSION_INFO).Trim()
+      $build_id = $env:BUILD_BUILDID
+      Write-Host "build_id: ${build_id}"
+
+      $nuget_version_type = "${{parameters.nuget_version_type}}"
+      Write-Host "nuget_version_type: $nuget_version_type"
+
+      $commit = git rev-parse --short HEAD
+      Write-Host "commit: $commit"
+
+      $version_info = (Get-Content -Path .\VERSION_INFO).Trim()
+      Write-Host "version: $version_info"
+
+      $date = (Get-Date).ToString("yyyyMMdd")
+      Write-Host "date: $date"
+
+      $version = switch ($nuget_version_type)
+      {
+        'dev' { "$version_info-$date-$build_id-$commit" }
+        'stable' { "$version_info" }
+        default { 'unknown' }
+      }
+
       Write-Host "Setting variable: genai_version = ${version}"
       Write-Host "##vso[task.setvariable variable=genai_version]${version}"

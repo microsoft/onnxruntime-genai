@@ -77,7 +77,7 @@ def _parse_args():
     parser.add_argument("--build", action="store_true", help="Build.")
     parser.add_argument("--test", action="store_true", help="Run tests.")
     parser.add_argument(
-        "--clean", action="store_true", help="Run 'cmake --build --target clean' for the selected config/s."
+        "--clean", action="store_true", help="Run 'cmake --build --target clean' for the selected config."
     )
 
     parser.add_argument("--skip_tests", action="store_true", help="Skip all tests. Overrides --test.")
@@ -320,7 +320,7 @@ def _validate_cmake_args(args: argparse.Namespace):
 
 def _validate_args(args: argparse.Namespace):
     # default to all 3 stages
-    if not args.update and not args.build and not args.test:
+    if not any((args.update, args.clean, args.build, args.test)):
         args.update = True
         args.build = True
         args.test = True
@@ -639,12 +639,12 @@ def clean(args: argparse.Namespace, env: dict[str, str]):
     Clean the build output.
     """
     log.info("Cleaning targets")
-    cmd_args = [str(args.cmake), "--build", str(args.build_dir), "--config", args.config, "--target", "clean"]
+    cmd_args = [str(args.cmake_path), "--build", str(args.build_dir), "--config", args.config, "--target", "clean"]
     util.run(cmd_args, env=env)
 
 
 if __name__ == "__main__":
-    if not (util.is_windows() or util.is_linux() or util.is_mac()):
+    if not (util.is_windows() or util.is_linux() or util.is_mac() or util.is_aix()):
         raise OSError(f"Unsupported platform {sys.platform}.")
 
     arguments = _parse_args()
@@ -654,6 +654,9 @@ if __name__ == "__main__":
 
     if arguments.update:
         update(arguments, environment)
+
+    if arguments.clean:
+        clean(arguments, environment)
 
     if arguments.build:
         build(arguments, environment)
