@@ -34,7 +34,6 @@ struct State {
   void ClearIO();  // Clear all inputs/outputs
 
   void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
-  RoamingArray<float> MakeDummy() { return RoamingArray<float>(); }
 
   const Model& model_;
 

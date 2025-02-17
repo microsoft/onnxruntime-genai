@@ -24,7 +24,7 @@ struct AudioEncoderState : State {
   AudioEncoderState& operator=(const AudioEncoderState&) = delete;
 
   void AddCrossCache(std::unique_ptr<Cross_Cache>& cross_cache) { cross_cache->AddOutputs(*this); }
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) override;
   int GetNumFrames() { return audio_features_.GetShape()[2]; }
 
  private:
@@ -42,12 +42,12 @@ struct WhisperDecoderState : State {
   WhisperDecoderState& operator=(const WhisperDecoderState&) = delete;
   
   void AddCrossCache(std::unique_ptr<Cross_Cache>& cross_cache) { cross_cache->AddInputs(*this); }
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) override;
 
  private:
   friend struct WhisperState;
 
-  void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length, bool first_update);
+  void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool first_update);
 
   const WhisperModel& model_;
 
@@ -71,11 +71,11 @@ struct WhisperDecoderState : State {
 };
 
 struct WhisperState : State {
-  WhisperState(const WhisperModel& model, const GeneratorParams& params, RoamingArray<int32_t> sequence_lengths);
+  WhisperState(const WhisperModel& model, const GeneratorParams& params, DeviceSpan<int32_t> sequence_lengths);
   WhisperState(const WhisperState&) = delete;
   WhisperState& operator=(const WhisperState&) = delete;
 
-  RoamingArray<float> Run(int current_length, RoamingArray<int32_t> next_tokens, RoamingArray<int32_t> next_indices) override;
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) override;
   OrtValue* GetInput(const char* name) override;
   OrtValue* GetOutput(const char* name) override;
 
@@ -83,7 +83,7 @@ private:
   void TransposeKCaches(std::vector<std::unique_ptr<OrtValue>>& kv_caches);
   template <typename T> void UpdateCrossQKSearchBuffer(int current_length);
   template <typename T> void FinalizeCrossQK(int current_length);
-  void UpdateInputsOutputs(const RoamingArray<int32_t>& next_tokens, RoamingArray<int32_t> next_indices, int current_length);
+  void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length);
   void Finalize(int current_length) override;
 
   const WhisperModel& model_;
@@ -95,11 +95,8 @@ private:
   // Temporary buffer for transpoing self attention K caches and cross attention K caches
   std::unique_ptr<OrtValue> transpose_k_cache_buffer_;  // { batch_size, num_heads, num_frames / 2, head_size }
 
-#if USE_CUDA
-  // Buffers for calculating word-level timestamps
-  cuda_unique_ptr<void*> cross_qk_ptrs_buffer_;        // To create and hold a reference to the GPU memory so it isn't freed
-  gpu_span<void*> output_cross_qk_ptrs_gpu_;           // To use for copying the CPU vector of float* pointers into
-#endif
+  // To create and hold a reference to the GPU vector of T* pointers
+  DeviceSpan<void*> cross_qk_ptrs_;                     // { num_decoder_layers }
 
   std::unique_ptr<OrtValue> alignment_heads_;           // { num_alignment_heads, 2 }
   std::unique_ptr<OrtValue> cross_qk_search_buffer_;    // { batch_size, num_alignment_heads, max_sequence_length, num_frames / 2 }
