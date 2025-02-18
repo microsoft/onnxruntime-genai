@@ -9,6 +9,8 @@ from pathlib import Path
 
 import onnxruntime_genai as og
 
+# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
+
 def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
     curr_path = Path(current_dir).absolute()
     target_dir = glob.glob(target_dir_name, root_dir=curr_path)
