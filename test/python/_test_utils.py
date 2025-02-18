@@ -58,7 +58,7 @@ def get_model_paths():
         "olmo": "amd/AMD-OLMo-1B-SFT-DPO",
         "qwen": "Qwen/Qwen2.5-0.5B",
         "phi-3.5": "microsoft/Phi-3.5-mini-instruct",
-        # "llama-3.2": "meta-llama/Llama-3.2-1B-instruct",
+        "llama-3.2": "meta-llama/Llama-3.2-1B-instruct",
         "granite-3.0": "ibm-granite/granite-3.0-2b-instruct",
     }
 
@@ -136,9 +136,20 @@ def download_models(download_path, precision, device):
 
     # python -m onnxruntime_genai.models.builder -m <model_name> -o <output_path> -p <precision> -e <device>
     for model_name, hf_name in hf_paths.items():
+        try:
+            from huggingface_hub import model_info
+            model_info(hf_name)
+        except ImportError:
+            print("huggingface_hub is not installed. Skipping downloading hugging face models.")
+            continue
+        except Exception as e:
+            print(f"Error: {e}. Skipping downloading hugging face models.")
+            continue
         output_path = os.path.join(download_path, model_name, precision, device)
         if not os.path.exists(output_path):
             download_model(hf_name, "", output_path, precision, device)
             output_paths.append(output_path)
+
+    assert len(output_paths) > 0, "No models downloaded."
 
     return output_paths
