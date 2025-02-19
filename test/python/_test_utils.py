@@ -56,7 +56,7 @@ def get_model_paths():
     hf_paths = {
         "phi-2": "microsoft/phi-2",
         "olmo": "amd/AMD-OLMo-1B-SFT-DPO",
-        "qwen": "Qwen/Qwen2.5-0.5B",
+        "qwen-2.5": "Qwen/Qwen2.5-0.5B",
         "phi-3.5": "microsoft/Phi-3.5-mini-instruct",
         "llama-3.2": "meta-llama/Llama-3.2-1B-instruct",
         "granite-3.0": "ibm-granite/granite-3.0-2b-instruct",
@@ -124,13 +124,18 @@ def download_model(model_name, input_path, output_path, precision, device, one_l
     run_subprocess(command).check_returncode()
 
 
-def download_models(download_path, precision, device):
+def download_models(download_path, precision, device, log):
+    log.debug(f"Downloading models to {download_path} with precision {precision} and device {device}")
+
     ci_paths, hf_paths = get_model_paths()
     output_paths = []
     
+    log.debug(f"Downloading {len(ci_paths)} PyTorch models and {len(hf_paths)} Hugging Face models")
+
     # python -m onnxruntime_genai.models.builder -i <input_path> -o <output_path> -p <precision> -e <device>
     for model_name, input_path in ci_paths.items():
         output_path = os.path.join(download_path, model_name, precision, device)
+        log.debug(f"Downloading {model_name} from {input_path} to {output_path}")
         if not os.path.exists(output_path):
             download_model(None, input_path, output_path, precision, device)
             output_paths.append(output_path)
@@ -141,15 +146,20 @@ def download_models(download_path, precision, device):
             from huggingface_hub import model_info
             model_info(hf_name)
         except ImportError:
-            print("huggingface_hub is not installed. Skipping downloading hugging face models.")
+            log.warning("huggingface_hub is not installed. Skipping downloading hugging face models.")
             continue
         except Exception as e:
-            print(f"Error: {e}. Skipping downloading hugging face models.")
+            log.warning(f"Error: {e}. Skipping downloading hugging face models")
             continue
         output_path = os.path.join(download_path, model_name, precision, device)
+
+        log.debug(f"Downloading {model_name} from {hf_name} to {output_path}")
+
         if not os.path.exists(output_path):
             download_model(hf_name, "", output_path, precision, device)
             output_paths.append(output_path)
+
+    log.info(f"Successfully downloaded {len(output_paths)} models")
 
     assert len(output_paths) > 0, "No models downloaded."
 
