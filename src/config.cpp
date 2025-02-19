@@ -610,11 +610,19 @@ struct Search_Element : JSON::Element {
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value) {
-  Search_Element(search).OnValue(name, value);
+  try {
+    Search_Element(search).OnValue(name, value);
+  } catch (...) {
+    JSON::TranslateException(name);
+  }
 }
 
 void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
-  Search_Element(search).OnValue(name, value);
+  try {
+    Search_Element(search).OnValue(name, value);
+  } catch (...) {
+    JSON::TranslateException(name);
+  }
 }
 
 void ClearProviders(Config& config) {
@@ -710,6 +718,12 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
       throw std::runtime_error(oss.str());
     }
   }
+}
+
+void OverlayConfig(Config& config, std::string_view json) {
+  Root_Element root{config};
+  RootObject_Element element{root};
+  JSON::Parse(element, json);
 }
 
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {

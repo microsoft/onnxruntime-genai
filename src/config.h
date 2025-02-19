@@ -188,6 +188,7 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
+void OverlayConfig(Config& config, std::string_view json);
 bool IsCudaGraphEnabled(Config::SessionOptions& session_options);
 
 }  // namespace Generators

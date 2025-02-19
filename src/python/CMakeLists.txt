@@ -7,7 +7,7 @@ file(GLOB python_srcs CONFIGURE_DEPENDS
 pybind11_add_module(python ${python_srcs})
 target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(python PRIVATE ${ORT_LIB_DIR})
-target_link_libraries(python PRIVATE onnxruntime-genai-static)
+target_link_libraries(python PRIVATE onnxruntime-genai)
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
 target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
@@ -51,6 +51,14 @@ if(BUILD_WHEEL)
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/package_description.md" DESTINATION ${WHEEL_FILES_DIR}/)
   file(COPY "${CMAKE_SOURCE_DIR}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_TARGET_NAME}/)
   file(COPY "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION ${WHEEL_TARGET_NAME}/)
+
+  # Copy over the onnxruntime-genai.dll shared library
+  add_custom_command(TARGET python POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy
+    $<TARGET_FILE:onnxruntime-genai> $<TARGET_FILE:python>
+    ${WHEEL_TARGET_NAME}
+    COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
+  )
   add_custom_command(TARGET python POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
     ${ortgenai_embed_libs} $<TARGET_FILE:python>

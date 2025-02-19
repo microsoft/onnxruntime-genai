@@ -21,6 +21,14 @@ struct Result {
 
 }  // namespace Generators
 
+// Allocate a null terminated C string from a std::string
+const char* AllocOgaString(const std::string& string) {
+  auto length = string.length() + 1;
+  auto cstr_buffer = std::make_unique<char[]>(length);
+  memcpy(cstr_buffer.get(), string.c_str(), length);
+  return cstr_buffer.release();
+}
+
 extern "C" {
 
 #define OGA_TRY try {
@@ -118,6 +126,19 @@ OgaResult* OGA_API_CALL OgaLoadImages(const OgaStringArray* image_paths, OgaImag
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaLoadImagesFromBuffers(const void** image_data, const size_t* image_data_sizes, size_t count, OgaImages** images) {
+  OGA_TRY
+  std::unique_ptr<ort_extensions::ImageRawData[]> image_raw_data = std::make_unique<ort_extensions::ImageRawData[]>(count);
+  for (size_t i = 0; i < count; ++i) {
+    auto data = reinterpret_cast<const uint8_t*>(image_data[i]);
+    image_raw_data[i] = ort_extensions::ImageRawData(data, data + image_data_sizes[i]);  // TODO: This is copying the data into a new buffer. We should avoid this.
+  }
+
+  *images = reinterpret_cast<OgaImages*>(std::make_unique<Generators::Images>(std::move(image_raw_data), count).release());
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaLoadAudio(const char* audio_path, OgaAudios** audios) {
   OGA_TRY
   const std::vector<const char*> audio_paths_vector{audio_path};
@@ -180,6 +201,13 @@ OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config, const char
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaConfigOverlay(OgaConfig* config, const char* json) {
+  OGA_TRY
+  Generators::OverlayConfig(*reinterpret_cast<Generators::Config*>(config), json);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
   OGA_TRY
   auto config_copy = std::make_unique<Generators::Config>(*reinterpret_cast<const Generators::Config*>(config));
@@ -192,6 +220,20 @@ OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaMod
 
 OgaResult* OGA_API_CALL OgaCreateModel(const char* config_path, OgaModel** out) {
   return OgaCreateModelWithRuntimeSettings(config_path, nullptr, out);
+}
+
+OgaResult* OGA_API_CALL OgaModelGetType(const OgaModel* model, const char** out) {
+  OGA_TRY
+  *out = AllocOgaString(reinterpret_cast<const Generators::Model*>(model)->config_->model.type.c_str());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char** out) {
+  OGA_TRY
+  *out = AllocOgaString(to_string(reinterpret_cast<const Generators::Model*>(model)->p_device_->GetType()));
+  return nullptr;
+  OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* model, OgaGeneratorParams** out) {
@@ -312,6 +354,16 @@ OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator) 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator, const int32_t** out, size_t* out_count) {
+  OGA_TRY
+  auto& generator_ = *reinterpret_cast<const Generators::Generator*>(generator);
+  auto tokens = generator_.search_->GetNextTokens().CopyDeviceToCpu();
+  *out = tokens.data();
+  *out_count = tokens.size();
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t new_length) {
   OGA_TRY
   reinterpret_cast<Generators::Generator*>(generator)->RewindToLength(new_length);
@@ -364,17 +416,20 @@ OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* oga_generator, OgaT
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* oga_generator, OgaTensor* tensor) {
+OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* oga_generator, OgaTensor* oga_tensor) {
   OGA_TRY
   auto generator = reinterpret_cast<Generators::Generator*>(oga_generator);
-  if (!generator->computed_logits_) {
+  auto tensor = reinterpret_cast<Generators::Tensor*>(oga_tensor);
+  auto logits = generator->search_->GetLogits();
+  if (!generator->computed_logits_ && logits.size() != 0) {
     throw std::runtime_error("logits are not computed yet. Please call GenerateNextToken or AppendTokens before calling SetLogits.");
   }
-  auto logits_tensor = reinterpret_cast<Generators::Tensor*>(tensor);
-  size_t element_count = logits_tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
-  auto new_logits_span = std::span<const float>(logits_tensor->ort_tensor_->GetTensorData<float>(), element_count);
-  auto logits = generator->search_->GetLogits();
-  if (new_logits_span.size() != logits.size()) {
+  size_t element_count = tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
+  auto new_logits_span = std::span<const float>(tensor->ort_tensor_->GetTensorData<float>(), element_count);
+  if (logits.size()==0) {
+    logits = generator->model_->p_device_inputs_->Allocate<float>(element_count);
+    generator->SetLogits(logits);
+  } else if (new_logits_span.size() != logits.size()) {
     throw std::runtime_error("Generator::SetLogits passed an array of size " +
                              std::to_string(new_logits_span.size()) + " but should be size " + std::to_string(logits.size()));
   }
@@ -413,6 +468,16 @@ OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* p, const char* st
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer* p, const char** strings, size_t count, OgaTensor** out) {
+  OGA_TRY
+  auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
+  auto tensor = tokenizer.EncodeBatch(std::span<const char*>(strings, count));
+  tensor->external_owner_ = tensor;
+  *out = reinterpret_cast<OgaTensor*>(tensor.get());
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* p, const char* str, int32_t* token_id) {
   OGA_TRY
   auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
@@ -424,12 +489,22 @@ OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* p, const char*
 OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* p, const int32_t* tokens, size_t token_count, const char** out_string) {
   OGA_TRY
   auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
+  *out_string = AllocOgaString(tokenizer.Decode({tokens, token_count}));
+  return nullptr;
+  OGA_CATCH
+}
 
-  auto string = tokenizer.Decode({tokens, token_count});
-  auto length = string.length() + 1;
-  auto cstr_buffer = std::make_unique<char[]>(length);
-  memcpy(cstr_buffer.get(), string.c_str(), length);
-  *out_string = cstr_buffer.release();
+OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer* p, const OgaTensor* oga_tensor, OgaStringArray** out) {
+  OGA_TRY
+  auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
+  auto& tensor = *reinterpret_cast<const Generators::Tensor*>(oga_tensor);
+  auto shape_info = tensor.ort_tensor_->GetTensorTypeAndShapeInfo();
+  auto shape = shape_info->GetShape();
+  if (shape.size() != 2)
+    throw std::runtime_error("Expected a 2D tensor");
+  auto strings = tokenizer.DecodeBatch(std::span<const int32_t>{tensor.ort_tensor_->GetTensorData<int32_t>(), shape_info->GetElementCount()}, shape[0]);
+  auto string_array = std::make_unique<std::vector<std::string>>(std::move(strings));
+  *out = reinterpret_cast<OgaStringArray*>(string_array.release());
   return nullptr;
   OGA_CATCH
 }
@@ -437,12 +512,7 @@ OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* p, const int32_t*
 OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor* p, const int32_t* tokens, size_t token_count, const char** out_string) {
   OGA_TRY
   auto& processor = *reinterpret_cast<const Generators::MultiModalProcessor*>(p);
-
-  auto string = processor.tokenizer_->Decode({tokens, token_count});
-  auto length = string.length() + 1;
-  auto cstr_buffer = std::make_unique<char[]>(length);
-  memcpy(cstr_buffer.get(), string.c_str(), length);
-  *out_string = cstr_buffer.release();
+  *out_string = AllocOgaString(processor.tokenizer_->Decode({tokens, token_count}));
   return nullptr;
   OGA_CATCH
 }
@@ -477,10 +547,15 @@ OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* sha
   auto tensor = std::make_shared<Generators::Tensor>();
   auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   auto ort_element_type = static_cast<ONNXTensorElementDataType>(element_type);
-  size_t byte_count = Generators::SizeOf(ort_element_type);
+  size_t byte_count = Ort::SizeOf(ort_element_type);
+  auto shape = std::span<const int64_t>{shape_dims, shape_dims_count};
   for (size_t i = 0; i < shape_dims_count; i++)
     byte_count *= shape_dims[i];
-  tensor->ort_tensor_ = OrtValue::CreateTensor(*p_memory_info, data, byte_count, std::span<const int64_t>{shape_dims, shape_dims_count}, ort_element_type);
+  if (data)
+    tensor->ort_tensor_ = OrtValue::CreateTensor(*p_memory_info, data, byte_count, shape, ort_element_type);
+  else
+    tensor->ort_tensor_ = OrtValue::CreateTensor(Ort::Allocator::GetWithDefaultOptions(), shape, ort_element_type);
+
   tensor->external_owner_ = tensor;
   *out = reinterpret_cast<OgaTensor*>(tensor.get());
   return nullptr;
@@ -593,8 +668,18 @@ OgaResult* OGA_API_CALL OgaStringArrayAddString(OgaStringArray* string_array, co
   OGA_CATCH
 }
 
-size_t OGA_API_CALL OgaStringArrayGetCount(const OgaStringArray* string_array) {
-  return reinterpret_cast<const std::vector<std::string>*>(string_array)->size();
+OgaResult* OGA_API_CALL OgaStringArrayGetCount(const OgaStringArray* string_array, size_t* out) {
+  OGA_TRY
+  *out = reinterpret_cast<const std::vector<std::string>*>(string_array)->size();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaStringArrayGetString(const OgaStringArray* string_array, size_t index, const char** out) {
+  OGA_TRY
+  *out = reinterpret_cast<const std::vector<std::string>*>(string_array)->at(index).c_str();
+  return nullptr;
+  OGA_CATCH
 }
 
 OgaResult* OgaCreateAdapters(const OgaModel* model, OgaAdapters** out) {
