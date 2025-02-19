@@ -80,7 +80,7 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
 )
 
 set(ortgenai_embed_libs "") # shared libs that will be embedded inside the onnxruntime-genai package
-
+if(NOT USE_VCPKG)
 if (IOS OR MAC_CATALYST)
   if (NOT EXISTS "${ORT_LIB_DIR}/onnxruntime.xcframework")
     message(FATAL_ERROR "Expected the ONNX Runtime XCFramework to be found at ${ORT_LIB_DIR}/onnxruntime.xcframework. Actual: Not found.")
@@ -90,8 +90,8 @@ else()
     message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")
   endif()
 endif()
-
-if(NOT EXISTS "${ORT_HEADER_DIR}/onnxruntime_c_api.h")
+endif()
+if(NOT USE_VCPKG AND NOT EXISTS "${ORT_HEADER_DIR}/onnxruntime_c_api.h")
   message(FATAL_ERROR "Expected the ONNX Runtime C API header to be found at \"${ORT_HEADER_DIR}/onnxruntime_c_api.h\". Actual: Not found.")
 endif()
 

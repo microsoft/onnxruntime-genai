@@ -94,6 +94,7 @@ else()
   add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 endif()
 
+if(NOT USE_VCPKG)
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
@@ -103,15 +104,26 @@ target_include_directories(onnxruntime-genai-static PUBLIC ${onnxruntime_extensi
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
+else()
+target_link_libraries(onnxruntime-genai PRIVATE  onnxruntime_extensions::ortcustomops
+  onnxruntime_extensions::ocos_operators
+  onnxruntime_extensions::noexcep_operators
+  onnxruntime::onnxruntime dlib::dlib)
+target_link_libraries(onnxruntime-genai-static PRIVATE  onnxruntime_extensions::ortcustomops
+  onnxruntime_extensions::ocos_operators
+  onnxruntime_extensions::noexcep_operators
+  onnxruntime::onnxruntime)
+endif()
 target_link_libraries(onnxruntime-genai PRIVATE Threads::Threads)
 target_link_libraries(onnxruntime-genai-static PUBLIC Threads::Threads)
-
+if(NOT USE_VCPKG)
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.
 if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK) AND (NOT MAC_CATALYST)))
   add_compile_definitions(_ORT_GENAI_USE_DLOPEN)
 else()
   target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+endif()
 endif()
 
 if(APPLE)

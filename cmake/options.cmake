@@ -4,7 +4,7 @@ include(CMakeDependentOption)
 option(USE_CUDA "Build with CUDA support" ON)
 option(USE_ROCM "Build with ROCm support" ON)
 option(USE_DML "Build with DML support" OFF)
-
+option(USE_VCPKG "Build with VCPKG package manager" OFF)
 # bindings
 option(ENABLE_JAVA "Build the Java API." OFF)
 option(ENABLE_PYTHON "Build the Python API." ON)

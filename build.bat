@@ -1,8 +1,1 @@
-:: Copyright (c) Microsoft Corporation. All rights reserved.
-:: Licensed under the MIT License.
-
-@echo off
-setlocal
-
-rem Requires a Python install to be available in your PATH
-python "%~dp0\build.py" %*
+cmake -Bbuild -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake "-DVCPKG_INSTALL_OPTIONS=--overlay-triplets=C:\src\onnxruntime-genai\build\default" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md -DFETCHCONTENT_FULLY_DISCONNECTED=ON -DUSE_CUDA=OFF         -DUSE_ROCM=OFF         -DENABLE_PYTHON=OFF         -DENABLE_TESTS=OFF         -DENABLE_MODEL_BENCHMARK=OFF -DUSE_VCPKG=ON

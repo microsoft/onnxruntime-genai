@@ -34,7 +34,7 @@ if(ENABLE_PYTHON)
     set(pybind11_dep pybind11::pybind11)
   endif()
 endif()
-
+if(ENABLE_TESTS)
 FetchContent_Declare(
   googletest
   URL ${DEP_URL_googletest}
@@ -43,6 +43,7 @@ FetchContent_Declare(
 )
 
 onnxruntime_fetchcontent_makeavailable(googletest)
+endif()
 
 if(USE_DML)
   set(WIL_BUILD_PACKAGING OFF CACHE BOOL "" FORCE)
@@ -79,17 +80,29 @@ if(USE_DML)
   )
 endif()
 
-
+if(USE_VCPKG)
+  find_package(onnxruntime CONFIG REQUIRED)
+  find_package(Microsoft.GSL CONFIG REQUIRED)
+  find_package(farmhash CONFIG REQUIRED)
+  find_package(nlohmann_json CONFIG REQUIRED)
+  find_package(onnxruntime_extensions CONFIG REQUIRED)
+  find_package(re2 CONFIG REQUIRED)
+  find_package(dlib CONFIG REQUIRED)
+  find_package(protobuf CONFIG REQUIRED)
+  find_package(sentencepiece CONFIG REQUIRED)
+else()
 FetchContent_Declare(
   onnxruntime_extensions
   GIT_REPOSITORY ${DEP_URL_onnxruntime_extensions}
   GIT_TAG ${DEP_SHA1_onnxruntime_extensions}
+  FIND_PACKAGE_ARGS NAMES onnxruntime_extensions
 )
 set(OCOS_BUILD_PRESET ort_genai)
 onnxruntime_fetchcontent_makeavailable(onnxruntime_extensions)
-
+endif()
 list(APPEND EXTERNAL_LIBRARIES
-  onnxruntime_extensions
-  ocos_operators
-  noexcep_operators
+  onnxruntime_extensions::ortcustomops
+  onnxruntime_extensions::ocos_operators
+  onnxruntime_extensions::noexcep_operators
+  onnxruntime::onnxruntime
 )

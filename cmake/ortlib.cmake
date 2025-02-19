@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
-
+if(NOT USE_VCPKG)
 if(ORT_HOME)
   # If ORT_HOME is specified at build time, use ORT_HOME to get the onnxruntime headers and libraries
   message(STATUS "Using ONNX Runtime from ${ORT_HOME}")
@@ -93,6 +93,7 @@ else()
     endif()
   endif()
 endif()
+endif()
 
 # Download DML headers and libraries
 if(USE_DML)
@@ -132,10 +133,11 @@ if(USE_DML)
 
   set(D3D12_LIB_DIR ${d3d12lib_SOURCE_DIR}/build/native/bin/${DML_BINARY_PLATFORM})
 endif()
-
+if(NOT USE_VCPKG)
 # onnxruntime-extensions can use the same onnxruntime headers
 set(ONNXRUNTIME_INCLUDE_DIR ${ORT_HEADER_DIR})
 set(ONNXRUNTIME_LIB_DIR ${ORT_LIB_DIR})
 
 message(STATUS "ORT_HEADER_DIR: ${ORT_HEADER_DIR}")
 message(STATUS "ORT_LIB_DIR: ${ORT_LIB_DIR}")
+endif()
