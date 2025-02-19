@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
   AZCOPY_AUTO_LOGIN_TYPE: MSI
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
@@ -80,7 +81,7 @@ jobs:
 
     - name: Configure CMake
       run: |
-        cmake --preset windows_x64_directml_release -DTEST_PHI2=False
+        cmake --preset windows_x64_directml_release -DTEST_PHI2=True
 
     - name: Build with CMake
       run: |
@@ -92,6 +93,10 @@ jobs:
         python -m pip install -r test\python\directml\torch\requirements.txt
         python -m pip install -r test\python\directml\ort\requirements.txt
         python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+
+    - name: Run the Python Tests
+      run: |
+        python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models" --e2e
 
     - name: Verify Build Artifacts
       if: always()
