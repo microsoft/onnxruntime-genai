@@ -362,23 +362,9 @@ def test_get_output(test_data_path, relative_model_path):
     sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
     reason="Python 3.8 is required for downloading models.",
 )
-@pytest.mark.parametrize(
-    "relative_model_path",
-    (
-        [
-            Path("qwen/int4/cpu"),
-            Path("qwen/int4/cuda"),
-        ]
-        if og.is_cuda_available()
-        else [
-            Path("qwen/int4/cpu"),
-        ]
-    ),
-)
-def test_hidden_states(test_data_path, relative_model_path):
-    model_path = os.fspath(Path(test_data_path) / relative_model_path)
-
-    model = og.Model(model_path)
+@pytest.mark.parametrize("device", devices)
+def test_hidden_states(qwen_for, device):
+    model = og.Model(qwen_for(device))
 
     search_params = og.GeneratorParams(model)
     input_ids = np.array(

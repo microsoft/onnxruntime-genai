@@ -53,6 +53,16 @@ def llama_for(request):
 
 
 @pytest.fixture
+def qwen_for(request):
+    return functools.partial(
+        get_path_for_model,
+        request.config.getoption("--test_models"),
+        "qwen-2.5",
+        "int4",
+    )
+
+
+@pytest.fixture
 def path_for_model(request):
     return functools.partial(
         get_path_for_model, request.config.getoption("--test_models")

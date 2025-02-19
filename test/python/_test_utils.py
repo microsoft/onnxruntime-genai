@@ -78,7 +78,7 @@ def get_model_paths():
         # "phi-3-mini": os.path.join(ci_data_path, "phi3-mini-128k-instruct"),
         # "gemma-2-2b": os.path.join(ci_data_path, "gemma-2-2b-it"),
         # "llama-3.2": os.path.join(ci_data_path, "llama-3.2b-1b-instruct"),
-        # "qwen-2.5": os.path.join(ci_data_path, "qwen2.5-0.5b-instruct"),
+        "qwen-2.5": os.path.join(ci_data_path, "qwen2.5-0.5b-instruct"),
         # "nemotron-mini": os.path.join(ci_data_path, "nemotron-mini-4b"),
     }
 
