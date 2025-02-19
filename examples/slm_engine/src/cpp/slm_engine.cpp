@@ -33,14 +33,14 @@ namespace microsoft {
 namespace aias {
 
 std::unique_ptr<SLMEngine> SLMEngine::CreateEngine(
-    const char* model_path, const std::string& model_name, bool verbose) {
+    const char* model_path, const std::string& model_family_name, bool verbose) {
   cout << RED << "Current Memory Usage: " << GetMemoryUsage() << " MB"
        << CLEAR << endl;
 
   // Convert the model name to the SupportedModelType
-  auto model_type = StringToModelType(model_name);
+  auto model_type = StringToModelType(model_family_name);
   if (model_type == SupportedModelType::UNKNOWN) {
-    cout << RED << "Error! Unknown Model Type: " << model_name << CLEAR
+    cout << RED << "Error! Unknown Model Type: " << model_family_name << CLEAR
          << endl;
     return nullptr;
   }
@@ -264,6 +264,14 @@ const auto PromptFormatTable = R"(
          "system": { "prefix": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n", "suffix": "<|eot_id|>" },
          "user": { "prefix": "<|start_header_id|>user<|end_header_id|>\n\n", "suffix": "<|eot_id|>" },
          "assistant": { "prefix": "<|start_header_id|>assistant<|end_header_id|>\n\n", "suffix": "<|eot_id|>" }
+      }
+   },
+   {
+      "llm_type": "custom",
+      "prompt_format": {
+         "system": { "prefix": "", "suffix": "" },
+         "user": { "prefix": "", "suffix": "" },
+         "assistant": { "prefix": "", "suffix": "" }
       }
    }
 ]

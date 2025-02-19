@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
   string model_family;
   program.add_argument("-mf", "--model_family")
       .required()
-      .help("Model family: phi3 or llama3.2")
+      .help("Model family: <phi3|llama3.2|custom>")
       .store_into(model_family);
 
   int port_number = 8080;

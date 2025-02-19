@@ -5,6 +5,7 @@ import argparse
 import platform
 import shutil
 import subprocess
+import sys
 
 BLUE = "\033[34m"
 MAGENTA = "\033[35m"
@@ -100,11 +101,11 @@ def build_ort(args):
 
     # Make the src directory if needed
     os.makedirs("src", exist_ok=True)
+    os.chdir("src")
 
-    if not os.path.exists("src/onnxruntime"):
+    if not os.path.exists("onnxruntime"):
         # Clone the ORT Repo
         print("Cloning ONNX Runtime")
-        os.chdir("src")
         if (
             subprocess.call(
                 ["git", "clone", "https://github.com/microsoft/onnxruntime.git"]
@@ -113,22 +114,22 @@ def build_ort(args):
         ):
             raise Exception("Failed to clone ONNX Runtime")
 
-        # Now get the dependencies
-        os.chdir("onnxruntime")
+    # Now get the dependencies
+    os.chdir("onnxruntime")
 
-        # Checkout the correct version
-        version = "v1.20.1"
-        if subprocess.call(["git", "checkout", version]) != 0:
-            raise Exception("Failed to checkout ONNX Runtime version")
+    # Checkout the correct version
+    version = args.ort_version_to_use
+    print(f"Checking out ONNX Runtime version: {version}")
+    if subprocess.call(["git", "fetch", "--tags", "origin"]) != 0:
+        raise Exception("Failed to fetch tags for ONNX Runtime")
+    if subprocess.call(["git", "checkout", version]) != 0:
+        raise Exception("Failed to checkout ONNX Runtime version")
 
-        if (
-            subprocess.call(["git", "submodule", "update", "--init", "--recursive"])
-            != 0
-        ):
-            raise Exception("Failed to  update ONNX Runtime submodules")
+    if subprocess.call(["git", "submodule", "update", "--init", "--recursive"]) != 0:
+        raise Exception("Failed to  update ONNX Runtime submodules")
 
-        # Return to the original directory
-        os.chdir("../..")
+    # Return to the original directory
+    os.chdir("../..")
 
     # Prepare the command arguments
     cmd_args = [
@@ -249,7 +250,8 @@ def build_ort(args):
         )
 
     print(f"{BLUE}Running build.py with args: {cmd_args}{CLEAR}")
-    result = subprocess.call(["python", "build.py"] + cmd_args)
+    python_executable = sys.executable
+    result = subprocess.call([python_executable, "build.py"] + cmd_args)
     if result != 0:
         raise Exception(f"{RED}Failed to build ORT-GenAI{CLEAR}")
 
@@ -428,6 +430,13 @@ def main():
         "--skip_ort_build",
         action="store_true",
         help="If set, skip building ONNX Runtime",
+    )
+
+    parser.add_argument(
+        "--ort_version_to_use",
+        type=str,
+        default="v1.20.2",
+        help="ONNX Runtime version to use. Must be a git tag or branch",
     )
 
     # Parsing arguments
