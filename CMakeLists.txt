@@ -241,7 +241,7 @@ source_group(TREE ${GENERATORS_ROOT} FILES ${generator_srcs})
 if(USE_VCPKG)
 install(TARGETS
   onnxruntime-genai-static
-  EXPORT ${PROJECT_NAME}Targets
+  EXPORT onnxruntime_genaiTargets
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib
   ARCHIVE DESTINATION lib
@@ -253,26 +253,26 @@ install(TARGETS
   include(CMakePackageConfigHelpers)
   set(PROJECT_CONFIG_CONTENT "@PACKAGE_INIT@\n")
   string(APPEND PROJECT_CONFIG_CONTENT
-        "include(\"\${CMAKE_CURRENT_LIST_DIR}/${PROJECT_NAME}Targets.cmake\")")
+        "include(\"\${CMAKE_CURRENT_LIST_DIR}/onnxruntime_genaiTargets.cmake\")")
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/PROJECT_CONFIG_FILE" ${PROJECT_CONFIG_CONTENT})
-  install(EXPORT ${PROJECT_NAME}Targets
-    NAMESPACE ${PROJECT_NAME}::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME})
+  install(EXPORT onnxruntime_genaiTargets
+    NAMESPACE onnxruntime_genai::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/onnxruntime_genai)
 # Create config for find_package()
   configure_package_config_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/PROJECT_CONFIG_FILE" ${PROJECT_NAME}Config.cmake
-    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}")
+    "${CMAKE_CURRENT_BINARY_DIR}/PROJECT_CONFIG_FILE" onnxruntime_genaiConfig.cmake
+    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/onnxruntime_genai")
 
   write_basic_package_version_file(
-    "${PROJECT_BINARY_DIR}/${PROJECT_NAME}ConfigVersion.cmake"
+    "${PROJECT_BINARY_DIR}/onnxruntime_genaiConfigVersion.cmake"
     VERSION ${ORT_GENAI_VERSION}
     COMPATIBILITY SameMajorVersion)
 
   install(
     FILES
-    "${PROJECT_BINARY_DIR}/${PROJECT_NAME}Config.cmake"
-    "${PROJECT_BINARY_DIR}/${PROJECT_NAME}ConfigVersion.cmake"
-    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/${PROJECT_NAME}")
+    "${PROJECT_BINARY_DIR}/onnxruntime_genaiConfig.cmake"
+    "${PROJECT_BINARY_DIR}/onnxruntime_genaiConfigVersion.cmake"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/onnxruntime_genai")
 else()
 include(cmake/package.cmake)
 endif()
