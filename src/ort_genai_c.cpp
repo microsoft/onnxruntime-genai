@@ -426,7 +426,7 @@ OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* oga_generator, OgaT
   }
   size_t element_count = tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
   auto new_logits_span = std::span<const float>(tensor->ort_tensor_->GetTensorData<float>(), element_count);
-  if (logits.size()==0) {
+  if (logits.size() == 0) {
     logits = generator->model_->p_device_inputs_->Allocate<float>(element_count);
     generator->SetLogits(logits);
   } else if (new_logits_span.size() != logits.size()) {

@@ -448,7 +448,7 @@ struct OgaGenerator : OgaAbstract {
 
 struct OgaTensor : OgaAbstract {
 #if OGA_USE_SPAN
-  template<typename T>
+  template <typename T>
   static std::unique_ptr<OgaTensor> Create(T* data, std::span<const int64_t> shape) {
     OgaTensor* p;
     OgaCheckResult(OgaCreateTensorFromBuffer(data, shape.data(), shape.size(), OgaTypeToElementType<T>, &p));

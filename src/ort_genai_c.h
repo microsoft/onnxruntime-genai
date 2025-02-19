@@ -160,10 +160,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImages(const OgaStringArray* image_pat
 
 /**
  * \brief Load multiple images from an array of byte buffers
-* \param[in] image_data Array of byte buffers containing the image data.
-* \param[in] image_data_sizes Array of sizes of the byte buffers.
-* \param[in] count Number of images to load.
-* \param[out] images The loaded images.
+ * \param[in] image_data Array of byte buffers containing the image data.
+ * \param[in] image_data_sizes Array of sizes of the byte buffers.
+ * \param[in] count Number of images to load.
+ * \param[out] images The loaded images.
  * \return OgaResult containing the error message if the loading of the images failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImagesFromBuffers(const void** image_data, const size_t* image_data_sizes, size_t count, OgaImages** images);
@@ -492,7 +492,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
 
-/** Create an OgaTensor from an optional user owned buffer. If a user owned buffer is supplied, the OgaTensor does 
+/** Create an OgaTensor from an optional user owned buffer. If a user owned buffer is supplied, the OgaTensor does
  * not own the memory (as it has no way to free it) so the 'data' parameter must be valid for the lifetime of the OgaTensor.
  *  If the 'data' parameter is nullptr, the OgaTensor will allocate its own memory.
  *
@@ -560,8 +560,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaStringArrayGetCount(const OgaStringArray* 
 
 /**
  * \brief Get a string from a string_array
-* \param[in] string_array The OgaStringArray object to get the string from.
-* \param[in] index The index of the string to get.
+ * \param[in] string_array The OgaStringArray object to get the string from.
+ * \param[in] index The index of the string to get.
  * \return The string at the given index.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaStringArrayGetString(const OgaStringArray* string_array, size_t index, const char** out);
