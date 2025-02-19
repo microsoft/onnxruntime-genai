@@ -87,6 +87,8 @@ def main():
         output_paths += download_models(os.path.abspath(args.test_models), "int4", "cpu", log)
         if og.is_cuda_available():
             output_paths += download_models(os.path.abspath(args.test_models), "int4", "cuda", log)
+        if og.is_dml_available():
+            output_paths += download_models(os.path.abspath(args.test_models), "int4", "dml", log)
 
     # Run ONNX Runtime GenAI tests
     run_onnxruntime_genai_api_tests(os.path.abspath(args.cwd), log, os.path.abspath(args.test_models))

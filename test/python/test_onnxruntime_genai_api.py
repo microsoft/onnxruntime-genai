@@ -247,6 +247,9 @@ def test_tokenizer_stream(device, phi2_for):
 )
 @pytest.mark.parametrize("device", devices)
 def test_batching(device, phi2_for):
+    if device == "dml":
+        pytest.skip("EP DML does not support batching")
+
     model = og.Model(phi2_for(device))
     tokenizer = og.Tokenizer(model)
 
@@ -254,6 +257,32 @@ def test_batching(device, phi2_for):
         "This is a test.",
         "Rats are awesome pets!",
         "The quick brown fox jumps over the lazy dog.",
+    ]
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=20, batch_size=len(prompts))  # To run faster
+
+    generator = og.Generator(model, params)
+    generator.append_tokens(tokenizer.encode_batch(prompts))
+    while not generator.is_done():
+        generator.generate_next_token()
+    for i in range(len(prompts)):
+        print(tokenizer.decode(generator.get_sequence(0)))
+
+
+# TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
+# requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
+)
+@pytest.mark.parametrize("device", devices)
+def test_e2e(device, phi2_for):
+    model = og.Model(phi2_for(device))
+    tokenizer = og.Tokenizer(model)
+
+    prompts = [
+        "This is a test.",
     ]
 
     params = og.GeneratorParams(model)
@@ -640,6 +669,9 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
             adapter_paths.append(adapter_file_name)
 
         return adapter_model_path, adapter_paths
+    
+    if device == "dml":
+        pytest.skip("EP DML does not support adapters")
 
     model_path, adapter_paths = _prepare_adapter_model(test_data_path)
     model = og.Model(model_path)
@@ -713,6 +745,9 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
         )
 
         return extra_inputs_model_path, valid
+
+    if device == "dml":
+        pytest.skip("EP DML does not support preset extra inputs")
 
     model_path, valid_model = _prepare_model(test_data_path)
     model = og.Model(model_path)
