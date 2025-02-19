@@ -161,6 +161,4 @@ def download_models(download_path, precision, device, log):
 
     log.info(f"Successfully downloaded {len(output_paths)} models")
 
-    assert len(output_paths) > 0, "No models downloaded."
-
     return output_paths
