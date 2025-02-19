@@ -66,6 +66,7 @@ def get_model_paths():
     if not os.path.exists(ci_data_path):
         return {}, hf_paths
 
+    # TODO: Uncomment the following models as needed in the CI pipeline.
     # Note: If a model has over 4B parameters, please add a quantized version
     # to `ci_paths` instead of `hf_paths` to reduce file size and testing time.
     ci_paths = {
