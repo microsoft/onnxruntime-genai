@@ -68,7 +68,7 @@ struct SamplingBenchmark {
     double total_time = 0.0;
     int num_iter = 1000;
 
-    auto logits = OgaTensor::Create(reinterpret_cast<float*>(nullptr), std::array<int64_t, 1>{vocab_size*batch_size_});
+    auto logits = OgaTensor::Create<float>(nullptr, std::array<int64_t, 1>{vocab_size*batch_size_});
     auto test_start = std::chrono::high_resolution_clock::now();
 
     for (int i = 0; i < num_iter; i++) {

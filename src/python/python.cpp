@@ -258,9 +258,6 @@ struct PyGenerator {
 
  private:
   std::unique_ptr<OgaGenerator> generator_;
-  //  PyDeviceMemorySpan<int32_t> py_tokens_;
-  //  PyDeviceMemorySpan<int32_t> py_sequence_;
-  //  PyDeviceMemorySpan<float> py_logits_;
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {
@@ -343,7 +340,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def("create_stream", [](const OgaTokenizer& t) { return OgaTokenizerStream::Create(t); });
 
-  // Pybind class using the C API for OgaConfig
   pybind11::class_<OgaConfig>(m, "Config")
       .def(pybind11::init([](const std::string& config_path) { return OgaConfig::Create(config_path.c_str()); }))
       .def("append_provider", &OgaConfig::AppendProvider)
@@ -354,7 +350,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([](const OgaConfig& config) { return OgaModel::Create(config); }))
       .def(pybind11::init([](const std::string& config_path) { return OgaModel::Create(config_path.c_str()); }))
       .def_property_readonly("type", [](const OgaModel& model) -> std::string { return model.GetType().p_; })
-      .def_property_readonly("device_type", [](const OgaModel& model) -> std::string { return model.GetDeviceType().p_; }, "The device type the model is running on")
+      .def_property_readonly(
+          "device_type", [](const OgaModel& model) -> std::string { return model.GetDeviceType().p_; }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const OgaModel& model) { return OgaMultiModalProcessor::Create(model); });
 
   pybind11::class_<PyGenerator>(m, "Generator")
