@@ -64,6 +64,8 @@ def get_model_paths():
 
     ci_data_path = os.path.join(os.path.abspath(os.sep), "data", "ortgenai", "pytorch")
     print("CI data path:", ci_data_path)
+    if is_windows():
+        ci_data_path = R"C:\data\models\ortgenai\pytorch"
     if not os.path.exists(ci_data_path):
         return {}, hf_paths
     exit()
