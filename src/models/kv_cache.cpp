@@ -187,8 +187,8 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
           sb_kv_caches_.empty() ? OrtValue::CreateTensor(Allocator(), shape_, type_)
                                 : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
       // Zero the memory so we don't leak any data from the previous run
+      // WebGPU device has no Zero() implementation yet. Since this zeroing is optional we disable it for WebGPU for now
       if (Device().GetType() != DeviceType::WEBGPU) {
-        // ort c api does not have a method to update device memory - temporarily disable.
         ByteWrapTensor(Device(), *presents_.back()).Zero();
       }
     }
