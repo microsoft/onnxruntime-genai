@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y \
     git \
     git-lfs \
     build-essential \
+    ninja-build \
     && apt-get clean
 
 # Install Python packages

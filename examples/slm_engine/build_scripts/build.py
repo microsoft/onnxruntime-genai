@@ -49,8 +49,11 @@ def main():
     artifacts_dir = os.path.abspath(f"deps/artifacts/")
     cmake_options = [
         "cmake",
+        "-G",
+        "Ninja",
         TOPLEVEL_DIR,
         f"-DARTIFACTS_DIR={artifacts_dir}",
+        f"-DCMAKE_BUILD_TYPE={args.build_type}",
     ]
 
     # We keep the build directory prefix as same as that's returned by the
@@ -78,7 +81,7 @@ def main():
     result = subprocess.call(cmake_options)
     if result != 0:
         raise Exception(f"{RED}CMake error!{CLEAR}")
-    # result = subprocess.call(["cmake", "--build", ".", "--", f"-j{os.cpu_count()}"])
+
     result = subprocess.call(
         [
             "cmake",

@@ -142,6 +142,45 @@ class SLMEngine {
   /// works
   std::string complete(const char* prompt);
 
+  /// @brief Struct to hold the runtime performance metrics of the SLM Engine
+  /// @param PromptTokenCount Number of tokens in the prompt
+  /// @param TimeToFirstToken Time taken to generate the first token
+  /// @param GeneratedTokenCount Number of tokens generated
+  /// @param TokenRate Number of tokens generated per second
+  /// @param TotalTime Total time taken to generate the response
+  /// @param CurrentMemoryUsed Current memory used by the SLM Engine
+  struct RuntimePerf {
+    uint32_t PromptTokenCount;
+    uint32_t TimeToFirstToken;
+    uint32_t GeneratedTokenCount;
+    uint32_t TokenRate;
+    uint32_t TotalTime;
+    uint32_t CurrentMemoryUsed;
+  };
+
+  /// @brief Struct to hold the generation options for the GenAI Model
+  /// @param MaxGeneratedTokens Maximum number of tokens to generate
+  /// @param TopK Top K sampling
+  /// @param TopP Top P sampling
+  /// @param Temperature Temperature for sampling
+  struct GenerationOptions {
+    uint32_t MaxGeneratedTokens;
+    uint32_t TopK;
+    float TopP;
+    float Temperature;
+  };
+
+  /// @brief Asks the GenAI Model for a response
+  /// @param formatted_prompt Formatted prompt to generate response for
+  /// @param generation_options Generation options for the GenAI Model
+  /// @param response_str Generated response
+  /// @param kpi Runtime performance metrics of the SLM Engine
+  void generate(
+      const std::string& formatted_prompt,
+      const GenerationOptions& generation_options,
+      std::string& response_str,
+      RuntimePerf& kpi);
+
   SLMEngine(const SLMEngine&) = delete;
   SLMEngine& operator=(const SLMEngine&) = delete;
   static std::string GetVersion() { return std::string(SW_VERSION_NUMBER); }

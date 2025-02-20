@@ -67,12 +67,12 @@ int run_test(const string& model_path, const string& model_family,
     }
 
     auto response = slm_engine->complete(line.c_str());
-
     json output_json = json::parse(response);
+
     if (!verbose) {
       cout << BLUE << "Question: " << output_json["question"]
            << CLEAR << endl;
-      cout << GREEN << "Answer: " << output_json["answer"]
+      cout << GREEN << "Answer: " << output_json["choices"][0]["message"]["content"]
            << CLEAR << endl;
     }
     // Save to the file

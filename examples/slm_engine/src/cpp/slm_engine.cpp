@@ -56,34 +56,15 @@ std::unique_ptr<SLMEngine> SLMEngine::CreateEngine(
   return std::move(new_obj);
 }
 
-std::string SLMEngine::complete(const char* user_prompt) {
+void SLMEngine::generate(
+    const std::string& formatted_prompt,
+    const GenerationOptions& generation_options,
+    std::string& response_str,
+    RuntimePerf& kpi) {
   // Use a scoped mutex to ensure only one thread can call complete at a time
   std::lock_guard<std::mutex> lock(m_mutex);
 
   auto api_start = std::chrono::steady_clock::now();
-
-  InputDecoder::InputParams input_parameters;
-  // Decode the user prompt
-  if (!m_input_decoder->decode(user_prompt, input_parameters)) {
-    cout << RED << "Error decoding input message: " << user_prompt << CLEAR
-         << endl;
-    json output_json;
-    output_json["status"] = "error";
-    output_json["message"] =
-        "Error decoding input message: " + string(user_prompt);
-
-    json response_message;
-    response_message["response"] = output_json;
-
-    return response_message.dump();
-  }
-
-  auto formatted_prompt = format_input(input_parameters);
-  m_llm_input_dbg_stream << formatted_prompt << endl;
-  if (m_verbose) {
-    // json temp_j;
-    // temp_j["question"] = input_parameters;
-  }
 
   auto sequences = OgaSequences::Create();
   m_tokenizer->Encode(formatted_prompt.c_str(), *sequences);
@@ -91,30 +72,18 @@ std::string SLMEngine::complete(const char* user_prompt) {
   auto start = std::chrono::steady_clock::now();
 
   auto params = OgaGeneratorParams::Create(*m_onnx_model);
-  params->SetSearchOption("max_length", input_parameters.MaxGeneratedTokens);
-  params->SetSearchOption("temperature", input_parameters.Temperature);
+  params->SetSearchOption("max_length", generation_options.MaxGeneratedTokens);
+  params->SetSearchOption("temperature", generation_options.Temperature);
+  params->SetSearchOption("top_k", generation_options.TopK);
+  params->SetSearchOption("top_p", generation_options.TopP);
 
   auto generator = OgaGenerator::Create(*m_onnx_model, *params);
   generator->AppendTokenSequences(*sequences);
   bool is_first_token = true;
   auto time_count = 0;
 
-  if (m_verbose) {
-    cout << BLUE << "User: " << input_parameters.UserPrompt << endl;
-    cout << GREEN;
-  }
   auto initial_prompt_token_count = generator->GetSequenceCount(0);
 
-  struct RuntimePerf {
-    uint32_t PromptTokenCount;
-    uint32_t TimeToFirstToken;
-    uint32_t GeneratedTokenCount;
-    uint32_t TokenRate;
-    uint32_t TotalTime;
-    uint32_t CurrentMemoryUsed;
-  };
-
-  RuntimePerf kpi;
   std::ostringstream response;
   bool stop_token_found = false;
   while (!generator->IsDone()) {
@@ -143,19 +112,7 @@ std::string SLMEngine::complete(const char* user_prompt) {
       // We received end of the text - so will exclude
       response << next_string_piece;
     }
-    // If we see that the the generated text is trailing with the stop token
-    // sequence then we break
-    if (input_parameters.StopTokens.size() > 0) {
-      for (const auto& stop_token : input_parameters.StopTokens) {
-        if (response.str().find(stop_token) != std::string::npos) {
-          stop_token_found = true;
-          break;
-        }
-      }
-      if (stop_token_found) {
-        break;
-      }
-    }
+
     // Print next output string if the generation continues
     if (m_verbose) {
       cout << next_string_piece;
@@ -167,18 +124,9 @@ std::string SLMEngine::complete(const char* user_prompt) {
     cout << CLEAR << endl;
   }
 
-  string response_str = response.str();
+  response_str = response.str();
   m_llm_output_dbg_stream << response_str << endl;
-  if (stop_token_found) {
-    // We need to remove the stop token from the response
-    for (const auto& stop_token : input_parameters.StopTokens) {
-      auto stop_token_pos = response_str.find(stop_token);
-      if (stop_token_pos != std::string::npos) {
-        response_str = response_str.substr(0, stop_token_pos);
-        break;
-      }
-    }
-  }
+
   kpi.GeneratedTokenCount =
       generator->GetSequenceCount(0) - initial_prompt_token_count;
   kpi.TokenRate = kpi.GeneratedTokenCount / (time_count / 1000.0f);
@@ -189,19 +137,58 @@ std::string SLMEngine::complete(const char* user_prompt) {
 
   // // Get the current memory
   kpi.CurrentMemoryUsed = GetMemoryUsage();
+}
 
-  // The LLM response part of the OpenAI API chat.completion looks like this
-  // "choices":[
-  //    {
-  //       "index":0,
-  //       "message": {
-  //          "role": "assistant",
-  //          "content": "The assistant's response"
-  //       },
-  //       "logprobs": null,
-  //       "finish_reason": "length"
-  //    }
-  // ]
+std::string SLMEngine::complete(const char* user_prompt) {
+  // Use a scoped mutex to ensure only one thread can call complete at a time
+
+  auto api_start = std::chrono::steady_clock::now();
+
+  InputDecoder::InputParams input_parameters;
+  // Decode the user prompt
+  if (!m_input_decoder->decode(user_prompt, input_parameters)) {
+    cout << RED << "Error decoding input message: " << user_prompt << CLEAR
+         << endl;
+    json output_json;
+    output_json["status"] = "error";
+    output_json["message"] =
+        "Error decoding input message: " + string(user_prompt);
+
+    json response_message;
+    response_message["response"] = output_json;
+
+    return response_message.dump();
+  }
+
+  auto formatted_prompt = format_input(input_parameters);
+  m_llm_input_dbg_stream << formatted_prompt << endl;
+
+  if (m_verbose) {
+    cout << BLUE << "User: " << input_parameters.UserPrompt << endl;
+    cout << GREEN;
+  }
+
+  RuntimePerf kpi;
+  std::string response;
+  bool stop_token_found = false;
+
+  GenerationOptions generator_options;
+  generator_options.MaxGeneratedTokens = input_parameters.MaxGeneratedTokens;
+  generator_options.Temperature = input_parameters.Temperature;
+  generator_options.TopK = input_parameters.TopK;
+  generator_options.TopP = input_parameters.TopP;
+
+  generate(formatted_prompt, generator_options, response, kpi);
+
+  m_llm_output_dbg_stream << response << endl;
+  // We need to remove the stop token from the response
+  for (const auto& stop_token : input_parameters.StopTokens) {
+    auto stop_token_pos = response.find(stop_token);
+    if (stop_token_pos != std::string::npos) {
+      response = response.substr(0, stop_token_pos);
+      break;
+    }
+  }
 
   auto choices_str = R"(
     [
@@ -218,7 +205,7 @@ std::string SLMEngine::complete(const char* user_prompt) {
     )";
 
   json choices = json::parse(choices_str);
-  choices[0]["message"]["content"] = response_str;
+  choices[0]["message"]["content"] = response;
 
   json output_json;
   output_json["status"] = "success";
