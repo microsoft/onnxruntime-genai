@@ -251,8 +251,6 @@ TEST(ModelTests, BeamSearchGptCuda) {
 
 #if TEST_PHI2 && (USE_CUDA || USE_DML)
 TEST(ModelTests, TestApiDevice) {
-#if TEST_PHI2
-
   auto prompt = R"(
 def print_prime(n):
 '''

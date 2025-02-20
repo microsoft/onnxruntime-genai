@@ -113,7 +113,7 @@ int ToNumpyType(ONNXTensorElementDataType type) {
 template <typename... Types>
 std::string ToFormatDescriptor(ONNXTensorElementDataType type, Ort::TypeList<Types...>) {
   std::string result;
-  ((type == Ort::TypeToTensorType<Types> ? result = pybind11::format_descriptor<Types>::format(), true : false) || ...);
+  (void)((type == Ort::TypeToTensorType<Types> ? result = pybind11::format_descriptor<Types>::format(), true : false) || ...);
   if (result.empty())
     throw std::runtime_error("Unsupported onnx type");
   return result;
