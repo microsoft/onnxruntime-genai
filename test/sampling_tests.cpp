@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <algorithm>
 #include <array>
+#include <cstring>  // for memcmp
 #include <numeric>
 #include <random>
 #include "span.h"
@@ -33,7 +35,7 @@ TEST(SamplingTests, BatchedSamplingTopPCpu) {
   params->SetSearchOption("batch_size", 4);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  auto logits_tensor = OgaTensor::Create(logits_cpu.data(), std::array{4LL, 5LL});
+  auto logits_tensor = OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{4LL, 5LL});
   generator->SetLogits(*logits_tensor);
 
   // Verify outputs match expected outputs
@@ -62,7 +64,7 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
   params->SetSearchOption("batch_size", batch_size);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  auto logits_tensor = OgaTensor::Create(logits_cpu.data(), std::array{4LL, 5LL});
+  auto logits_tensor = OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{4LL, 5LL});
   generator->SetLogits(*logits_tensor);
 
   // Verify outputs match expected outputs

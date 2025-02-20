@@ -14,8 +14,6 @@ import numpy as np
 import onnxruntime_genai as og
 import pytest
 
-input("Press enter to continue...")
-
 if not sysconfig.get_platform().endswith("arm64"):
     # Skip importing onnx if running on ARM64
     import onnx
