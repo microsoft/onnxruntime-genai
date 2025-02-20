@@ -62,7 +62,8 @@ std::unique_ptr<OrtValue> ProcessTensor<Ort::Float16_t>(OrtxTensor* tensor, Ort:
       allocator.GetInfo(),
       std::span<float>(const_cast<float*>(tensor_data), tensor_num_elements),
       std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
-  ConvertFp32ToFp16(allocator, *tensor_value_fp32, tensor_value, DeviceType::CPU, nullptr);
+  auto p_device = GetDeviceInterface(DeviceType::CPU);
+  Cast(*tensor_value_fp32, tensor_value, *p_device, Ort::TypeToTensorType<Ort::Float16_t>);
   return tensor_value;
 }
 
@@ -97,7 +98,8 @@ std::unique_ptr<OrtValue> ProcessTensor<int64_t, Ort::Float16_t>(OrtxTensor* ten
   std::transform(tensor_data, tensor_data + tensor_num_elements,
                  tensor_value_fp32->GetTensorMutableData<float>(),
                  [](int64_t value) { return static_cast<float>(value); });
-  ConvertFp32ToFp16(allocator, *tensor_value_fp32, tensor_value, DeviceType::CPU, nullptr);
+  auto p_device = GetDeviceInterface(DeviceType::CPU);
+  Cast(*tensor_value_fp32, tensor_value, *p_device, Ort::TypeToTensorType<Ort::Float16_t>);
   return tensor_value;
 }
 

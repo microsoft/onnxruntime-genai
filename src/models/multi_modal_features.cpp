@@ -28,7 +28,7 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
   // 4) Created as an input for embedding model (num_feature_tokens = 0)
   //    The tensor does not need to be pre-allocated because it will be created during (2).
   if (mode == MultiModalFeatures::Mode::Output) {
-    features_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
   }
 }
 
@@ -52,7 +52,7 @@ void MultiModalFeatures::Update(bool is_prompt) {
   // num_feature_tokens will be 0 when no image is provided
   if (!is_prompt && shape_[0] > 0) {  // if num_image_tokens > 0
     shape_[0] = 0;
-    features_ = OrtValue::CreateTensor(*model_.allocator_device_, shape_, type_);
+    features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
     state_.inputs_[index_] = features_.get();
   }
 }

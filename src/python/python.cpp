@@ -158,7 +158,7 @@ pybind11::array ToNumpy(OrtValue* v, const Generators::Model* model = nullptr) {
   }
 
   bool is_cpu = v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
-  auto device_span = Generators::ByteWrapTensor(is_cpu ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU) : *model.p_device_, *v);
+  auto device_span = Generators::ByteWrapTensor(is_cpu ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU) : *(model->p_device_), *v);
 
   pybind11::buffer_info bufinfo{
       device_span.CopyDeviceToCpu().data(),          // Pointer to memory buffer
