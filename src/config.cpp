@@ -62,6 +62,19 @@ struct ProviderOptionsArray_Element : JSON::Element {
   ProviderOptionsObject_Element object_{v_};
 };
 
+GraphOptimizationLevel getGraphOptimizationLevel(std::string_view name) {
+  if (name =="ORT_DISABLE_ALL") {
+      return ORT_DISABLE_ALL;
+  } else if (name == "ORT_ENABLE_BASIC") {
+      return ORT_ENABLE_BASIC;
+  } else if (name == "ORT_ENABLE_EXTENDED") {
+      return ORT_ENABLE_EXTENDED;
+  } else if (name == "ORT_ENABLE_ALL") {
+      return ORT_ENABLE_ALL;
+  } else
+    throw JSON::unknown_value_error{};
+}
+
 struct SessionOptions_Element : JSON::Element {
   explicit SessionOptions_Element(Config::SessionOptions& v) : v_{v} {}
 
@@ -94,6 +107,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.ep_context_enable = JSON::Get<bool>(value);
     else if (name == "use_env_allocators")
       v_.use_env_allocators = JSON::Get<bool>(value);
+    else if (name == "graph_optimization_level")
+      v_.graph_optimization_level = getGraphOptimizationLevel(JSON::Get<std::string_view>(value));
     else
       throw JSON::unknown_value_error{};
   }
