@@ -38,7 +38,6 @@ def main():
     parser.add_argument(
         "--cmake_generator",
         type=str,
-        default="Unix Makefiles",
         help="{Unix Makefiles|Ninja|Visual Studio 17 2022|Xcode}",
     )
 
@@ -58,8 +57,6 @@ def main():
         if sys.platform.startswith("win"):
             cmake_generator = "Visual Studio 17 2022"
         elif sys.platform.startswith("linux"):
-            cmake_generator = "Ninja"
-        elif sys.platform.startswith("darwin"):
             cmake_generator = "Ninja"
         else:
             cmake_generator = "Unix Makefiles"
