@@ -87,6 +87,10 @@ def copy_files_keeping_symlinks(src_files, dest):
             linkto = os.path.basename(os.readlink(file))
             if not os.path.exists(linkname):
                 os.symlink(linkto, linkname)
+        elif os.path.isdir(file):
+            shutil.copytree(
+                file, f"{dest}/{os.path.basename(file)}", dirs_exist_ok=True
+            )
         else:
             shutil.copy2(file, dest)
 
@@ -174,6 +178,7 @@ def build_ort(args):
     build_dir_name = f"build/{get_platform_dirname(args)}/{args.build_type}"
     build_dir_name = os.path.abspath(build_dir_name)
     ort_home = os.path.abspath(f"{build_dir_name}/install")
+    print(f"{MAGENTA}ORT Home: {ort_home}{CLEAR}")
 
     os.chdir(build_dir_name)
 
@@ -193,8 +198,8 @@ def build_ort(args):
         raise Exception("Failed to install ONNX Runtime")
 
     # Now create the symbolic links only if Android Build
+    os.chdir(ort_home)
     if args.android:
-        os.chdir(ort_home)
         # Create the symbolic links only in doesn't exist
         if not os.path.exists("headers"):
             os.symlink("include/onnxruntime", "headers")
@@ -204,6 +209,14 @@ def build_ort(args):
         os.chdir("jni")
         if not os.path.exists("arm64-v8a"):
             os.symlink("../lib", "arm64-v8a")
+    else:
+        # Copy the include/onnxruntime/* to include directory
+        copy_files_keeping_symlinks(
+            glob.glob(f"include/onnxruntime/*"),
+            f"include",
+        )
+        # Remove the include/onnxruntime directory
+        shutil.rmtree("include/onnxruntime")
 
     # Back to the original directory
     os.chdir(current_dir)
