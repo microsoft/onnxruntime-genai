@@ -137,7 +137,10 @@ if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
   target_compile_options(onnxruntime-genai PRIVATE "/sdl")
 endif()
 
-
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(onnxruntime-genai PRIVATE dl)  # For dlopen & co
+endif()
 
 if(USE_DML)
   list(APPEND ortgenai_embed_libs "${D3D12_LIB_DIR}/D3D12Core.dll")
