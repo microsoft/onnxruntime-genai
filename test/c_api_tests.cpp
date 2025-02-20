@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cstring>  // for memcmp
 #include <numeric>
 #include <iostream>
 #include <thread>

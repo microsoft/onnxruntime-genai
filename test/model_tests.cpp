@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cstring>  // for memcmp
 #include <iostream>
 #include <random>
 #include <gtest/gtest.h>
@@ -246,8 +247,10 @@ TEST(ModelTests, BeamSearchGptCuda) {
   for (auto model_path : c_tiny_gpt2_model_paths)
     Test_BeamSearch_Gpt_Cuda(model_path.first, model_path.second);
 }
+#endif
 
-TEST(ModelTests, TestApiCuda) {
+#if TEST_PHI2 && (USE_CUDA || USE_DML)
+TEST(ModelTests, TestApiDevice) {
 #if TEST_PHI2
 
   auto prompt = R"(
@@ -261,7 +264,6 @@ Print all primes between 1 and n
 
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
-
   auto tokens = OgaSequences::Create();
   tokenizer->Encode(prompt, *tokens);
 
@@ -269,7 +271,6 @@ Print all primes between 1 and n
   params->SetSearchOption("max_length", 128);
   params->SetSearchOption("batch_size", 1);  // Redundant, but for testing
 
-  // Generator version
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(tokens->Get(0));
   while (!generator->IsDone()) {
@@ -279,13 +280,9 @@ Print all primes between 1 and n
   auto result = generator->GetSequence(0);
 
   std::cout << tokenizer->Decode(result) << "\r\n";
-#endif
 }
-#endif
 
-#if USE_DML && TEST_PHI2
-TEST(ModelTests, TestApiDml) {
-
+TEST(ModelTests, TestTopKDevice) {
   auto prompt = R"(
 def print_prime(n):
 '''
@@ -295,54 +292,24 @@ Print all primes between 1 and n
 
   std::cout << "With prompt:" << prompt << "\r\n";
 
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
-  auto tokenizer = model->CreateTokenizer();
-  auto tokens = tokenizer->Encode(prompt);
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto tokens = OgaSequences::Create();
+  tokenizer->Encode(prompt, *tokens);
 
-  auto params = Generators::CreateGeneratorParams(*model);
-  params->search.batch_size = 1;
-  params->search.max_length = 128;
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 128);
+  params->SetSearchOption("batch_size", 1);  // Redundant, but for testing
+  params->SetSearchOption("top_k", 3);
 
-  // Generator version
-  auto generator = Generators::CreateGenerator(*model, *params);
-  generator->AppendTokens(Generators::cpu_span<int>(tokens.data(), tokens.size()));
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(tokens->Get(0));
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
 
   auto result = generator->GetSequence(0);
 
-  std::cout << tokenizer->Decode(result.CopyDeviceToCpu()) << "\r\n";
-}
-
-TEST(ModelTests, TestTopKDml) {
-  auto prompt = R"(
-def print_prime(n):
-'''
-Print all primes between 1 and n
-'''
-)";
-
-  std::cout << "With prompt:" << prompt << "\r\n";
-
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
-  auto tokenizer = model->CreateTokenizer();
-  auto tokens = tokenizer->Encode(prompt);
-
-  auto params = Generators::CreateGeneratorParams(*model);
-  params->search.top_k = 3;
-  params->search.batch_size = 1;
-  params->search.max_length = 128;
-
-  // Generator version
-  auto generator = Generators::CreateGenerator(*model, *params);
-  generator->AppendTokens(Generators::cpu_span<int>(tokens.data(), tokens.size()));
-  while (!generator->IsDone()) {
-    generator->GenerateNextToken();
-  }
-
-  auto result = generator->GetSequence(0);
-
-  std::cout << tokenizer->Decode(result.CopyDeviceToCpu()) << "\r\n";
+  std::cout << tokenizer->Decode(result) << "\r\n";
 }
 #endif
