@@ -17,6 +17,8 @@
 #ifndef PHI2_PATH
 #if USE_CUDA
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cuda"
+#elif USE_DML
+#define PHI2_PATH MODEL_PATH "phi-2/int4/dml"
 #else
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
 #endif
@@ -271,5 +273,68 @@ Print all primes between 1 and n
   std::cout << tokenizer->Decode(result.CopyDeviceToCpu()) << "\r\n";
 #endif
 }
+#endif
 
+#if USE_DML && TEST_PHI2
+TEST(ModelTests, TestApiDml) {
+
+  auto prompt = R"(
+def print_prime(n):
+'''
+Print all primes between 1 and n
+'''
+)";
+
+  std::cout << "With prompt:" << prompt << "\r\n";
+
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
+  auto tokenizer = model->CreateTokenizer();
+  auto tokens = tokenizer->Encode(prompt);
+
+  auto params = Generators::CreateGeneratorParams(*model);
+  params->search.batch_size = 1;
+  params->search.max_length = 128;
+
+  // Generator version
+  auto generator = Generators::CreateGenerator(*model, *params);
+  generator->AppendTokens(Generators::cpu_span<int>(tokens.data(), tokens.size()));
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto result = generator->GetSequence(0);
+
+  std::cout << tokenizer->Decode(result.CopyDeviceToCpu()) << "\r\n";
+}
+
+TEST(ModelTests, TestTopKDml) {
+  auto prompt = R"(
+def print_prime(n):
+'''
+Print all primes between 1 and n
+'''
+)";
+
+  std::cout << "With prompt:" << prompt << "\r\n";
+
+  auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
+  auto tokenizer = model->CreateTokenizer();
+  auto tokens = tokenizer->Encode(prompt);
+
+  auto params = Generators::CreateGeneratorParams(*model);
+  params->search.top_k = 3;
+  params->search.batch_size = 1;
+  params->search.max_length = 128;
+
+  // Generator version
+  auto generator = Generators::CreateGenerator(*model, *params);
+  generator->AppendTokens(Generators::cpu_span<int>(tokens.data(), tokens.size()));
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto result = generator->GetSequence(0);
+
+  std::cout << tokenizer->Decode(result.CopyDeviceToCpu()) << "\r\n";
+}
 #endif
