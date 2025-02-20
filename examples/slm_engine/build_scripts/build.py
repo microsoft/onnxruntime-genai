@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import sys
 import argparse
 import platform
 import subprocess
@@ -27,13 +28,18 @@ def main():
     parser = argparse.ArgumentParser(description="Build script for this repo")
 
     # Adding arguments
-    parser.add_argument("--android", action="store_true", help="Build for Android")
     parser.add_argument("--android_ndk_path", type=str, help="Path to ANDROID NDK")
     parser.add_argument(
         "--build_type",
         type=str,
         default="Release",
         help="{Release|RelWithDebInfo|Debug}",
+    )
+    parser.add_argument(
+        "--cmake_generator",
+        type=str,
+        default="Unix Makefiles",
+        help="{Unix Makefiles|Ninja|Visual Studio 17 2022|Xcode}",
     )
 
     # Parsing arguments
@@ -46,11 +52,25 @@ def main():
     # We need to get the name of the toplevel/src directory
     TOPLEVEL_DIR = f"{TOPLEVEL_DIR}/src"
 
+    # Set up the cmake generator
+    cmake_generator = args.cmake_generator
+    if cmake_generator is None:
+        if sys.platform.startswith("win"):
+            cmake_generator = "Visual Studio 17 2022"
+        elif sys.platform.startswith("linux"):
+            cmake_generator = "Ninja"
+        elif sys.platform.startswith("darwin"):
+            cmake_generator = "Ninja"
+        else:
+            cmake_generator = "Unix Makefiles"
+
+    print(f"Using CMake generator: {cmake_generator}")
+
     artifacts_dir = os.path.abspath(f"deps/artifacts/")
     cmake_options = [
         "cmake",
         "-G",
-        "Ninja",
+        cmake_generator,
         TOPLEVEL_DIR,
         f"-DARTIFACTS_DIR={artifacts_dir}",
         f"-DCMAKE_BUILD_TYPE={args.build_type}",
@@ -60,15 +80,15 @@ def main():
     # platform.system() call which maps 1:1 with the Linux uname -s command.
     # When cross-compiling for Android, we use Android as the prefix.
 
-    # Use list comprehension to get the platform specific build directory prefix
-    dir_prefix = platform.system() if not args.android else "Android"
-    build_dir = f"builds/{dir_prefix}-{get_machine_type(args)}"
-    if args.android:
-        # Check to make sure that the other two options are also defined
-        if args.android_ndk_path is None:
-            print(f"Need to define android_ndk_path for Android builds")
-            return
+    dir_prefix = platform.system()
+    if args.android_ndk_path:
         cmake_options.extend(cmake_options_android(args.android_ndk_path))
+        dir_prefix = "Android"
+        args.android = True
+    else:
+        args.android = False
+
+    build_dir = f"builds/{dir_prefix}-{get_machine_type(args)}"
 
     # Launch build
     print(f"BUILD Dir:", build_dir)

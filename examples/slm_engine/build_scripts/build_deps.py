@@ -231,6 +231,8 @@ def build_ort(args):
         args.build_type,
         "--cmake_extra_defines",
         "ENABLE_PYTHON=OFF",
+        "--ort_home",
+        ort_home,
     ]
     if args.android:
         cmd_args.extend(
@@ -244,8 +246,6 @@ def build_ort(args):
                 "arm64-v8a",
                 "--android_api",
                 args.api_level,
-                "--ort_home",
-                ort_home,
             ]
         )
 
@@ -408,7 +408,6 @@ def main():
     )
 
     # Adding arguments
-    parser.add_argument("--android", action="store_true", help="Build for Android")
     parser.add_argument("--android_sdk_path", type=str, help="Path to ANDROID SDK")
     parser.add_argument("--android_ndk_path", type=str, help="Path to ANDROID NDK")
     parser.add_argument(
@@ -441,6 +440,11 @@ def main():
 
     # Parsing arguments
     args = parser.parse_args()
+
+    if args.android_sdk_path or args.android_ndk_path:
+        args.android = True
+    else:
+        args.android = False
 
     # Change directory to where this Python file is located to avoid any issues
     # related to running this script from another directory

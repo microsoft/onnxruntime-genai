@@ -24,6 +24,7 @@ file (
     LIMIT_COUNT 1)
 message(STATUS "SW-VERSION: ${VERSION_NUMBER}")
 add_compile_definitions(SW_VERSION_NUMBER="v${VERSION_NUMBER}")
+add_compile_definitions(BUILDING_SLM_ENGINE)
 
 if (${CMAKE_SYSTEM_NAME} STREQUAL "Darwin") 
     set(CMAKE_INSTALL_RPATH "@loader_path")

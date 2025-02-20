@@ -199,14 +199,13 @@ For example, if you are building on MacOS then the built artifacts will be store
 Following are the command line options applicable for the dependency build:
 
 ```bash
-usage: build_deps.py [-h] [--android] [--android_sdk_path ANDROID_SDK_PATH] [--android_ndk_path ANDROID_NDK_PATH]
+usage: build_deps.py [-h] [--android_sdk_path ANDROID_SDK_PATH] [--android_ndk_path ANDROID_NDK_PATH]
                      [--api_level API_LEVEL] [--qnn_sdk_path QNN_SDK_PATH] [--build_type BUILD_TYPE] [--skip_ort_build]
 
 Build script for dependency libraries
 
 options:
   -h, --help            show this help message and exit
-  --android             Build for Android
   --android_sdk_path ANDROID_SDK_PATH
                         Path to ANDROID SDK
   --android_ndk_path ANDROID_NDK_PATH
@@ -229,7 +228,7 @@ The following example illustrates how to cross compile the dependencies for Andr
 $ export ANDROID_SDK_ROOT=<Android SDK Directory>
 $ export NDK_ROOT=$ANDROID_SDK_ROOT/ndk/<Version Number>
 $ export QNN_SDK_ROOT=<qualcomm/qairt/VERSION>
-$ python build_deps.py --android \
+$ python build_deps.py \
     --android_sdk_path $ANDROID_SDK_ROOT \
     --android_ndk_path $NDK_ROOT \
     --qnn_sdk_path $QNN_SDK_ROOT
@@ -252,13 +251,12 @@ $ python build.py
 For Android build, the following commandline options are important:
 
 ```bash
-usage: build.py [-h] [--android] [--android_ndk_path ANDROID_NDK_PATH] [--build_type BUILD_TYPE]
+usage: build.py [-h] [--android_ndk_path ANDROID_NDK_PATH] [--build_type BUILD_TYPE]
 
 Build script for this repo
 
 options:
   -h, --help            show this help message and exit
-  --android             Build for Android
   --android_ndk_path ANDROID_NDK_PATH
                         Path to ANDROID NDK
   --build_type BUILD_TYPE
@@ -269,11 +267,18 @@ options:
 For Android builds - use the following example:
 
 ```bash
-$ python build_deps.py --android  --android_ndk_path $NDK_ROOT
+$ python build.py --android_ndk_path $NDK_ROOT
 ...
 ```
 
 Notice that no need to specify any QNN flags as QNN device is handled by the ONNX Runtime via the [Execution Provider](https://onnxruntime.ai/docs/execution-providers/) mechanism.
+
+For building on a Linux host we also provide a Dockerfile and a shell script to build using docker. Use the following command:
+
+```bash
+$ ./build_linux.sh
+...
+```
 
 ## Testing the build
 

@@ -10,6 +10,27 @@
 #include "input_decoder.h"
 #include "ort_genai.h"
 
+#ifdef MYLIBRARY_EXPORTS
+#define MYLIBRARY_API __declspec(dllexport)
+#else
+#define MYLIBRARY_API __declspec(dllimport)
+#endif
+
+#ifdef _WIN32
+#ifdef BUILDING_SLM_ENGINE
+#define SLM_ENGINE_EXPORT __declspec(dllexport)
+#else
+#define SLM_ENGINE_EXPORT __declspec(dllimport)
+#endif
+#else
+// To make symbols visible on macOS/iOS
+#ifdef __APPLE__
+#define SLM_ENGINE_EXPORT __attribute__((visibility("default")))
+#else
+#define SLM_ENGINE_EXPORT
+#endif
+#endif
+
 namespace microsoft {
 namespace aias {
 
@@ -46,7 +67,7 @@ namespace aias {
 /// @endcode
 ///
 
-class SLMEngine {
+class SLM_ENGINE_EXPORT SLMEngine {
  public:
   /// @brief Enum to define the supported model types
   enum class SupportedModelType { PHI3,
