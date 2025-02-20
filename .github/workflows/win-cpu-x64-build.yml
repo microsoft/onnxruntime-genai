@@ -71,25 +71,27 @@ jobs:
         move ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
         move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-x64/native/* ort/lib/
 
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v3
-      with:
-        languages: 'cpp'
+    # - name: Initialize CodeQL
+    #   uses: github/codeql-action/init@v3
+    #   with:
+    #     languages: 'cpp'
 
-    - name: Configure CMake
-      run: |
-        cmake --preset windows_x64_cpu_release
+    # - name: Configure CMake
+    #   run: |
+    #     cmake --preset windows_x64_cpu_release
 
-    - name: Build with CMake
-      run: |
-        cmake --build --preset windows_x64_cpu_release --parallel
+    # - name: Build with CMake
+    #   run: |
+    #     cmake --build --preset windows_x64_cpu_release --parallel
 
     - name: Install the python wheel and test dependencies
       run: |
         python3 -m pip install -r test\python\requirements.txt --user
         python3 -m pip install -r test\python\cpu\torch\requirements.txt --user
         python3 -m pip install -r test\python\cpu\ort\requirements.txt --user
-        python3 -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+        dir C:\data\models\ortgenai\pytorch
+
+    # python3 -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
     - name: Run the Python Tests
       run: |

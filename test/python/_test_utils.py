@@ -63,8 +63,10 @@ def get_model_paths():
     }
 
     ci_data_path = os.path.join(os.path.abspath(os.sep), "data", "ortgenai", "pytorch")
+    print("CI data path:", ci_data_path)
     if not os.path.exists(ci_data_path):
         return {}, hf_paths
+    exit()
 
     # TODO: Uncomment the following models as needed in the CI pipeline.
     # Note: If a model has over 4B parameters, please add a quantized version
