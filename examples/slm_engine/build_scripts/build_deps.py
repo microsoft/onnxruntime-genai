@@ -218,6 +218,15 @@ def build_ort(args):
         # Remove the include/onnxruntime directory
         shutil.rmtree("include/onnxruntime")
 
+        # If we are on Windows - then we need to copy the .dll files to the 
+        # lib directory as well
+        if platform.system() == "Windows":
+            copy_files_keeping_symlinks(
+                glob.glob(f"bin/*.dll"),
+                f"lib",
+            )
+
+
     # Back to the original directory
     os.chdir(current_dir)
     os.chdir("../../../")
