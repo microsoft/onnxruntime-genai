@@ -13,14 +13,14 @@ It implements the generative AI loop for ONNX models, including pre and post pro
 
 See documentation at https://onnxruntime.ai/docs/genai.
 
-| Support matrix | Supported now | Under development | On the roadmap |
+|Support matrix|Supported now|Under development|On the roadmap|
 | -------------- | ------------- | ----------------- | -------------- |
-| Model architectures | Gemma <br/> Llama * <br/> Mistral + <br/> Phi (language + vision) <br/> Qwen <br/> Nemotron <br/> Granite <br/> AMD OLMo | Whisper | Stable diffusion |
-| API | Python <br/> C# <br/> C/C++ <br/> Java ^ | Objective-C | |
-| Platform | Linux <br/> Windows <br/> Mac ^ <br/> Android ^ | | iOS |
-| Architecture | x86 <br/> x64 <br/> Arm64 ~ | | |
-| Hardware Acceleration | CUDA <br/> DirectML <br/> | QNN <br/> OpenVINO <br/> ROCm | |
-| Features | | Interactive decoding <br/> Customization (fine-tuning) | Speculative decoding |
+| Model architectures | DeepSeek <br/> Gemma <br/> Llama * <br/> Mistral + <br/> Phi (language + vision) <br/> Qwen <br/> Nemotron <br/> Granite <br/> AMD OLMo | Whisper | Stable diffusion |
+|API| Python <br/>C# <br/>C/C++ <br/> Java ^ |Objective-C||
+|Platform| Linux <br/> Windows <br/>Mac ^ <br/>Android ^  ||iOS |||
+|Architecture|x86 <br/> x64 <br/> Arm64 ~ ||||
+|Hardware Acceleration|CUDA<br/>DirectML<br/>|QNN <br/> OpenVINO <br/> ROCm ||
+|Features|MultiLoRA <br/> Continuous decoding (session continuation)^ | Constrained decoding | Speculative decoding |
 
 \* The Llama model architecture supports similar model families such as CodeLlama, Vicuna, Yi, and more.
 
@@ -142,6 +142,30 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
    print()
    del generator
    ```
+
+### Choosing the Right Examples: Release vs. Main Branch
+
+Due to evolving nature of this project and ongoing feature additions, examples in the `main` branch may not always align with the latest stable release. This section outlines how to ensure compatibility between the examples and the corresponding version. Majority of the steps would remain same, just the package installation and the model example file would change.
+
+### Stable version
+Install the package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install). Let's say you installed 0.5.2 version of ONNX Runtime GenAI, so the instructions would look like this:
+
+```bash
+# Clone the repo
+git clone https://github.com/microsoft/onnxruntime-genai.git && cd onnxruntime-genai
+# Checkout the branch for the version you are using
+git checkout v0.5.2
+cd examples
+```
+
+### Nightly version (Main Branch)
+Build the package from source using these [instructions](https://onnxruntime.ai/docs/genai/howto/build-from-source.html). Now just go to the folder location where all the examples are present.
+
+```bash
+# Clone the repo
+git clone https://github.com/microsoft/onnxruntime-genai.git && cd onnxruntime-genai
+cd examples
+```
 
 ## Roadmap
 

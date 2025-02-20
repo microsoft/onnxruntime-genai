@@ -1,13 +1,16 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <gtest/gtest.h>
-#include <generators.h>
-#include <search.h>
-#include <models/model.h>
 #include <iostream>
 #include <random>
-#include <smartptrs.h>
+
+#include <gtest/gtest.h>
+
+#include "generators.h"
+#include "models/model.h"
+#include "search.h"
+#include "smartptrs.h"
+
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
 #endif
@@ -17,12 +20,6 @@
 #else
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
 #endif
-#endif
-#if USE_DML
-#include <DirectML.h>
-#include <wrl.h>
-#include <d3d12.h>
-#include <dxgi1_6.h>
 #endif
 
 // To generate this file:
@@ -35,7 +32,7 @@ static const std::pair<const char*, const char*> c_tiny_gpt2_model_paths[] = {
 
 #if USE_DML
 TEST(ModelTests, DMLAdapterSelection) {
-#if TEST_PHI2
+#if 0 // TEST_PHI2 TODO: Remove this? Can't access the device directly anymore.
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
   auto d3d12Device = model->GetD3D12Device();
 

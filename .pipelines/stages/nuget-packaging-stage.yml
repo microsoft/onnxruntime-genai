@@ -44,6 +44,11 @@ parameters:
   type: boolean
   default: true
 
+- name: enable_win_qnn
+  displayName: Whether QNN nuget package should be built.'
+  type: boolean
+  default: true
+
 - name: ort_version
   type: string
 - name: ort_cuda_version
@@ -53,6 +58,9 @@ parameters:
 - name: build_config
   type: string
   default: 'release'
+
+- name: nuget_version_type
+  type: string
 
 stages:
 - stage: nuget_packaging
@@ -69,6 +77,7 @@ stages:
           enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
           enable_android: ${{ parameters.enable_android }}
           enable_apple_framework: ${{ parameters.enable_apple_framework }}
+          nuget_version_type: ${{ parameters.nuget_version_type }}
     - ${{ if or(eq(parameters.enable_linux_cuda, true), eq(parameters.enable_win_cuda, true)) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
@@ -77,6 +86,7 @@ stages:
           build_config: ${{ parameters.build_config }}
           enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
           enable_win_cuda: ${{ parameters.enable_win_cuda }}
+          nuget_version_type: ${{ parameters.nuget_version_type }}
     - ${{ if eq(parameters.enable_win_dml, true) }}:
       - template: jobs/nuget-packaging-job.yml
         parameters:
@@ -85,3 +95,16 @@ stages:
           build_config: ${{ parameters.build_config }}
           enable_win_dml: ${{ parameters.enable_win_dml }}
           enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+    - ${{ if eq(parameters.enable_win_qnn, true) }}:
+      - template: jobs/nuget-packaging-job.yml
+        parameters:
+          ep: 'cpu'
+          build_config: ${{ parameters.build_config }}
+          enable_linux_cpu: false
+          enable_win_cpu: false
+          enable_win_arm64: true
+          enable_macos_cpu: false
+          enable_android: false
+          enable_apple_framework: false
+          enable_win_qnn: true
+          nuget_version_type: ${{ parameters.nuget_version_type }}

@@ -12,10 +12,6 @@
 #include "../logging.h"
 #include "../smartptrs.h"
 
-#if USE_CUDA
-#include "../cuda/cuda_common.h"
-#endif
-
 using namespace pybind11::literals;
 
 // If a parameter to a C++ function is an array of float16, this type will let pybind11::array_t<Ort::Float16_t> map to numpy's float16 format
@@ -151,52 +147,21 @@ pybind11::array ToNumpy(OrtValue* v, const Generators::Model* model = nullptr) {
   auto shape = type_info->GetShape();
   auto type = type_info->GetElementType();
   auto element_size = Generators::SizeOf(type);
-  auto data = v->GetTensorMutableRawData();
-
-  std::unique_ptr<uint8_t[]> cpu_copy;
-
-  if (model != nullptr) {
-#if USE_DML
-    // TODO: DML version of this
-    if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model->device_type_ == Generators::DeviceType::DML) {
-      auto data_size = type_info->GetElementCount() * element_size;
-      cpu_copy = std::make_unique<uint8_t[]>(data_size);
-
-      ComPtr<ID3D12Resource> gpu_resource;
-      Ort::ThrowOnError(model->GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
-          model->allocator_device_,
-          data,
-          &gpu_resource));
-
-      model->GetDmlReadbackHeap()->ReadbackFromGpu(
-          std::span(reinterpret_cast<uint8_t*>(cpu_copy.get()), data_size),
-          gpu_resource.Get(),
-          0,
-          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-      data = cpu_copy.get();
-    }
-#endif
-#if USE_CUDA
-    if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model->device_type_ == Generators::DeviceType::CUDA) {
-      auto data_size = type_info->GetElementCount() * element_size;
-      cpu_copy = std::make_unique<uint8_t[]>(data_size);
-      Generators::CudaCheck() == cudaMemcpy(cpu_copy.get(), data, data_size, cudaMemcpyDeviceToHost);
-      data = cpu_copy.get();
-    }
-#endif
-  }
 
   std::vector<int64_t> strides(shape.size());
   {
-    auto size = Generators::SizeOf(type);
+    auto size = element_size;
     for (size_t i = strides.size(); i-- > 0;) {
       strides[i] = size;
       size *= shape[i];
     }
   }
 
+  bool is_cpu = v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
+  auto device_span = Generators::ByteWrapTensor(is_cpu ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU) : *model.p_device_, *v);
+
   pybind11::buffer_info bufinfo{
-      data,                                          // Pointer to memory buffer
+      device_span.CopyDeviceToCpu().data(),          // Pointer to memory buffer
       static_cast<pybind11::ssize_t>(element_size),  // Size of underlying scalar type
       ToFormatDescriptor(type),                      // Python struct-style format descriptor
       static_cast<pybind11::ssize_t>(shape.size()),  // Number of dimensions
@@ -455,7 +420,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       }))
       .def_property_readonly("type", [](const Model& model) { return model.config_->model.type; })
       .def_property_readonly(
-          "device_type", [](const Model& model) { return to_string(model.device_type_); }, "The device type the model is running on")
+          "device_type", [](const Model& model) { return to_string(model.p_device_->GetType()); }, "The device type the model is running on")
       .def("create_multimodal_processor", [](const Model& model) { return model.CreateMultiModalProcessor(); });
 
   pybind11::class_<PyGenerator>(m, "Generator")
@@ -600,7 +565,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });
   m.def("is_rocm_available", []() { return USE_ROCM != 0; });
-  m.def("is_webgpu_available", []() { return USE_WEBGPU != 0; });
+  m.def("is_webgpu_available", []() { return true; });
+  m.def("is_qnn_available", []() { return true; });
 
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });

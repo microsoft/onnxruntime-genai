@@ -56,7 +56,12 @@ elseif(APPLE)
     set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.dylib")
   endif()
 else()
-  set(ONNXRUNTIME_LIB "libonnxruntime.so")
+  #In AIX, only CPU inferencing is supported, so no need to update ONNXRUNTIME_PROVIDERS_CUDA_LIB and ONNXRUNTIME_PROVIDERS_ROCM_LIB
+  if (CMAKE_SYSTEM_NAME MATCHES "AIX")
+    set(ONNXRUNTIME_LIB "libonnxruntime.a")
+  else()
+    set(ONNXRUNTIME_LIB "libonnxruntime.so")
+  endif()
   set(ONNXRUNTIME_PROVIDERS_CUDA_LIB "libonnxruntime_providers_cuda.so")
   set(ONNXRUNTIME_PROVIDERS_ROCM_LIB "libonnxruntime_providers_rocm.so")
 endif()
@@ -66,6 +71,10 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/*.cpp"
   "${GENERATORS_ROOT}/cpu/*.h"
   "${GENERATORS_ROOT}/cpu/*.cpp"
+  "${GENERATORS_ROOT}/qnn/*.h"
+  "${GENERATORS_ROOT}/qnn/*.cpp"
+  "${GENERATORS_ROOT}/webgpu/*.h"
+  "${GENERATORS_ROOT}/webgpu/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
 )
@@ -138,6 +147,8 @@ else()
     set(genai_target_platform "arm64")
   elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
     set(genai_target_platform "x64")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "powerpc")
+    set(genai_target_platform "powerpc")
   else()
     message(FATAL_ERROR "Unsupported architecture. CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
   endif()
