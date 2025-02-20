@@ -109,10 +109,6 @@ jobs:
             bash -c " \
               /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 
-      - name: Use Dummy HuggingFace Token
-        run: |
-          echo "HF_TOKEN=12345" >> $GITHUB_ENV
-
       - name: Install the onnxruntime-genai Python wheel and run python test
         run: |
           echo "Installing the onnxruntime-genai Python wheel and running the Python tests"
