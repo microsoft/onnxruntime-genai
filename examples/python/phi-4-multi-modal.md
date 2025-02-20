@@ -147,9 +147,13 @@ $ python3 builder.py --input ./pytorch --output ./cuda --precision fp16 --execut
 $ python3 builder.py --input ./pytorch --output ./dml --precision fp16 --execution_provider dml
 ```
 
-## 3. Build `genai_config.json` and `processor_config.json`
+## 3. Build `genai_config.json`, `speech_processor.json`, and `vision_processor.json`
 
-Currently, both JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Phi-4 multi-modal model. [Here](https://huggingface.co/microsoft/Phi-4-mini-mm-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json` and [here](https://huggingface.co/microsoft/Phi-4-mini-mm-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/processor_config.json) is an example for `processor_config.json`.
+Currently, the JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Phi-4 multi-modal model.
+
+- [Here](https://huggingface.co/microsoft/Phi-4-mini-mm-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json`
+- [Here](https://huggingface.co/microsoft/Phi-4-mini-mm-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/speech_processor.json) is an example for `speech_processor.json`
+- [Here](https://huggingface.co/microsoft/Phi-4-mini-mm-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/vision_processor.json) is an example for `vision_processor.json`
 
 ## 4. Run Phi-4 multi-modal ONNX models
 

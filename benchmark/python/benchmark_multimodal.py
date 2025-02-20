@@ -13,14 +13,55 @@
 #
 # 2) Run this script with the desired arguments. Run benchmark_multimodal.py -h for help.
 
+import argparse
 import json
 import onnxruntime_genai as og
 import os
 import pandas as pd
+import psutil
+import subprocess
+import threading
 import time
-import argparse
 from tqdm import tqdm
 
+peak_cpu_memory = 0.0
+peak_gpu_memory = 0.0
+peak_memory_lock = threading.Lock()
+stop_monitoring = False
+
+try:
+    subprocess.run(["nvidia-smi"], check=True)
+    IS_NVIDIA_SYSTEM = True
+except Exception:
+    IS_NVIDIA_SYSTEM = False
+
+# Monitor the GPU memory usage
+def monitor_gpu_memory():
+    global peak_gpu_memory
+
+    while not stop_monitoring:
+        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader,nounits'], capture_output=True, text=True)
+
+        memory_usage = result.stdout.splitlines()
+
+        if len(memory_usage) >= 1:
+            gpu_memory = [float(line) for line in memory_usage]
+            current_peak = round(max(gpu_memory) / 1024, 2)
+            with peak_memory_lock:
+                peak_gpu_memory = max(current_peak, peak_gpu_memory)
+        else:
+            print("No GPU Memory Info Found")
+        time.sleep(0.1)
+
+# Monitor the CPU memory usage
+def monitor_cpu_memory():
+    global peak_cpu_memory
+
+    while not stop_monitoring:
+        current_used_memory = round(psutil.virtual_memory().used / 1024**3, 2)
+        with peak_memory_lock:
+            peak_cpu_memory = max(peak_cpu_memory, current_used_memory)
+        time.sleep(0.1)
 
 def save_results(results, filename):
     df = pd.DataFrame(
@@ -37,11 +78,44 @@ def save_results(results, filename):
             "Sampling Latency (ms)",
             "Wall Clock Throughput (tps)",
             "Wall Clock Time (s)",
+            "Memory Usage (GiB)",
         ],
     )
     # df = df.transpose()  # This line swaps the rows and columns
     df.to_csv(filename, header=True, index=False)
     print(f"Results saved in {filename}!")
+
+def run_benchmark_memory(args, model, processor, image, audio, generation_length, max_length):
+    """
+    This function is to run benchmark and print the memory usage
+    """
+    global stop_monitoring
+    global peak_gpu_memory
+    global peak_cpu_memory
+
+    # Reset the peak memory variables and the monitoring flag
+    stop_monitoring = False
+    peak_gpu_memory = 0.0
+    peak_cpu_memory = 0.0
+
+    if IS_NVIDIA_SYSTEM:
+        monitor_thread = threading.Thread(target=monitor_gpu_memory)
+    else:
+        monitor_thread = threading.Thread(target=monitor_cpu_memory)
+    
+    monitor_thread.start()
+
+    metrics = run_benchmark(args, model, processor, image, audio, generation_length, max_length)
+
+    stop_monitoring = True
+    monitor_thread.join()
+
+    if IS_NVIDIA_SYSTEM:
+        metrics.append(peak_gpu_memory)
+    else:
+        metrics.append(peak_cpu_memory)
+    
+    return metrics
 
 def run_benchmark(args, model, processor, image, audio, generation_length, max_length):
     # Get user arguments
@@ -238,7 +312,7 @@ def main(args):
         else:
             max_length = 3072
         print(f"Args: tokens = {gen_length}, max_length = {max_length}")
-        metrics = run_benchmark(args, model, processor, image, audio, gen_length, max_length)
+        metrics = run_benchmark_memory(args, model, processor, image, audio, gen_length, max_length)
         all_csv_metrics.append(metrics)
     # Add metrics to CSV
     if args.verbose: print("Adding results to CSV")
@@ -258,7 +332,7 @@ if __name__ == "__main__":
     parser.add_argument('-im', '--image_path', type=str, default="", required=False, help='Path to the image')
     parser.add_argument('-g', '--generation_lengths', type=str2intlist, default=[256], help='Number of tokens to generate after prompt')
     parser.add_argument('-m', '--max_lengths', type=str2intlist, default=[7680], help='Max length buffer sizes... User should supply one for every Generation length')
-    parser.add_argument('-r', '--repetitions', type=int, default=10, help='Number of times to repeat the benchmark')
+    parser.add_argument('-r', '--repetitions', type=int, default=30, help='Number of times to repeat the benchmark')
     parser.add_argument('-w', '--warmup', type=int, default=5, help='Number of warmup runs before benchmarking')
     parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
     parser.add_argument('-p', '--top_p', type=float, default=1.0, help='Top p probability to sample with')
