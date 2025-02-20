@@ -295,7 +295,7 @@ class Model:
         # Quantization-specific variables (INT4, INT8, etc.)
         self.quant_attrs = {
             "int4": {
-                "accuracy_level": int(extra_options.get("int4_accuracy_level", 0)),   # Default is 0 for non-QDQ formats, default is 4 for QDQ formats
+                "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep == "cpu" else 0)),   # Default is 0 for non-QDQ formats, default is 4 for QDQ formats
                 "block_size": int(extra_options.get("int4_block_size", 32)),
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
@@ -3324,6 +3324,7 @@ def get_args():
                     3 is bf16.
                     2 is fp16.
                     1 is fp32.
+                    Default is 4 for CPU and 0 for non-CPU.
                 int4_block_size = 16/32/64/128/256: Specify the block_size for int4 quantization.
                 int4_is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4. If false, quantization is done to uint4.
