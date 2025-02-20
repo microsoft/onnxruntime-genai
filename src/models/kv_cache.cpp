@@ -188,7 +188,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
                                 : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
       // Zero the memory so we don't leak any data from the previous run
       if (Device().GetType() != DeviceType::WEBGPU) {
-        // ort c api does have a method to update device memory - temporarily disable.
+        // ort c api does not have a method to update device memory - temporarily disable.
         ByteWrapTensor(Device(), *presents_.back()).Zero();
       }
     }
