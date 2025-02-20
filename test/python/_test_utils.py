@@ -53,6 +53,8 @@ def run_subprocess(
 
 
 def get_model_paths():
+    # TODO: Uncomment the following models as needed in the CI pipeline.
+
     hf_paths = {
         "phi-2": "microsoft/phi-2",
         # "olmo": "amd/AMD-OLMo-1B-SFT-DPO",
@@ -62,15 +64,15 @@ def get_model_paths():
         # "granite-3.0": "ibm-granite/granite-3.0-2b-instruct",
     }
 
-    ci_data_path = os.path.join(os.path.abspath(os.sep), "data", "ortgenai", "pytorch")
-    print("CI data path:", ci_data_path)
+    ci_data_path = None
     if is_windows():
-        ci_data_path = R"C:\data\models\ortgenai\pytorch"
+        ci_data_path = os.path.join(R"C:\\", "data", "models", "ortgenai", "pytorch")
+    else:
+        ci_data_path = os.path.join(os.path.abspath(os.sep), "data", "ortgenai", "pytorch")
+
     if not os.path.exists(ci_data_path):
         return {}, hf_paths
-    exit()
 
-    # TODO: Uncomment the following models as needed in the CI pipeline.
     # Note: If a model has over 4B parameters, please add a quantized version
     # to `ci_paths` instead of `hf_paths` to reduce file size and testing time.
     ci_paths = {
