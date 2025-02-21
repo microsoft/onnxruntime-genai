@@ -11,7 +11,7 @@ using json = nlohmann::json;
 using namespace std;
 
 namespace microsoft {
-namespace aias {
+namespace slm_engine {
 
 // clang-format off
 // OpenAI API example
@@ -164,5 +164,5 @@ unique_ptr<InputDecoder> InputDecoder::CreateDecoder(const string& name) {
   return nullptr;
 }
 
-}  // namespace aias
+}  // namespace slm_engine
 }  // namespace microsoft

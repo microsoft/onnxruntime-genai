@@ -150,6 +150,85 @@ The SLM server supports the following REST APIs (click to expand):
 
 </details>
 
+### C++ Application using the SLMEngine
+
+The SLMEngine is designed to be used from another C++ application running on the Edge. Integrating the SLMEngine into another C++ project using cmake is illustrated below.
+
+First build the SLM Engine from source using the build instructions provided in this document. The build output are stored in the target specific `install/include` and `install/bin` directories.
+
+#### CMakeLists.txt
+
+```cmake
+cmake_minimum_required(VERSION 3.28)
+project(HelloSLM)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+add_library(slm_engine SHARED IMPORTED)
+set_target_properties(
+    slm_engine
+    PROPERTIES
+    IMPORTED_IMPLIB
+    <location-of-slm-artifacts>/bin/libslmengine.so
+)
+add_library(ort SHARED IMPORTED)
+set_target_properties(
+    ort
+    PROPERTIES
+    IMPORTED_IMPLIB
+    <location-of-slm-artifacts>/bin/libonnxruntime.so
+
+add_library(ort_genai SHARED IMPORTED)
+set_target_properties(
+    ort_genai
+    PROPERTIES
+    IMPORTED_IMPLIB
+    <location-of-slm-artifacts>/bin/libonnxruntime-genai.so
+
+include_directories(<location-of-slm-artifacts>/include)
+
+add_executable(hello_slm hello_slm.cpp)
+target_link_libraries(inference_server slm_engine ort ort_genai)
+
+```
+
+#### hello_slm.cpp
+
+```c++
+
+#include <string>
+#include <iostream>
+#include "slm_engine.h"
+
+int main(int argc, char **argv) {
+
+    auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
+        "path to ONNX Model Directory", "phi3", true);
+
+    if (!slm_engine) {
+        std::cout << "Cannot create engine!\n";
+        return;
+    }
+
+    microsoft::slm_engine::SLMEngine::GenerationOptions generator_options;
+    generator_options.MaxGeneratedTokens = 2400;
+    std::string response_str;
+    microsoft::slm_engine::SLMEngine::RuntimePerf kpi;
+
+    // Call the SLM engine
+    slm_engine->generate("What is 2 + 2?", generator_options, response_str, kpi);
+
+    std::cout << "Generated Response: " << response_str << std::endl;
+}
+
+```
+
+See the [slm_engine.h](src/cpp/slm_engine.h) for more details of the C++ API.
+
+See the following reference CLI applications to learn more about how to use an HTTP server [slm_server.cpp](src/cpp/slm_server.cpp) or a CLI program for batch generation processing [slm_runner.cpp](src/cpp/slm_runner.cpp) using this library.
+
 ## Installation
 
 Since this is targeted for various devices running on the Edge we provide a simple to use build setup that the developers can use to build for any system of their choosing.

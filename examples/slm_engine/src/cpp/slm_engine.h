@@ -32,7 +32,7 @@
 #endif
 
 namespace microsoft {
-namespace aias {
+namespace slm_engine {
 
 /// @brief SLM Engine class to interact with the GenAI Model
 ///
@@ -204,7 +204,7 @@ class SLM_ENGINE_EXPORT SLMEngine {
 
   SLMEngine(const SLMEngine&) = delete;
   SLMEngine& operator=(const SLMEngine&) = delete;
-  static std::string GetVersion() { return std::string(SW_VERSION_NUMBER); }
+  static std::string GetVersion();
 
  private:
   SLMEngine(bool verbose) : m_verbose(verbose) {}
@@ -250,5 +250,5 @@ class SLM_ENGINE_EXPORT SLMEngine {
   // Need a scoped mutex to ensure only one complete() call at a time
   std::mutex m_mutex;
 };
-}  // namespace aias
+}  // namespace slm_engine
 }  // namespace microsoft

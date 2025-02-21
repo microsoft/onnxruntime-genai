@@ -31,7 +31,7 @@ using namespace std;
 int run_server(const string& model_path, const string& model_family,
                int port_number, bool verbose) {
   // Create the SLM
-  auto slm_engine = microsoft::aias::SLMEngine::CreateEngine(
+  auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
       model_path.c_str(), model_family, verbose);
   if (!slm_engine) {
     cout << "Cannot create engine!\n";
@@ -46,7 +46,7 @@ int run_server(const string& model_path, const string& model_family,
 
     json engine_state = {
         {"model", std::filesystem::path(model_path).filename().string()},
-        {"engine_version", microsoft::aias::SLMEngine::GetVersion()}};
+        {"engine_version", microsoft::slm_engine::SLMEngine::GetVersion()}};
     response_body["engine_state"] = engine_state;
     json get_response;
     get_response["response"] = response_body;
@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
           "If provided, more debugging information printed on standard "
           "output");
 
-  cout << "SLM Runner Version: " << microsoft::aias::SLMEngine::GetVersion()
+  cout << "SLM Runner Version: " << microsoft::slm_engine::SLMEngine::GetVersion()
        << endl;
   try {
     program.parse_args(argc, argv);

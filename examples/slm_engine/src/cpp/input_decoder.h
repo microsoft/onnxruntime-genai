@@ -8,7 +8,7 @@
 #include <vector>
 
 namespace microsoft {
-namespace aias {
+namespace slm_engine {
 /// @brief An abstract class defining the interface to various types of
 ///        input decoder such as OpenAI and so on.
 class InputDecoder {
@@ -108,5 +108,5 @@ class InputDecoder {
   virtual bool decode(const std::string& message,
                       InputParams& decoded_params) = 0;
 };
-}  // namespace aias
+}  // namespace slm_engine
 }  // namespace microsoft

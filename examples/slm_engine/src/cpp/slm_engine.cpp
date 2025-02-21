@@ -30,7 +30,12 @@ using json = nlohmann::json;
 #define CLEAR "\033[0m"
 
 namespace microsoft {
-namespace aias {
+namespace slm_engine {
+
+std::string SLMEngine::GetVersion() {
+  // SW_VERSION_NUMBER is defined in the CMakeLists.txt file
+  return std::string(SW_VERSION_NUMBER);
+}
 
 std::unique_ptr<SLMEngine> SLMEngine::CreateEngine(
     const char* model_path, const std::string& model_family_name, bool verbose) {
@@ -404,5 +409,5 @@ uint32_t SLMEngine::GetMemoryUsage() {
 #endif
 }
 
-}  // namespace aias
+}  // namespace slm_engine
 }  // namespace microsoft

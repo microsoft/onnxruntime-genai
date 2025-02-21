@@ -51,7 +51,7 @@ int run_test(const string& model_path, const string& model_family,
        << "Test File: " << test_data_file << "\n";
 
   // Create the SLM
-  auto slm_engine = microsoft::aias::SLMEngine::CreateEngine(
+  auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
       model_path.c_str(), model_family, verbose);
   if (!slm_engine) {
     cout << "Cannot create engine!\n";
@@ -144,7 +144,7 @@ int main(int argc, char** argv) {
           "If provided, more debugging information printed on standard "
           "output");
 
-  cout << "SLM Runner Version: " << microsoft::aias::SLMEngine::GetVersion()
+  cout << "SLM Runner Version: " << microsoft::slm_engine::SLMEngine::GetVersion()
        << endl;
   try {
     program.parse_args(argc, argv);
