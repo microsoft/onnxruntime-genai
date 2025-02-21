@@ -193,7 +193,7 @@ class SLM_ENGINE_EXPORT SLMEngine {
       MaxGeneratedTokens = 2048;
       Temperature = 0.00000000000001f;
       TopK = 50;
-      TopP = 1.0f;
+      TopP = 0.1f;
     }
   };
 
