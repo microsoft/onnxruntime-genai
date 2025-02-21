@@ -52,13 +52,6 @@ if(BUILD_WHEEL)
   file(COPY "${CMAKE_SOURCE_DIR}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_TARGET_NAME}/)
   file(COPY "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION ${WHEEL_TARGET_NAME}/)
 
-  # Copy over the onnxruntime-genai.dll shared library
-  add_custom_command(TARGET python POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy
-    $<TARGET_FILE:onnxruntime-genai> $<TARGET_FILE:python>
-    ${WHEEL_TARGET_NAME}
-    COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
-  )
   add_custom_command(TARGET python POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
     ${ortgenai_embed_libs} $<TARGET_FILE:python>

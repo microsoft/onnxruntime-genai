@@ -152,7 +152,7 @@ struct LibraryHandle {
     auto path = Ort::GetCurrentModuleDir() + "/" + filename;
     handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!handle_)
-      throw std::runtime_error(std::string("Failed to load library: ") + path + " Error:" + dlerror());
+      throw std::runtime_error(std::string("Failed to load library: ") + dlerror());  // dlerror() includes the path
   }
   ~LibraryHandle() {
     dlclose(handle_);

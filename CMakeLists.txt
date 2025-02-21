@@ -98,6 +98,9 @@ target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(onnxruntime-genai PRIVATE Threads::Threads)
 
+# The genai library itself is always embedded in the shared library
+list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
+
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.
 if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR (CMAKE_SYSTEM_NAME STREQUAL "Darwin" AND (NOT BUILD_APPLE_FRAMEWORK) AND (NOT MAC_CATALYST)))
