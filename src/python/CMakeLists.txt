@@ -25,6 +25,7 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
   enable_language(CUDA)
   set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
   target_link_libraries(python PRIVATE cublas curand cudart)
+  target_link_libraries(python PRIVATE onnxruntime-genai-cuda)
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${python_srcs})
