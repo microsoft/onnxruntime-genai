@@ -20,14 +20,6 @@ if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
   target_compile_options(python PRIVATE "/sdl" PRIVATE "/Qspectre")
 endif()
 
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
-  cmake_policy(SET CMP0104 OLD)
-  enable_language(CUDA)
-  set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(python PRIVATE cublas curand cudart)
-  target_link_libraries(python PRIVATE onnxruntime-genai-cuda)
-endif()
-
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${python_srcs})
 
 if(BUILD_WHEEL)
@@ -96,7 +88,7 @@ if(BUILD_WHEEL)
     list(APPEND modified_exclude_list "--exclude" ${item})
   endforeach()
 
-  if(false) # MANYLINUX)
+  if(MANYLINUX)
     add_custom_target(PyPackageBuild ALL
       COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
       COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*
