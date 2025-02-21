@@ -5,22 +5,11 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    /// <summary>
-    /// The MultiModalProcessor class is responsible for converting text/images into a NamedTensors list
-    /// that can be fed into a Generator class instance.
-    /// </summary>
     public class MultiModalProcessor : IDisposable
     {
         private IntPtr _processorHandle;
         private bool _disposed = false;
 
-        /// <summary>
-        /// Construct a MultiModalProcessor for a given model.
-        /// </summary>
-        /// <param name="model">The model to use.</param>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
         public MultiModalProcessor(Model model)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateMultiModalProcessor(model.Handle, out _processorHandle));
@@ -28,17 +17,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _processorHandle; } }
 
-        /// <summary>
-        /// Processes a string and image into a NamedTensor.
-        /// </summary>
-        /// <param name="prompt">The text to encode as token ids.</param>
-        /// <param name="images">The image input.</param>
-        /// <returns>
-        /// The NamedTensors object.
-        /// </returns>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
         public NamedTensors ProcessImages(string prompt, Images images)
         {
             IntPtr imagesHandle = images == null ? IntPtr.Zero : images.Handle;
@@ -47,16 +25,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return new NamedTensors(namedTensorsHandle);
         }
 
-        /// <summary>
-        /// Decodes a sequence of token ids into text.
-        /// </summary>
-        /// <param name="sequence">The token ids to decode to text.</param>
-        /// <returns>
-        /// The text representation of the sequence.
-        /// </returns>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
         public string Decode(ReadOnlySpan<int> sequence)
         {
             IntPtr outStr = IntPtr.Zero;
@@ -77,16 +45,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
-        /// <summary>
-        /// Creates a TokenizerStream object for streaming tokenization. This is used with Generator class
-        /// to provide each token as it is generated.
-        /// </summary>
-        /// <returns>
-        /// The new TokenizerStream instance.
-        /// </returns>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
         public TokenizerStream CreateStream()
         {
             IntPtr tokenizerStreamHandle = IntPtr.Zero;
