@@ -96,7 +96,7 @@ if(BUILD_WHEEL)
     list(APPEND modified_exclude_list "--exclude" ${item})
   endforeach()
 
-  if(MANYLINUX)
+  if(false) # MANYLINUX)
     add_custom_target(PyPackageBuild ALL
       COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
       COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*

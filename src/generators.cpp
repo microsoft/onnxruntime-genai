@@ -149,7 +149,8 @@ struct LibraryHandle {
 #elif defined(__linux__) && !defined(__ANDROID__)
 struct LibraryHandle {
   LibraryHandle(const char* filename) {
-    handle_ = dlopen(filename, RTLD_NOW | RTLD_LOCAL);
+    auto path = Ort::GetCurrentModuleDir() + "/" + filename;
+    handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!handle_)
       throw std::runtime_error(std::string("Failed to load library: ") + dlerror());  // dlerror() includes the path
   }
