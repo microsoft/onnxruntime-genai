@@ -78,7 +78,7 @@ def main(args):
             system_prompt = f"<|im_start|>system<|im_sep|>\n{args.system_prompt}<|im_end|>"
         elif model_type.startswith("llama"):
             system_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{args.system_prompt}<|eot_id|>"
-            print("Using System Prompt for LLAMA 3, if you are using LLAMA  2 please pass the argument --system_prompt '<s>[INST] <<SYS>>\n{args.system_prompt}\n<</SYS>>')")
+            print("Using System Prompt for LLAMA 3, if you are using LLAMA  2 please pass the argument --system_prompt '<s>[INST] <<SYS>>\\n{args.system_prompt}\\n<</SYS>>')")
         elif model_type.startswith("qwen2"):
             system_prompt = f"<|im_start|>system\n{args.system_prompt}<|im_end|>\n"
         else:
