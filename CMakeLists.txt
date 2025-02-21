@@ -142,6 +142,7 @@ endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  set_target_properties(onnxruntime-genai PROPERTIES INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH TRUE)
   target_link_libraries(onnxruntime-genai PRIVATE dl)  # For dlopen & co
 endif()
 
