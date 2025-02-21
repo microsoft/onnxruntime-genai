@@ -189,6 +189,12 @@ class SLM_ENGINE_EXPORT SLMEngine {
     uint32_t TopK;
     float TopP;
     float Temperature;
+    explicit GenerationOptions() {
+      MaxGeneratedTokens = 2048;
+      Temperature = 0.00000000000001f;
+      TopK = 50;
+      TopP = 1.0f;
+    }
   };
 
   /// @brief Asks the GenAI Model for a response
