@@ -10,7 +10,7 @@ target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE onnxruntime-genai)
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
-target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
+  target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
@@ -89,6 +89,7 @@ if(BUILD_WHEEL)
   endforeach()
 
   if(MANYLINUX)
+    set_target_properties(python PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
     add_custom_target(PyPackageBuild ALL
       COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
       COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*

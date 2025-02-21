@@ -141,7 +141,7 @@ if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set_target_properties(onnxruntime-genai PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH_USE_LINK_PATH FALSE INSTALL_RPATH "$ORIGIN/")
+  set_target_properties(onnxruntime-genai PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
   set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_link_libraries(onnxruntime-genai PRIVATE dl)  # For dlopen & co
 endif()
