@@ -172,6 +172,7 @@ if (option == 3) // Streaming Chat
     generatorParams.SetSearchOption("max_length", maxLength);
     using var tokenizerStream = tokenizer.CreateStream();
     using var generator = new Generator(model, generatorParams);
+    var prevTotalTokens = 0;
     do{
         string prompt = GetPrompt(interactive);
         if (string.IsNullOrEmpty(prompt))
@@ -183,6 +184,7 @@ if (option == 3) // Streaming Chat
             break;
         }
         var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         generator.AppendTokenSequences(sequences);
         while (!generator.IsDone())
         {
@@ -190,5 +192,11 @@ if (option == 3) // Streaming Chat
             Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
         }
         Console.WriteLine();
+        watch.Stop();
+        var runTimeInSeconds = watch.Elapsed.TotalSeconds;
+        var outputSequence = generator.GetSequence(0);
+        var totalNewTokens = outputSequence.Length - prevTotalTokens;
+        prevTotalTokens = totalNewTokens;
+        Console.WriteLine($"Streaming Tokens: {totalNewTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalNewTokens / runTimeInSeconds:0.00}");
     } while (interactive);
 }
