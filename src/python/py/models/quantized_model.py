@@ -76,6 +76,8 @@ class QuantizedDecoderLayer:
         self.input_layernorm = TensorModule()
         self.self_attn = QuantizedAttention(bits, group_size)
         self.post_attention_layernorm = TensorModule()
+        self.pre_feedforward_layernorm = TensorModule()
+        self.post_feedforward_layernorm = TensorModule()
         self.mlp = QuantizedMLP(bits, group_size)
 
     def is_empty(self):
@@ -100,10 +102,10 @@ class QuantizedModel:
 
                 # Map weights to modules
                 for name, tensor in weights.items():
-                    
+
                     self.local_bits = self.global_bits
                     self.local_group_size = self.global_group_size
-                    
+
                     # Per-layer quantization support
                     if quant_type == "quark" and quant_attrs["config"]["layer_quant_config"]:
                         self.get_layer_config(name, quant_attrs)
@@ -259,6 +261,18 @@ class QuantizedModel:
                         elif bool(re.match(r"^model.layers\.\d+\.post_attention_layernorm\.bias$", name)):
                             # model.layers.layer_id.post_attention_layernorm.bias
                             module.post_attention_layernorm.bias = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.pre_feedforward_layernorm\.weight$", name)):
+                            # model.layers.layer_id.pre_feedforward_layernorm.weight
+                            module.pre_feedforward_layernorm.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.pre_feedforward_layernorm\.bias$", name)):
+                            # model.layers.layer_id.pre_feedforward_layernorm.bias
+                            module.pre_feedforward_layernorm.bias = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.post_feedforward_layernorm\.weight$", name)):
+                            # model.layers.layer_id.post_feedforward_layernorm.weight
+                            module.post_feedforward_layernorm.weight = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.post_feedforward_layernorm\.bias$", name)):
+                            # model.layers.layer_id.post_feedforward_layernorm.bias
+                            module.post_feedforward_layernorm.bias = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.mlp.gate_proj\.qweight$", name)):
                             # model.layers.layer_id.mlp.gate_proj.qweight
                             module.mlp.gate_proj.qweight = tensor
@@ -406,7 +420,7 @@ class QuantizedModel:
         else:
             self.global_group_size = quant_attrs["config"]["group_size"]
             self.global_bits = quant_attrs["config"]["bits"]
-    
+
     def get_layer_config(self, layer_name, quant_attrs):
         # basic layer specific configuration for quark
 
@@ -421,7 +435,7 @@ class QuantizedModel:
                     "uint4": 4,
                     "int4": 4,
                 }  
-            
+
                 local_bits = dtype_bits_maps[local_dtype]
                 if local_bits is None:
                     raise NotImplementedError(f"Dtype: {local_dtype} not supported.")
