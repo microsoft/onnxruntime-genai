@@ -1,4 +1,4 @@
-name: "Linux CPU x64 Nightly Build"
+name: "Linux CPU x64 Nightly Examples Build"
 
 # Run at 5:00 AM UTC every day
 # 9:00 PM PST
