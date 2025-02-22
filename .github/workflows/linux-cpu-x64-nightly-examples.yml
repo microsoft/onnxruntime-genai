@@ -1,0 +1,54 @@
+name: "Linux CPU x64 Nightly Build"
+
+# Run at 5:00 AM UTC every day
+# 9:00 PM PST
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+env:
+  ort_dir: "onnxruntime-linux-x64-1.18.0"
+  ort_zip: "onnxruntime-linux-x64-1.18.0.tgz"
+  ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-x64-1.18.0.tgz"
+jobs:
+  job:
+    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
+    steps:
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v2
+
+      - name: Download OnnxRuntime
+        run: |
+          curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
+
+      - name: Unzip OnnxRuntime
+        run: |
+          tar -xzf ${{ env.ort_zip }}
+          rm ${{ env.ort_zip }}
+
+      - name: Rename OnnxRuntime to ort
+        run: |
+          mv ${{ env.ort_dir }} ort
+
+      - name: Git Submodule Update
+        run: |
+          git submodule update --init --recursive
+          
+      - name: Build with CMake and clang
+        run: |
+          set -e -x
+          rm -rf build
+          cmake --preset linux_gcc_cpu_release
+          cmake --build --preset linux_gcc_cpu_release
+
+      - name: Install the python wheel and test dependencies
+        run: |
+          python3 -m pip install -r test/python/requirements.txt --user
+          python3 -m pip install -r test/python/cpu/torch/requirements.txt --user
+          python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
+          python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl --no-deps
