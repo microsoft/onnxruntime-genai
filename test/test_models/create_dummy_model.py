@@ -9,6 +9,8 @@ This is helpful for creating ONNX models to run simple API tests (e.g. pre-proce
 where the contents of the ONNX models don't matter.
 
 Example usage:
+
+Phi vision:
 1) python3 create_dummy_model.py \
     --inputs "pixel_values; TensorProto.FLOAT16; ['num_images', 'max_num_crops', 3, 'height', 'width']" "image_sizes; TensorProto.INT64; ['num_images', 2]" \
     --outputs "image_features; TensorProto.FLOAT16; ['num_image_tokens', 3072]" \
@@ -21,6 +23,16 @@ Example usage:
     --inputs "inputs_embeds; TensorProto.FLOAT; ['batch_size', 'sequence_length', 3072]" "attention_mask; TensorProto.INT64; ['batch_size', 'total_sequence_length']" "past_key_values.0.key; TensorProto.FLOAT; ['batch_size', 32, 'past_sequence_length', 96]" "past_key_values.0.value; TensorProto.FLOAT; ['batch_size', 32, 'past_sequence_length', 96]" \
     --outputs "logits; TensorProto.FLOAT; ['batch_size', 'sequence_length', 32064]" "present.0.key; TensorProto.FLOAT; ['batch_size', 32, 'total_sequence_length', 96]" "present.0.value; TensorProto.FLOAT; ['batch_size', 32, 'total_sequence_length', 96]" \
     --filename "dummy_text.onnx"
+
+Whisper:
+4) python3 create_dummy_model.py \
+    --inputs "audio_features; TensorProto.FLOAT; ['batch_size', 80, 3000]" \
+    --outputs "encoder_hidden_states; TensorProto.FLOAT; ['batch_size', 1500, 1280]" "present_key_cross_0; TensorProto.FLOAT; ['batch_size', 6, 1500, 64]" \
+    --filename "dummy_encoder.onnx"
+5) python3 create_dummy_model.py \
+    --inputs "input_ids; TensorProto.INT32; ['batch_size', 'sequence_length']" "past_key_self_0; TensorProto.FLOAT; ['batch_size', 6, 'past_sequence_length', 64]" "past_value_self_0; TensorProto.FLOAT; ['batch_size', 6, 'past_sequence_length', 64]" "past_key_cross_0; TensorProto.FLOAT; ['batch_size', 6, 1500, 64]" "past_value_cross_0; TensorProto.FLOAT; ['batch_size', 6, 1500, 64]" \
+    --outputs "logits; TensorProto.FLOAT; ['batch_size', 'sequence_length', 51865]" "present_key_self_0; TensorProto.FLOAT; ['batch_size', 6, 'total_sequence_length', 64]" "present_value_self_0; TensorProto.FLOAT; ['batch_size', 6, 'total_sequence_length', 64]" "output_cross_qk_0; TensorProto.FLOAT; ['batch_size', 6, 'sequence_length', 1500]" \
+    --filename "dummy_decoder.onnx"
 """
 
 import argparse

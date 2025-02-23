@@ -96,7 +96,7 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
   return {};
 }
 
-VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens)
+VisionEncoderState::VisionEncoderState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens)
     : State{params, model},
       model_{model},
       num_image_tokens_{num_image_tokens} {
@@ -104,7 +104,7 @@ VisionState::VisionState(const MultiModalVisionModel& model, const GeneratorPara
   image_features_.Add();
 }
 
-DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+DeviceSpan<float> VisionEncoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   const int num_images = static_cast<int>(inputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[0]);
   State::Run(*model_.vision_session_, num_images);
 
@@ -145,8 +145,8 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalVisionModel& mo
       num_image_tokens_{GetNumImageTokens(params_->extra_inputs, model_.config_->model.vision.inputs.pixel_values, model_.config_->model.vision.inputs.image_sizes)},
       captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)} {
   embedding_state_ = std::make_unique<EmbeddingState>(model, params, num_image_tokens_);
-  vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
-  decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths_unk, params, captured_graph_info_.get());
+  vision_state_ = std::make_unique<VisionEncoderState>(model, params, num_image_tokens_);
+  decoder_state_ = std::make_unique<DecoderState>(model, sequence_lengths_unk, params, captured_graph_info_.get());
 }
 
 DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens,
@@ -174,7 +174,6 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
 
     is_prompt_ = false;
-    vision_state_.reset();  // The vision state is no longer needed in generation stage
 
     return logits;
   }
@@ -183,5 +182,55 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   embedding_state_->Run(current_length, next_tokens, next_indices);
   return decoder_state_->Run(current_length, next_tokens, next_indices);
 }
+
+OrtValue* MultiModalPipelineState::GetInput(const char* name) {
+  // Check if input name is in vision state's inputs
+  for (size_t i = 0; i < vision_state_->input_names_.size(); i++) {
+    if (std::strcmp(vision_state_->input_names_[i], name) == 0) {
+      return vision_state_->inputs_[i];
+    }
+  }
+
+  // Check if input name is in embedding state's inputs
+  for (size_t i = 0; i < embedding_state_->input_names_.size(); i++) {
+    if (std::strcmp(embedding_state_->input_names_[i], name) == 0) {
+      return embedding_state_->inputs_[i];
+    }
+  }
+
+  // Check if input name is in decoder state's inputs
+  for (size_t i = 0; i < decoder_state_->input_names_.size(); i++) {
+    if (std::strcmp(decoder_state_->input_names_[i], name) == 0) {
+      return decoder_state_->inputs_[i];
+    }
+  }
+
+  return State::GetInput(name);
+};
+
+OrtValue* MultiModalPipelineState::GetOutput(const char* name) {
+  // Check if output name is in vision state's outputs
+  for (size_t i = 0; i < vision_state_->output_names_.size(); i++) {
+    if (std::strcmp(vision_state_->output_names_[i], name) == 0) {
+      return vision_state_->outputs_[i];
+    }
+  }
+
+  // Check if output name is in embedding state's outputs
+  for (size_t i = 0; i < embedding_state_->output_names_.size(); i++) {
+    if (std::strcmp(embedding_state_->output_names_[i], name) == 0) {
+      return embedding_state_->outputs_[i];
+    }
+  }
+
+  // Check if output name is in decoder state's outputs
+  for (size_t i = 0; i < decoder_state_->output_names_.size(); i++) {
+    if (std::strcmp(decoder_state_->output_names_[i], name) == 0) {
+      return decoder_state_->outputs_[i];
+    }
+  }
+
+  return State::GetOutput(name);
+};
 
 }  // namespace Generators

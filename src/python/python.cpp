@@ -206,9 +206,9 @@ struct PyGeneratorParams {
   std::shared_ptr<GeneratorParams> params_;
 
   void Prepare() {
-    if (py_whisper_input_features_.size() != 0) {
+    if (py_audio_features_.size() != 0) {
       GeneratorParams::Whisper& whisper = params_->inputs.emplace<GeneratorParams::Whisper>();
-      whisper.input_features = std::make_shared<Tensor>(ToOrtValue(py_whisper_input_features_));
+      whisper.audio_features = std::make_shared<Tensor>(ToOrtValue(py_audio_features_));
       if (py_alignment_heads_.size() != 0) {
         whisper.alignment_heads = std::make_shared<Tensor>(ToOrtValue(py_alignment_heads_));
       }
@@ -252,8 +252,8 @@ struct PyGeneratorParams {
     params_->TryGraphCapture(max_batch_size.cast<int>());
   }
 
-  pybind11::array py_whisper_input_features_;
-  pybind11::array py_alignment_heads_;
+  pybind11::array py_audio_features_;
+  pybind11::array_t<int32_t> py_alignment_heads_;
 
   std::vector<pybind11::object> refs_;             // References to data we want to ensure doesn't get garbage collected
   std::shared_ptr<PyNamedTensors> named_tensors_;  // Ensure the model inputs don't get garbage collected
@@ -274,6 +274,10 @@ struct PyGenerator {
     return py_sequence_.GetNumpy();
   }
 
+  pybind11::array GetInput(const std::string& name) {
+    return ToNumpy(generator_->state_->GetInput(name.c_str()), *(generator_->model_));
+  }
+  
   pybind11::array GetOutput(const std::string& name) {
     return ToNumpy(generator_->state_->GetOutput(name.c_str()), *(generator_->model_));
   }
@@ -365,8 +369,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def_property_readonly("pad_token_id", [](const PyGeneratorParams& v) { return v.params_->config.model.pad_token_id; })
       .def_property_readonly("eos_token_id", [](const PyGeneratorParams& v) { return v.params_->config.model.eos_token_id; })
       .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->config.model.vocab_size; })
-      // TODO(baijumeswani): Rename/redesign the whisper_input_features to be more generic
-      .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
+      .def_readwrite("audio_features", &PyGeneratorParams::py_audio_features_)
       .def_readwrite("alignment_heads", &PyGeneratorParams::py_alignment_heads_)
       .def("set_inputs", [](PyGeneratorParams& generator_params, std::shared_ptr<PyNamedTensors> named_tensors) {
         if (!named_tensors || !named_tensors->named_tensors_)
@@ -426,6 +429,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<Model&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
+      .def("get_input", &PyGenerator::GetInput)
       .def("get_output", &PyGenerator::GetOutput)
       .def("append_tokens", &PyGenerator::AppendTokens)
       .def("get_logits", &PyGenerator::GetLogits)

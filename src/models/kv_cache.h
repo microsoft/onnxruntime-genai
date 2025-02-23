@@ -5,6 +5,8 @@
 
 namespace Generators {
 
+std::string ComposeKeyValueName(const std::string& template_string, int index);
+
 struct KeyValueCache {
   virtual ~KeyValueCache() = default;
 
@@ -67,10 +69,13 @@ struct CombinedKeyValueCache : KeyValueCache {
 struct DefaultKeyValueCache : KeyValueCache {
   DefaultKeyValueCache(State& state);
 
-  void AddEncoder() override;  // If model has an initial encoder step, this is used
-  // Register input_ids as ORT session input.
-  // Called only once during initialization of state.
+  static bool IsCacheNeeded(const Model& model);
+
   void Add() override;
+  auto& GetShape() const { return shape_; }
+  auto& GetType() const { return type_; }
+  auto& GetPresents() { return presents_; }
+
   // Move present to past. Prepare present output for next generation iteration.
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   void RewindTo(size_t index) override;
@@ -107,15 +112,13 @@ struct DefaultKeyValueCache : KeyValueCache {
 struct CrossCache {
   CrossCache(State& state);
 
-  void AddOutputs();
-  void AddInputs();
+  void AddOutputs(State& state);
+  void AddInputs(State& state);
+  auto& GetShape() const { return shape_; }
+  auto& GetType() const { return type_; }
+  auto& GetValues() { return values_; }
 
  private:
-  DeviceInterface& Device() { return *model_.p_device_kvcache_; }
-  Ort::Allocator& Allocator() { return model_.p_device_kvcache_->GetAllocator(); }
-
-  State& state_;
-  const Model& model_{state_.model_};
   int layer_count_;
 
   std::array<int64_t, 4> shape_;

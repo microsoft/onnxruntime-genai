@@ -50,10 +50,10 @@ struct EmbeddingState : State {
                             model_.config_->model.embedding.outputs.embeddings};
 };
 
-struct VisionState : State {
-  VisionState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens);
-  VisionState(const VisionState&) = delete;
-  VisionState& operator=(const VisionState&) = delete;
+struct VisionEncoderState : State {
+  VisionEncoderState(const MultiModalVisionModel& model, const GeneratorParams& params, const int64_t num_image_tokens);
+  VisionEncoderState(const VisionEncoderState&) = delete;
+  VisionEncoderState& operator=(const VisionEncoderState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices = {}) override;
@@ -102,6 +102,8 @@ struct MultiModalPipelineState : State {
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
+  OrtValue* GetInput(const char* name) override;
+  OrtValue* GetOutput(const char* name) override;
 
  private:
   void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
@@ -111,7 +113,7 @@ struct MultiModalPipelineState : State {
   int64_t num_image_tokens_{};
   const CapturedGraphInfoPtr captured_graph_info_;
   std::unique_ptr<EmbeddingState> embedding_state_;
-  std::unique_ptr<VisionState> vision_state_;
+  std::unique_ptr<VisionEncoderState> vision_state_;
   std::unique_ptr<DecoderState> decoder_state_;
   bool is_prompt_{true};
 };
