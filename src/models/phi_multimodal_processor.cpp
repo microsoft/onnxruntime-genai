@@ -28,7 +28,7 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
                                  1LL, std::multiplies<int64_t>());
   }
 
-  const float* audio_sizes_data{};
+  const int64_t* audio_sizes_data{};
   int64_t num_audios = 0LL;
   if (audio_sizes) {
     const int64_t* audio_sizes_shape{};
@@ -107,6 +107,7 @@ PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)},
       attention_mask_type_{session_info.GetInputDataType(config.model.vision.inputs.attention_mask)},
       audio_features_type_{session_info.GetInputDataType(config.model.speech.inputs.audio_embeds)},
+      audio_attention_mask_type_{session_info.GetInputDataType(config.model.speech.inputs.audio_attention_mask)},
       audio_sizes_type_{session_info.GetInputDataType(config.model.speech.inputs.audio_sizes)} {
   const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
@@ -121,6 +122,7 @@ PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo
   config.AddMapping(std::string(Config::Defaults::ImageSizesName), config.model.vision.inputs.image_sizes);
 
   config.AddMapping(std::string(Config::Defaults::AudioEmbedsName), config.model.speech.inputs.audio_embeds);
+  config.AddMapping(std::string(Config::Defaults::AudioAttentionMaskName), config.model.speech.inputs.audio_attention_mask);
   config.AddMapping(std::string(Config::Defaults::AudioSizesName), config.model.speech.inputs.audio_sizes);
 }
 
@@ -140,12 +142,13 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
   }
 
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> audio_result;
-  OrtxTensor *audio_embeds{}, *audio_sizes{};
+  OrtxTensor *audio_embeds{}, *audio_attention_mask{}, *audio_sizes{};
   if (payload.audios) {
     CheckResult(OrtxFeatureExtraction(audio_processor_.get(), payload.audios->audios_.get(), audio_result.ToBeAssigned()));
 
     CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, &audio_embeds));
-    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 1, &audio_sizes));
+    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 1, &audio_attention_mask));
+    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 2, &audio_sizes));
   }
 
   auto [input_ids, audio_projection_mode] = ProcessImageAudioPrompt(tokenizer, payload.prompt, num_img_tokens, audio_sizes, allocator);
@@ -184,12 +187,20 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
                              std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(audio_embeds, allocator)));
     }
 
-    if (audio_sizes_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    if (audio_features_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL) {
+      named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
+                             std::make_shared<Tensor>(ProcessTensor<bool>(audio_attention_mask, allocator)));
+    } else {
+      named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
+                             std::make_shared<Tensor>(ProcessTensor<int64_t>(audio_attention_mask, allocator)));
+    }
+
+    if (audio_sizes_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
       named_tensors->emplace(std::string(Config::Defaults::AudioSizesName),
-                             std::make_shared<Tensor>(ProcessTensor<float>(audio_sizes, allocator)));
+                             std::make_shared<Tensor>(ProcessTensor<int64_t>(audio_sizes, allocator)));
     } else {
       named_tensors->emplace(std::string(Config::Defaults::AudioSizesName),
-                             std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(audio_sizes, allocator)));
+                             std::make_shared<Tensor>(ProcessTensor<int32_t>(audio_sizes, allocator)));
     }
   }
 

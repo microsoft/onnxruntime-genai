@@ -406,6 +406,8 @@ struct SpeechInputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "audio_embeds") {
       v_.audio_embeds = JSON::Get<std::string_view>(value);
+    } else if (name == "audio_attention_mask") {
+      v_.audio_attention_mask = JSON::Get<std::string_view>(value);
     } else if (name == "audio_sizes") {
       v_.audio_sizes = JSON::Get<std::string_view>(value);
     } else if (name == "audio_projection_mode") {

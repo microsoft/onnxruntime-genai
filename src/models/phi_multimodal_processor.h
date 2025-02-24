@@ -18,6 +18,7 @@ struct PhiMultiModalProcessor : Processor {
   ONNXTensorElementDataType pixel_values_type_;
   ONNXTensorElementDataType attention_mask_type_;
   ONNXTensorElementDataType audio_features_type_;
+  ONNXTensorElementDataType audio_attention_mask_type_;
   ONNXTensorElementDataType audio_sizes_type_;
 };
 

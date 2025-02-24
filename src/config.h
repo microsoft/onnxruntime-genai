@@ -36,6 +36,7 @@ struct Config {
     // Speech names
     static constexpr std::string_view InputFeaturesName = "encoder_input_ids";
     static constexpr std::string_view AudioEmbedsName = "audio_embeds";
+    static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
     static constexpr std::string_view AudioSizesName = "audio_sizes";
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
@@ -129,6 +130,7 @@ struct Config {
 
       struct Inputs {
         std::string audio_embeds{Defaults::AudioEmbedsName};
+        std::string audio_attention_mask{Defaults::AudioAttentionMaskName};
         std::string audio_sizes{Defaults::AudioSizesName};
         std::string audio_projection_mode{Defaults::AudioProjectionModeName};
       } inputs;
