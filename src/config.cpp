@@ -63,14 +63,14 @@ struct ProviderOptionsArray_Element : JSON::Element {
 };
 
 GraphOptimizationLevel GetGraphOptimizationLevel(std::string_view name) {
-  if (name =="ORT_DISABLE_ALL") {
-      return ORT_DISABLE_ALL;
+  if (name == "ORT_DISABLE_ALL") {
+    return ORT_DISABLE_ALL;
   } else if (name == "ORT_ENABLE_BASIC") {
-      return ORT_ENABLE_BASIC;
+    return ORT_ENABLE_BASIC;
   } else if (name == "ORT_ENABLE_EXTENDED") {
-      return ORT_ENABLE_EXTENDED;
+    return ORT_ENABLE_EXTENDED;
   } else if (name == "ORT_ENABLE_ALL") {
-      return ORT_ENABLE_ALL;
+    return ORT_ENABLE_ALL;
   } else
     throw std::runtime_error("Unrecognized value:" + std::string(name));
 }
