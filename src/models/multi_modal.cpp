@@ -58,8 +58,6 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *vision_session_options, true, true);
     vision_session_ = OrtSession::Create(
         ort_env, (config_->config_path / fs::path(config_->model.vision.filename)).c_str(), vision_session_options.get());
-  } else {
-    vision_session_ = nullptr;
   }
 
   if (speech) {
@@ -67,8 +65,6 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *speech_session_options, true, true);
     speech_session_ = OrtSession::Create(
         ort_env, (config_->config_path / fs::path(config_->model.speech.filename)).c_str(), speech_session_options.get());
-  } else {
-    speech_session_ = nullptr;
   }
 
   auto embedding_session_options = OrtSessionOptions::Create();
@@ -123,15 +119,15 @@ EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const Gener
       num_image_tokens_{num_image_tokens},
       num_audio_tokens_{num_audio_tokens} {
   input_ids_.Add();
-  if (model_.vision_session_ != nullptr) image_features_.Add();
-  if (model_.speech_session_ != nullptr) audio_features_.Add();
+  if (model_.vision_session_) image_features_.Add();
+  if (model_.speech_session_) audio_features_.Add();
   inputs_embeds_.Add();
 }
 
 void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool is_prompt) {
   input_ids_.Update(next_tokens);
-  if (model_.vision_session_ != nullptr) image_features_.Update(is_prompt);
-  if (model_.speech_session_ != nullptr) audio_features_.Update(is_prompt);
+  if (model_.vision_session_) image_features_.Update(is_prompt);
+  if (model_.speech_session_) audio_features_.Update(is_prompt);
 }
 
 DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -173,15 +169,11 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
       num_audio_tokens_{GetNumAudioTokens(params_->extra_inputs, model_.config_->model.speech.inputs.audio_sizes)},
       captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)},
       adapters_{std::make_shared<Adapters>(&model_)} {
-  if (model_.vision_session_ != nullptr) {
+  if (model_.vision_session_) {
     vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
-  } else {
-    vision_state_ = nullptr;
   }
-  if (model_.speech_session_ != nullptr) {
+  if (model_.speech_session_) {
     speech_state_ = std::make_unique<SpeechState>(model_, params, num_audio_tokens_);
-  } else {
-    speech_state_ = nullptr;
   }
   embedding_state_ = std::make_unique<EmbeddingState>(model, params, num_image_tokens_, num_audio_tokens_);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params, captured_graph_info_.get());
@@ -212,22 +204,22 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
   decoder_state_->UpdateInputsOutputs(next_tokens, current_length, next_indices);
 
   if (is_prompt_) {
-    if (num_image_tokens_ > 0 && vision_state_ != nullptr) {
+    if (num_image_tokens_ > 0 && vision_state_ ) {
       vision_state_->Run(current_length, next_tokens, next_indices);
     }
-    if (num_audio_tokens_ > 0 && speech_state_ != nullptr) {
+    if (num_audio_tokens_ > 0 && speech_state_ ) {
       speech_state_->Run(current_length, next_tokens, next_indices);
     }
-    if (vision_state_ != nullptr) embedding_state_->image_features_.ReuseFeaturesBuffer(vision_state_->image_features_);
-    if (speech_state_ != nullptr) embedding_state_->audio_features_.ReuseFeaturesBuffer(speech_state_->audio_features_);
+    if (vision_state_ ) embedding_state_->image_features_.ReuseFeaturesBuffer(vision_state_->image_features_);
+    if (speech_state_ ) embedding_state_->audio_features_.ReuseFeaturesBuffer(speech_state_->audio_features_);
     embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
     embedding_state_->Run(current_length, next_tokens, next_indices);
 
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
 
     is_prompt_ = false;
-    if (vision_state_ != nullptr) vision_state_.reset();  // The vision state is no longer needed in generation stage
-    if (speech_state_ != nullptr) speech_state_.reset();  // The speech state is no longer needed in generation stage
+    if (vision_state_) vision_state_.reset();  // The vision state is no longer needed in generation stage
+    if (speech_state_) speech_state_.reset();  // The speech state is no longer needed in generation stage
 
     return logits;
   }
@@ -238,7 +230,7 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {
-  if (vision_state_ != nullptr) {
+  if (vision_state_) {
     // Check if input name is in vision state's inputs
     for (size_t i = 0; i < vision_state_->input_names_.size(); i++) {
       if (std::strcmp(vision_state_->input_names_[i], name) == 0) {
@@ -247,7 +239,7 @@ OrtValue* MultiModalPipelineState::GetInput(const char* name) {
     }
   }
 
-  if (speech_state_ != nullptr) {
+  if (speech_state_) {
     // Check if input name is in speech state's inputs
     for (size_t i = 0; i < speech_state_->input_names_.size(); i++) {
       if (std::strcmp(speech_state_->input_names_[i], name) == 0) {
@@ -274,7 +266,7 @@ OrtValue* MultiModalPipelineState::GetInput(const char* name) {
 };
 
 OrtValue* MultiModalPipelineState::GetOutput(const char* name) {
-  if (vision_state_ != nullptr) {
+  if (vision_state_) {
     // Check if output name is in vision state's outputs
     for (size_t i = 0; i < vision_state_->output_names_.size(); i++) {
       if (std::strcmp(vision_state_->output_names_[i], name) == 0) {
@@ -283,7 +275,7 @@ OrtValue* MultiModalPipelineState::GetOutput(const char* name) {
     }
   }
 
-  if (speech_state_ != nullptr) {
+  if (speech_state_) {
     // Check if output name is in speech state's outputs
     for (size_t i = 0; i < speech_state_->output_names_.size(); i++) {
       if (std::strcmp(speech_state_->output_names_[i], name) == 0) {

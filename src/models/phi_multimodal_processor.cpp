@@ -17,7 +17,7 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
   constexpr size_t audio_start_input_id = -10000;
 
   const int64_t* num_img_tokens_data{};
-  int64_t num_images = 0LL;
+  int64_t num_images{};
   if (num_img_tokens) {
     const int64_t* num_img_tokens_shape{};
     size_t num_img_tokens_num_dims;
@@ -29,7 +29,7 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
   }
 
   const int64_t* audio_sizes_data{};
-  int64_t num_audios = 0LL;
+  int64_t num_audios{};
   if (audio_sizes) {
     const int64_t* audio_sizes_shape{};
     size_t audio_sizes_num_dims;
