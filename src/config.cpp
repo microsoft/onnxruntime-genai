@@ -72,7 +72,7 @@ GraphOptimizationLevel getGraphOptimizationLevel(std::string_view name) {
   } else if (name == "ORT_ENABLE_ALL") {
       return ORT_ENABLE_ALL;
   } else
-    throw JSON::unknown_value_error{};
+    throw std::runtime_error("Unrecognized value:" + name);
 }
 
 struct SessionOptions_Element : JSON::Element {
