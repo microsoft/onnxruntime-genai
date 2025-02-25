@@ -55,4 +55,5 @@ jobs:
 
       - name: Run the python tests
         run: |
-          python3 examples/python/model-qa.py -m /data/ortgenai/pytorch/phi2 -e cpu --input_prompt "what is sq root of 4"
+          python3 -m onnxruntime_genai.models.builder -i /data/ortgenai/pytorch/llama-3.2b-1b-instruct -e cpu -p int4 -o ./example-models/llama-3.2b-1b-instruct 
+          python3 examples/python/model-qa.py -m ./example-models/llama-3.2b-1b-instruct -e cpu --input_prompt "what is sq root of 4"
