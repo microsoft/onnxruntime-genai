@@ -62,7 +62,7 @@ struct ProviderOptionsArray_Element : JSON::Element {
   ProviderOptionsObject_Element object_{v_};
 };
 
-GraphOptimizationLevel getGraphOptimizationLevel(std::string_view name) {
+GraphOptimizationLevel GetGraphOptimizationLevel(std::string_view name) {
   if (name =="ORT_DISABLE_ALL") {
       return ORT_DISABLE_ALL;
   } else if (name == "ORT_ENABLE_BASIC") {
