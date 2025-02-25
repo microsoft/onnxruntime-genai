@@ -16,7 +16,7 @@ env:
   ort_zip: "onnxruntime-linux-x64-1.18.0.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-x64-1.18.0.tgz"
 jobs:
-  job:
+  Nightly_test_examples:
     runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
@@ -52,3 +52,7 @@ jobs:
           python3 -m pip install -r test/python/cpu/torch/requirements.txt --user
           python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
           python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl --no-deps
+
+      - name: Run the python tests
+        run: |
+          python3 examples/python/model-qa.py -m /data/ortgenai/pytorch/phi2 -e cpu --input_prompt "what is sq root of 4"
