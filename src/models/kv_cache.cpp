@@ -173,7 +173,10 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   if (past_present_share_buffer_) {
     shape_[2] = state_.params_->search.max_length;
 
+    // std::cout << "captured_graph_info: " << state_.GetCapturedGraphInfo() << std::endl;
+
     if (state_.GetCapturedGraphInfo()) {
+      // std::cout << "sb_kv_caches_: " << state_.GetCapturedGraphInfo()->sb_kv_caches_.size() << std::endl;
       sb_kv_caches_.reserve(layer_count_ * 2);
       for (int i = 0; i < layer_count_ * 2; ++i) {
         sb_kv_caches_.push_back(state_.GetCapturedGraphInfo()->sb_kv_caches_[i].get());

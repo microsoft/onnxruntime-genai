@@ -70,6 +70,7 @@ DeviceSpan<float> Logits::Get() {
   if (logits_.empty() || logits_of_last_token->GetTensorMutableRawData() != logits_.Span().data())
     logits_ = WrapTensor<float>(*model_.p_device_inputs_, *logits_of_last_token);
 
+  // TODO: This functionality may have to be moved to DeviceInterface to make the code platform agnostic
   if (model_.p_device_inputs_->GetType() == DeviceType::CUDA) {
     if (!cuda_eos_token_ids_.empty())
       model_.p_device_inputs_->LaunchHandleEOSArray(
@@ -78,6 +79,10 @@ DeviceSpan<float> Logits::Get() {
           static_cast<int>(shape_[2]) /* vocab_size */,
           cuda_eos_token_ids_.Span().data(),
           static_cast<int>(cuda_eos_token_ids_.size()));
+    return logits_;
+  } else if (model_.p_device_inputs_->GetType() == DeviceType::DML) {
+    HandleEOSArray(logits_.CopyDeviceToCpu());
+    logits_.CopyCpuToDevice();
     return logits_;
   }
 

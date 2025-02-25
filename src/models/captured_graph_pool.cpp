@@ -19,7 +19,7 @@ void CapturedGraphInfoRecycler::operator()(CapturedGraphInfo* captured_graph_inf
 }
 
 CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model, const GeneratorParams& params) const {
-  if (!params.use_cuda_graph || (model.p_device_->GetType() != DeviceType::CUDA)) {
+  if (!params.use_graph_capture || (model.p_device_->GetType() != DeviceType::CUDA/* && model.p_device_->GetType() != DeviceType::DML*/)) {
     return nullptr;
   }
 
@@ -46,7 +46,7 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
 
     // Create the static buffer for the input ids
     size_t max_beam_batch_size = static_cast<size_t>(params.search.num_beams) * params.max_batch_size;
-    new_captured_graph->sb_input_ids_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
+    // new_captured_graph->sb_input_ids_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
 
     // Create the static buffers for the cache
     int layer_count = config_->model.decoder.num_hidden_layers;
@@ -57,24 +57,24 @@ CapturedGraphInfoPtr CapturedGraphPool::ReserveCapturedGraph(const Model& model,
     }
 
     // Create the static buffer for the position ids, if needed
-    if (session_info_->HasInput(config_->model.decoder.inputs.position_ids)) {
-      new_captured_graph->sb_position_ids_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
-    }
+    // if (session_info_->HasInput(config_->model.decoder.inputs.position_ids)) {
+    //   new_captured_graph->sb_position_ids_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
+    // }
 
     // Create the static buffer for the attention mask, if needed
-    if (session_info_->HasInput(config_->model.decoder.inputs.attention_mask)) {
-      new_captured_graph->sb_attention_mask_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
-    }
+    // if (session_info_->HasInput(config_->model.decoder.inputs.attention_mask)) {
+    //   new_captured_graph->sb_attention_mask_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
+    // }
 
-    auto output_type = session_info_->GetOutputDataType(config_->model.decoder.outputs.logits);
+    // auto output_type = session_info_->GetOutputDataType(config_->model.decoder.outputs.logits);
 
-    if (output_type == Ort::TypeToTensorType<float>) {
-      new_captured_graph->sb_logits32_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
-    }
+    // if (output_type == Ort::TypeToTensorType<float>) {
+    //   new_captured_graph->sb_logits32_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
+    // }
 
-    if (output_type == Ort::TypeToTensorType<Ort::Float16_t>) {
-      new_captured_graph->sb_logits16_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
-    }
+    // if (output_type == Ort::TypeToTensorType<Ort::Float16_t>) {
+    //   new_captured_graph->sb_logits16_ = std::make_unique<StaticBuffer>(allocator_device_, max_beam_batch_size);
+    // }
 
     // Create the extra inputs
     for (const auto& extra_input : params.extra_inputs) {

@@ -632,7 +632,7 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
   JSON::Parse(element, json.str());
 }
 
-bool IsCudaGraphEnabled(Config::SessionOptions& session_options) {
+bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
   for (const auto& provider_options : session_options.provider_options) {
     if (provider_options.name == "cuda") {
       for (const auto& value : provider_options.options) {

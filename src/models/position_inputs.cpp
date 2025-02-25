@@ -38,14 +38,14 @@ DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, D
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
 
-  if (state_.GetCapturedGraphInfo()) {
-    if (has_posid_input_) {
-      sb_position_ids_ = state_.GetCapturedGraphInfo()->sb_position_ids_.get();
-    }
-    if (has_mask_input_) {
-      sb_attention_mask_ = state_.GetCapturedGraphInfo()->sb_attention_mask_.get();
-    }
-  }
+  // if (state_.GetCapturedGraphInfo()) {
+  //   if (has_posid_input_) {
+  //     sb_position_ids_ = state_.GetCapturedGraphInfo()->sb_position_ids_.get();
+  //   }
+  //   if (has_mask_input_) {
+  //     sb_attention_mask_ = state_.GetCapturedGraphInfo()->sb_attention_mask_.get();
+  //   }
+  // }
 }
 
 void DefaultPositionInputs::Add() {
@@ -114,21 +114,21 @@ void DefaultPositionInputs::AddPositionIDs() {
 }
 
 void DefaultPositionInputs::CreateNextPositionIDsTensor() {
-  if (!sb_position_ids_) {
+  // if (!sb_position_ids_) {
     if (position_ids_shape_[1] == 1 && position_ids_next_) {
       position_ids_ = std::move(position_ids_next_);
       position_ids_next_ = nullptr;
     } else {
       position_ids_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), position_ids_shape_, type_);
     }
-  } else {
-    position_ids_ = sb_position_ids_->CreateTensorOnStaticBuffer(position_ids_shape_, type_);
-    if (position_ids_shape_[1] == 1) {
-      auto position_ids_span = ByteWrapTensor(*model_.p_device_inputs_, *position_ids_);
-      auto position_ids_next_span = ByteWrapTensor(*model_.p_device_inputs_, *position_ids_next_);
-      position_ids_span.CopyFrom(position_ids_next_span);
-    }
-  }
+  // } else {
+  //   position_ids_ = sb_position_ids_->CreateTensorOnStaticBuffer(position_ids_shape_, type_);
+  //   if (position_ids_shape_[1] == 1) {
+  //     auto position_ids_span = ByteWrapTensor(*model_.p_device_inputs_, *position_ids_);
+  //     auto position_ids_next_span = ByteWrapTensor(*model_.p_device_inputs_, *position_ids_next_);
+  //     position_ids_span.CopyFrom(position_ids_next_span);
+  //   }
+  // }
 }
 
 void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_length) {
@@ -142,24 +142,26 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
     state_.inputs_[posid_input_index_] = position_ids_.get();
   }
 
-  if (model_.p_device_inputs_->GetType() == DeviceType::CUDA)
-    model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetTensorMutableRawData(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
-  else {
-    type_ == Ort::TypeToTensorType<int32_t> ? UpdatePositionIDsImpl<int32_t>(total_length, new_kv_length)
-                                            : UpdatePositionIDsImpl<int64_t>(total_length, new_kv_length);
-  }
+  // if (model_.p_device_inputs_->GetType() == DeviceType::CUDA || model_.p_device_inputs_->GetType() == DeviceType::DML)
+  //   model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetTensorMutableRawData(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length);
+  // else {
+  //   type_ == Ort::TypeToTensorType<int32_t> ? UpdatePositionIDsImpl<int32_t>(total_length, new_kv_length)
+  //                                           : UpdatePositionIDsImpl<int64_t>(total_length, new_kv_length);
+  // }
+  model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
 }
 
 void DefaultPositionInputs::CreateNextAttentionMaskTensor(int total_length) {
-  if (!sb_attention_mask_) {
+  // if (!sb_attention_mask_) {
+  if (!state_.params_->use_graph_capture) {
     attention_mask_shape_[1] = total_length;
     attention_mask_next_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), attention_mask_shape_, type_);
   } else {
     attention_mask_shape_[1] = state_.params_->search.max_length;
-    attention_mask_next_ = sb_attention_mask_->CreateTensorOnStaticBuffer(attention_mask_shape_, type_);
-    if (is_first_mask_update_) {
+    attention_mask_next_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), attention_mask_shape_, type_);
+    // if (is_first_mask_update_) {
       ByteWrapTensor(*model_.p_device_inputs_, *attention_mask_next_).Zero();
-    }
+    // }
   }
 }
 
@@ -168,23 +170,33 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
     throw std::runtime_error("DefaultPositionInputs::UpdatePositionIDs - batch_size must be 1 for continuous decoding.");
 
   CreateNextAttentionMaskTensor(total_length);
-  state_.inputs_[mask_input_index_] = attention_mask_.get();
 
-  if (model_.p_device_inputs_->GetType() == DeviceType::CUDA) {
-    int max_length = sb_attention_mask_ ? state_.params_->search.max_length : total_length;
-    bool update_only = sb_attention_mask_ && !is_first_mask_update_;
-    model_.p_device_inputs_->UpdateAttentionMask(attention_mask_next_->GetTensorMutableRawData(),
-                                                 attention_mask_->GetTensorRawData(),
-                                                 static_cast<int>(attention_mask_shape_[0]),
-                                                 new_kv_length,
-                                                 total_length,
-                                                 max_length,
-                                                 update_only,
-                                                 type_);
-  } else {
-    type_ == Ort::TypeToTensorType<int32_t> ? UpdateAttentionMaskImpl<int32_t>(total_length)
-                                            : UpdateAttentionMaskImpl<int64_t>(total_length);
-  }
+  // if (model_.p_device_inputs_->GetType() == DeviceType::CUDA) {
+  //   // int max_length = sb_attention_mask_ ? state_.params_->search.max_length : total_length;
+  //   int max_length = total_length;
+  //   bool update_only = false; // sb_attention_mask_ && !is_first_mask_update_;
+  //   model_.p_device_inputs_->UpdateAttentionMask(attention_mask_next_->GetTensorMutableRawData(),
+  //                                                attention_mask_->GetTensorRawData(),
+  //                                                static_cast<int>(attention_mask_shape_[0]),
+  //                                                new_kv_length,
+  //                                                total_length,
+  //                                                max_length,
+  //                                                update_only,
+  //                                                type_);
+  // } else {
+  //   type_ == Ort::TypeToTensorType<int32_t> ? UpdateAttentionMaskImpl<int32_t>(total_length)
+  //                                           : UpdateAttentionMaskImpl<int64_t>(total_length);
+  // }
+  int max_length = state_.params_->search.max_length;
+  bool update_only = false; // sb_attention_mask_ && !is_first_mask_update_;
+  model_.p_device_inputs_->UpdateAttentionMask(attention_mask_next_->GetTensorMutableRawData(),
+                                               attention_mask_->GetTensorRawData(),
+                                               static_cast<int>(attention_mask_shape_[0]),
+                                               new_kv_length,
+                                               total_length,
+                                               max_length,
+                                               update_only,
+                                               type_);
 
   attention_mask_ = std::move(attention_mask_next_);
   state_.inputs_[mask_input_index_] = attention_mask_.get();
@@ -252,41 +264,42 @@ void DefaultPositionInputs::InitializeSequenceLengths(std::array<int64_t, 2> sha
   }
 }
 
-template <typename T>
-void DefaultPositionInputs::UpdatePositionIDsImpl(int total_length, int new_kv_length) {
-  auto* data = position_ids_->GetTensorMutableData<T>();
-  if (position_ids_shape_[0] == 1) {
-    // For batch size == 1 we calculate position ids with total length and new kv length for continuous decoding
-    for (int i = 0; i < new_kv_length; i++)
-      data[i] = i + total_length - new_kv_length;
-  } else {
-    // For batch size > 1 we increment position ids by 1... continuous decoding is not supported
-    for (int i = 0; i < position_ids_shape_[0]; i++)
-      data[i]++;
-  }
-}
+// template <typename T>
+// void DefaultPositionInputs::UpdatePositionIDsImpl(int total_length, int new_kv_length) {
+//   auto* data = position_ids_->GetTensorMutableData<T>();
+//   if (position_ids_shape_[0] == 1) {
+//     // For batch size == 1 we calculate position ids with total length and new kv length for continuous decoding
+//     for (int i = 0; i < new_kv_length; i++)
+//       data[i] = i + total_length - new_kv_length;
+//   } else {
+//     // For batch size > 1 we increment position ids by 1... continuous decoding is not supported
+//     for (int i = 0; i < position_ids_shape_[0]; i++)
+//       data[i]++;
+//   }
+// }
 
-template <typename T>
-void DefaultPositionInputs::UpdateAttentionMaskImpl(int total_length) {
-  auto* data = attention_mask_next_->GetTensorMutableData<T>();
-  auto* old_data = attention_mask_->GetTensorData<T>();
-  if (attention_mask_shape_[0] == 1) {
-    // For batch size == 1 we assume no padding. We make this explicit for continuous decoding.
-    for (int i = 0; i < total_length; i++)
-      data[i] = 1;
-  } else {
-    // For batch size > 1 we increment attention mask by 1... continuous decoding is not supported
-    for (int i = 0; i < attention_mask_shape_[0]; i++) {
-      for (int j = 0; j < total_length - 1; j++) {
-        data[i * total_length + j] = old_data[i * (total_length - 1) + j];
-      }
-      data[i * total_length + total_length - 1] = 1;
-    }
-  }
-}
+// template <typename T>
+// void DefaultPositionInputs::UpdateAttentionMaskImpl(int total_length) {
+//   auto* data = attention_mask_next_->GetTensorMutableData<T>();
+//   auto* old_data = attention_mask_->GetTensorData<T>();
+//   if (attention_mask_shape_[0] == 1) {
+//     // For batch size == 1 we assume no padding. We make this explicit for continuous decoding.
+//     for (int i = 0; i < total_length; i++)
+//       data[i] = 1;
+//   } else {
+//     // For batch size > 1 we increment attention mask by 1... continuous decoding is not supported
+//     for (int i = 0; i < attention_mask_shape_[0]; i++) {
+//       for (int j = 0; j < total_length - 1; j++) {
+//         data[i * total_length + j] = old_data[i * (total_length - 1) + j];
+//       }
+//       data[i * total_length + total_length - 1] = 1;
+//     }
+//   }
+// }
 
 void DefaultPositionInputs::RewindMask(size_t index) {
-  if (sb_attention_mask_ && !is_first_mask_update_) {
+  // if (sb_attention_mask_ && !is_first_mask_update_) {
+  if (!is_first_mask_update_) {
     throw std::runtime_error("PositionInputs::RewindMask - Static buffer is not supported for continuous decoding.");
 #if 0  // TODO: Fix implementation, cudaMemsetAsync of 1 is setting bytes of 1 vs int32's of 1
     int past_length = static_cast<int>(index);
@@ -303,6 +316,8 @@ void DefaultPositionInputs::RewindMask(size_t index) {
   }
 }
 
+
+// TODO(aciddelgado): Changes to Default must be replicated in SlidingWindow
 WindowedPositionInputs::WindowedPositionInputs(State& state)
     : state_{state} {
   has_posid_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.position_ids);

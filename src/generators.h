@@ -76,7 +76,8 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
   int max_batch_size{0};
-  bool use_cuda_graph{};
+  // bool use_cuda_graph{};
+  bool use_graph_capture{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
   DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
@@ -105,7 +106,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   void SetInputs(const NamedTensors& inputs);
 
  private:
-  bool is_cuda_graph_enabled_{};
+  bool is_graph_capture_enabled_{};
 };
 
 struct Generator : LeakChecked<Generator> {

@@ -33,6 +33,7 @@ def main(args):
     params = og.GeneratorParams(model)
     params.set_search_options(**search_options)
     generator = og.Generator(model, params)
+    # og.set_log_options(**{'enabled': True, 'generate_next_token': True, 'model_input_values': True, 'model_output_values': True})
 
     # Keep asking for input prompts in a loop
     while True:

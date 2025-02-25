@@ -98,6 +98,49 @@ struct CpuInterface : DeviceInterface {
     return true;
   }
 
+  template <typename T>
+  void UpdatePositionIds(T* position_ids, int batch_beam_size, int total_length, int new_kv_length) {
+    if (batch_beam_size == 1) {
+      // For batch size == 1 we calculate position ids with total length and new kv length for continuous decoding
+      for (int i = 0; i < new_kv_length; i++)
+        position_ids[i] = i + total_length - new_kv_length;
+    } else {
+      // For batch size > 1 we increment position ids by 1... continuous decoding is not supported
+      for (int i = 0; i < batch_beam_size; i++)
+        position_ids[i]++;
+    }
+  }
+  
+  void UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
+    type == Ort::TypeToTensorType<int32_t>
+      ? UpdatePositionIds<int32_t>(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length)
+      : UpdatePositionIds<int64_t>(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length);
+  }
+
+  template <typename T>
+  void UpdateAttentionMask(T* mask_data, const T* old_data, int batch_beam_size, int new_kv_length, int total_length) {
+    if (batch_beam_size == 1) {
+      // For batch size == 1 we assume no padding. We make this explicit for continuous decoding.
+      for (int i = 0; i < total_length; i++)
+        mask_data[i] = 1;
+    } else {
+      // For batch size > 1 we increment attention mask by 1... continuous decoding is not supported
+      for (int i = 0; i < batch_beam_size; i++) {
+        for (int j = 0; j < total_length - 1; j++) {
+          mask_data[i * total_length + j] = old_data[i * (total_length - 1) + j];
+        }
+        mask_data[i * total_length + total_length - 1] = 1;
+      }
+    }
+  }
+
+  void UpdateAttentionMask(void* mask_data, const void* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
+    if (type == Ort::TypeToTensorType<int32_t>)
+      UpdateAttentionMask(static_cast<int32_t*>(mask_data), static_cast<const int32_t*>(old_data), batch_beam_size, new_kv_length, total_length);
+    else
+      UpdateAttentionMask(static_cast<int64_t*>(mask_data), static_cast<const int64_t*>(old_data), batch_beam_size, new_kv_length, total_length);
+  }
+
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
 

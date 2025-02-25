@@ -26,20 +26,26 @@ State::State(const GeneratorParams& params, const Model& model)
       extra_outputs_{*this} {}
 
 void State::Run(OrtSession& session, int new_batch_size) {
-  auto captured_graph_info = GetCapturedGraphInfo();
+  // auto captured_graph_info = GetCapturedGraphInfo();
 
   if (first_run_) {
-    if (captured_graph_info) {
+    // if (captured_graph_info) {
+    if (params_->use_graph_capture) {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
     }
+    // }
     extra_outputs_.Add(session.GetOutputNames());
     first_run_ = false;
   } else {
-    if (captured_graph_info && new_batch_size != current_batch_size_) {
+    // if (captured_graph_info && new_batch_size != current_batch_size_) {
+    //   current_batch_size_ = new_batch_size;
+    //   auto annotation_id = std::to_string(captured_graph_info->GenerateUniqueAnnotationID(new_batch_size));
+    //   run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
+    if (params_->use_graph_capture && new_batch_size != current_batch_size_) {
       current_batch_size_ = new_batch_size;
-      auto annotation_id = std::to_string(captured_graph_info->GenerateUniqueAnnotationID(new_batch_size));
-      run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
+      run_options_->AddConfigEntry("gpu_graph_id", "5");
     }
+    // }
     extra_outputs_.Update();
   }
 
@@ -310,8 +316,8 @@ Model::~Model() = default;
 void Model::InitDeviceAllocator(OrtSession& session) {
   EnsureDeviceOrtInit(session, p_device_->GetType());
 
-  // Only CUDA does every input on the device
-  if (p_device_->GetType() == DeviceType::CUDA)
+  // Only CUDA and DML does every input on the device
+  if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML)
     p_device_inputs_ = p_device_;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
@@ -455,6 +461,11 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         }
 
         InitDmlInterface(p_device_luid);
+      }
+
+      if (!disable_graph_capture) {
+        session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
+        session_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
       }
 
       SetDmlProvider(session_options);

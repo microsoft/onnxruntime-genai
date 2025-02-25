@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "../search.h"
+#include "../models/utils.h"
 #include "../cpu/interface.h"
 #include "interface.h"
 #include <cstdarg>
@@ -207,6 +208,108 @@ struct InterfaceImpl : DeviceInterface {
 
   void Synchronize() override {
   }
+
+  // TODO: perform operation directly on DML
+  bool Cast(OrtValue& input, OrtValue& output) override {
+    auto input_info = input.GetTensorTypeAndShapeInfo();
+    auto output_info = output.GetTensorTypeAndShapeInfo();
+    auto input_type = input_info->GetElementType();
+    auto output_type = output_info->GetElementType();
+    auto element_count = input_info->GetElementCount();
+
+    if (element_count != output_info->GetElementCount())
+      throw std::runtime_error("Cast - input and output element counts do not match");
+    if (input_type == output_type)
+      throw std::runtime_error("Cast - input and output types are the same");
+    
+      // TODO(aciddelgado): Use ByteWrapTensor instead of WrapMemory
+    // auto input_data_device = reinterpret_cast<const uint8_t*>(input.GetTensorRawData());
+    // auto input_data_span = WrapMemory<const uint8_t>(std::span<const uint8_t>(input_data_device, element_count * SizeOf(input_type)));
+    // auto input_data_cpu = input_data_span.CopyDeviceToCpu();
+
+    // auto output_data_device = reinterpret_cast<uint8_t*>(output.GetTensorMutableRawData());
+    // auto output_data_span = WrapMemory<uint8_t>(std::span<uint8_t>(output_data_device, element_count * SizeOf(output_type)));
+    // auto output_data_cpu = output_data_span.CopyDeviceToCpu();
+
+    auto input_data_span = ByteWrapTensor(*GetDmlInterface(), input);
+    auto input_data_cpu = input_data_span.CopyDeviceToCpu();
+    auto output_data_span = ByteWrapTensor(*GetDmlInterface(), output);
+    auto output_data_cpu = output_data_span.CopyDeviceToCpu();
+
+    if (input_type == Ort::TypeToTensorType<float> && output_type == Ort::TypeToTensorType<Ort::Float16_t>) {
+      auto fp32_cpu = reinterpret_cast<const float*>(input_data_cpu.data());
+      auto fp16_cpu = reinterpret_cast<uint16_t*>(output_data_cpu.data());
+      for (size_t i = 0; i < element_count; i++)
+        fp16_cpu[i] = FastFloat32ToFloat16(fp32_cpu[i]);
+    } else if (input_type == Ort::TypeToTensorType<Ort::Float16_t> && output_type == Ort::TypeToTensorType<float>) {
+      auto fp16_cpu = reinterpret_cast<const uint16_t*>(input_data_cpu.data());
+      auto fp32_cpu = reinterpret_cast<float*>(output_data_cpu.data());
+      for (size_t i = 0; i < element_count; i++)
+        fp32_cpu[i] = FastFloat16ToFloat32(fp16_cpu[i]);
+    } else if (input_type == Ort::TypeToTensorType<int32_t> && output_type == Ort::TypeToTensorType<int64_t>) {
+      auto int32_cpu = reinterpret_cast<const int32_t*>(input_data_cpu.data());
+      auto int64_cpu = reinterpret_cast<int64_t*>(output_data_cpu.data());
+      for (size_t i = 0; i < element_count; i++)
+        int64_cpu[i] = int32_cpu[i];
+    } else
+      return false;
+    output_data_span.CopyCpuToDevice();
+    return true;
+  }
+
+  // TODO: perform operation directly on DML
+  template <typename T>
+  void UpdatePositionIds(T* position_ids, int batch_beam_size, int total_length, int new_kv_length) {
+    auto data_span = WrapMemory<T>(std::span<T>(position_ids, batch_beam_size * new_kv_length));
+    auto data = data_span.CopyDeviceToCpu();
+    if (batch_beam_size == 1) {
+      // For batch size == 1 we calculate position ids with total length and new kv length for continuous decoding
+      for (int i = 0; i < new_kv_length; i++)
+        data[i] = i + total_length - new_kv_length;
+    } else {
+      // For batch size > 1 we increment position ids by 1... continuous decoding is not supported
+      for (int i = 0; i < batch_beam_size; i++)
+        data[i]++;
+    }
+    data_span.CopyCpuToDevice();
+  }
+  
+  void UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
+    type == Ort::TypeToTensorType<int32_t>
+      ? UpdatePositionIds<int32_t>(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length)
+      : UpdatePositionIds<int64_t>(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length);
+  }
+
+  template <typename T>
+  void UpdateAttentionMask(T* device_mask_data, const T* device_old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length) {
+    auto mask_data_span = WrapMemory<T>(std::span<T>(device_mask_data, batch_beam_size * max_length));
+    auto old_data_span = WrapMemory<const T>(std::span<const T>(device_old_data, batch_beam_size * (total_length - 1)));
+    auto mask_data = mask_data_span.CopyDeviceToCpu();
+    auto old_data = old_data_span.CopyDeviceToCpu();
+    if (batch_beam_size == 1) {
+      // For batch size == 1 we assume no padding. We make this explicit for continuous decoding.
+      for (int i = 0; i < total_length; i++)
+        mask_data[i] = 1;
+    } else {
+      // TODO(aciddelgado): this won't work for graph capture right now
+      // For batch size > 1 we increment attention mask by 1... continuous decoding is not supported
+      for (int i = 0; i < batch_beam_size; i++) {
+        for (int j = 0; j < total_length - 1; j++) {
+          mask_data[i * total_length + j] = old_data[i * (total_length - 1) + j];
+        }
+        mask_data[i * total_length + total_length - 1] = 1;
+      }
+    }
+    mask_data_span.CopyCpuToDevice();
+  }
+
+  void UpdateAttentionMask(void* mask_data, const void* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
+    if (type == Ort::TypeToTensorType<int32_t>)
+      UpdateAttentionMask(static_cast<int32_t*>(mask_data), static_cast<const int32_t*>(old_data), batch_beam_size, new_kv_length, total_length, max_length);
+    else
+      UpdateAttentionMask(static_cast<int64_t*>(mask_data), static_cast<const int64_t*>(old_data), batch_beam_size, new_kv_length, total_length, max_length);
+  }
+
 };
 
 }  // namespace Dml

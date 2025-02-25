@@ -62,8 +62,8 @@ struct DefaultPositionInputs : PositionInputs {
   std::unique_ptr<OrtValue> attention_mask_next_;  // Replaces attention_mask_ after the first Run() call
 
   // Used for decoding runs with cuda graphs.
-  StaticBuffer* sb_position_ids_{};
-  StaticBuffer* sb_attention_mask_{};
+  // StaticBuffer* sb_position_ids_{};
+  // StaticBuffer* sb_attention_mask_{};
 
   bool is_first_mask_update_{true};
   bool is_first_update_{true};
