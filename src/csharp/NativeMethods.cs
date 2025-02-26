@@ -277,7 +277,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                    out IntPtr /* const OgaImages** */ images);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaLoadAudios(IntPtr /* const OgaStringArray* */ audioPaths,
+                                                                   out IntPtr /* const OgaAudios** */ audios);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyImages(IntPtr /* OgaImages* */ images);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern void OgaDestroyAudios(IntPtr /* OgaAudios* */ audios);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyNamedTensors(IntPtr /* OgaNamedTensors* */ namedTensors);
