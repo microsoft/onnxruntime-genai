@@ -55,5 +55,5 @@ jobs:
 
       - name: Run the python tests
         run: |
-          python3 -m onnxruntime_genai.models.builder -i /data/ortgenai/pytorch/phi3-mini-128k-instruct -e cpu -p int4 -o ./example-models/phi3-mini-128k-instruct
-          python3 examples/python/model-qa.py -m ./example-models/phi3-mini-128k-instruct -e cpu --input_prompt "what is sq root of 4"
+          python3 -m onnxruntime_genai.models.builder -i /data/ortgenai/pytorch/qwen2.5-0.5b-instruct -e cpu -p int4 -o ./example-models/qwen2.5-0.5b-instruct
+          python3 examples/python/model-qa.py -m ./example-models/qwen2.5-0.5b-instruct -e cpu --input_prompt "what is 1+1?"
