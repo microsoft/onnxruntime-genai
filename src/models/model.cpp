@@ -407,6 +407,10 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.AddConfigEntry("session.use_env_allocators", "1");
   }
 
+  if (config_session_options.graph_optimization_level.has_value()) {
+    session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
+  }
+
   for (auto& provider_options : config_session_options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();

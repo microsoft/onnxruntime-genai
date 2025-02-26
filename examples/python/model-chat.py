@@ -50,10 +50,9 @@ def main(args):
             args.chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
         elif model_type.startswith("phi4"):
             args.chat_template = '<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>'
-        elif model_type.startswith("llama3"):
+        elif model_type.startswith("llama"):
             args.chat_template = '<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
-        elif model_type.startswith("llama2"):
-            args.chat_template = '<s>{input}'
+            print("Using Chat Template for LLAMA 3, if you are using LLAMA  2 please pass the argument --chat_template '{input} [/INST]')")
         elif model_type.startswith("qwen2"):
             args.chat_template = '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
         else:
@@ -77,10 +76,9 @@ def main(args):
             system_prompt = f"<|system|>\n{args.system_prompt}<|end|>"
         elif model_type.startswith('phi4'):
             system_prompt = f"<|im_start|>system<|im_sep|>\n{args.system_prompt}<|im_end|>"
-        elif model_type.startswith("llama3"):
+        elif model_type.startswith("llama"):
             system_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{args.system_prompt}<|eot_id|>"
-        elif model_type.startswith("llama2"):
-            system_prompt = f"<s>[INST] <<SYS>>\n{args.system_prompt}\n<</SYS>>"
+            print("Using System Prompt for LLAMA 3, if you are using LLAMA  2 please pass the argument --system_prompt '<s>[INST] <<SYS>>\\n{args.system_prompt}\\n<</SYS>>')")
         elif model_type.startswith("qwen2"):
             system_prompt = f"<|im_start|>system\n{args.system_prompt}<|im_end|>\n"
         else:
@@ -92,10 +90,13 @@ def main(args):
 
     # Keep asking for input prompts in a loop
     while True:
-        text = input("Input: ")
+        text = input("Prompt (Use quit() to exit): ")
         if not text:
             print("Error, input cannot be empty")
             continue
+
+        if text == "quit()":
+            break
 
         if args.timings: started_timestamp = time.time()
 

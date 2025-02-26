@@ -5,7 +5,7 @@
 You can download a published model from Hugging Face. For example, this is Phi-3.5 mini optimized for CPU and mobile. You can find other models here: 
 
 ```script
-huggingface-cli download microsoft/Phi-3.5-mini-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir models
+huggingface-cli download microsoft/Phi-3.5-mini-instruct-onnx --include cpu_and_mobile/cpu-int4-awq-block-128-acc-level-4/* --local-dir models
 move models\cpu_and_mobile\cpu-int4-rtn-block-32-acc-level-4 models\phi-3
 ```
 
