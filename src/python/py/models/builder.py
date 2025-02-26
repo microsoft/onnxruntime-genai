@@ -3361,7 +3361,7 @@ def get_args():
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
-                use_webgpu_fp32 = Use fp32 for webgpu ep.
+                use_webgpu_fp32 = Use FP32 for WebGPU EP.
                     Use this option to enable gpus that do not support fp16 on webgpu, ie gtx10xx.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
