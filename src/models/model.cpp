@@ -617,7 +617,7 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
 }
 
 std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& prompt, const Images* images, const Audios* audios) const {
-  Payload payload{.prompt = prompt, .images = images, .audios = audios};
+  Payload payload{prompt, images, audios};
   return processor_->Process(*tokenizer_, payload);
 }
 }  // namespace Generators
