@@ -31,9 +31,7 @@ int64_t GetNumAudioTokens(const std::vector<GeneratorParams::Input>& extra_input
       const auto element_count = type_and_shape_info->GetElementCount();
       if (type_and_shape_info->GetElementType() == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
         const int64_t* audio_sizes_data = extra_inputs[i].tensor->ort_tensor_->GetTensorData<int64_t>();
-        return std::accumulate(audio_sizes_data, audio_sizes_data + element_count, 0LL, [](int64_t a, float b) {
-          return a + static_cast<int64_t>(b + 0.5f);
-        });
+        return std::accumulate(audio_sizes_data, audio_sizes_data + element_count, 0LL);
       } else {
         throw std::runtime_error("Unsupported data type " + std::to_string(static_cast<int64_t>(type_and_shape_info->GetElementType())) + " for audio_sizes tensor. Only int64 is supported.");
       }
