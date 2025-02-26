@@ -180,11 +180,13 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
 
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
     const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.vision.adapter_filename));
-    adapters_->LoadAdapter(lora_adapter.c_str(), vision_adapter_name_);
+    std::string lora_adapter_str = lora_adapter.string(); // Returns UTF-8 encoded string on Windows
+    adapters_->LoadAdapter(lora_adapter_str.c_str(), vision_adapter_name_);
     decoder_state_->SetActiveAdapter(adapters_.get(), vision_adapter_name_);
   } else if (speech_state_ != nullptr && model_.config_->model.speech.adapter_filename.has_value() && num_audio_tokens_ > 0) {
     const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.speech.adapter_filename));
-    adapters_->LoadAdapter(lora_adapter.c_str(), speech_adapter_name_);
+    std::string lora_adapter_str = lora_adapter.string(); // Returns UTF-8 encoded string on Windows
+    adapters_->LoadAdapter(lora_adapter_str.c_str(), speech_adapter_name_);
     decoder_state_->SetActiveAdapter(adapters_.get(), speech_adapter_name_);
   }
 }

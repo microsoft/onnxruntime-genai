@@ -14,7 +14,6 @@ std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
                         OrtxTensor* num_img_tokens, OrtxTensor* audio_sizes,
                         Ort::Allocator& allocator) {
-  constexpr size_t audio_start_input_id = -10000;
 
   const int64_t* num_img_tokens_data{};
   int64_t num_images{};
@@ -64,7 +63,7 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
   size_t image_idx{0U}, audio_idx{0U};
   for (const auto token : input_ids) {
     if (token == image_special_token_id) {
-      if (image_idx >= num_images) {
+      if (static_cast<int64_t>(image_idx) >= num_images) {
         throw std::runtime_error("Number of image tokens exceeds the number of images. Please fix the prompt.");
       }
 
@@ -73,7 +72,7 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
       }
       image_idx++;
     } else if (token == audio_special_token_id) {
-      if (audio_idx >= num_audios) {
+      if (static_cast<int64_t>(audio_idx) >= num_audios) {
         throw std::runtime_error("Number of audio tokens exceeds the number of audios. Please fix the prompt.");
       }
 
@@ -86,11 +85,11 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
     }
   }
 
-  if (image_idx != num_images) {
+  if (static_cast<int64_t>(image_idx) != num_images) {
     throw std::runtime_error("Number of image tokens does not match the number of images. Please fix the prompt.");
   }
 
-  if (audio_idx != num_audios) {
+  if (static_cast<int64_t>(audio_idx) != num_audios) {
     throw std::runtime_error("Number of audio tokens does not match the number of audios. Please fix the prompt.");
   }
 

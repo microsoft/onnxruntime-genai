@@ -50,7 +50,7 @@ std::unique_ptr<OrtValue> ProcessImagePrompt(const Generators::Tokenizer& tokeni
                                                   image_id_position_end - image_id_position_begin));
   }
 
-  if (std::set<int32_t>(image_ids.begin(), image_ids.end()).size() != num_images) {
+  if (static_cast<int64_t>(std::set<int32_t>(image_ids.begin(), image_ids.end()).size()) != num_images) {
     throw std::runtime_error("Number of unique image tags does not match the number of images.");
   }
 
