@@ -48,6 +48,27 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         }
 
         /// <summary>
+        /// Processes a string, image and audio into a NamedTensor.
+        /// </summary>
+        /// <param name="prompt">The text to encode as token ids.</param>
+        /// <param name="images">The image input.</param>
+        /// <param name="audios">The audio input.</param>
+        /// <returns>
+        /// The NamedTensors object.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
+        public NamedTensors ProcessImagesAndAudios(string prompt, Images images, Audios audios)
+        {
+            IntPtr imagesHandle = images == null ? IntPtr.Zero : images.Handle;
+            IntPtr audiosHandle = audios == null ? IntPtr.Zero : audios.Handle;
+            Result.VerifySuccess(NativeMethods.OgaProcessorProcessImagesAndAudios(_processorHandle, StringUtils.ToUtf8(prompt),
+                                                                         imagesHandle, audiosHandle, out IntPtr namedTensorsHandle));
+            return new NamedTensors(namedTensorsHandle);
+        }
+
+        /// <summary>
         /// Decodes a sequence of token ids into text.
         /// </summary>
         /// <param name="sequence">The token ids to decode to text.</param>
