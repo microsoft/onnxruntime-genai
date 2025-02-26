@@ -141,7 +141,7 @@ DeviceSpan<float> Whisper_State::Run(int current_length, DeviceSpan<int32_t>& ne
     case RunState::Decoder_First: {
       auto src_shape_info = init_presents_[0]->GetTensorTypeAndShapeInfo();
 
-      const auto copy_data_size_all = src_shape_info->GetElementCount() * SizeOf(src_shape_info->GetElementType());
+      const auto copy_data_size_all = src_shape_info->GetElementCount() * Ort::SizeOf(src_shape_info->GetElementType());
 
 #if 0  // USE_CUDA
       const auto src_dims = src_shape_info->GetShape();

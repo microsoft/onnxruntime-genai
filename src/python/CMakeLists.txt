@@ -7,10 +7,10 @@ file(GLOB python_srcs CONFIGURE_DEPENDS
 pybind11_add_module(python ${python_srcs})
 target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(python PRIVATE ${ORT_LIB_DIR})
-target_link_libraries(python PRIVATE onnxruntime-genai-static)
+target_link_libraries(python PRIVATE onnxruntime-genai)
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
-target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
+  target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
@@ -18,13 +18,6 @@ set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
   target_link_options(python PRIVATE "/CETCOMPAT")
   target_compile_options(python PRIVATE "/sdl" PRIVATE "/Qspectre")
-endif()
-
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
-  cmake_policy(SET CMP0104 OLD)
-  enable_language(CUDA)
-  set_target_properties(python PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(python PRIVATE cublas curand cudart)
 endif()
 
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${python_srcs})
@@ -96,6 +89,7 @@ if(BUILD_WHEEL)
   endforeach()
 
   if(MANYLINUX)
+    set_target_properties(python PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
     add_custom_target(PyPackageBuild ALL
       COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
       COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*

@@ -38,7 +38,10 @@ std::unique_ptr<OrtValue> ProcessMel(ort_extensions::OrtxObjectPtr<OrtxTensor>& 
 
 }  // namespace
 
-std::unique_ptr<Audios> LoadAudios(const std::span<const char* const>& audio_paths) {
+std::unique_ptr<Audios> LoadAudios(std::span<const char* const> audio_paths) {
+  if (audio_paths.empty())
+    throw std::runtime_error("No audios provided");
+
   for (const char* audio_path : audio_paths) {
     if (!fs::path(audio_path).exists()) {
       throw std::runtime_error("Audio path does not exist: " + std::string(audio_path));

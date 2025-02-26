@@ -763,7 +763,7 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
 
     generator = og.Generator(model, params)
     if not valid_model:
-        with pytest.raises(og.OrtException) as exc_info:
+        with pytest.raises(RuntimeError) as exc_info:
             generator.append_tokens(tokenizer.encode_batch(prompts))
 
         assert f"Missing Input: {extra_inputs[0]}" in str(exc_info.value)

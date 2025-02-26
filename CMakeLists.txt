@@ -87,24 +87,19 @@ if(WIN32)
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_PATCH=${VERSION_PATCH})
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_SUFFIX=${VERSION_SUFFIX})
   target_compile_definitions(onnxruntime-genai PRIVATE FILE_NAME=\"onnxruntime-genai.dll\")
-
-  add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 else()
   add_library(onnxruntime-genai SHARED ${generator_srcs})
-  add_library(onnxruntime-genai-static STATIC ${generator_srcs})
 endif()
 
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
-target_include_directories(onnxruntime-genai-static PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
 target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api/)
-target_include_directories(onnxruntime-genai-static PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
-target_include_directories(onnxruntime-genai-static PUBLIC ${onnxruntime_extensions_SOURCE_DIR}/shared/api/)
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
-target_link_libraries(onnxruntime-genai-static PUBLIC onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(onnxruntime-genai PRIVATE Threads::Threads)
-target_link_libraries(onnxruntime-genai-static PUBLIC Threads::Threads)
+
+# The genai library itself is always embedded in the shared library
+list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
 
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.
@@ -146,30 +141,20 @@ if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set_target_properties(onnxruntime-genai-static PROPERTIES POSITION_INDEPENDENT_CODE ON)
-  target_link_libraries(onnxruntime-genai-static PRIVATE dl)  # For dlopen & co
+  set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_link_libraries(onnxruntime-genai PRIVATE dl)  # For dlopen & co
 endif()
-
 
 if(USE_DML)
   list(APPEND ortgenai_embed_libs "${D3D12_LIB_DIR}/D3D12Core.dll")
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
   target_include_directories(onnxruntime-genai PRIVATE $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
-  target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${WIL_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
-  target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>/directx)
-  target_include_directories(onnxruntime-genai-static PUBLIC $<TARGET_PROPERTY:${DIRECTX_HEADERS_TARGET},INTERFACE_INCLUDE_DIRECTORIES>)
   target_include_directories(onnxruntime-genai PRIVATE ${DML_HEADER_DIR})
-  target_include_directories(onnxruntime-genai-static PRIVATE ${DML_HEADER_DIR})
   target_include_directories(onnxruntime-genai PRIVATE ${D3D12_HEADER_DIR})
-  target_include_directories(onnxruntime-genai-static PRIVATE ${D3D12_HEADER_DIR})
   target_link_directories(onnxruntime-genai PRIVATE ${DML_LIB_DIR})
   target_link_directories(onnxruntime-genai PRIVATE ${D3D12_LIB_DIR})
-  target_link_directories(onnxruntime-genai-static PUBLIC ${DML_LIB_DIR})
-  target_link_directories(onnxruntime-genai-static PUBLIC ${D3D12_LIB_DIR})
   target_link_libraries(onnxruntime-genai PRIVATE d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
-  target_link_libraries(onnxruntime-genai PRIVATE d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
-  target_link_libraries(onnxruntime-genai-static PUBLIC d3d12.lib dxcore.lib dxguid.lib dxgi.lib)
 
   get_filename_component(PACKAGES_DIR ${CMAKE_CURRENT_BINARY_DIR}/_deps ABSOLUTE)
   set(DXC_PACKAGE_DIR ${PACKAGES_DIR}/Microsoft.Direct3D.DXC.1.7.2308.12)
@@ -194,7 +179,6 @@ if(USE_DML)
 
   add_dependencies(RESTORE_PACKAGES nuget)
   add_dependencies(onnxruntime-genai RESTORE_PACKAGES)
-  add_dependencies(onnxruntime-genai-static RESTORE_PACKAGES)
 endif()
 
 if(ANDROID)
