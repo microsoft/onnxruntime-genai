@@ -199,7 +199,7 @@ jobs:
 
   - template: steps/utils/download-huggingface-model.yml
     parameters:
-      HuggingFaceRepo: 'microsoft/Phi-4-mini-mm-instruct-onnx'
+      HuggingFaceRepo: 'microsoft/Phi-4-multimodal-instruct-onnx'
       LocalFolder: 'phi4-mm'
       RepoFolder: $(prebuild_phi4_mm_model_folder)
       WorkingDirectory: '$(Build.Repository.LocalPath)/examples/python'

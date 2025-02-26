@@ -1,11 +1,11 @@
-# Build your Phi-4 multi-modal ONNX models for ONNX Runtime GenAI
+# Build your Phi-4 Multimodal ONNX models for ONNX Runtime GenAI
 
 ## Steps
 0. [Pre-requisites](#pre-requisites)
 1. [Prepare Local Workspace](#prepare-local-workspace)
 2. [Build ONNX Components](#build-onnx-components)
 3. [Build ORT GenAI Configs](#build-genai_configjson-and-processor_configjson)
-4. [Run Phi-4 multi-modal ONNX models](#run-phi-4-multi-modal-onnx-models)
+4. [Run Phi-4 Multimodal ONNX models](#run-phi-4-multimodal-onnx-models)
 
 ## 0. Pre-requisites
 
@@ -77,7 +77,7 @@ Please ensure you have the following Python packages installed to create the ONN
 
 ## 1. Prepare Local Workspace
 
-Phi-4 multi-modal is a multi-modal model consisting of several models internally. In order to run Phi-4 multi-modal with ONNX Runtime GenAI, each internal model needs to be created as a separate ONNX model. To get these ONNX models, some of the original PyTorch modeling files have to be modified.
+Phi-4 multimodal is a multi-modal model consisting of several models internally. In order to run Phi-4 multimodal with ONNX Runtime GenAI, each internal model needs to be created as a separate ONNX model. To get these ONNX models, some of the original PyTorch modeling files have to be modified.
 
 ### Download the original PyTorch modeling files
 
@@ -87,17 +87,17 @@ First, let's download the original PyTorch modeling files.
 # Download PyTorch model and files
 $ mkdir -p phi4-multi-modal/pytorch
 $ cd phi4-multi-modal/pytorch
-$ huggingface-cli download microsoft/Phi-4-mini-mm-instruct --local-dir .
+$ huggingface-cli download microsoft/Phi-4-multimodal-instruct --local-dir .
 ```
 
 ### Download the modified PyTorch modeling files
 
-Now, let's download the modified PyTorch modeling files that have been uploaded to the Phi-4 multi-modal ONNX repository on Hugging Face.
+Now, let's download the modified PyTorch modeling files that have been uploaded to the Phi-4 multimodal ONNX repository on Hugging Face.
 
 ```bash
 # Download modified files
 $ cd ..
-$ huggingface-cli download microsoft/Phi-4-mini-mm-instruct-onnx --include onnx/* --local-dir .
+$ huggingface-cli download microsoft/Phi-4-multimodal-instruct-onnx --include onnx/* --local-dir .
 ```
 
 ### Replace original PyTorch repo files with modified files
@@ -118,6 +118,10 @@ $ mv onnx/speech_conformer_encoder.py pytorch/
 # In our `vision_siglip_navit.py`, we modified some classes for exporting to ONNX
 $ rm pytorch/vision_siglip_navit.py
 $ mv onnx/vision_siglip_navit.py pytorch/
+
+# In our `processing_phio.py`, we modified some classes for exporting to ONNX
+$ rm pytorch/processing_phio.py
+$ mv onnx/processing_phio.py pytorch/
 
 # Move the builder script to the root directory
 $ mv onnx/builder.py .
@@ -149,15 +153,15 @@ $ python3 builder.py --input ./pytorch --output ./dml --precision fp16 --executi
 
 ## 3. Build `genai_config.json`, `speech_processor.json`, and `vision_processor.json`
 
-Currently, the JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Phi-4 multi-modal model.
+Currently, the JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Phi-4 multimodal model.
 
-- [Here](https://huggingface.co/microsoft/Phi-4-mini-mm-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json`
-- [Here](https://huggingface.co/microsoft/Phi-4-mini-mm-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/speech_processor.json) is an example for `speech_processor.json`
-- [Here](https://huggingface.co/microsoft/Phi-4-mini-mm-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/vision_processor.json) is an example for `vision_processor.json`
+- [Here](https://huggingface.co/microsoft/Phi-4-multimodal-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json`
+- [Here](https://huggingface.co/microsoft/Phi-4-multimodal-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/speech_processor.json) is an example for `speech_processor.json`
+- [Here](https://huggingface.co/microsoft/Phi-4-multimodal-instruct-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/vision_processor.json) is an example for `vision_processor.json`
 
-## 4. Run Phi-4 multi-modal ONNX models
+## 4. Run Phi-4 Multimodal ONNX models
 
-[Here](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi4-mm.py) is an example of how you can run your Phi-4 multi-modal model with ONNX Runtime GenAI.
+[Here](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi4-mm.py) is an example of how you can run your Phi-4 multimodal model with ONNX Runtime GenAI.
 
 ### CPU
 ```bash

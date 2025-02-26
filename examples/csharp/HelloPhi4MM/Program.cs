@@ -106,7 +106,7 @@ if (string.IsNullOrEmpty(executionProvider))
 }
 
 Console.WriteLine("--------------------");
-Console.WriteLine("Hello, Phi-3-Vision!");
+Console.WriteLine("Hello, Phi-4-Multimodal!");
 Console.WriteLine("--------------------");
 
 Console.WriteLine("Model path: " + modelPath);
@@ -199,7 +199,7 @@ do
     prompt += text + "<|end|>\n<|assistant|>\n";
 
     Console.WriteLine("Processing inputs...");
-    using var inputTensors = processor.ProcessInputs(prompt, images, audios);
+    using var inputTensors = processor.ProcessImagesAndAudios(prompt, images, audios);
 
     Console.WriteLine("Generating response...");
     using GeneratorParams generatorParams = new GeneratorParams(model);
