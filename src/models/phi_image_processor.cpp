@@ -127,6 +127,8 @@ std::unique_ptr<NamedTensors> PhiImageProcessor::Process(const Tokenizer& tokeni
   }
   named_tensors->emplace(std::string(Config::Defaults::ImageSizesName),
                          std::make_shared<Tensor>(ProcessTensor<int64_t>(image_sizes, allocator)));
+  named_tensors->emplace(Config::Defaults::NumImageTokens,
+                         std::make_shared<Tensor>(ProcessTensor<int64_t>(num_img_tokens, allocator)));
 
   return named_tensors;
 }
