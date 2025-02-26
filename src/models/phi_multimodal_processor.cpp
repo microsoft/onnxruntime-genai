@@ -62,7 +62,7 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
   size_t image_idx{0U}, audio_idx{0U};
   for (const auto token : input_ids) {
     if (token == image_special_token_id) {
-      if (image_idx >= num_images) {
+      if (static_cast<int64_t>(image_idx) >= num_images) {
         throw std::runtime_error("Number of image tokens exceeds the number of images. Please fix the prompt.");
       }
 
@@ -71,7 +71,7 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
       }
       image_idx++;
     } else if (token == audio_special_token_id) {
-      if (audio_idx >= num_audios) {
+      if (static_cast<int64_t>(audio_idx) >= num_audios) {
         throw std::runtime_error("Number of audio tokens exceeds the number of audios. Please fix the prompt.");
       }
 
@@ -84,11 +84,11 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
     }
   }
 
-  if (image_idx != num_images) {
+  if (static_cast<int64_t>(image_idx) != num_images) {
     throw std::runtime_error("Number of image tokens does not match the number of images. Please fix the prompt.");
   }
 
-  if (audio_idx != num_audios) {
+  if (static_cast<int64_t>(audio_idx) != num_audios) {
     throw std::runtime_error("Number of audio tokens does not match the number of audios. Please fix the prompt.");
   }
 
@@ -100,8 +100,6 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
 }
 
 std::unique_ptr<OrtValue> ProcessAudioAttentionMask(OrtxTensor* num_frames, OrtxTensor* audio_embeds, Ort::Allocator& allocator) {
-  constexpr int32_t feat_stride = 1;
-
   const int64_t* tensor_data{};
   const int64_t* tensor_shape{};
   size_t tensor_num_dims;
