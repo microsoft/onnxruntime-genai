@@ -78,13 +78,9 @@ struct EmbeddingState : State {
   int64_t num_image_tokens_;
   int64_t num_audio_tokens_;
 
-  DefaultInputIDs input_ids_{*this};                                          // Model input
-  MultiModalFeatures image_features_{*this, MultiModalFeatures::Mode::Input,  // Optional model input
-                                     model_.config_->model.embedding.inputs.image_features,
-                                     num_image_tokens_};
-  MultiModalFeatures audio_features_{*this, MultiModalFeatures::Mode::Input,  // Optional model input
-                                     model_.config_->model.embedding.inputs.audio_features,
-                                     num_audio_tokens_};
+  DefaultInputIDs input_ids_{*this};                          // Model input
+  std::unique_ptr<MultiModalFeatures> image_features_;        // Optional model input
+  std::unique_ptr<MultiModalFeatures> audio_features_;        // Optional model input
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Output,  // Model output
                             model_.config_->model.embedding.outputs.embeddings};
 };

@@ -70,8 +70,12 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
 
   InitDeviceAllocator(*decoder_session_);
   session_info_->Add(*embedding_session_);
-  if (speech) session_info_->Add(*speech_session_);
-  if (vision) session_info_->Add(*vision_session_);
+  if (speech) {
+    session_info_->Add(*speech_session_);
+  }
+  if (vision) {
+    session_info_->Add(*vision_session_);
+  }
 }
 
 std::unique_ptr<State> MultiModalLanguageModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
@@ -112,15 +116,25 @@ EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const Gener
       num_image_tokens_{num_image_tokens},
       num_audio_tokens_{num_audio_tokens} {
   input_ids_.Add();
-  if (model_.vision_session_) image_features_.Add();
-  if (model_.speech_session_) audio_features_.Add();
+  if (model_.vision_session_) {
+    image_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,  // Optional model input
+                                                            model_.config_->model.embedding.inputs.image_features,
+                                                            num_image_tokens_);
+    image_features_->Add();
+  }
+  if (model_.speech_session_) {
+    audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,  // Optional model input
+                                                            model_.config_->model.embedding.inputs.audio_features,
+                                                            num_audio_tokens_);
+    audio_features_->Add();
+  }
   inputs_embeds_.Add();
 }
 
 void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool is_prompt) {
   input_ids_.Update(next_tokens);
-  if (model_.vision_session_) image_features_.Update(is_prompt);
-  if (model_.speech_session_) audio_features_.Update(is_prompt);
+  if (model_.vision_session_) image_features_->Update(is_prompt);
+  if (model_.speech_session_) audio_features_->Update(is_prompt);
 }
 
 DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -163,14 +177,18 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
       captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)},
       adapters_{std::make_shared<Adapters>(&model_)} {
   if (model_.vision_session_) {
+    std::cout << "create vision state" << std::endl;
     vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
   }
   if (model_.speech_session_) {
+    std::cout << "create speech state" << std::endl;
     speech_state_ = std::make_unique<SpeechState>(model_, params, num_audio_tokens_);
   }
+  std::cout << "create embedding and decoder states" << std::endl;
   embedding_state_ = std::make_unique<EmbeddingState>(model, params, num_image_tokens_, num_audio_tokens_);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params, captured_graph_info_.get());
 
+  std::cout << "set lora adapters" << std::endl;
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
     const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.vision.adapter_filename));
     std::string lora_adapter_str = lora_adapter.string();  // Returns UTF-8 encoded string on Windows
@@ -182,6 +200,8 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
     adapters_->LoadAdapter(lora_adapter_str.c_str(), speech_adapter_name_);
     decoder_state_->SetActiveAdapter(adapters_.get(), speech_adapter_name_);
   }
+
+  std::cout << "constructor is done" << std::endl;
 }
 
 DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -200,13 +220,15 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
 
   if (is_prompt_) {
     if (num_image_tokens_ > 0 && vision_state_) {
+      std::cout << "run vision state" << std::endl;
       vision_state_->Run(current_length, next_tokens, next_indices);
     }
     if (num_audio_tokens_ > 0 && speech_state_) {
+      std::cout << "run audio state" << std::endl;
       speech_state_->Run(current_length, next_tokens, next_indices);
     }
-    if (vision_state_) embedding_state_->image_features_.ReuseFeaturesBuffer(vision_state_->image_features_);
-    if (speech_state_) embedding_state_->audio_features_.ReuseFeaturesBuffer(speech_state_->audio_features_);
+    if (vision_state_) embedding_state_->image_features_->ReuseFeaturesBuffer(vision_state_->image_features_);
+    if (speech_state_) embedding_state_->audio_features_->ReuseFeaturesBuffer(speech_state_->audio_features_);
     embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
     embedding_state_->Run(current_length, next_tokens, next_indices);
 

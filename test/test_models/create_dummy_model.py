@@ -30,7 +30,7 @@ Phi multi-modal:
     --outputs "image_features; TensorProto.FLOAT; ['num_image_tokens', 3072]" \
     --filename "dummy_vision.onnx"
 5) python create_dummy_model.py \
-    --inputs "audio_embeds; TensorProto.FLOAT; ['num_audios', 'num_frames', 80]" "audio_sizes; TensorProto.FLOAT; ['num_audios']" "audio_projection_mode; TensorProto.INT64; [1]" \
+    --inputs "audio_embeds; TensorProto.FLOAT; ['num_audios', 'num_frames', 80]" "audio_attention_mask; TensorProto.BOOL; ['num_audios', 'num_frames'] "audio_sizes; TensorProto.INT64; ['num_audios']" "audio_projection_mode; TensorProto.INT64; [1]" \
     --outputs "audio_features; TensorProto.FLOAT; ['num_audio_tokens', 3072]" \
     --filename "dummy_speech.onnx"
 6) python create_dummy_model.py \
