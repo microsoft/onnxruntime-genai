@@ -71,8 +71,35 @@ Please ensure you have the following Python packages installed to create the ONN
 - `scipy`
 - `soundfile`
 - `torch`
-    - Please install the latest nightly version. You can install torch by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torch with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
-- `torchvision`
+    - Please install the Jan 25, 2025 nightly version. You can install torch by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torch with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
+    - For CPU:
+    ```bash
+    pip install torch==2.7.0.dev20250125
+    ```
+    - For CUDA:
+    ```bash
+    pip install torch==2.7.0.dev20250125+cu124 --index-url https://download.pytorch.org/whl/nightly/cu124
+    ```
+- `torchaudio`
+    - Please install the Jan 25, 2025 nightly version. You can install torchaudio by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torchaudio with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
+    - For CPU:
+    ```bash
+    pip install torchaudio==2.6.0.dev20250125+cu124
+    ```
+    - For CUDA:
+    ```bash
+    pip install torchaudio==2.6.0.dev20250125+cu124 --index-url https://download.pytorch.org/whl/nightly/cu124
+    ```
+- `torchvision` 
+    - Please install the Jan 25, 2025 nightly version. You can install torchvision by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torchvision with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
+    - For CPU:
+    ```bash
+    pip install torchvision==0.22.0.dev20250125+cu124
+    ```
+    - For CUDA:
+    ```bash
+    pip install torchvision==0.22.0.dev20250125+cu124 --index-url https://download.pytorch.org/whl/nightly/cu124
+    ```
 - `transformers`
 
 ## 1. Prepare Local Workspace
@@ -107,9 +134,9 @@ $ huggingface-cli download microsoft/Phi-4-multimodal-instruct-onnx --include on
 $ rm pytorch/config.json
 $ mv onnx/config.json pytorch/
 
-# In our `modeling_phio.py`, we modified some classes for exporting to ONNX
-$ rm pytorch/modeling_phio.py
-$ mv onnx/modeling_phio.py pytorch/
+# In our `modeling_phi4mm.py`, we modified some classes for exporting to ONNX
+$ rm pytorch/modeling_phi4mm.py
+$ mv onnx/modeling_phi4mm.py pytorch/
 
 # In our `speech_conformer_encoder.py`, we modified some classes for exporting to ONNX
 $ rm pytorch/speech_conformer_encoder.py
@@ -119,9 +146,9 @@ $ mv onnx/speech_conformer_encoder.py pytorch/
 $ rm pytorch/vision_siglip_navit.py
 $ mv onnx/vision_siglip_navit.py pytorch/
 
-# In our `processing_phio.py`, we modified some classes for exporting to ONNX
-$ rm pytorch/processing_phio.py
-$ mv onnx/processing_phio.py pytorch/
+# In our `processing_phi4mm.py`, we modified some classes for exporting to ONNX
+$ rm pytorch/processing_phi4mm.py
+$ mv onnx/processing_phi4mm.py pytorch/
 
 # Move the builder script to the root directory
 $ mv onnx/builder.py .
