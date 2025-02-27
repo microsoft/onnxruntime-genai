@@ -55,5 +55,5 @@ jobs:
 
       - name: Run the python tests
         run: |
-          python3 -m onnxruntime_genai.models.builder -i /data/ortgenai/pytorch/llama-3.2b-1b-instruct -e cpu -p int4 -o ./example-models/llama-3.2b-1b-instruct
-          python3 examples/python/model-qa.py -m ./example-models/llama-3.2b-1b-instruct -e cpu --input_prompt "what is 1+1?"
+          python3 -m onnxruntime_genai.models.builder -i /data/ortgenai/pytorch/qwen2.5-0.5b-instruct -e cpu -p int4 -o ./example-models/qwen2.5-0.5b-instruct
+          python3 examples/python/model-qa.py -m ./example-models/qwen2.5-0.5b-instruct -e cpu --input_prompt "what is 1+1?"
