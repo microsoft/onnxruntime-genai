@@ -48,6 +48,7 @@ struct Config {
     bool use_env_allocators{};
 
     std::vector<ProviderOptions> provider_options;
+    std::optional<GraphOptimizationLevel> graph_optimization_level;
   };
 
   struct Model {
