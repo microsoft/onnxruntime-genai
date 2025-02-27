@@ -56,4 +56,9 @@ jobs:
       - name: Run the python tests
         run: |
           python3 -m onnxruntime_genai.models.builder -i /data/ortgenai/pytorch/qwen2.5-0.5b-instruct -e cpu -p int4 -o ./example-models/qwen2.5-0.5b-instruct
-          python3 examples/python/model-qa.py -m ./example-models/qwen2.5-0.5b-instruct -e cpu --input_prompt "what is 1+1?"
+          if python3 examples/python/model-qa.py -m ./example-models/qwen2.5-0.5b-instruct -e cpu --input_prompt "what is 1+1?" | grep -Eq "2|two"; then
+            echo "Result seems correct"
+          else
+            echo "Result seems incorrect!"
+            exit 1
+          fi
