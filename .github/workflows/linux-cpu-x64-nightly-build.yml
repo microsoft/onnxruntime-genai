@@ -65,7 +65,7 @@ jobs:
           ls -l ${{ github.workspace }}/build
 
       - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: onnxruntime-genai-linux-cpu-x64
           path: ${{ github.workspace }}/build/**/*.a
