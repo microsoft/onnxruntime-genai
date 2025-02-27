@@ -3,6 +3,7 @@ import os
 import sys
 import onnxruntime_genai as og
 from app_modules.utils import convert_to_markdown, is_stop_word_or_prefix, shared_state
+import logging
 
 current_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(current_dir, "..", "..", ".."))
@@ -82,17 +83,21 @@ You are a helpful AI assistant.<|eot_id|>"""
         params.set_search_options(**search_options)
 
         generator = og.Generator(self.model, params)
-        generator.append_tokens(input_ids)
+        
+        try:
+            generator.append_tokens(input_ids)
 
-        idx = 0
-        while not generator.is_done():
-            idx += 1
-            generator.generate_next_token()
-            next_token = generator.get_next_tokens()[0]
-            output_tokens.append(next_token)
+            idx = 0
+            while not generator.is_done():
+                idx += 1
+                generator.generate_next_token()
+                next_token = generator.get_next_tokens()[0]
+                output_tokens.append(next_token)
 
-            if idx % token_printing_step == 0:
-                yield self.tokenizer.decode(output_tokens)
+                if idx % token_printing_step == 0:
+                    yield self.tokenizer.decode(output_tokens)
+        except KeyboardInterrupt:
+                print("  --control+c pressed, aborting generation--")
 
     def predict(
         self,

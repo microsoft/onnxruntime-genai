@@ -9,13 +9,14 @@ from app_modules.presets import description, small_and_beautiful_theme, title
 from app_modules.utils import cancel_outputing, delete_last_conversation, reset_state, reset_textbox, transfer_input
 from interface.hddr_llm_onnx_interface import ONNXModel
 from interface.multimodal_onnx_interface import MultiModal_ONNXModel
+from interface.omnimodel_onnx_interface import Omni_ONNXModel
+
 
 top_directory = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 optimized_directory = os.path.join(top_directory, "models")
 available_models = {}
 
 interface = None
-
 
 def change_model_listener(new_model_name):
     global interface
@@ -33,6 +34,11 @@ def change_model_listener(new_model_name):
         interface = MultiModal_ONNXModel(
             model_path=d["model_dir"], execution_provider=d["provider"],
         )
+    elif "omni" in new_model_name:
+        print("Configuring for omni model")
+        interface = Omni_ONNXModel(
+            model_path=d["model_dir"], execution_provider=d["provider"],
+        )
     else:
         print("Configuring for language-only model")
         interface = ONNXModel(
@@ -43,19 +49,13 @@ def change_model_listener(new_model_name):
 
     return [
         new_model_name,
-        gr.update(visible="vision" in new_model_name),
+        gr.update(visible="vision" in new_model_name or "omni" in new_model_name),
+        gr.update(visible = "omni" in new_model_name),
         [],
         [],
         gr.update(value=""),
         "",
     ]
-
-
-def change_image_visibility(new_model_name):
-    if "vision" in new_model_name:
-        return gr.update(visible=True)
-
-    return gr.update(visible=False)
 
 
 gr.Chatbot.postprocess = postprocess
@@ -131,7 +131,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                 max_length_tokens = gr.Slider(
                     minimum=0,
                     maximum=131072,
-                    value=8192,
+                    value=7680,
                     step=128,
                     interactive=True,
                     label="Max Token Length",
@@ -139,7 +139,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                 max_context_length_tokens = gr.Slider(
                     minimum=0,
                     maximum=131072,
-                    value=8192,
+                    value=7680,
                     step=128,
                     interactive=True,
                     label="Max History Token Length",
@@ -161,10 +161,18 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                 )
                 images.change(**reset_args)
 
+                audios = gr.File(file_count="multiple", file_types=["audio"], label="Upload audio(s)", visible=False)
+                audios.change(
+                    reset_state,
+                    outputs=[chatbot, history, status_display],
+                    show_progress=True,
+                )
+                audios.change(**reset_args)
+
                 model_name.change(
                     change_model_listener,
                     inputs=[model_name],
-                    outputs=[model_name, images, chatbot, history, user_input, status_display],
+                    outputs=[model_name, images, audios, chatbot, history, user_input, status_display],
                 )
         gr.Markdown(description)
 
@@ -178,6 +186,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                 max_context_length_tokens,
                 token_printing_step,
                 images,
+                audios
             ],
             "outputs": [chatbot, history, status_display],
             "show_progress": True,
@@ -190,7 +199,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                 max_length_tokens,
                 max_context_length_tokens,
                 token_printing_step,
-                images
+                images,
             ],
             "outputs": [chatbot, history, status_display],
             "show_progress": True,
@@ -230,14 +239,16 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
             cancels=[predict_event1, predict_event2, predict_event3],
         )
 
-        demo.load(change_model_listener, inputs=[model_name], outputs=[model_name, images], concurrency_limit=1)
+        demo.load(change_model_listener, inputs=[model_name], outputs=[model_name, images, audios], concurrency_limit=1)
 
     demo.title = "Local Model UI"
 
+    port = os.getenv("GRADIO_SERVER_PORT")
+
     if expose_locally:
-        demo.launch(server_name="0.0.0.0", server_port=5000)
+        demo.launch(server_name="0.0.0.0", server_port=int(port) if port else 5000)
     else:
-        demo.launch(share=True, server_port=5000)
+        demo.launch(share=True, server_port=int(port) if port else 5000)
 
 
 if __name__ == "__main__":
