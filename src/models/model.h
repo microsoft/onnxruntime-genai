@@ -4,8 +4,9 @@
 #include "ortx_tokenizer.h"
 #include "captured_graph_pool.h"
 #include "utils.h"
-#include "prompt_image_processor.h"
-#include "audio_processor.h"
+#include "phi_image_processor.h"
+#include "whisper_processor.h"
+#include "phi_multimodal_processor.h"
 #include "adapters.h"
 #include "extra_outputs.h"
 
@@ -96,9 +97,10 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
 struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor> {
   MultiModalProcessor(Config& config, const SessionInfo& session_info);
 
+  std::unique_ptr<NamedTensors> Process(const std::string& prompt, const Images* images, const Audios* audios) const;
+
   std::shared_ptr<Tokenizer> tokenizer_;
-  std::shared_ptr<ImageProcessor> image_processor_;
-  std::shared_ptr<AudioProcessor> audio_processor_;
+  std::shared_ptr<Processor> processor_;
 
   std::shared_ptr<MultiModalProcessor> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 };

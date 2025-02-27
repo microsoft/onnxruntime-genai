@@ -6,28 +6,28 @@ using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    public class Images : IDisposable
+    public class Audios : IDisposable
     {
-        private IntPtr _imagesHandle;
+        private IntPtr _audiosHandle;
         private bool _disposed = false;
 
-        private Images(IntPtr imagesHandle)
+        private Audios(IntPtr audiosHandle)
         {
-            _imagesHandle = imagesHandle;
+            _audiosHandle = audiosHandle;
         }
 
-        internal IntPtr Handle { get { return _imagesHandle; } }
+        internal IntPtr Handle { get { return _audiosHandle; } }
 
-        public static Images Load(string[] imagePaths)
+        public static Audios Load(string[] audioPaths)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateStringArray(out IntPtr stringArray));
-            foreach (string imagePath in imagePaths)
+            foreach (string audioPath in audioPaths)
             {
-                Result.VerifySuccess(NativeMethods.OgaStringArrayAddString(stringArray, StringUtils.ToUtf8(imagePath)));
+                Result.VerifySuccess(NativeMethods.OgaStringArrayAddString(stringArray, StringUtils.ToUtf8(audioPath)));
             }
-            Result.VerifySuccess(NativeMethods.OgaLoadImages(stringArray, out IntPtr imagesHandle));
+            Result.VerifySuccess(NativeMethods.OgaLoadAudios(stringArray, out IntPtr audiosHandle));
             NativeMethods.OgaDestroyStringArray(stringArray);
-            return new Images(imagesHandle);
+            return new Audios(audiosHandle);
         }
 
         public void Dispose()
@@ -42,8 +42,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             {
                 return;
             }
-            NativeMethods.OgaDestroyImages(_imagesHandle);
-            _imagesHandle = IntPtr.Zero;
+            NativeMethods.OgaDestroyAudios(_audiosHandle);
+            _audiosHandle = IntPtr.Zero;
             _disposed = true;
         }
     }

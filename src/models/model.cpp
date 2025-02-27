@@ -13,7 +13,7 @@
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
-#include "multi_modal_vision_model.h"
+#include "multi_modal.h"
 #include "decoder_only_pipeline.h"
 #include "../dml/interface.h"
 
@@ -425,6 +425,10 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.AddConfigEntry("session.use_env_allocators", "1");
   }
 
+  if (config_session_options.graph_optimization_level.has_value()) {
+    session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
+  }
+
   for (auto& provider_options : config_session_options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
@@ -561,9 +565,11 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (config->model.type == "whisper")
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);
   if (config->model.type == "phi3v")
-    return std::make_shared<MultiModalVisionModel>(std::move(config), ort_env);
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (config->model.type == "decoder-pipeline")
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
+  if (config->model.type == "phi4mm")
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }
@@ -622,12 +628,18 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
     : tokenizer_{std::make_shared<Tokenizer>(config)} {
   if (config.model.type == "phi3v") {
-    image_processor_ = std::make_shared<ImageProcessor>(config, session_info);
+    processor_ = std::make_shared<PhiImageProcessor>(config, session_info);
   } else if (config.model.type == "whisper") {
-    audio_processor_ = std::make_shared<AudioProcessor>(config, session_info);
+    processor_ = std::make_shared<WhisperProcessor>(config, session_info);
+  } else if (config.model.type == "phi4mm") {
+    processor_ = std::make_shared<PhiMultiModalProcessor>(config, session_info);
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. Expected a multimodal model. Actual: " + config.model.type);
   }
 }
 
+std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& prompt, const Images* images, const Audios* audios) const {
+  Payload payload{prompt, images, audios};
+  return processor_->Process(*tokenizer_, payload);
+}
 }  // namespace Generators

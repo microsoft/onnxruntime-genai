@@ -11,13 +11,6 @@ git clone https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai/examples/c
 ```
 
-If they don't already exist, create folders called `include` and `lib`.
-
-```bash
-mkdir include
-mkdir lib
-```
-
 ## Phi-3.5 mini
 
 ### Download model

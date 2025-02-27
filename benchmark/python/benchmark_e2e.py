@@ -176,7 +176,7 @@ def save_results(args, results, filename, print_memory_usage=False):
 
 def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max_length):
     """
-    This function is to run benchmark and print the momory usage
+    This function is to run benchmark and print the memory usage
     """
     global stop_monitoring
     global peak_gpu_memory

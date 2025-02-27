@@ -385,20 +385,22 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         if (image_datas.empty())
           throw std::runtime_error("No images provided");
 
-        std::vector<const void*> image_data_ptrs;
-        std::vector<size_t> image_data_sizes;
-
+        std::vector<const void*> image_raw_data(image_datas.size());
+        std::vector<int64_t> image_sizes(image_datas.size());
         for (size_t i = 0; i < image_datas.size(); ++i) {
           if (!pybind11::isinstance<pybind11::bytes>(image_datas[i]))
             throw std::runtime_error("Image data must be bytes.");
           auto bytes = image_datas[i].cast<pybind11::bytes>();
           pybind11::buffer_info info(pybind11::buffer(bytes).request());
-          uint8_t* data = reinterpret_cast<uint8_t*>(info.ptr);
-          image_data_ptrs.push_back(data);
-          image_data_sizes.push_back(info.size);
+          image_raw_data[i] = reinterpret_cast<void*>(info.ptr);
+          image_sizes[i] = info.size;
         }
 
         return OgaImages::Load(image_data_ptrs.data(), image_data_sizes.data(), image_datas.size());
+        ort_extensions::OrtxObjectPtr<OrtxRawImages> images;
+        CheckResult(OrtxCreateRawImages(images.ToBeAssigned(), image_raw_data.data(), image_sizes.data(), image_datas.size()));
+
+        return std::make_shared<Images>(std::move(images), image_datas.size());
       });
 
   pybind11::class_<OgaAudios>(m, "Audios")
@@ -416,20 +418,54 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return OgaAudios::Load(audio_paths_vector);
       });
 
-  pybind11::class_<OgaMultiModalProcessor>(m, "MultiModalProcessor")
+  pybind11::class_<PyNamedTensors, std::shared_ptr<PyNamedTensors>>(m, "NamedTensors")
+      .def("__getitem__", [](PyNamedTensors& named_tensors, const std::string& name) {
+        auto tensor = named_tensors.named_tensors_->find(name);
+        if (tensor == named_tensors.named_tensors_->end())
+          throw std::runtime_error("Tensor with name: " + name + " not found.");
+
+        return ToNumpy(tensor->second->ort_tensor_.get());
+      })
+      .def("__setitem__", [](PyNamedTensors& named_tensors, const std::string& name, pybind11::array& value) {
+        auto tensor = std::make_shared<Tensor>(ToOrtValue(value));
+        (*named_tensors.named_tensors_)[name] = tensor;
+      })
+      .def("__contains__", [](PyNamedTensors& named_tensors, const std::string& name) {
+        return named_tensors.named_tensors_->find(name) != named_tensors.named_tensors_->end();
+      })
+      .def("keys", [](PyNamedTensors& named_tensors) {
+        std::vector<std::string> keys;
+        for (const auto& tensor : *named_tensors.named_tensors_) {
+          keys.push_back(tensor.first);
+        }
+        return keys;
+      })
+      .def("__iter__", [](PyNamedTensors& named_tensors) {
+        return pybind11::make_key_iterator(named_tensors.named_tensors_->begin(), named_tensors.named_tensors_->end());
+      })
+      .def("__len__", [](PyNamedTensors& named_tensors) { return named_tensors.named_tensors_->size(); })
+      .def("__repr__", [](PyNamedTensors& named_tensors) {
+        std::string result = "{";
+        for (const auto& tensor : *named_tensors.named_tensors_) {
+          result += tensor.first + ": Tensor(" + ToFormatDescriptor(tensor.second->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementType()) + "), ";
+        }
+        result += "}";
+        return result;
+      });
+
+  pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
       .def(
           "__call__", [](OgaMultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) {
             if (kwargs.contains("images")) {
-              auto* images = kwargs["images"].cast<const OgaImages*>();
-              if (!prompt.has_value())
-                throw std::runtime_error("Prompt is required for processing the image.");
-              return processor.ProcessImages(prompt->c_str(), images);
-            } else if (kwargs.contains("audios")) {
-              auto* audios = kwargs["audios"].cast<const OgaAudios*>();
-              return processor.ProcessAudios(audios);
-            } else {
-              throw std::runtime_error("Nothing to process.");
+              images = kwargs["images"].cast<Images*>();
             }
+
+            if (kwargs.contains("audios")) {
+              audios = kwargs["audios"].cast<Audios*>();
+            }
+
+            return std::make_shared<PyNamedTensors>(
+                processor.Process(prompt.value_or(""), images, audios));
           },
           pybind11::arg("prompt") = pybind11::none())
       .def("create_stream", [](OgaMultiModalProcessor& processor) { return OgaTokenizerStream::Create(processor); })

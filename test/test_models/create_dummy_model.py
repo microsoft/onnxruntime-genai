@@ -9,17 +9,37 @@ This is helpful for creating ONNX models to run simple API tests (e.g. pre-proce
 where the contents of the ONNX models don't matter.
 
 Example usage:
-1) python3 create_dummy_model.py \
-    --inputs "pixel_values; TensorProto.FLOAT16; ['num_images', 'max_num_crops', 3, 'height', 'width']" "image_sizes; TensorProto.INT64; ['num_images', 2]" \
-    --outputs "image_features; TensorProto.FLOAT16; ['num_image_tokens', 3072]" \
+
+Phi vision:
+1) python create_dummy_model.py \
+    --inputs "pixel_values; TensorProto.FLOAT; ['num_images', 'max_num_crops', 3, 'height', 'width']" "image_sizes; TensorProto.INT64; ['num_images', 2]" \
+    --outputs "image_features; TensorProto.FLOAT; ['num_image_tokens', 3072]" \
     --filename "dummy_vision.onnx"
-2) python3 create_dummy_model.py \
-    --inputs "input_ids; TensorProto.INT64; ['batch_size', 'sequence_length']" "image_features; TensorProto.FLOAT16; ['num_image_tokens', 3072]" \
+2) python create_dummy_model.py \
+    --inputs "input_ids; TensorProto.INT64; ['batch_size', 'sequence_length']" "image_features; TensorProto.FLOAT; ['num_image_tokens', 3072]" \
     --outputs "inputs_embeds; TensorProto.FLOAT; ['batch_size', 'sequence_length', 3072]" \
     --filename "dummy_embedding.onnx"
-3) python3 create_dummy_model.py \
+3) python create_dummy_model.py \
     --inputs "inputs_embeds; TensorProto.FLOAT; ['batch_size', 'sequence_length', 3072]" "attention_mask; TensorProto.INT64; ['batch_size', 'total_sequence_length']" "past_key_values.0.key; TensorProto.FLOAT; ['batch_size', 32, 'past_sequence_length', 96]" "past_key_values.0.value; TensorProto.FLOAT; ['batch_size', 32, 'past_sequence_length', 96]" \
     --outputs "logits; TensorProto.FLOAT; ['batch_size', 'sequence_length', 32064]" "present.0.key; TensorProto.FLOAT; ['batch_size', 32, 'total_sequence_length', 96]" "present.0.value; TensorProto.FLOAT; ['batch_size', 32, 'total_sequence_length', 96]" \
+    --filename "dummy_text.onnx"
+
+Phi multi-modal:
+4) python create_dummy_model.py \
+    --inputs "pixel_values; TensorProto.FLOAT; ['num_images', 'max_num_crops', 3, 'height', 'width']" "attention_mask; TensorProto.FLOAT; ['num_images', 'max_num_crops', 32, 32]" "image_sizes; TensorProto.INT64; ['num_images', 2]" \
+    --outputs "image_features; TensorProto.FLOAT; ['num_image_tokens', 3072]" \
+    --filename "dummy_vision.onnx"
+5) python create_dummy_model.py \
+    --inputs "audio_embeds; TensorProto.FLOAT; ['num_audios', 'num_frames', 80]" "audio_attention_mask; TensorProto.BOOL; ['num_audios', 'num_frames'] "audio_sizes; TensorProto.INT64; ['num_audios']" "audio_projection_mode; TensorProto.INT64; [1]" \
+    --outputs "audio_features; TensorProto.FLOAT; ['num_audio_tokens', 3072]" \
+    --filename "dummy_speech.onnx"
+6) python create_dummy_model.py \
+    --inputs "input_ids; TensorProto.INT64; ['batch_size', 'sequence_length']" "image_features; TensorProto.FLOAT; ['num_image_tokens', 3072]" "audio_features; TensorProto.FLOAT; ['num_audio_tokens', 3072]" \
+    --outputs "inputs_embeds; TensorProto.FLOAT; ['batch_size', 'sequence_length', 3072]" \
+    --filename "dummy_embedding.onnx"
+7) python create_dummy_model.py \
+    --inputs "inputs_embeds; TensorProto.FLOAT; ['batch_size', 'sequence_length', 3072]" "attention_mask; TensorProto.INT64; ['batch_size', 'total_sequence_length']" "past_key_values.0.key; TensorProto.FLOAT; ['batch_size', 8, 'past_sequence_length', 128]" "past_key_values.0.value; TensorProto.FLOAT; ['batch_size', 8, 'past_sequence_length', 128]" \
+    --outputs "logits; TensorProto.FLOAT; ['batch_size', 'sequence_length', 200064]" "present.0.key; TensorProto.FLOAT; ['batch_size', 8, 'total_sequence_length', 128]" "present.0.value; TensorProto.FLOAT; ['batch_size', 8, 'total_sequence_length', 128]" \
     --filename "dummy_text.onnx"
 """
 
