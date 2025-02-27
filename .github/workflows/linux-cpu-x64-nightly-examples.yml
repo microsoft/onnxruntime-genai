@@ -64,7 +64,7 @@ jobs:
             exit 1
           fi
 
-        - name: Verify Build Artifacts
+      - name: Verify Build Artifacts
         if: always()
         run: |
           ls -l ${{ github.workspace }}/build
