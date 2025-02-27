@@ -139,7 +139,6 @@ PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)},
       attention_mask_type_{session_info.GetInputDataType(config.model.vision.inputs.attention_mask)},
       audio_features_type_{session_info.GetInputDataType(config.model.speech.inputs.audio_embeds)},
-      // audio_attention_mask_type_{session_info.GetInputDataType(config.model.speech.inputs.audio_attention_mask)},
       audio_sizes_type_{session_info.GetInputDataType(config.model.speech.inputs.audio_sizes)} {
   const auto image_processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(image_processor_.ToBeAssigned(), image_processor_config.c_str()));
@@ -154,7 +153,7 @@ PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo
   config.AddMapping(std::string(Config::Defaults::ImageSizesName), config.model.vision.inputs.image_sizes);
 
   config.AddMapping(std::string(Config::Defaults::AudioEmbedsName), config.model.speech.inputs.audio_embeds);
-  config.AddMapping(std::string(Config::Defaults::AudioAttentionMaskName), config.model.speech.inputs.audio_attention_mask);
+  config.AddMapping(std::string(Config::Defaults::AudioAttentionMaskName), config.model.speech.inputs.attention_mask);
   config.AddMapping(std::string(Config::Defaults::AudioSizesName), config.model.speech.inputs.audio_sizes);
 }
 

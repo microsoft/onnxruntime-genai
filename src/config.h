@@ -131,7 +131,7 @@ struct Config {
 
       struct Inputs {
         std::string audio_embeds{Defaults::AudioEmbedsName};
-        std::string audio_attention_mask{Defaults::AudioAttentionMaskName};
+        std::string attention_mask{Defaults::AudioAttentionMaskName};
         std::string audio_sizes{Defaults::AudioSizesName};
         std::string audio_projection_mode{Defaults::AudioProjectionModeName};
       } inputs;
