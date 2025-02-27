@@ -864,6 +864,7 @@ class Model:
         matmul_A_name = self.make_matmul_op(matmul.lora_A.default, matmul_A_basename, root_input=root_input)
         lora_A = f"{matmul_A_name}/output_0"
 
+        matmul.lora_B.default.weight.requires_grad = False  # since a leaf variable is updated in-place
         matmul.lora_B.default.weight *= matmul.scaling["default"]
         matmul_B_basename = "/".join(basename_parts[:-1] + ["lora_B"] + basename_parts[-1:])
         matmul_B_name = self.make_matmul_op(matmul.lora_B.default, matmul_B_basename, root_input=lora_A)
@@ -1588,10 +1589,10 @@ class Model:
 
         if hasattr(qkv_linear, "base_layer"):
             # For LoRA packed `MatMul`
-            return self.make_attention_unpacked_lora(layer_id, attention, qkv_linear, root_input, **kwargs)
+            self.make_attention_unpacked_lora(layer_id, attention, qkv_linear, root_input, **kwargs)
         else:
             # For regular packed `MatMul`
-            return self.make_attention_unpacked_regular(layer_id, attention, qkv_linear, root_input, **kwargs)
+            self.make_attention_unpacked_regular(layer_id, attention, qkv_linear, root_input, **kwargs)
 
         # Delete original packed weights
         del qkv_linear
@@ -1632,17 +1633,17 @@ class Model:
 
         # Create Q/K/V LoRA layers
         attention.q_proj = LoraLayer(q_proj)
-        attention.q_proj.lora_A = qkv_linear.lora_A
+        attention.q_proj.lora_A.default = qkv_linear.lora_A.default
         attention.q_proj.lora_B.default = q_lora_B
         attention.q_proj.scaling = qkv_linear.scaling
 
         attention.k_proj = LoraLayer(k_proj)
-        attention.k_proj.lora_A = qkv_linear.lora_A
+        attention.k_proj.lora_A.default = qkv_linear.lora_A.default
         attention.k_proj.lora_B.default = k_lora_B
         attention.k_proj.scaling = qkv_linear.scaling
 
         attention.v_proj = LoraLayer(v_proj)
-        attention.v_proj.lora_A = qkv_linear.lora_A
+        attention.v_proj.lora_A.default = qkv_linear.lora_A.default
         attention.v_proj.lora_B.default = v_lora_B
         attention.v_proj.scaling = qkv_linear.scaling
 
@@ -1681,17 +1682,16 @@ class Model:
 
         if hasattr(gate_up_linear, "base_layer"):
             # For LoRA packed `MatMul`
-            return self.make_mlp_unpacked_lora(layer_id, mlp, root_input)
+            self.make_mlp_unpacked_lora(layer_id, mlp, gate_up_linear, root_input)
         else:
             # For regular packed `MatMul`
-            return self.make_mlp_unpacked_regular(layer_id, mlp, root_input)
+            self.make_mlp_unpacked_regular(layer_id, mlp, gate_up_linear, root_input)
 
         # Delete original packed weights
         del gate_up_linear
 
-    def make_mlp_unpacked_lora(self, layer_id, mlp, root_input):
+    def make_mlp_unpacked_lora(self, layer_id, mlp, gate_up_linear, root_input):
         from peft.tuners.lora.layer import LoraLayer
-        gate_up_linear = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
 
         # Create GateProj/UpProj base layers
         gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
@@ -1715,18 +1715,16 @@ class Model:
 
         # Create GateProj/UpProj LoRA layers
         mlp.gate_proj = LoraLayer(gate_proj)
-        mlp.gate_proj.lora_A = gate_up_linear.lora_A
+        mlp.gate_proj.lora_A.default = gate_up_linear.lora_A.default
         mlp.gate_proj.lora_B.default = gate_proj_lora_B
         mlp.gate_proj.scaling = gate_up_linear.scaling
 
         mlp.up_proj = LoraLayer(up_proj)
-        mlp.up_proj.lora_A = gate_up_linear.lora_A
+        mlp.up_proj.lora_A.default = gate_up_linear.lora_A.default
         mlp.up_proj.lora_B.default = up_proj_lora_B
         mlp.up_proj.scaling = gate_up_linear.scaling
 
-    def make_mlp_unpacked_regular(self, layer_id, mlp, root_input):
-        gate_up_linear = getattr(mlp, "gate_up_proj", None) or getattr(mlp, "dense_h_to_4h", None)
-
+    def make_mlp_unpacked_regular(self, layer_id, mlp, gate_up_linear, root_input):
         mlp.gate_proj = torch.nn.Linear(in_features=self.hidden_size, out_features=self.intermediate_size)
         mlp.gate_proj.weight = torch.nn.Parameter(gate_up_linear.weight[: self.intermediate_size, :], requires_grad=False)
         mlp.gate_proj.bias = None if gate_up_linear.bias is None else torch.nn.Parameter(gate_up_linear.bias[: self.intermediate_size], requires_grad=False)
@@ -3121,6 +3119,30 @@ class GraniteModel(MistralModel):
             self.layernorm_attrs["last_layernorm"] = True
 
 
+class PhiOModel(Phi3VModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.matmul_attrs["use_lora"] = True
+        self.attention_attrs["use_packed_matmul"] = False
+
+    def make_layer(self, layer_id, layer):
+        layer.self_attn.qkv_proj.lora_A.default = layer.self_attn.qkv_proj.lora_A.vision
+        layer.self_attn.qkv_proj.lora_B.default = layer.self_attn.qkv_proj.lora_B.vision
+        layer.self_attn.qkv_proj.scaling["default"] = layer.self_attn.qkv_proj.scaling["vision"]
+        layer.self_attn.o_proj.lora_A.default = layer.self_attn.o_proj.lora_A.vision
+        layer.self_attn.o_proj.lora_B.default = layer.self_attn.o_proj.lora_B.vision
+        layer.self_attn.o_proj.scaling["default"] = layer.self_attn.o_proj.scaling["vision"]
+
+        layer.mlp.gate_up_proj.lora_A.default = layer.mlp.gate_up_proj.lora_A.vision
+        layer.mlp.gate_up_proj.lora_B.default = layer.mlp.gate_up_proj.lora_B.vision
+        layer.mlp.gate_up_proj.scaling["default"] = layer.mlp.gate_up_proj.scaling["vision"]
+        layer.mlp.down_proj.lora_A.default = layer.mlp.down_proj.lora_A.vision
+        layer.mlp.down_proj.lora_B.default = layer.mlp.down_proj.lora_B.vision
+        layer.mlp.down_proj.scaling["default"] = layer.mlp.down_proj.scaling["vision"]
+
+        super().make_layer(layer_id, layer)
+
+
 def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
@@ -3240,6 +3262,10 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             extra_options["exclude_embeds"] = True
             onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "PhiOForCausalLM":
+            print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+            extra_options["exclude_embeds"] = True
+            onnx_model = PhiOModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen2ForCausalLM":
             onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:

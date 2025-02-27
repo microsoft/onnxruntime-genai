@@ -139,7 +139,7 @@ std::unique_ptr<OrtValue> ToOrtValue(pybind11::array& v) {
   return ort_value;
 }
 
-pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
+pybind11::array ToNumpy(OrtValue* v, const Generators::Model* model = nullptr) {
   if (!v)
     return {};
 
@@ -158,7 +158,7 @@ pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
   }
 
   bool is_cpu = v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
-  auto device_span = Generators::ByteWrapTensor(is_cpu ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU) : *model.p_device_, *v);
+  auto device_span = Generators::ByteWrapTensor(is_cpu ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU) : *(model->p_device_), *v);
 
   pybind11::buffer_info bufinfo{
       device_span.CopyDeviceToCpu().data(),          // Pointer to memory buffer
@@ -275,7 +275,7 @@ struct PyGenerator {
   }
 
   pybind11::array GetOutput(const std::string& name) {
-    return ToNumpy(generator_->state_->GetOutput(name.c_str()), *(generator_->model_));
+    return ToNumpy(generator_->state_->GetOutput(name.c_str()), generator_->model_.get());
   }
 
   void AppendTokens(pybind11::array_t<int32_t> tokens) {
@@ -458,17 +458,21 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         if (image_datas.empty())
           throw std::runtime_error("No images provided");
 
-        std::unique_ptr<ort_extensions::ImageRawData[]> image_raw_data = std::make_unique<ort_extensions::ImageRawData[]>(image_datas.size());
+        std::vector<const void*> image_raw_data(image_datas.size());
+        std::vector<int64_t> image_sizes(image_datas.size());
         for (size_t i = 0; i < image_datas.size(); ++i) {
           if (!pybind11::isinstance<pybind11::bytes>(image_datas[i]))
             throw std::runtime_error("Image data must be bytes.");
           auto bytes = image_datas[i].cast<pybind11::bytes>();
           pybind11::buffer_info info(pybind11::buffer(bytes).request());
-          uint8_t* data = reinterpret_cast<uint8_t*>(info.ptr);
-          image_raw_data[i] = ort_extensions::ImageRawData(data, data + info.size);
+          image_raw_data[i] = reinterpret_cast<void*>(info.ptr);
+          image_sizes[i] = info.size;
         }
 
-        return std::make_shared<Images>(std::move(image_raw_data), image_datas.size());
+        ort_extensions::OrtxObjectPtr<OrtxRawImages> images;
+        CheckResult(OrtxCreateRawImages(images.ToBeAssigned(), image_raw_data.data(), image_sizes.data(), image_datas.size()));
+
+        return std::make_shared<Images>(std::move(images), image_datas.size());
       });
 
   pybind11::class_<Audios, std::shared_ptr<Audios>>(m, "Audios")
@@ -489,28 +493,60 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return std::shared_ptr<Audios>(LoadAudios(audio_paths_vector));
       });
 
-  pybind11::class_<PyNamedTensors, std::shared_ptr<PyNamedTensors>>(m, "NamedTensors");
+  pybind11::class_<PyNamedTensors, std::shared_ptr<PyNamedTensors>>(m, "NamedTensors")
+      .def("__getitem__", [](PyNamedTensors& named_tensors, const std::string& name) {
+        auto tensor = named_tensors.named_tensors_->find(name);
+        if (tensor == named_tensors.named_tensors_->end())
+          throw std::runtime_error("Tensor with name: " + name + " not found.");
+
+        return ToNumpy(tensor->second->ort_tensor_.get());
+      })
+      .def("__setitem__", [](PyNamedTensors& named_tensors, const std::string& name, pybind11::array& value) {
+        auto tensor = std::make_shared<Tensor>(ToOrtValue(value));
+        (*named_tensors.named_tensors_)[name] = tensor;
+      })
+      .def("__contains__", [](PyNamedTensors& named_tensors, const std::string& name) {
+        return named_tensors.named_tensors_->find(name) != named_tensors.named_tensors_->end();
+      })
+      .def("keys", [](PyNamedTensors& named_tensors) {
+        std::vector<std::string> keys;
+        for (const auto& tensor : *named_tensors.named_tensors_) {
+          keys.push_back(tensor.first);
+        }
+        return keys;
+      })
+      .def("__iter__", [](PyNamedTensors& named_tensors) {
+        return pybind11::make_key_iterator(named_tensors.named_tensors_->begin(), named_tensors.named_tensors_->end());
+      })
+      .def("__len__", [](PyNamedTensors& named_tensors) { return named_tensors.named_tensors_->size(); })
+      .def("__repr__", [](PyNamedTensors& named_tensors) {
+        std::string result = "{";
+        for (const auto& tensor : *named_tensors.named_tensors_) {
+          result += tensor.first + ": Tensor(" + ToFormatDescriptor(tensor.second->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementType()) + "), ";
+        }
+        result += "}";
+        return result;
+      });
 
   pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
       .def(
           "__call__", [](MultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) -> std::shared_ptr<PyNamedTensors> {
-            if (kwargs.contains("images")) {
-              if (processor.image_processor_ == nullptr) {
-                throw std::runtime_error("Image processor is not available for this model.");
-              }
-              const Images* images = kwargs["images"].cast<const Images*>();
-              if (!prompt.has_value()) {
-                throw std::runtime_error("Prompt is required for processing the image.");
-              }
-              return std::make_shared<PyNamedTensors>(
-                  processor.image_processor_->Process(*processor.tokenizer_, *prompt, images));
-            } else if (kwargs.contains("audios")) {
-              const Audios* audios = kwargs["audios"].cast<const Audios*>();
-              return std::make_shared<PyNamedTensors>(
-                  processor.audio_processor_->Process(audios));
-            } else {
-              throw std::runtime_error("Nothing to process.");
+            Images* images = nullptr;
+            Audios* audios = nullptr;
+            if (!processor.processor_) {
+              throw pybind11::key_error("Processor is not available for this model.");
             }
+
+            if (kwargs.contains("images")) {
+              images = kwargs["images"].cast<Images*>();
+            }
+
+            if (kwargs.contains("audios")) {
+              audios = kwargs["audios"].cast<Audios*>();
+            }
+
+            return std::make_shared<PyNamedTensors>(
+                processor.Process(prompt.value_or(""), images, audios));
           },
           pybind11::arg("prompt") = pybind11::none())
       .def("create_stream", [](MultiModalProcessor& processor) { return processor.tokenizer_->CreateStream(); })
