@@ -107,9 +107,9 @@ $ huggingface-cli download microsoft/Phi-4-multimodal-instruct-onnx --include on
 $ rm pytorch/config.json
 $ mv onnx/config.json pytorch/
 
-# In our `modeling_phio.py`, we modified some classes for exporting to ONNX
-$ rm pytorch/modeling_phio.py
-$ mv onnx/modeling_phio.py pytorch/
+# In our `modeling_phi4mm.py`, we modified some classes for exporting to ONNX
+$ rm pytorch/modeling_phi4mm.py
+$ mv onnx/modeling_phi4mm.py pytorch/
 
 # In our `speech_conformer_encoder.py`, we modified some classes for exporting to ONNX
 $ rm pytorch/speech_conformer_encoder.py
@@ -119,9 +119,9 @@ $ mv onnx/speech_conformer_encoder.py pytorch/
 $ rm pytorch/vision_siglip_navit.py
 $ mv onnx/vision_siglip_navit.py pytorch/
 
-# In our `processing_phio.py`, we modified some classes for exporting to ONNX
-$ rm pytorch/processing_phio.py
-$ mv onnx/processing_phio.py pytorch/
+# In our `processing_phi4mm.py`, we modified some classes for exporting to ONNX
+$ rm pytorch/processing_phi4mm.py
+$ mv onnx/processing_phi4mm.py pytorch/
 
 # Move the builder script to the root directory
 $ mv onnx/builder.py .
