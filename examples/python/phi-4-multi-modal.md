@@ -91,7 +91,7 @@ Please ensure you have the following Python packages installed to create the ONN
     pip install torchaudio==2.6.0.dev20250125+cu124 --index-url https://download.pytorch.org/whl/nightly/cu124
     ```
 - `torchvision` 
-    - Please install the Jan 25, 2025 nightly version. You can install torchvision by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torchaudio with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
+    - Please install the Jan 25, 2025 nightly version. You can install torchvision by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torchvision with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
     - For CPU:
     ```bash
     pip install torchvision==0.22.0.dev20250125+cu124
