@@ -3119,7 +3119,7 @@ class GraniteModel(MistralModel):
             self.layernorm_attrs["last_layernorm"] = True
 
 
-class PhiOModel(Phi3VModel):
+class Phi4MMModel(Phi3VModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.matmul_attrs["use_lora"] = True
@@ -3262,10 +3262,10 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             extra_options["exclude_embeds"] = True
             onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "PhiOForCausalLM":
+        elif config.architectures[0] == "Phi4MMForCausalLM":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             extra_options["exclude_embeds"] = True
-            onnx_model = PhiOModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi4MMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen2ForCausalLM":
             onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
