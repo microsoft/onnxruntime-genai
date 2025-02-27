@@ -56,9 +56,21 @@ jobs:
       - name: Run the python tests
         run: |
           python3 -m onnxruntime_genai.models.builder -i /data/ortgenai/pytorch/qwen2.5-0.5b-instruct -e cpu -p int4 -o ./example-models/qwen2.5-0.5b-instruct
-          if python3 examples/python/model-qa.py -m ./example-models/qwen2.5-0.5b-instruct -e cpu --input_prompt "what is 1+1?" | grep -Eq "2|two"; then
+          python3 examples/python/model-qa.py -m ./example-models/qwen2.5-0.5b-instruct -e cpu --input_prompt "what is 10+4?" > output.log 2>&1
+          if cat output.log | grep -Eq "14|fourteen"; then
             echo "Result seems correct"
           else
             echo "Result seems incorrect!"
             exit 1
           fi
+
+        - name: Verify Build Artifacts
+        if: always()
+        run: |
+          ls -l ${{ github.workspace }}/build
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: onnxruntime-genai-linux-cpu-examples
+          path: ${{ github.workspace }}/build/**/*.a
