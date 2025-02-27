@@ -362,6 +362,8 @@ struct VisionInputs_Element : JSON::Element {
       v_.pixel_values = JSON::Get<std::string_view>(value);
     } else if (name == "image_sizes") {
       v_.image_sizes = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_mask") {
+      v_.attention_mask = JSON::Get<std::string_view>(value);
     } else
       throw JSON::unknown_value_error{};
   }
@@ -390,6 +392,10 @@ struct Vision_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "config_filename") {
+      v_.config_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "adapter_filename") {
+      v_.adapter_filename = JSON::Get<std::string_view>(value);
     } else
       throw JSON::unknown_value_error{};
   }
@@ -407,6 +413,69 @@ struct Vision_Element : JSON::Element {
   Config::Model::Vision& v_;
   VisionInputs_Element inputs_{v_.inputs};
   VisionOutputs_Element outputs_{v_.outputs};
+};
+
+struct SpeechInputs_Element : JSON::Element {
+  explicit SpeechInputs_Element(Config::Model::Speech::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "audio_embeds") {
+      v_.audio_embeds = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_mask") {
+      v_.attention_mask = JSON::Get<std::string_view>(value);
+    } else if (name == "audio_sizes") {
+      v_.audio_sizes = JSON::Get<std::string_view>(value);
+    } else if (name == "audio_projection_mode") {
+      v_.audio_projection_mode = JSON::Get<std::string_view>(value);
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Speech::Inputs& v_;
+};
+
+struct SpeechOutputs_Element : JSON::Element {
+  explicit SpeechOutputs_Element(Config::Model::Speech::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "audio_features") {
+      v_.audio_features = JSON::Get<std::string_view>(value);
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Speech::Outputs& v_;
+};
+
+struct Speech_Element : JSON::Element {
+  explicit Speech_Element(Config::Model::Speech& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "config_filename") {
+      v_.config_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "adapter_filename") {
+      v_.adapter_filename = JSON::Get<std::string_view>(value);
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") {
+      return inputs_;
+    } else if (name == "outputs") {
+      return outputs_;
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Speech& v_;
+  SpeechInputs_Element inputs_{v_.inputs};
+  SpeechOutputs_Element outputs_{v_.outputs};
 };
 
 struct Eos_Array_Element : JSON::Element {
@@ -440,6 +509,8 @@ struct EmbeddingInputs_Element : JSON::Element {
       v_.input_ids = JSON::Get<std::string_view>(value);
     } else if (name == "image_features") {
       v_.image_features = JSON::Get<std::string_view>(value);
+    } else if (name == "audio_features") {
+      v_.audio_features = JSON::Get<std::string_view>(value);
     } else
       throw JSON::unknown_value_error{};
   }
@@ -565,6 +636,9 @@ struct Model_Element : JSON::Element {
     if (name == "prompt_templates") {
       return prompt_templates_;
     }
+    if (name == "speech") {
+      return speech_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -576,6 +650,7 @@ struct Model_Element : JSON::Element {
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   PromptTemplates_Element prompt_templates_{v_.prompt_templates};
+  Speech_Element speech_{v_.speech};
 };
 
 struct Search_Element : JSON::Element {
