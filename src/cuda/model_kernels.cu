@@ -45,7 +45,7 @@ template <typename T>
 __global__ void UpdateAttentionMask(T* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   int batch_id = i / new_kv_length;
-  int seq_id = i % new_kv_length;
+  int seq_id = (i % new_kv_length) + 1;
   if (i < new_kv_length * batch_beam_size) {
     mask_data[batch_id * max_length + total_length - seq_id] = 1;
   }

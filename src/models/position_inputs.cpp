@@ -38,6 +38,11 @@ DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, D
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
 
+  position_ids_ = std::make_unique<OgaValue>(model_.p_device_inputs_, type_);
+  position_ids_next_ = std::make_unique<OgaValue>(model_.p_device_inputs_, type_);
+  attention_mask_ = std::make_unique<OgaValue>(model_.p_device_inputs_, type_);
+  attention_mask_next_ = std::make_unique<OgaValue>(model_.p_device_inputs_, type_);
+
   // if (state_.GetCapturedGraphInfo()) {
   //   if (has_posid_input_) {
   //     sb_position_ids_ = state_.GetCapturedGraphInfo()->sb_position_ids_.get();
@@ -89,7 +94,7 @@ void DefaultPositionInputs::RewindTo(size_t index) {
   // Reset the state of the position inputs
   if (index == 0) {
     is_first_update_ = true;
-    is_first_mask_update_ = true;
+    // is_first_mask_update_ = true;
     // Rewind the mask input to a previous state
   } else if (has_mask_input_) {
     if (attention_mask_shape_[0] == 1) {
@@ -102,33 +107,66 @@ void DefaultPositionInputs::RewindTo(size_t index) {
 void DefaultPositionInputs::AddAttentionMask() {
   mask_input_index_ = state_.inputs_.size();
 
-  state_.inputs_.push_back(attention_mask_.get());
+  state_.inputs_.push_back(attention_mask_->GetOrtValue());
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.attention_mask.c_str());
 }
 
 void DefaultPositionInputs::AddPositionIDs() {
   posid_input_index_ = state_.inputs_.size();
 
-  state_.inputs_.push_back(position_ids_.get());
+  state_.inputs_.push_back(position_ids_->GetOrtValue());
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.position_ids.c_str());
 }
 
+// void DefaultPositionInputs::CreateNextPositionIDsTensor() {
+//   if (position_ids_->shape_[1] == 1) {
+
+//   }
+//   // if (!sb_position_ids_) {
+//     // if (position_ids_shape_[1] == 1 && position_ids_next_) {
+//     //   position_ids_ = std::move(position_ids_next_);
+//     //   position_ids_next_ = nullptr;
+//     // } else {
+//     //   position_ids_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), position_ids_shape_, type_);
+//     // }
+//   // } else {
+//   //   position_ids_ = sb_position_ids_->CreateTensorOnStaticBuffer(position_ids_shape_, type_);
+//   //   if (position_ids_shape_[1] == 1) {
+//   //     auto position_ids_span = ByteWrapTensor(*model_.p_device_inputs_, *position_ids_);
+//   //     auto position_ids_next_span = ByteWrapTensor(*model_.p_device_inputs_, *position_ids_next_);
+//   //     position_ids_span.CopyFrom(position_ids_next_span);
+//   //   }
+//   // }
+// }
+
+// void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_length) {
+//   if (position_ids_shape_[0] != 1 && !(total_length == 0 || new_kv_length == 1))
+//     throw std::runtime_error("DefaultPositionInputs::UpdatePositionIDs - batch_size must be 1 for continuous decoding.");
+
+//   // Reallocate position_ids when new_kv_length changes
+//   if (position_ids_shape_[1] != new_kv_length) {
+//     position_ids_shape_[1] = new_kv_length;
+//     CreateNextPositionIDsTensor();
+//     state_.inputs_[posid_input_index_] = position_ids_.get();
+//   }
+
+//   // if (model_.p_device_inputs_->GetType() == DeviceType::CUDA || model_.p_device_inputs_->GetType() == DeviceType::DML)
+//   //   model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetTensorMutableRawData(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length);
+//   // else {
+//   //   type_ == Ort::TypeToTensorType<int32_t> ? UpdatePositionIDsImpl<int32_t>(total_length, new_kv_length)
+//   //                                           : UpdatePositionIDsImpl<int64_t>(total_length, new_kv_length);
+//   // }
+//   model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
+// }
+
 void DefaultPositionInputs::CreateNextPositionIDsTensor() {
-  // if (!sb_position_ids_) {
-    if (position_ids_shape_[1] == 1 && position_ids_next_) {
-      position_ids_ = std::move(position_ids_next_);
-      position_ids_next_ = nullptr;
-    } else {
-      position_ids_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), position_ids_shape_, type_);
-    }
-  // } else {
-  //   position_ids_ = sb_position_ids_->CreateTensorOnStaticBuffer(position_ids_shape_, type_);
-  //   if (position_ids_shape_[1] == 1) {
-  //     auto position_ids_span = ByteWrapTensor(*model_.p_device_inputs_, *position_ids_);
-  //     auto position_ids_next_span = ByteWrapTensor(*model_.p_device_inputs_, *position_ids_next_);
-  //     position_ids_span.CopyFrom(position_ids_next_span);
-  //   }
-  // }
+  // position_ids_next_ tensor is allocated and initialized in anticipation of token generation
+  if (position_ids_next_ && position_ids_shape_[0] > 1 && position_ids_shape_[1] == 1) {
+    position_ids_ = std::move(position_ids_next_);
+    position_ids_next_ = nullptr;
+  } else {
+    position_ids_->CreateTensor(position_ids_shape_, state_.params_->use_graph_capture && position_ids_shape_[1] == 1);
+  }
 }
 
 void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_length) {
@@ -139,7 +177,7 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
   if (position_ids_shape_[1] != new_kv_length) {
     position_ids_shape_[1] = new_kv_length;
     CreateNextPositionIDsTensor();
-    state_.inputs_[posid_input_index_] = position_ids_.get();
+    state_.inputs_[posid_input_index_] = position_ids_->GetOrtValue();
   }
 
   // if (model_.p_device_inputs_->GetType() == DeviceType::CUDA || model_.p_device_inputs_->GetType() == DeviceType::DML)
@@ -148,21 +186,18 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
   //   type_ == Ort::TypeToTensorType<int32_t> ? UpdatePositionIDsImpl<int32_t>(total_length, new_kv_length)
   //                                           : UpdatePositionIDsImpl<int64_t>(total_length, new_kv_length);
   // }
-  model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
+  // TODO(aciddelgado): pass OgaValue instead of mutable data
+  // model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
+  model_.p_device_inputs_->UpdatePositionIds(*position_ids_, total_length);
 }
 
+// When graph capture is enabled, we create a new attention mask tensor of size max length only once
+// Otherwise, we increment the attention mask tensor by new_kv_length
 void DefaultPositionInputs::CreateNextAttentionMaskTensor(int total_length) {
-  // if (!sb_attention_mask_) {
-  if (!state_.params_->use_graph_capture) {
-    attention_mask_shape_[1] = total_length;
-    attention_mask_next_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), attention_mask_shape_, type_);
-  } else {
-    attention_mask_shape_[1] = state_.params_->search.max_length;
-    attention_mask_next_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), attention_mask_shape_, type_);
-    // if (is_first_mask_update_) {
-      ByteWrapTensor(*model_.p_device_inputs_, *attention_mask_next_).Zero();
-    // }
-  }
+  if (state_.params_->use_graph_capture)
+    return;
+  attention_mask_shape_[1] = total_length;
+  attention_mask_next_->CreateTensor(attention_mask_shape_);
 }
 
 void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_length) {
@@ -171,46 +206,31 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
 
   CreateNextAttentionMaskTensor(total_length);
 
-  // if (model_.p_device_inputs_->GetType() == DeviceType::CUDA) {
-  //   // int max_length = sb_attention_mask_ ? state_.params_->search.max_length : total_length;
-  //   int max_length = total_length;
-  //   bool update_only = false; // sb_attention_mask_ && !is_first_mask_update_;
-  //   model_.p_device_inputs_->UpdateAttentionMask(attention_mask_next_->GetTensorMutableRawData(),
-  //                                                attention_mask_->GetTensorRawData(),
-  //                                                static_cast<int>(attention_mask_shape_[0]),
-  //                                                new_kv_length,
-  //                                                total_length,
-  //                                                max_length,
-  //                                                update_only,
-  //                                                type_);
-  // } else {
-  //   type_ == Ort::TypeToTensorType<int32_t> ? UpdateAttentionMaskImpl<int32_t>(total_length)
-  //                                           : UpdateAttentionMaskImpl<int64_t>(total_length);
-  // }
-  int max_length = state_.params_->search.max_length;
-  bool update_only = false; // sb_attention_mask_ && !is_first_mask_update_;
-  model_.p_device_inputs_->UpdateAttentionMask(attention_mask_next_->GetTensorMutableRawData(),
-                                               attention_mask_->GetTensorRawData(),
-                                               static_cast<int>(attention_mask_shape_[0]),
+  // TODO(aciddelgado): pass OgaValue instead of mutable data and update generally
+  // int max_length = state_.params_->search.max_length;
+  model_.p_device_inputs_->UpdateAttentionMask(*attention_mask_next_,
+                                               *attention_mask_,
                                                new_kv_length,
                                                total_length,
-                                               max_length,
-                                               update_only,
-                                               type_);
+                                               state_.params_->use_graph_capture);
 
-  attention_mask_ = std::move(attention_mask_next_);
-  state_.inputs_[mask_input_index_] = attention_mask_.get();
-  is_first_mask_update_ = false;
+  // Function to do this? Am I off the deep end?
+  if (!state_.params_->use_graph_capture) {
+    attention_mask_->ort_value_ = std::move(attention_mask_next_->ort_value_);
+    state_.inputs_[mask_input_index_] = attention_mask_->GetOrtValue();
+  }
+  // is_first_mask_update_ = false;
 }
 
+// TODO(aciddelgado): change to use OgaValue
 template <typename T>
 void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
-  position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
-  position_ids_next_ = OrtValue::CreateTensor(model_.allocator_cpu_, std::array<int64_t, 2>{shape[0], 1}, type_);
-  auto* position_data = position_ids_->GetTensorMutableData<T>();
-  auto* position_data_next = position_ids_next_->GetTensorMutableData<T>();
+  auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
+  auto position_ids_next = OrtValue::CreateTensor(model_.allocator_cpu_, std::array<int64_t, 2>{shape[0], 1}, type_);
+  auto* position_data = position_ids->GetTensorMutableData<T>();
+  auto* position_data_next = position_ids_next->GetTensorMutableData<T>();
   const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data();
   auto* position = position_data;
   for (int i = 0; i < shape[0]; i++) {
@@ -222,23 +242,50 @@ void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> n
         *position = abs_position++;
       }
     }
-
     position_data_next[i] = abs_position - 1;
   }
 
   // Move tensors to appropriate device and expand by num_beams
-  position_ids_ = model_.ExpandInputs(position_ids_, state_.params_->search.num_beams);
-  position_ids_next_ = model_.ExpandInputs(position_ids_next_, state_.params_->search.num_beams);
+  position_ids_->ort_value_ = model_.ExpandInputs(position_ids, state_.params_->search.num_beams);
+  position_ids_next_->ort_value_ = model_.ExpandInputs(position_ids_next, state_.params_->search.num_beams);
+  if (state_.params_->use_graph_capture)
+    position_ids_next_->MakeStatic();
   position_ids_shape_[0] *= state_.params_->search.num_beams;
-  state_.inputs_[posid_input_index_] = position_ids_.get();
+  state_.inputs_[posid_input_index_] = position_ids_->GetOrtValue();
+}
+
+// Note: This function instead of extending ExpandInputs because we need to
+// initialize a static tensor in attention_mask_, we can't just return a random OrtValue
+template <typename T>
+void DefaultPositionInputs::InitializeStaticMask(OrtValue& cpu_attention_mask) {
+  // Create static tensor of size max_length and expanded by num_beams
+  attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  attention_mask_shape_[1] = state_.params_->search.max_length;
+  attention_mask_->CreateTensor(attention_mask_shape_, true);
+  auto output_span = WrapTensor<T>(*attention_mask_);
+  output_span.Zero();
+  // Copy the first new_kv_length elements of each sequence num_beams times each
+  auto input_span = WrapTensor<T>(*GetDeviceInterface(DeviceType::CPU), cpu_attention_mask);
+  auto input_shape = cpu_attention_mask.GetTensorTypeAndShapeInfo()->GetShape();
+  auto batch_size = input_shape[0];
+  auto num_beams = state_.params_->search.num_beams;
+  auto new_kv_length = input_shape[1];
+  auto max_length = input_shape[1] * num_beams;
+  for (int i = 0; i < batch_size; i++) {
+    for (int j = 0; j < num_beams; j++) {
+      auto output_subspan = output_span.subspan((i * num_beams + j) * max_length, new_kv_length);
+      auto input_subspan = input_span.subspan(i * new_kv_length, new_kv_length);
+      output_subspan.CopyFrom(input_subspan);
+    }
+  }
 }
 
 template <typename T>
 void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
-  attention_mask_ = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
-  auto* mask_data = attention_mask_->GetTensorMutableData<T>();
+  auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
+  auto* mask_data = attention_mask->GetTensorMutableData<T>();
   const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data();
   auto* mask = mask_data;
   for (int i = 0; i < shape[0]; i++) {
@@ -251,10 +298,16 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     }
   }
 
-  // Move tensors to appropriate device and expand by num_beams
-  attention_mask_ = model_.ExpandInputs(attention_mask_, state_.params_->search.num_beams);
-  attention_mask_shape_[0] *= state_.params_->search.num_beams;
-  state_.inputs_[mask_input_index_] = attention_mask_.get();
+  // @ryanunderhill: If we made above attention_mask size max length in graph capture case, this fork unnecessary, but more inneficeint
+  // I choose fork for now
+  if (state_.params_->use_graph_capture) {
+    InitializeStaticMask<T>(*attention_mask);
+  } else {
+    attention_mask = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
+    attention_mask_->ort_value_ = std::move(attention_mask);
+    attention_mask_shape_[0] *= state_.params_->search.num_beams;
+  }
+  state_.inputs_[mask_input_index_] = attention_mask_->GetOrtValue();
 }
 
 template <typename T>
@@ -299,7 +352,7 @@ void DefaultPositionInputs::InitializeSequenceLengths(std::array<int64_t, 2> sha
 
 void DefaultPositionInputs::RewindMask(size_t index) {
   // if (sb_attention_mask_ && !is_first_mask_update_) {
-  if (!is_first_mask_update_) {
+  // if (!is_first_mask_update_) {
     throw std::runtime_error("PositionInputs::RewindMask - Static buffer is not supported for continuous decoding.");
 #if 0  // TODO: Fix implementation, cudaMemsetAsync of 1 is setting bytes of 1 vs int32's of 1
     int past_length = static_cast<int>(index);
@@ -313,7 +366,7 @@ void DefaultPositionInputs::RewindMask(size_t index) {
                     (type_ == Ort::TypeToTensorType<int32_t> ? sizeof(int32_t) : sizeof(int64_t)) * past_length,
                     model_.cuda_stream_);
 #endif
-  }
+  // }
 }
 
 

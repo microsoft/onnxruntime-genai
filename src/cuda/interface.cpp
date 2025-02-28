@@ -138,18 +138,31 @@ struct CudaInterfaceImpl final : DeviceInterface {
     return true;
   }
 
-  void UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
+  // void UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
+  //   if (type == Ort::TypeToTensorType<int32_t>)
+  //     cuda::Launch_UpdatePositionIds(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length, GetStream());
+  //   else
+  //     cuda::Launch_UpdatePositionIds(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length, GetStream());
+  // }
+
+  void UpdatePositionIds(OgaValue& position_ids, int total_length) override {
+    int batch_beam_size = position_ids.GetShape()[0];
+    int new_kv_length = position_ids.GetShape()[1];
+    ONNXTensorElementDataType type = position_ids.GetType();
     if (type == Ort::TypeToTensorType<int32_t>)
-      cuda::Launch_UpdatePositionIds(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length, GetStream());
+      cuda::Launch_UpdatePositionIds(position_ids.GetMutableData<int32_t>(), batch_beam_size, total_length, new_kv_length, GetStream());
     else
-      cuda::Launch_UpdatePositionIds(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length, GetStream());
+      cuda::Launch_UpdatePositionIds(position_ids.GetMutableData<int64_t>(), batch_beam_size, total_length, new_kv_length, GetStream());
   }
 
-  void UpdateAttentionMask(void* mask_data, const void* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
+  void UpdateAttentionMask(OgaValue& new_mask, const OgaValue& old_mask, int new_kv_length, int total_length, bool update_only) override {
+    int batch_beam_size = new_mask.GetShape()[0];
+    int max_length = new_mask.GetTShape()[1];
+    ONNXTensorElementDataType type = new_mask.GetType();
     if (type == Ort::TypeToTensorType<int32_t>)
-      cuda::Launch_UpdateAttentionMask(static_cast<int32_t*>(mask_data), static_cast<const int32_t*>(old_data), batch_beam_size, new_kv_length, total_length, max_length, update_only, GetStream());
+      cuda::Launch_UpdateAttentionMask(new_mask.GetMutableData<int32_t>(), old_mask.GetData<int32_t>(), batch_beam_size, new_kv_length, total_length, max_length, update_only, GetStream());
     else
-      cuda::Launch_UpdateAttentionMask(static_cast<int64_t*>(mask_data), static_cast<const int64_t*>(old_data), batch_beam_size, new_kv_length, total_length, max_length, update_only, GetStream());
+      cuda::Launch_UpdateAttentionMask(new_mask.GetMutableData<int64_t>(), old_mask.GetData<int64_t>(), batch_beam_size, new_kv_length, total_length, max_length, update_only, GetStream());
   }
 
   void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count) override {

@@ -13,6 +13,7 @@ namespace Generators {
 struct Search;
 struct Sequences;
 struct GeneratorParams;
+struct OgaValue;
 
 // A DeviceBuffer is an abstract interface to a block of device memory (can be cuda/dml/cpu memory)
 // Note: For a CPU DeviceBuffer, there's only one block of memory on CPU, the copy methods are no-ops
@@ -115,8 +116,10 @@ struct DeviceInterface {
 
   virtual bool Cast(OrtValue& /*input*/, OrtValue& /*output*/) { return false; }
 
-  virtual void UpdatePositionIds(void* /*position_ids*/, int /*batch_beam_size*/, int /*total_length*/, int /*new_kv_length*/, ONNXTensorElementDataType /*type*/) { assert(false); }
-  virtual void UpdateAttentionMask(void* /*mask_data*/, const void* /*old_data*/, int /*batch_beam_size*/, int /*new_kv_length*/, int /*total_length*/, int /*max_length*/, bool /*update_only*/, ONNXTensorElementDataType /*type*/) { assert(false); }
+  // virtual void UpdatePositionIds(void* /*position_ids*/, int /*batch_beam_size*/, int /*total_length*/, int /*new_kv_length*/, ONNXTensorElementDataType /*type*/) { assert(false); }
+  virtual void UpdatePositionIds(OgaValue& /*position_ids*/, int /*total_length*/) { assert(false); }
+  // virtual void UpdateAttentionMask(void* /*mask_data*/, const void* /*old_data*/, int /*batch_beam_size*/, int /*new_kv_length*/, int /*total_length*/, int /*max_length*/, bool /*update_only*/, ONNXTensorElementDataType /*type*/) { assert(false); }
+  virtual void UpdateAttentionMask(OgaValue& /*new_mask*/, const OgaValue& /*old_mask*/, int /*new_kv_length*/, int /*total_length*/, bool /*update_only*/) { assert(false); }
 
   virtual void LaunchHandleEOSArray(float* /*batch_logits*/, int /*batch_beam_size*/, int /*vocab_size*/, const int32_t* /*eos_token_ids*/, int /*eos_token_ids_count*/) { assert(false); }
   virtual void UpdateCacheIndirectionKernelLauncher(int32_t* /*tgt_indir_cache*/, const int32_t* /*src_indir_cache*/, const int32_t* /*beam_ids*/, int /*batch_size*/, int /*beam_width*/, int /*input_seq_length*/, int /*max_seq_length*/, int /*current_length*/) { assert(false); }

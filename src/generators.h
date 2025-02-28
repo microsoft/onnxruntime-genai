@@ -28,6 +28,7 @@
 #include "make_string.h"
 #include "models/onnxruntime_api.h"
 #include "smartptrs.h"
+#include "oga_value.h"
 #include "models/debugging.h"
 #include "config.h"
 #include "logging.h"
@@ -49,7 +50,14 @@ DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
   return device.WrapMemory(std::span<T>{value.GetTensorMutableData<T>(), info->GetElementCount()});
 }
 
+template <typename T>
+DeviceSpan<T> WrapTensor(OgaValue& value) {
+  assert(value.GetType() == Ort::TypeToTensorType<std::remove_const_t<T>>);
+  return value.p_device_->WrapMemory(std::span<T>{value.GetMutableData<T>(), value.GetElementCount()});
+}
+
 DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value);
+DeviceSpan<uint8_t> ByteWrapTensor(OgaValue& value);
 
 template <typename T>
 struct OrtTensor {
