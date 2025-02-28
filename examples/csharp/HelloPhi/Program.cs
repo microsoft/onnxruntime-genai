@@ -83,54 +83,109 @@ var option = 2;
 if (interactive)
 {
     Console.WriteLine("Please enter option number:");
-    Console.WriteLine("1. Complete Output");
-    Console.WriteLine("2. Streaming Output");
+    Console.WriteLine("1. Complete Q&A");
+    Console.WriteLine("2. Streaming Q&A");
+    Console.WriteLine("3. Streaming Chat (not supported for DirectML and QNN currently)");
     int.TryParse(Console.ReadLine(), out option);
 }
 
-do
+int minLength = 50;
+int maxLength = 500;
+
+static string GetPrompt(bool interactive)
 {
     string prompt = "def is_prime(num):"; // Example prompt
     if (interactive)
     {
-        Console.WriteLine("Prompt:");
+        Console.WriteLine("Prompt: (Use quit() to exit)");
         prompt = Console.ReadLine();
     }
-    if (string.IsNullOrEmpty(prompt))
-    {
-        continue;
-    }
-    var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
+    return prompt;
+}
 
-    using GeneratorParams generatorParams = new GeneratorParams(model);
-    generatorParams.SetSearchOption("min_length", 50);
-    generatorParams.SetSearchOption("max_length", 200);
-    if (option == 1) // Complete Output
+if (option == 1 || option == 2)
+{
+    do
     {
-        using var generator = new Generator(model, generatorParams);
-        generator.AppendTokenSequences(sequences);
-        var watch = System.Diagnostics.Stopwatch.StartNew();
-        while (!generator.IsDone())
+        string prompt = GetPrompt(interactive);
+        if (string.IsNullOrEmpty(prompt))
         {
-            generator.GenerateNextToken();
+            continue;
+        }
+        if (string.Compare(prompt, "quit()", StringComparison.OrdinalIgnoreCase) == 0)
+        {
+            break;
+        }
+        var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
+
+        if (option == 1) // Complete Output
+        {
+            using GeneratorParams generatorParams = new GeneratorParams(model);
+            generatorParams.SetSearchOption("min_length", minLength);
+            generatorParams.SetSearchOption("max_length", maxLength);
+            using var generator = new Generator(model, generatorParams);
+            generator.AppendTokenSequences(sequences);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            while (!generator.IsDone())
+            {
+                generator.GenerateNextToken();
+            }
+
+            var outputSequence = generator.GetSequence(0);
+            var outputString = tokenizer.Decode(outputSequence);
+            watch.Stop();
+            var runTimeInSeconds = watch.Elapsed.TotalSeconds;
+            Console.WriteLine("Output:");
+            Console.WriteLine(outputString);
+            var totalTokens = outputSequence.Length;
+            Console.WriteLine($"Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
         }
 
-        var outputSequence = generator.GetSequence(0);
-        var outputString = tokenizer.Decode(outputSequence);
-        watch.Stop();
-        var runTimeInSeconds = watch.Elapsed.TotalSeconds;
-        Console.WriteLine("Output:");
-        Console.WriteLine(outputString);
-        var totalTokens = outputSequence.Length;
-        Console.WriteLine($"Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
-    }
+        else if (option == 2) //Streaming Output
+        {
+            using GeneratorParams generatorParams = new GeneratorParams(model);
+            generatorParams.SetSearchOption("min_length", minLength);
+            generatorParams.SetSearchOption("max_length", maxLength);
+            using var tokenizerStream = tokenizer.CreateStream();
+            using var generator = new Generator(model, generatorParams);
+            generator.AppendTokenSequences(sequences);
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            while (!generator.IsDone())
+            {
+                generator.GenerateNextToken();
+                Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
+            }
+            Console.WriteLine();
+            watch.Stop();
+            var runTimeInSeconds = watch.Elapsed.TotalSeconds;
+            var outputSequence = generator.GetSequence(0);
+            var totalTokens = outputSequence.Length;
+            Console.WriteLine($"Streaming Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
+        }
+    } while (interactive);
+}
 
-    else if (option == 2) //Streaming Output
-    {
-        using var tokenizerStream = tokenizer.CreateStream();
-        using var generator = new Generator(model, generatorParams);
-        generator.AppendTokenSequences(sequences);
+if (option == 3) // Streaming Chat
+{
+    using GeneratorParams generatorParams = new GeneratorParams(model);
+    generatorParams.SetSearchOption("min_length", minLength);
+    generatorParams.SetSearchOption("max_length", maxLength);
+    using var tokenizerStream = tokenizer.CreateStream();
+    using var generator = new Generator(model, generatorParams);
+    var prevTotalTokens = 0;
+    do{
+        string prompt = GetPrompt(interactive);
+        if (string.IsNullOrEmpty(prompt))
+        {
+            continue;
+        }
+        if (string.Compare(prompt, "quit()", StringComparison.OrdinalIgnoreCase) == 0)
+        {
+            break;
+        }
+        var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
         var watch = System.Diagnostics.Stopwatch.StartNew();
+        generator.AppendTokenSequences(sequences);
         while (!generator.IsDone())
         {
             generator.GenerateNextToken();
@@ -140,7 +195,8 @@ do
         watch.Stop();
         var runTimeInSeconds = watch.Elapsed.TotalSeconds;
         var outputSequence = generator.GetSequence(0);
-        var totalTokens = outputSequence.Length;
-        Console.WriteLine($"Streaming Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
-    }
-} while (interactive);
+        var totalNewTokens = outputSequence.Length - prevTotalTokens;
+        prevTotalTokens = totalNewTokens;
+        Console.WriteLine($"Streaming Tokens: {totalNewTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalNewTokens / runTimeInSeconds:0.00}");
+    } while (interactive);
+}

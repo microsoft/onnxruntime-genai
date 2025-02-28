@@ -171,5 +171,22 @@ jobs:
       CsprojConfiguration: $(csproj_configuration)
       LocalFolder: 'phi3.5-vision'
       ModelFolder: $(prebuild_phi3_5_vision_model_folder)
+  
+  - template: steps/utils/download-huggingface-model.yml
+    parameters:
+      HuggingFaceRepo: 'microsoft/Phi-4-multimodal-instruct-onnx'
+      LocalFolder: 'phi4-mm'
+      RepoFolder: $(prebuild_phi4_mm_model_folder)
+      WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/HelloPhi4MM'
+      HuggingFaceToken: $(HF_TOKEN)
+      os: ${{ parameters.os }}
+
+  - template: steps/nuget-validation-step.yml
+    parameters:
+      CsprojFolder: "examples/csharp/HelloPhi4MM"
+      CsprojName: "HelloPhi4MM"
+      CsprojConfiguration: $(csproj_configuration)
+      LocalFolder: 'phi4-mm'
+      ModelFolder: $(prebuild_phi4_mm_model_folder)
 
   - template: steps/compliant-and-cleanup-step.yml
