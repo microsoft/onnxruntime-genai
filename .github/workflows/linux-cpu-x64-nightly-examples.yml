@@ -1,12 +1,12 @@
-name: "Linux CPU x64 Nightly Examples Build"
+name: "Linux CPU x64 Nightly Examples"
+
+# Run at 5:00 AM UTC every day
+# 9:00 PM PST
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-    - main
-    - rel-*
-  pull_request:
+  schedule:
+    - cron: "0 5 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -63,14 +63,3 @@ jobs:
             echo "Result seems incorrect!"
             exit 1
           fi
-
-      - name: Verify Build Artifacts
-        if: always()
-        run: |
-          ls -l ${{ github.workspace }}/build
-
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: onnxruntime-genai-linux-cpu-examples
-          path: ${{ github.workspace }}/build/**/*.a
