@@ -35,4 +35,5 @@ struct Element {
 };
 
 void Parse(Element& element, std::string_view document);
+void TranslateException(std::string_view name);  // Translate JSON exceptions into std::runtime_exception with a useful message
 }  // namespace JSON

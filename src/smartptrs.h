@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 #include <assert.h>
+#include <atomic>
 #include <memory>
 #include "span.h"
 
@@ -128,6 +129,25 @@ struct DeviceInterface {
     assert(false);
     return nullptr;
   }  // Temporary until we fully factor out providers
+};
+
+// A shared_ptr based type that we expose through our C API should inherit from this type.
+// ExternalAddRef must be called when returning an object through the C API
+// ExternalRelease must be called on the C API destroy method
+template <typename T>
+struct ExternalRefCounted {
+  void ExternalAddRef() {
+    if (++ref_count_ == 1)  // First reference?
+      external_owner_ = static_cast<T*>(this)->shared_from_this();
+  }
+  void ExternalRelease() {
+    if (--ref_count_ == 0)
+      external_owner_ = nullptr;
+  }
+
+ private:
+  std::shared_ptr<T> external_owner_;  // shared_ptr to ourselves to keep us alive
+  std::atomic<int> ref_count_{};       // C API refcount (can't use only the shared_ptr)
 };
 
 namespace Location {

@@ -26,7 +26,7 @@ target_include_directories(model_benchmark PRIVATE
   ${CMAKE_SOURCE_DIR}/src  # directory containing the ort_genai headers
 )
 
-target_link_libraries(model_benchmark PRIVATE onnxruntime-genai-static ${ONNXRUNTIME_LIB})
+target_link_libraries(model_benchmark PRIVATE onnxruntime-genai ${ONNXRUNTIME_LIB})
 
 target_link_directories(model_benchmark PRIVATE ${ORT_LIB_DIR})
 
