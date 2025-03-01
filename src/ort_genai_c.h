@@ -526,7 +526,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetShape(OgaTensor*, int64_t* shape_
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetData(OgaTensor*, void** out);
 
 /** \brief Create an OgaNamedTensors
-* \param[out] out The created OgaNamedTensors
+ * \param[out] out The created OgaNamedTensors
  * \return OgaResult containing the error message if the creation of the OgaNamedTensors failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateNamedTensors(OgaNamedTensors** out);
@@ -551,7 +551,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsSet(OgaNamedTensors* named_ten
  * \param[in] named_tensors The named tensors to remove the tensor
  * \param[in] name The name of the tensor to remove
  * \return OgaResult containing the error message if the tensor with the given name could not be removed.
- */ 
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsDelete(OgaNamedTensors* named_tensors, const char* name);
 
 /** \brief Get the number of tensors in the NamedTensors

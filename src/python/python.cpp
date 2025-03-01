@@ -331,7 +331,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("keys", [](OgaNamedTensors& named_tensors) {
         std::vector<std::string> keys;
         auto names = named_tensors.GetNames();
-        for (size_t i=0;i<names->Count();i++)
+        for (size_t i = 0; i < names->Count(); i++)
           keys.push_back(names->Get(i));
         return keys;
       });
