@@ -82,20 +82,6 @@ std::unique_ptr<OrtValue> ProcessImagePrompt(const Generators::Tokenizer& tokeni
 
 }  // namespace
 
-std::unique_ptr<Images> LoadImages(std::span<const char* const> image_paths) {
-  if (image_paths.empty())
-    throw std::runtime_error("No images provided");
-
-  for (const char* image_path : image_paths) {
-    if (!fs::path(image_path).exists()) {
-      throw std::runtime_error("Image path does not exist: " + std::string(image_path));
-    }
-  }
-  auto [images, num_images] = ort_extensions::LoadRawData<const char* const*, ort_extensions::ImageRawData>(
-      image_paths.data(), image_paths.data() + image_paths.size());
-  return std::make_unique<Images>(std::move(images), num_images);
-}
-
 PhiImageProcessor::PhiImageProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)} {
   auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();

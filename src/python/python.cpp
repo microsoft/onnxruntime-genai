@@ -307,7 +307,34 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
 
-  pybind11::class_<OgaNamedTensors>(m, "NamedTensors");
+  pybind11::class_<OgaNamedTensors>(m, "NamedTensors")
+      .def(pybind11::init([]() { return OgaNamedTensors::Create(); }))
+      .def("__getitem__", [](const OgaNamedTensors& named_tensors, const std::string& name) {
+        auto tensor = named_tensors.Get(name.c_str());
+        if (!tensor)
+          throw std::runtime_error("Tensor with name: " + name + " not found.");
+        return tensor;
+      })
+      .def("__setitem__", [](OgaNamedTensors& named_tensors, const std::string& name, pybind11::array& value) {
+        named_tensors.Set(name.c_str(), *ToOgaTensor(value));
+      })
+      .def("__setitem__", [](OgaNamedTensors& named_tensors, const std::string& name, OgaTensor& value) {
+        named_tensors.Set(name.c_str(), value);
+      })
+      .def("__contains__", [](const OgaNamedTensors& named_tensors, const std::string& name) {
+        return named_tensors.Get(name.c_str()) != nullptr;
+      })
+      .def("__delitem__", [](OgaNamedTensors& named_tensors, const std::string& name) {
+        named_tensors.Delete(name.c_str());
+      })
+      .def("__len__", &OgaNamedTensors::Count)
+      .def("keys", [](OgaNamedTensors& named_tensors) {
+        std::vector<std::string> keys;
+        auto names = named_tensors.GetNames();
+        for (size_t i=0;i<names->Count();i++)
+          keys.push_back(names->Get(i));
+        return keys;
+      });
 
   pybind11::class_<OgaTensor>(m, "Tensor")
       .def(pybind11::init([](pybind11::array& v) { return ToOgaTensor(v); }))
@@ -382,11 +409,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return OgaImages::Load(image_paths_vector);
       })
       .def_static("open_bytes", [](pybind11::args image_datas) {
-        if (image_datas.empty())
-          throw std::runtime_error("No images provided");
-
         std::vector<const void*> image_raw_data(image_datas.size());
-        std::vector<int64_t> image_sizes(image_datas.size());
+        std::vector<size_t> image_sizes(image_datas.size());
         for (size_t i = 0; i < image_datas.size(); ++i) {
           if (!pybind11::isinstance<pybind11::bytes>(image_datas[i]))
             throw std::runtime_error("Image data must be bytes.");
@@ -396,11 +420,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           image_sizes[i] = info.size;
         }
 
-        return OgaImages::Load(image_data_ptrs.data(), image_data_sizes.data(), image_datas.size());
-        ort_extensions::OrtxObjectPtr<OrtxRawImages> images;
-        CheckResult(OrtxCreateRawImages(images.ToBeAssigned(), image_raw_data.data(), image_sizes.data(), image_datas.size()));
-
-        return std::make_shared<Images>(std::move(images), image_datas.size());
+        return OgaImages::Load(image_raw_data.data(), image_sizes.data(), image_raw_data.size());
       });
 
   pybind11::class_<OgaAudios>(m, "Audios")
@@ -418,54 +438,16 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         return OgaAudios::Load(audio_paths_vector);
       });
 
-  pybind11::class_<PyNamedTensors, std::shared_ptr<PyNamedTensors>>(m, "NamedTensors")
-      .def("__getitem__", [](PyNamedTensors& named_tensors, const std::string& name) {
-        auto tensor = named_tensors.named_tensors_->find(name);
-        if (tensor == named_tensors.named_tensors_->end())
-          throw std::runtime_error("Tensor with name: " + name + " not found.");
-
-        return ToNumpy(tensor->second->ort_tensor_.get());
-      })
-      .def("__setitem__", [](PyNamedTensors& named_tensors, const std::string& name, pybind11::array& value) {
-        auto tensor = std::make_shared<Tensor>(ToOrtValue(value));
-        (*named_tensors.named_tensors_)[name] = tensor;
-      })
-      .def("__contains__", [](PyNamedTensors& named_tensors, const std::string& name) {
-        return named_tensors.named_tensors_->find(name) != named_tensors.named_tensors_->end();
-      })
-      .def("keys", [](PyNamedTensors& named_tensors) {
-        std::vector<std::string> keys;
-        for (const auto& tensor : *named_tensors.named_tensors_) {
-          keys.push_back(tensor.first);
-        }
-        return keys;
-      })
-      .def("__iter__", [](PyNamedTensors& named_tensors) {
-        return pybind11::make_key_iterator(named_tensors.named_tensors_->begin(), named_tensors.named_tensors_->end());
-      })
-      .def("__len__", [](PyNamedTensors& named_tensors) { return named_tensors.named_tensors_->size(); })
-      .def("__repr__", [](PyNamedTensors& named_tensors) {
-        std::string result = "{";
-        for (const auto& tensor : *named_tensors.named_tensors_) {
-          result += tensor.first + ": Tensor(" + ToFormatDescriptor(tensor.second->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementType()) + "), ";
-        }
-        result += "}";
-        return result;
-      });
-
-  pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
+  pybind11::class_<OgaMultiModalProcessor>(m, "MultiModalProcessor")
       .def(
           "__call__", [](OgaMultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) {
-            if (kwargs.contains("images")) {
-              images = kwargs["images"].cast<Images*>();
-            }
-
-            if (kwargs.contains("audios")) {
-              audios = kwargs["audios"].cast<Audios*>();
-            }
-
-            return std::make_shared<PyNamedTensors>(
-                processor.Process(prompt.value_or(""), images, audios));
+            OgaImages* images{};
+            OgaAudios* audios{};
+            if (kwargs.contains("images"))
+              images = kwargs["images"].cast<OgaImages*>();
+            if (kwargs.contains("audios"))
+              audios = kwargs["audios"].cast<OgaAudios*>();
+            return processor.ProcessImagesAndAudios(prompt.value_or("").c_str(), images, audios);
           },
           pybind11::arg("prompt") = pybind11::none())
       .def("create_stream", [](OgaMultiModalProcessor& processor) { return OgaTokenizerStream::Create(processor); })

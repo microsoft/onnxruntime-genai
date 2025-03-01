@@ -525,6 +525,49 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetShape(OgaTensor*, int64_t* shape_
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetData(OgaTensor*, void** out);
 
+/** \brief Create an OgaNamedTensors
+* \param[out] out The created OgaNamedTensors
+ * \return OgaResult containing the error message if the creation of the OgaNamedTensors failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateNamedTensors(OgaNamedTensors** out);
+
+/** \brief Lookup a tensor in a NamedTensor set by name
+ * \param[in] named_tensors The named tensors to search
+ * \param[in] name The name of the tensor to find
+ * \param[out] out The tensor with the given name
+ * \return OgaResult containing the error message if the tensor with the given name could not be found.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsGet(const OgaNamedTensors* named_tensors, const char* name, OgaTensor** out);
+
+/** \brief Set a tensor in a NamedTensor set by name
+ * \param[in] named_tensors The named tensors to set the tensor
+ * \param[in] name The name of the tensor to set
+ * \param[in] tensor The tensor to set
+ * \return OgaResult containing the error message if the tensor with the given name could not be set.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsSet(OgaNamedTensors* named_tensors, const char* name, OgaTensor* tensor);
+
+/** \brief Delete a tensor in a NamedTensor set by name
+ * \param[in] named_tensors The named tensors to remove the tensor
+ * \param[in] name The name of the tensor to remove
+ * \return OgaResult containing the error message if the tensor with the given name could not be removed.
+ */ 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsDelete(OgaNamedTensors* named_tensors, const char* name);
+
+/** \brief Get the number of tensors in the NamedTensors
+ * \param[in] named_tensors The named tensors to get the count of the tensors
+ * \param[out] out The number of tensors in the NamedTensors
+ * \return OgaResult containing the error message if the getting of the count of the tensors failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsCount(const OgaNamedTensors* named_tensors, size_t* out);
+
+/** \brief Return an OgaStringArray of the names of the tensors in an OgaNamedTensors object
+ * \param[in] named_tensors The named tensors to get the names of the tensors
+ * \param[out] out The OgaStringArray containing the names of the tensors
+ * \return OgaResult containing the error message if the getting of the names of the tensors failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsGetNames(const OgaNamedTensors* named_tensors, OgaStringArray** out);
+
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetCurrentGpuDeviceId(int device_id);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGetCurrentGpuDeviceId(int* device_id);
 
