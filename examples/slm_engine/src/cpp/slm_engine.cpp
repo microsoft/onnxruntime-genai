@@ -1,6 +1,8 @@
 
 #include "slm_engine.h"
 
+#include "onnxruntime/onnxruntime_cxx_api.h"
+
 #include <stdio.h>
 #include <string.h>
 #if !defined(_WIN32)
@@ -32,9 +34,12 @@ using json = nlohmann::json;
 namespace microsoft {
 namespace slm_engine {
 
-std::string SLMEngine::GetVersion() {
+void SLMEngine::GetVersion(std::string& slm_version, std::string& ortga_version,
+                           std::string& ort_version) {
   // SW_VERSION_NUMBER is defined in the CMakeLists.txt file
-  return std::string(SW_VERSION_NUMBER);
+  slm_version = std::string(SW_VERSION_NUMBER);
+  ortga_version = std::string(ORT_GENAI_VERSION);
+  ort_version = Ort::GetVersionString();
 }
 
 std::unique_ptr<SLMEngine> SLMEngine::CreateEngine(
@@ -243,7 +248,7 @@ std::string SLMEngine::complete(const char* user_prompt) {
 const auto PromptFormatTable = R"(
 [
    {
-      "llm_type": "phi3",
+      "llm_type": "phi",
       "prompt_format": {
          "system": { "prefix": "<|system|>\n", "suffix": "<|end|>\n" },
          "user": { "prefix": "<|user|>\n", "suffix": "<|end|>\n" },
@@ -251,7 +256,7 @@ const auto PromptFormatTable = R"(
       }
    },
    {     
-      "llm_type": "llama3.2",
+      "llm_type": "llama",
       "prompt_format": {
          "system": { "prefix": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n", "suffix": "<|eot_id|>" },
          "user": { "prefix": "<|start_header_id|>user<|end_header_id|>\n\n", "suffix": "<|eot_id|>" },
@@ -312,13 +317,16 @@ bool SLMEngine::load_model(const char* model_path,
     return false;
   }
 
+  string slm_ver, oga_ver, ort_ver;
+  GetVersion(slm_ver, oga_ver, ort_ver);
+
   cout << "Loaded Model: " << model_path << endl;
   cout << "Model Type: " << ModelTypeToString(model_type) << endl;
   cout << "Prompt Format: " << m_prompt_format.llm_type << endl;
-  cout << "SLM Engine Version: " << GetVersion() << endl;
   cout << "SLM Engine Initialized" << endl;
-
-  cout << "VERSION: " << SW_VERSION_NUMBER << endl;
+  cout << "SLM VERSION: " << slm_ver << endl;
+  cout << "ORT GenAI VERSION: " << oga_ver << endl;
+  cout << "ORT VERSION: " << ort_ver << endl;
   m_llm_input_dbg_stream.open("slm-input-records.jsonl");
   m_llm_output_dbg_stream.open("slm-output-records.jsonl");
 

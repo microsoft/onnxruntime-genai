@@ -98,7 +98,7 @@ if __name__ == "__main__":
     )
 
     parser.add_argument("-m", "--model_path", help="Path to the ONNX model")
-    parser.add_argument("-mf", "--model_family", help="Type of model: phi3 or llama3.2")
+    parser.add_argument("-mf", "--model_family", help="Type of model: phi or llama")
 
     args = parser.parse_args()
     if args.server_binary_path is None:

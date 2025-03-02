@@ -117,7 +117,7 @@ int main(int argc, char** argv) {
   string model_family;
   program.add_argument("-mf", "--model_family")
       .required()
-      .help("Model family: <phi3|llama3.2|custom>")
+      .help("Model family: <phi|llama|custom>")
       .store_into(model_family);
 
   string test_data_file;
@@ -144,7 +144,11 @@ int main(int argc, char** argv) {
           "If provided, more debugging information printed on standard "
           "output");
 
-  cout << "SLM Runner Version: " << microsoft::slm_engine::SLMEngine::GetVersion()
+  std::string slm_ver, oga_ver, ort_ver;
+  microsoft::slm_engine::SLMEngine::GetVersion(slm_ver, oga_ver, ort_ver);
+
+  cout << "SLM Runner Version: "
+       << slm_ver << "\nORT GenAI Version: " << oga_ver << "\nORT Version: " << ort_ver
        << endl;
   try {
     program.parse_args(argc, argv);

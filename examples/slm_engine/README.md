@@ -34,7 +34,7 @@ Unknown argument: --help
 Usage: slm_server --model_family VAR --model_path VAR [--port_number VAR] [--verbose]
 
 Optional arguments:
-  -mf, --model_family   Type of model: llama3.2 or phi3
+  -mf, --model_family   Type of model: llama or phi
   -m,  --model_path     Path to the model file [required]
   -p, --port_number     HTTP Port Number to use (default 8080)
   -v, --verbose         If provided, more debugging information printed on standard output
@@ -44,7 +44,7 @@ Optional arguments:
 ### Example Launch Command
 
 ```shell
-$ ./slm-server -mf phi3  -m <path to the ONNX model> -v
+$ ./slm-server -mf phi  -m <path to the ONNX model> -v
 
 ```
 
@@ -205,7 +205,7 @@ target_link_libraries(inference_server slm_engine ort ort_genai)
 int main(int argc, char **argv) {
 
     auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
-        "path to ONNX Model Directory", "phi3", true);
+        "path to ONNX Model Directory", "phi", true);
 
     if (!slm_engine) {
         std::cout << "Cannot create engine!\n";
@@ -244,6 +244,13 @@ For Windows, often the maximum path length is 260 which results in breaking the 
 - Open the 'Run' command (Win+R) and type gpedit.msc, then press Enter.
 - Navigate to: Computer Configuration > Administrative Templates > System > Filesystem.
 - Double-click Enable Win32 long paths and set it to Enabled, then click Apply.
+
+Also, enable long filenames by opening a terminal window as **Administrator** and then running the following command:
+
+```
+c:\> git config --system core.longpaths true
+
+```
 
 Following are the platforms we tested the builds.
 
@@ -372,7 +379,7 @@ Following example show how to test this on a Windows 11:
 
 ```Powershell
 >  cd .\build_scripts\builds\Windows-AMD64\install\bin\
->  .\slm-runner.exe -mf phi3 -t ..\..\..\..\..\test\batch-input.jsonl -m ..\..\..\..\..\..\..\..\..\models\Phi-3-mini-4k-instruct-onnx\cpu_and_mobile\cpu-int4-rtn-block-32-acc-level-4\ -o output.jsonl -v
+>  .\slm-runner.exe -mf phi -t ..\..\..\..\..\test\batch-input.jsonl -m ..\..\..\..\..\..\..\..\..\models\Phi-3-mini-4k-instruct-onnx\cpu_and_mobile\cpu-int4-rtn-block-32-acc-level-4\ -o output.jsonl -v
 
 ```
 
@@ -389,7 +396,7 @@ Unknown argument: --help
 Usage: slm_runner --model_family VAR --model_path VAR --test_data_file VAR --output_file VAR [--verbose]
 
 Optional arguments:
-  -mf, --model_family   Type of model: llama3.2 or phi3
+  -mf, --model_family   Type of model: llama or phi
   -m, --model_path      Path to the model file [required]
   -t, --test_data_file  Path to the test data file (JSONL) [required]
   -o, --output_file     Path to the output file (JSONL) [required]

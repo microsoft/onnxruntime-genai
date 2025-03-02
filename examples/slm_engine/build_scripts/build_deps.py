@@ -209,16 +209,15 @@ def build_ort(args):
         os.chdir("jni")
         if not os.path.exists("arm64-v8a"):
             os.symlink("../lib", "arm64-v8a")
+        os.chdir("..")
     else:
         # Copy the include/onnxruntime/* to include directory
         copy_files_keeping_symlinks(
             glob.glob(f"include/onnxruntime/*"),
             f"include",
         )
-        # Remove the include/onnxruntime directory
-        shutil.rmtree("include/onnxruntime")
 
-        # If we are on Windows - then we need to copy the .dll files to the 
+        # If we are on Windows - then we need to copy the .dll files to the
         # lib directory as well
         if platform.system() == "Windows":
             copy_files_keeping_symlinks(
@@ -226,6 +225,17 @@ def build_ort(args):
                 f"lib",
             )
 
+    # Copy these artifacts to the SLM Engine dep/artifacts directory
+    # Now copy the artifacts to the artifacts directory
+    artifacts_dir = os.path.abspath(
+        f"../../../../../../artifacts/{get_platform_dirname(args)}-{get_machine_type(args)}"
+    )
+
+    print(f"{MAGENTA}Copying ORT artifacts to 3P Artifacts: {artifacts_dir}{CLEAR}")
+    os.makedirs(artifacts_dir, exist_ok=True)
+    copy_files_keeping_symlinks(glob.glob(f"{ort_home}/*"), artifacts_dir)
+
+    # shutil.copytree(ort_home, artifacts_dir, dirs_exist_ok=True)
 
     # Back to the original directory
     os.chdir(current_dir)
@@ -309,12 +319,6 @@ def build_ort(args):
 
     # The "current_dir" is the "build_scripts" directory. Need to
     os.chdir(current_dir)
-
-    # Now copy the artifacts to the artifacts directory
-    artifacts_dir = os.path.abspath(
-        f"deps/artifacts/{get_platform_dirname(args)}-{get_machine_type(args)}"
-    )
-    print(f"{MAGENTA}Copying artifacts to {artifacts_dir}{CLEAR}")
 
     os.makedirs(f"{artifacts_dir}/include", exist_ok=True)
     os.makedirs(f"{artifacts_dir}/lib", exist_ok=True)

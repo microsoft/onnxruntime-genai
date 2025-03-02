@@ -22,9 +22,21 @@ file (
     ${CMAKE_CURRENT_LIST_DIR}/VERSION.txt 
     VERSION_NUMBER
     LIMIT_COUNT 1)
-message(STATUS "SW-VERSION: ${VERSION_NUMBER}")
-add_compile_definitions(SW_VERSION_NUMBER="v${VERSION_NUMBER}")
+message(STATUS "SLM Engine VERSION: ${VERSION_NUMBER}")
+add_compile_definitions(SW_VERSION_NUMBER="${VERSION_NUMBER}")
 add_compile_definitions(BUILDING_SLM_ENGINE)
+
+# Read the version number of the Gen AI library
+set(REPO_ROOT ${CMAKE_CURRENT_LIST_DIR}/../../..)
+if (EXISTS ${REPO_ROOT}/VERSION_INFO)
+    file(READ "${REPO_ROOT}/VERSION_INFO" ver)
+    set(ORT_GENAI_VERSION ${ver})
+else()
+    message(WARNING "VERSION_INFO file not found. Setting to UNKNOWN")
+    set(ORT_GENAI_VERSION "UNKNOWN")  
+endif()
+message(STATUS "ORT-GENAI-VERSION: ${ORT_GENAI_VERSION}")
+add_compile_definitions(ORT_GENAI_VERSION="${ORT_GENAI_VERSION}")
 
 if (${CMAKE_SYSTEM_NAME} STREQUAL "Darwin") 
     set(CMAKE_INSTALL_RPATH "@loader_path")
@@ -71,8 +83,6 @@ file(GLOB_RECURSE ORT_LIBS
 
 list(APPEND IMPORTED_LIB_LIST ${ORT_LIBS})
 if (${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
-#     list(APPEND IMPORTED_LIB_LIST ${ORT_LIBS})
-# else()
     list(APPEND IMPORTED_LIB_LIST 
         ${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime${LIB_VERSION_ORT}.${LIB_EXT})
 endif() 

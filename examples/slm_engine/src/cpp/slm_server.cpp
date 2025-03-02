@@ -44,9 +44,11 @@ int run_server(const string& model_path, const string& model_family,
     json response_body;
     response_body["status"] = "success";
 
+    std::string slm_ver, oga_ver, ort_ver;
+    microsoft::slm_engine::SLMEngine::GetVersion(slm_ver, oga_ver, ort_ver);
     json engine_state = {
         {"model", std::filesystem::path(model_path).filename().string()},
-        {"engine_version", microsoft::slm_engine::SLMEngine::GetVersion()}};
+        {"engine_version", {"slm_version", slm_ver, "oga_version", oga_ver, "ort_version", ort_ver}}};
     response_body["engine_state"] = engine_state;
     json get_response;
     get_response["response"] = response_body;
@@ -101,7 +103,7 @@ int main(int argc, char** argv) {
   string model_family;
   program.add_argument("-mf", "--model_family")
       .required()
-      .help("Model family: <phi3|llama3.2|custom>")
+      .help("Model family: <phi|llama|custom>")
       .store_into(model_family);
 
   int port_number = 8080;
@@ -116,7 +118,11 @@ int main(int argc, char** argv) {
           "If provided, more debugging information printed on standard "
           "output");
 
-  cout << "SLM Runner Version: " << microsoft::slm_engine::SLMEngine::GetVersion()
+  string slm_ver, oga_ver, ort_ver;
+  microsoft::slm_engine::SLMEngine::GetVersion(slm_ver, oga_ver, ort_ver);
+  cout << "SLM Runner Version: " << slm_ver << "\n"
+       << "ORT GenAI Version: " << oga_ver << "\n"
+       << "ORT Version: " << ort_ver
        << endl;
   try {
     program.parse_args(argc, argv);

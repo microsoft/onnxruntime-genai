@@ -6,15 +6,10 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <strings.h>
 
 #include "input_decoder.h"
 #include "ort_genai.h"
-
-#ifdef MYLIBRARY_EXPORTS
-#define MYLIBRARY_API __declspec(dllexport)
-#else
-#define MYLIBRARY_API __declspec(dllimport)
-#endif
 
 #ifdef _WIN32
 #ifdef BUILDING_SLM_ENGINE
@@ -53,7 +48,7 @@ namespace slm_engine {
 /// Example Usage:
 /// @code
 /// // Create a new instance of the SLM Engine
-/// auto slm_engine = SLMEngine::CreateEngine("path/to/model", "phi3", true);
+/// auto slm_engine = SLMEngine::CreateEngine("path/to/model", "phi", true);
 /// if (!slm_engine) {
 ///     std::cout << "Error creating the SLM Engine" << std::endl;
 ///     return -1;
@@ -70,29 +65,30 @@ namespace slm_engine {
 class SLM_ENGINE_EXPORT SLMEngine {
  public:
   /// @brief Enum to define the supported model types
-  enum class SupportedModelType { PHI3,
-                                  Llama3_2,
+  enum class SupportedModelType { PHI,
+                                  Llama,
                                   CUSTOM,
                                   UNKNOWN };
 
   // Utility to convert string to SupportedModelType
   static SupportedModelType StringToModelType(const std::string& model_type) {
-    if (model_type == "phi3") {
-      return SupportedModelType::PHI3;
-    } else if (model_type == "llama3.2") {
-      return SupportedModelType::Llama3_2;
-    } else if (model_type == "custom") {
+    if (strncasecmp(model_type.c_str(), "phi", 3) == 0) {
+      return SupportedModelType::PHI;
+    } else if (strncasecmp(model_type.c_str(), "llama", 5) == 0) {
+      return SupportedModelType::Llama;
+    } else if (strncasecmp(model_type.c_str(), "custom", 6) == 0) {
       return SupportedModelType::CUSTOM;
     }
     return SupportedModelType::UNKNOWN;
   }
+
   // Utility to convert SupportedModelType to string
   static std::string ModelTypeToString(SupportedModelType model_type) {
     switch (model_type) {
-      case SupportedModelType::PHI3:
-        return "phi3";
-      case SupportedModelType::Llama3_2:
-        return "llama3.2";
+      case SupportedModelType::PHI:
+        return "phi";
+      case SupportedModelType::Llama:
+        return "llama";
       case SupportedModelType::CUSTOM:
         return "custom";
       case SupportedModelType::UNKNOWN:
@@ -103,7 +99,7 @@ class SLM_ENGINE_EXPORT SLMEngine {
 
   /// @brief Creates a new instance of the SLM Engine and initializes it
   /// @param model_path Path to ONNX GenAI Model Directory
-  /// @param model_family_name Model family name (phi3 or llama3.2)
+  /// @param model_family_name Model family name (phi or llama)
   /// @param verbose When set, the LLM Generated output is displayed on stdout
   /// @return New object or null if unsuccessful
 
@@ -210,7 +206,7 @@ class SLM_ENGINE_EXPORT SLMEngine {
 
   SLMEngine(const SLMEngine&) = delete;
   SLMEngine& operator=(const SLMEngine&) = delete;
-  static std::string GetVersion();
+  static void GetVersion(std::string& slm_version, std::string& ortga_version, std::string& ort_version);
 
  private:
   SLMEngine(bool verbose) : m_verbose(verbose) {}
