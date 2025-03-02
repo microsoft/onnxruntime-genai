@@ -96,10 +96,14 @@ def copy_files_keeping_symlinks(src_files, dest):
             shutil.copy2(file, dest)
 
 
-def build_ort(args):
+def build_ort(args, artifacts_dir):
     """
     Build the ONNX Runtime library and ORT-GenAI library
     """
+
+    # Navigate to the directory where this Python file is located
+    os.chdir(os.path.dirname(os.path.realpath(__file__)))
+    print(f"{MAGENTA}Current Directory: {os.getcwd()}{CLEAR}")
 
     # Navigate to the deps directory
     os.chdir("deps")
@@ -237,21 +241,20 @@ def build_ort(args):
                 f"lib",
             )
 
-    # Copy these artifacts to the SLM Engine dep/artifacts directory
-    # Now copy the artifacts to the artifacts directory
-    artifacts_dir = os.path.abspath(
-        f"../../../../../../artifacts/{get_platform_dirname(args)}-{get_machine_type(args)}"
-    )
-
     print(f"{MAGENTA}Copying ORT artifacts to 3P Artifacts: {artifacts_dir}{CLEAR}")
     os.makedirs(artifacts_dir, exist_ok=True)
     copy_files_keeping_symlinks(glob.glob(f"{ort_home}/*"), artifacts_dir)
 
-    # shutil.copytree(ort_home, artifacts_dir, dirs_exist_ok=True)
-
     # Back to the original directory
     os.chdir(current_dir)
-    os.chdir("../../../")
+
+    return ort_home
+
+
+def build_ort_genai(args, artifacts_dir, ort_home=None):
+
+    # Navigate to the directory where this Python file is located
+    os.chdir(os.path.dirname(os.path.realpath(__file__)))
 
     # Save the current directory
     current_dir = os.getcwd()
@@ -275,9 +278,10 @@ def build_ort(args):
         args.build_type,
         "--cmake_extra_defines",
         "ENABLE_PYTHON=OFF",
-        "--ort_home",
-        ort_home,
     ]
+    if ort_home is not None:
+        cmd_args.extend(["--ort_home", ort_home])
+
     if args.android:
         cmd_args.extend(
             [
@@ -351,7 +355,7 @@ def build_ort(args):
     print(f"{BLUE}Artifacts are available in: {artifacts_dir}{CLEAR}")
 
 
-def build_header_only(args):
+def build_header_only(args, artifacts_dir):
     """
     Build the header-only libraries
     """
@@ -381,7 +385,7 @@ def build_header_only(args):
     ]
 
     # Copy the headers to the artifacts directory
-    dest_root_dir = os.path.abspath(f"deps/artifacts/common/include")
+    dest_root_dir = os.path.abspath(f"{artifacts_dir}/common/include")
 
     os.chdir("deps")
     print(f"Current Directory: {os.getcwd()}")
@@ -497,12 +501,28 @@ def main():
     # Create the deps directory if it doesn't exist
     os.makedirs("deps", exist_ok=True)
 
+    artifacts_dir = os.path.abspath(
+        f"deps/artifacts/{get_platform_dirname(args)}-{get_machine_type(args)}"
+    )
+
+    os.makedirs(
+        artifacts_dir,
+        exist_ok=True,
+    )
+
+    # Initialize the ort_home to None. Default behavior is to download the
+    # ONNX Runtime library and use that. If the user however chooses to build
+    # the ONNX Runtime library from source (e.g., for Android or other embedded targets)
+    # then we will use the location of the ort_home as set by the build_ort()
+    ort_home = None
     if not args.skip_ort_build:
-        build_ort(args)
+        ort_home = build_ort(args, artifacts_dir)
     else:
         print(f"{BLUE}Skipping ORT Build{CLEAR}")
 
-    build_header_only(args)
+    build_ort_genai(args, artifacts_dir, ort_home)
+
+    build_header_only(args, artifacts_dir)
 
     # Return to the original directory
     os.chdir("..")
