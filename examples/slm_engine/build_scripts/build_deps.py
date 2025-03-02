@@ -472,7 +472,6 @@ def main():
     parser.add_argument(
         "--ort_version_to_use",
         type=str,
-        default="v1.20.2",
         help="ONNX Runtime version to use. Must be a git tag or branch",
     )
 
@@ -483,6 +482,13 @@ def main():
         args.android = True
     else:
         args.android = False
+
+    if args.ort_version_to_use is None:
+        # If not Windows then use 1.20.2
+        if platform.system() != "Windows":
+            args.ort_version_to_use = "v1.20.2"
+        else:
+            args.ort_version_to_use = "main"
 
     # Change directory to where this Python file is located to avoid any issues
     # related to running this script from another directory

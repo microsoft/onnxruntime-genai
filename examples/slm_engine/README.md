@@ -13,7 +13,152 @@ SLM Engine is designed to be built from sources for different types of target ha
 
 The current version is tested on Windows 11, MacOS, Linux and Android running on the CPU of various platforms. The SLM Engine also runs on various accelerators (such as GPU and NPU) via the execution provider mechanism of the ONNX runtime.
 
-## Getting Started
+## Installation
+
+Since this is targeted for various devices running on the Edge we provide a simple to use build setup that the developers can use to build for any system of their choosing.
+
+### Prerequisites
+
+The SLM Engine first builds the `onnxruntime` and `onnxruntime-genai` libraries from source. Therefore, any prerequisites that apply to build from source of these two libraries also applicable to SLM Engine. There are no additional requirements for building SLM engine.
+
+#### Windows Long File Path
+
+For Windows, often the maximum path length is 260 which results in breaking the onnxruntime dependency build. Therefore, the long file path needs to be enabled in the group policy editor using the following steps:
+
+- Open the 'Run' command (Win+R) and type gpedit.msc, then press Enter.
+- Navigate to: Computer Configuration > Administrative Templates > System > Filesystem.
+- Double-click Enable Win32 long paths and set it to Enabled, then click Apply.
+
+Also, enable long filenames by opening a terminal window as **Administrator** and then running the following command:
+
+```
+c:\> git config --system core.longpaths true
+
+```
+
+Following are the platforms we tested the builds.
+
+| Platform         | Binary Directory Name | Comments                                                           |
+| ---------------- | --------------------- | ------------------------------------------------------------------ |
+| Android-aarch64  | Android-aarch64       | Can be cross compiled on Windows, MacOS or Linux                   |
+| MacOS-aarch64    | Darwin-aarch64        | Great for host side development                                    |
+| Ubuntu 24.04/x86 | Linux-x86_64          | Necessary for Cross Compiling for Android and Qualcomm QNN support |
+| Ubuntu 24.04/ARM | Linux-aarch64         |
+| Windows 11       | Windows-AMD64         | Can be used to run on AI PCs                                       |
+
+### Build from Source
+
+In order to install the software from source, you will need C++ toolchain such as clang/llvm and cmake. Since the build scripts use Python3 any Python 3 would work. However, to enable Qualcomm QNN support, you need to use a Linux host and Python 3.8
+
+Building is as easy as following these steps:
+
+#### Build the Dependencies
+
+This program is based on ONNRuntime-GenAI library which in turn depends on ONNX Runtime core libraries. First step is to build the dependencies. Open a terminal window and run the following steps:
+
+```bash
+$ cd build_scripts
+$ python build_deps.py
+...
+```
+
+This will first build the onnxruntime by cloning a local copy in the deps/src directory. Once the build is complete, the script will next build the onnxruntime-gen - which is this repo itself. Upon completion, the script will clone and build few other `header only` dependencies. At the end of the build, all the built artifacts such as the header files and libraries are stored inside the deps/artifacts directory under a subdirectory that's named after the target platform.
+
+For example, if you are building on MacOS then the built artifacts will be stored in `deps/artifacts/Darwin-aarch64/`. Similarly, if you are cross compiling for Android, then the artifacts will be stored in `deps/artifacts/Android-aarch64/`.
+
+Following are the command line options applicable for the dependency build:
+
+```bash
+usage: build_deps.py [-h] [--android_sdk_path ANDROID_SDK_PATH] [--android_ndk_path ANDROID_NDK_PATH]
+                     [--api_level API_LEVEL] [--qnn_sdk_path QNN_SDK_PATH] [--build_type BUILD_TYPE] [--skip_ort_build] [--ort_version_to_use ORT_VERSION_TO_USE]
+
+Build script for dependency libraries
+
+options:
+  -h, --help            show this help message and exit
+  --android_sdk_path ANDROID_SDK_PATH
+                        Path to ANDROID SDK
+  --android_ndk_path ANDROID_NDK_PATH
+                        Path to ANDROID NDK
+  --api_level API_LEVEL
+                        Android API Level
+  --qnn_sdk_path QNN_SDK_PATH
+                        Path to Qualcomm QNN SDK (AI Engine Direct)
+  --build_type BUILD_TYPE
+                        {Release|RelWithDebInfo|Debug}
+  --skip_ort_build      If set, skip building ONNX Runtime
+
+  --ort_version_to_use ORT_VERSION_TO_USE
+                        ONNX Runtime version to use. Must be a git tag or branch
+
+
+```
+
+##### Note
+
+Use the option `--ort_version_to_use` and provide a git commit hash or a branch name or a tag, if you want to use a specific version of the ONNX Runtime library. However, if you previously used a different ONNX Runtime version, then delete the `deps/src/onnxruntime` directory before running the `build_deps.py` again with this option provided.
+
+##### Android Build With QNN Support
+
+The following example illustrates how to cross compile the dependencies for Android CPU from Linux host.
+
+```bash
+$ export ANDROID_SDK_ROOT=<Android SDK Directory>
+$ export NDK_ROOT=$ANDROID_SDK_ROOT/ndk/<Version Number>
+$ export QNN_SDK_ROOT=<qualcomm/qairt/VERSION>
+$ python build_deps.py \
+    --android_sdk_path $ANDROID_SDK_ROOT \
+    --android_ndk_path $NDK_ROOT \
+    --qnn_sdk_path $QNN_SDK_ROOT
+...
+
+```
+
+If you are building just for Android CPU, then omit the `qnn_sdk_path`.
+
+After the dependencies are built, it's time to build the SLM Engine as described in the next section.
+
+#### Build SLM Engine
+
+Next step is to build the program itself. For that use the script `build.py` with appropriate command line options as needed for Android build.
+
+```bash
+$ python build.py
+```
+
+For Android build, the following commandline options are important:
+
+```bash
+usage: build.py [-h] [--android_ndk_path ANDROID_NDK_PATH] [--build_type BUILD_TYPE]
+
+Build script for this repo
+
+options:
+  -h, --help            show this help message and exit
+  --android_ndk_path ANDROID_NDK_PATH
+                        Path to ANDROID NDK
+  --build_type BUILD_TYPE
+                        {Release|RelWithDebInfo|Debug}
+
+```
+
+For Android builds - use the following example:
+
+```bash
+$ python build.py --android_ndk_path $NDK_ROOT
+...
+```
+
+Notice that no need to specify any QNN flags as QNN device is handled by the ONNX Runtime via the [Execution Provider](https://onnxruntime.ai/docs/execution-providers/) mechanism.
+
+For building on a Linux host we also provide a Dockerfile and a shell script to build using docker. Use the following command:
+
+```bash
+$ ./build_linux.sh
+...
+```
+
+## Using SLM Engine
 
 To use the SLM Engine in your AI application, use one of the following methods:
 
@@ -229,144 +374,7 @@ See the [slm_engine.h](src/cpp/slm_engine.h) for more details of the C++ API.
 
 See the following reference CLI applications to learn more about how to use an HTTP server [slm_server.cpp](src/cpp/slm_server.cpp) or a CLI program for batch generation processing [slm_runner.cpp](src/cpp/slm_runner.cpp) using this library.
 
-## Installation
-
-Since this is targeted for various devices running on the Edge we provide a simple to use build setup that the developers can use to build for any system of their choosing.
-
-### Prerequisites
-
-The SLM Engine first builds the `onnxruntime` and `onnxruntime-genai` libraries from source. Therefore, any prerequisites that apply to build from source of these two libraries also applicable to SLM Engine. There are no additional requirements for building SLM engine.
-
-#### Windows Long File Path
-
-For Windows, often the maximum path length is 260 which results in breaking the onnxruntime dependency build. Therefore, the long file path needs to be enabled in the group policy editor using the following steps:
-
-- Open the 'Run' command (Win+R) and type gpedit.msc, then press Enter.
-- Navigate to: Computer Configuration > Administrative Templates > System > Filesystem.
-- Double-click Enable Win32 long paths and set it to Enabled, then click Apply.
-
-Also, enable long filenames by opening a terminal window as **Administrator** and then running the following command:
-
-```
-c:\> git config --system core.longpaths true
-
-```
-
-Following are the platforms we tested the builds.
-
-| Platform         | Binary Directory Name | Comments                                                           |
-| ---------------- | --------------------- | ------------------------------------------------------------------ |
-| Android-aarch64  | Android-aarch64       | Can be cross compiled on Windows, MacOS or Linux                   |
-| MacOS-aarch64    | Darwin-aarch64        | Great for host side development                                    |
-| Ubuntu 24.04/x86 | Linux-x86_64          | Necessary for Cross Compiling for Android and Qualcomm QNN support |
-| Ubuntu 24.04/ARM | Linux-aarch64         |
-| Windows 11       | Windows-AMD64         | Can be used to run on AI PCs                                       |
-
-### Build from Source
-
-In order to install the software from source, you will need C++ toolchain such as clang/llvm and cmake. Since the build scripts use Python3 any Python 3 would work. However, to enable Qualcomm QNN support, you need to use a Linux host and Python 3.8
-
-Building is as easy as following these steps:
-
-#### Build the Dependencies
-
-This program is based on ONNRuntime-GenAI library which in turn depends on ONNX Runtime core libraries. First step is to build the dependencies. Open a terminal window and run the following steps:
-
-```bash
-$ cd build_scripts
-$ python build_deps.py
-...
-```
-
-This will first build the onnxruntime by cloning a local copy in the deps/src directory. Once the build is complete, the script will next build the onnxruntime-gen - which is this repo itself. Upon completion, the script will clone and build few other `header only` dependencies. At the end of the build, all the built artifacts such as the header files and libraries are stored inside the deps/artifacts directory under a subdirectory that's named after the target platform.
-
-For example, if you are building on MacOS then the built artifacts will be stored in `deps/artifacts/Darwin-aarch64/`. Similarly, if you are cross compiling for Android, then the artifacts will be stored in `deps/artifacts/Android-aarch64/`.
-
-Following are the command line options applicable for the dependency build:
-
-```bash
-usage: build_deps.py [-h] [--android_sdk_path ANDROID_SDK_PATH] [--android_ndk_path ANDROID_NDK_PATH]
-                     [--api_level API_LEVEL] [--qnn_sdk_path QNN_SDK_PATH] [--build_type BUILD_TYPE] [--skip_ort_build]
-
-Build script for dependency libraries
-
-options:
-  -h, --help            show this help message and exit
-  --android_sdk_path ANDROID_SDK_PATH
-                        Path to ANDROID SDK
-  --android_ndk_path ANDROID_NDK_PATH
-                        Path to ANDROID NDK
-  --api_level API_LEVEL
-                        Android API Level
-  --qnn_sdk_path QNN_SDK_PATH
-                        Path to Qualcomm QNN SDK (AI Engine Direct)
-  --build_type BUILD_TYPE
-                        {Release|RelWithDebInfo|Debug}
-  --skip_ort_build      If set, skip building ONNX Runtime
-
-```
-
-##### Android Build With QNN Support
-
-The following example illustrates how to cross compile the dependencies for Android CPU from Linux host.
-
-```bash
-$ export ANDROID_SDK_ROOT=<Android SDK Directory>
-$ export NDK_ROOT=$ANDROID_SDK_ROOT/ndk/<Version Number>
-$ export QNN_SDK_ROOT=<qualcomm/qairt/VERSION>
-$ python build_deps.py \
-    --android_sdk_path $ANDROID_SDK_ROOT \
-    --android_ndk_path $NDK_ROOT \
-    --qnn_sdk_path $QNN_SDK_ROOT
-...
-
-```
-
-If you are building just for Android CPU, then omit the `qnn_sdk_path`.
-
-After the dependencies are built, it's time to build the SLM Engine as described in the next section.
-
-#### Build SLM Engine
-
-Next step is to build the program itself. For that use the script `build.py` with appropriate command line options as needed for Android build.
-
-```bash
-$ python build.py
-```
-
-For Android build, the following commandline options are important:
-
-```bash
-usage: build.py [-h] [--android_ndk_path ANDROID_NDK_PATH] [--build_type BUILD_TYPE]
-
-Build script for this repo
-
-options:
-  -h, --help            show this help message and exit
-  --android_ndk_path ANDROID_NDK_PATH
-                        Path to ANDROID NDK
-  --build_type BUILD_TYPE
-                        {Release|RelWithDebInfo|Debug}
-
-```
-
-For Android builds - use the following example:
-
-```bash
-$ python build.py --android_ndk_path $NDK_ROOT
-...
-```
-
-Notice that no need to specify any QNN flags as QNN device is handled by the ONNX Runtime via the [Execution Provider](https://onnxruntime.ai/docs/execution-providers/) mechanism.
-
-For building on a Linux host we also provide a Dockerfile and a shell script to build using docker. Use the following command:
-
-```bash
-$ ./build_linux.sh
-...
-```
-
-## Testing the build
+## Example running SLM Engine
 
 After the build is complete, the binaries are available in the build_scripts/builds/<TARGET_NAME>/install/bin directory. To test the build, download the ONNX model first and then run following command to execute SLM engine with a sample input file.
 
