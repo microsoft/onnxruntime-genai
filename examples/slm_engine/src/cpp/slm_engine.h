@@ -6,7 +6,13 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#if defined(_WIN32) || defined(_WIN64)
+#include <string.h>
+#define strcasecmp _stricmp
+#define strncasecmp _strnicmp
+#else
 #include <strings.h>
+#endif
 
 #include "input_decoder.h"
 #include "ort_genai.h"

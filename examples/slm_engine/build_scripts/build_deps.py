@@ -84,7 +84,8 @@ def copy_files_keeping_symlinks(src_files, dest):
         if os.path.islink(file):
             # Get the name of the link without the rest of the path
             linkname = f"{dest}/{os.path.basename(file)}"
-            linkto = os.path.basename(os.readlink(file))
+            linkto = os.readlink(file)
+
             if not os.path.exists(linkname):
                 os.symlink(linkto, linkname)
         elif os.path.isdir(file):
@@ -129,7 +130,18 @@ def build_ort(args):
     if subprocess.call(["git", "checkout", version]) != 0:
         raise Exception("Failed to checkout ONNX Runtime version")
 
-    if subprocess.call(["git", "submodule", "update", "--init", "--recursive"]) != 0:
+    if (
+        subprocess.call(
+            [
+                "git",
+                "submodule",
+                "update",
+                "--init",
+                "--recursive",
+            ]
+        )
+        != 0
+    ):
         raise Exception("Failed to  update ONNX Runtime submodules")
 
     # Return to the original directory
