@@ -68,7 +68,7 @@ inline void OgaCheckResult(OgaResult* result) {
 struct OgaFloat16_t;
 struct OgaBFloat16_t;
 
-// Variable templates to convert a C++ type into it's ONNXTensorElementDataType
+// Variable templates to convert a C++ type into it's OgaElementType
 template <typename T>
 inline constexpr OgaElementType OgaTypeToElementType = T::Unsupported_Type;  // Force a compile error if hit, please add specialized version if type is valid
 template <>

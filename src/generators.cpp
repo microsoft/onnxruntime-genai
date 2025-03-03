@@ -58,11 +58,10 @@ OrtGlobals::OrtGlobals()
 }
 
 // Ensure Shutdown() has been called before process exit
-struct ValidateShutdown {
-  ~ValidateShutdown() {
+struct EnsureShutdown {
+  ~EnsureShutdown() {
     if (GetOrtGlobals()) {
-      std::cerr << "OGA Error: Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
-      std::abort();
+      Shutdown();
     }
   }
 };
@@ -70,7 +69,7 @@ struct ValidateShutdown {
 std::unique_ptr<OrtGlobals>&
 GetOrtGlobals() {
   static auto globals = std::make_unique<OrtGlobals>();
-  static auto validate = std::make_unique<ValidateShutdown>();  // Must be after the above line so the destructor runs before the above destructor
+  static auto validate = std::make_unique<EnsureShutdown>();  // Must be after the above line so the destructor runs before the above destructor
   return globals;
 }
 
@@ -84,7 +83,6 @@ bool LeakTypeList<Types...>::Dump() {
 void Shutdown() {
   if (LeakTypes::Dump()) {
     std::cerr << "    Please see the documentation for the API being used to ensure proper cleanup." << std::endl;
-    std::abort();
   }
 
   GetOrtGlobals().reset();  // Delete now because on process exit is too late
@@ -467,7 +465,7 @@ void Generator::GenerateNextToken() {
   }
 
   last_action_ = Action::generated;
-  if (!search.do_sample || search.top_k == 1) {
+  if (!search.do_sample || search.top_k == 1 || search.temperature <= 0) {
     search_->SelectTop();
     return;
   }
