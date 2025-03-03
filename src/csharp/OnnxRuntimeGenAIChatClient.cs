@@ -154,6 +154,7 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
                 }
 
                 // Avoid blocking calling thread with expensive compute
+                cancellationToken.ThrowIfCancellationRequested();
                 await YieldAwaiter.Instance;
 
                 // Generate the next token.
