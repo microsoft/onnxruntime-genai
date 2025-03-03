@@ -6,6 +6,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 
 BLUE = "\033[34m"
 MAGENTA = "\033[35m"
@@ -26,7 +27,6 @@ def cmake_options_android(ndk_dir):
 
 def get_platform_dirname(args):
     # Get the name of the OS
-    import platform
 
     platform_name = platform.system()
     if platform_name == "Darwin":
@@ -34,6 +34,15 @@ def get_platform_dirname(args):
 
     if args.android:
         platform_name = "Android"
+
+    return platform_name
+
+
+def get_target_specific_oga_build_dirname():
+    # Get the name of the OS
+    platform_name = platform.system()
+    if platform_name == "Darwin":
+        platform_name = "macOS"
 
     return platform_name
 
@@ -96,17 +105,59 @@ def copy_files_keeping_symlinks(src_files, dest):
             shutil.copy2(file, dest)
 
 
-def build_ort(args, artifacts_dir):
+def copy_artifacts(args, artifacts_dir):
+    """
+    Copy the artifacts from the prebuilt directory to the artifacts directory
+    """
+    # Determine the top level directory
+    top_level_dir = f"{os.path.dirname(os.path.realpath(__file__))}/../../../"
+    target_specific_dir = f"{top_level_dir}/build/{get_target_specific_oga_build_dirname()}/{args.build_type}/_deps/ortlib-src"
+    src_include_dir = os.path.abspath(f"{target_specific_dir}/build/native/include")
+
+    # Get the platform and machine type
+    platform_name = platform.system()
+    if platform_name == "Darwin":
+        platform_name = "osx"
+    elif platform_name == "Linux":
+        platform_name = "linux"
+    elif platform_name == "Windows":
+        platform_name = "win"
+
+    machine_type = platform.machine()
+    if machine_type == "x86_64":
+        machine_type = "x64"
+    elif machine_type == "aarch64":
+        machine_type = "arm64"
+    elif machine_type == "x86":
+        machine_type = "x86"
+    elif machine_type.lower() == "amd64":
+        machine_type = "x64"
+    elif machine_type.lower() == "arm64":
+        machine_type = "arm64"
+
+    src_lib_dir = os.path.abspath(
+        f"{target_specific_dir}/runtimes/{platform_name}-{machine_type}/native"
+    )
+    print(f"Copying Source Lib Dir: {src_lib_dir}")
+    copy_files_keeping_symlinks(
+        glob.glob(f"{src_lib_dir}/*"),
+        f"{artifacts_dir}/lib",
+    )
+
+    print(f"Source Include Dir: {src_include_dir}")
+    os.makedirs(f"{artifacts_dir}/include/onnxruntime", exist_ok=True)
+    copy_files_keeping_symlinks(
+        glob.glob(f"{src_include_dir}/*"),
+        f"{artifacts_dir}/include/onnxruntime",
+    )
+
+
+def build_ort(args, build_dir, artifacts_dir):
     """
     Build the ONNX Runtime library and ORT-GenAI library
     """
 
-    # Navigate to the directory where this Python file is located
-    os.chdir(os.path.dirname(os.path.realpath(__file__)))
-    print(f"{MAGENTA}Current Directory: {os.getcwd()}{CLEAR}")
-
-    # Navigate to the deps directory
-    os.chdir("deps")
+    os.chdir(build_dir)
 
     # Make the src directory if needed
     os.makedirs("src", exist_ok=True)
@@ -325,15 +376,21 @@ def build_ort_genai(args, artifacts_dir, ort_home=None):
         print(f"Current Directory: {os.getcwd()}")
         raise Exception(f"{RED}Failed to install ONNX Runtime{CLEAR}")
 
-    # Now copy the ORT Libs to the ORT-GenAI directory installation location
-    dest_dir = f"{build_dir_name}/install/lib"
-    copy_files_keeping_symlinks(glob.glob(f"{ort_home}/lib/*onnxruntime*"), dest_dir)
+    # Copy the artifacts only if ort_home is None
+    if ort_home is not None:
+        # Now copy the ORT Libs to the ORT-GenAI directory installation location
+        dest_dir = f"{build_dir_name}/install/lib"
+        copy_files_keeping_symlinks(
+            glob.glob(f"{ort_home}/lib/*onnxruntime*"), dest_dir
+        )
 
-    # For Windows build, the .dll files are stored in the bin directory.
-    # For Linux/Mac this is a no-op
-    copy_files_keeping_symlinks(glob.glob(f"{ort_home}/bin/*onnxruntime*"), dest_dir)
+        # For Windows build, the .dll files are stored in the bin directory.
+        # For Linux/Mac this is a no-op
+        copy_files_keeping_symlinks(
+            glob.glob(f"{ort_home}/bin/*onnxruntime*"), dest_dir
+        )
 
-    # The "current_dir" is the "build_scripts" directory. Need to
+    # The "current_dir" is the "build_scripts" directory.
     os.chdir(current_dir)
 
     os.makedirs(f"{artifacts_dir}/include", exist_ok=True)
@@ -350,12 +407,12 @@ def build_ort_genai(args, artifacts_dir, ort_home=None):
         glob.glob(f"{build_dir_name}/install/include/*"),
         f"{artifacts_dir}/include",
     )
-
-    print(f"{MAGENTA}ONNX Runtime Built{CLEAR}")
     print(f"{BLUE}Artifacts are available in: {artifacts_dir}{CLEAR}")
 
+    print(f"{MAGENTA}ONNX Runtime Built{CLEAR}")
 
-def build_header_only(args, artifacts_dir):
+
+def build_header_only(args, build_dir, artifacts_dir):
     """
     Build the header-only libraries
     """
@@ -385,9 +442,10 @@ def build_header_only(args, artifacts_dir):
     ]
 
     # Copy the headers to the artifacts directory
-    dest_root_dir = os.path.abspath(f"{artifacts_dir}/common/include")
+    dest_root_dir = os.path.abspath(f"{artifacts_dir}/include")
 
-    os.chdir("deps")
+    os.chdir(build_dir)
+
     print(f"Current Directory: {os.getcwd()}")
     os.makedirs("src", exist_ok=True)
 
@@ -468,9 +526,9 @@ def main():
     )
 
     parser.add_argument(
-        "--skip_ort_build",
+        "--build_ort_from_source",
         action="store_true",
-        help="If set, skip building ONNX Runtime",
+        help="If set, ONNX Runtime is built from source",
     )
 
     parser.add_argument(
@@ -484,6 +542,11 @@ def main():
 
     if args.android_sdk_path or args.android_ndk_path:
         args.android = True
+        # If the user didn't specify build_ort_from_source assert
+        if not args.build_ort_from_source:
+            raise Exception(
+                "For Android build ONNX Runtime use: --build_ort_from_source"
+            )
     else:
         args.android = False
 
@@ -498,34 +561,50 @@ def main():
     # related to running this script from another directory
     os.chdir(os.path.dirname(os.path.realpath(__file__)))
 
-    # Create the deps directory if it doesn't exist
-    os.makedirs("deps", exist_ok=True)
+    # The following directory contains the following directories:
+    # - artifacts
+    #   -- Contains the artifacts of onnxruntime and onnxruntime-genai
+    #      This applies for both - downloaded or built from source
+    # - slm_deps
+    #   -- src
+    #      Contains the source code of the dependencies. The repos downloaded here
+    dep_src_dir = os.path.abspath("../../../build/slm_deps")
+    os.makedirs(dep_src_dir, exist_ok=True)
 
     artifacts_dir = os.path.abspath(
-        f"deps/artifacts/{get_platform_dirname(args)}-{get_machine_type(args)}"
+        f"slm_deps/artifacts/{get_platform_dirname(args)}-{get_machine_type(args)}"
     )
 
-    os.makedirs(
-        artifacts_dir,
-        exist_ok=True,
-    )
+    os.makedirs(artifacts_dir, exist_ok=True)
 
+    common_artifacts_dir = os.path.abspath(f"slm_deps/artifacts/common")
+    os.makedirs(common_artifacts_dir, exist_ok=True)
+
+    time_build_start = time.time()
     # Initialize the ort_home to None. Default behavior is to download the
     # ONNX Runtime library and use that. If the user however chooses to build
     # the ONNX Runtime library from source (e.g., for Android or other embedded targets)
     # then we will use the location of the ort_home as set by the build_ort()
     ort_home = None
-    if not args.skip_ort_build:
-        ort_home = build_ort(args, artifacts_dir)
-    else:
-        print(f"{BLUE}Skipping ORT Build{CLEAR}")
+    if args.build_ort_from_source:
+        ort_home = build_ort(args, dep_src_dir, artifacts_dir)
 
+    # Now build the ORT-GenAI library
     build_ort_genai(args, artifacts_dir, ort_home)
 
-    build_header_only(args, artifacts_dir)
+    if not args.build_ort_from_source:
+        # The ORT binaries are available as they were downloaded during the GenAI build
+        # Copy the ORT artifacts to the artifacts directory
+        copy_artifacts(args, artifacts_dir)
+
+    # Now build the header-only libraries
+    build_header_only(args, dep_src_dir, common_artifacts_dir)
 
     # Return to the original directory
     os.chdir("..")
+    time_build_end = time.time()
+
+    print(f"Build Time: {time_build_end - time_build_start:.2f} seconds")
 
 
 if __name__ == "__main__":

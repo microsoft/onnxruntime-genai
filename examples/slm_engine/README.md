@@ -46,13 +46,13 @@ Following are the platforms we tested the builds.
 | Ubuntu 24.04/ARM | Linux-aarch64         |
 | Windows 11       | Windows-AMD64         | Can be used to run on AI PCs                                       |
 
-### Build from Source
+### Build
 
-In order to install the software from source, you will need C++ toolchain such as clang/llvm and cmake. Since the build scripts use Python3 any Python 3 would work. However, to enable Qualcomm QNN support, you need to use a Linux host and Python 3.8
+In order to install the software from source, you will need C++ toolchain such as clang/llvm and cmake. Since the build scripts use Python3, any Python 3 would work. However, to enable Qualcomm QNN support, you need to use a Linux host and Python 3.8. Note that Python module `requests` is required. Use `pip install requests` when setting up the Python for building this software.
 
 Building is as easy as following these steps:
 
-#### Build the Dependencies
+#### 1. Build the Dependencies
 
 This program is based on ONNRuntime-GenAI library which in turn depends on ONNX Runtime core libraries. First step is to build the dependencies. Open a terminal window and run the following steps:
 
@@ -70,7 +70,7 @@ Following are the command line options applicable for the dependency build:
 
 ```bash
 usage: build_deps.py [-h] [--android_sdk_path ANDROID_SDK_PATH] [--android_ndk_path ANDROID_NDK_PATH]
-                     [--api_level API_LEVEL] [--qnn_sdk_path QNN_SDK_PATH] [--build_type BUILD_TYPE] [--skip_ort_build] [--ort_version_to_use ORT_VERSION_TO_USE]
+                     [--api_level API_LEVEL] [--qnn_sdk_path QNN_SDK_PATH] [--build_type BUILD_TYPE] [--build_ort_from_source] [--ort_version_to_use ORT_VERSION_TO_USE]
 
 Build script for dependency libraries
 
@@ -86,7 +86,8 @@ options:
                         Path to Qualcomm QNN SDK (AI Engine Direct)
   --build_type BUILD_TYPE
                         {Release|RelWithDebInfo|Debug}
-  --skip_ort_build      If set, skip building ONNX Runtime
+  --build_ort_from_source
+                        If set, ONNX Runtime is built from source
 
   --ort_version_to_use ORT_VERSION_TO_USE
                         ONNX Runtime version to use. Must be a git tag or branch
@@ -94,9 +95,11 @@ options:
 
 ```
 
-##### Note
+#### Notes
 
-Use the option `--ort_version_to_use` and provide a git commit hash or a branch name or a tag, if you want to use a specific version of the ONNX Runtime library. However, if you previously used a different ONNX Runtime version, then delete the `deps/src/onnxruntime` directory before running the `build_deps.py` again with this option provided.
+1. Use the option `--ort_version_to_use` and provide a git commit hash or a branch name or a tag, if you want to use a specific version of the ONNX Runtime library. However, if you previously used a different ONNX Runtime version, then delete the `deps/src/onnxruntime` directory before running the `build_deps.py` again with this option provided.
+
+1. For Android builds, the `--build_ort_from_source` option must be set as for Android build, only build from source is supported.
 
 ##### Android Build With QNN Support
 
@@ -109,6 +112,7 @@ $ export QNN_SDK_ROOT=<qualcomm/qairt/VERSION>
 $ python build_deps.py \
     --android_sdk_path $ANDROID_SDK_ROOT \
     --android_ndk_path $NDK_ROOT \
+    --build_ort_from_source \
     --qnn_sdk_path $QNN_SDK_ROOT
 ...
 
@@ -118,7 +122,7 @@ If you are building just for Android CPU, then omit the `qnn_sdk_path`.
 
 After the dependencies are built, it's time to build the SLM Engine as described in the next section.
 
-#### Build SLM Engine
+#### 2. Build SLM Engine
 
 Next step is to build the program itself. For that use the script `build.py` with appropriate command line options as needed for Android build.
 

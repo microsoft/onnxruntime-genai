@@ -63,7 +63,7 @@ def main():
 
     print(f"Using CMake generator: {cmake_generator}")
 
-    artifacts_dir = os.path.abspath(f"deps/artifacts/")
+    artifacts_dir = os.path.abspath(f"slm_deps/artifacts/")
     cmake_options = [
         "cmake",
         "-G",
