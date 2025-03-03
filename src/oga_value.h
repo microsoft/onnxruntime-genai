@@ -6,7 +6,7 @@
 
 namespace Generators {
 
-struct OgaValue : std::enable_shared_from_this<OgaValue> {
+struct OgaValue {
   OgaValue(DeviceInterface* device, ONNXTensorElementDataType type);
   ~OgaValue();
 
@@ -38,5 +38,13 @@ struct OgaValue : std::enable_shared_from_this<OgaValue> {
   void* buffer_{};
   size_t bytes_{};
 };
+
+template uint8_t* OgaValue::GetMutableData<uint8_t>();
+template int32_t* OgaValue::GetMutableData<int32_t>();
+template int64_t* OgaValue::GetMutableData<int64_t>();
+
+template const uint8_t* OgaValue::GetData<uint8_t>() const;
+template const int32_t* OgaValue::GetData<int32_t>() const;
+template const int64_t* OgaValue::GetData<int64_t>() const;
 
 }  // namespace Generators

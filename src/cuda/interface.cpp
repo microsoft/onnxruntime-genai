@@ -7,6 +7,7 @@
 #include "../search.h"
 #include "search_cuda.h"
 #include "kernels.h"
+#include "../oga_value.h"
 #include <cstdarg>
 
 namespace Generators {

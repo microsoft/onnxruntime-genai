@@ -7,6 +7,7 @@
 #include "../cpu/interface.h"
 #include "interface.h"
 #include <cstdarg>
+#include "../oga_value.h"
 
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"

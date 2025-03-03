@@ -5,6 +5,7 @@
 #include "../search.h"
 #include "../models/utils.h"
 #include "interface.h"
+#include "../oga_value.h"
 
 namespace Generators {
 

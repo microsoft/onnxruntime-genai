@@ -60,16 +60,20 @@ OrtValue* OgaValue::GetOrtValue() {
 
 template <typename T>
 T* OgaValue::GetMutableData() {
-  return GetOrtValue()->GetTensorMutableData<T>();
+  return ort_value_->GetTensorMutableData<T>();
 }
 
 template <typename T>
 const T* OgaValue::GetData() const {
-  return GetOrtValue()->GetTensorData<T>();
+  return ort_value_->GetTensorData<T>();
 }
 
 std::span<const int64_t> OgaValue::GetShape() const {
   return ort_value_->GetTensorTypeAndShapeInfo()->GetShape();
+}
+
+ONNXTensorElementDataType OgaValue::GetType() const {
+  return type_;
 }
 
 size_t OgaValue::GetElementCount() const {
