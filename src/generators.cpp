@@ -465,7 +465,7 @@ void Generator::GenerateNextToken() {
   }
 
   last_action_ = Action::generated;
-  if (!search.do_sample || search.top_k == 1 || search.temperature <= 0) {
+  if (!search.do_sample || search.top_k == 1 || search.temperature == 0) {
     search_->SelectTop();
     return;
   }
@@ -479,8 +479,6 @@ void Generator::GenerateNextToken() {
     throw std::runtime_error("top_p must be between 0.0 and 1.0");
   if (search.top_k < 0)
     throw std::runtime_error("top_k must be 0 or greater");
-  if (search.temperature <= 0.0f)
-    throw std::runtime_error("temperature must be greater than 0");
 
   if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1) {
     search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);
