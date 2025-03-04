@@ -77,10 +77,16 @@ def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
     if use_graph_capture:
         params.try_graph_capture_with_max_batch_size(1)
 
+    print("inside generate_prompt")
     generator=og.Generator(model, params)
     generator.append_tokens(tokens)
+    print("appended tokens")
     while not generator.is_done():
         generator.generate_next_token()
+    output_tokens = generator.get_sequence(0)
+    print("generated tokens")
+    output_prompt = tokenizer.decode(output_tokens)
+    print("generated prompt")
     return tokenizer.decode(generator.get_sequence(0))
 
 # Use prompt length to get pre-defined prompt
@@ -118,8 +124,6 @@ def save_results(args, results, filename, print_memory_usage=False):
     "Prompt Length",
     "Tokens Generated",
     "Max Length",
-    "Tokenization Throughput (tps)",
-    "Tokenization Latency (ms)",
     "Prompt Processing Throughput (tps)",
     "Prompt Processing Latency (ms)",
     "Token Generation Throughput (tps)",
@@ -151,8 +155,6 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.config.customized["prompt_length"] = row["Prompt Length"]
         record.config.customized["tokens_generated"] = row["Tokens Generated"]
         record.config.customized["max_length"] = row["Max Length"]
-        record.metrics.customized["tokenization_throughput_tps"] = row["Tokenization Throughput (tps)"]
-        record.metrics.customized["tokenization_latency_ms"] = row["Tokenization Latency (ms)"]
         record.metrics.customized["prompt_processing_throughput_tps"] = row["Prompt Processing Throughput (tps)"]
         record.metrics.customized["prompt_processing_latency_ms"] = row["Prompt Processing Latency (ms)"]
         record.metrics.customized["token_generation_throughput_tps"] = row["Token Generation Throughput (tps)"]
@@ -251,12 +253,11 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         else:
             raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
 
+ 
     # Generate prompt
     if args.use_random_tokens:
         # use random tokens instead of generating a prompt using the model and then tokenizing it
         tokens = np.random.randint(100, size=(batch_size, prompt_length))
-        text = [tokenizer.decode(tokens[0])] * batch_size
-        prompt = f'{args.chat_template.format(input=text)}'
     elif args.use_prompt_set:
         text = [get_prompt_by_length(prompt_length)] * batch_size
         prompt = f'{args.chat_template.format(input=text)}'
@@ -270,7 +271,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     params = og.GeneratorParams(model)
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
-    params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length, batch_size=batch_size)
+    params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
 
     if args.use_graph_capture:
         params.try_graph_capture_with_max_batch_size(batch_size)
@@ -285,20 +286,13 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
 
-    tokenize_times = []
     prompt_times = []
     token_gen_times = []
     sampling_times = []
     wall_clock_times = []
-    if args.verbose: print(f"Running benchmark for batch size = {batch_size}, prompt length = {prompt_length}")
+    if args.verbose: print(f"Running benchmark for batch size = {len(tokens)}, prompt length = {len(tokens[0])}")
     for _ in tqdm(range(num_repetitions)):
         wall_clock_start_time = time.time()
-
-        # Measure tokenization
-        tokenize_start_time = time.perf_counter()
-        tokens = tokenizer.encode(prompt)
-        tokenize_end_time = time.perf_counter()
-        tokenize_times.append(tokenize_end_time - tokenize_start_time)
 
         # Prepare run
         params = og.GeneratorParams(model)
@@ -337,13 +331,6 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
 
-    # Calculate tokenization metrics
-    avg_tokenization_latency_s = sum(tokenize_times) / len(tokenize_times)
-    avg_tokenization_latency_ms = avg_tokenization_latency_s * 1000
-    avg_per_token_tokenization_latency_ms = avg_tokenization_latency_ms / prompt_length
-    avg_tokenization_thrpt = batch_size * (1000 / avg_per_token_tokenization_latency_ms)
-    print(f"Average Tokenization Latency (per token): {avg_per_token_tokenization_latency_ms} ms")
-    print(f"Average Tokenization Throughput (per token): {avg_tokenization_thrpt} tps")
 
     # Calculate prompt processing metrics
     avg_prompt_latency_s = sum(prompt_times) / len(prompt_times)
@@ -384,8 +371,6 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         prompt_length,
         generation_length,
         max_length,
-        avg_tokenization_thrpt, 
-        avg_tokenization_latency_ms, 
         avg_per_token_prompt_thrpt, 
         avg_per_token_prompt_latency_ms, 
         avg_token_gen_thrpt, 
