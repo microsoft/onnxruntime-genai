@@ -295,12 +295,6 @@ def build_ort(args, build_dir, artifacts_dir):
             os.symlink("../lib", "arm64-v8a")
         os.chdir("..")
     else:
-        # Copy the include/onnxruntime/* to include directory
-        copy_files_keeping_symlinks(
-            glob.glob(f"include/onnxruntime/*"),
-            f"include",
-        )
-
         # If we are on Windows - then we need to copy the .dll files to the
         # lib directory as well
         if platform.system() == "Windows":
@@ -308,6 +302,12 @@ def build_ort(args, build_dir, artifacts_dir):
                 glob.glob(f"bin/*.dll"),
                 f"lib",
             )
+
+    # Copy the include/onnxruntime/* to include directory
+    copy_files_keeping_symlinks(
+        glob.glob(f"include/onnxruntime/*"),
+        f"include",
+    )
 
     print(f"{MAGENTA}Copying ORT artifacts to 3P Artifacts: \n{artifacts_dir}{CLEAR}")
     os.makedirs(artifacts_dir, exist_ok=True)

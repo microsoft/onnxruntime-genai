@@ -41,23 +41,7 @@ c:\> git config --system core.longpaths true
 
 </details>
 
-<details>
- <summary><b>Supported Platforms</b></summary>
-
-Following are the platforms we tested the builds.
-
-| Platform         | Binary Directory Name | Comments                                                           |
-| ---------------- | --------------------- | ------------------------------------------------------------------ |
-| Android-aarch64  | Android-aarch64       | Can be cross compiled on Windows, MacOS or Linux                   |
-| MacOS-arm64      | Darwin-arm64          | Great for host side development                                    |
-| Ubuntu 24.04/x86 | Linux-x86_64          | Necessary for Cross Compiling for Android and Qualcomm QNN support |
-| Ubuntu 24.04/ARM | Linux-aarch64         |
-| Windows 11       | Windows-AMD64         | Can be used to run on AI PCs                                       |
-| Windows 11       | Windows-ARM64         | Can be used to run on AI PCs                                       |
-
-</details>
-
-### Build
+#### Build
 
 Building is as easy as following these steps:
 
@@ -185,6 +169,20 @@ $ ./build_linux.sh
 ```
 
 </details>
+
+### Target Specific onnxruntime Library Build Information
+
+Following table provides target specific build information for the `onnxruntime` library.
+
+| Build Host       | Target Platform  | Using prebuilt <br>onnxruntime | Output <br>Directory | Relevant <br>Build Options                                           |
+| ---------------- | ---------------- | ------------------------------ | -------------------- | -------------------------------------------------------------------- |
+| MacOS/arm64      | Android-aarch64  | ❌                             | Android-aarch64      | --android_sdk_path <br>--android_ndk_path<br>--build_ort_from_source |
+| MacOS/arm64      | MacOS-arm64      | ❌                             | Darwin-arm64         | --build_ort_from_source                                              |
+| Ubuntu 24.04/x86 | Android-aarch64  | ❌                             | Android-aarch64      | --android_sdk_path <br>--android_ndk_path<br>--build_ort_from_source |
+| Ubuntu 24.04/x86 | Ubuntu 24.04/x86 | ✅                             | Linux-x86_64         | --build_ort_from_source (optional)                                   |
+| Ubuntu 24.04/ARM | Ubuntu 24.04/ARM | ✅                             | Linux-aarch64        | --build_ort_from_source (optional)                                   |
+| Windows 11/AMD64 | Windows 11 AMD64 | ✅                             | Windows-AMD64        | --build_ort_from_source (optional)                                   |
+| Windows 11/ARM64 | Windows 11 ARM64 | ✅                             | Windows-ARM64        | --build_ort_from_source (optional)                                   |
 
 ## Using SLM Engine
 

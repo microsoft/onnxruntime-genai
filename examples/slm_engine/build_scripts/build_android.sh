@@ -8,12 +8,19 @@
 # The script also assumes that the android-sdk and android-ndk are installed
 # in the /opt/android-sdk directory.
 # 
+
+# Check the architecture
+if [ "$(uname -m)" != "x86_64" ]; then
+    echo "This script is intended to run on x86_64 architecture only."
+    exit 1
+fi
+
 set -e
 set -x
 set -u
 
 # Build the docker image 
-docker buildx build --platform linux/arm64 -t slm-engine-builder -f Dockerfile .
+docker build -t slm-engine-builder -f Dockerfile .
 
 # Run the docker to build dependencies
 docker run --rm -v \

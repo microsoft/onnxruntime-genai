@@ -12,7 +12,7 @@ set -x
 set -u
 
 # Build the docker image 
-docker buildx build --platform linux/arm64 -t slm-engine-builder -f Dockerfile .
+docker build -t slm-engine-builder -f Dockerfile .
 
 # Run the docker to build dependencies
 docker run --rm -v \
