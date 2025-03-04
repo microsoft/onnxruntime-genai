@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentView xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             xmlns:toolkit="http://schemas.microsoft.com/dotnet/2022/maui/toolkit"
+             xmlns:vm="clr-namespace:GennyMaui.ViewModels"
+             x:Class="GennyMaui.Pages.Views.ChatView">
+    <ContentView.BindingContext>
+        <vm:ChatViewModel/>
+    </ContentView.BindingContext>
+
+    <toolkit:DockLayout>
+
+        <!--Input Controls-->
+        <VerticalStackLayout toolkit:DockLayout.DockPosition="Bottom" HeightRequest="100" Margin="4">
+            <!--Buttons-->
+            <!--Prompt-->
+            <Entry Text="{Binding Prompt, Mode=TwoWay}" TextChanged="PromptTextChanged" />
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="3*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Button Grid.Column="0" Text="Send" Command="{Binding GenerateCommand}" Margin="4"/>
+                <Button Grid.Column="1" Text="Clear" Command="{Binding ClearCommand}" Margin="4"/>
+                <Button Grid.Column="2" Text="Cancel" Command="{Binding CancelCommand}" Margin="4"/>
+            </Grid>
+        </VerticalStackLayout>
+
+        <!--Result List-->
+        <Border StrokeThickness="1" toolkit:DockLayout.DockPosition="Top" x:Name="Container" HorizontalOptions="FillAndExpand" Margin="4">
+            <ListView ItemsSource="{Binding ResultHistory}" HasUnevenRows="True" SelectionMode="None">
+                <ListView.ItemTemplate>
+                    <DataTemplate>
+                        <ViewCell>
+                            <Border StrokeThickness="1"
+                                    Margin="4">
+                                <VerticalStackLayout>
+                                    <HorizontalStackLayout>
+                                        <Image WidthRequest="60" HeightRequest="60">
+                                            <Image.Style>
+                                                <Style TargetType="{x:Type Image}">
+                                                    <Setter Property="Source" Value="{StaticResource ImageAvatarRobot}" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger TargetType="Image" Binding="{Binding IsUserInput}" Value="True">
+                                                            <Setter Property="Source" Value="{StaticResource ImageAvatarUser}" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Image.Style>
+                                        </Image>
+                                        <Label Text="{Binding Content}"
+                                               LineBreakMode="CharacterWrap"
+                                               MaximumWidthRequest="{Binding Source={x:Reference Container}, Path=Width, ConverterParameter=x-80, Converter={toolkit:MathExpressionConverter}}"/>
+                                    </HorizontalStackLayout>
+                                    <Label Text="{Binding Timestamp}" />
+                                </VerticalStackLayout>
+                            </Border>
+                        </ViewCell>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </Border>
+    </toolkit:DockLayout>
+</ContentView>
