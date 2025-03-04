@@ -88,8 +88,12 @@ if(BUILD_WHEEL)
     list(APPEND modified_exclude_list "--exclude" ${item})
   endforeach()
 
-  if(MANYLINUX)
+  # On Linux we need this so the python bindings can load our other shared libraries in the same folder
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_target_properties(python PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
+  endif()
+
+  if(MANYLINUX)
     add_custom_target(PyPackageBuild ALL
       COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
       COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*
