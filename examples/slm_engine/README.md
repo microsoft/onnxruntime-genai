@@ -73,7 +73,7 @@ All the dependency artifacts are stored in `slm_deps/artifacts/<PLATFORM>`. For 
 
 <details>
 
- <summary><b>Build Details</b></summary>
+ <summary><b>Dependency Build Details</b></summary>
  <p>
 
 Depending on the build options specified, the `onnxruntime` is either built from pre-built binaries or source. The pre-built option is not available for Android or MacOS Sequoia. Next, `onnxruntime-genai` library is built from source. Finally, the script will clone and build few other `header only` dependencies.
@@ -415,7 +415,7 @@ After the build is complete, the binaries are available in the build_scripts/bui
 Following example show how to test this on a Windows 11:
 
 ```Powershell
->  cd .\build_scripts\builds\Windows-AMD64\install\bin\
+>  cd .\build_scripts\builds\Windows-ARM64\install\bin\
 >  .\slm-runner.exe -mf phi -t ..\..\..\..\..\test\batch-input.jsonl -m ..\..\..\..\..\..\..\..\..\models\Phi-3-mini-4k-instruct-onnx\cpu_and_mobile\cpu-int4-rtn-block-32-acc-level-4\ -o output.jsonl -v
 
 ```
