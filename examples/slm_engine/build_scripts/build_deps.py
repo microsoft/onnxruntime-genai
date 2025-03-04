@@ -8,7 +8,6 @@ import subprocess
 import sys
 import time
 
-BLUE = "\033[34m"
 MAGENTA = "\033[35m"
 RED = "\033[31m"
 CLEAR = "\033[0m"
@@ -139,6 +138,9 @@ def copy_artifacts(ort_version, artifacts_dir):
     FILE_PREFIX = f"onnxruntime-{platform_name}-{machine_type}-{ort_version}"
 
     FILE_NAME = f"{FILE_PREFIX}.tgz"
+    if platform_name == "win":
+        FILE_NAME = f"{FILE_PREFIX}.zip"
+
     download_url = f"{URL_PREFIX}/v{ort_version}/{FILE_NAME}"
     print(f"Downloading from: {download_url}")
 
@@ -152,9 +154,7 @@ def copy_artifacts(ort_version, artifacts_dir):
         if result != 0:
             raise Exception(f"Failed to download {download_url}")
         # Extract the file
-        result = subprocess.call(["tar", "-xzf", FILE_NAME])
-        if result != 0:
-            raise Exception(f"Failed to extract {download_url}")
+        shutil.unpack_archive(FILE_NAME, ".")
         os.remove(FILE_NAME)
 
     # Now copy the files to the artifacts directory
@@ -251,11 +251,11 @@ def build_ort(args, build_dir, artifacts_dir):
             cmd_args.extend(["--use_qnn", "--qnn_home", args.qnn_sdk_path])
 
     # now build the ORT library
-    print(f"{BLUE}Building ONNX Runtime{CLEAR}")
+    print(f"{MAGENTA}Building ONNX Runtime{CLEAR}")
     os.chdir("src/onnxruntime")
 
     build_script = "build.bat" if platform.system() == "Windows" else "./build.sh"
-    print(f"{BLUE}Running {build_script} with args: {cmd_args}{CLEAR}")
+    print(f"{MAGENTA}Running {build_script} with args: {cmd_args}{CLEAR}")
     result = subprocess.call([build_script] + cmd_args)
     if result != 0:
         raise Exception("Failed to build ONNX Runtime")
@@ -315,7 +315,7 @@ def build_ort(args, build_dir, artifacts_dir):
                 f"lib",
             )
 
-    print(f"{MAGENTA}Copying ORT artifacts to 3P Artifacts: {artifacts_dir}{CLEAR}")
+    print(f"{MAGENTA}Copying ORT artifacts to 3P Artifacts: \n{artifacts_dir}{CLEAR}")
     os.makedirs(artifacts_dir, exist_ok=True)
     copy_files_keeping_symlinks(glob.glob(f"{ort_home}/*"), artifacts_dir)
 
@@ -346,7 +346,7 @@ def build_ort_genai(args, artifacts_dir, ort_home=None):
         raise Exception("Failed to update submodules")
 
     # Now build the ORT-GenAI library
-    print(f"{BLUE}Building ONNX Runtime-GenAI{CLEAR}")
+    print(f"{MAGENTA}Building ONNX Runtime-GenAI{CLEAR}")
     # Prepare the command arguments
     cmd_args = [
         "--skip_wheel",
@@ -375,7 +375,7 @@ def build_ort_genai(args, artifacts_dir, ort_home=None):
             ]
         )
 
-    print(f"{BLUE}Running build.py with args: {cmd_args}{CLEAR}")
+    print(f"{MAGENTA}Running build.py with args: {cmd_args}{CLEAR}")
     python_executable = sys.executable
     result = subprocess.call([python_executable, "build.py"] + cmd_args)
     if result != 0:
@@ -434,7 +434,7 @@ def build_ort_genai(args, artifacts_dir, ort_home=None):
         glob.glob(f"{build_dir_name}/install/include/*"),
         f"{artifacts_dir}/include",
     )
-    print(f"{BLUE}Artifacts are available in: {artifacts_dir}{CLEAR}")
+    print(f"{MAGENTA}Artifacts are available in: \n{artifacts_dir}{CLEAR}")
 
     print(f"{MAGENTA}ONNX Runtime Built{CLEAR}")
     time_build_end = time.time()
@@ -483,7 +483,7 @@ def build_header_only(args, build_dir, artifacts_dir):
         # Clone the repo
         if not os.path.exists(f"src/{lib['name']}"):
             # Clone the ORT Repo
-            print(f"{BLUE}Cloning {lib['name']}{CLEAR}")
+            print(f"{MAGENTA}Cloning {lib['name']}{CLEAR}")
             os.chdir("src")
             result = subprocess.call(["git", "clone", lib["url"]])
             if result != 0:
@@ -528,7 +528,7 @@ def build_header_only(args, build_dir, artifacts_dir):
         # Return to the original directory
         os.chdir("..")
     print(f"{MAGENTA}Header Only Libraries Built{CLEAR}")
-    print(f"{BLUE}Artifacts are available in: {dest_root_dir}{CLEAR}")
+    print(f"{MAGENTA}Artifacts are available in: \n{dest_root_dir}{CLEAR}")
 
 
 def main():
