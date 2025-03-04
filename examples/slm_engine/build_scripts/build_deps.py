@@ -121,17 +121,11 @@ def copy_artifacts(ort_version, artifacts_dir):
     elif platform_name == "Windows":
         platform_name = "win"
 
-    machine_type = platform.machine()
+    machine_type = platform.machine().lower()
     if machine_type == "x86_64":
         machine_type = "x64"
-    elif machine_type == "aarch64":
-        machine_type = "arm64"
-    elif machine_type == "x86":
-        machine_type = "x86"
-    elif machine_type.lower() == "amd64":
+    elif machine_type == "amd64":
         machine_type = "x64"
-    elif machine_type.lower() == "arm64":
-        machine_type = "arm64"
 
     # Prepare the URL
     URL_PREFIX = "https://github.com/microsoft/onnxruntime/releases/download"

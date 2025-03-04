@@ -19,9 +19,12 @@ Since this is targeted for various devices running on the Edge we provide a simp
 
 ### Prerequisites
 
-The SLM Engine first builds the `onnxruntime` and `onnxruntime-genai` libraries from source. Therefore, any prerequisites that apply to build from source of these two libraries also applicable to SLM Engine. There are no additional requirements for building SLM engine.
+The SLM Engine first builds the `onnxruntime-genai` library from source. For some targets you also need to build `onnxruntime` from source. Therefore, any prerequisites that apply to build from source of these two libraries also applicable to SLM Engine. There are no additional requirements for building SLM engine.
 
-#### Windows Long File Path
+In order to build the software you will need C++ toolchain such as clang/llvm and cmake. Since the build scripts use Python3, any Python 3 would work. However, to enable Qualcomm QNN support, you need to use a Linux host and Python 3.8. Note that Python module `requests` is required. Use `pip install requests` when setting up the Python for building this software.
+
+<details>
+ <summary><b>Windows Long File Path</b></summary>
 
 For Windows, often the maximum path length is 260 which results in breaking the onnxruntime dependency build. Therefore, the long file path needs to be enabled in the group policy editor using the following steps:
 
@@ -36,25 +39,29 @@ c:\> git config --system core.longpaths true
 
 ```
 
+</details>
+
+<details>
+ <summary><b>Supported Platforms</b></summary>
+
 Following are the platforms we tested the builds.
 
 | Platform         | Binary Directory Name | Comments                                                           |
 | ---------------- | --------------------- | ------------------------------------------------------------------ |
 | Android-aarch64  | Android-aarch64       | Can be cross compiled on Windows, MacOS or Linux                   |
-| MacOS-aarch64    | Darwin-aarch64        | Great for host side development                                    |
+| MacOS-arm64      | Darwin-arm64          | Great for host side development                                    |
 | Ubuntu 24.04/x86 | Linux-x86_64          | Necessary for Cross Compiling for Android and Qualcomm QNN support |
 | Ubuntu 24.04/ARM | Linux-aarch64         |
 | Windows 11       | Windows-AMD64         | Can be used to run on AI PCs                                       |
+| Windows 11       | Windows-ARM64         | Can be used to run on AI PCs                                       |
+
+</details>
 
 ### Build
-
-In order to install the software from source, you will need C++ toolchain such as clang/llvm and cmake. Since the build scripts use Python3, any Python 3 would work. However, to enable Qualcomm QNN support, you need to use a Linux host and Python 3.8. Note that Python module `requests` is required. Use `pip install requests` when setting up the Python for building this software.
 
 Building is as easy as following these steps:
 
 #### 1. Build the Dependencies
-
-This program is based on ONNRuntime-GenAI library which in turn depends on ONNX Runtime core libraries. First step is to build the dependencies. Open a terminal window and run the following steps:
 
 ```bash
 $ cd build_scripts
@@ -62,9 +69,18 @@ $ python build_deps.py
 ...
 ```
 
-This will first build the onnxruntime by cloning a local copy in the deps/src directory. Once the build is complete, the script will next build the onnxruntime-gen - which is this repo itself. Upon completion, the script will clone and build few other `header only` dependencies. At the end of the build, all the built artifacts such as the header files and libraries are stored inside the deps/artifacts directory under a subdirectory that's named after the target platform.
+All the dependency artifacts are stored in `slm_deps/artifacts/<PLATFORM>`. For example, if you are building on MacOS then the built artifacts will be stored in `slm_deps/artifacts/MacOS-armh64/`. Similarly, if you are cross compiling for Android, then the artifacts will be stored in `slm_deps/artifacts/Android-aarch64/`.
 
-For example, if you are building on MacOS then the built artifacts will be stored in `deps/artifacts/Darwin-aarch64/`. Similarly, if you are cross compiling for Android, then the artifacts will be stored in `deps/artifacts/Android-aarch64/`.
+<details>
+
+ <summary><b>Build Details</b></summary>
+ <p>
+
+Depending on the build options specified, the `onnxruntime` is either built from pre-built binaries or source. The pre-built option is not available for Android or MacOS Sequoia. Next, `onnxruntime-genai` library is built from source. Finally, the script will clone and build few other `header only` dependencies.
+
+At the end of the build, all the built artifacts such as the header files and libraries are stored inside the deps/artifacts directory under a subdirectory that's named after the target platform.
+
+#### build_deps.py
 
 Following are the command line options applicable for the dependency build:
 
@@ -92,7 +108,6 @@ options:
   --ort_version_to_use ORT_VERSION_TO_USE
                         ONNX Runtime version to use. Must be a git tag or branch
 
-
 ```
 
 #### Notes
@@ -101,7 +116,7 @@ options:
 
 1. For Android builds, the `--build_ort_from_source` option must be set as for Android build, only build from source is supported.
 
-##### Android Build With QNN Support
+#### Android Build With QNN Support
 
 The following example illustrates how to cross compile the dependencies for Android CPU from Linux host.
 
@@ -122,6 +137,8 @@ If you are building just for Android CPU, then omit the `qnn_sdk_path`.
 
 After the dependencies are built, it's time to build the SLM Engine as described in the next section.
 
+</details>
+
 #### 2. Build SLM Engine
 
 Next step is to build the program itself. For that use the script `build.py` with appropriate command line options as needed for Android build.
@@ -129,6 +146,11 @@ Next step is to build the program itself. For that use the script `build.py` wit
 ```bash
 $ python build.py
 ```
+
+<details>
+
+ <summary><b>Build Details</b></summary>
+ <p>
 
 For Android build, the following commandline options are important:
 
@@ -162,6 +184,8 @@ $ ./build_linux.sh
 ...
 ```
 
+</details>
+
 ## Using SLM Engine
 
 To use the SLM Engine in your AI application, use one of the following methods:
@@ -178,16 +202,17 @@ The command line options of the slm-server are the following:
 
 ```shell
 $ ./slm-server  --help
-SLM Runner Version: v0.3.0
-Unknown argument: --help
-Usage: slm_server --model_family VAR --model_path VAR [--port_number VAR] [--verbose]
+SLM Runner Version: 1.0.0
+ORT GenAI Version: 0.7.0-dev
+ORT Version: 1.20.1
+-mf: required.
+Usage: slm_server --model_path VAR --model_family VAR [--port_number VAR] [--verbose]
 
 Optional arguments:
-  -mf, --model_family   Type of model: llama or phi
-  -m,  --model_path     Path to the model file [required]
-  -p, --port_number     HTTP Port Number to use (default 8080)
-  -v, --verbose         If provided, more debugging information printed on standard output
-
+  -m, --model_path     Path to the model file [required]
+  -mf, --model_family  Model family: <phi|llama|custom> [required]
+  -p, --port_number    HTTP Port Number to use (default 8080)
+  -v, --verbose        If provided, more debugging information printed on standard output
 ```
 
 ### Example Launch Command
@@ -378,7 +403,7 @@ See the [slm_engine.h](src/cpp/slm_engine.h) for more details of the C++ API.
 
 See the following reference CLI applications to learn more about how to use an HTTP server [slm_server.cpp](src/cpp/slm_server.cpp) or a CLI program for batch generation processing [slm_runner.cpp](src/cpp/slm_runner.cpp) using this library.
 
-## Example running SLM Engine
+## Running SLM Engine
 
 After the build is complete, the binaries are available in the build_scripts/builds/<TARGET_NAME>/install/bin directory. To test the build, download the ONNX model first and then run following command to execute SLM engine with a sample input file.
 
@@ -403,16 +428,19 @@ The `slm-runner` CLI application works in a batch mode and thus useful for bench
 
 ```shell
 $ ./slm-runner --help
-SLM Runner Version: v0.3.0
+SLM Runner Version: 1.0.0
+ORT GenAI Version: 0.7.0-dev
+ORT Version: 1.20.1
 Unknown argument: --help
 Usage: slm_runner --model_family VAR --model_path VAR --test_data_file VAR --output_file VAR [--verbose]
 
 Optional arguments:
-  -mf, --model_family   Type of model: llama or phi
-  -m, --model_path      Path to the model file [required]
-  -t, --test_data_file  Path to the test data file (JSONL) [required]
-  -o, --output_file     Path to the output file (JSONL) [required]
-  -v, --verbose         If provided, more debugging information printed on standard output
+  -m, --model_path             Path to the model file [required]
+  -mf, --model_family          Model family: <phi|llama|custom> [required]
+  -t, --test_data_file         Path to the test data file (JSONL) [required]
+  -o, --output_file            Path to the output file (JSONL) [required]
+  -w, --wait_between_requests  Wait time between requests in milliseconds
+  -v, --verbose                If provided, more debugging information printed on standard output
 ```
 
 ```JSON

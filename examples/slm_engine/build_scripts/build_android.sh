@@ -1,12 +1,13 @@
 #!/bin/sh
 
-# This script builds the slm_engine for Linux using docker.
-# It uses the Dockerfile in the current directory to build a docker image   
+# This script builds the slm_engine for Android using docker.
+# It uses the Dockerfile in the current directory to build a docker image
 # that contains all the necessary dependencies for building the slm_engine.
 # The script then runs the docker image to build the slm_engine.
 # The script assumes that the Dockerfile is in the same directory as this script.
-# The script also assumes that the docker is installed and running on the host machine.
-
+# The script also assumes that the android-sdk and android-ndk are installed
+# in the /opt/android-sdk directory.
+# 
 set -e
 set -x
 set -u
@@ -18,10 +19,14 @@ docker buildx build --platform linux/arm64 -t slm-engine-builder -f Dockerfile .
 docker run --rm -v \
     `pwd`/../../../:`pwd`/../../../  \
     -u $(id -u):$(id -g) -w `pwd`  \
-    slm-engine-builder python3 build_deps.py
+    slm-engine-builder python3 build_deps.py \
+    --build_ort_from_source \
+    --android_sdk_path /opt/android-sdk/ \
+    --android_ndk_path /opt/android-sdk/ndk/27.2.12479018/ 
 
 # Next build the slm_engine
 docker run --rm -v \
     `pwd`/../../../:`pwd`/../../../  \
     -u $(id -u):$(id -g) -w `pwd` \
-    slm-engine-builder python3 build.py
+    slm-engine-builder python3 build.py \
+    --android_ndk_path /opt/android-sdk/ndk/27.2.12479018/ \
