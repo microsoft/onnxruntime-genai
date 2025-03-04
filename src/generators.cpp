@@ -58,11 +58,10 @@ OrtGlobals::OrtGlobals()
 }
 
 // Ensure Shutdown() has been called before process exit
-struct ValidateShutdown {
-  ~ValidateShutdown() {
+struct EnsureShutdown {
+  ~EnsureShutdown() {
     if (GetOrtGlobals()) {
-      std::cerr << "OGA Error: Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
-      std::abort();
+      Shutdown();
     }
   }
 };
@@ -70,7 +69,7 @@ struct ValidateShutdown {
 std::unique_ptr<OrtGlobals>&
 GetOrtGlobals() {
   static auto globals = std::make_unique<OrtGlobals>();
-  static auto validate = std::make_unique<ValidateShutdown>();  // Must be after the above line so the destructor runs before the above destructor
+  static auto validate = std::make_unique<EnsureShutdown>();  // Must be after the above line so the destructor runs before the above destructor
   return globals;
 }
 
@@ -84,7 +83,6 @@ bool LeakTypeList<Types...>::Dump() {
 void Shutdown() {
   if (LeakTypes::Dump()) {
     std::cerr << "    Please see the documentation for the API being used to ensure proper cleanup." << std::endl;
-    std::abort();
   }
 
   GetOrtGlobals().reset();  // Delete now because on process exit is too late
@@ -128,37 +126,73 @@ struct GenaiInterfaceImpl : GenaiInterface {
   void Sequences_RewindTo(Sequences* p_this, size_t new_length) override { return p_this->RewindTo(new_length); }
 } g_genai;
 
-DeviceInterface* GetCudaInterface() {
-// Load the shared library onnxruntime-genai-cuda.dll
-// This is a workaround to avoid linking the CUDA library to the generator library
-// The CUDA library is only needed for the CUDA allocator
 #if defined(_WIN32)
-  static std::unique_ptr<void, void (*)(void*)> cuda_library{LoadLibrary((CurrentModulePath() + "onnxruntime-genai-cuda.dll").c_str()),
-                                                             [](void* h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};
-#elif defined(__linux__) && !defined(__ANDROID__)
-  static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen((Ort::GetCurrentModuleDir() + "/libonnxruntime-genai-cuda.so").c_str(), RTLD_NOW | RTLD_DEEPBIND),
-                                                             [](void* h) { dlclose(h); }};
-#else
-  static std::unique_ptr<void, void (*)(void*)> cuda_library{nullptr, [](void* h) {}};
-#endif
+struct LibraryHandle {
+  LibraryHandle(const char* filename) {
+    auto path = CurrentModulePath() + filename;
+    handle_ = LoadLibrary(path.c_str());
+    if (!handle_)
+      throw std::runtime_error(std::string("Failed to load library: ") + path + " Error: " + std::to_string(GetLastError()));
+  };
 
-  if (!cuda_library) {
-    throw std::runtime_error("Cuda interface not available.");
+  ~LibraryHandle() { FreeLibrary(handle_); }
+
+  FARPROC __stdcall GetSymbol(const char* name) { return ::GetProcAddress(handle_, name); }
+
+  operator HANDLE() { return handle_; }
+
+ private:
+  HMODULE handle_{};
+};
+#elif defined(__linux__) && !defined(__ANDROID__)
+struct LibraryHandle {
+  LibraryHandle(const char* filename) {
+    auto path = Ort::GetCurrentModuleDir() + "/" + filename;
+    handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!handle_)
+      throw std::runtime_error(std::string("Failed to load library: ") + dlerror());  // dlerror() includes the path
+  }
+  ~LibraryHandle() {
+    dlclose(handle_);
   }
 
-  Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai);
-  static DeviceInterface* cuda_interface{[] {
-#if defined(_WIN32)
-    auto get_cuda_fn = reinterpret_cast<decltype(&GetInterface)>(GetProcAddress(reinterpret_cast<HMODULE>(cuda_library.get()), "GetInterface"));
-#elif defined(__linux__) && !defined(__ANDROID__)
-    auto get_cuda_fn = reinterpret_cast<decltype(&GetInterface)>(dlsym(cuda_library.get(), "GetInterface"));
-#else
-    auto get_cuda_fn = [](GenaiInterface*) { return nullptr; };
-#endif
-    return get_cuda_fn(&g_genai);
-  }()};
+  void* GetSymbol(const char* name) { return ::dlsym(handle_, name); }
 
-  return cuda_interface;
+  operator void*() { return handle_; }
+
+ private:
+  void* handle_{};
+};
+#else
+struct LibraryHandle {
+  LibraryHandle(const char* filename) {}
+  ~LibraryHandle() {}
+
+  void* GetSymbol(const char* name) { return nullptr; }
+
+  operator bool() { return false; }
+};
+#endif
+
+DeviceInterface* GetCudaInterface() {
+  try {
+#if defined(_WIN32)
+    static LibraryHandle library{"onnxruntime-genai-cuda.dll"};
+#elif defined(__linux__) && !defined(__ANDROID__)
+    static LibraryHandle library{"libonnxruntime-genai-cuda.so"};
+#else
+    static LibraryHandle library{""};
+#endif
+    if (!library)
+      throw std::runtime_error("Shared library load failure (see first error)");
+
+    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai);
+    static DeviceInterface* cuda_interface = reinterpret_cast<decltype(&GetInterface)>(library.GetSymbol("GetInterface"))(&g_genai);
+
+    return cuda_interface;
+  } catch (const std::exception& e) {
+    throw std::runtime_error("Cuda interface not available: " + std::string(e.what()));
+  }
 }
 
 std::string to_string(DeviceType device_type) {
@@ -431,7 +465,7 @@ void Generator::GenerateNextToken() {
   }
 
   last_action_ = Action::generated;
-  if (!search.do_sample || search.top_k == 1) {
+  if (!search.do_sample || search.top_k == 1 || search.temperature == 0) {
     search_->SelectTop();
     return;
   }
@@ -445,8 +479,6 @@ void Generator::GenerateNextToken() {
     throw std::runtime_error("top_p must be between 0.0 and 1.0");
   if (search.top_k < 0)
     throw std::runtime_error("top_k must be 0 or greater");
-  if (search.temperature <= 0.0f)
-    throw std::runtime_error("temperature must be greater than 0");
 
   if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1) {
     search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);

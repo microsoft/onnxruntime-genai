@@ -68,7 +68,7 @@ using TokenSequences = std::vector<std::vector<int32_t>>;
 std::string to_string(DeviceType device_type);
 DeviceInterface* GetDeviceInterface(DeviceType type);
 
-struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams> {
+struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams>, ExternalRefCounted<GeneratorParams> {
   GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
   GeneratorParams(const Model& model);
 
@@ -89,8 +89,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   };
 
   std::variant<Whisper> inputs;
-
-  std::shared_ptr<GeneratorParams> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
   struct Input {
     std::string name;
