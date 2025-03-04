@@ -1,7 +1,7 @@
 
 #include "slm_engine.h"
 
-#include "onnxruntime/onnxruntime_cxx_api.h"
+#include "onnxruntime_cxx_api.h"
 
 #include <stdio.h>
 #include <string.h>

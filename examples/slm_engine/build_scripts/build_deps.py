@@ -105,14 +105,13 @@ def copy_files_keeping_symlinks(src_files, dest):
             shutil.copy2(file, dest)
 
 
-def copy_artifacts(args, artifacts_dir):
+def copy_artifacts(ort_version, artifacts_dir):
     """
     Copy the artifacts from the prebuilt directory to the artifacts directory
     """
     # Determine the top level directory
-    top_level_dir = f"{os.path.dirname(os.path.realpath(__file__))}/../../../"
-    target_specific_dir = f"{top_level_dir}/build/{get_target_specific_oga_build_dirname()}/{args.build_type}/_deps/ortlib-src"
-    src_include_dir = os.path.abspath(f"{target_specific_dir}/build/native/include")
+    build_scripts_dir = f"{os.path.dirname(os.path.realpath(__file__))}"
+    os.chdir(build_scripts_dir)
 
     # Get the platform and machine type
     platform_name = platform.system()
@@ -135,20 +134,43 @@ def copy_artifacts(args, artifacts_dir):
     elif machine_type.lower() == "arm64":
         machine_type = "arm64"
 
-    src_lib_dir = os.path.abspath(
-        f"{target_specific_dir}/runtimes/{platform_name}-{machine_type}/native"
-    )
-    print(f"Copying Source Lib Dir: {src_lib_dir}")
-    copy_files_keeping_symlinks(
-        glob.glob(f"{src_lib_dir}/*"),
-        f"{artifacts_dir}/lib",
-    )
+    # Prepare the URL
+    URL_PREFIX = "https://github.com/microsoft/onnxruntime/releases/download"
+    FILE_PREFIX = f"onnxruntime-{platform_name}-{machine_type}-{ort_version}"
 
-    print(f"Source Include Dir: {src_include_dir}")
-    os.makedirs(f"{artifacts_dir}/include/onnxruntime", exist_ok=True)
+    FILE_NAME = f"{FILE_PREFIX}.tgz"
+    download_url = f"{URL_PREFIX}/v{ort_version}/{FILE_NAME}"
+    print(f"Downloading from: {download_url}")
+
+    # Download the file
+    if not os.path.exists(artifacts_dir):
+        os.makedirs(artifacts_dir, exist_ok=True)
+    os.chdir(artifacts_dir)
+
+    if not os.path.exists(FILE_NAME):
+        result = subprocess.call(["curl", "-L", download_url, "-o", FILE_NAME])
+        if result != 0:
+            raise Exception(f"Failed to download {download_url}")
+        # Extract the file
+        result = subprocess.call(["tar", "-xzf", FILE_NAME])
+        if result != 0:
+            raise Exception(f"Failed to extract {download_url}")
+        os.remove(FILE_NAME)
+
+    # Now copy the files to the artifacts directory
+
+    # Copy the include files
+    src_dir = os.path.abspath(FILE_PREFIX)
+    os.makedirs(f"{artifacts_dir}/include", exist_ok=True)
     copy_files_keeping_symlinks(
-        glob.glob(f"{src_include_dir}/*"),
-        f"{artifacts_dir}/include/onnxruntime",
+        glob.glob(f"{src_dir}/include/*"),
+        f"{artifacts_dir}/include/",
+    )
+    # Copy the lib files
+    os.makedirs(f"{artifacts_dir}/lib", exist_ok=True)
+    copy_files_keeping_symlinks(
+        glob.glob(f"{src_dir}/lib/*"),
+        f"{artifacts_dir}/lib/",
     )
 
 
@@ -156,6 +178,7 @@ def build_ort(args, build_dir, artifacts_dir):
     """
     Build the ONNX Runtime library and ORT-GenAI library
     """
+    start_time = time.time()
 
     os.chdir(build_dir)
 
@@ -298,11 +321,15 @@ def build_ort(args, build_dir, artifacts_dir):
 
     # Back to the original directory
     os.chdir(current_dir)
+    time_build_end = time.time()
+    print(f"ORT Build Time: {time_build_end - start_time:.2f} seconds")
 
     return ort_home
 
 
 def build_ort_genai(args, artifacts_dir, ort_home=None):
+
+    time_build_start = time.time()
 
     # Navigate to the directory where this Python file is located
     os.chdir(os.path.dirname(os.path.realpath(__file__)))
@@ -410,6 +437,8 @@ def build_ort_genai(args, artifacts_dir, ort_home=None):
     print(f"{BLUE}Artifacts are available in: {artifacts_dir}{CLEAR}")
 
     print(f"{MAGENTA}ONNX Runtime Built{CLEAR}")
+    time_build_end = time.time()
+    print(f"GenAI Build Time: {time_build_end - time_build_start:.2f} seconds")
 
 
 def build_header_only(args, build_dir, artifacts_dir):
@@ -534,7 +563,7 @@ def main():
     parser.add_argument(
         "--ort_version_to_use",
         type=str,
-        help="ONNX Runtime version to use. Must be a git tag or branch",
+        help="ONNX Runtime version to use when building from source. Must be a git tag or branch",
     )
 
     # Parsing arguments
@@ -549,13 +578,6 @@ def main():
             )
     else:
         args.android = False
-
-    if args.ort_version_to_use is None:
-        # If not Windows then use 1.20.2
-        if platform.system() != "Windows":
-            args.ort_version_to_use = "v1.20.2"
-        else:
-            args.ort_version_to_use = "main"
 
     # Change directory to where this Python file is located to avoid any issues
     # related to running this script from another directory
@@ -587,15 +609,30 @@ def main():
     # then we will use the location of the ort_home as set by the build_ort()
     ort_home = None
     if args.build_ort_from_source:
+        if args.ort_version_to_use is None:
+            # If not Windows then use 1.20.1
+            if platform.system() != "Windows":
+                args.ort_version_to_use = "v1.20.1"
+            else:
+                args.ort_version_to_use = "main"
         ort_home = build_ort(args, dep_src_dir, artifacts_dir)
+    else:
+        if platform.system() == "Darwin":
+            # The ORT release for OS X ARM64 is not available recent releases of the XCode.
+            # So the resulting build may not work. If so, then build from source
+            print(
+                f"{RED}For MacOS ARM64 if the build may not run with newer XCode versions{CLEAR}"
+            )
+            print(f"{RED}Please build from source in that case{CLEAR}")
+        # The ORT binaries are available as they were downloaded during the GenAI build
+        # This is the supported version for most platforms
+        ORT_VERSION = "1.20.1"
+        # Copy the ORT artifacts to the artifacts directory.
+        copy_artifacts(ORT_VERSION, artifacts_dir)
+        ort_home = artifacts_dir
 
     # Now build the ORT-GenAI library
     build_ort_genai(args, artifacts_dir, ort_home)
-
-    if not args.build_ort_from_source:
-        # The ORT binaries are available as they were downloaded during the GenAI build
-        # Copy the ORT artifacts to the artifacts directory
-        copy_artifacts(args, artifacts_dir)
 
     # Now build the header-only libraries
     build_header_only(args, dep_src_dir, common_artifacts_dir)
@@ -604,7 +641,7 @@ def main():
     os.chdir("..")
     time_build_end = time.time()
 
-    print(f"Build Time: {time_build_end - time_build_start:.2f} seconds")
+    print(f"Total Build Time: {time_build_end - time_build_start:.2f} seconds")
 
 
 if __name__ == "__main__":
