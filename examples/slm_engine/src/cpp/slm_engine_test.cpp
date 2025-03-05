@@ -5,6 +5,9 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <fstream>
+#include <filesystem>
+#include <vector>
 
 using namespace std;
 
@@ -14,15 +17,15 @@ namespace testing {
 
 // Define the path to the model file
 // This should be set in the environment variable MODEL_FILE_PATH
-const char* MODEL_FILE_PATH = std::getenv("MODEL_FILE_PATH");
+const char* MODEL_FILE_PATH = getenv("MODEL_FILE_PATH");
 
 // Define the path to the model root directory
 // Al the model directories are expected to be under this directory
-const char* MODEL_ROOT_DIR = std::getenv("MODEL_ROOT_DIR");
+const char* MODEL_ROOT_DIR = getenv("MODEL_ROOT_DIR");
 
 struct ModelInfo {
-  std::string model_path;
-  std::string model_family;
+  string model_path;
+  string model_family;
 };
 
 const ModelInfo MODELS[] = {
@@ -34,63 +37,64 @@ TEST(SLMEngineTest, TestModelFamily) {
   ASSERT_TRUE(MODEL_ROOT_DIR != nullptr) << "MODEL_ROOT_DIR is not set";
 
   for (const auto& model : MODELS) {
-    std::string model_path = std::string(MODEL_ROOT_DIR) + "/" + model.model_path;
-    std::string model_family = SLMEngine::GetModelFamily(model_path);
+    string model_path = string(MODEL_ROOT_DIR) + "/" + model.model_path;
+    string model_family = SLMEngine::GetModelFamily(model_path);
     ASSERT_EQ(model_family, model.model_family);
   }
 }
 
 // A few Test Prompts and their expected answers
 struct TestPrompt {
-  std::string system_prompt;
-  std::string user_prompt;
-  std::string expected_answer;
+  string system_prompt;
+  string user_prompt;
+  string expected_answer;
 };
 
 const TestPrompt TEST_PROMPTS[] = {
-    {"You are a shool teacher who's very specific. Just provide the answer and nothing else.", "What is 2 * 20 - 10?", "Expected answer 1"},
+    {"You are a shool teacher who's very specific. Just provide the answer and nothing else.",
+     "What is 2 * 20 - 10?", "------"},
 
     {"You are a travel assistant. Mention just the answer and do not explain anything.",
      "What is the airport code for Los Angeles?",
-     "Expected answer 2"},
+     "----"},
 
     {"You are a travel assistant. Provided a detailed answer as good as you can.",
-     "Which state is San Diego in?", ""},
+     "Which state is San Diego in?", "-----"},
 
     {"Briefly answer any question you are asked. Do not provide any explanation.",
      "Which is the capital of France?",
-     ""},
+     "-----"},
 
     {"You are a travel assistant. Just provide the answer and nothing else.",
-     "Which state is San Diego in?", ""}};
+     "Which state is San Diego in?", "-----"}};
 
 TEST(SLMEngineTest, LoadUnloadModel) {
   ASSERT_TRUE(MODEL_FILE_PATH != nullptr) << "MODEL_FILE_PATH is not set";
 
-  std::cout << "Initial Memory Usage: "
-            << microsoft::slm_engine::SLMEngine::GetMemoryUsage() << " MB"
-            << std::endl;
+  cout << "Initial Memory Usage: "
+       << microsoft::slm_engine::SLMEngine::GetMemoryUsage() << " MB"
+       << endl;
 
   for (int i = 0; i < 5; i++) {
     // Test loading a model
-    std::cout << "Before Engine Create Memory Usage: "
-              << microsoft::slm_engine::SLMEngine::GetMemoryUsage() << " MB"
-              << std::endl;
+    cout << "Before Engine Create Memory Usage: "
+         << microsoft::slm_engine::SLMEngine::GetMemoryUsage() << " MB"
+         << endl;
     auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
         MODEL_FILE_PATH, false);
 
-    std::cout << "After Loading Model Memory Usage: "
-              << microsoft::slm_engine::SLMEngine::GetMemoryUsage() << " MB"
-              << std::endl;
+    cout << "After Loading Model Memory Usage: "
+         << microsoft::slm_engine::SLMEngine::GetMemoryUsage() << " MB"
+         << endl;
 
     ASSERT_NE(slm_engine, nullptr);
 
     // Reset the engine to free up resources
     slm_engine.reset();
 
-    std::cout << "After delete engine Memory Usage: "
-              << microsoft::slm_engine::SLMEngine::GetMemoryUsage() << " MB"
-              << std::endl;
+    cout << "After delete engine Memory Usage: "
+         << microsoft::slm_engine::SLMEngine::GetMemoryUsage() << " MB"
+         << endl;
   }
 }
 
@@ -101,22 +105,112 @@ TEST(SLMEngineTest, TestGeneration) {
       MODEL_FILE_PATH, false);
   ASSERT_NE(slm_engine, nullptr);
 
-  std::cout << "After Loading Model Memory Usage: "
-            << microsoft::slm_engine::SLMEngine::GetMemoryUsage() << " MB"
-            << std::endl;
+  cout << "After Loading Model Memory Usage: "
+       << microsoft::slm_engine::SLMEngine::GetMemoryUsage() << " MB"
+       << endl;
 
   for (const auto& test_prompt : TEST_PROMPTS) {
     SLMEngine::RuntimePerf kpi;
     SLMEngine::GenerationOptions generator_options;
-
     string response;
     slm_engine->generate(test_prompt.system_prompt + test_prompt.user_prompt, generator_options, response, kpi);
-    cout << "Response: " << response << std::endl;
+
+    cout << "Response: " << response << endl;
     cout << "TTFT: " << kpi.TimeToFirstToken << " TPS: " << kpi.TokenRate
          << " Memory Usage: " << kpi.CurrentMemoryUsed << " MB" << endl;
   }
 }
 
+const char* TEST_INPUT_FILE = getenv("TEST_INPUT_FILE");
+
+TEST(SLMEngineTest, CaptureMemoryUsage) {
+  // This test captures the memory usage at various stages of the SLM  Engine lifecycle
+  // Produces a JSON file with performance metrics that can be used for analysis
+  ASSERT_TRUE(MODEL_FILE_PATH != nullptr) << "MODEL_FILE_PATH is not set";
+  ASSERT_TRUE(TEST_INPUT_FILE != nullptr) << "TEST_INPUT_FILE is not set";
+
+  nlohmann::json overall_status_json;
+  overall_status_json["model_path"] = MODEL_FILE_PATH;
+  overall_status_json["test_input_file"] = TEST_INPUT_FILE;
+
+  string ort_version, oga_version, slm_version;
+
+  SLMEngine::GetVersion(ort_version, oga_version, slm_version);
+  overall_status_json["ort_version"] = ort_version;
+  overall_status_json["oga_version"] = oga_version;
+  overall_status_json["slm_version"] = slm_version;
+
+  overall_status_json["memory_before_run"] = SLMEngine::GetMemoryUsage();
+
+  auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
+      MODEL_FILE_PATH, false);
+  ASSERT_NE(slm_engine, nullptr) << "Failed to create SLMEngine";
+  overall_status_json["memory_after_load"] = SLMEngine::GetMemoryUsage();
+
+  // Now start the run
+  ASSERT_TRUE(filesystem::exists(TEST_INPUT_FILE)) << "Input file doesn't exist: " << TEST_INPUT_FILE;
+
+  ifstream file(TEST_INPUT_FILE);
+  ASSERT_TRUE(file.is_open()) << "Failed to open test input file";
+
+  auto per_prompt_stats_json_array = nlohmann::json::array();
+  string line;
+  while (getline(file, line)) {
+    try {
+      auto jsonObject = nlohmann::json::parse(line);  // Parse the JSON object
+      cout << "Question: " << jsonObject["messages"][1]["content"] << endl;
+
+      auto per_prompt_stats_json = nlohmann::json::object();
+      per_prompt_stats_json["memory_before_generate"] = SLMEngine::GetMemoryUsage();
+
+      SLMEngine::RuntimePerf kpi;
+      SLMEngine::GenerationOptions generator_options;
+      string response;
+
+      slm_engine->generate(line, generator_options, response, kpi);
+
+      // Capture the stats
+      per_prompt_stats_json["ttft"] = kpi.TimeToFirstToken;
+      per_prompt_stats_json["tok_rate"] = kpi.TokenRate;
+      per_prompt_stats_json["memory_usage"] = kpi.CurrentMemoryUsed;
+      per_prompt_stats_json["total_time"] = kpi.TotalTime;
+      per_prompt_stats_json["prompt_toks"] = kpi.PromptTokenCount;
+      per_prompt_stats_json["generated_toks"] = kpi.GeneratedTokenCount;
+
+      per_prompt_stats_json["memory_after_generate"] = SLMEngine::GetMemoryUsage();
+
+      cout << "Response: " << response << endl;
+      cout << "TTFT: " << kpi.TimeToFirstToken << " TPS: " << kpi.TokenRate
+           << " Memory Usage: " << kpi.CurrentMemoryUsed << " MB" << endl
+           << endl;
+
+      per_prompt_stats_json_array.push_back(per_prompt_stats_json);
+
+    } catch (const nlohmann::json::parse_error& e) {
+      FAIL() << "Failed to parse JSON: " << e.what();
+    }
+  }
+
+  // Destroy the engine
+  slm_engine.reset();
+  overall_status_json["memory_after_unload"] = SLMEngine::GetMemoryUsage();
+
+  // At the end - capture the memory usage
+  overall_status_json["memory_after_run"] = SLMEngine::GetMemoryUsage();
+
+  nlohmann::json test_output_json;
+  test_output_json["overall_stats"] = overall_status_json;
+  test_output_json["per_prompt_stats"] = per_prompt_stats_json_array;
+
+  // Write the JSON object to a file
+  ofstream output_file("test_output.json");
+  if (output_file.is_open()) {
+    output_file << test_output_json.dump(4);  // Pretty print with 4 spaces
+    output_file.close();
+  } else {
+    FAIL() << "Failed to open output file for writing";
+  }
+}
 }  // namespace testing
 }  // namespace slm_engine
 }  // namespace microsoft
