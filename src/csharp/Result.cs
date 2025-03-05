@@ -6,18 +6,22 @@ using System.Runtime.CompilerServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    class Result
+    internal static class Result
     {
-        private static string GetErrorMessage(IntPtr nativeResult)
+        internal static string GetErrorMessage(IntPtr nativeResult)
         {
-
-            return StringUtils.FromUtf8(NativeMethods.OgaResultGetError(nativeResult));
+            return StringUtils.FromNullTerminatedUtf8(NativeMethods.OgaResultGetError(nativeResult));
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void VerifySuccess(IntPtr nativeResult)
         {
             if (nativeResult != IntPtr.Zero)
+            {
+                Throw(nativeResult);
+            }
+
+            static void Throw(IntPtr nativeResult)
             {
                 try
                 {

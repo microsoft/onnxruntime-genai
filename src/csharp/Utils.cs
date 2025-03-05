@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
@@ -52,45 +54,57 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public static void SetLogBool(string name, bool value)
         {
-            Result.VerifySuccess(NativeMethods.OgaSetLogBool(StringUtils.ToUtf8(name), value));
+            Result.VerifySuccess(NativeMethods.OgaSetLogBool(StringUtils.ToNullTerminatedUtf8(name), value));
         }
         
         public static void SetLogString(string name, string value)
         {
-            Result.VerifySuccess(NativeMethods.OgaSetLogString(StringUtils.ToUtf8(name), StringUtils.ToUtf8(value)));
+            Result.VerifySuccess(NativeMethods.OgaSetLogString(StringUtils.ToNullTerminatedUtf8(name), StringUtils.ToNullTerminatedUtf8(value)));
         }
     }
 
     internal class StringUtils
     {
-        internal static byte[] EmptyByteArray = new byte[] { 0 };
+        internal static readonly byte[] EmptyByteArray = [0];
 
-        internal static byte[] ToUtf8(string str)
+        internal static byte[] ToNullTerminatedUtf8(string str) => ToNullTerminatedUtf8(str.AsSpan());
+
+        internal static unsafe byte[] ToNullTerminatedUtf8(ReadOnlySpan<char> str)
         {
-            if (string.IsNullOrEmpty(str))
+            if (str.IsEmpty)
                 return EmptyByteArray;
 
-            int arraySize = UTF8Encoding.UTF8.GetByteCount(str);
-            byte[] utf8Bytes = new byte[arraySize + 1];
-            UTF8Encoding.UTF8.GetBytes(str, 0, str.Length, utf8Bytes, 0);
-            utf8Bytes[utf8Bytes.Length - 1] = 0;
-            return utf8Bytes;
+            fixed (char* pStr = str)
+            {
+                int byteCount = Encoding.UTF8.GetByteCount(pStr, str.Length);
+                
+                byte[] utf8Bytes = new byte[byteCount + 1];
+                fixed (byte* pBytes = utf8Bytes)
+                {
+                    Encoding.UTF8.GetBytes(pStr, str.Length, pBytes, byteCount);
+                    pBytes[byteCount] = 0;
+                }
+                
+                return utf8Bytes;
+            }
         }
 
-        internal static string FromUtf8(IntPtr nativeUtf8)
+        internal static unsafe string FromNullTerminatedUtf8(IntPtr nativeUtf8)
         {
-            unsafe
-            {
-                int len = 0;
-                while (*(byte*)(nativeUtf8 + len) != 0) ++len;
+            int len = GetNullTerminatedUtf8Length(nativeUtf8);
+            return len > 0 ? Encoding.UTF8.GetString((byte*)nativeUtf8, len) : string.Empty;
+        }
 
-                if (len == 0)
-                {
-                    return string.Empty;
-                }
-                var nativeBytes = (byte*)nativeUtf8;
-                return Encoding.UTF8.GetString(nativeBytes, len);
-            }
+        internal static unsafe int GetNullTerminatedUtf8Length(IntPtr nativeUtf8)
+        {
+            // On .NET Core, we can use an optimized code path.
+#if NETCOREAPP
+            return MemoryMarshal.CreateReadOnlySpanFromNullTerminated((byte*)nativeUtf8).Length;
+#else
+            int len = 0;
+            while (*(byte*)(nativeUtf8 + len) != 0) ++len;
+            return len;
+#endif
         }
     }
 }

@@ -31,8 +31,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// <param name="adapterName">adapter name</param>
         public void LoadAdapter(string adapterPath, string adapterName)
         {
-            Result.VerifySuccess(NativeMethods.OgaLoadAdapter(handle,
-                StringUtils.ToUtf8(adapterPath), StringUtils.ToUtf8(adapterName)));
+            Result.VerifySuccess(NativeMethods.OgaLoadAdapter(
+                handle,
+                StringUtils.ToNullTerminatedUtf8(adapterPath), 
+                StringUtils.ToNullTerminatedUtf8(adapterName)));
         }
 
         /// <summary>
@@ -42,7 +44,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         /// <param name="adapterName"></param>
         public void UnloadAdapter(string adapterName)
         {
-            Result.VerifySuccess(NativeMethods.OgaUnloadAdapter(handle, StringUtils.ToUtf8(adapterName)));
+            Result.VerifySuccess(NativeMethods.OgaUnloadAdapter(
+                handle, 
+                StringUtils.ToNullTerminatedUtf8(adapterName)));
         }
 
         internal IntPtr Handle { get { return handle; } }

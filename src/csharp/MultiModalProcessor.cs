@@ -20,8 +20,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public NamedTensors ProcessImages(string prompt, Images images)
         {
             IntPtr imagesHandle = images == null ? IntPtr.Zero : images.Handle;
-            Result.VerifySuccess(NativeMethods.OgaProcessorProcessImages(_processorHandle, StringUtils.ToUtf8(prompt),
-                                                                         imagesHandle, out IntPtr namedTensorsHandle));
+            Result.VerifySuccess(NativeMethods.OgaProcessorProcessImages(
+                _processorHandle, 
+                StringUtils.ToNullTerminatedUtf8(prompt),
+                imagesHandle, 
+                out IntPtr namedTensorsHandle));
             return new NamedTensors(namedTensorsHandle);
         }
 
@@ -41,8 +44,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             IntPtr imagesHandle = images == null ? IntPtr.Zero : images.Handle;
             IntPtr audiosHandle = audios == null ? IntPtr.Zero : audios.Handle;
-            Result.VerifySuccess(NativeMethods.OgaProcessorProcessImagesAndAudios(_processorHandle, StringUtils.ToUtf8(prompt),
-                                                                         imagesHandle, audiosHandle, out IntPtr namedTensorsHandle));
+            Result.VerifySuccess(NativeMethods.OgaProcessorProcessImagesAndAudios(
+                _processorHandle, 
+                StringUtils.ToNullTerminatedUtf8(prompt),
+                imagesHandle, 
+                audiosHandle, 
+                out IntPtr namedTensorsHandle));
             return new NamedTensors(namedTensorsHandle);
         }
 
@@ -68,7 +75,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
             try
             {
-                return StringUtils.FromUtf8(outStr);
+                return StringUtils.FromNullTerminatedUtf8(outStr);
             }
             finally
             {

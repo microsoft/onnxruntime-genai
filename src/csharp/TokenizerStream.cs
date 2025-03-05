@@ -21,7 +21,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             IntPtr decodedStr = IntPtr.Zero;
             Result.VerifySuccess(NativeMethods.OgaTokenizerStreamDecode(_tokenizerStreamHandle, token, out decodedStr));
-            return StringUtils.FromUtf8(decodedStr);
+            return StringUtils.FromNullTerminatedUtf8(decodedStr);
         }
 
         ~TokenizerStream()
