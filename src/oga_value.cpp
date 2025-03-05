@@ -18,11 +18,11 @@ OgaValue::~OgaValue() {
 void OgaValue::CreateTensor(std::span<const int64_t> shape, bool make_static) {
   if (make_static) {
     size_t new_bytes = SizeOf(type_) * ElementCountFromShape(shape);
-    if (new_bytes > bytes_) {
-      throw std::runtime_error("OgaValue: Static buffer new_bytes > bytes_");
-    } else if (buffer_ == nullptr) {
+    if (buffer_ == nullptr) {
       bytes_ = new_bytes;
       buffer_ = p_device_->GetAllocator().Alloc(bytes_);
+    } else if (new_bytes > bytes_) {
+      throw std::runtime_error("OgaValue: Static buffer new_bytes > bytes_");
     }
     ort_value_ = OrtValue::CreateTensor(p_device_->GetAllocator().GetInfo(), buffer_, new_bytes, shape, type_);
     is_static_ = true;
@@ -38,37 +38,61 @@ void OgaValue::MakeStatic() {
   }
   size_t new_bytes = GetElementCount() * SizeOf(type_);
   if (buffer_ == nullptr) {
-    // I think this will cause memory out of bounds
-    buffer_ = ort_value_->GetTensorMutableRawData();
+    buffer_ = p_device_->GetAllocator().Alloc(new_bytes);
     bytes_ = new_bytes;
   } else if (new_bytes > bytes_) {
     throw std::runtime_error("OgaValue: Static buffer new_bytes > bytes_");
-  } else {
-    // Copy the data to the static buffer
-    auto new_static_tensor = OrtValue::CreateTensor(p_device_->GetAllocator().GetInfo(), buffer_, new_bytes, GetShape(), type_);
-    auto new_static_span = ByteWrapTensor(*p_device_, *new_static_tensor);
-    auto old_static_span = ByteWrapTensor(*p_device_, *ort_value_);
-    new_static_span.CopyFrom(old_static_span);
-    ort_value_ = std::move(new_static_tensor);
   }
+  // Copy the data to the static buffer
+  auto new_static_tensor = OrtValue::CreateTensor(p_device_->GetAllocator().GetInfo(), buffer_, new_bytes, GetShape(), type_);
+  auto new_static_span = ByteWrapTensor(*p_device_, *new_static_tensor);
+  auto old_static_span = ByteWrapTensor(*p_device_, *ort_value_);
+  new_static_span.CopyFrom(old_static_span);
+  ort_value_ = std::move(new_static_tensor);
   is_static_ = true;
 }
 
 OrtValue* OgaValue::GetOrtValue() {
+  if (ort_value_ == nullptr) {
+    return nullptr;
+  }
   return ort_value_.get();
 }
 
-template <typename T>
-T* OgaValue::GetMutableData() {
-  return ort_value_->GetTensorMutableData<T>();
+// template <typename T>
+// T* OgaValue::GetMutableData() {
+//   if (ort_value_ == nullptr) {
+//     throw std::runtime_error("OgaValue: GetMutableData called before CreateTensor");
+//   }
+//   return ort_value_->GetTensorMutableData<T>();
+// }
+
+// template <typename T>
+// const T* OgaValue::GetData() const {
+//   if (ort_value_ == nullptr) {
+//     throw std::runtime_error("OgaValue: GetData called before CreateTensor");
+//   }
+//   return ort_value_->GetTensorData<T>();
+// }
+
+void* OgaValue::GetMutableRawData() {
+  if (ort_value_ == nullptr) {
+    throw std::runtime_error("OgaValue: GetMutableRawData called before CreateTensor");
+  }
+  return ort_value_->GetTensorMutableRawData();
 }
 
-template <typename T>
-const T* OgaValue::GetData() const {
-  return ort_value_->GetTensorData<T>();
+const void* OgaValue::GetRawData() const {
+  if (ort_value_ == nullptr) {
+    throw std::runtime_error("OgaValue: GetRawData called before CreateTensor");
+  }
+  return ort_value_->GetTensorRawData();
 }
 
-std::span<const int64_t> OgaValue::GetShape() const {
+std::vector<int64_t> OgaValue::GetShape() const {
+  if (ort_value_ == nullptr) {
+    throw std::runtime_error("OgaValue: GetShape called before CreateTensor");
+  }
   return ort_value_->GetTensorTypeAndShapeInfo()->GetShape();
 }
 
@@ -77,6 +101,9 @@ ONNXTensorElementDataType OgaValue::GetType() const {
 }
 
 size_t OgaValue::GetElementCount() const {
+  if (ort_value_ == nullptr) {
+    return 0;
+  }
   return ort_value_->GetTensorTypeAndShapeInfo()->GetElementCount();
 }
 

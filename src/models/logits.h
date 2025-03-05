@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include "static_buffer.h"
+// #include "static_buffer.h"
+#include "../oga_value.h"
 
 namespace Generators {
 
@@ -33,7 +34,7 @@ struct Logits {
   std::unique_ptr<OrtValue> output_last_tokens_;
   std::unique_ptr<OrtValue> logits_of_last_token_fp32_;
 
-  std::unique_ptr<OrtValue> output_raw_;  // Raw logits output from model
+  std::unique_ptr<OgaValue> output_raw_;  // Raw logits output from model
 
   std::vector<int> input_sequence_lengths;
   // OrtValue wrapped in a DeviceMemory object to make it universal

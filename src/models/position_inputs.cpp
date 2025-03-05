@@ -187,8 +187,8 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
   //                                           : UpdatePositionIDsImpl<int64_t>(total_length, new_kv_length);
   // }
   // TODO(aciddelgado): pass OgaValue instead of mutable data
-  // model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetTensorMutableData<int64_t>(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
-  model_.p_device_inputs_->UpdatePositionIds(*position_ids_, total_length);
+  model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetMutableRawData(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
+  // model_.p_device_inputs_->UpdatePositionIds(*position_ids_, total_length);
 }
 
 // When graph capture is enabled, we create a new attention mask tensor of size max length only once
@@ -207,14 +207,22 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
   CreateNextAttentionMaskTensor(total_length);
 
   // TODO(aciddelgado): pass OgaValue instead of mutable data and update generally
-  // int max_length = state_.params_->search.max_length;
-  model_.p_device_inputs_->UpdateAttentionMask(*attention_mask_next_,
-                                               *attention_mask_,
+  // model_.p_device_inputs_->UpdateAttentionMask(*attention_mask_next_,
+  //                                              *attention_mask_,
+  //                                              new_kv_length,
+  //                                              total_length,
+  //                                              state_.params_->use_graph_capture);
+
+  // int max_length = state_.params_->use_graph_capture ? state_.params_->search.max_length : total_length;
+  model_.p_device_inputs_->UpdateAttentionMask(state_.params_->use_graph_capture ? nullptr : attention_mask_next_->GetMutableRawData(),
+                                               attention_mask_->GetMutableRawData(),
+                                               static_cast<int>(attention_mask_shape_[0]),
                                                new_kv_length,
                                                total_length,
-                                               state_.params_->use_graph_capture);
+                                               state_.params_->search.max_length,
+                                               state_.params_->use_graph_capture,
+                                               type_);
 
-  // Function to do this? Am I off the deep end?
   if (!state_.params_->use_graph_capture) {
     attention_mask_->ort_value_ = std::move(attention_mask_next_->ort_value_);
     state_.inputs_[mask_input_index_] = attention_mask_->GetOrtValue();
@@ -298,7 +306,7 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     }
   }
 
-  // @ryanunderhill: If we made above attention_mask size max length in graph capture case, this fork unnecessary, but more inneficeint
+  // @ryanunderhill: If we made above attention_mask size max length in graph capture case, this fork unnecessary, but that seems dumb
   // I choose fork for now
   if (state_.params_->use_graph_capture) {
     InitializeStaticMask<T>(*attention_mask);
@@ -307,6 +315,16 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     attention_mask_->ort_value_ = std::move(attention_mask);
     attention_mask_shape_[0] *= state_.params_->search.num_beams;
   }
+  // Print attention_mask for debugging
+  // auto attention_mask_span = WrapTensor<T>(*attention_mask_);
+  // auto attention_mask_shape = attention_mask_->GetShape();
+  // Print data
+  // for (int i = 0; i < attention_mask_shape[0]; i++) {
+  //   for (int j = 0; j < attention_mask_shape[1]; j++) {
+  //     std::cout << attention_mask_span.Span()[i * attention_mask_shape[1] + j] << " ";
+  //   }
+  //   std::cout << std::endl;
+  // }
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtValue();
 }
 

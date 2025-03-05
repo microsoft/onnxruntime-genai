@@ -10,7 +10,7 @@ Logits::Logits(State& state)
     : state_{state},
       shape_{static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
-  output_raw_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
+  output_raw_ = std::make_unique<OgaValue>(model_.p_device_inputs_, type_);
 
   if (model_.p_device_inputs_->GetType() == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
     auto& cpu_ids = model_.config_->model.eos_token_ids;
@@ -26,7 +26,7 @@ DeviceSpan<float> Logits::Get() {
   size_t element_count = shape_[0] * shape_[1] * shape_[2];
 
   // The model's output logits are {batch_size*num_beams, input_seq_len, vocab_size}
-  OrtValue* logits_of_last_token = output_raw_.get();
+  OrtValue* logits_of_last_token = output_raw_->GetOrtValue();
   std::array<int64_t, 3> shape_last{shape_[0], 1, shape_[2]};
   if (shape_[1] != 1) {
     const size_t seq_length = shape_[1];
@@ -44,7 +44,7 @@ DeviceSpan<float> Logits::Get() {
     size_t element_size = SizeOf(type_);
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
-    auto logits_raw = ByteWrapTensor(*model_.p_device_inputs_, *output_raw_);
+    auto logits_raw = ByteWrapTensor(*output_raw_);
     auto logits_last_tokens = ByteWrapTensor(*model_.p_device_inputs_, *logits_of_last_token);
 
     for (int batch_index = 0; batch_index < state_.params_->search.batch_size; batch_index++) {
@@ -91,7 +91,7 @@ DeviceSpan<float> Logits::Get() {
 }
 
 void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length) {
-  if (static_cast<size_t>(output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1]) == new_kv_length && new_kv_length == 1) {
+  if (output_raw_->ort_value_ && static_cast<size_t>(output_raw_->GetShape()[1]) == new_kv_length && new_kv_length == 1) {
     return;
   }
 
@@ -107,13 +107,13 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
     input_sequence_lengths[b] = static_cast<int>(token_index + 1);
   }
 
-  if (static_cast<size_t>(output_raw_.get()->GetTensorTypeAndShapeInfo()->GetShape()[1]) == new_kv_length) {
+  if (output_raw_->ort_value_ && static_cast<size_t>(output_raw_->GetShape()[1]) == new_kv_length) {
     return;
   }
 
   shape_[1] = new_kv_length;
-  output_raw_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), shape_, type_);
-  state_.outputs_[output_index_] = output_raw_.get();
+  output_raw_->CreateTensor(shape_, state_.params_->use_graph_capture && shape_[1] == 1);
+  state_.outputs_[output_index_] = output_raw_->GetOrtValue();
 }
 
 void Logits::HandleEOSArray(std::span<float> batched_logits) {
@@ -140,7 +140,7 @@ void Logits::Add() {
   output_index_ = state_.outputs_.size();
 
   state_.output_names_.push_back(model_.config_->model.decoder.outputs.logits.c_str());
-  state_.outputs_.push_back(output_raw_.get());
+  state_.outputs_.push_back(output_raw_->GetOrtValue());
 }
 
 }  // namespace Generators

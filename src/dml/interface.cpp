@@ -7,7 +7,6 @@
 #include "../cpu/interface.h"
 #include "interface.h"
 #include <cstdarg>
-#include "../oga_value.h"
 
 #include <wil/wrl.h>
 #include "dml_provider_factory.h"
@@ -222,15 +221,6 @@ struct InterfaceImpl : DeviceInterface {
       throw std::runtime_error("Cast - input and output element counts do not match");
     if (input_type == output_type)
       throw std::runtime_error("Cast - input and output types are the same");
-    
-      // TODO(aciddelgado): Use ByteWrapTensor instead of WrapMemory
-    // auto input_data_device = reinterpret_cast<const uint8_t*>(input.GetTensorRawData());
-    // auto input_data_span = WrapMemory<const uint8_t>(std::span<const uint8_t>(input_data_device, element_count * SizeOf(input_type)));
-    // auto input_data_cpu = input_data_span.CopyDeviceToCpu();
-
-    // auto output_data_device = reinterpret_cast<uint8_t*>(output.GetTensorMutableRawData());
-    // auto output_data_span = WrapMemory<uint8_t>(std::span<uint8_t>(output_data_device, element_count * SizeOf(output_type)));
-    // auto output_data_cpu = output_data_span.CopyDeviceToCpu();
 
     auto input_data_span = ByteWrapTensor(*GetDmlInterface(), input);
     auto input_data_cpu = input_data_span.CopyDeviceToCpu();
@@ -275,60 +265,78 @@ struct InterfaceImpl : DeviceInterface {
     data_span.CopyCpuToDevice();
   }
   
-  // void UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
-  //   type == Ort::TypeToTensorType<int32_t>
-  //     ? UpdatePositionIds<int32_t>(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length)
-  //     : UpdatePositionIds<int64_t>(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length);
-  // }
-
-  void UpdatePositionIds(OgaValue& position_ids, int total_length) override {
-    int batch_beam_size = static_cast<int>(position_ids.GetShape()[0]);
-    int new_kv_length = static_cast<int>(position_ids.GetShape()[1]);
-    ONNXTensorElementDataType type = position_ids.GetType();
+  void UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
     type == Ort::TypeToTensorType<int32_t>
-      ? UpdatePositionIds<int32_t>(position_ids.GetMutableData<int32_t>(), batch_beam_size, total_length, new_kv_length)
-      : UpdatePositionIds<int64_t>(position_ids.GetMutableData<int64_t>(), batch_beam_size, total_length, new_kv_length);
+      ? UpdatePositionIds<int32_t>(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length)
+      : UpdatePositionIds<int64_t>(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length);
   }
 
-  // TODO(aciddelgado): pre-wrap memory and pass in spans
+  // void UpdatePositionIds(OgaValue& position_ids, int total_length) override {
+  //   int batch_beam_size = static_cast<int>(position_ids.GetShape()[0]);
+  //   int new_kv_length = static_cast<int>(position_ids.GetShape()[1]);
+  //   ONNXTensorElementDataType type = position_ids.GetType();
+  //   type == Ort::TypeToTensorType<int32_t>
+  //     ? UpdatePositionIds<int32_t>(position_ids.GetMutableData<int32_t>(), batch_beam_size, total_length, new_kv_length)
+  //     : UpdatePositionIds<int64_t>(position_ids.GetMutableData<int64_t>(), batch_beam_size, total_length, new_kv_length);
+  // }
+
   template <typename T>
-  void UpdateAttentionMask(T* device_mask_data, const T* device_old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only) {
-    auto mask_data_span = WrapMemory<T>(std::span<T>(device_mask_data, batch_beam_size * max_length));
-    auto old_data_span = WrapMemory<const T>(std::span<const T>(device_old_data, batch_beam_size * (total_length - 1)));
+  void UpdateAttentionMask(T* device_next_mask_data, const T* device_mask_data, int batch_beam_size, int total_length) {
+    auto next_mask_data_span = WrapMemory<T>(std::span<T>(device_next_mask_data, batch_beam_size * total_length));
+    auto mask_data_span = WrapMemory<const T>(std::span<const T>(device_mask_data, batch_beam_size * (total_length - 1)));
+    auto next_mask_data = next_mask_data_span.CopyDeviceToCpu();
     auto mask_data = mask_data_span.CopyDeviceToCpu();
-    auto old_data = old_data_span.CopyDeviceToCpu();
-    if (update_only) {
-      // Update total_length - new_kv_length up to total_length
-      for (int i = 0; i < batch_beam_size; i++) {
-        for (int j = total_length - new_kv_length; j < total_length; j++) {
-          mask_data[i * max_length + j] = 1;
-        }
-      }
-    } else if (batch_beam_size == 1) {
+    if (batch_beam_size == 1) {
       // For batch size == 1 we assume no padding. We make this explicit for continuous decoding.
       for (int i = 0; i < total_length; i++)
-        mask_data[i] = 1;
+        next_mask_data[i] = 1;
     } else {
       // For batch size > 1 we increment attention mask by 1... continuous decoding is not supported
       for (int i = 0; i < batch_beam_size; i++) {
         for (int j = 0; j < total_length - 1; j++) {
-          mask_data[i * total_length + j] = old_data[i * (total_length - 1) + j];
+          next_mask_data[i * total_length + j] = mask_data[i * (total_length - 1) + j];
         }
-        mask_data[i * total_length + total_length - 1] = 1;
+        next_mask_data[i * total_length + total_length - 1] = 1;
+      }
+    }
+    next_mask_data_span.CopyCpuToDevice();
+  }
+
+  template <typename T>
+  void UpdateAttentionMaskStatic(T* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length) {
+    auto mask_data_span = WrapMemory<T>(std::span<T>(mask_data, batch_beam_size * max_length));
+    auto mask_data_cpu = mask_data_span.CopyDeviceToCpu();
+    for (int i = 0; i < batch_beam_size; i++) {
+      for (int j = total_length - new_kv_length; j < total_length; j++) {
+        mask_data_cpu[i * max_length + j] = 1;
       }
     }
     mask_data_span.CopyCpuToDevice();
   }
 
-  void UpdateAttentionMask(OgaValue& new_mask, const OgaValue& old_mask, int new_kv_length, int total_length, bool update_only) override {
-    int batch_beam_size = static_cast<int>(new_mask.GetShape()[0]);
-    int max_length = static_cast<int>(new_mask.GetShape()[1]);
-    auto type = new_mask.GetType();
-    if (type == Ort::TypeToTensorType<int32_t>)
-      UpdateAttentionMask(new_mask.GetMutableData<int32_t>(), old_mask.GetData<int32_t>(), batch_beam_size, new_kv_length, total_length, max_length, update_only);
-    else
-      UpdateAttentionMask(new_mask.GetMutableData<int64_t>(), old_mask.GetData<int64_t>(), batch_beam_size, new_kv_length, total_length, max_length, update_only);
+  void UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
+    if (update_only) {
+      if (type == Ort::TypeToTensorType<int32_t>)
+        UpdateAttentionMaskStatic(static_cast<int32_t*>(mask_data), batch_beam_size, new_kv_length, total_length, max_length);
+      else
+        UpdateAttentionMaskStatic(static_cast<int64_t*>(mask_data), batch_beam_size, new_kv_length, total_length, max_length);
+    } else {
+      if (type == Ort::TypeToTensorType<int32_t>)
+        UpdateAttentionMask(static_cast<int32_t*>(next_mask_data), static_cast<int32_t*>(mask_data), batch_beam_size, total_length);
+      else
+        UpdateAttentionMask(static_cast<int64_t*>(next_mask_data), static_cast<int64_t*>(mask_data), batch_beam_size, total_length);
+    }
   }
+
+  // void UpdateAttentionMask(OgaValue& new_mask, const OgaValue& old_mask, int new_kv_length, int total_length, bool update_only) override {
+  //   int batch_beam_size = static_cast<int>(new_mask.GetShape()[0]);
+  //   int max_length = static_cast<int>(new_mask.GetShape()[1]);
+  //   auto type = new_mask.GetType();
+  //   if (type == Ort::TypeToTensorType<int32_t>)
+  //     UpdateAttentionMask(new_mask.GetMutableData<int32_t>(), old_mask.GetData<int32_t>(), batch_beam_size, new_kv_length, total_length, max_length, update_only);
+  //   else
+  //     UpdateAttentionMask(new_mask.GetMutableData<int64_t>(), old_mask.GetData<int64_t>(), batch_beam_size, new_kv_length, total_length, max_length, update_only);
+  // }
 
 };
 

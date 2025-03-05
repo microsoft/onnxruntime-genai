@@ -19,12 +19,23 @@ struct OgaValue {
   OrtValue* GetOrtValue();
 
   template <typename T>
-  T* GetMutableData();
+  T* GetMutableData() {
+    if (ort_value_ == nullptr)
+      throw std::runtime_error("OgaValue: GetMutableData called before CreateTensor");
+    return ort_value_->GetTensorMutableData<T>();
+  }
 
   template <typename T>
-  const T* GetData() const;
+  const T* GetData() const {
+    if (ort_value_ == nullptr)
+      throw std::runtime_error("OgaValue: GetData called before CreateTensor");
+    return ort_value_->GetTensorData<T>();
+  }
 
-  std::span<const int64_t> GetShape() const;
+  void* GetMutableRawData();
+  const void* GetRawData() const;
+
+  std::vector<int64_t> GetShape() const;
 
   ONNXTensorElementDataType GetType() const;
   
@@ -39,12 +50,12 @@ struct OgaValue {
   size_t bytes_{};
 };
 
-template uint8_t* OgaValue::GetMutableData<uint8_t>();
-template int32_t* OgaValue::GetMutableData<int32_t>();
-template int64_t* OgaValue::GetMutableData<int64_t>();
+// template uint8_t* OgaValue::GetMutableData<uint8_t>();
+// template int32_t* OgaValue::GetMutableData<int32_t>();
+// template int64_t* OgaValue::GetMutableData<int64_t>();
 
-template const uint8_t* OgaValue::GetData<uint8_t>() const;
-template const int32_t* OgaValue::GetData<int32_t>() const;
-template const int64_t* OgaValue::GetData<int64_t>() const;
+// template const uint8_t* OgaValue::GetData<uint8_t>() const;
+// template const int32_t* OgaValue::GetData<int32_t>() const;
+// template const int64_t* OgaValue::GetData<int64_t>() const;
 
 }  // namespace Generators

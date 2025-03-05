@@ -175,6 +175,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
     // std::cout << "captured_graph_info: " << state_.GetCapturedGraphInfo() << std::endl;
 
+    // TODO(aciddelgado): remove this stuff and use OgaValue
     if (state_.GetCapturedGraphInfo()) {
       // std::cout << "sb_kv_caches_: " << state_.GetCapturedGraphInfo()->sb_kv_caches_.size() << std::endl;
       sb_kv_caches_.reserve(layer_count_ * 2);

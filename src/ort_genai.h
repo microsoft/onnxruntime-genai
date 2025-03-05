@@ -337,6 +337,8 @@ struct OgaGenerator : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyGenerator(reinterpret_cast<OgaGenerator*>(p)); }
 };
 
+// This is a wrapper around an OrtValue that is used to hold the output of a generator
+// TODO(aciddelgado): update with new API??????????
 struct OgaTensor : OgaAbstract {
 #if __cplusplus >= 202002L
   static std::unique_ptr<OgaTensor> Create(void* data, std::span<const int64_t> shape, OgaElementType element_type) {

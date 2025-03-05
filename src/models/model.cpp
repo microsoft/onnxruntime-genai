@@ -28,6 +28,7 @@ State::State(const GeneratorParams& params, const Model& model)
 void State::Run(OrtSession& session, int new_batch_size) {
   // auto captured_graph_info = GetCapturedGraphInfo();
 
+  // TODO(aciddelgado): this needs to be made more sophisticated
   if (first_run_) {
     // if (captured_graph_info) {
     if (params_->use_graph_capture) {
