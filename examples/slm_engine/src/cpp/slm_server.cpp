@@ -28,11 +28,11 @@ using json = nlohmann::json;
 
 using namespace std;
 
-int run_server(const string& model_path, const string& model_family,
+int run_server(const string& model_path,
                int port_number, bool verbose) {
   // Create the SLM
   auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
-      model_path.c_str(), model_family, verbose);
+      model_path.c_str(), verbose);
   if (!slm_engine) {
     cout << "Cannot create engine!\n";
     return -1;
@@ -100,12 +100,6 @@ int main(int argc, char** argv) {
       .help("Path to the model file")
       .store_into(model_path);
 
-  string model_family;
-  program.add_argument("-mf", "--model_family")
-      .required()
-      .help("Model family: <phi|llama|custom>")
-      .store_into(model_family);
-
   int port_number = 8080;
   program.add_argument("-p", "--port_number")
       .help("HTTP Port Number to use (default 8080)")
@@ -137,6 +131,6 @@ int main(int argc, char** argv) {
     verbose = true;
   }
 
-  run_server(model_path, model_family, port_number, verbose);
+  run_server(model_path, port_number, verbose);
   OgaShutdown();
 }

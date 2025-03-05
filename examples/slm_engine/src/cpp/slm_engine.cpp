@@ -34,23 +34,12 @@ using json = nlohmann::json;
 namespace microsoft {
 namespace slm_engine {
 
-void SLMEngine::GetVersion(std::string& slm_version, std::string& ortga_version,
-                           std::string& ort_version) {
-  // SW_VERSION_NUMBER is defined in the CMakeLists.txt file
-  slm_version = std::string(SW_VERSION_NUMBER);
-  ortga_version = std::string(ORT_GENAI_VERSION);
-  ort_version = Ort::GetVersionString();
-}
-
 std::unique_ptr<SLMEngine> SLMEngine::CreateEngine(
-    const char* model_path, const std::string& model_family_name, bool verbose) {
-  cout << RED << "Current Memory Usage: " << GetMemoryUsage() << " MB"
-       << CLEAR << endl;
-
+    const char* model_path, bool verbose) {
   // Convert the model name to the SupportedModelType
-  auto model_type = StringToModelType(model_family_name);
+  auto model_type = StringToModelType(GetModelFamily(model_path));
   if (model_type == SupportedModelType::UNKNOWN) {
-    cout << RED << "Error! Unknown Model Type: " << model_family_name << CLEAR
+    cout << RED << "Error! Cannot detect the model type for model: " << model_path << CLEAR
          << endl;
     return nullptr;
   }
@@ -60,10 +49,46 @@ std::unique_ptr<SLMEngine> SLMEngine::CreateEngine(
     cout << RED << "Error creating the SLM Engine" << CLEAR << endl;
     return nullptr;
   }
-  cout << RED << "Current Memory Usage: " << GetMemoryUsage() << " MB"
-       << CLEAR << endl;
 
   return std::move(new_obj);
+}
+
+void SLMEngine::GetVersion(std::string& slm_version, std::string& ortga_version,
+                           std::string& ort_version) {
+  // SW_VERSION_NUMBER is defined in the CMakeLists.txt file
+  slm_version = std::string(SW_VERSION_NUMBER);
+  ortga_version = std::string(ORT_GENAI_VERSION);
+  ort_version = Ort::GetVersionString();
+}
+
+std::string SLMEngine::GetModelFamily(const std::string& model_path) {
+  // Open the config.json file
+  std::ifstream config_file(model_path + "/config.json");
+  if (!config_file.is_open()) {
+    std::cout << RED << "Error opening config.json file" << CLEAR << std::endl;
+    return "";
+  }
+  // Parse the JSON file
+  json config_json;
+  config_file >> config_json;
+  config_file.close();
+
+  // Check if the "model_type" field exists
+  if (config_json.find("model_type") == config_json.end()) {
+    std::cout << RED << "Error: model_type field not found in config.json" << CLEAR << std::endl;
+    return "";
+  }
+  // Get the value of the "model_type" field
+  std::string model_type = config_json["model_type"];
+
+  return model_type;
+}
+
+SLMEngine::~SLMEngine() {
+  m_onnx_model.reset();
+  m_tokenizer.reset();
+  m_tokenizer_stream.reset();
+  m_input_decoder.reset();
 }
 
 void SLMEngine::generate(
@@ -301,6 +326,11 @@ bool SLMEngine::parse_prompt_format_dict(
 
 bool SLMEngine::load_model(const char* model_path,
                            SupportedModelType model_type) {
+  if (m_verbose) {
+    cout << RED << "Memory Usage Before Model Load: " << GetMemoryUsage() << " MB"
+         << CLEAR << endl;
+  }
+
   m_onnx_model = OgaModel::Create(model_path);
   m_tokenizer = OgaTokenizer::Create(*m_onnx_model);
   m_tokenizer_stream = OgaTokenizerStream::Create(*m_tokenizer);
@@ -317,16 +347,18 @@ bool SLMEngine::load_model(const char* model_path,
     return false;
   }
 
-  string slm_ver, oga_ver, ort_ver;
-  GetVersion(slm_ver, oga_ver, ort_ver);
+  if (m_verbose) {
+    string slm_ver, oga_ver, ort_ver;
+    GetVersion(slm_ver, oga_ver, ort_ver);
 
-  cout << "Loaded Model: " << model_path << endl;
-  cout << "Model Type: " << ModelTypeToString(model_type) << endl;
-  cout << "Prompt Format: " << m_prompt_format.llm_type << endl;
-  cout << "SLM Engine Initialized" << endl;
-  cout << "SLM VERSION: " << slm_ver << endl;
-  cout << "ORT GenAI VERSION: " << oga_ver << endl;
-  cout << "ORT VERSION: " << ort_ver << endl;
+    cout << "Loaded Model: " << model_path << endl;
+    cout << "Model Type: " << ModelTypeToString(model_type) << endl;
+    cout << "Prompt Format: " << m_prompt_format.llm_type << endl;
+    cout << "SLM Engine Initialized" << endl;
+    cout << "SLM VERSION: " << slm_ver << endl;
+    cout << "ORT GenAI VERSION: " << oga_ver << endl;
+    cout << "ORT VERSION: " << ort_ver << endl;
+  }
   m_llm_input_dbg_stream.open("slm-input-records.jsonl");
   m_llm_output_dbg_stream.open("slm-output-records.jsonl");
 

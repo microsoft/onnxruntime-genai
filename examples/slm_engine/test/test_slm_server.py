@@ -9,7 +9,7 @@ RED = "\033[31m"
 CLEAR = "\033[0m"
 
 
-def launch_server(server_binary: str, model_path: str, model_family: str):
+def launch_server(server_binary: str, model_path: str):
     import subprocess
 
     pid = subprocess.Popen(
@@ -17,8 +17,6 @@ def launch_server(server_binary: str, model_path: str, model_family: str):
             str(server_binary),
             "--model_path",
             str(model_path),
-            "--model_family",
-            str(model_family),
             "--port_number",
             "8000",
         ]
@@ -98,7 +96,6 @@ if __name__ == "__main__":
     )
 
     parser.add_argument("-m", "--model_path", help="Path to the ONNX model")
-    parser.add_argument("-mf", "--model_family", help="Type of model: phi or llama")
 
     args = parser.parse_args()
     if args.server_binary_path is None:
@@ -108,6 +105,6 @@ if __name__ == "__main__":
         run_test(args.url)
     else:
         # Launch the server and run the
-        launch_server(args.server_binary_path, args.model_path, args.model_family)
+        launch_server(args.server_binary_path, args.model_path)
         url = "http://localhost:8000"
         run_test(url)

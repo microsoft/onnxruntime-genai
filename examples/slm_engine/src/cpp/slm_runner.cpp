@@ -31,7 +31,7 @@ using namespace std;
 /// @param test_data_file JSONL file containing the question set to ask SLM
 /// @param output_file Path to the JSONL file to save the SLM response and stats
 /// @return 0 if successful, -1 otherwise
-int run_test(const string& model_path, const string& model_family,
+int run_test(const string& model_path,
              const string& test_data_file, const string& output_file,
              bool verbose, int wait_between_requests) {
   // Make sure that the files exist
@@ -52,7 +52,7 @@ int run_test(const string& model_path, const string& model_family,
 
   // Create the SLM
   auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
-      model_path.c_str(), model_family, verbose);
+      model_path.c_str(), verbose);
   if (!slm_engine) {
     cout << "Cannot create engine!\n";
     return -1;
@@ -114,12 +114,6 @@ int main(int argc, char** argv) {
       .help("Path to the model file")
       .store_into(model_path);
 
-  string model_family;
-  program.add_argument("-mf", "--model_family")
-      .required()
-      .help("Model family: <phi|llama|custom>")
-      .store_into(model_family);
-
   string test_data_file;
   program.add_argument("-t", "--test_data_file")
       .required()
@@ -165,7 +159,7 @@ int main(int argc, char** argv) {
   // Responsible for cleaning up the library during shutdown
   // OgaHandle handle;
 
-  run_test(model_path, model_family, test_data_file, output_file, verbose,
+  run_test(model_path, test_data_file, output_file, verbose,
            wait_between_requests);
 
   OgaShutdown();

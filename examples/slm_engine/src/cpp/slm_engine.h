@@ -105,12 +105,11 @@ class SLM_ENGINE_EXPORT SLMEngine {
 
   /// @brief Creates a new instance of the SLM Engine and initializes it
   /// @param model_path Path to ONNX GenAI Model Directory
-  /// @param model_family_name Model family name (phi or llama)
   /// @param verbose When set, the LLM Generated output is displayed on stdout
   /// @return New object or null if unsuccessful
 
   static std::unique_ptr<SLMEngine> CreateEngine(
-      const char* model_path, const std::string& model_family_name, bool verbose);
+      const char* model_path, bool verbose);
 
   /// @brief Generates a response to the user prompt using the GenAI Model
   /// @param prompt User prompt to generate response for. The format for this
@@ -214,10 +213,20 @@ class SLM_ENGINE_EXPORT SLMEngine {
   SLMEngine& operator=(const SLMEngine&) = delete;
   static void GetVersion(std::string& slm_version, std::string& ortga_version, std::string& ort_version);
 
+  /// @brief Destructor for the SLM Engine
+  ~SLMEngine();
+
+  /// @brief  Get the current memory usage of the SLM Engine
+  /// @return Current memory usage in MB
+  static uint32_t GetMemoryUsage();
+
+  /// @brief Get the model family from the model path
+  /// @param model_path Path to the model file
+  /// @return Model family as a string
+  static std::string GetModelFamily(const std::string& model_path);
+
  private:
   SLMEngine(bool verbose) : m_verbose(verbose) {}
-
-  static uint32_t GetMemoryUsage();
 
   /// @brief
   /// @param model_path
