@@ -70,7 +70,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public Tensor GetOutput(string outputName)
         {
             Result.VerifySuccess(NativeMethods.OgaGenerator_GetOutput(_generatorHandle,
-                                                                      StringUtils.ToUtf8(outputName),
+                                                                      StringUtils.ToNullTerminatedUtf8(outputName),
                                                                       out IntPtr outputTensor));
             return new Tensor(outputTensor);
         }
@@ -85,7 +85,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         {
             Result.VerifySuccess(NativeMethods.OgaSetActiveAdapter(_generatorHandle,
                                                                    adapters.Handle,
-                                                                   StringUtils.ToUtf8(adapterName)));
+                                                                   StringUtils.ToNullTerminatedUtf8(adapterName)));
         }
 
         ~Generator()
