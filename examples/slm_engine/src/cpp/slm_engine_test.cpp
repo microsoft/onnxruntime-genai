@@ -33,6 +33,31 @@ const ModelInfo MODELS[] = {
     {"Phi-4-mini-instruct-onnx/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/", "phi3"},
 };
 
+void trim_left_inplace(std::string& s) {
+  s.erase(
+      s.begin(), std::find_if_not(s.begin(), s.end(),
+                                  [](unsigned char c) { return std::isspace(c); }));
+}
+
+void trim_right_inplace(std::string& s) {
+  s.erase(
+      std::find_if_not(s.rbegin(), s.rend(),
+                       [](unsigned char c) { return std::isspace(c); })
+          .base(),
+      s.end());
+}
+
+void trim_inplace(std::string& s) {
+  trim_left_inplace(s);
+  trim_right_inplace(s);
+}
+
+std::string trim(const std::string& s) {
+  std::string trimmed = s;
+  trim_inplace(trimmed);
+  return trimmed;
+}
+
 TEST(SLMEngineTest, TestModelFamily) {
   ASSERT_TRUE(MODEL_ROOT_DIR != nullptr) << "MODEL_ROOT_DIR is not set";
 
@@ -42,31 +67,6 @@ TEST(SLMEngineTest, TestModelFamily) {
     ASSERT_EQ(model_family, model.model_family);
   }
 }
-
-// A few Test Prompts and their expected answers
-struct TestPrompt {
-  string system_prompt;
-  string user_prompt;
-  string expected_answer;
-};
-
-const TestPrompt TEST_PROMPTS[] = {
-    {"You are a shool teacher who's very specific. Just provide the answer and nothing else.",
-     "What is 2 * 20 - 10?", "------"},
-
-    {"You are a travel assistant. Mention just the answer and do not explain anything.",
-     "What is the airport code for Los Angeles?",
-     "----"},
-
-    {"You are a travel assistant. Provided a detailed answer as good as you can.",
-     "Which state is San Diego in?", "-----"},
-
-    {"Briefly answer any question you are asked. Do not provide any explanation.",
-     "Which is the capital of France?",
-     "-----"},
-
-    {"You are a travel assistant. Just provide the answer and nothing else.",
-     "Which state is San Diego in?", "-----"}};
 
 TEST(SLMEngineTest, LoadUnloadModel) {
   ASSERT_TRUE(MODEL_FILE_PATH != nullptr) << "MODEL_FILE_PATH is not set";
@@ -98,6 +98,49 @@ TEST(SLMEngineTest, LoadUnloadModel) {
   }
 }
 
+// A few Test Prompts and their expected answers
+struct TestPrompt {
+  string system_prompt;
+  string user_prompt;
+  string expected_answer;
+};
+
+const char* SYS_PROMPT =
+    "You are a helpful assistant. "
+    "Analyze the sentiment of the statement and just answer in one word what it is. "
+    "You can chose from one of Positive, Neutral, or Negative. "
+    "Use a new line after the answer.";
+
+const TestPrompt TEST_PROMPTS[] = {
+    {SYS_PROMPT,
+     "I love the new design of your website!\nThe sentiment of the text is: ", "Positive"},
+    {SYS_PROMPT,
+     "The customer service was terrible and unhelpful.\nThe sentiment of the text is: ",
+     "Negative"},
+    {SYS_PROMPT,
+     "I'm not sure how I feel about the new update.\nThe sentiment of the text is: ", "Neutral"},
+    {SYS_PROMPT,
+     "The product quality has improved significantly.\nThe sentiment of the text is: ",
+     "Positive"},
+    {SYS_PROMPT,
+     "I had a bad experience with the delivery service.\nThe sentiment of the text is: ",
+     "Negative"},
+    {SYS_PROMPT,
+     "The instructions were clear and easy to follow.\nThe sentiment of the text is: ",
+     "Positive"},
+    {SYS_PROMPT,
+     "I'm disappointed with the recent changes.\nThe sentiment of the text is: ",
+     "Negative"},
+    {SYS_PROMPT,
+     "The event was well-organized and enjoyable.\nThe sentiment of the text is: ",
+     "Positive"},
+    {SYS_PROMPT,
+     "I have mixed feelings about the new policy.\nThe sentiment of the text is: ",
+     "Neutral"},
+    {SYS_PROMPT,
+     "The food was delicious and the service was excellent.\nThe sentiment of the text is: ",
+     "Positive"}};
+
 TEST(SLMEngineTest, TestGeneration) {
   ASSERT_TRUE(MODEL_FILE_PATH != nullptr) << "MODEL_FILE_PATH is not set";
 
@@ -110,14 +153,38 @@ TEST(SLMEngineTest, TestGeneration) {
        << endl;
 
   for (const auto& test_prompt : TEST_PROMPTS) {
-    SLMEngine::RuntimePerf kpi;
     SLMEngine::GenerationOptions generator_options;
+    generator_options.MaxGeneratedTokens = 250;
+    generator_options.Temperature = 0.000000001f;
+
     string response;
-    slm_engine->generate(test_prompt.system_prompt + test_prompt.user_prompt, generator_options, response, kpi);
+    SLMEngine::RuntimePerf kpi;
+
+    cout << "Question: " << test_prompt.user_prompt << endl;
+    slm_engine->generate(
+        test_prompt.system_prompt + test_prompt.user_prompt,
+        generator_options, response, kpi);
+
+    string stop_token("\n");
+    // We need to remove the stop token(s) from the response
+    auto stop_token_pos = response.find(stop_token);
+    if (stop_token_pos != std::string::npos) {
+      response = response.substr(0, stop_token_pos);
+    }
+
+    trim_inplace(response);
 
     cout << "Response: " << response << endl;
+    cout << "Expected: " << test_prompt.expected_answer << endl;
     cout << "TTFT: " << kpi.TimeToFirstToken << " TPS: " << kpi.TokenRate
-         << " Memory Usage: " << kpi.CurrentMemoryUsed << " MB" << endl;
+         << " Memory Usage: " << kpi.CurrentMemoryUsed << " MB "
+         << "Generated Tokens: " << kpi.GeneratedTokenCount
+         << " Prompt Tokens: " << kpi.PromptTokenCount << endl
+         << endl;
+
+    EXPECT_STREQ(response.c_str(), test_prompt.expected_answer.c_str())
+        << "Test failed for prompt: " << test_prompt.user_prompt
+        << " with response: " << response;
   }
 }
 
@@ -148,7 +215,8 @@ TEST(SLMEngineTest, CaptureMemoryUsage) {
   overall_status_json["memory_after_load"] = SLMEngine::GetMemoryUsage();
 
   // Now start the run
-  ASSERT_TRUE(filesystem::exists(TEST_INPUT_FILE)) << "Input file doesn't exist: " << TEST_INPUT_FILE;
+  ASSERT_TRUE(filesystem::exists(TEST_INPUT_FILE))
+      << "Input file doesn't exist: " << TEST_INPUT_FILE;
 
   ifstream file(TEST_INPUT_FILE);
   ASSERT_TRUE(file.is_open()) << "Failed to open test input file";
