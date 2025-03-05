@@ -11,7 +11,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         private bool _disposed = false;
         public Config(string modelPath)
         {
-            Result.VerifySuccess(NativeMethods.OgaCreateConfig(StringUtils.ToUtf8(modelPath), out _configHandle));
+            Result.VerifySuccess(NativeMethods.OgaCreateConfig(
+                StringUtils.ToNullTerminatedUtf8(modelPath),
+                out _configHandle));
         }
 
         internal IntPtr Handle { get { return _configHandle; } }
@@ -22,12 +24,18 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public void AppendProvider(string provider)
         {
-            Result.VerifySuccess(NativeMethods.OgaConfigAppendProvider(_configHandle, StringUtils.ToUtf8(provider)));
+            Result.VerifySuccess(NativeMethods.OgaConfigAppendProvider(
+                _configHandle, 
+                StringUtils.ToNullTerminatedUtf8(provider)));
         }
 
         public void SetProviderOption(string provider, string option, string value)
         {
-            Result.VerifySuccess(NativeMethods.OgaConfigSetProviderOption(_configHandle, StringUtils.ToUtf8(provider), StringUtils.ToUtf8(option), StringUtils.ToUtf8(value)));
+            Result.VerifySuccess(NativeMethods.OgaConfigSetProviderOption(
+                _configHandle, 
+                StringUtils.ToNullTerminatedUtf8(provider), 
+                StringUtils.ToNullTerminatedUtf8(option), 
+                StringUtils.ToNullTerminatedUtf8(value)));
         }
 
         ~Config()

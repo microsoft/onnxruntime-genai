@@ -23,7 +23,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaCreateStringArray(out IntPtr stringArray));
             foreach (string audioPath in audioPaths)
             {
-                Result.VerifySuccess(NativeMethods.OgaStringArrayAddString(stringArray, StringUtils.ToUtf8(audioPath)));
+                Result.VerifySuccess(NativeMethods.OgaStringArrayAddString(
+                    stringArray,
+                    StringUtils.ToNullTerminatedUtf8(audioPath)));
             }
             Result.VerifySuccess(NativeMethods.OgaLoadAudios(stringArray, out IntPtr audiosHandle));
             NativeMethods.OgaDestroyStringArray(stringArray);

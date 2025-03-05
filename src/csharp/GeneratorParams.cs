@@ -2,9 +2,6 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
@@ -21,12 +18,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public void SetSearchOption(string searchOption, double value)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSearchNumber(_generatorParamsHandle, StringUtils.ToUtf8(searchOption), value));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSearchNumber(
+                _generatorParamsHandle, 
+                StringUtils.ToNullTerminatedUtf8(searchOption), value));
         }
 
         public void SetSearchOption(string searchOption, bool value)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSearchBool(_generatorParamsHandle, StringUtils.ToUtf8(searchOption), value));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetSearchBool(
+                _generatorParamsHandle,
+                StringUtils.ToNullTerminatedUtf8(searchOption), value));
         }
 
         public void TryGraphCaptureWithMaxBatchSize(int maxBatchSize)
@@ -36,12 +37,17 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public void SetModelInput(string name, Tensor value)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetModelInput(_generatorParamsHandle, StringUtils.ToUtf8(name), value.Handle));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetModelInput(
+                _generatorParamsHandle, 
+                StringUtils.ToNullTerminatedUtf8(name),
+                value.Handle));
         }
 
         public void SetInputs(NamedTensors namedTensors)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputs(_generatorParamsHandle, namedTensors.Handle));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputs(
+                _generatorParamsHandle, 
+                namedTensors.Handle));
         }
 
         ~GeneratorParams()
