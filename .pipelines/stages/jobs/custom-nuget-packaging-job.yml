@@ -4,6 +4,10 @@ parameters:
   type: string
   default: ''
 
+- name: nuget_version_type
+  type: string
+  default: 'stable'
+
 jobs:
 - job: custom_nuget_packaging
   displayName: 'Custom NuGet Packaging'
@@ -28,6 +32,8 @@ jobs:
     submodules: recursive
 
   - template: steps/utils/set-genai-version.yml
+    parameters:
+      nuget_version_type: ${{ parameters.nuget_version_type }}
 
   - powershell: |
       $artifacts_dir = '$(Build.BinariesDirectory)/artifact-downloads'

@@ -163,3 +163,4 @@ stages:
   - template: stages/custom-nuget-packaging-stage.yml
     parameters:
       custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
+      nuget_version_type: ${{ parameters.nuget_version_type }}
