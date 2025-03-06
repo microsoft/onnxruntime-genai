@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
@@ -13,7 +12,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public Model(string modelPath)
         {
-            Result.VerifySuccess(NativeMethods.OgaCreateModel(StringUtils.ToUtf8(modelPath), out _modelHandle));
+            Result.VerifySuccess(NativeMethods.OgaCreateModel(
+                StringUtils.ToNullTerminatedUtf8(modelPath), 
+                out _modelHandle));
         }
 
         public Model(Config config)
