@@ -62,10 +62,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
         private static string _phi2Path => _lazyPhi2Path.Value;
 
-        private static Lazy<string> _lazyTinyRandomGpt2ModelPath = new Lazy<string>(() =>
+        private static Lazy<string> _lazyTinyRandomLlamaModelPath = new Lazy<string>(() =>
         {
             string modelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
-                                            "test_models", "hf-internal-testing", "tiny-random-gpt2-fp32");
+                                            "test_models", "hf-internal-testing", "tiny-random-LlamaForCausalLM-fp32");
             if (System.IO.Directory.Exists(modelPath))
             {
                 return modelPath;
@@ -74,7 +74,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             return null;
         });
 
-        private static string _tinyRandomGpt2ModelPath => _lazyTinyRandomGpt2ModelPath.Value;
+        private static string _tinyRandomLlamaModelPath => _lazyTinyRandomLlamaModelPath.Value;
 
         private static Lazy<string> _lazyAdaptersPath = new Lazy<string>(() =>
         {
@@ -118,7 +118,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [Fact(DisplayName = "TestConfig")]
         public void TestConfig()
         {
-            string modelPath = _tinyRandomGpt2ModelPath;
+            string modelPath = _tinyRandomLlamaModelPath;
             using (var config = new Config(modelPath))
             {
                 config.ClearProviders();
@@ -138,10 +138,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
             var inputIDsShape = new ulong[] { 2, 4 };
             ulong batchSize = inputIDsShape[0];
-            var expectedOutput = new int[] { 0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
-                                             0, 0, 195, 731, 731, 114, 114, 114, 114, 114 };
+            var expectedOutput = new int[] { 0, 0, 0, 52, 12102, 30463, 4666, 17192, 3266, 18061,
+                                             0, 0, 195, 731, 29592, 4877, 18112, 22607, 12936, 997 };
 
-            string modelPath = _tinyRandomGpt2ModelPath;
+            string modelPath = _tinyRandomLlamaModelPath;
             using (var config = new Config(modelPath))
             {
                 Assert.NotNull(config);
@@ -562,7 +562,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [Fact(DisplayName = "TestTensorAndAddExtraInput")]
         public void TestTensorAndAddExtraInput()
         {
-            string modelPath = _tinyRandomGpt2ModelPath;
+            string modelPath = _tinyRandomLlamaModelPath;
             using var model = new Model(modelPath);
             Assert.NotNull(model);
 

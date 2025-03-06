@@ -30,7 +30,7 @@ if og.is_rocm_available():
     devices.append("rocm")
 
 def test_config(test_data_path):
-    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-LlamaForCausalLM-fp32")
     config = og.Config(model_path)
     config.clear_providers()
     config.append_provider("cuda")
@@ -63,12 +63,11 @@ def test_NamedTensors():
     "relative_model_path",
     (
         [
-            Path("hf-internal-testing") / "tiny-random-gpt2-fp32",
-            Path("hf-internal-testing") / "tiny-random-gpt2-fp32-cuda",
-            Path("hf-internal-testing") / "tiny-random-gpt2-fp16-cuda",
+            Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp32",
+            Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp16",
         ]
         if og.is_cuda_available()
-        else [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]
+        else [Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp32"]
     ),
 )
 def test_greedy_search(test_data_path, relative_model_path):
@@ -95,8 +94,8 @@ def test_greedy_search(test_data_path, relative_model_path):
 
     expected_sequence = np.array(
         [
-            [0, 0, 0, 52, 204, 204, 204, 204, 204, 204],
-            [0, 0, 195, 731, 731, 114, 114, 114, 114, 114],
+            [0, 0, 0, 52, 12102, 30463, 4666, 17192, 3266, 18061],
+            [0, 0, 195, 731, 29592, 4877, 18112, 22607, 12936, 997],
         ],
         dtype=np.int32,
     )
@@ -108,12 +107,11 @@ def test_greedy_search(test_data_path, relative_model_path):
     "relative_model_path",
     (
         [
-            Path("hf-internal-testing") / "tiny-random-gpt2-fp32",
-            Path("hf-internal-testing") / "tiny-random-gpt2-fp32-cuda",
-            Path("hf-internal-testing") / "tiny-random-gpt2-fp16-cuda",
+            Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp32",
+            Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp16",
         ]
         if og.is_cuda_available()
-        else [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]
+        else [Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp32"]
     ),
 )
 def test_rewind_cuda(test_data_path, relative_model_path):
@@ -169,7 +167,7 @@ def test_rewind_cuda(test_data_path, relative_model_path):
 @pytest.mark.parametrize(
     "relative_model_path",
     (
-        [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]
+        [Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp32"]
     ),
 )
 def test_rewind(test_data_path, relative_model_path):
@@ -178,7 +176,7 @@ def test_rewind(test_data_path, relative_model_path):
     model = og.Model(model_path)
 
     expected_sequence = np.array(
-        [0, 0, 195, 731, 731, 114, 114, 114, 114, 114],
+        [0, 0, 195, 731, 29592, 4877, 18112, 22607, 12936, 997],
         dtype=np.int32,
     )
     
@@ -196,7 +194,7 @@ def test_rewind(test_data_path, relative_model_path):
 
     generator.rewind_to(3)
 
-    generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
+    generator.append_tokens(np.array([[731, 29592]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
     
@@ -327,12 +325,12 @@ def test_logging():
     "relative_model_path",
     (
         [
-            (Path("hf-internal-testing") / "tiny-random-gpt2-fp32", "CPU"),
-            (Path("hf-internal-testing") / "tiny-random-gpt2-fp32-cuda", "CUDA"),
-            (Path("hf-internal-testing") / "tiny-random-gpt2-fp16-cuda", "CUDA"),
+            (Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp32", "CPU"),
+            (Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp32", "CUDA"),
+            (Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp16", "CUDA"),
         ]
         if og.is_cuda_available()
-        else [(Path("hf-internal-testing") / "tiny-random-gpt2-fp32", "CPU")]
+        else [(Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp32", "CPU")]
     ),
 )
 def test_model_device_type(test_data_path, relative_model_path):
@@ -347,13 +345,12 @@ def test_model_device_type(test_data_path, relative_model_path):
     "relative_model_path",
     (
         [
-            Path("hf-internal-testing") / "tiny-random-gpt2-fp32",
-            Path("hf-internal-testing") / "tiny-random-gpt2-fp32-cuda",
-            Path("hf-internal-testing") / "tiny-random-gpt2-fp16-cuda",
+            Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp32",
+            Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp16",
         ]
         if og.is_cuda_available()
         else [
-            Path("hf-internal-testing") / "tiny-random-gpt2-fp32",
+            Path("hf-internal-testing") / "tiny-random-LlamaForCausalLM-fp32",
         ]
     ),
 )
@@ -376,16 +373,16 @@ def test_get_output(test_data_path, relative_model_path):
     expected_sampled_logits_prompt = np.array(
         [
             [
-                [0.29694548, 0.00955007, 0.0430819, 0.10063869, 0.0437237],
-                [0.27329233, 0.00841076, -0.1060291, 0.11328877, 0.13369876],
-                [0.30323744, 0.0545997, 0.03894716, 0.11702324, 0.0410665],
-                [-0.12675379, -0.04443946, 0.14492269, 0.03021223, -0.03212897],
+                [-0.0682238, 0.0405136, 0.057766, -0.0431961, 0.00696388],
+                [-0.0153187, 0.0369705, 0.0259072, -0.0189864, 0.010939],
+                [-0.007559, 0.0976457, -0.0195211, -0.0496172, -0.0826776],
+                [-0.061368, 0.0905409, 0.0395047, 0.0156607, -0.124637],
             ],
             [
-                [0.29694548, 0.00955007, 0.0430819, 0.10063869, 0.0437237],
-                [0.27329233, 0.00841076, -0.1060291, 0.11328877, 0.13369876],
-                [-0.04699047, 0.17915794, 0.20838135, 0.10888482, -0.00277808],
-                [0.2938929, -0.10538938, -0.00226692, 0.12050669, -0.10622668],
+                [0.0302449, 0.0105196, -0.0475081, 0.18416, -0.102302],
+                [0.0363197, -0.0178498, 0.0538303, -0.15488, 0.0186949],
+                [-0.308369, -0.150942, 0.0628686, 0.121276, -0.043074],
+                [0.0784324, -0.0752792, 0.0352388, -0.0203399, -0.0446295],
             ],
         ]
     )
@@ -398,8 +395,8 @@ def test_get_output(test_data_path, relative_model_path):
     # full logits has shape [2, 1, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 1, 5]
     expected_sampled_logits_token_gen = np.array(
         [
-            [[0.03742531, -0.05752287, 0.14159015, 0.04210977, -0.1484456]],
-            [[0.3041716, -0.08701379, -0.03778192, 0.07471392, -0.02049096]],
+            [[-0.0966602, 0.0653766, -0.0240025, -0.238864, 0.0626191]],
+            [[0.0217852, 0.0282981, 0.0627022, -0.0670064, -0.0286431]],
         ]
     )
     logits = generator.get_output("logits")

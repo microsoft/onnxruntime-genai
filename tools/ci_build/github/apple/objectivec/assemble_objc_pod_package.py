@@ -47,7 +47,7 @@ all_objc_files = {
         "objectivec/test/*.mm",
     ],
     "test_resource_files": [
-        "test/test_models/hf-internal-testing/tiny-random-gpt2-fp32",
+        "test/test_models/hf-internal-testing/tiny-random-LlamaForCausalLM-fp32",
     ],
 }
 
