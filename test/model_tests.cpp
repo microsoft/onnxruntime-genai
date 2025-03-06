@@ -24,12 +24,15 @@
 #endif
 #endif
 
-// To generate this file:
-// python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
-// And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-static const std::pair<const char*, const char*> c_tiny_gpt2_model_paths[] = {
-    {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32-cuda", "fp32"},
-    {MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp16-cuda", "fp16"},
+// This model was generated using the model builder, but the config.json of the model had to be adjusted to have num_attention_heads and num_key_value_heads be 1
+// to make the GroupQueryAttention op not complain about the head_size not being a multiple of 16.
+// We use this tiny trivial file to do basic unit tests.
+#define LLAMA_FP16_PATH MODEL_PATH "hf-internal-testing/tiny-random-LlamaForCausalLM-fp16"
+#define LLAMA_FP32_PATH MODEL_PATH "hf-internal-testing/tiny-random-LlamaForCausalLM-fp32"
+
+static const std::pair<const char*, const char*> c_tiny_llama_model_paths[] = {
+    {LLAMA_FP32_PATH, "fp32"},
+    {LLAMA_FP16_PATH, "fp16"},
 };
 
 #if USE_DML
@@ -57,18 +60,15 @@ TEST(ModelTests, DMLAdapterSelection) {
 
 // DML doesn't support GPT attention
 #if !USE_DML
-TEST(ModelTests, GreedySearchGptFp32) {
+TEST(ModelTests, GreedySearchLlamaFp32) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
   std::vector<int32_t> expected_output{
-      0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
-      0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+      0, 0, 0, 52, 12102, 30463, 4666, 17192, 3266, 18061,
+      0, 0, 195, 731, 29592, 4877, 18112, 22607, 12936, 997};
 
-  // To generate this file:
-  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
-  // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = OgaModel::Create(LLAMA_FP32_PATH);
 
   auto params = OgaGeneratorParams::Create(*model);
   int max_length = 10;
@@ -91,7 +91,7 @@ TEST(ModelTests, GreedySearchGptFp32) {
   }
 }
 
-TEST(ModelTests, BeamSearchGptFp32) {
+TEST(ModelTests, BeamSearchLlamaFp32) {
   std::vector<int64_t> input_ids_shape{3, 12};
   std::vector<int32_t> input_ids{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620,
@@ -99,16 +99,11 @@ TEST(ModelTests, BeamSearchGptFp32) {
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328};
 
   std::vector<int32_t> expected_output{
-      0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638,
-      41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
-      0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 328, 669, 669, 669, 669, 669, 669, 669};
+      0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 23145, 13392, 2754, 10010, 29136, 6868, 12230, 23861,
+      41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 1810, 4702, 29668, 11709, 27728, 12420, 616, 10337,
+      0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 21955, 5331, 12815, 1404, 5661, 18625, 10014, 8136};
 
-  // The ONNX model is generated like the following:
-  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
-  //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
-  // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
-
-  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = OgaModel::Create(LLAMA_FP32_PATH);
 
   int max_length = 20;
   int batch_size = static_cast<int>(input_ids_shape[0]);
@@ -135,15 +130,18 @@ TEST(ModelTests, BeamSearchGptFp32) {
 
 #if USE_CUDA
 
-void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label) {
+void Test_GreedySearch_Llama_Cuda(const char* model_path, const char* model_label) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
   std::vector<int32_t> expected_output{
-      0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
-      0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+      0, 0, 0, 52, 12102, 30463, 4666, 17192, 3266, 18061,
+      0, 0, 195, 731, 29592, 4877, 18112, 22607, 12936, 997};
 
-  auto model = OgaModel::Create(model_path);
+  auto config = OgaConfig::Create(model_path);
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+  auto model = OgaModel::Create(*config);
 
   int max_length = 10;
   int batch_size = static_cast<int>(input_ids_shape[0]);
@@ -168,7 +166,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   // Test batch size 1 continuous case
   input_ids_shape = {1, 4};
   input_ids = {0, 0, 195, 731};
-  std::vector<int32_t> expected_output_continuous{0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
+  std::vector<int32_t> expected_output_continuous{0, 0, 195, 731, 29592, 4877, 18112, 22607, 12936, 997};
 
   batch_size = static_cast<int>(input_ids_shape[0]);
   params->SetSearchOption("batch_size", batch_size);
@@ -186,8 +184,8 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
 
   generator->RewindTo(3);
-  std::vector<int32_t> next_ids{731, 731};
-  generator->AppendTokens(next_ids);
+  generator->AppendTokens(std::array<int32_t, 1>{731});
+  generator->AppendTokens(std::array<int32_t, 1>{29592});
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
@@ -197,12 +195,12 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
 }
 
-TEST(ModelTests, GreedySearchGptCuda) {
-  for (auto model_path : c_tiny_gpt2_model_paths)
-    Test_GreedySearch_Gpt_Cuda(model_path.first, model_path.second);
+TEST(ModelTests, GreedySearchLlamaCuda) {
+  for (auto model_path : c_tiny_llama_model_paths)
+    Test_GreedySearch_Llama_Cuda(model_path.first, model_path.second);
 }
 
-void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
+void Test_BeamSearch_Llama_Cuda(const char* model_path, const char* model_label) {
   std::vector<int64_t> input_ids_shape{3, 12};
   std::vector<int32_t> input_ids{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620,
@@ -210,15 +208,14 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328};
 
   std::vector<int32_t> expected_output{
-      0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 131, 131, 131, 181, 638, 638, 638, 638,
-      41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 292, 292, 292, 292, 292, 292, 292, 292,
-      0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 328, 669, 669, 669, 669, 669, 669, 669};
+      0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 23145, 13392, 2754, 10010, 29136, 6868, 12230, 23861,
+      41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 1810, 4702, 29668, 11709, 27728, 12420, 616, 10337,
+      0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 21955, 5331, 12815, 1404, 5661, 18625, 10014, 8136};
 
-  // The ONNX model is generated like the following:
-  // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
-  //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
-  // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
-  auto model = OgaModel::Create(model_path);
+  auto config = OgaConfig::Create(model_path);
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+  auto model = OgaModel::Create(*config);
 
   int batch_size = static_cast<int>(input_ids_shape[0]);
   int max_length = 20;
@@ -243,9 +240,9 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   }
 }
 
-TEST(ModelTests, BeamSearchGptCuda) {
-  for (auto model_path : c_tiny_gpt2_model_paths)
-    Test_BeamSearch_Gpt_Cuda(model_path.first, model_path.second);
+TEST(ModelTests, BeamSearchLlamaCuda) {
+  for (auto model_path : c_tiny_llama_model_paths)
+    Test_BeamSearch_Llama_Cuda(model_path.first, model_path.second);
 }
 #endif
 

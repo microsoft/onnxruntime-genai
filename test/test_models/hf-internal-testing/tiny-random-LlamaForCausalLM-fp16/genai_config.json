@@ -1,0 +1,50 @@
+{
+    "model": {
+        "bos_token_id": 0,
+        "context_length": 2048,
+        "decoder": {
+            "session_options": {
+                "log_id": "onnxruntime-genai",
+                "provider_options": []
+            },
+            "filename": "model.onnx",
+            "head_size": 16,
+            "hidden_size": 16,
+            "inputs": {
+                "input_ids": "input_ids",
+                "attention_mask": "attention_mask",
+                "position_ids": "position_ids",
+                "past_key_names": "past_key_values.%d.key",
+                "past_value_names": "past_key_values.%d.value"
+            },
+            "outputs": {
+                "logits": "logits",
+                "present_key_names": "present.%d.key",
+                "present_value_names": "present.%d.value"
+            },
+            "num_attention_heads": 1,
+            "num_hidden_layers": 2,
+            "num_key_value_heads": 1
+        },
+        "eos_token_id": 1,
+        "pad_token_id": -1,
+        "type": "llama",
+        "vocab_size": 32000
+    },
+    "search": {
+        "diversity_penalty": 0.0,
+        "do_sample": false,
+        "early_stopping": true,
+        "length_penalty": 1.0,
+        "max_length": 2048,
+        "min_length": 0,
+        "no_repeat_ngram_size": 0,
+        "num_beams": 1,
+        "num_return_sequences": 1,
+        "past_present_share_buffer": false,
+        "repetition_penalty": 1.0,
+        "temperature": 1.0,
+        "top_k": 1,
+        "top_p": 1.0
+    }
+}
