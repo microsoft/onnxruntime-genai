@@ -16,6 +16,8 @@
 #define MODEL_PATH "../../test/test_models/"
 #endif
 
+#define LLAMA_FP32_PATH MODEL_PATH "hf-internal-testing/tiny-random-LlamaForCausalLM-fp32"
+
 TEST(SamplingTests, BatchedSamplingTopPCpu) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<int32_t> expected_output{1, 2, 3, 4};
@@ -24,7 +26,7 @@ TEST(SamplingTests, BatchedSamplingTopPCpu) {
                                    0.1f, 0.1f, 0.1f, 0.6f, 0.1f,
                                    0.1f, 0.1f, 0.1f, 0.1f, 0.6f};
 
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto config = OgaConfig::Create(LLAMA_FP32_PATH);
   config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
 
   auto model = OgaModel::Create(*config);
@@ -51,7 +53,7 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
                                 0.25f, 2.0f, 0.25f, 1.5f, 1.25f,
                                 1.25f, 0.25f, 1.5f, 0.25f, 2.0f};
 
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto config = OgaConfig::Create(LLAMA_FP32_PATH);
   config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
 
   int batch_size = 4;
@@ -84,7 +86,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
                                 0.25f, 2.0f, 0.25f, 1.5f, 1.25f,
                                 1.25f, 0.25f, 1.5f, 0.25f, 2.0f};
 
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto config = OgaConfig::Create(LLAMA_FP32_PATH);
   config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
 
   int batch_size = 4;
@@ -138,7 +140,7 @@ TEST(SamplingTests, RandomizedSamplingTopPCpu) {
   int vocab_size = 32000;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
 
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto config = OgaConfig::Create(LLAMA_FP32_PATH);
   config->Overlay(R"({ "model": { "vocab_size" : 32000 } })");
 
   auto model = OgaModel::Create(*config);
@@ -188,7 +190,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
   const int k = 5;
   const int vocab_size = 13;
 
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto config = OgaConfig::Create(LLAMA_FP32_PATH);
   config->Overlay(R"({ "model": { "vocab_size" : 13 } })");
 
   auto model = OgaModel::Create(*config);
@@ -249,7 +251,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
   const int vocab_size = 32000;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
 
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto config = OgaConfig::Create(LLAMA_FP32_PATH);
   config->Overlay(R"({ "model": { "vocab_size" : 32000 } })");
 
   auto model = OgaModel::Create(*config);
@@ -294,7 +296,7 @@ TEST(SamplingTests, BatchedSamplingTopPCuda) {
   int batch_size = 4;
   int vocab_size = 5;
 
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto config = OgaConfig::Create(LLAMA_FP32_PATH);
   config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");
@@ -324,7 +326,7 @@ TEST(SamplingTests, BatchedSamplingTopKCuda) {
   int batch_size = 4;
   int vocab_size = 5;
 
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto config = OgaConfig::Create(LLAMA_FP32_PATH);
   config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");
@@ -358,7 +360,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
   int batch_size = 4;
   int vocab_size = 5;
 
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto config = OgaConfig::Create(LLAMA_FP32_PATH);
   config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");
@@ -389,7 +391,7 @@ TEST(SamplingTests, RandomizedSamplingTopPCuda) {
   int vocab_size = 32000;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
 
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto config = OgaConfig::Create(LLAMA_FP32_PATH);
   config->Overlay(R"({ "model": { "vocab_size" : 32000 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");
@@ -429,7 +431,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
   const int k = 5;
   const int vocab_size = 17;
 
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto config = OgaConfig::Create(LLAMA_FP32_PATH);
   config->Overlay(R"({ "model": { "vocab_size" : 17 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");
@@ -491,7 +493,7 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKCuda) {
   int k = 5;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
 
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto config = OgaConfig::Create(LLAMA_FP32_PATH);
   config->Overlay(R"({ "model": { "vocab_size" : 32000 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");
@@ -533,7 +535,7 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda) {
   int vocab_size = 32000;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
 
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto config = OgaConfig::Create(LLAMA_FP32_PATH);
   config->Overlay(R"({ "model": { "vocab_size" : 32000 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");

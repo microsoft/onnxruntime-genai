@@ -27,24 +27,8 @@
             "num_key_value_heads": 1
         },
         "eos_token_id": 1,
-        "pad_token_id": -1,
+        "pad_token_id": 2,
         "type": "llama",
         "vocab_size": 32000
-    },
-    "search": {
-        "diversity_penalty": 0.0,
-        "do_sample": false,
-        "early_stopping": true,
-        "length_penalty": 1.0,
-        "max_length": 2048,
-        "min_length": 0,
-        "no_repeat_ngram_size": 0,
-        "num_beams": 1,
-        "num_return_sequences": 1,
-        "past_present_share_buffer": false,
-        "repetition_penalty": 1.0,
-        "temperature": 1.0,
-        "top_k": 1,
-        "top_p": 1.0
     }
 }

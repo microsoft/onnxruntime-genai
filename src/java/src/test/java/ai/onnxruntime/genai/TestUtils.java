@@ -19,8 +19,8 @@ public class TestUtils {
     return getFilePathFromDisk(getTestResourcePath("adapters/adapters.onnx_adapter"));
   }
 
-  public static final String tinyGpt2ModelPath() {
-    return getFilePathFromDisk(getTestResourcePath("hf-internal-testing/tiny-random-gpt2-fp32"));
+  public static final String tinyLlamaModelPath() {
+    return getFilePathFromDisk(getTestResourcePath("hf-internal-testing/tiny-random-LlamaForCausalLM-fp32"));
   }
 
   public static final String testVisionModelPath() {

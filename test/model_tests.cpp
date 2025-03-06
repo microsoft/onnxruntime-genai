@@ -61,10 +61,10 @@ TEST(ModelTests, DMLAdapterSelection) {
 // DML doesn't support GPT attention
 #if !USE_DML
 TEST(ModelTests, GreedySearchLlamaFp32) {
-  std::vector<int64_t> input_ids_shape{2, 4};
-  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+  std::array<int64_t, 2> input_ids_shape{2, 4};
+  std::array<int32_t, 8> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
-  std::vector<int32_t> expected_output{
+  std::array<int32_t, 20> expected_output{
       0, 0, 0, 52, 12102, 30463, 4666, 17192, 3266, 18061,
       0, 0, 195, 731, 29592, 4877, 18112, 22607, 12936, 997};
 
@@ -92,13 +92,13 @@ TEST(ModelTests, GreedySearchLlamaFp32) {
 }
 
 TEST(ModelTests, BeamSearchLlamaFp32) {
-  std::vector<int64_t> input_ids_shape{3, 12};
-  std::vector<int32_t> input_ids{
+  std::array<int64_t, 2> input_ids_shape{3, 12};
+  std::array<int32_t, 36> input_ids{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620,
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328};
 
-  std::vector<int32_t> expected_output{
+  std::array<int32_t, 60> expected_output{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 23145, 13392, 2754, 10010, 29136, 6868, 12230, 23861,
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 1810, 4702, 29668, 11709, 27728, 12420, 616, 10337,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 21955, 5331, 12815, 1404, 5661, 18625, 10014, 8136};
@@ -131,10 +131,10 @@ TEST(ModelTests, BeamSearchLlamaFp32) {
 #if USE_CUDA
 
 void Test_GreedySearch_Llama_Cuda(const char* model_path, const char* model_label) {
-  std::vector<int64_t> input_ids_shape{2, 4};
-  std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
+  std::array<int64_t, 2> input_ids_shape{2, 4};
+  std::array<int32_t, 8> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
 
-  std::vector<int32_t> expected_output{
+  std::array<int32_t, 20> expected_output{
       0, 0, 0, 52, 12102, 30463, 4666, 17192, 3266, 18061,
       0, 0, 195, 731, 29592, 4877, 18112, 22607, 12936, 997};
 
@@ -165,14 +165,12 @@ void Test_GreedySearch_Llama_Cuda(const char* model_path, const char* model_labe
 
   // Test batch size 1 continuous case
   input_ids_shape = {1, 4};
-  input_ids = {0, 0, 195, 731};
-  std::vector<int32_t> expected_output_continuous{0, 0, 195, 731, 29592, 4877, 18112, 22607, 12936, 997};
 
-  batch_size = static_cast<int>(input_ids_shape[0]);
+  batch_size = 1;
   params->SetSearchOption("batch_size", batch_size);
 
   generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokens(input_ids);
+  generator->AppendTokens(std::span(input_ids).subspan(4, 4));
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
@@ -180,7 +178,7 @@ void Test_GreedySearch_Llama_Cuda(const char* model_path, const char* model_labe
   
   // Verify outputs match expected outputs
   auto sequence = generator->GetSequence(0);
-  auto* expected_output_start = &expected_output_continuous[0];
+  auto* expected_output_start = &expected_output[max_length];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
 
   generator->RewindTo(3);
@@ -201,13 +199,13 @@ TEST(ModelTests, GreedySearchLlamaCuda) {
 }
 
 void Test_BeamSearch_Llama_Cuda(const char* model_path, const char* model_label) {
-  std::vector<int64_t> input_ids_shape{3, 12};
-  std::vector<int32_t> input_ids{
+  std::array<int64_t, 2> input_ids_shape{3, 12};
+  std::array<int32_t, 36> input_ids{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620,
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328};
 
-  std::vector<int32_t> expected_output{
+  std::array<int32_t, 60> expected_output{
       0, 0, 0, 0, 0, 52, 195, 731, 321, 301, 734, 620, 23145, 13392, 2754, 10010, 29136, 6868, 12230, 23861,
       41, 554, 74, 622, 206, 222, 75, 223, 221, 198, 224, 572, 1810, 4702, 29668, 11709, 27728, 12420, 616, 10337,
       0, 0, 0, 52, 328, 219, 328, 206, 288, 227, 896, 328, 21955, 5331, 12815, 1404, 5661, 18625, 10014, 8136};

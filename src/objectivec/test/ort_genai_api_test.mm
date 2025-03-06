@@ -27,7 +27,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (NSString*)getModelPath {
     NSBundle* bundle = [NSBundle bundleForClass:[ORTGenAIAPITest class]];
-    NSString* path = [[bundle resourcePath] stringByAppendingString:@"/tiny-random-gpt2-fp32"];
+    NSString* path = [[bundle resourcePath] stringByAppendingString:@"/tiny-random-LlamaForCausalLM-fp32"];
     return path;
 }
 
@@ -81,15 +81,15 @@ NS_ASSUME_NONNULL_BEGIN
     XCTAssertNil(error);
 
     // check prompt
-     // full logits has shape [2, 4, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 4, 5]
-    std::vector<float> expected_sampled_logits_prompt{0.29694548f, 0.00955007f, 0.0430819f, 0.10063869f, 0.0437237f,
-                                                      0.27329233f, 0.00841076f, -0.1060291f, 0.11328877f, 0.13369876f,
-                                                      0.30323744f, 0.0545997f, 0.03894716f, 0.11702324f, 0.0410665f,
-                                                      -0.12675379f, -0.04443946f, 0.14492269f, 0.03021223f, -0.03212897f,
-                                                      0.29694548f, 0.00955007f, 0.0430819f, 0.10063869f, 0.0437237f,
-                                                      0.27329233f, 0.00841076f, -0.1060291f, 0.11328877f, 0.13369876f,
-                                                      -0.04699047f, 0.17915794f, 0.20838135f, 0.10888482f, -0.00277808f,
-                                                      0.2938929f, -0.10538938f, -0.00226692f, 0.12050669f, -0.10622668f};
+    // full logits has shape [2, 4, vocab_size]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 4, 5]
+    std::vector<float> expected_sampled_logits_prompt{-0.0682238f, 0.0405136f, 0.057766f, -0.0431961f, 0.00696388f,
+                                                       -0.0153187f, 0.0369705f, 0.0259072f, -0.0189864f, 0.010939f,
+                                                       -0.007559f, 0.0976457f, -0.0195211f, -0.0496172f, -0.0826776f,
+                                                       -0.061368f, 0.0905409f, 0.0395047f, 0.0156607f, -0.124637f,
+                                                       0.0302449f, 0.0105196f, -0.0475081f, 0.18416f, -0.102302f,
+                                                       0.0363197f, -0.0178498f, 0.0538303f, -0.15488f, 0.0186949f,
+                                                       -0.308369f, -0.150942f, 0.0628686f, 0.121276f, -0.043074f,
+                                                       0.0784324f, -0.0752792f, 0.0352388f, -0.0203399f, -0.0446295f};
 
     OGATensor* prompt_logits_ptr = [generator getOutput:@"logits" error:&error];
     ORTAssertNullableResultSuccessful(prompt_logits_ptr, error);
@@ -111,8 +111,8 @@ NS_ASSUME_NONNULL_BEGIN
 
     // check for the 1st token generation
     // full logits has shape [2, 1, 1000]. Sample 1 for every 200 tokens and the expected sampled logits has shape [2, 1, 5]
-    std::vector<float> expected_sampled_logits_token_gen{0.03742531f, -0.05752287f, 0.14159015f, 0.04210977f, -0.1484456f,
-                                                         0.3041716f, -0.08701379f, -0.03778192f, 0.07471392f, -0.02049096f};
+    std::vector<float> expected_sampled_logits_token_gen{-0.0966602f, 0.0653766f, -0.0240025f, -0.238864f, 0.0626191f,
+                                                          0.0217852f, 0.0282981f, 0.0627022f, -0.0670064f, -0.0286431f};
 
     OGATensor* token_gen_logits_ptr = [generator getOutput:@"logits" error:&error];
     ORTAssertNullableResultSuccessful(token_gen_logits_ptr, error);

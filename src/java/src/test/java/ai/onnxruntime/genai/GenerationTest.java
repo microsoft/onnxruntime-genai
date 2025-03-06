@@ -115,7 +115,7 @@ public class GenerationTest {
   public void testWithInputIds() throws GenAIException {
     // test using the HF model. input id values must be < 1000 so we use manually created input.
     // Input/expected output copied from the C# unit tests
-    try (Config config = new Config(TestUtils.tinyGpt2ModelPath());
+    try (Config config = new Config(TestUtils.tinyLlamaModelPath());
         Model model = new Model(config);
         GeneratorParams params = new GeneratorParams(model); ) {
       int batchSize = 2;
@@ -132,8 +132,8 @@ public class GenerationTest {
 
       int[] expectedOutput =
           new int[] {
-            0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
-            0, 0, 195, 731, 731, 114, 114, 114, 114, 114
+            0, 0, 0, 52, 12102, 30463, 4666, 17192, 3266, 18061,
+            0, 0, 195, 731, 29592, 4877, 18112, 22607, 12936, 997
           };
 
       try (Generator generator = new Generator(model, params); ) {

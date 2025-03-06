@@ -13,7 +13,7 @@ public class GeneratorParamsTest {
   @Test
   public void testValidSearchOption() throws GenAIException {
     // test setting an invalid search option throws a GenAIException
-    try (SimpleGenAI generator = new SimpleGenAI(TestUtils.tinyGpt2ModelPath());
+    try (SimpleGenAI generator = new SimpleGenAI(TestUtils.tinyLlamaModelPath());
         GeneratorParams params = generator.createGeneratorParams(); ) {
       params.setSearchOption("early_stopping", true); // boolean
       params.setSearchOption("max_length", 20); // number
@@ -23,7 +23,7 @@ public class GeneratorParamsTest {
   @Test
   public void testInvalidSearchOption() throws GenAIException {
     // test setting an invalid search option throws a GenAIException
-    try (SimpleGenAI generator = new SimpleGenAI(TestUtils.tinyGpt2ModelPath());
+    try (SimpleGenAI generator = new SimpleGenAI(TestUtils.tinyLlamaModelPath());
         GeneratorParams params = generator.createGeneratorParams(); ) {
       assertThrows(GenAIException.class, () -> params.setSearchOption("invalid", true));
     }
