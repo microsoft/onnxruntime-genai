@@ -48,23 +48,24 @@ ExtraInputs::ExtraInputs(State& state)
     : state_{state} {
   extra_inputs_.reserve(state_.params_->extra_inputs.size());
 
-  if (state_.GetCapturedGraphInfo()) {
-    owned_extra_inputs_.reserve(state_.params_->extra_inputs.size());
+  // if (state_.GetCapturedGraphInfo()) {
+  //   owned_extra_inputs_.reserve(state_.params_->extra_inputs.size());
 
-    for (int i = 0; i < state_.params_->extra_inputs.size(); ++i) {
-      auto type_and_shape_info = state_.params_->extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
-      const auto& input_name = state_.params_->extra_inputs[i].name;
+  //   for (int i = 0; i < state_.params_->extra_inputs.size(); ++i) {
+  //     auto type_and_shape_info = state_.params_->extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
+  //     const auto& input_name = state_.params_->extra_inputs[i].name;
 
-      sb_extra_inputs_.emplace(input_name, state_.GetCapturedGraphInfo()->sb_extra_inputs_.at(input_name).get());
-      owned_extra_inputs_.push_back(sb_extra_inputs_.at(input_name)->CreateTensorOnStaticBuffer(type_and_shape_info->GetShape(), type_and_shape_info->GetElementType()));
-      extra_inputs_.push_back(owned_extra_inputs_.back().get());
-    }
-  } else {
+  //     sb_extra_inputs_.emplace(input_name, state_.GetCapturedGraphInfo()->sb_extra_inputs_.at(input_name).get());
+  //     owned_extra_inputs_.push_back(sb_extra_inputs_.at(input_name)->CreateTensorOnStaticBuffer(type_and_shape_info->GetShape(), type_and_shape_info->GetElementType()));
+  //     extra_inputs_.push_back(owned_extra_inputs_.back().get());
+  //   }
+  // } else {
     // We don't use graph capture, so simply use the existing pointers
     for (auto& extra_input : state_.params_->extra_inputs) {
+      // TODO(aciddelgado): If we move OgaValue into Tensor, we can call MakeStatic here to make ort tensor static for graph capture
       extra_inputs_.push_back(extra_input.tensor->ort_tensor_.get());
     }
-  }
+  // }
 }
 
 void ExtraInputs::Add(const std::vector<std::string>& required_input_names) {

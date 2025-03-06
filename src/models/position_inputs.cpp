@@ -42,15 +42,6 @@ DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, D
   position_ids_next_ = std::make_unique<OgaValue>(model_.p_device_inputs_, type_);
   attention_mask_ = std::make_unique<OgaValue>(model_.p_device_inputs_, type_);
   attention_mask_next_ = std::make_unique<OgaValue>(model_.p_device_inputs_, type_);
-
-  // if (state_.GetCapturedGraphInfo()) {
-  //   if (has_posid_input_) {
-  //     sb_position_ids_ = state_.GetCapturedGraphInfo()->sb_position_ids_.get();
-  //   }
-  //   if (has_mask_input_) {
-  //     sb_attention_mask_ = state_.GetCapturedGraphInfo()->sb_attention_mask_.get();
-  //   }
-  // }
 }
 
 void DefaultPositionInputs::Add() {
@@ -206,13 +197,7 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
 
   CreateNextAttentionMaskTensor(total_length);
 
-  // TODO(aciddelgado): pass OgaValue instead of mutable data and update generally
-  // model_.p_device_inputs_->UpdateAttentionMask(*attention_mask_next_,
-  //                                              *attention_mask_,
-  //                                              new_kv_length,
-  //                                              total_length,
-  //                                              state_.params_->use_graph_capture);
-
+  // TODO(aciddelgado): clean up comments everywhere
   // int max_length = state_.params_->use_graph_capture ? state_.params_->search.max_length : total_length;
   model_.p_device_inputs_->UpdateAttentionMask(state_.params_->use_graph_capture ? nullptr : attention_mask_next_->GetMutableRawData(),
                                                attention_mask_->GetMutableRawData(),

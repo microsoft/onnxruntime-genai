@@ -91,8 +91,7 @@ VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorPa
 }
 
 DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  const int num_images = static_cast<int>(inputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[0]);
-  State::Run(*model_.vision_session_, num_images);
+  State::Run(*model_.vision_session_);
   return {};
 }
 
@@ -105,8 +104,7 @@ SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorPa
 }
 
 DeviceSpan<float> SpeechState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  const int num_audios = static_cast<int>(inputs_[0]->GetTensorTypeAndShapeInfo()->GetShape()[0]);
-  State::Run(*model_.speech_session_, num_audios);
+  State::Run(*model_.speech_session_);
   return {};
 }
 
@@ -138,15 +136,13 @@ void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool 
 }
 
 DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
-  State::Run(*model_.embedding_session_, batch_size);
+  State::Run(*model_.embedding_session_);
   return {};
 }
 
-DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info)
+DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      captured_graph_info_{captured_graph_info},
       position_inputs_{model, *this, sequence_lengths} {
   inputs_embeds_.Add();
   position_inputs_.Add();
@@ -155,8 +151,8 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
 }
 
 DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
-  State::Run(*model_.decoder_session_, batch_size);
+  bool graph_capture_this_run = params_->use_graph_capture && inputs_embeds_.GetShape()[1] == 1;
+  State::Run(*model_.decoder_session_, graph_capture_this_run);
   return logits_.Get();
 }
 
@@ -174,7 +170,6 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
       model_{model},
       num_image_tokens_{GetNumImageTokens(params_->extra_inputs)},
       num_audio_tokens_{GetNumAudioTokens(params_->extra_inputs, model_.config_->model.speech.inputs.audio_sizes)},
-      captured_graph_info_{model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)},
       adapters_{std::make_shared<Adapters>(&model_)} {
   if (model_.vision_session_) {
     vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
@@ -183,7 +178,7 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
     speech_state_ = std::make_unique<SpeechState>(model_, params, num_audio_tokens_);
   }
   embedding_state_ = std::make_unique<EmbeddingState>(model, params, num_image_tokens_, num_audio_tokens_);
-  decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params, captured_graph_info_.get());
+  decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
 
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
     const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.vision.adapter_filename));

@@ -3,6 +3,8 @@
 //
 // Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
 #include <algorithm>
+#include <climits>
+#include <random>
 #include <set>
 #include <string>
 #include <thread>
@@ -19,34 +21,33 @@
 
 namespace Generators {
 
+// TODO(aciddelgado): Instantiate state with a random graph capture id
 State::State(const GeneratorParams& params, const Model& model)
     : model_{model},
       params_{params.shared_from_this()},
       run_options_{OrtRunOptions::Create()},
-      extra_outputs_{*this} {}
+      extra_outputs_{*this} {
+  // Generate a random id for graph capture
+  if (params_->use_graph_capture) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(1, INT_MAX);
+    graph_id_ = std::to_string(dis(gen));
+  }
+}
 
-void State::Run(OrtSession& session, int new_batch_size) {
-  // auto captured_graph_info = GetCapturedGraphInfo();
-
-  // TODO(aciddelgado): this needs to be made more sophisticated
-  if (first_run_) {
-    // if (captured_graph_info) {
-    if (params_->use_graph_capture) {
+void State::Run(OrtSession& session, bool graph_capture_this_run) {
+  if (params_->use_graph_capture) {
+    if (graph_capture_this_run)
+      run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
+    else
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
-    }
-    // }
+  }
+
+  if (first_run_) {
     extra_outputs_.Add(session.GetOutputNames());
     first_run_ = false;
   } else {
-    // if (captured_graph_info && new_batch_size != current_batch_size_) {
-    //   current_batch_size_ = new_batch_size;
-    //   auto annotation_id = std::to_string(captured_graph_info->GenerateUniqueAnnotationID(new_batch_size));
-    //   run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
-    if (params_->use_graph_capture && new_batch_size != current_batch_size_) {
-      current_batch_size_ = new_batch_size;
-      run_options_->AddConfigEntry("gpu_graph_id", "5");
-    }
-    // }
     extra_outputs_.Update();
   }
 
@@ -327,7 +328,6 @@ void Model::InitDeviceAllocator(OrtSession& session) {
   p_device_kvcache_ = p_device_;
 
   session_info_ = std::make_unique<SessionInfo>(session);
-  captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), &p_device_->GetAllocator());
 }
 
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
