@@ -151,6 +151,13 @@ OgaResult* OGA_API_CALL OgaLoadAudios(const OgaStringArray* audio_paths, OgaAudi
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaLoadAudiosFromBuffers(const void** audio_data, const size_t* audio_data_sizes, size_t count, OgaAudios** audios) {
+  OGA_TRY
+  *audios = reinterpret_cast<OgaAudios*>(Generators::LoadAudiosFromBuffers(std::span<const void*>(audio_data, count), std::span<const size_t>(audio_data_sizes, count)).release());
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateRuntimeSettings(OgaRuntimeSettings** out) {
   OGA_TRY
   *out = reinterpret_cast<OgaRuntimeSettings*>(Generators::CreateRuntimeSettings().release());
