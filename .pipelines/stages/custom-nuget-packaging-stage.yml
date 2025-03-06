@@ -1,0 +1,13 @@
+parameters:
+- name: custom_ort_package_versioned_name
+  displayName: 'Custom ort package name.'
+  type: string
+  default: ''
+
+stages:
+- stage: custom_nuget_packaging
+  dependsOn: [capi_win_cuda_x64_packaging, capi_win_cpu_arm64_packaging]
+  jobs:
+    - template: jobs/custom-nuget-packaging-job.yml
+      parameters:
+        custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
