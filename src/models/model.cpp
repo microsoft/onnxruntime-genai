@@ -21,7 +21,6 @@
 
 namespace Generators {
 
-// TODO(aciddelgado): Instantiate state with a random graph capture id
 State::State(const GeneratorParams& params, const Model& model)
     : model_{model},
       params_{params.shared_from_this()},

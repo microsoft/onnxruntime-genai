@@ -151,8 +151,7 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
 }
 
 DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  // TODO(aciddelgado): can we enable this???
-  // bool graph_capture_this_run = params_->use_graph_capture && inputs_embeds_.GetShape()[1] == 1;
+  // TODO(aciddelgado): Enable multimodal graph capture once embeddings supports it
   State::Run(*model_.decoder_session_);
   return logits_.Get();
 }

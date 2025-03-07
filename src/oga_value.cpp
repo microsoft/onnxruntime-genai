@@ -59,22 +59,6 @@ OrtValue* OgaValue::GetOrtValue() {
   return ort_value_.get();
 }
 
-// template <typename T>
-// T* OgaValue::GetMutableData() {
-//   if (ort_value_ == nullptr) {
-//     throw std::runtime_error("OgaValue: GetMutableData called before CreateTensor");
-//   }
-//   return ort_value_->GetTensorMutableData<T>();
-// }
-
-// template <typename T>
-// const T* OgaValue::GetData() const {
-//   if (ort_value_ == nullptr) {
-//     throw std::runtime_error("OgaValue: GetData called before CreateTensor");
-//   }
-//   return ort_value_->GetTensorData<T>();
-// }
-
 void* OgaValue::GetMutableRawData() {
   if (ort_value_ == nullptr) {
     throw std::runtime_error("OgaValue: GetMutableRawData called before CreateTensor");

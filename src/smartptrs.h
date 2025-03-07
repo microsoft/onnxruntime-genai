@@ -13,7 +13,6 @@ namespace Generators {
 struct Search;
 struct Sequences;
 struct GeneratorParams;
-struct OgaValue;
 
 // A DeviceBuffer is an abstract interface to a block of device memory (can be cuda/dml/cpu memory)
 // Note: For a CPU DeviceBuffer, there's only one block of memory on CPU, the copy methods are no-ops

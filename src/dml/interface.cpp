@@ -271,6 +271,7 @@ struct InterfaceImpl : DeviceInterface {
       : UpdatePositionIds<int64_t>(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length);
   }
 
+  // TODO: perform operation directly on DML
   template <typename T>
   void UpdateAttentionMask(T* device_next_mask_data, const T* device_mask_data, int batch_beam_size, int total_length) {
     auto next_mask_data_span = WrapMemory<T>(std::span<T>(device_next_mask_data, batch_beam_size * total_length));
@@ -293,6 +294,7 @@ struct InterfaceImpl : DeviceInterface {
     next_mask_data_span.CopyCpuToDevice();
   }
 
+  // TODO: perform operation directly on DML
   template <typename T>
   void UpdateAttentionMaskStatic(T* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length) {
     auto mask_data_span = WrapMemory<T>(std::span<T>(mask_data, batch_beam_size * max_length));

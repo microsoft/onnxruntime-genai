@@ -81,7 +81,6 @@ void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
   is_first_update_ = false;
 }
 
-// TODO(aciddelgado): this was changed, differ between static and dynamic mask
 void DefaultPositionInputs::RewindTo(size_t index) {
   // Reset the state of the position inputs
   if (index == 0) {
@@ -254,7 +253,6 @@ void DefaultPositionInputs::InitializeSequenceLengths(std::array<int64_t, 2> sha
   }
 }
 
-// TODO(aciddelgado): This only needs to be done with static mask... but it's called always?
 void DefaultPositionInputs::RewindMask(size_t index) {
   if (state_.params_->use_graph_capture) {
     throw std::runtime_error("PositionInputs::RewindMask - Static buffer is not supported for continuous decoding.");

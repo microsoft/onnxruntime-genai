@@ -211,7 +211,7 @@ GeneratorParams::GeneratorParams(const Model& model)
   }
 }
 
-// TODO(aciddelgado): Remove this from existence?
+// TODO(aciddelgado): Remove max_batch_size
 void GeneratorParams::TryGraphCapture(int max_bs) {
   if (!is_graph_capture_enabled_ || p_device->GetType() == DeviceType::CPU) {
     // no-op

@@ -84,7 +84,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
   int max_batch_size{0};
-  // bool use_cuda_graph{};
   bool use_graph_capture{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
