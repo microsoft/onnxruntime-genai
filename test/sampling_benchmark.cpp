@@ -16,6 +16,8 @@
 #define MODEL_PATH "../../test/test_models/"
 #endif
 
+#define LLAMA_FP32_PATH MODEL_PATH "hf-internal-testing/tiny-random-LlamaForCausalLM-fp32"
+
 // Defined in sampling_tests.cpp
 void CreateRandomLogits(float* logits, int num_large, int vocab_size, int batch_size, std::mt19937& engine);
 
@@ -33,8 +35,7 @@ struct SamplingBenchmark {
       input_ids.push_back(i);
 
     const int vocab_size = 32000;
-    auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-    config->Overlay(R"({ "model": { "vocab_size" : 32000 } })");
+    auto config = OgaConfig::Create(LLAMA_FP32_PATH);
     config->ClearProviders();
     if (strcmp(device_type_, "cpu"))
       config->AppendProvider(device_type_);

@@ -16,7 +16,7 @@ public class TensorTest {
   @Test
   public void testAddTensorInput() throws GenAIException {
     // test setting an invalid search option throws a GenAIException
-    try (SimpleGenAI generator = new SimpleGenAI(TestUtils.tinyGpt2ModelPath());
+    try (SimpleGenAI generator = new SimpleGenAI(TestUtils.tinyLlamaModelPath());
         GeneratorParams params = generator.createGeneratorParams(); ) {
       long[] shape = {2, 2};
       Tensor.ElementType elementType = Tensor.ElementType.float32;
