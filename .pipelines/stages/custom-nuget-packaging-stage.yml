@@ -10,7 +10,7 @@ parameters:
 
 stages:
 - stage: custom_nuget_packaging
-  dependsOn: [capi_win_cuda_x64_packaging, capi_win_cpu_arm64_packaging]
+  dependsOn: [capi_packaging]
   jobs:
     - template: jobs/custom-nuget-packaging-job.yml
       parameters:
