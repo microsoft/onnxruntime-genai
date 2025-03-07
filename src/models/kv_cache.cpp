@@ -185,9 +185,12 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
   try {
     for (int i = 0; i < layer_count_ * 2; ++i) {
-      presents_.push_back(
-          sb_kv_caches_.empty() ? OrtValue::CreateTensor(Allocator(), shape_, type_)
-                                : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
+      // presents_.push_back(
+      //     sb_kv_caches_.empty() ? OrtValue::CreateTensor(Allocator(), shape_, type_)
+      //                           : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
+
+      presents_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
+
       // Zero the memory so we don't leak any data from the previous run
       // WebGPU device has no Zero() implementation yet. Since this zeroing is optional we disable it for WebGPU for now
       if (Device().GetType() != DeviceType::WEBGPU) {

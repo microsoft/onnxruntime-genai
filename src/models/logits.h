@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 #pragma once
 
-// #include "static_buffer.h"
 #include "../oga_value.h"
 
 namespace Generators {

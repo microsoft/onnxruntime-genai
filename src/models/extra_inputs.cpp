@@ -79,12 +79,12 @@ void ExtraInputs::Add(const std::vector<std::string>& required_input_names) {
   }
 
   // Copy the data from the CPU-backed ORT value to the static buffers
-  for (int i = 0; i < sb_extra_inputs_.size(); ++i) {
-    auto tensor = ByteWrapTensor(*model_.p_device_, *extra_inputs_[i]);
-    auto source = std::span{state_.params_->extra_inputs[i].tensor->ort_tensor_->GetTensorData<uint8_t>(), tensor.size()};
-    copy(source, tensor.CpuSpan());
-    tensor.CopyCpuToDevice();
-  }
+  // for (int i = 0; i < sb_extra_inputs_.size(); ++i) {
+  //   auto tensor = ByteWrapTensor(*model_.p_device_, *extra_inputs_[i]);
+  //   auto source = std::span{state_.params_->extra_inputs[i].tensor->ort_tensor_->GetTensorData<uint8_t>(), tensor.size()};
+  //   copy(source, tensor.CpuSpan());
+  //   tensor.CopyCpuToDevice();
+  // }
 
   registrar_.Add();
 }

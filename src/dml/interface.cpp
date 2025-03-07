@@ -271,15 +271,6 @@ struct InterfaceImpl : DeviceInterface {
       : UpdatePositionIds<int64_t>(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length);
   }
 
-  // void UpdatePositionIds(OgaValue& position_ids, int total_length) override {
-  //   int batch_beam_size = static_cast<int>(position_ids.GetShape()[0]);
-  //   int new_kv_length = static_cast<int>(position_ids.GetShape()[1]);
-  //   ONNXTensorElementDataType type = position_ids.GetType();
-  //   type == Ort::TypeToTensorType<int32_t>
-  //     ? UpdatePositionIds<int32_t>(position_ids.GetMutableData<int32_t>(), batch_beam_size, total_length, new_kv_length)
-  //     : UpdatePositionIds<int64_t>(position_ids.GetMutableData<int64_t>(), batch_beam_size, total_length, new_kv_length);
-  // }
-
   template <typename T>
   void UpdateAttentionMask(T* device_next_mask_data, const T* device_mask_data, int batch_beam_size, int total_length) {
     auto next_mask_data_span = WrapMemory<T>(std::span<T>(device_next_mask_data, batch_beam_size * total_length));
@@ -327,16 +318,6 @@ struct InterfaceImpl : DeviceInterface {
         UpdateAttentionMask(static_cast<int64_t*>(next_mask_data), static_cast<int64_t*>(mask_data), batch_beam_size, total_length);
     }
   }
-
-  // void UpdateAttentionMask(OgaValue& new_mask, const OgaValue& old_mask, int new_kv_length, int total_length, bool update_only) override {
-  //   int batch_beam_size = static_cast<int>(new_mask.GetShape()[0]);
-  //   int max_length = static_cast<int>(new_mask.GetShape()[1]);
-  //   auto type = new_mask.GetType();
-  //   if (type == Ort::TypeToTensorType<int32_t>)
-  //     UpdateAttentionMask(new_mask.GetMutableData<int32_t>(), old_mask.GetData<int32_t>(), batch_beam_size, new_kv_length, total_length, max_length, update_only);
-  //   else
-  //     UpdateAttentionMask(new_mask.GetMutableData<int64_t>(), old_mask.GetData<int64_t>(), batch_beam_size, new_kv_length, total_length, max_length, update_only);
-  // }
 
 };
 

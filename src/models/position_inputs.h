@@ -38,11 +38,6 @@ struct DefaultPositionInputs : PositionInputs {
   template <typename T>
   void InitializeStaticMask(OrtValue& cpu_attention_mask);
 
-  // template <typename T>
-  // void UpdatePositionIDsImpl(int total_length, int new_kv_length);
-  // template <typename T>
-  // void UpdateAttentionMaskImpl(int total_length);
-
   void RewindMask(size_t index);
 
   const Model& model_;
@@ -63,11 +58,6 @@ struct DefaultPositionInputs : PositionInputs {
   std::unique_ptr<OgaValue> attention_mask_;
   std::unique_ptr<OgaValue> attention_mask_next_;  // Replaces attention_mask_ after each run
 
-  // Used for decoding runs with cuda graphs.
-  // StaticBuffer* sb_position_ids_{};
-  // StaticBuffer* sb_attention_mask_{};
-
-  // bool is_first_mask_update_{true};
   bool is_first_update_{true};
 };
 

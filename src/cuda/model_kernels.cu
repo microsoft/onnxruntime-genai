@@ -52,15 +52,15 @@ __global__ void UpdateAttentionMaskStatic(T* mask_data, int batch_beam_size, int
 }
 
 template <typename T>
-__global__ void CopyAndUpdateAttentionMask(T* next_mask_data, const T* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length) {
+__global__ void CopyAndUpdateAttentionMask(T* next_mask_data, const T* mask_data, int batch_beam_size, int new_kv_length, int total_length) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   int batch_id = i / total_length;
   int seq_id = i % total_length;
   if (i < total_length * batch_beam_size) {
     if (seq_id < total_length - new_kv_length) {
-      next_mask_data[batch_id * max_length + seq_id] = mask_data[batch_id * (total_length - new_kv_length) + seq_id];
+      next_mask_data[batch_id * total_length + seq_id] = mask_data[batch_id * (total_length - new_kv_length) + seq_id];
     } else {
-      next_mask_data[batch_id * max_length + seq_id] = 1;
+      next_mask_data[batch_id * total_length + seq_id] = 1;
     }
   }
 }
@@ -75,7 +75,7 @@ void Launch_UpdateAttentionMask(T* next_mask_data, T* mask_data, int batch_beam_
   } else {
     int threads = std::min(256, batch_beam_size * total_length);
     int blocks = (batch_beam_size * total_length + threads - 1) / threads;
-    CopyAndUpdateAttentionMask<T><<<blocks, threads, 0, stream>>>(next_mask_data, mask_data, batch_beam_size, new_kv_length, total_length, max_length);
+    CopyAndUpdateAttentionMask<T><<<blocks, threads, 0, stream>>>(next_mask_data, mask_data, batch_beam_size, new_kv_length, total_length);
   }
 }
 

@@ -57,7 +57,7 @@ void Embeddings::UpdateSequenceLength(size_t new_length) {
 
     if (mode_ == Embeddings::Mode::Input) {
       // if (!sb_embeddings_) {
-        embeddings_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
+      embeddings_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
       // } else {
       //   embeddings_ = sb_embeddings_->CreateTensorOnStaticBuffer(shape_, type_);
       // }
