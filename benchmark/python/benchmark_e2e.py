@@ -254,9 +254,11 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     # Generate prompt
     if args.use_random_tokens:
         # use random tokens instead of generating a prompt using the model and then tokenizing it
-        tokens = np.random.randint(100, size=(batch_size, prompt_length))
+        _random_tokens = np.random.randint(100, size=(batch_size, prompt_length))
+        tokens = _random_tokens
         text = [tokenizer.decode(tokens[0])] * batch_size
         prompt = f'{args.chat_template.format(input=text)}'
+        prompt_length = batch_size*prompt_length
     elif args.use_prompt_set:
         text = [get_prompt_by_length(prompt_length)] * batch_size
         prompt = f'{args.chat_template.format(input=text)}'
@@ -299,6 +301,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         tokens = tokenizer.encode(prompt)
         tokenize_end_time = time.perf_counter()
         tokenize_times.append(tokenize_end_time - tokenize_start_time)
+
+        if args.use_random_tokens:
+            tokens = _random_tokens
 
         # Prepare run
         params = og.GeneratorParams(model)
