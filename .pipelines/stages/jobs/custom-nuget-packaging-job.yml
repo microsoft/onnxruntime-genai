@@ -49,23 +49,16 @@ jobs:
       foreach ($file in $artifacts) {
         $a = $file.Name
         Write-Host "Extracting " $a
-        $rid_match = $a -match "onnxruntime-genai-$(genai_version)-(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
+        $rid_match = $a -match "onnxruntime-genai-(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
         if ($rid_match) {
           $rid = $Matches.1
         }
         else {
-          $rid_match = $a -match "onnxruntime-genai-(android|ios)-$(genai_version)(.+?)?(\.zip|\.aar)"
-          if ($rid_match) {
-            $rid = $Matches.1
-          }
-          else {
-            Write-Host "Invalid artifact name" $file
-            return
-          }
+          Write-Host "Invalid artifact name" $file
+          return
         }
 
         mkdir -Force $outputDir/$rid
-        mkdir -Force $outputDir/$rid/$(buildConfig)
         if ($a -like "*.zip") {
           Expand-Archive -Path $file -DestinationPath $outputDir/$rid
         }
@@ -97,6 +90,9 @@ jobs:
       $genai_nuget_package_suffix = $ort_nuget_package_name.Substring("Microsoft.ML.OnnxRuntime.".Length)
       $genai_nuget_package_name = "Microsoft.ML.OnnxRuntimeGenAI.$genai_nuget_package_suffix"
 
+      $win_x64_artifact_path = ("$(Build.BinariesDirectory)/artifact-downloads/onnxruntime-genai-*-win-x64-cuda")[0].FullName
+      $win_arm64_artifact_path = ("$(Build.BinariesDirectory)/artifact-downloads/onnxruntime-genai-*-win-arm64")[0].FullName
+
       $ort_package_version = "$(custom_ort_package_versioned_name)".Substring($ort_nuget_package_name.Length + 1, $(custom_ort_package_versioned_name).Length - $ort_nuget_package_name.Length - 1 - ".nupkg".Length)
       python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_custom_nuget.py `
         --package_name $(genai_nuget_package_name) `
@@ -105,8 +101,8 @@ jobs:
         --ort_package_version $(ort_version) `
         --root_dir $(Build.Repository.LocalPath) `
         --nuspec_path $(Build.Repository.LocalPath)/nuget/$(genai_nuget_package_name).nuspec `
-        --win_x64 '$(Build.BinariesDirectory)/artifact-downloads/onnxruntime-genai-win-cuda-x64-capi' `
-        --win_arm64 '$(Build.BinariesDirectory)/artifact-downloads/onnxruntime-genai-win-cpu-arm64-capi'
+        --win_x64 $win_x64_artifact_path `
+        --win_arm64 $win_arm64_artifact_path
 
       cat $(Build.Repository.LocalPath)\nuget\$(genai_nuget_package_name).nuspec
 
