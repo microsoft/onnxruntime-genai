@@ -72,7 +72,7 @@ struct TokenizerStream : LeakChecked<TokenizerStream> {
 // Sequence length is vector.size()/count
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id);
 
-struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenizer> {
+struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenizer>, ExternalRefCounted<Tokenizer> {
   Tokenizer(Config& config);
 
   std::unique_ptr<TokenizerStream> CreateStream() const;
@@ -81,26 +81,24 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::string Decode(std::span<const int32_t> tokens) const;
 
   std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
+  std::shared_ptr<Tensor> EncodeBatch(std::span<const char*> strings) const;
   std::vector<std::string> DecodeBatch(std::span<const int32_t> sequences, size_t count) const;
 
   int32_t TokenToTokenId(const char* token) const;
 
   OrtxPtr<OrtxTokenizer> tokenizer_;
-  std::shared_ptr<Tokenizer> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
  private:
   int32_t pad_token_id_;
 };
 
-struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor> {
+struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, ExternalRefCounted<MultiModalProcessor> {
   MultiModalProcessor(Config& config, const SessionInfo& session_info);
 
   std::unique_ptr<NamedTensors> Process(const std::string& prompt, const Images* images, const Audios* audios) const;
 
   std::shared_ptr<Tokenizer> tokenizer_;
   std::shared_ptr<Processor> processor_;
-
-  std::shared_ptr<MultiModalProcessor> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 };
 
 struct SessionInfo {
@@ -120,7 +118,7 @@ struct SessionInfo {
   std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;
 };
 
-struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
+struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, ExternalRefCounted<Model> {
   Model(std::unique_ptr<Config> config);
   virtual ~Model();
 
@@ -144,8 +142,6 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model> {
   Ort::Allocator& allocator_cpu_{GetDeviceInterface(DeviceType::CPU)->GetAllocator()};
 
   std::unique_ptr<SessionInfo> session_info_;
-
-  std::shared_ptr<Model> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
  protected:
   void InitDeviceAllocator(OrtSession& session);

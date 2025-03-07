@@ -215,6 +215,24 @@ std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings
   return PadInputs(span_sequences, pad_token_id_);
 }
 
+std::shared_ptr<Tensor> Tokenizer::EncodeBatch(std::span<const char*> strings) const {
+  std::vector<std::vector<int32_t>> sequences;
+  std::vector<std::span<const int32_t>> span_sequences;
+  for (size_t i = 0; i < strings.size(); i++) {
+    sequences.emplace_back(Encode(strings[i]));
+    span_sequences.emplace_back(sequences.back());
+  }
+
+  auto encoded = PadInputs(span_sequences, pad_token_id_);  // TODO: Pad directly into tensor vs copying?
+
+  auto tensor = std::make_shared<Tensor>();
+  auto shape = std::array<int64_t, 2>{static_cast<int64_t>(strings.size()), static_cast<int64_t>(encoded.size() / strings.size())};
+  tensor->ort_tensor_ = OrtValue::CreateTensor<int32_t>(Ort::Allocator::GetWithDefaultOptions(), shape);
+  std::copy(encoded.begin(), encoded.end(), tensor->ort_tensor_->GetTensorMutableData<int32_t>());
+
+  return tensor;
+}
+
 std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequences, size_t count) const {
   if (sequences.size() % count != 0)
     throw std::runtime_error("DecodeBatch: sequences must be evenly divisible by the count");

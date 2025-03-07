@@ -24,7 +24,7 @@ struct Adapter {
   std::unique_ptr<OrtLoraAdapter> adapter_;
 };
 
-struct Adapters : std::enable_shared_from_this<Adapters> {
+struct Adapters : std::enable_shared_from_this<Adapters>, ExternalRefCounted<Adapters> {
   Adapters() = delete;
   Adapters(const Adapters&) = delete;
   Adapters& operator=(const Adapters&) = delete;
@@ -38,8 +38,6 @@ struct Adapters : std::enable_shared_from_this<Adapters> {
   const OrtLoraAdapter* AcquireAdapter(const std::string& adapter_name);
 
   void ReleaseAdapter(const std::string& adapter_name);
-
-  std::shared_ptr<Adapters> external_owner_;
 
  private:
   const Model* model_;

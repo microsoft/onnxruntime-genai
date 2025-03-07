@@ -1,17 +1,18 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cstring>  // for memcmp
+#include <numeric>
 #include <iostream>
 #include <thread>
 #include <vector>
+#include "span.h"
+
+#define OGA_USE_SPAN 1
+#include "models/onnxruntime_api.h"
+#include "ort_genai.h"
 
 #include <gtest/gtest.h>
-
-#include "generators.h"
-#include "models/model.h"
-#include "ort_genai.h"
-#include "search.h"
-#include "span.h"
 
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
