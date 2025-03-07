@@ -43,13 +43,13 @@ jobs:
 
       $outputDir = '$(Build.BinariesDirectory)/artifact-downloads'
       Write-Host "List extracted artifacts"
-      Get-ChildItem -Path $nativeBuildOutputDir -Recurse
+      Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads' -Recurse
 
       mkdir -Force $outputDir
       foreach ($file in $artifacts) {
         $a = $file.Name
         Write-Host "Extracting " $a
-        $rid_match = $a -match "onnxruntime-genai-(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
+        $rid_match = $a -match "onnxruntime-genai-\d+\.\d+\.\d+(?:-[^-\s]+-)(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
         if ($rid_match) {
           $rid = $Matches.1
         }
@@ -90,8 +90,8 @@ jobs:
       $genai_nuget_package_suffix = $ort_nuget_package_name.Substring("Microsoft.ML.OnnxRuntime.".Length)
       $genai_nuget_package_name = "Microsoft.ML.OnnxRuntimeGenAI.$genai_nuget_package_suffix"
 
-      $win_x64_artifact_path = ("$(Build.BinariesDirectory)/artifact-downloads/onnxruntime-genai-*-win-x64-cuda")[0].FullName
-      $win_arm64_artifact_path = ("$(Build.BinariesDirectory)/artifact-downloads/onnxruntime-genai-*-win-arm64")[0].FullName
+      $win_x64_artifact_path = ("$(Build.BinariesDirectory)/artifact-downloads/win-x64")[0].FullName
+      $win_arm64_artifact_path = ("$(Build.BinariesDirectory)/artifact-downloads/win-arm64")[0].FullName
 
       $ort_package_version = "$(custom_ort_package_versioned_name)".Substring($ort_nuget_package_name.Length + 1, $(custom_ort_package_versioned_name).Length - $ort_nuget_package_name.Length - 1 - ".nupkg".Length)
       python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_custom_nuget.py `
