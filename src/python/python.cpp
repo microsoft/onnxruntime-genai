@@ -436,6 +436,20 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         }
 
         return OgaAudios::Load(audio_paths_vector);
+      })
+      .def_static("open_bytes", [](pybind11::args audio_datas) {
+        std::vector<const void*> audio_raw_data(audio_datas.size());
+        std::vector<size_t> audio_sizes(audio_datas.size());
+        for (size_t i = 0; i < audio_datas.size(); ++i) {
+          if (!pybind11::isinstance<pybind11::bytes>(audio_datas[i]))
+            throw std::runtime_error("Audio data must be bytes.");
+          auto bytes = audio_datas[i].cast<pybind11::bytes>();
+          pybind11::buffer_info info(pybind11::buffer(bytes).request());
+          audio_raw_data[i] = reinterpret_cast<void*>(info.ptr);
+          audio_sizes[i] = info.size;
+        }
+
+        return OgaAudios::Load(audio_raw_data.data(), audio_sizes.data(), audio_raw_data.size());
       });
 
   pybind11::class_<OgaMultiModalProcessor>(m, "MultiModalProcessor")

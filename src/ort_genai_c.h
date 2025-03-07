@@ -174,6 +174,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudio(const char* audio_path, OgaAudio
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudios(const OgaStringArray* audio_paths, OgaAudios** audios);
 
+/**
+ * \brief Load multiple audios from an array of byte buffers
+ * \param[in] audio_data Array of byte buffers containing the audio data.
+ * \param[in] audio_data_sizes Array of sizes of the byte buffers.
+ * \param[in] count Number of audios to load.
+ * \param[out] audios The loaded audios.
+ * \return OgaResult containing the error message if the loading of the audios failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudiosFromBuffers(const void** audio_data, const size_t* audio_data_sizes, size_t count, OgaAudios** audios);
+
 OGA_EXPORT void OGA_API_CALL OgaDestroyAudios(OgaAudios* audios);
 
 /**

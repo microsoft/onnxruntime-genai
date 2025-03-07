@@ -542,6 +542,12 @@ struct OgaAudios : OgaAbstract {
   }
 #endif
 
+  static std::unique_ptr<OgaAudios> Load(const void** audio_data, const size_t* audio_data_sizes, size_t count) {
+    OgaAudios* p;
+    OgaCheckResult(OgaLoadAudiosFromBuffers(audio_data, audio_data_sizes, count, &p));
+    return std::unique_ptr<OgaAudios>(p);
+  }
+
   static void operator delete(void* p) { OgaDestroyAudios(reinterpret_cast<OgaAudios*>(p)); }
 };
 
