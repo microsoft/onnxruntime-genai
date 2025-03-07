@@ -104,7 +104,7 @@ def copy_files_keeping_symlinks(src_files, dest):
             shutil.copy2(file, dest)
 
 
-def copy_artifacts(ort_version, artifacts_dir):
+def download_ort(ort_version, artifacts_dir):
     """
     Copy the artifacts from the prebuilt directory to the artifacts directory
     """
@@ -201,20 +201,6 @@ def build_ort(args, build_dir, artifacts_dir):
         raise Exception("Failed to fetch tags for ONNX Runtime")
     if subprocess.call(["git", "checkout", version]) != 0:
         raise Exception("Failed to checkout ONNX Runtime version")
-
-    if (
-        subprocess.call(
-            [
-                "git",
-                "submodule",
-                "update",
-                "--init",
-                "--recursive",
-            ]
-        )
-        != 0
-    ):
-        raise Exception("Failed to  update ONNX Runtime submodules")
 
     # Return to the original directory
     os.chdir("../..")
@@ -321,7 +307,7 @@ def build_ort(args, build_dir, artifacts_dir):
     return ort_home
 
 
-def build_ort_genai(args, artifacts_dir, ort_home=None):
+def build_ort_genai(args, artifacts_dir, ort_home):
 
     time_build_start = time.time()
 
@@ -351,8 +337,13 @@ def build_ort_genai(args, artifacts_dir, ort_home=None):
         "--cmake_extra_defines",
         "ENABLE_PYTHON=OFF",
     ]
-    if ort_home is not None:
-        cmd_args.extend(["--ort_home", ort_home])
+    if ort_home is None:
+        raise Exception(
+            f"{RED}ORT Home is None. Please build ORT from source first{CLEAR}"
+        )
+
+    print(f"{MAGENTA}ORT Home: {ort_home}{CLEAR}")
+    cmd_args.extend(["--ort_home", ort_home])
 
     if args.android:
         cmd_args.extend(
@@ -396,20 +387,6 @@ def build_ort_genai(args, artifacts_dir, ort_home=None):
     if result != 0:
         print(f"Current Directory: {os.getcwd()}")
         raise Exception(f"{RED}Failed to install ONNX Runtime{CLEAR}")
-
-    # Copy the artifacts only if ort_home is None
-    if ort_home is not None:
-        # Now copy the ORT Libs to the ORT-GenAI directory installation location
-        dest_dir = f"{build_dir_name}/install/lib"
-        copy_files_keeping_symlinks(
-            glob.glob(f"{ort_home}/lib/*onnxruntime*"), dest_dir
-        )
-
-        # For Windows build, the .dll files are stored in the bin directory.
-        # For Linux/Mac this is a no-op
-        copy_files_keeping_symlinks(
-            glob.glob(f"{ort_home}/bin/*onnxruntime*"), dest_dir
-        )
 
     # The "current_dir" is the "build_scripts" directory.
     os.chdir(current_dir)
@@ -560,6 +537,12 @@ def main():
         help="ONNX Runtime version to use when building from source. Must be a git tag or branch",
     )
 
+    parser.add_argument(
+        "--ort_home_dir",
+        type=str,
+        help="Location of the prebuilt ORT artifacts.",
+    )
+
     # Parsing arguments
     args = parser.parse_args()
 
@@ -611,19 +594,18 @@ def main():
                 args.ort_version_to_use = "main"
         ort_home = build_ort(args, dep_src_dir, artifacts_dir)
     else:
-        if platform.system() == "Darwin":
-            # The ORT release for OS X ARM64 is not available recent releases of the XCode.
-            # So the resulting build may not work. If so, then build from source
-            print(
-                f"{RED}For MacOS ARM64 if the build may not run with newer XCode versions{CLEAR}"
-            )
-            print(f"{RED}Please build from source in that case{CLEAR}")
-        # The ORT binaries are available as they were downloaded during the GenAI build
-        # This is the supported version for most platforms
-        ORT_VERSION = "1.20.1"
-        # Copy the ORT artifacts to the artifacts directory.
-        copy_artifacts(ORT_VERSION, artifacts_dir)
-        ort_home = artifacts_dir
+        if args.ort_home_dir:
+            ort_home = os.path.abspath(args.ort_home_dir)
+        else:
+            # The ORT binaries are available as they were downloaded during the GenAI build
+            # This is the supported version for most platforms
+            if args.ort_version_to_use is None:
+                ORT_VERSION = "1.20.1"
+            else:
+                ORT_VERSION = args.ort_version_to_use
+            # Copy the ORT artifacts to the artifacts directory.
+            download_ort(ORT_VERSION, artifacts_dir)
+            ort_home = artifacts_dir
 
     # Now build the ORT-GenAI library
     build_ort_genai(args, artifacts_dir, ort_home)
