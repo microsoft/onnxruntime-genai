@@ -93,7 +93,7 @@ jobs:
       $genai_nuget_package_name = "Microsoft.ML.OnnxRuntimeGenAI.$genai_nuget_package_suffix"
 
       $win_x64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads/win-x64/')[0].FullName
-      $win_arm64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloadswin-arm64/')[0].FullName
+      $win_arm64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads/win-arm64/')[0].FullName
 
       Write-Host "Win x64 artifact path " $win_x64_artifact_path
       Write-Host "Win arm64 artifact path " $win_arm64_artifact_path
