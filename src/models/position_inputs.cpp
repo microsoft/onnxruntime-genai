@@ -218,6 +218,9 @@ void DefaultPositionInputs::InitializeStaticMask(OrtValue& cpu_attention_mask) {
   }
 }
 
+template void DefaultPositionInputs::InitializeStaticMask<int32_t>(OrtValue& cpu_attention_mask);
+template void DefaultPositionInputs::InitializeStaticMask<int64_t>(OrtValue& cpu_attention_mask);
+
 template <typename T>
 void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape) {
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
