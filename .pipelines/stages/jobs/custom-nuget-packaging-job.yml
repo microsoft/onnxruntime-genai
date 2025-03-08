@@ -79,7 +79,7 @@ jobs:
 
   - powershell: |
       $pattern = "Microsoft\.ML\.OnnxRuntime\.[\w-]+"
-      $match = [regex]::Match($(custom_ort_package_versioned_name), $pattern)
+      $match = [regex]::Match("$(custom_ort_package_versioned_name)", $pattern)
       if ($match.Success) {
         $ort_nuget_package_name = $match.Value
       }
@@ -90,8 +90,8 @@ jobs:
       $genai_nuget_package_suffix = $ort_nuget_package_name.Substring("Microsoft.ML.OnnxRuntime.".Length)
       $genai_nuget_package_name = "Microsoft.ML.OnnxRuntimeGenAI.$genai_nuget_package_suffix"
 
-      $win_x64_artifact_path = ("$(Build.BinariesDirectory)/artifact-downloads/win-x64")[0].FullName
-      $win_arm64_artifact_path = ("$(Build.BinariesDirectory)/artifact-downloads/win-arm64")[0].FullName
+      $win_x64_artifact_path = ("$(Build.BinariesDirectory)/artifact-downloads/win-x64/*")[0].FullName
+      $win_arm64_artifact_path = ("$(Build.BinariesDirectory)/artifact-downloads/win-arm64/*")[0].FullName
 
       $ort_package_version = "$(custom_ort_package_versioned_name)".Substring($ort_nuget_package_name.Length + 1, $(custom_ort_package_versioned_name).Length - $ort_nuget_package_name.Length - 1 - ".nupkg".Length)
       python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_custom_nuget.py `
