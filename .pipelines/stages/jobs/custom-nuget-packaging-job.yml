@@ -79,21 +79,26 @@ jobs:
 
   - powershell: |
       $pattern = "Microsoft\.ML\.OnnxRuntime\.[\w-]+"
-      $match = [regex]::Match("$(custom_ort_package_versioned_name)", $pattern)
+      $versioned_name = "$(custom_ort_package_versioned_name)"
+      Write-Host "Versioned name " $versioned_name
+      $match = [regex]::Match($versioned_name, $pattern)
       if ($match.Success) {
         $ort_nuget_package_name = $match.Value
       }
       else {
-        Write-Host "Invalid ort package name" $(custom_ort_package_versioned_name)
+        Write-Host "Invalid ort package name" $versioned_name
         exit 1
       }
       $genai_nuget_package_suffix = $ort_nuget_package_name.Substring("Microsoft.ML.OnnxRuntime.".Length)
       $genai_nuget_package_name = "Microsoft.ML.OnnxRuntimeGenAI.$genai_nuget_package_suffix"
 
-      $win_x64_artifact_path = ("$(Build.BinariesDirectory)/artifact-downloads/win-x64/*")[0].FullName
-      $win_arm64_artifact_path = ("$(Build.BinariesDirectory)/artifact-downloads/win-arm64/*")[0].FullName
+      $win_x64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloadswin-x64/')[0].FullName
+      $win_arm64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloadswin-arm64/')[0].FullName
 
-      $ort_package_version = "$(custom_ort_package_versioned_name)".Substring($ort_nuget_package_name.Length + 1, $(custom_ort_package_versioned_name).Length - $ort_nuget_package_name.Length - 1 - ".nupkg".Length)
+      Write-Host "Win x64 artifact path " $win_x64_artifact_path
+      Write-Host "Win arm64 artifact path " $win_arm64_artifact_path
+
+      $ort_package_version = $versioned_name.Substring($ort_nuget_package_name.Length + 1, $versioned_nam.Length - $ort_nuget_package_name.Length - 1 - ".nupkg".Length)
       python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_custom_nuget.py `
         --package_name $(genai_nuget_package_name) `
         --package_version $(genai_version) `
