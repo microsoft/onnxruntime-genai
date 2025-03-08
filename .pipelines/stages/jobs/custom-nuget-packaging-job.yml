@@ -79,7 +79,7 @@ jobs:
 
   - powershell: |
       $pattern = "Microsoft\.ML\.OnnxRuntime\.[\w-]+"
-      $versioned_name = "$(custom_ort_package_versioned_name)"
+      $versioned_name = "${{ parameters.custom_ort_package_versioned_name }}"
       Write-Host "Versioned name " $versioned_name
       $match = [regex]::Match($versioned_name, $pattern)
       if ($match.Success) {
