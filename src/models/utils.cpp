@@ -2,12 +2,17 @@
 // Licensed under the MIT License.
 #include "../generators.h"
 #include "utils.h"
+#include "../oga_value.h"
 
 namespace Generators {
 
 DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value) {
   auto info = value.GetTensorTypeAndShapeInfo();
   return device.WrapMemory(std::span<uint8_t>{value.GetTensorMutableData<uint8_t>(), info->GetElementCount() * SizeOf(info->GetElementType())});
+}
+
+DeviceSpan<uint8_t> ByteWrapTensor(OgaValue& value) {
+  return value.p_device_->WrapMemory(std::span<uint8_t>{value.GetMutableData<uint8_t>(), value.GetElementCount() * SizeOf(value.GetType())});
 }
 
 size_t SizeOf(ONNXTensorElementDataType type) {

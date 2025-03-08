@@ -87,13 +87,11 @@ struct EmbeddingState : State {
 
 struct DecoderState : State {
   DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths,
-               const GeneratorParams& params, const CapturedGraphInfo* captured_graph_info);
+               const GeneratorParams& params);
   DecoderState(const DecoderState&) = delete;
   DecoderState& operator=(const DecoderState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
-
-  const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_; };
 
  private:
   friend struct MultiModalPipelineState;
@@ -101,7 +99,6 @@ struct DecoderState : State {
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
 
   const MultiModalLanguageModel& model_;
-  const CapturedGraphInfo* captured_graph_info_;
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
   DefaultPositionInputs position_inputs_;  // Model input
@@ -127,7 +124,6 @@ struct MultiModalPipelineState : State {
   const MultiModalLanguageModel& model_;
   int64_t num_image_tokens_{};
   int64_t num_audio_tokens_{};
-  const CapturedGraphInfoPtr captured_graph_info_;
   std::unique_ptr<VisionState> vision_state_;
   std::unique_ptr<SpeechState> speech_state_;
   std::unique_ptr<EmbeddingState> embedding_state_;

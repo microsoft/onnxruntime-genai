@@ -6,6 +6,9 @@
 
 namespace Generators {
 
+struct Config;
+struct SessionInfo;
+
 struct WhisperProcessor : Processor {
   WhisperProcessor(Config& config, const SessionInfo& session_info);
 

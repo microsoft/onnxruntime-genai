@@ -42,45 +42,45 @@ template void Launch_UpdatePositionIds(int32_t* positions, int batch_beam_size, 
 template void Launch_UpdatePositionIds(int64_t* positions, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream);
 
 template <typename T>
-__global__ void UpdateAttentionMask(T* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length) {
+__global__ void UpdateAttentionMaskStatic(T* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   int batch_id = i / new_kv_length;
-  int seq_id = i % new_kv_length;
+  int seq_id = (i % new_kv_length) + 1;
   if (i < new_kv_length * batch_beam_size) {
     mask_data[batch_id * max_length + total_length - seq_id] = 1;
   }
 }
 
 template <typename T>
-__global__ void CopyAndUpdateAttentionMask(T* mask_data, const T* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length) {
+__global__ void CopyAndUpdateAttentionMask(T* next_mask_data, const T* mask_data, int batch_beam_size, int new_kv_length, int total_length) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   int batch_id = i / total_length;
   int seq_id = i % total_length;
   if (i < total_length * batch_beam_size) {
     if (seq_id < total_length - new_kv_length) {
-      mask_data[batch_id * max_length + seq_id] = old_data[batch_id * (total_length - new_kv_length) + seq_id];
+      next_mask_data[batch_id * total_length + seq_id] = mask_data[batch_id * (total_length - new_kv_length) + seq_id];
     } else {
-      mask_data[batch_id * max_length + seq_id] = 1;
+      next_mask_data[batch_id * total_length + seq_id] = 1;
     }
   }
 }
 
 template <typename T>
-void Launch_UpdateAttentionMask(T* mask_data, const T* old_data, int batch_beam_size, int new_kv_length,
+void Launch_UpdateAttentionMask(T* next_mask_data, T* mask_data, int batch_beam_size, int new_kv_length,
                                 int total_length, int max_length, bool update_only, cudaStream_t stream) {
   if (update_only) {
     int threads = std::min(256, batch_beam_size * new_kv_length);
     int blocks = (batch_beam_size * new_kv_length + threads - 1) / threads;
-    UpdateAttentionMask<T><<<blocks, threads, 0, stream>>>(mask_data, batch_beam_size, new_kv_length, total_length, max_length);
+    UpdateAttentionMaskStatic<T><<<blocks, threads, 0, stream>>>(mask_data, batch_beam_size, new_kv_length, total_length, max_length);
   } else {
     int threads = std::min(256, batch_beam_size * total_length);
     int blocks = (batch_beam_size * total_length + threads - 1) / threads;
-    CopyAndUpdateAttentionMask<T><<<blocks, threads, 0, stream>>>(mask_data, old_data, batch_beam_size, new_kv_length, total_length, max_length);
+    CopyAndUpdateAttentionMask<T><<<blocks, threads, 0, stream>>>(next_mask_data, mask_data, batch_beam_size, new_kv_length, total_length);
   }
 }
 
-template void Launch_UpdateAttentionMask(int32_t* mask_data, const int32_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream);
-template void Launch_UpdateAttentionMask(int64_t* mask_data, const int64_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream);
+template void Launch_UpdateAttentionMask(int32_t* next_mask_data, int32_t* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream);
+template void Launch_UpdateAttentionMask(int64_t* next_mask_data, int64_t* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream);
 
 __global__ void HandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count) {
   int index = blockIdx.x * blockDim.x + threadIdx.x;

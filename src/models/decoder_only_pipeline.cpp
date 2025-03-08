@@ -83,7 +83,7 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 
 DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
-  State::Run(*model_.sessions_[id_], params_->BatchBeamSize());
+  State::Run(*model_.sessions_[id_]);
   return {};
 }
 

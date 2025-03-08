@@ -3,7 +3,6 @@
 #pragma once
 
 #include "ortx_utils.h"
-
 #include "../span.h"
 
 namespace Generators {

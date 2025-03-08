@@ -33,6 +33,7 @@
 #include "logging.h"
 #include "runtime_settings.h"
 #include "tensor.h"
+#include "oga_value.h"
 
 void ThrowErrorIfSessionTerminated(bool is_session_terminated);
 
@@ -49,7 +50,14 @@ DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
   return device.WrapMemory(std::span<T>{value.GetTensorMutableData<T>(), info->GetElementCount()});
 }
 
+template <typename T>
+DeviceSpan<T> WrapTensor(OgaValue& value) {
+  assert(value.GetType() == Ort::TypeToTensorType<std::remove_const_t<T>>);
+  return value.p_device_->WrapMemory(std::span<T>{value.GetMutableData<T>(), value.GetElementCount()});
+}
+
 DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value);
+DeviceSpan<uint8_t> ByteWrapTensor(OgaValue& value);
 
 template <typename T>
 struct OrtTensor {
@@ -76,7 +84,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
   int max_batch_size{0};
-  bool use_cuda_graph{};
+  bool use_graph_capture{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
   DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
@@ -103,7 +111,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   void SetInputs(const NamedTensors& inputs);
 
  private:
-  bool is_cuda_graph_enabled_{};
+  bool is_graph_capture_enabled_{};
 };
 
 struct Generator : LeakChecked<Generator> {
