@@ -77,14 +77,14 @@ set_target_properties(
     IMPORTED_IMPLIB 
     ${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime${LIB_VERSION_ORT}.${LIB_EXT})
 
-file(GLOB_RECURSE ORT_LIBS
+file(GLOB ORT_LIB_FILES 
     "${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime*")
 
-list(APPEND IMPORTED_LIB_LIST ${ORT_LIBS})
-if (${CMAKE_SYSTEM_NAME} STREQUAL "Darwin")
-    list(APPEND IMPORTED_LIB_LIST 
-        ${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime${LIB_VERSION_ORT}.${LIB_EXT})
-endif() 
+file(GLOB ORT_LIB_DIRS "${ARTIFACTS}/${SYS_TARGET_ID}/lib"
+    "${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime*/")
+
+list(APPEND IMPORTED_LIB_LIST ${ORT_LIB_FILES})
+list(APPEND IMPORTED_LIB_LIST ${ORT_LIB_DIRS})
 
 # Import ONNXRT-GenAI stuff
 add_library(ort-genai SHARED IMPORTED)
@@ -98,7 +98,14 @@ list(APPEND IMPORTED_LIB_LIST
 ${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime-genai.${LIB_EXT})
 
 set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/install/")
-install(FILES ${IMPORTED_LIB_LIST} DESTINATION bin)
+
+# In a loop copy all the files and directories in the list
+# We cannot use "install(FILES" because the list contains both files and directories"
+foreach (lib ${IMPORTED_LIB_LIST})
+    get_filename_component(lib_name ${lib} NAME)
+    message(STATUS "Copying ${lib_name} to install directory")
+    file(COPY ${lib} DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
+endforeach()
 
 # Include directories
 message(STATUS "Adding include directories: ${ARTIFACTS}/${SYS_TARGET_ID}/include")
