@@ -134,7 +134,7 @@ if(BUILD_APPLE_FRAMEWORK)
   add_custom_command(TARGET onnxruntime-genai PRE_BUILD COMMAND ${CMAKE_COMMAND} -E make_directory ${STATIC_FRAMEWORK_DIR})
 
   set(INTERNAL_LIBRARIES)
-  list(APPEND INTERNAL_LIBRARIES onnxruntime-genai-static)
+  list(APPEND INTERNAL_LIBRARIES onnxruntime-genai)
 
   # If it's an onnxruntime library, extract .o files from the original cmake build path to a separate directory for
   # each library to avoid any clashes with filenames (e.g. utils.o)
