@@ -267,8 +267,8 @@ struct InterfaceImpl : DeviceInterface {
   
   void UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
     type == Ort::TypeToTensorType<int32_t>
-      ? UpdatePositionIds<int32_t>(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length)
-      : UpdatePositionIds<int64_t>(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length);
+        ? UpdatePositionIds<int32_t>(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length)
+        : UpdatePositionIds<int64_t>(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length);
   }
 
   // TODO: perform operation directly on DML
@@ -320,7 +320,6 @@ struct InterfaceImpl : DeviceInterface {
         UpdateAttentionMask(static_cast<int64_t*>(next_mask_data), static_cast<int64_t*>(mask_data), batch_beam_size, total_length);
     }
   }
-
 };
 
 }  // namespace Dml

@@ -257,7 +257,7 @@ void GreedySearch_Cpu::AppendNextTokensToSequences() {
   // Append next token to each sequence.
   auto sequences_span = sequences_.GetSequences().CpuSpan();
   auto current_length = sequences_.GetSequenceLength();
-  auto next_tokens = next_tokens_ptr_.Span(); // always on cpu
+  auto next_tokens = next_tokens_ptr_.Span();  // always on cpu
   auto batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     sequences_span[i * sequences_.max_length_ + current_length] = next_tokens[i];

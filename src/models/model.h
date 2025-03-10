@@ -46,7 +46,7 @@ struct State {
   std::vector<OrtValue*> inputs_, outputs_;
 
  protected:
-  void Run(OrtSession& session, bool graph_capture_this_run=false);  // Uses the inputs below to run
+  void Run(OrtSession& session, bool graph_capture_this_run = false);  // Uses the inputs below to run
   bool first_run_{true};
 
   std::unique_ptr<OrtRunOptions> run_options_;

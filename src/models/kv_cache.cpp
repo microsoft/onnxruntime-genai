@@ -170,7 +170,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
   if (state_.params_->use_graph_capture && !past_present_share_buffer_) {
     // share buffer is a precondition for graph capture
-    throw std::runtime_error("Graph capture is not supported with past_present_share_buffer set to false.");    
+    throw std::runtime_error("Graph capture is not supported with past_present_share_buffer set to false.");
   }
 
   // Set the size after empty_past_ has been created with 0 for this field

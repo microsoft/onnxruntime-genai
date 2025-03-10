@@ -226,19 +226,15 @@ TEST(CAPITests, EndToEndPhi) {
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
 
-  const char* input_strings[] = {
-      "This is a test."
-  };
-
-  auto input_sequences = OgaSequences::Create();
-  for (auto& string : input_strings)
-    tokenizer->Encode(string, *input_sequences);
+  const char* input_string = "This is a test.";
+  auto input_sequence = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequence);
 
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 40);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokenSequences(*input_sequences);
+  generator->AppendTokenSequences(*input_sequence);
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();

@@ -60,9 +60,6 @@ struct DefaultPositionInputs : PositionInputs {
   bool is_first_update_{true};
 };
 
-// template void DefaultPositionInputs::InitializeStaticMask<int32_t>(OrtValue& cpu_attention_mask);
-// template void DefaultPositionInputs::InitializeStaticMask<int64_t>(OrtValue& cpu_attention_mask);
-
 // Certain models can only process a fixed number of tokens at a time.
 // For example, given a prompt with 120 tokens, and a model that can only process 20 tokens at a time,
 // this class will split the position ids into 6 windows of 20 tokens each.

@@ -14,7 +14,7 @@ struct OgaValue {
   // A non-static tensor is allocated as a new OrtValue every time CreateTensor is called
   void CreateTensor(std::span<const int64_t> shape, bool make_static = false);
 
-  void MakeStatic(); // Make the tensor static, if it is not already
+  void MakeStatic();  // Make the tensor static, if it is not already
 
   OrtValue* GetOrtValue();
 
@@ -38,9 +38,9 @@ struct OgaValue {
   std::vector<int64_t> GetShape() const;
 
   ONNXTensorElementDataType GetType() const;
-  
+
   size_t GetElementCount() const;
-  
+
   ONNXTensorElementDataType type_;
   bool is_static_{};
   mutable DeviceInterface* p_device_{};
