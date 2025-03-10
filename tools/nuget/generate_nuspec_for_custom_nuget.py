@@ -4,7 +4,6 @@
 import argparse
 import glob
 import os
-import sys
 
 from generate_nuspec_for_native_nuget import generate_metadata
 
