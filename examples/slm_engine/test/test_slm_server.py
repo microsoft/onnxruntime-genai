@@ -57,16 +57,13 @@ def run_test(url: str):
     # Test the API
     print("Testing the API with a test message")
     test_message = """
-    {
-        "messages": 
-        [
-            {"role": "system", "content": "You are a helpful assistant. Be very brief and precise"}, 
-            {"role": "user", "content": "How to make pizza?"}
-        ],
-        "temperature":0, 
-        "max_tokens": 1200, 
-        "stop":["\\n\\n\\n"]
-    }
+        {"messages":
+            [
+                {"role": "system", "content": "You are a helpful assistant. Be very brief and precise"}, 
+                {"role": "user", "content": "How to make pizza in five steps?"}
+            ], 
+                "max_tokens": 1200
+        }
     """
     json_message = json.loads(test_message)
     response = requests.post(url + "/completions", json=json_message)
@@ -81,7 +78,7 @@ def run_test(url: str):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Test OpenAI API Interface")
+    parser = argparse.ArgumentParser(description="Test SLM Engine Using HTTP API")
 
     # Adding arguments
     parser.add_argument(
