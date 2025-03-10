@@ -162,9 +162,9 @@ if(BUILD_APPLE_FRAMEWORK)
   endforeach()
 
   # do the pre-link with `ld -r` to create a single relocatable object with correct symbol visibility
-  add_custom_command(TARGET onnxruntime-genai POST_BUILD
-                     COMMAND ld ARGS -r -o ${STATIC_LIB_DIR}/prelinked_objects.o */*.o ../*.a
-                     WORKING_DIRECTORY ${STATIC_LIB_TEMP_DIR})
+  # add_custom_command(TARGET onnxruntime-genai POST_BUILD
+  #                    COMMAND ld ARGS -r -o ${STATIC_LIB_DIR}/prelinked_objects.o */*.o ../*.a
+  #                    WORKING_DIRECTORY ${STATIC_LIB_TEMP_DIR})
 
   # create the static library
   add_custom_command(TARGET onnxruntime-genai POST_BUILD
