@@ -264,7 +264,7 @@ struct InterfaceImpl : DeviceInterface {
     }
     data_span.CopyCpuToDevice();
   }
-  
+
   void UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
     type == Ort::TypeToTensorType<int32_t>
         ? UpdatePositionIds<int32_t>(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length)
