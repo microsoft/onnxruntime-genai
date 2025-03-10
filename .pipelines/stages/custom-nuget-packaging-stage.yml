@@ -1,0 +1,18 @@
+parameters:
+- name: custom_ort_package_versioned_name
+  displayName: 'Custom ort package name.'
+  type: string
+  default: ''
+
+- name: nuget_version_type
+  type: string
+  default: 'stable'
+
+stages:
+- stage: custom_nuget_packaging
+  dependsOn: [capi_packaging]
+  jobs:
+    - template: jobs/custom-nuget-packaging-job.yml
+      parameters:
+        custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
+        nuget_version_type: ${{ parameters.nuget_version_type }}

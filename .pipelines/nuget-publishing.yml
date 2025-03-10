@@ -93,6 +93,11 @@ parameters:
   - dev
   - stable
 
+- name: custom_ort_package_versioned_name
+  displayName: 'Versioned name of ort nuget package. Must follow Microsoft.ML.OnnxRuntime.*.version.nupkg.'
+  type: string
+  default: ''
+
 resources:
   repositories:
   - repository: manylinux
@@ -153,3 +158,9 @@ stages:
       ort_dml_version: ${{ parameters.ort_dml_version }}
       cuda_version: ${{ parameters.cuda_version }}
       SpecificArtifact: false
+
+- ${{ if and(and(ne(parameters.custom_ort_package_versioned_name, ''), eq(parameters.enable_win_arm64, true)), eq(parameters.enable_win_cuda, true)) }}:
+  - template: stages/custom-nuget-packaging-stage.yml
+    parameters:
+      custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
+      nuget_version_type: ${{ parameters.nuget_version_type }}
