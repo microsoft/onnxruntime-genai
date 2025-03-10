@@ -167,9 +167,9 @@ if(BUILD_APPLE_FRAMEWORK)
   #                    WORKING_DIRECTORY ${STATIC_LIB_TEMP_DIR})
 
   # create the static library
-  add_custom_command(TARGET onnxruntime-genai POST_BUILD
-                     COMMAND libtool -static -o ${STATIC_FRAMEWORK_DIR}/onnxruntime-genai prelinked_objects.o
-                     WORKING_DIRECTORY ${STATIC_LIB_DIR})
+  # add_custom_command(TARGET onnxruntime-genai POST_BUILD
+  #                    COMMAND libtool -static -o ${STATIC_FRAMEWORK_DIR}/onnxruntime-genai prelinked_objects.o
+  #                    WORKING_DIRECTORY ${STATIC_LIB_DIR})
 
     # Assemble the other pieces of the static framework
   add_custom_command(TARGET onnxruntime-genai POST_BUILD
