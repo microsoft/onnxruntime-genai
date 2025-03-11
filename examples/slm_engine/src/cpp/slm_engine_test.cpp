@@ -9,11 +9,13 @@
 #include <filesystem>
 #include <vector>
 
-using namespace std;
+#define MAGENTA "\033[35;1m"
+#define RED "\033[31;1m"
+#define BLUE "\033[34;1m"
+#define GREEN "\033[32;1m"
+#define CLEAR "\033[0m"
 
-namespace microsoft {
-namespace slm_engine {
-namespace testing {
+using namespace std;
 
 // Define the path to the model file
 // This should be set in the environment variable MODEL_FILE_PATH
@@ -22,6 +24,14 @@ const char* MODEL_FILE_PATH = getenv("MODEL_FILE_PATH");
 // Define the path to the model root directory
 // Al the model directories are expected to be under this directory
 const char* MODEL_ROOT_DIR = getenv("MODEL_ROOT_DIR");
+
+// Define the path to the model root directory
+// Al the model directories are expected to be under this directory
+const char* ADAPTER_ROOT_DIR = getenv("ADAPTER_ROOT_DIR");
+
+namespace microsoft {
+namespace slm_engine {
+namespace testing {
 
 struct ModelInfo {
   string model_path;
@@ -277,6 +287,85 @@ TEST(SLMEngineTest, CaptureMemoryUsage) {
     output_file.close();
   } else {
     FAIL() << "Failed to open output file for writing";
+  }
+}
+
+TEST(SLMEngineTest, LoRAAdapterTest) {
+  ASSERT_TRUE(ADAPTER_ROOT_DIR != nullptr) << "ADAPTER_ROOT_DIR is not set";
+
+  auto adapters = vector<SLMEngine::LoRAAdapter>({
+      {"function_caller",
+       string(ADAPTER_ROOT_DIR) + "/function_calling.onnx_adapter"},
+  });
+
+  SLMEngine::Status status;
+  auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngineWithAdapters(
+      (string(ADAPTER_ROOT_DIR) + "/llama3.2-1B-onnx-fp32").c_str(), adapters, false, status);
+
+  ASSERT_NE(slm_engine, nullptr) << "Failed to create SLMEngine with adapters: " << status.message;
+
+  // Send some test data
+  const char* SYS_PROMPT =
+      "You are an in car virtual assistant that maps user's inputs to the "
+      "corresponding function call in the vehicle. You must respond with only "
+      "a JSON object matching the following schema: "
+      "{\"function_name\": <name of the function>, \"arguments\": <arguments of the function>}";
+
+  const TestPrompt TEST_INPUTS[] = {
+      {SYS_PROMPT,
+       "Can you please set the radio to 90.3?",
+       "{\"function_name\": \"tune_radio\", \"arguments\": {\"station\": 90.3}}"},
+      {SYS_PROMPT,
+       "Please text Dominik that I am running behind",
+       "{\"function_name\": \"text\", \"arguments\": {\"name\": \"Dominik\", \"message\": \"I am running behind\"}}"},
+      {SYS_PROMPT,
+       "Can you please set it to 74 degrees?",
+       "{\"function_name\": \"set_car_temperature_setpoint\", \"arguments\": {\"temperature\": 74}}"},
+      {SYS_PROMPT,
+       "Drive to 1020 South Figueroa Street.",
+       "{\"function_name\": \"navigate\", \"arguments\": {\"destination\": \"1020 South Figueroa Street\"}}"},
+  };
+
+  for (int i = 0; i < 10; i++) {
+    for (const auto& next_input : TEST_INPUTS) {
+      cout << "Question: " << next_input.user_prompt << endl;
+      auto formatted_prompt = slm_engine->format_prompt(
+          next_input.system_prompt, next_input.user_prompt);
+
+      // cout << "Formatted Prompt: " BLUE << formatted_prompt << CLEAR << endl;
+
+      SLMEngine::GenerationOptions generator_options;
+      generator_options.MaxGeneratedTokens = 500;
+      generator_options.Temperature = 0.000000001f;
+      string response;
+      SLMEngine::RuntimePerf kpi;
+      slm_engine->generate("function_caller", formatted_prompt, generator_options, response, kpi);
+      cout << "Response (LoRA): " << MAGENTA
+           << "Time: " << kpi.TotalTime << " TPS: " << kpi.TokenRate << " Memory: " << kpi.CurrentMemoryUsed
+           << "\n"
+           << response << CLEAR << endl;
+
+      slm_engine->generate(formatted_prompt, generator_options, response, kpi);
+      cout << "Response: "
+           << GREEN
+           << "Time: " << kpi.TotalTime << " TPS: " << kpi.TokenRate << " Memory: " << kpi.CurrentMemoryUsed
+           << "\n"
+           << response << CLEAR << endl;
+
+      slm_engine->generate("function_caller", formatted_prompt, generator_options, response, kpi);
+      cout << "Response (LoRA): "
+           << MAGENTA
+           << "Time: " << kpi.TotalTime << " TPS: " << kpi.TokenRate << " Memory: " << kpi.CurrentMemoryUsed
+           << "\n"
+           << response << CLEAR << endl;
+
+      auto resp_json = nlohmann::json::parse(response);
+      auto expected_json = nlohmann::json::parse(next_input.expected_answer);
+
+      EXPECT_EQ(resp_json.dump(), expected_json.dump())
+          << "Test failed for prompt: " << next_input.user_prompt
+          << " \nwith response: " << resp_json.dump() << " \nexpected: " << expected_json.dump();
+    }
   }
 }
 }  // namespace testing
