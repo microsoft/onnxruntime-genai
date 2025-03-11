@@ -123,7 +123,7 @@ if(BUILD_APPLE_FRAMEWORK)
   endif()
 
   # Setup the various directories required. Remove any existing ones so we start with a clean directory.
-  set(STATIC_LIB_DIR ${CMAKE_CURRENT_BINARY_DIR}/static_libraries)
+  set(STATIC_FRAMEWORK_DIR ${STATIC_FRAMEWORK_OUTPUT_DIR}/static_framework/onnxruntime-genai.framework)
 
   # Copy the onnxruntime-genai shared library to the framework directory
   add_custom_command(TARGET onnxruntime-genai POST_BUILD
