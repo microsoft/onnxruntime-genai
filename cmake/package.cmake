@@ -122,37 +122,6 @@ if(BUILD_APPLE_FRAMEWORK)
     set(STATIC_FRAMEWORK_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_BUILD_TYPE}-${CMAKE_OSX_SYSROOT})
   endif()
 
-  # Setup the various directories required. Remove any existing ones so we start with a clean directory.
-  set(STATIC_LIB_DIR ${CMAKE_CURRENT_BINARY_DIR}/static_libraries)
-  set(STATIC_LIB_TEMP_DIR ${STATIC_LIB_DIR}/temp)
-  add_custom_command(TARGET onnxruntime-genai PRE_BUILD COMMAND ${CMAKE_COMMAND} -E rm -rf ${STATIC_LIB_DIR})
-  add_custom_command(TARGET onnxruntime-genai PRE_BUILD COMMAND ${CMAKE_COMMAND} -E make_directory ${STATIC_LIB_DIR})
-  add_custom_command(TARGET onnxruntime-genai PRE_BUILD COMMAND ${CMAKE_COMMAND} -E make_directory ${STATIC_LIB_TEMP_DIR})
-
-  set(STATIC_FRAMEWORK_DIR ${STATIC_FRAMEWORK_OUTPUT_DIR}/static_framework/onnxruntime-genai.framework)
-  add_custom_command(TARGET onnxruntime-genai PRE_BUILD COMMAND ${CMAKE_COMMAND} -E rm -rf ${STATIC_FRAMEWORK_DIR})
-  add_custom_command(TARGET onnxruntime-genai PRE_BUILD COMMAND ${CMAKE_COMMAND} -E make_directory ${STATIC_FRAMEWORK_DIR})
-
-    # for external libraries we create a symlink to the .a file
-  foreach(_LIB ${EXTERNAL_LIBRARIES})
-    GET_TARGET_PROPERTY(_LIB_TYPE ${_LIB} TYPE)
-    if(_LIB_TYPE STREQUAL "STATIC_LIBRARY")
-      add_custom_command(TARGET onnxruntime-genai POST_BUILD
-                         COMMAND ${CMAKE_COMMAND} -E create_symlink
-                           $<TARGET_FILE:${_LIB}> ${STATIC_LIB_DIR}/$<TARGET_LINKER_FILE_NAME:${_LIB}>)
-    endif()
-  endforeach()
-
-  # do the pre-link with `ld -r` to create a single relocatable object with correct symbol visibility
-  add_custom_command(TARGET onnxruntime-genai POST_BUILD
-                     COMMAND ld ARGS -r -o ${STATIC_LIB_DIR}/prelinked_objects.o */*.o ../*.a
-                     WORKING_DIRECTORY ${STATIC_LIB_TEMP_DIR})
-
-  # create the static library
-  add_custom_command(TARGET onnxruntime-genai POST_BUILD
-                     COMMAND libtool -static -o ${STATIC_FRAMEWORK_DIR}/onnxruntime-genai prelinked_objects.o
-                     WORKING_DIRECTORY ${STATIC_LIB_DIR})
-
     # Assemble the other pieces of the static framework
   add_custom_command(TARGET onnxruntime-genai POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E
