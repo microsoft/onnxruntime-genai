@@ -131,7 +131,7 @@ jobs:
       FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
       DoEsrp: 'true'
 
-  - job: Nuget_Packaging
+  - task: Nuget_Packaging
     outputs:
     - output: pipelineArtifact
       path: '$(Build.ArtifactStagingDirectory)\nuget'
