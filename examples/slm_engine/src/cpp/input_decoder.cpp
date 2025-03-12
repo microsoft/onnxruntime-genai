@@ -16,6 +16,7 @@ namespace slm_engine {
 // clang-format off
 // OpenAI API example
 // {
+//     "model": "name-of-the-adapter (optional)", 
 //     "messages": [
 // 		{
 // 			"role": "system",
@@ -58,6 +59,9 @@ class OpenAIInputDecoder : public InputDecoder {
                << CLEAR;
           return false;
         }
+      }
+      if (json_msg.contains("model")) {
+        decoded_params.LoRAAdapterName = json_msg["model"].get<string>();
       }
       if (json_msg.contains("temperature")) {
         decoded_params.Temperature =

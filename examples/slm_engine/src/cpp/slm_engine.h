@@ -107,6 +107,12 @@ class SLM_ENGINE_EXPORT SLMEngine {
   struct SLM_ENGINE_EXPORT LoRAAdapter {
     std::string name;
     std::string adapter_path;
+    explicit LoRAAdapter(const std::string& name,
+                         const std::string& adapter_path)
+        : name(name), adapter_path(adapter_path) {}
+    // Copy constructor
+    LoRAAdapter(const LoRAAdapter& other)
+        : name(other.name), adapter_path(other.adapter_path) {}
   };
 
   /// @brief Create SLMEngine, loads the model and adapters
@@ -132,8 +138,14 @@ class SLM_ENGINE_EXPORT SLMEngine {
   /// using the GenAI Model. The function returns the generated response as a
   /// string.
   ///
+  ///  In SLM engine - the model is loaded at the create time. So we are re-purposing
+  ///  the OpenAI API "model" parameter to indicate name as the LoRA adapter if
+  ///  the adapter was loaded. If this parameter is not provided, the default
+  ///  then the base model without the apdapter is used.
+  ///
   /// The user prompt should be in the following format:
   /// {
+  ///     "model": "LoRA adapter name",
   ///     "messages": [
   ///         {
   ///             "role": "system",
@@ -178,10 +190,11 @@ class SLM_ENGINE_EXPORT SLMEngine {
 
   /// @brief Struct to hold the runtime performance metrics of the SLM Engine
   /// @param PromptTokenCount Number of tokens in the prompt
-  /// @param TimeToFirstToken Time taken to generate the first token
+  /// @param TimeToFirstToken Time taken to generate the first token (milliseconds)
   /// @param GeneratedTokenCount Number of tokens generated
   /// @param TokenRate Number of tokens generated per second
-  /// @param TotalTime Total time taken to generate the response
+  /// @param TotalTime Total time taken to generate the response (milliseconds)
+  /// @param LoRAAdapterSwitchTime Time taken to "SetActiveAdapter" (milliseconds)
   /// @param CurrentMemoryUsed Current memory used by the SLM Engine
   struct RuntimePerf {
     uint32_t PromptTokenCount;
@@ -189,7 +202,27 @@ class SLM_ENGINE_EXPORT SLMEngine {
     uint32_t GeneratedTokenCount;
     uint32_t TokenRate;
     uint32_t TotalTime;
+    uint32_t GenerationTimePerToken;
     uint32_t CurrentMemoryUsed;
+    RuntimePerf()
+        : PromptTokenCount(0),
+          TimeToFirstToken(0),
+          GeneratedTokenCount(0),
+          TokenRate(0),
+          TotalTime(0),
+          GenerationTimePerToken(0),
+          CurrentMemoryUsed(0) {}
+    RuntimePerf(const RuntimePerf& other)
+        : PromptTokenCount(other.PromptTokenCount),
+          TimeToFirstToken(other.TimeToFirstToken),
+          GeneratedTokenCount(other.GeneratedTokenCount),
+          TokenRate(other.TokenRate),
+          TotalTime(other.TotalTime),
+          GenerationTimePerToken(other.GenerationTimePerToken),
+          CurrentMemoryUsed(other.CurrentMemoryUsed) {}
+    RuntimePerf& operator=(const RuntimePerf& other) = delete;
+    RuntimePerf(RuntimePerf&& other) = delete;
+    RuntimePerf& operator=(RuntimePerf&& other) = delete;
   };
 
   /// @brief Struct to hold the generation options for the GenAI Model
@@ -215,7 +248,7 @@ class SLM_ENGINE_EXPORT SLMEngine {
   /// @param generation_options Generation options for the GenAI Model
   /// @param response_str Generated response
   /// @param kpi Runtime performance metrics of the SLM Engine
-  void generate(
+  SLMEngine::Status generate(
       const std::string& formatted_prompt,
       const GenerationOptions& generation_options,
       std::string& response_str,
@@ -300,7 +333,7 @@ class SLM_ENGINE_EXPORT SLMEngine {
   std::unique_ptr<OgaGenerator> create_generator(
       const std::string& formatted_prompt,
       const GenerationOptions& generation_options,
-      OgaGeneratorParams* generator_params);
+      uint32_t& time_to_prefill);
 
   /// @brief Generate the response using the GenAI Model
   /// @param formatted_prompt Formatted prompt to generate response for

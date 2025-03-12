@@ -169,7 +169,7 @@ SLMEngine::~SLMEngine() {
 std::unique_ptr<OgaGenerator> SLMEngine::create_generator(
     const std::string& formatted_prompt,
     const GenerationOptions& generation_options,
-    OgaGeneratorParams* generator_params) {
+    uint32_t& time_to_prefill) {
   m_generator_params = OgaGeneratorParams::Create(*m_onnx_model);
   if (!m_generator_params) {
     return nullptr;
@@ -180,13 +180,39 @@ std::unique_ptr<OgaGenerator> SLMEngine::create_generator(
   m_generator_params->SetSearchOption("top_k", generation_options.TopK);
   m_generator_params->SetSearchOption("top_p", generation_options.TopP);
 
+  auto mem_before = GetMemoryUsage();
+
+  // Create the generator
   auto generator = OgaGenerator::Create(*m_onnx_model, *m_generator_params);
   if (!generator) {
     return nullptr;
   }
+
   m_sequences = OgaSequences::Create();
+
+  auto start = std::chrono::steady_clock::now();
   m_tokenizer->Encode(formatted_prompt.c_str(), *m_sequences);
+  auto time_to_encode =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count();
+
+  start = std::chrono::steady_clock::now();
+
   generator->AppendTokenSequences(*m_sequences);
+  time_to_prefill =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count();
+
+  auto mem_after = GetMemoryUsage();
+
+  if (m_verbose) {
+    cout << BLUE << "Time to encode: " << time_to_encode
+         << " ms Initial Tokens: " << generator->GetSequenceCount(0) << " Time to append: " << time_to_prefill << " ms" << CLEAR << endl;
+
+    cout << BLUE << "Memory used: " << mem_after - mem_before << " bytes" << CLEAR << endl;
+  }
 
   return std::move(generator);
 }
@@ -203,8 +229,9 @@ SLMEngine::Status SLMEngine::generate(
   }
   auto api_start = std::chrono::steady_clock::now();
 
+  uint32_t time_to_prefill;
   auto generator = create_generator(
-      formatted_prompt, generation_options, nullptr);
+      formatted_prompt, generation_options, time_to_prefill);
 
   if (!generator) {
     return Status{false, "Failed to create generator"};
@@ -212,6 +239,9 @@ SLMEngine::Status SLMEngine::generate(
 
   // Set the adapter
   generator->SetActiveAdapter(*(m_adapters.get()), adapter_name.c_str());
+
+  // Add the time_to_prefill to the KPI
+  kpi.TimeToFirstToken = time_to_prefill;
 
   // Delegate to generate
   auto status = generate(generator.get(), nullptr, response_str, kpi);
@@ -221,25 +251,28 @@ SLMEngine::Status SLMEngine::generate(
   return status;
 }
 
-void SLMEngine::generate(
+SLMEngine::Status SLMEngine::generate(
     const std::string& formatted_prompt,
     const GenerationOptions& generation_options,
     std::string& response_str,
     RuntimePerf& kpi) {
   auto api_start = std::chrono::steady_clock::now();
 
+  uint32_t time_to_prefill;
   auto generator = create_generator(
-      formatted_prompt, generation_options, nullptr);
+      formatted_prompt, generation_options, time_to_prefill);
 
   if (!generator) {
     cout << RED << "Error creating the generator" << CLEAR << endl;
-    return;
+    return Status{false, "Error creating the generator"};
   }
 
+  kpi.TimeToFirstToken = time_to_prefill;
   generate(generator.get(), nullptr, response_str, kpi);
   kpi.TotalTime = std::chrono::duration_cast<std::chrono::milliseconds>(
                       std::chrono::steady_clock::now() - api_start)
                       .count();
+  return Status{true, "Generation successful"};
 }
 
 SLMEngine ::Status SLMEngine::generate(
@@ -255,9 +288,20 @@ SLMEngine ::Status SLMEngine::generate(
 
   auto initial_prompt_token_count = generator->GetSequenceCount(0);
 
+  int count = 0;
+  uint32_t total_generation_time = 0;
   std::ostringstream response;
   while (!generator->IsDone()) {
+    auto gen_start = std::chrono::steady_clock::now();
     generator->GenerateNextToken();
+    auto gen_end = std::chrono::steady_clock::now();
+    auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(gen_end - gen_start)
+            .count();
+    total_generation_time += elapsed;
+    count++;
+    // cout << BLUE << "Generation time: " << elapsed << " us" << CLEAR
+    //      << endl;
 
     const auto num_tokens = generator->GetSequenceCount(0);
     const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
@@ -269,7 +313,7 @@ SLMEngine ::Status SLMEngine::generate(
                                                                 start)
               .count();
       kpi.PromptTokenCount = initial_prompt_token_count;
-      kpi.TimeToFirstToken = elapsed;
+      kpi.TimeToFirstToken += elapsed;
     } else {
       time_count += std::chrono::duration_cast<std::chrono::milliseconds>(
                         end - start)
@@ -305,6 +349,11 @@ SLMEngine ::Status SLMEngine::generate(
     // Reset the start time for the next token
     start = std::chrono::steady_clock::now();
   }
+
+  // Find out the generation time
+  uint32_t avg_generation_time =
+      static_cast<float>(total_generation_time) / static_cast<float>(count);
+  kpi.GenerationTimePerToken = avg_generation_time;
 
   if (m_verbose) {
     cout << CLEAR << endl;
@@ -357,8 +406,16 @@ std::string SLMEngine::complete(const char* user_prompt) {
   generator_options.TopK = input_parameters.TopK;
   generator_options.TopP = input_parameters.TopP;
 
+  SLMEngine::Status status;
   auto api_start = std::chrono::steady_clock::now();
-  generate(formatted_prompt, generator_options, response, kpi);
+  if (input_parameters.LoRAAdapterName.empty()) {
+    status = generate(formatted_prompt, generator_options, response, kpi);
+  } else {
+    status = generate(input_parameters.LoRAAdapterName, formatted_prompt,
+                      generator_options, response, kpi);
+  }
+
+  // generate(formatted_prompt, generator_options, response, kpi);
   kpi.TotalTime = std::chrono::duration_cast<std::chrono::milliseconds>(
                       std::chrono::steady_clock::now() - api_start)
                       .count();
@@ -391,6 +448,12 @@ std::string SLMEngine::complete(const char* user_prompt) {
   choices[0]["message"]["content"] = response;
 
   json output_json;
+  if (!status.code) {
+    output_json["status"] = "error";
+    output_json["message"] = status.message;
+    return output_json.dump();
+  }
+
   output_json["status"] = "success";
   output_json["question"] = input_parameters.UserPrompt;
   output_json["choices"] = choices;
