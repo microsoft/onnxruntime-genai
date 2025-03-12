@@ -360,7 +360,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnModelAbsenceFact(DisplayName = "TestChatClient")]
         public async Task TestChatClient()
         {
-            OnnxRuntimeGenAIChatClientOptions config = new()
+            OnnxRuntimeGenAIChatClientOptions options = new()
             {
                 StopSequences = ["<|system|>", "<|user|>", "<|assistant|>", "<|end|>"],
                 PromptFormatter = static (messages, options) =>
@@ -375,7 +375,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 },
             };
 
-            using var client = new OnnxRuntimeGenAIChatClient(config, _phi2Path);
+            using var client = new OnnxRuntimeGenAIChatClient(_phi2Path, options);
 
             var completion = await client.GetResponseAsync("The quick brown fox jumps over the lazy dog.", new()
             {
@@ -384,7 +384,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 StopSequences = ["."],
             });
 
-            Assert.NotEmpty(completion.Message.Text);
+            Assert.NotEmpty(completion.Text);
         }
 
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
