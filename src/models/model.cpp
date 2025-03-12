@@ -603,8 +603,22 @@ void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& d
   if (!output)
     output = OrtValue::CreateTensor(device.GetAllocator(), shape, output_type);
 
-  if (!device.Cast(input, *output))
-    GetDeviceInterface(DeviceType::CPU)->Cast(input, *output);
+  auto input_type = input_info->GetElementType();
+  auto element_count = input_info->GetElementCount();
+
+  if (element_count != output->GetTensorTypeAndShapeInfo()->GetElementCount())
+    throw std::runtime_error("Cast: input and output element count mismatch");
+  
+  void* input_data = input.GetTensorMutableRawData();
+  void* output_data = output->GetTensorMutableRawData();
+  if (!device.Cast(input_data, output_data, input_type, output_type, element_count)) {
+    auto input_span = ByteWrapTensor(device, input);
+    auto output_span = ByteWrapTensor(device, *output);
+    input_data = input_span.CopyDeviceToCpu().data();
+    output_data = output_span.CopyDeviceToCpu().data();
+    GetDeviceInterface(DeviceType::CPU)->Cast(input_data, output_data, input_type, output_type, element_count);
+    output_span.CopyCpuToDevice();
+  }
 }
 
 std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const {

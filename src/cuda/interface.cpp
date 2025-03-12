@@ -111,19 +111,7 @@ struct CudaInterfaceImpl final : DeviceInterface {
     return GetStream();
   }
 
-  bool Cast(OrtValue& input, OrtValue& output) override {
-    auto input_info = input.GetTensorTypeAndShapeInfo();
-    auto output_info = output.GetTensorTypeAndShapeInfo();
-
-    auto input_type = input_info->GetElementType();
-    auto output_type = output_info->GetElementType();
-
-    auto input_data = input.GetTensorRawData();
-    auto output_data = output.GetTensorMutableRawData();
-
-    auto element_count = input_info->GetElementCount();
-    if (element_count != output_info->GetElementCount())
-      throw std::runtime_error("Cast - input and output element counts do not match");
+  bool Cast(void* input_data, void* output_data, ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type, size_t element_count) override {
     if (input_type == output_type)
       throw std::runtime_error("Cast - input and output types are the same");
 

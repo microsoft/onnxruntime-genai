@@ -210,45 +210,6 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   // TODO: perform operation directly on DML
-  bool Cast(OrtValue& input, OrtValue& output) override {
-    auto input_info = input.GetTensorTypeAndShapeInfo();
-    auto output_info = output.GetTensorTypeAndShapeInfo();
-    auto input_type = input_info->GetElementType();
-    auto output_type = output_info->GetElementType();
-    auto element_count = input_info->GetElementCount();
-
-    if (element_count != output_info->GetElementCount())
-      throw std::runtime_error("Cast - input and output element counts do not match");
-    if (input_type == output_type)
-      throw std::runtime_error("Cast - input and output types are the same");
-
-    auto input_data_span = ByteWrapTensor(*GetDmlInterface(), input);
-    auto input_data_cpu = input_data_span.CopyDeviceToCpu();
-    auto output_data_span = ByteWrapTensor(*GetDmlInterface(), output);
-    auto output_data_cpu = output_data_span.CopyDeviceToCpu();
-
-    if (input_type == Ort::TypeToTensorType<float> && output_type == Ort::TypeToTensorType<Ort::Float16_t>) {
-      auto fp32_cpu = reinterpret_cast<const float*>(input_data_cpu.data());
-      auto fp16_cpu = reinterpret_cast<uint16_t*>(output_data_cpu.data());
-      for (size_t i = 0; i < element_count; i++)
-        fp16_cpu[i] = FastFloat32ToFloat16(fp32_cpu[i]);
-    } else if (input_type == Ort::TypeToTensorType<Ort::Float16_t> && output_type == Ort::TypeToTensorType<float>) {
-      auto fp16_cpu = reinterpret_cast<const uint16_t*>(input_data_cpu.data());
-      auto fp32_cpu = reinterpret_cast<float*>(output_data_cpu.data());
-      for (size_t i = 0; i < element_count; i++)
-        fp32_cpu[i] = FastFloat16ToFloat32(fp16_cpu[i]);
-    } else if (input_type == Ort::TypeToTensorType<int32_t> && output_type == Ort::TypeToTensorType<int64_t>) {
-      auto int32_cpu = reinterpret_cast<const int32_t*>(input_data_cpu.data());
-      auto int64_cpu = reinterpret_cast<int64_t*>(output_data_cpu.data());
-      for (size_t i = 0; i < element_count; i++)
-        int64_cpu[i] = int32_cpu[i];
-    } else
-      return false;
-    output_data_span.CopyCpuToDevice();
-    return true;
-  }
-
-  // TODO: perform operation directly on DML
   template <typename T>
   void UpdatePositionIds(T* position_ids, int batch_beam_size, int total_length, int new_kv_length) {
     auto data_span = WrapMemory<T>(std::span<T>(position_ids, batch_beam_size * new_kv_length));

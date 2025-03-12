@@ -65,34 +65,25 @@ struct CpuInterface : DeviceInterface {
     return std::make_shared<CpuMemory>(p, size);
   }
 
-  bool Cast(OrtValue& input, OrtValue& output) override {
-    auto input_info = input.GetTensorTypeAndShapeInfo();
-    auto output_info = output.GetTensorTypeAndShapeInfo();
-
-    auto input_type = input_info->GetElementType();
-    auto output_type = output_info->GetElementType();
-
-    auto element_count = input_info->GetElementCount();
-    if (element_count != output_info->GetElementCount())
-      throw std::runtime_error("Cast - input and output element counts do not match");
+  bool Cast(void* input_data, void* output_data, ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type, size_t element_count) override {
     if (input_type == output_type)
       throw std::runtime_error("Cast - input and output types are the same");
 
     if (input_type == Ort::TypeToTensorType<float> && output_type == Ort::TypeToTensorType<Ort::Float16_t>) {
-      auto* fp32 = input.GetTensorData<float>();
-      auto* fp16 = output.GetTensorMutableData<uint16_t>();
+      auto* fp32 = static_cast<float*>(input_data);
+      auto* fp16 = static_cast<uint16_t*>(output_data);
       for (size_t i = 0; i < element_count; i++)
         fp16[i] = FastFloat32ToFloat16(fp32[i]);
     } else if (input_type == Ort::TypeToTensorType<Ort::Float16_t> && output_type == Ort::TypeToTensorType<float>) {
-      auto* fp16 = input.GetTensorData<uint16_t>();
-      auto* fp32 = output.GetTensorMutableData<float>();
+      auto* fp16 = static_cast<uint16_t*>(input_data);
+      auto* fp32 = static_cast<float*>(output_data);
       for (size_t i = 0; i < element_count; i++)
         fp32[i] = FastFloat16ToFloat32(fp16[i]);
     } else if (input_type == Ort::TypeToTensorType<int32_t> && output_type == Ort::TypeToTensorType<int64_t>) {
-      auto* input_data = input.GetTensorData<int32_t>();
-      auto* output_data = output.GetTensorMutableData<int64_t>();
+      auto* int32 = static_cast<int32_t*>(input_data);
+      auto* int64 = static_cast<int64_t*>(output_data);
       for (size_t i = 0; i < element_count; i++)
-        output_data[i] = input_data[i];
+        int64[i] = int32[i];
     } else
       throw std::runtime_error("Cast - Unimplemented cast");
     return true;

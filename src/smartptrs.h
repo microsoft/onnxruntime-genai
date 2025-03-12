@@ -114,7 +114,7 @@ struct DeviceInterface {
 
   virtual void Synchronize() = 0;  // Synchronize the device, typically used for timing or debugging
 
-  virtual bool Cast(OrtValue& /*input*/, OrtValue& /*output*/) { return false; }
+  virtual bool Cast(void* /*input*/, void* /*output*/, ONNXTensorElementDataType /*input_type*/, ONNXTensorElementDataType /*output_type*/, size_t /*element_count*/) { return false; }
 
   virtual void UpdatePositionIds(void* /*position_ids*/, int /*batch_beam_size*/, int /*total_length*/, int /*new_kv_length*/, ONNXTensorElementDataType /*type*/) { assert(false); }
   virtual void UpdateAttentionMask(void* /*next_mask_data*/, void* /*mask_data*/, int /*batch_beam_size*/, int /*new_kv_length*/, int /*total_length*/, int /*max_length*/, bool /*update_only*/, ONNXTensorElementDataType /*type*/) { assert(false); }
