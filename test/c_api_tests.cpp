@@ -471,14 +471,11 @@ TEST(CAPITests, SetTerminate) {
   };
 
   auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
-    try {
+    EXPECT_THROW({
       while (!generator->IsDone()) {
         generator->GenerateNextToken();
       }
-    } catch (const std::exception& e) {
-      EXPECT_EQ(generator->IsSessionTerminated(), true);
-      std::cout << "Session Terminated: " << e.what() << std::endl;
-    }
+    }, std::runtime_error);
   };
 
   auto model = OgaModel::Create(PHI2_PATH);
@@ -499,7 +496,6 @@ TEST(CAPITests, SetTerminate) {
   threads.push_back(std::thread(GeneratorSetTerminateCall, generator.get()));
 
   for (auto& th : threads) {
-    std::cout << "Waiting for threads completion" << std::endl;
     th.join();  // Wait for each thread to finish
   }
   EXPECT_EQ(generator->IsSessionTerminated(), true);
@@ -588,14 +584,9 @@ TEST(CAPITests, TopKTopPCAPI) {
   test.Run();
 }
 
-#endif  // TEST_PHI2 && !USE_DML
-
-#if TEST_PHI2
 TEST(CAPITests, AdaptersTest) {
 #ifdef USE_CUDA
   using OutputType = Ort::Float16_t;
-#elif defined(USE_DML)
-  using OutputType = Ort::Float16_t; 
 #else
   using OutputType = float;
 #endif
@@ -673,10 +664,8 @@ TEST(CAPITests, AdaptersTest) {
   // So, the generator must go out of scope before the adapter can be unloaded.
   adapters->UnloadAdapter("adapters_a_and_b");
 }
-#endif
 
 TEST(CAPITests, AdaptersTestMultipleAdapters) {
-#if TEST_PHI2
   // The python unit tests create the adapter model.
   // In order to run this test, the python unit test must have been run first.
   auto model = OgaModel::Create(MODEL_PATH "multiple_adapters");
@@ -715,8 +704,8 @@ TEST(CAPITests, AdaptersTestMultipleAdapters) {
   // So, the generator must go out of scope before the adapter can be unloaded.
   adapters->UnloadAdapter("adapter_a");
   adapters->UnloadAdapter("adapter_b");
-#endif
 }
+#endif  // TEST_PHI2 && !USE_DML
 
 void CheckResult(OgaResult* result) {
   if (result) {
