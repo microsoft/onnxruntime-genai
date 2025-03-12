@@ -5,22 +5,11 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    /// <summary>
-    /// The MultiModalProcessor class is responsible for converting text/images into a NamedTensors list
-    /// that can be fed into a Generator class instance.
-    /// </summary>
     public class MultiModalProcessor : IDisposable
     {
         private IntPtr _processorHandle;
         private bool _disposed = false;
 
-        /// <summary>
-        /// Construct a MultiModalProcessor for a given model.
-        /// </summary>
-        /// <param name="model">The model to use.</param>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
         public MultiModalProcessor(Model model)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateMultiModalProcessor(model.Handle, out _processorHandle));
@@ -28,22 +17,32 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _processorHandle; } }
 
+        public NamedTensors ProcessImages(string prompt, Images images)
+        {
+            IntPtr imagesHandle = images == null ? IntPtr.Zero : images.Handle;
+            Result.VerifySuccess(NativeMethods.OgaProcessorProcessImages(_processorHandle, StringUtils.ToUtf8(prompt),
+                                                                         imagesHandle, out IntPtr namedTensorsHandle));
+            return new NamedTensors(namedTensorsHandle);
+        }
+
         /// <summary>
-        /// Processes a string and image into a NamedTensor.
+        /// Processes a string, image and audio into a NamedTensor.
         /// </summary>
         /// <param name="prompt">The text to encode as token ids.</param>
         /// <param name="images">The image input.</param>
+        /// <param name="audios">The audio input.</param>
         /// <returns>
         /// The NamedTensors object.
         /// </returns>
         /// <exception cref="OnnxRuntimeGenAIException">
         /// Thrown when the call to the GenAI native API fails.
         /// </exception>
-        public NamedTensors ProcessImages(string prompt, Images images)
+        public NamedTensors ProcessImagesAndAudios(string prompt, Images images, Audios audios)
         {
             IntPtr imagesHandle = images == null ? IntPtr.Zero : images.Handle;
-            Result.VerifySuccess(NativeMethods.OgaProcessorProcessImages(_processorHandle, StringUtils.ToUtf8(prompt),
-                                                                         imagesHandle, out IntPtr namedTensorsHandle));
+            IntPtr audiosHandle = audios == null ? IntPtr.Zero : audios.Handle;
+            Result.VerifySuccess(NativeMethods.OgaProcessorProcessImagesAndAudios(_processorHandle, StringUtils.ToUtf8(prompt),
+                                                                         imagesHandle, audiosHandle, out IntPtr namedTensorsHandle));
             return new NamedTensors(namedTensorsHandle);
         }
 
@@ -77,16 +76,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
-        /// <summary>
-        /// Creates a TokenizerStream object for streaming tokenization. This is used with Generator class
-        /// to provide each token as it is generated.
-        /// </summary>
-        /// <returns>
-        /// The new TokenizerStream instance.
-        /// </returns>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
         public TokenizerStream CreateStream()
         {
             IntPtr tokenizerStreamHandle = IntPtr.Zero;

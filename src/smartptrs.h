@@ -2,8 +2,13 @@
 // Licensed under the MIT License.
 #pragma once
 #include <assert.h>
+#include <atomic>
 #include <memory>
 #include "span.h"
+
+namespace Ort {
+struct Allocator;
+}
 
 namespace Generators {
 struct Search;
@@ -21,6 +26,7 @@ struct DeviceBuffer : std::enable_shared_from_this<DeviceBuffer> {
   virtual void CopyDeviceToCpu() = 0;  // Allocates p_cpu_ if necessary and copies p_device_ memory into it
   virtual void CopyCpuToDevice() = 0;
   virtual void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) = 0;
+  virtual void Zero() = 0;  // Zero out the device memory
 
   uint8_t* p_device_{};
   uint8_t* p_cpu_{};
@@ -37,6 +43,8 @@ struct DeviceSpan {
 
   bool empty() const { return length_ == 0; }
   size_t size() const { return length_; }
+
+  operator DeviceSpan<const T>() const { return DeviceSpan<const T>(*p_device_memory_, begin_, length_); }
 
   DeviceSpan<T> subspan(size_t begin, size_t length) { return DeviceSpan<T>(*p_device_memory_, begin_ + begin, length); }
 
@@ -58,24 +66,47 @@ struct DeviceSpan {
   // Copy CPU memory to device memory, typically used after calling CpuSpan or CopyDeviceToCpu to update the device memory with the modifications made
   void CopyCpuToDevice() { p_device_memory_->CopyCpuToDevice(); }
 
+  // Zero out the device memory
+  void Zero() { p_device_memory_->Zero(); }
+
+  void CopyFrom(const DeviceSpan<const T>& source) {
+    assert(source.size() == size());  // Spans must be the same size to copy
+    p_device_memory_->CopyFrom(begin_ * sizeof(T), *source.p_device_memory_, source.begin_ * sizeof(T), length_ * sizeof(T));
+  }
+
  private:
   DeviceSpan(DeviceBuffer& memory, size_t begin, size_t length)
       : p_device_memory_{memory.shared_from_this()}, begin_{begin}, length_{length} {}
 
   std::shared_ptr<DeviceBuffer> p_device_memory_;
   size_t begin_{}, length_{};  // Subspan of p_device_memory_, relative to original memory block
+  template <typename U>
+  friend struct DeviceSpan;  // All DeviceSpans are friends
+};
+
+enum struct DeviceType {
+  CPU,
+  CUDA,
+  DML,
+  WEBGPU,
+  QNN,
+  MAX
 };
 
 struct DeviceInterface {
   virtual ~DeviceInterface() {}
 
+  virtual DeviceType GetType() const = 0;
+  virtual void InitOrt(const OrtApi& api, Ort::Allocator& allocator) = 0;
+  virtual Ort::Allocator& GetAllocator() = 0;
+
   template <typename T>
-  DeviceSpan<T> Allocate(size_t count, bool cpu_accessible = false) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count, cpu_accessible)); }
-  virtual std::shared_ptr<DeviceBuffer> AllocateBase(size_t size, bool cpu_accessible) = 0;
+  DeviceSpan<T> Allocate(size_t count) { return DeviceSpan<T>(AllocateBase(sizeof(T) * count)); }
+  virtual std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) = 0;
 
   // Wraps an existing memory block, useful for tensors. Use WrapTensor for OrtValue vs calling this directly
   template <typename T>
-  DeviceSpan<T> WrapMemory(std::span<T> memory) { return DeviceSpan<T>(WrapMemoryBase(memory.data(), memory.size_bytes())); }
+  DeviceSpan<T> WrapMemory(std::span<T> memory) { return DeviceSpan<T>(WrapMemoryBase(const_cast<std::remove_const_t<T>*>(memory.data()), memory.size_bytes())); }
   virtual std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* memory, size_t size) = 0;
 
   virtual std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) = 0;
@@ -83,10 +114,40 @@ struct DeviceInterface {
 
   virtual void Synchronize() = 0;  // Synchronize the device, typically used for timing or debugging
 
-  virtual cudaStream_t GetCudaStream() {
+  virtual bool Cast(OrtValue& /*input*/, OrtValue& /*output*/) { return false; }
+
+  virtual void UpdatePositionIds(void* /*position_ids*/, int /*batch_beam_size*/, int /*total_length*/, int /*new_kv_length*/, ONNXTensorElementDataType /*type*/) { assert(false); }
+  virtual void UpdateAttentionMask(void* /*mask_data*/, const void* /*old_data*/, int /*batch_beam_size*/, int /*new_kv_length*/, int /*total_length*/, int /*max_length*/, bool /*update_only*/, ONNXTensorElementDataType /*type*/) { assert(false); }
+
+  virtual void LaunchHandleEOSArray(float* /*batch_logits*/, int /*batch_beam_size*/, int /*vocab_size*/, const int32_t* /*eos_token_ids*/, int /*eos_token_ids_count*/) { assert(false); }
+  virtual void UpdateCacheIndirectionKernelLauncher(int32_t* /*tgt_indir_cache*/, const int32_t* /*src_indir_cache*/, const int32_t* /*beam_ids*/, int /*batch_size*/, int /*beam_width*/, int /*input_seq_length*/, int /*max_seq_length*/, int /*current_length*/) { assert(false); }
+  virtual void ReorderPastStatesKernelLauncher(void* /*out_buffer*/, const void* /*in_buffer*/, int /*batch_size*/, int /*num_heads*/, int /*max_length*/, int /*head_size*/, int /*chunk_size*/) { assert(false); }
+  virtual void LaunchCopyCrossQKSingleDecodeStep(float* /*cross_qk_buffer_data*/, float** /*qk_layer_pointers*/, int /*token_index*/, int /*batch_beam_size*/, int /*num_layers*/, int /*num_heads*/, int /*num_alignment_heads*/, const int* /*alignment_heads*/, int /*frames*/, int /*max_length*/) { assert(false); }
+  virtual void LaunchFinalizeCrossQK(int /*iteration_number*/, int /*context_decoding_len*/, int /*batch_size*/, int /*num_beams*/, int /*max_length*/, int /*num_alignment_heads*/, int /*frames_of_k*/, const float* /*cross_qk_buffer_data*/, float* /*cross_qk_output*/, int /*num_return_sequences*/, const int* /*cache_indir_data*/) { assert(false); }
+
+  virtual void* GetCudaStream() {
     assert(false);
     return nullptr;
   }  // Temporary until we fully factor out providers
+};
+
+// A shared_ptr based type that we expose through our C API should inherit from this type.
+// ExternalAddRef must be called when returning an object through the C API
+// ExternalRelease must be called on the C API destroy method
+template <typename T>
+struct ExternalRefCounted {
+  void ExternalAddRef() {
+    if (++ref_count_ == 1)  // First reference?
+      external_owner_ = static_cast<T*>(this)->shared_from_this();
+  }
+  void ExternalRelease() {
+    if (--ref_count_ == 0)
+      external_owner_ = nullptr;
+  }
+
+ private:
+  std::shared_ptr<T> external_owner_;  // shared_ptr to ourselves to keep us alive
+  std::atomic<int> ref_count_{};       // C API refcount (can't use only the shared_ptr)
 };
 
 namespace Location {

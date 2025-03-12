@@ -3,18 +3,9 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
-#include <iostream>
-#include "../generators.h"
+#define OGA_USE_SPAN 1
+#include "../models/onnxruntime_api.h"
 #include "../ort_genai.h"
-#include "../json.h"
-#include "../search.h"
-#include "../models/model.h"
-#include "../logging.h"
-#include "../smartptrs.h"
-
-#if USE_CUDA
-#include "../cuda/cuda_common.h"
-#endif
 
 using namespace pybind11::literals;
 
@@ -37,11 +28,19 @@ struct npy_format_descriptor<Ort::Float16_t> {
 }  // namespace pybind11
 
 template <typename T>
-Generators::cpu_span<T> ToSpan(pybind11::array_t<T> v) {
+std::span<T> ToSpan(pybind11::array_t<T> v) {
   if constexpr (std::is_const_v<T>)
     return {v.data(), static_cast<size_t>(v.size())};
   else
     return {v.mutable_data(), static_cast<size_t>(v.size())};
+}
+
+template <typename T>
+std::span<T> ToSpan(OgaTensor& v) {
+  assert(static_cast<ONNXTensorElementDataType>(v.Type()) == Ort::TypeToTensorType<T>);
+  auto shape = v.Shape();
+  auto element_count = std::accumulate(shape.begin(), shape.end(), 1LL, std::multiplies<int64_t>());
+  return {reinterpret_cast<T*>(v.Data()), static_cast<size_t>(element_count)};
 }
 
 template <typename T>
@@ -114,7 +113,7 @@ int ToNumpyType(ONNXTensorElementDataType type) {
 template <typename... Types>
 std::string ToFormatDescriptor(ONNXTensorElementDataType type, Ort::TypeList<Types...>) {
   std::string result;
-  ((type == Ort::TypeToTensorType<Types> ? result = pybind11::format_descriptor<Types>::format(), true : false) || ...);
+  (void)((type == Ort::TypeToTensorType<Types> ? result = pybind11::format_descriptor<Types>::format(), true : false) || ...);
   if (result.empty())
     throw std::runtime_error("Unsupported onnx type");
   return result;
@@ -124,7 +123,7 @@ std::string ToFormatDescriptor(ONNXTensorElementDataType type) {
   return ToFormatDescriptor(type, Ort::TensorTypes{});
 }
 
-std::unique_ptr<OrtValue> ToOrtValue(pybind11::array& v) {
+std::unique_ptr<OgaTensor> ToOgaTensor(pybind11::array& v, bool copy = true) {
   auto type = ToTensorType(v.dtype());
 
   std::vector<int64_t> shape(v.ndim());
@@ -135,58 +134,24 @@ std::unique_ptr<OrtValue> ToOrtValue(pybind11::array& v) {
   if ((v.flags() & (pybind11::array::c_style | pybind11::array::f_style)) == 0)
     throw std::runtime_error("Array must be contiguous. Please use NumPy's 'ascontiguousarray' method on the value.");
 
-  // Copy data into ort_value
-  auto ort_value = OrtValue::CreateTensor(Ort::Allocator::GetWithDefaultOptions(), shape, type);
-  auto ort_data = ort_value->GetTensorMutableData<uint8_t>();
-  auto python_data = reinterpret_cast<const uint8_t*>(v.data());
-  std::copy(python_data, python_data + v.nbytes(), ort_data);
-  return ort_value;
+  auto tensor = OgaTensor::Create(copy ? nullptr : v.mutable_data(), shape, static_cast<OgaElementType>(type));
+  if (copy) {
+    auto ort_data = reinterpret_cast<uint8_t*>(tensor->Data());
+    auto python_data = reinterpret_cast<const uint8_t*>(v.data());
+    std::copy(python_data, python_data + v.nbytes(), ort_data);
+  }
+  return tensor;
 }
 
-pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
-  if (!v)
-    return {};
-
-  auto type_info = v->GetTensorTypeAndShapeInfo();
-  auto shape = type_info->GetShape();
-  auto type = type_info->GetElementType();
-  auto element_size = Generators::SizeOf(type);
-  auto data = v->GetTensorMutableRawData();
-
-  std::unique_ptr<uint8_t[]> cpu_copy;
-
-#if USE_DML
-  // TODO: DML version of this
-  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model.device_type_ == Generators::DeviceType::DML) {
-    auto data_size = type_info->GetElementCount() * element_size;
-    cpu_copy = std::make_unique<uint8_t[]>(data_size);
-
-    ComPtr<ID3D12Resource> gpu_resource;
-    Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
-        model.allocator_device_,
-        data,
-        &gpu_resource));
-
-    model.GetDmlReadbackHeap()->ReadbackFromGpu(
-        std::span(reinterpret_cast<uint8_t*>(cpu_copy.get()), data_size),
-        gpu_resource.Get(),
-        0,
-        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    data = cpu_copy.get();
-  }
-#endif
-#if USE_CUDA
-  if (v->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_GPU && model.device_type_ == Generators::DeviceType::CUDA) {
-    auto data_size = type_info->GetElementCount() * element_size;
-    cpu_copy = std::make_unique<uint8_t[]>(data_size);
-    Generators::CudaCheck() == cudaMemcpy(cpu_copy.get(), data, data_size, cudaMemcpyDeviceToHost);
-    data = cpu_copy.get();
-  }
-#endif
+pybind11::array ToNumpy(OgaTensor& v) {
+  auto shape = v.Shape();
+  auto type = static_cast<ONNXTensorElementDataType>(v.Type());
+  auto element_size = Ort::SizeOf(type);
+  auto data = v.Data();
 
   std::vector<int64_t> strides(shape.size());
   {
-    auto size = Generators::SizeOf(type);
+    auto size = element_size;
     for (size_t i = strides.size(); i-- > 0;) {
       strides[i] = size;
       size *= shape[i];
@@ -204,168 +169,106 @@ pybind11::array ToNumpy(OrtValue* v, const Generators::Model& model) {
 
   return pybind11::array{bufinfo};
 }
-namespace Generators {
-
-template <typename T>
-struct PyDeviceMemorySpan {
-  void operator=(DeviceSpan<T> span) {
-    span_ = std::move(span);
-  }
-
-  pybind11::array_t<T> GetNumpy() {
-    auto v = span_.CopyDeviceToCpu();
-    py_cpu_array_ = pybind11::array_t<T>({v.size()}, {sizeof(T)}, v.data(), pybind11::capsule(v.data(), [](void*) {}));
-    return py_cpu_array_;
-  }
-
- private:
-  DeviceSpan<T> span_;
-  pybind11::array_t<T> py_cpu_array_;
-};
-
-struct PyNamedTensors {
-  PyNamedTensors(std::unique_ptr<NamedTensors> named_tensors) : named_tensors_{std::move(named_tensors)} {
-  }
-
-  std::unique_ptr<NamedTensors> named_tensors_;
-};
 
 struct PyGeneratorParams {
-  PyGeneratorParams(const Model& model) : params_{std::make_shared<GeneratorParams>(model)} {
-  }
+  PyGeneratorParams(const OgaModel& model) : params_{OgaGeneratorParams::Create(model)} {}
 
-  operator const GeneratorParams&() const { return *params_; }
+  operator const OgaGeneratorParams&() const { return *params_; }
 
-  std::shared_ptr<GeneratorParams> params_;
-
-  void Prepare() {
-    if (py_whisper_input_features_.size() != 0) {
-      GeneratorParams::Whisper& whisper = params_->inputs.emplace<GeneratorParams::Whisper>();
-      whisper.input_features = std::make_shared<Tensor>(ToOrtValue(py_whisper_input_features_));
-      if (py_alignment_heads_.size() != 0) {
-        whisper.alignment_heads = std::make_shared<Tensor>(ToOrtValue(py_alignment_heads_));
-      }
-    }
-  }
+  std::unique_ptr<OgaGeneratorParams> params_;
 
   void SetModelInput(const std::string& name, pybind11::array& value) {
-    params_->extra_inputs.push_back({name, std::make_shared<Tensor>(ToOrtValue(value))});
+    params_->SetModelInput(name.c_str(), *ToOgaTensor(value, false));
     refs_.emplace_back(value);
   }
 
-  void SetInputs(std::shared_ptr<PyNamedTensors> named_tensors) {
-    params_->SetInputs(*named_tensors->named_tensors_);
-    named_tensors_ = named_tensors;
+  void SetInputs(OgaNamedTensors& named_tensors) {
+    params_->SetInputs(named_tensors);
   }
 
   void SetSearchOptions(const pybind11::kwargs& dict) {
     for (auto& entry : dict) {
       auto name = entry.first.cast<std::string>();
-      try {
-        if (pybind11::isinstance<pybind11::float_>(entry.second)) {
-          SetSearchNumber(params_->search, name, entry.second.cast<double>());
-        } else if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
-          SetSearchBool(params_->search, name, entry.second.cast<bool>());
-        } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
-          SetSearchNumber(params_->search, name, entry.second.cast<int>());
-        } else
-          throw std::runtime_error("Unknown search option type, can be float/bool/int:" + name);
-      } catch (JSON::unknown_value_error&) {
-        throw std::runtime_error("Unknown search option:" + name);
-      }
+      if (pybind11::isinstance<pybind11::float_>(entry.second)) {
+        params_->SetSearchOption(name.c_str(), entry.second.cast<double>());
+      } else if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
+        params_->SetSearchOptionBool(name.c_str(), entry.second.cast<bool>());
+      } else if (pybind11::isinstance<pybind11::int_>(entry.second)) {
+        params_->SetSearchOption(name.c_str(), entry.second.cast<int>());
+      } else
+        throw std::runtime_error("Unknown search option type, can be float/bool/int:" + name);
     }
   }
 
-  void TryUseCudaGraphWithMaxBatchSize(pybind11::int_ max_batch_size) {
-    Log("warning", "try_use_cuda_graph_with_max_batch_size will be deprecated in release 0.3.0. Please use try_graph_capture_with_max_batch_size instead");
-    params_->TryGraphCapture(max_batch_size.cast<int>());
-  }
-
   void TryGraphCaptureWithMaxBatchSize(pybind11::int_ max_batch_size) {
-    params_->TryGraphCapture(max_batch_size.cast<int>());
+    params_->TryGraphCaptureWithMaxBatchSize(max_batch_size.cast<int>());
   }
 
-  pybind11::array py_whisper_input_features_;
-  pybind11::array py_alignment_heads_;
-
-  std::vector<pybind11::object> refs_;             // References to data we want to ensure doesn't get garbage collected
-  std::shared_ptr<PyNamedTensors> named_tensors_;  // Ensure the model inputs don't get garbage collected
+  std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
 
 struct PyGenerator {
-  PyGenerator(Model& model, PyGeneratorParams& params) {
-    generator_ = CreateGenerator(model, *params.params_);
+  PyGenerator(const OgaModel& model, PyGeneratorParams& params) {
+    generator_ = OgaGenerator::Create(model, *params.params_);
   }
 
   pybind11::array_t<int32_t> GetNextTokens() {
-    py_tokens_ = generator_->search_->GetNextTokens();
-    return py_tokens_.GetNumpy();
+    return ToPython(generator_->GetNextTokens());
   }
 
   pybind11::array_t<int32_t> GetSequence(int index) {
-    py_sequence_ = generator_->search_->GetSequence(index);
-    return py_sequence_.GetNumpy();
+    return ToPython(generator_->GetSequence(index));
   }
 
   pybind11::array GetOutput(const std::string& name) {
-    return ToNumpy(generator_->state_->GetOutput(name.c_str()), *(generator_->model_));
+    return ToNumpy(*generator_->GetOutput(name.c_str()));
   }
 
-  void AppendTokens(pybind11::array_t<int32_t> tokens) {
+  void AppendTokens(OgaTensor& tokens) {
+    generator_->AppendTokens(ToSpan<int32_t>(tokens));
+  }
+
+  void AppendTokens(pybind11::array_t<int32_t>& tokens) {
     generator_->AppendTokens(ToSpan(tokens));
   }
 
   pybind11::array_t<float> GetLogits() {
-    py_logits_ = generator_->GetLogits();
-    return py_logits_.GetNumpy();
+    return ToNumpy(*generator_->GetLogits());
   }
 
   void SetLogits(pybind11::array_t<float> new_logits) {
-    auto logits = generator_->search_->GetLogits();
-    if (static_cast<size_t>(new_logits.size()) != logits.size())
-      throw std::runtime_error("Generator::SetLogits passed an array of size " + std::to_string(new_logits.size()) + " but should be size " + std::to_string(logits.size()));
-
-    copy(std::span<const float>{ToSpan(new_logits)}, logits.CpuSpan());
-    logits.CopyCpuToDevice();
-    generator_->computed_logits_ = true;
+    generator_->SetLogits(*ToOgaTensor(new_logits, false));
   }
 
   void GenerateNextToken() {
     generator_->GenerateNextToken();
   }
 
-  void RewindToLength(size_t new_length) {
-    generator_->RewindToLength(new_length);
+  void RewindTo(size_t new_length) {
+    generator_->RewindTo(new_length);
   }
 
   bool IsDone() const {
     return generator_->IsDone();
   }
 
-  void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name) {
-    generator_->state_->SetActiveAdapter(adapters, adapter_name);
+  void SetActiveAdapter(OgaAdapters& adapters, const std::string& adapter_name) {
+    generator_->SetActiveAdapter(adapters, adapter_name.c_str());
   }
 
  private:
-  std::unique_ptr<Generator> generator_;
-  PyDeviceMemorySpan<int32_t> py_tokens_;
-  PyDeviceMemorySpan<int32_t> py_sequence_;
-  PyDeviceMemorySpan<float> py_logits_;
+  std::unique_ptr<OgaGenerator> generator_;
 };
 
 void SetLogOptions(const pybind11::kwargs& dict) {
   for (auto& entry : dict) {
     auto name = entry.first.cast<std::string>();
-    try {
-      if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
-        SetLogBool(name, entry.second.cast<bool>());
-      } else if (pybind11::isinstance<pybind11::str>(entry.second)) {
-        SetLogString(name, entry.second.cast<std::string>());
-      } else
-        throw std::runtime_error("Unknown log option type, can be bool/string:" + name);
-    } catch (JSON::unknown_value_error&) {
-      throw std::runtime_error("Unknown log option:" + name);
-    }
+    if (pybind11::isinstance<pybind11::bool_>(entry.second)) {
+      Oga::SetLogBool(name.c_str(), entry.second.cast<bool>());
+    } else if (pybind11::isinstance<pybind11::str>(entry.second)) {
+      Oga::SetLogString(name.c_str(), entry.second.cast<std::string>().c_str());
+    } else
+      throw std::runtime_error("Unknown log option type, can be bool/string:" + name);
   }
 }
 
@@ -385,97 +288,115 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   static int unused{};  // The capsule needs something to reference
   pybind11::capsule cleanup(
       &unused, "cleanup", [](PyObject*) {
-        Generators::Shutdown();
+        OgaShutdown();
       });
   m.add_object("_cleanup", cleanup);
 
-  // So that python users can catch OrtExceptions specifically
-  pybind11::register_exception<Ort::Exception>(m, "OrtException");
-
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
-      .def(pybind11::init<const Model&>())
-      // TODO(ryanhill): Remove these entirely or replace with a single property that returns the entire config?
-      .def_property_readonly("pad_token_id", [](const PyGeneratorParams& v) { return v.params_->config.model.pad_token_id; })
-      .def_property_readonly("eos_token_id", [](const PyGeneratorParams& v) { return v.params_->config.model.eos_token_id; })
-      .def_property_readonly("vocab_size", [](const PyGeneratorParams& v) { return v.params_->config.model.vocab_size; })
+      .def(pybind11::init<const OgaModel&>())
+#if 0
       // TODO(baijumeswani): Rename/redesign the whisper_input_features to be more generic
       .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
       .def_readwrite("alignment_heads", &PyGeneratorParams::py_alignment_heads_)
-      .def("set_inputs", [](PyGeneratorParams& generator_params, std::shared_ptr<PyNamedTensors> named_tensors) {
-        if (!named_tensors || !named_tensors->named_tensors_)
-          throw std::runtime_error("No inputs provided.");
-
-        generator_params.SetInputs(named_tensors);
-      })
+#endif
+      .def("set_inputs", &PyGeneratorParams::SetInputs)
       .def("set_model_input", &PyGeneratorParams::SetModelInput)
-      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)                                     // See config.h 'struct Search' for the options
-      .def("try_use_cuda_graph_with_max_batch_size", &PyGeneratorParams::TryUseCudaGraphWithMaxBatchSize)  // will be deprecated
+      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
       .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize);
 
-  pybind11::class_<TokenizerStream>(m, "TokenizerStream")
-      .def("decode", [](TokenizerStream& t, int32_t token) { return t.Decode(token); });
+  pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
+      .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
 
-  pybind11::class_<Tokenizer, std::shared_ptr<Tokenizer>>(m, "Tokenizer")
-      .def(pybind11::init([](Model& model) { return model.CreateTokenizer(); }))
-      .def("encode", &Tokenizer::Encode)
-      .def("to_token_id", &Tokenizer::TokenToTokenId)
-      .def("decode", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) { return t.Decode(ToSpan(tokens)); })
-      .def("encode_batch", [](const Tokenizer& t, std::vector<std::string> strings) {
-        auto result = t.EncodeBatch(strings);
-        return pybind11::array_t<int32_t>({strings.size(), result.size() / strings.size()}, result.data());
+  pybind11::class_<OgaNamedTensors>(m, "NamedTensors")
+      .def(pybind11::init([]() { return OgaNamedTensors::Create(); }))
+      .def("__getitem__", [](const OgaNamedTensors& named_tensors, const std::string& name) {
+        auto tensor = named_tensors.Get(name.c_str());
+        if (!tensor)
+          throw std::runtime_error("Tensor with name: " + name + " not found.");
+        return tensor;
       })
-      .def("decode_batch", [](const Tokenizer& t, pybind11::array_t<int32_t> tokens) {
-        if (tokens.ndim() == 1) {  // Just a 1D array
-          return t.DecodeBatch(ToSpan(tokens), 1);
-        } else {
-          if (tokens.ndim() != 2)
-            throw std::runtime_error("token shape can only be 1 or 2 dimensional");
-
-          return t.DecodeBatch(ToSpan(tokens), tokens.shape(0));
-        }
+      .def("__setitem__", [](OgaNamedTensors& named_tensors, const std::string& name, pybind11::array& value) {
+        named_tensors.Set(name.c_str(), *ToOgaTensor(value));
       })
-      .def("create_stream", [](const Tokenizer& t) { return t.CreateStream(); });
+      .def("__setitem__", [](OgaNamedTensors& named_tensors, const std::string& name, OgaTensor& value) {
+        named_tensors.Set(name.c_str(), value);
+      })
+      .def("__contains__", [](const OgaNamedTensors& named_tensors, const std::string& name) {
+        return named_tensors.Get(name.c_str()) != nullptr;
+      })
+      .def("__delitem__", [](OgaNamedTensors& named_tensors, const std::string& name) {
+        named_tensors.Delete(name.c_str());
+      })
+      .def("__len__", &OgaNamedTensors::Count)
+      .def("keys", [](OgaNamedTensors& named_tensors) {
+        std::vector<std::string> keys;
+        auto names = named_tensors.GetNames();
+        for (size_t i = 0; i < names->Count(); i++)
+          keys.push_back(names->Get(i));
+        return keys;
+      });
 
-  // Pybind class using the C API for OgaConfig
+  pybind11::class_<OgaTensor>(m, "Tensor")
+      .def(pybind11::init([](pybind11::array& v) { return ToOgaTensor(v); }))
+      .def("shape", &OgaTensor::Shape)
+      .def("type", &OgaTensor::Type)
+      .def("data", &OgaTensor::Data)
+      .def("as_numpy", [](OgaTensor& t) { return ToNumpy(t); });
+
+  pybind11::class_<OgaTokenizer>(m, "Tokenizer")
+      .def(pybind11::init([](const OgaModel& model) { return OgaTokenizer::Create(model); }))
+      .def("encode", [](const OgaTokenizer& t, std::string s) -> pybind11::array_t<int32_t> {
+        auto sequences = OgaSequences::Create();
+        t.Encode(s.c_str(), *sequences);
+        return ToPython(sequences->Get(0));
+      })
+      .def("to_token_id", &OgaTokenizer::ToTokenId)
+      .def("decode", [](const OgaTokenizer& t, pybind11::array_t<int32_t> tokens) -> std::string { return t.Decode(ToSpan(tokens)).p_; })
+      .def("encode_batch", [](const OgaTokenizer& t, std::vector<std::string> strings) {
+        std::vector<const char*> c_strings;
+        for (const auto& s : strings)
+          c_strings.push_back(s.c_str());
+        return t.EncodeBatch(c_strings.data(), c_strings.size());
+      })
+      .def("decode_batch", [](const OgaTokenizer& t, const OgaTensor& tokens) {
+        std::vector<std::string> strings;
+        auto decoded = t.DecodeBatch(tokens);
+        for (size_t i = 0; i < decoded->Count(); i++)
+          strings.push_back(decoded->Get(i));
+        return strings;
+      })
+      .def("create_stream", [](const OgaTokenizer& t) { return OgaTokenizerStream::Create(t); });
+
   pybind11::class_<OgaConfig>(m, "Config")
       .def(pybind11::init([](const std::string& config_path) { return OgaConfig::Create(config_path.c_str()); }))
       .def("append_provider", &OgaConfig::AppendProvider)
       .def("set_provider_option", &OgaConfig::SetProviderOption)
       .def("clear_providers", &OgaConfig::ClearProviders);
 
-  pybind11::class_<Model, std::shared_ptr<Model>>(m, "Model")
-      .def(pybind11::init([](const OgaConfig& config) {
-        auto config_copy = std::make_unique<Config>(*reinterpret_cast<const Config*>(&config));
-        return CreateModel(GetOrtEnv(), std::move(config_copy));
-      }))
-      .def(pybind11::init([](const std::string& config_path) {
-        return CreateModel(GetOrtEnv(), config_path.c_str());
-      }))
-      .def_property_readonly("type", [](const Model& model) { return model.config_->model.type; })
+  pybind11::class_<OgaModel>(m, "Model")
+      .def(pybind11::init([](const OgaConfig& config) { return OgaModel::Create(config); }))
+      .def(pybind11::init([](const std::string& config_path) { return OgaModel::Create(config_path.c_str()); }))
+      .def_property_readonly("type", [](const OgaModel& model) -> std::string { return model.GetType().p_; })
       .def_property_readonly(
-          "device_type", [](const Model& model) { return to_string(model.device_type_); }, "The device type the model is running on")
-      .def("create_multimodal_processor", [](const Model& model) { return model.CreateMultiModalProcessor(); });
+          "device_type", [](const OgaModel& model) -> std::string { return model.GetDeviceType().p_; }, "The device type the model is running on")
+      .def("create_multimodal_processor", [](const OgaModel& model) { return OgaMultiModalProcessor::Create(model); });
 
   pybind11::class_<PyGenerator>(m, "Generator")
-      .def(pybind11::init<Model&, PyGeneratorParams&>())
+      .def(pybind11::init<const OgaModel&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
       .def("get_output", &PyGenerator::GetOutput)
-      .def("append_tokens", &PyGenerator::AppendTokens)
+      .def("append_tokens", pybind11::overload_cast<pybind11::array_t<int32_t>&>(&PyGenerator::AppendTokens))
+      .def("append_tokens", pybind11::overload_cast<OgaTensor&>(&PyGenerator::AppendTokens))
       .def("get_logits", &PyGenerator::GetLogits)
       .def("set_logits", &PyGenerator::SetLogits)
       .def("generate_next_token", &PyGenerator::GenerateNextToken)
-      .def("rewind_to", &PyGenerator::RewindToLength)
+      .def("rewind_to", &PyGenerator::RewindTo)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence)
-      .def("set_active_adapter", [](PyGenerator& generator, Adapters* adapters, const std::string& adapter_name) {
-        generator.SetActiveAdapter(adapters, adapter_name);
-      });
+      .def("set_active_adapter", &PyGenerator::SetActiveAdapter);
 
-  pybind11::class_<Images, std::shared_ptr<Images>>(m, "Images")
-      .def_static("open", [](pybind11::args image_paths) -> std::shared_ptr<Images> {
-        if (image_paths.empty())
-          throw std::runtime_error("No images provided");
-
+  pybind11::class_<OgaImages>(m, "Images")
+      .def_static("open", [](pybind11::args image_paths) {
         std::vector<std::string> image_paths_string;
         std::vector<const char*> image_paths_vector;
         for (auto image_path : image_paths) {
@@ -485,30 +406,25 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           image_paths_vector.push_back(image_paths_string.back().c_str());
         }
 
-        return std::shared_ptr<Images>(LoadImages(image_paths_vector));
+        return OgaImages::Load(image_paths_vector);
       })
       .def_static("open_bytes", [](pybind11::args image_datas) {
-        if (image_datas.empty())
-          throw std::runtime_error("No images provided");
-
-        std::unique_ptr<ort_extensions::ImageRawData[]> image_raw_data = std::make_unique<ort_extensions::ImageRawData[]>(image_datas.size());
+        std::vector<const void*> image_raw_data(image_datas.size());
+        std::vector<size_t> image_sizes(image_datas.size());
         for (size_t i = 0; i < image_datas.size(); ++i) {
           if (!pybind11::isinstance<pybind11::bytes>(image_datas[i]))
             throw std::runtime_error("Image data must be bytes.");
           auto bytes = image_datas[i].cast<pybind11::bytes>();
           pybind11::buffer_info info(pybind11::buffer(bytes).request());
-          uint8_t* data = reinterpret_cast<uint8_t*>(info.ptr);
-          image_raw_data[i] = ort_extensions::ImageRawData(data, data + info.size);
+          image_raw_data[i] = reinterpret_cast<void*>(info.ptr);
+          image_sizes[i] = info.size;
         }
 
-        return std::make_shared<Images>(std::move(image_raw_data), image_datas.size());
+        return OgaImages::Load(image_raw_data.data(), image_sizes.data(), image_raw_data.size());
       });
 
-  pybind11::class_<Audios, std::shared_ptr<Audios>>(m, "Audios")
+  pybind11::class_<OgaAudios>(m, "Audios")
       .def_static("open", [](pybind11::args audio_paths) {
-        if (audio_paths.empty())
-          throw std::runtime_error("No audios provided");
-
         std::vector<std::string> audio_paths_string;
         std::vector<const char*> audio_paths_vector;
 
@@ -519,43 +435,46 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           audio_paths_vector.push_back(audio_paths_string.back().c_str());
         }
 
-        return std::shared_ptr<Audios>(LoadAudios(audio_paths_vector));
+        return OgaAudios::Load(audio_paths_vector);
+      })
+      .def_static("open_bytes", [](pybind11::args audio_datas) {
+        std::vector<const void*> audio_raw_data(audio_datas.size());
+        std::vector<size_t> audio_sizes(audio_datas.size());
+        for (size_t i = 0; i < audio_datas.size(); ++i) {
+          if (!pybind11::isinstance<pybind11::bytes>(audio_datas[i]))
+            throw std::runtime_error("Audio data must be bytes.");
+          auto bytes = audio_datas[i].cast<pybind11::bytes>();
+          pybind11::buffer_info info(pybind11::buffer(bytes).request());
+          audio_raw_data[i] = reinterpret_cast<void*>(info.ptr);
+          audio_sizes[i] = info.size;
+        }
+
+        return OgaAudios::Load(audio_raw_data.data(), audio_sizes.data(), audio_raw_data.size());
       });
 
-  pybind11::class_<PyNamedTensors, std::shared_ptr<PyNamedTensors>>(m, "NamedTensors");
-
-  pybind11::class_<MultiModalProcessor, std::shared_ptr<MultiModalProcessor>>(m, "MultiModalProcessor")
+  pybind11::class_<OgaMultiModalProcessor>(m, "MultiModalProcessor")
       .def(
-          "__call__", [](MultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) -> std::shared_ptr<PyNamedTensors> {
-            if (kwargs.contains("images")) {
-              if (processor.image_processor_ == nullptr) {
-                throw std::runtime_error("Image processor is not available for this model.");
-              }
-              const Images* images = kwargs["images"].cast<const Images*>();
-              if (!prompt.has_value()) {
-                throw std::runtime_error("Prompt is required for processing the image.");
-              }
-              return std::make_shared<PyNamedTensors>(
-                  processor.image_processor_->Process(*processor.tokenizer_, *prompt, images));
-            } else if (kwargs.contains("audios")) {
-              const Audios* audios = kwargs["audios"].cast<const Audios*>();
-              return std::make_shared<PyNamedTensors>(
-                  processor.audio_processor_->Process(audios));
-            } else {
-              throw std::runtime_error("Nothing to process.");
-            }
+          "__call__", [](OgaMultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) {
+            OgaImages* images{};
+            OgaAudios* audios{};
+            if (kwargs.contains("images"))
+              images = kwargs["images"].cast<OgaImages*>();
+            if (kwargs.contains("audios"))
+              audios = kwargs["audios"].cast<OgaAudios*>();
+            return processor.ProcessImagesAndAudios(prompt.value_or("").c_str(), images, audios);
           },
           pybind11::arg("prompt") = pybind11::none())
-      .def("create_stream", [](MultiModalProcessor& processor) { return processor.tokenizer_->CreateStream(); })
-      .def("decode", [](MultiModalProcessor& processor, pybind11::array_t<int32_t> tokens) {
-        return processor.tokenizer_->Decode(ToSpan(tokens));
+      .def("create_stream", [](OgaMultiModalProcessor& processor) { return OgaTokenizerStream::Create(processor); })
+      .def("decode", [](OgaMultiModalProcessor& processor, pybind11::array_t<int32_t> tokens) -> std::string {
+        return processor.Decode(ToSpan(tokens)).p_;
       });
 
-  pybind11::class_<Adapters, std::shared_ptr<Adapters>>(m, "Adapters")
-      .def(pybind11::init([](Model& model) {
-        return std::make_shared<Adapters>(&model);
+  pybind11::class_<OgaAdapters>(m, "Adapters")
+      .def(pybind11::init([](OgaModel& model) {
+        return OgaAdapters::Create(model);
       }))
-      .def("load", &Adapters::LoadAdapter);
+      .def("unload", &OgaAdapters::UnloadAdapter)
+      .def("load", &OgaAdapters::LoadAdapter);
 
   m.def("set_log_options", &SetLogOptions);
 
@@ -568,5 +487,3 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });
 }
-
-}  // namespace Generators

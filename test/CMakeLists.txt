@@ -17,25 +17,15 @@ target_include_directories(unit_tests PRIVATE
 
 target_link_directories(unit_tests PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(unit_tests PRIVATE
-  onnxruntime-genai-static
+  onnxruntime-genai
   GTest::gtest
 )
 set_target_properties(unit_tests PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai-static>"
+    RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:onnxruntime-genai>"
 )
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
 target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
-endif()
-
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
-  file(GLOB cuda_test_srcs CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/*.cu"
-    "${CMAKE_CURRENT_SOURCE_DIR}/*.cuh"
-  )
-  set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
-  target_link_libraries(unit_tests PRIVATE cublasLt cublas curand cufft cudart)
-  target_sources(unit_tests PRIVATE ${cuda_test_srcs})
 endif()
 
 set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test_models/")

@@ -644,7 +644,7 @@ def clean(args: argparse.Namespace, env: dict[str, str]):
 
 
 if __name__ == "__main__":
-    if not (util.is_windows() or util.is_linux() or util.is_mac()):
+    if not (util.is_windows() or util.is_linux() or util.is_mac() or util.is_aix()):
         raise OSError(f"Unsupported platform {sys.platform}.")
 
     arguments = _parse_args()

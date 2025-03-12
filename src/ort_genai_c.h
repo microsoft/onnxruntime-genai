@@ -35,19 +35,22 @@ extern "C" {
 
 typedef enum OgaElementType {
   OgaElementType_undefined,
-  OgaElementType_float32,  // maps to c type float
-  OgaElementType_uint8,    // maps to c type uint8_t
-  OgaElementType_int8,     // maps to c type int8_t
-  OgaElementType_uint16,   // maps to c type uint16_t
-  OgaElementType_int16,    // maps to c type int16_t
-  OgaElementType_int32,    // maps to c type int32_t
-  OgaElementType_int64,    // maps to c type int64_t
-  OgaElementType_string,   // string type (not currently supported by Oga)
-  OgaElementType_bool,     // maps to c type bool
-  OgaElementType_float16,  // IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
-  OgaElementType_float64,  // maps to c type double
-  OgaElementType_uint32,   // maps to c type uint32_t
-  OgaElementType_uint64,   // maps to c type uint64_t
+  OgaElementType_float32,     // maps to c type float
+  OgaElementType_uint8,       // maps to c type uint8_t
+  OgaElementType_int8,        // maps to c type int8_t
+  OgaElementType_uint16,      // maps to c type uint16_t
+  OgaElementType_int16,       // maps to c type int16_t
+  OgaElementType_int32,       // maps to c type int32_t
+  OgaElementType_int64,       // maps to c type int64_t
+  OgaElementType_string,      // string type (not currently supported by Oga)
+  OgaElementType_bool,        // maps to c type bool
+  OgaElementType_float16,     // IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
+  OgaElementType_float64,     // maps to c type double
+  OgaElementType_uint32,      // maps to c type uint32_t
+  OgaElementType_uint64,      // maps to c type uint64_t
+  OgaElementType_complex64,   // complex with float32 real and imaginary components
+  OgaElementType_complex128,  // complex with float64 real and imaginary components
+  OgaElementType_bfloat16,    // Non-IEEE floating-point format based on IEEE754 single-precision
 } OgaElementType;
 
 typedef struct OgaResult OgaResult;
@@ -153,14 +156,33 @@ OGA_EXPORT size_t OGA_API_CALL OgaSequencesGetSequenceCount(const OgaSequences* 
 OGA_EXPORT const int32_t* OGA_API_CALL OgaSequencesGetSequenceData(const OgaSequences* sequences, size_t sequence_index);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImage(const char* image_path, OgaImages** images);
-
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImages(const OgaStringArray* image_paths, OgaImages** images);
+
+/**
+ * \brief Load multiple images from an array of byte buffers
+ * \param[in] image_data Array of byte buffers containing the image data.
+ * \param[in] image_data_sizes Array of sizes of the byte buffers.
+ * \param[in] count Number of images to load.
+ * \param[out] images The loaded images.
+ * \return OgaResult containing the error message if the loading of the images failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadImagesFromBuffers(const void** image_data, const size_t* image_data_sizes, size_t count, OgaImages** images);
 
 OGA_EXPORT void OGA_API_CALL OgaDestroyImages(OgaImages* images);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudio(const char* audio_path, OgaAudios** audios);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudios(const OgaStringArray* audio_paths, OgaAudios** audios);
+
+/**
+ * \brief Load multiple audios from an array of byte buffers
+ * \param[in] audio_data Array of byte buffers containing the audio data.
+ * \param[in] audio_data_sizes Array of sizes of the byte buffers.
+ * \param[in] count Number of audios to load.
+ * \param[out] audios The loaded audios.
+ * \return OgaResult containing the error message if the loading of the audios failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudiosFromBuffers(const void** audio_data, const size_t* audio_data_sizes, size_t count, OgaAudios** audios);
 
 OGA_EXPORT void OGA_API_CALL OgaDestroyAudios(OgaAudios* audios);
 
@@ -220,6 +242,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAppendProvider(OgaConfig* config, co
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config, const char* provider, const char* key, const char* value);
 
 /**
+ * \brief Overlay JSON on top of config file
+ * \param[in] config The config to overlay the JSON on.
+ * \param[in] json The JSON to overlay on the config.
+ * \return OgaResult containing the error message if the overlaying of the JSON failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigOverlay(OgaConfig* config, const char* json);
+
+/**
  * \brief Creates a model from the given configuration directory.
  * \param[in] config_path The path to the model configuration directory. The path is expected to be encoded in UTF-8.
  * \param[out] out The created model.
@@ -243,6 +273,22 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* con
  * \return OgaResult containing the error message if the model creation failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out);
+
+/**
+ * \brief Returns the type of the model.
+ * \param[in] model The model to get the type from.
+ * \param[out] out The type of the model. Must be destroyed with OgaDestroyString
+ * \return OgaResult containing the error message if the getting of the model type failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetType(const OgaModel* model, const char** out);
+
+/**
+ * \brief Returns the device type of the model.
+ * \param[in] model The model to get the device type from.
+ * \param[out] out The device type of the model. Must be destroyed with OgaDestroyString
+ * \return OgaResult containing the error message if the getting of the device type failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char** out);
 
 /**
  * \brief Destroys the given config
@@ -334,6 +380,15 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* oga_g
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GenerateNextToken(OgaGenerator* generator);
 
+/**
+ * \brief Returns a pointer to the next tokens generated by the model. The out_count will match the batch size
+ * \param[in] generator The generator to get the next tokens from.
+ * \param[out] out The pointer to the next tokens generated by the model. The pointer is valid until the next OgaGenerator call
+ * \param[out] out_count The number of tokens in the out array.
+ * \return OgaResult containing the error message if the getting of the next tokens failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetNextTokens(const OgaGenerator* generator, const int32_t** out, size_t* out_count);
+
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, const char* key, const char* value);
 
 /**
@@ -407,6 +462,16 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
 /**
+ * Batch encode an array of strings and return a single tensor output
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer*, const char** strings, size_t count, OgaTensor** out);
+
+/**
+ * Batch decode a tensor of token ids and return an array of strings
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer*, const OgaTensor* tensor, OgaStringArray** out);
+
+/**
  * \brief Converts the given string to a single token id.
  * \param[in] tokenizer The tokenizer to use to convert the string to a token id.
  * \param[in] str The string to convert to a token id.
@@ -418,6 +483,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* tok
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, OgaNamedTensors** input_tensors);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const OgaAudios* audios, OgaNamedTensors** input_tensors);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images,
+                                                                      const OgaAudios* audios, OgaNamedTensors** input_tensors);
 
 /** Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
@@ -437,16 +505,18 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
 
-/** Create an OgaTensor from a user owned buffer. The OgaTensor does not own the memory (as it has no way to free it) so
- * the 'data' parameter must be valid for the lifetime of the OgaTensor.
+/** Create an OgaTensor from an optional user owned buffer. If a user owned buffer is supplied, the OgaTensor does
+ * not own the memory (as it has no way to free it) so the 'data' parameter must be valid for the lifetime of the OgaTensor.
+ *  If the 'data' parameter is nullptr, the OgaTensor will allocate its own memory.
  *
- * \param[in] data User supplied memory pointer, must remain valid for lifetime of the OgaTensor
+ * \param[in] data User supplied memory pointer, if non nullptr it must remain valid for lifetime of the OgaTensor
  * \param[in] shape_dims Pointer to array of int64_t values that define the tensor shape, example [1 20 30] would be equivalent to a C array of [1][20][30]
  * \param[in] shape_dims_count Count of elements in the shape_dims array
  * \param[in] element_type The data type that 'data' points to.
  * \param[out] out Writes the newly created OgaTensor into this, must be destroyed with OgaDestroyTensor
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* shape_dims, size_t shape_dims_count, OgaElementType element_type, OgaTensor** out);
+
 OGA_EXPORT void OGA_API_CALL OgaDestroyTensor(OgaTensor* tensor);
 
 /** Get the OgaElementType of the data stored in the OgaTensor
@@ -464,6 +534,49 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetShape(OgaTensor*, int64_t* shape_
 /** A pointer to the tensor data, it is typically cast into the actual data type of the tensor
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTensorGetData(OgaTensor*, void** out);
+
+/** \brief Create an OgaNamedTensors
+ * \param[out] out The created OgaNamedTensors
+ * \return OgaResult containing the error message if the creation of the OgaNamedTensors failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateNamedTensors(OgaNamedTensors** out);
+
+/** \brief Lookup a tensor in a NamedTensor set by name
+ * \param[in] named_tensors The named tensors to search
+ * \param[in] name The name of the tensor to find
+ * \param[out] out The tensor with the given name
+ * \return OgaResult containing the error message if the tensor with the given name could not be found.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsGet(const OgaNamedTensors* named_tensors, const char* name, OgaTensor** out);
+
+/** \brief Set a tensor in a NamedTensor set by name
+ * \param[in] named_tensors The named tensors to set the tensor
+ * \param[in] name The name of the tensor to set
+ * \param[in] tensor The tensor to set
+ * \return OgaResult containing the error message if the tensor with the given name could not be set.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsSet(OgaNamedTensors* named_tensors, const char* name, OgaTensor* tensor);
+
+/** \brief Delete a tensor in a NamedTensor set by name
+ * \param[in] named_tensors The named tensors to remove the tensor
+ * \param[in] name The name of the tensor to remove
+ * \return OgaResult containing the error message if the tensor with the given name could not be removed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsDelete(OgaNamedTensors* named_tensors, const char* name);
+
+/** \brief Get the number of tensors in the NamedTensors
+ * \param[in] named_tensors The named tensors to get the count of the tensors
+ * \param[out] out The number of tensors in the NamedTensors
+ * \return OgaResult containing the error message if the getting of the count of the tensors failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsCount(const OgaNamedTensors* named_tensors, size_t* out);
+
+/** \brief Return an OgaStringArray of the names of the tensors in an OgaNamedTensors object
+ * \param[in] named_tensors The named tensors to get the names of the tensors
+ * \param[out] out The OgaStringArray containing the names of the tensors
+ * \return OgaResult containing the error message if the getting of the names of the tensors failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsGetNames(const OgaNamedTensors* named_tensors, OgaStringArray** out);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetCurrentGpuDeviceId(int device_id);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGetCurrentGpuDeviceId(int* device_id);
@@ -496,9 +609,18 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaStringArrayAddString(OgaStringArray* strin
 /**
  * \brief Gets the number of strings in the string_array.
  * \param[in] string_array The OgaStringArray object to get the count of the strings.
- * \return The number of strings in the string_array.
+ * \param[out] out The number of strings in the string_array.
+ * \return The result of the operation. If the operation is successful, a nullptr is returned.
  */
-OGA_EXPORT size_t OGA_API_CALL OgaStringArrayGetCount(const OgaStringArray* string_array);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStringArrayGetCount(const OgaStringArray* string_array, size_t* out);
+
+/**
+ * \brief Get a string from a string_array
+ * \param[in] string_array The OgaStringArray object to get the string from.
+ * \param[in] index The index of the string to get.
+ * \return The string at the given index.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaStringArrayGetString(const OgaStringArray* string_array, size_t index, const char** out);
 
 /**
  * \brief Creates the OgaAdapters object that manages the adapters.

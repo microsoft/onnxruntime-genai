@@ -12,7 +12,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  HF_TOKEN: ${{ secrets.HF_TOKEN }}
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Linux&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: Microsoft.ML.OnnxRuntime.Gpu.Linux
   ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"

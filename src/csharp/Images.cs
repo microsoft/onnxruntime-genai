@@ -6,9 +6,6 @@ using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    /// <summary>
-    /// This class can load images from the given path and prepare them for processing.
-    /// </summary>
     public class Images : IDisposable
     {
         private IntPtr _imagesHandle;
@@ -21,7 +18,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _imagesHandle; } }
 
-        private static Images Load(string[] imagePaths)
+        public static Images Load(string[] imagePaths)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateStringArray(out IntPtr stringArray));
             foreach (string imagePath in imagePaths)

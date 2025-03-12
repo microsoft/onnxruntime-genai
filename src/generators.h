@@ -23,17 +23,11 @@
 #include <unordered_set>
 #include <variant>
 #include <vector>
-#if USE_CUDA
-#include <cuda_runtime.h>
-#else
-// If we don't include cuda_runtime.h, we define this to avoid lots of extra #ifdefs
-using cudaStream_t = void*;
-#endif
 
 #include "leakcheck.h"
 #include "make_string.h"
-#include "smartptrs.h"
 #include "models/onnxruntime_api.h"
+#include "smartptrs.h"
 #include "models/debugging.h"
 #include "config.h"
 #include "logging.h"
@@ -50,24 +44,31 @@ struct Tokenizer;
 
 template <typename T>
 DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
-  return device.WrapMemory(std::span<T>{value.GetTensorMutableData<T>(), value.GetTensorTypeAndShapeInfo()->GetElementCount()});
+  auto info = value.GetTensorTypeAndShapeInfo();
+  assert(info->GetElementType() == Ort::TypeToTensorType<std::remove_const_t<T>>);
+  return device.WrapMemory(std::span<T>{value.GetTensorMutableData<T>(), info->GetElementCount()});
 }
+
+DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value);
+
+template <typename T>
+struct OrtTensor {
+  OrtTensor(std::unique_ptr<OrtValue> ort_value, DeviceInterface& device)
+      : ort_value_{std::move(ort_value)}, device_span_{WrapTensor<T>(device, *ort_value_)} {}
+
+  operator OrtValue*() { return ort_value_.get(); }
+
+  std::unique_ptr<OrtValue> ort_value_;
+  DeviceSpan<T> device_span_;
+};
 
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
 
-enum struct DeviceType {
-  CPU,
-  CUDA,
-  DML,
-  WEBGPU,
-  QNN,
-};
-
 std::string to_string(DeviceType device_type);
 DeviceInterface* GetDeviceInterface(DeviceType type);
 
-struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams> {
+struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams>, ExternalRefCounted<GeneratorParams> {
   GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
   GeneratorParams(const Model& model);
 
@@ -78,9 +79,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   bool use_cuda_graph{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
-  DeviceInterface* p_device{};
-  DeviceType device_type{DeviceType::CPU};
-  cudaStream_t cuda_stream{};
+  DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
 
   cpu_span<int32_t> aux_input_ids{};  // Intermediate solution to be used with SetInputs function for multimodal and whisper models
 
@@ -90,8 +89,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   };
 
   std::variant<Whisper> inputs;
-
-  std::shared_ptr<GeneratorParams> external_owner_;  // Set to 'this' when created by the C API to preserve lifetime
 
   struct Input {
     std::string name;
@@ -142,10 +139,8 @@ struct OrtGlobals {
   OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
-#if USE_CUDA
-  std::unique_ptr<OrtMemoryInfo> memory_info_cuda_;
-  std::unique_ptr<Ort::Allocator> allocator_cuda_;
-#endif
+  std::unique_ptr<Ort::Allocator> allocator_device_[static_cast<int>(DeviceType::MAX)];
+
  private:
   OrtGlobals(const OrtGlobals&) = delete;
   void operator=(const OrtGlobals&) = delete;
@@ -160,6 +155,9 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);
+
+// Fallback to copy between two separate device buffers by going through CPU memory (slow unless we're the CPU device)
+void CopyThroughCpu(DeviceBuffer& dest, size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes);
 
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
 

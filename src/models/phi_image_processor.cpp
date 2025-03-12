@@ -11,9 +11,16 @@ namespace Generators {
 namespace {
 
 std::unique_ptr<OrtValue> ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
-                                             ortc::Tensor<int64_t>* num_img_tokens, Ort::Allocator& allocator) {
-  const size_t num_images = num_img_tokens ? num_img_tokens->NumberOfElement() : 0U;
-  auto* num_img_tokens_data = num_img_tokens ? num_img_tokens->Data() : nullptr;
+                                             OrtxTensor* num_img_tokens, Ort::Allocator& allocator) {
+  const int64_t *num_img_tokens_data{}, *num_img_tokens_shape{};
+  size_t num_img_tokens_num_dims;
+  CheckResult(OrtxGetTensorData(num_img_tokens, reinterpret_cast<const void**>(&num_img_tokens_data),
+                                &num_img_tokens_shape, &num_img_tokens_num_dims));
+  const int64_t num_images = num_img_tokens_data
+                                 ? std::accumulate(num_img_tokens_shape,
+                                                   num_img_tokens_shape + num_img_tokens_num_dims,
+                                                   1LL, std::multiplies<int64_t>())
+                                 : 0LL;
 
   // Split the prompt string based on the occurrences of the pattern "<|image_<number>|>"
   // Here the <number> represents the image id.
@@ -43,7 +50,7 @@ std::unique_ptr<OrtValue> ProcessImagePrompt(const Generators::Tokenizer& tokeni
                                                   image_id_position_end - image_id_position_begin));
   }
 
-  if (std::set<int32_t>(image_ids.begin(), image_ids.end()).size() != num_images) {
+  if (static_cast<int64_t>(std::set<int32_t>(image_ids.begin(), image_ids.end()).size()) != num_images) {
     throw std::runtime_error("Number of unique image tags does not match the number of images.");
   }
 
@@ -73,61 +80,21 @@ std::unique_ptr<OrtValue> ProcessImagePrompt(const Generators::Tokenizer& tokeni
   return input_ids_value;
 }
 
-std::unique_ptr<OrtValue> ProcessPixelValues(ortc::Tensor<float>* pixel_values, ONNXTensorElementDataType expected_type,
-                                             Ort::Allocator& allocator) {
-  if (!(expected_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT || expected_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16)) {
-    throw std::runtime_error("Expected pixel_values to be of type float or float16. Actual: " + std::to_string(expected_type));
-  }
-  auto pixel_values_value = expected_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT
-                                ? OrtValue::CreateTensor<float>(allocator, pixel_values->Shape())
-                                : OrtValue::CreateTensor<Ort::Float16_t>(allocator, pixel_values->Shape());
-  if (expected_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    std::copy(pixel_values->Data(), pixel_values->Data() + pixel_values->NumberOfElement(),
-              pixel_values_value->GetTensorMutableData<float>());
-  } else {
-    auto pixel_values_fp32 = OrtValue::CreateTensor<float>(
-        allocator.GetInfo(),
-        std::span<float>(const_cast<float*>(pixel_values->Data()), pixel_values->NumberOfElement()),
-        pixel_values->Shape());
-    ConvertFp32ToFp16(allocator, *pixel_values_fp32, pixel_values_value, DeviceType::CPU, nullptr);
-  }
-
-  return pixel_values_value;
-}
-
-std::unique_ptr<OrtValue> ProcessImageSizes(ortc::Tensor<int64_t>* image_sizes, Ort::Allocator& allocator) {
-  auto image_sizes_value = OrtValue::CreateTensor<int64_t>(allocator, image_sizes->Shape());
-  std::copy(image_sizes->Data(), image_sizes->Data() + image_sizes->NumberOfElement(),
-            image_sizes_value->GetTensorMutableData<int64_t>());
-  return image_sizes_value;
-}
-
 }  // namespace
 
-std::unique_ptr<Images> LoadImages(const std::span<const char* const>& image_paths) {
-  for (const char* image_path : image_paths) {
-    if (!fs::path(image_path).exists()) {
-      throw std::runtime_error("Image path does not exist: " + std::string(image_path));
-    }
-  }
-  auto [images, num_images] = ort_extensions::LoadRawData<const char* const*, ort_extensions::ImageRawData>(
-      image_paths.data(), image_paths.data() + image_paths.size());
-  return std::make_unique<Images>(std::move(images), num_images);
-}
-
-ImageProcessor::ImageProcessor(Config& config, const SessionInfo& session_info)
+PhiImageProcessor::PhiImageProcessor(Config& config, const SessionInfo& session_info)
     : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)} {
-  const std::string default_processor_file_name = "processor_config.json";
-  auto processor_config = (config.config_path / fs::path(default_processor_file_name)).string();
-  CheckResult(OrtxCreateProcessor(processor_.Address(), processor_config.c_str()));
+  auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
+  CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 
   config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.embedding.inputs.input_ids);
   config.AddMapping(std::string(Config::Defaults::PixelValuesName), config.model.vision.inputs.pixel_values);
   config.AddMapping(std::string(Config::Defaults::ImageSizesName), config.model.vision.inputs.image_sizes);
 }
 
-std::unique_ptr<NamedTensors> ImageProcessor::Process(const Tokenizer& tokenizer, const std::string& prompt,
-                                                      const Images* images) const {
+std::unique_ptr<NamedTensors> PhiImageProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
+  std::string prompt = std::string(payload.prompt);
+  const Images* images = payload.images;
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
 
@@ -137,25 +104,31 @@ std::unique_ptr<NamedTensors> ImageProcessor::Process(const Tokenizer& tokenizer
     return named_tensors;
   }
 
-  ort_extensions::ImageProcessor* processor = static_cast<ort_extensions::ImageProcessor*>(processor_.p_);
+  ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;
+  CheckResult(OrtxImagePreProcess(processor_.get(), images->images_.get(), result.ToBeAssigned()));
 
-  ortc::Tensor<float>* pixel_values = nullptr;
-  ortc::Tensor<int64_t>* image_sizes = nullptr;
-  ortc::Tensor<int64_t>* num_img_tokens = nullptr;
-  auto [status, result] = processor->PreProcess(ort_extensions::span(images->images_.get(), images->num_images_),
-                                                &pixel_values, &image_sizes, &num_img_tokens);
-  if (!status.IsOk()) {
-    throw std::runtime_error(status.ToString());
-  }
+  OrtxTensor* pixel_values = nullptr;
+  CheckResult(OrtxTensorResultGetAt(result.get(), 0, &pixel_values));
+
+  OrtxTensor* image_sizes = nullptr;
+  CheckResult(OrtxTensorResultGetAt(result.get(), 1, &image_sizes));
+
+  OrtxTensor* num_img_tokens = nullptr;
+  CheckResult(OrtxTensorResultGetAt(result.get(), 2, &num_img_tokens));
 
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName),
                          std::make_shared<Tensor>(ProcessImagePrompt(tokenizer, prompt, num_img_tokens, allocator)));
-  named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                         std::make_shared<Tensor>(ProcessPixelValues(pixel_values, pixel_values_type_, allocator)));
+  if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                           std::make_shared<Tensor>(ProcessTensor<float>(pixel_values, allocator)));
+  } else {
+    named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                           std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(pixel_values, allocator)));
+  }
   named_tensors->emplace(std::string(Config::Defaults::ImageSizesName),
-                         std::make_shared<Tensor>(ProcessImageSizes(image_sizes, allocator)));
-
-  processor->ClearOutputs(&result);
+                         std::make_shared<Tensor>(ProcessTensor<int64_t>(image_sizes, allocator)));
+  named_tensors->emplace(Config::Defaults::NumImageTokens,
+                         std::make_shared<Tensor>(ProcessTensor<int64_t>(num_img_tokens, allocator)));
 
   return named_tensors;
 }

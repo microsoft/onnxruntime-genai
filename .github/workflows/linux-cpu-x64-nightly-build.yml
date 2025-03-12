@@ -12,7 +12,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 env:
-  HF_TOKEN: ${{ secrets.HF_TOKEN }}
   ort_dir: "onnxruntime-linux-x64-1.18.0"
   ort_zip: "onnxruntime-linux-x64-1.18.0.tgz"
   ort_url: "https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-x64-1.18.0.tgz"
@@ -66,7 +65,7 @@ jobs:
           ls -l ${{ github.workspace }}/build
 
       - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: onnxruntime-genai-linux-cpu-x64
           path: ${{ github.workspace }}/build/**/*.a

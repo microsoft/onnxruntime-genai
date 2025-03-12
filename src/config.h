@@ -11,14 +11,36 @@ struct Config {
   Config(const fs::path& path, std::string_view json_overlay);
 
   struct Defaults {
+    // Decoder names
     static constexpr std::string_view InputIdsName = "input_ids";
-    static constexpr std::string_view PixelValuesName = "pixel_values";
-    static constexpr std::string_view ImageSizesName = "image_sizes";
-    static constexpr std::string_view InputFeaturesName = "encoder_input_ids";
-    static constexpr std::string_view ImageFeaturesName = "image_features";
+    static constexpr std::string_view AttentionMaskName = "attention_mask";
+    static constexpr std::string_view PositionIdsName = "position_ids";
+    static constexpr std::string_view PastKeyName = "past_key_values.%d.key";
+    static constexpr std::string_view PastValueName = "past_key_values.%d.value";
+    static constexpr std::string_view LogitsName = "logits";
+    static constexpr std::string_view PresentKeyName = "present.%d.key";
+    static constexpr std::string_view PresentValueName = "present.%d.value";
+
+    static constexpr std::string_view InputsEmbedsName = "inputs_embeds";
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
     static constexpr std::string_view promptTemplate = "{Content}";
+
+    // Vision names
+    static constexpr std::string_view PixelValuesName = "pixel_values";
+    static constexpr std::string_view ImageSizesName = "image_sizes";
+    static constexpr std::string_view ImageFeaturesName = "image_features";
+    static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
+    static constexpr std::string_view NumImageTokens = "num_image_tokens";
+
+    // Speech names
+    static constexpr std::string_view InputFeaturesName = "encoder_input_ids";
+    static constexpr std::string_view AudioEmbedsName = "audio_embeds";
+    static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
+    static constexpr std::string_view AudioSizesName = "audio_sizes";
+    static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
+    static constexpr std::string_view AudioFeaturesName = "audio_features";
+    static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -48,6 +70,7 @@ struct Config {
     bool use_env_allocators{};
 
     std::vector<ProviderOptions> provider_options;
+    std::optional<GraphOptimizationLevel> graph_optimization_level;
   };
 
   struct Model {
@@ -77,25 +100,46 @@ struct Config {
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string image_features{Defaults::ImageFeaturesName};
+        std::string audio_features{Defaults::AudioFeaturesName};
       } inputs;
 
       struct Outputs {
-        std::string embeddings{"inputs_embeds"};
+        std::string embeddings{Defaults::InputsEmbedsName};
       } outputs;
     } embedding;
 
     struct Vision {
       std::string filename;
+      std::string config_filename{"processor_config.json"};
+      std::optional<std::string> adapter_filename{};
 
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
         std::string image_sizes{Defaults::ImageSizesName};
+        std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
       } inputs;
 
       struct Outputs {
         std::string image_features{Defaults::ImageFeaturesName};
       } outputs;
     } vision;
+
+    struct Speech {
+      std::string filename;
+      std::string config_filename{"audio_processor_config.json"};
+      std::optional<std::string> adapter_filename{};
+
+      struct Inputs {
+        std::string audio_embeds{Defaults::AudioEmbedsName};
+        std::string attention_mask{Defaults::AudioAttentionMaskName};
+        std::string audio_sizes{Defaults::AudioSizesName};
+        std::string audio_projection_mode{Defaults::AudioProjectionModeName};
+      } inputs;
+
+      struct Outputs {
+        std::string audio_features{Defaults::AudioFeaturesName};
+      } outputs;
+    } speech;
 
     struct Decoder {
       std::string filename;
@@ -115,10 +159,11 @@ struct Config {
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
-        std::string embeddings{"inputs_embeds"};
-        std::string position_ids{"position_ids"};
-        std::string attention_mask{"attention_mask"};
-        std::string past_key_names{"past_key_values.%d.key"}, past_value_names{"past_key_values.%d.value"};
+        std::string embeddings{Defaults::InputsEmbedsName};
+        std::string position_ids{Defaults::PositionIdsName};
+        std::string attention_mask{Defaults::AttentionMaskName};
+        std::string past_key_names{Defaults::PastKeyName};
+        std::string past_value_names{Defaults::PastValueName};
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
@@ -126,8 +171,9 @@ struct Config {
       } inputs;
 
       struct Outputs {
-        std::string logits{"logits"};
-        std::string present_key_names{"present.%d.key"}, present_value_names{"present.%d.value"};
+        std::string logits{Defaults::LogitsName};
+        std::string present_key_names{Defaults::PresentKeyName};
+        std::string present_value_names{Defaults::PresentValueName};
         std::string present_names;  // When key/value pairs are combined
         std::string cross_present_key_names, cross_present_value_names;
       } outputs;
@@ -188,6 +234,7 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
+void OverlayConfig(Config& config, std::string_view json);
 bool IsCudaGraphEnabled(Config::SessionOptions& session_options);
 
 }  // namespace Generators

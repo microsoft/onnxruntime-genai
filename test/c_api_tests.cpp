@@ -1,17 +1,18 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cstring>  // for memcmp
+#include <numeric>
 #include <iostream>
 #include <thread>
 #include <vector>
+#include "span.h"
+
+#define OGA_USE_SPAN 1
+#include "models/onnxruntime_api.h"
+#include "ort_genai.h"
 
 #include <gtest/gtest.h>
-
-#include "generators.h"
-#include "models/model.h"
-#include "ort_genai.h"
-#include "search.h"
-#include "span.h"
 
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
@@ -19,6 +20,8 @@
 #ifndef PHI2_PATH
 #if USE_CUDA
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cuda"
+#elif USE_DML
+#define PHI2_PATH MODEL_PATH "phi-2/int4/dml"
 #else
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
 #endif
@@ -153,6 +156,7 @@ TEST(CAPITests, MaxLength) {
   generator->AppendTokens(input_ids_0.data(), input_ids_0.size());
   EXPECT_THROW(generator->AppendTokens(input_ids_1.data(), input_ids_1.size()), std::runtime_error);
 
+#if !USE_DML
   // Batch size 3 case
   std::vector<int32_t> input_ids_2{1, 2, 3, 5, 8, 13, 21, 34, 55, 89,
                                    0, 0, 0, 52, 104, 52, 53, 54, 55, 56,
@@ -163,10 +167,12 @@ TEST(CAPITests, MaxLength) {
 
   generator = OgaGenerator::Create(*model, *params);
   EXPECT_THROW(generator->AppendTokens(input_ids_2.data(), input_ids_2.size()), std::runtime_error);
+#endif
 }
 
+// DML doesn't support batch_size > 1
 TEST(CAPITests, EndToEndPhiBatch) {
-#if TEST_PHI2
+#if TEST_PHI2 && !USE_DML
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
 
@@ -196,6 +202,65 @@ TEST(CAPITests, EndToEndPhiBatch) {
     auto out_string = tokenizer->Decode(generator->GetSequenceData(i), generator->GetSequenceCount(i));
     std::cout << "Decoded string:" << out_string << std::endl;
   }
+
+  // Verify outputs match expected outputs
+  std::vector<int32_t> expected_output{
+      1212, 318, 257, 1332, 13, 50256, 50256, 50256, 50256, 50256, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278, 6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417, 6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974,
+      49, 1381, 389, 7427, 17252, 0, 50256, 50256, 50256, 50256, 198, 50284, 37811, 628, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256,
+      464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13, 198, 50284, 37811, 628, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256};
+  
+  for (size_t i = 0; i < 3; i++) {
+    const auto sequence_length = generator->GetSequenceCount(i);
+    const auto* sequence_data = generator->GetSequenceData(i);
+
+    ASSERT_LE(sequence_length, 40);
+
+    const auto* expected_output_start = &expected_output[i * 40];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
+  }
+#endif
+}
+
+TEST(CAPITests, EndToEndPhi) {
+#if TEST_PHI2
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  const char* input_strings[] = {
+      "This is a test."
+  };
+
+  auto input_sequences = OgaSequences::Create();
+  for (auto& string : input_strings)
+    tokenizer->Encode(string, *input_sequences);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 40);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*input_sequences);
+
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Decode The Batch
+  auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
+  std::cout << "Decoded string:" << out_string << std::endl;
+
+  // Verify outputs match expected outputs
+  std::vector<int32_t> expected_output{
+      1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278, 
+      6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417, 
+      6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974, 82, 1039, 889, 263, 3684};
+
+  const auto sequence_length = generator->GetSequenceCount(0);
+  const auto* sequence_data = generator->GetSequenceData(0);
+
+  ASSERT_LE(sequence_length, 40);
+
+  const auto* expected_output_start = &expected_output[0];
+  EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 #endif
 }
 
@@ -448,7 +513,8 @@ TEST(CAPITests, SetTerminate) {
 #endif
 }
 
-#if TEST_PHI2
+// DML Doesn't support batch_size > 1
+#if TEST_PHI2 && !USE_DML
 
 struct Phi2Test {
   Phi2Test() {
@@ -526,12 +592,14 @@ TEST(CAPITests, TopKTopPCAPI) {
   test.Run();
 }
 
-#endif  // TEST_PHI2
+#endif  // TEST_PHI2 && !USE_DML
 
 #if TEST_PHI2
 TEST(CAPITests, AdaptersTest) {
 #ifdef USE_CUDA
   using OutputType = Ort::Float16_t;
+#elif defined(USE_DML)
+  using OutputType = Ort::Float16_t; 
 #else
   using OutputType = float;
 #endif

@@ -9,11 +9,11 @@
 #include "search.h"
 #include "cpu/interface.h"
 #include "cuda/interface.h"
-#if USE_CUDA
-#include "models/kernels.h"
-#endif
+#include "dml/interface.h"
+#include "qnn/interface.h"
+#include "webgpu/interface.h"
 
-#if _WIN32
+#if defined(_WIN32)
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
 
 std::string CurrentModulePath() {
@@ -39,11 +39,6 @@ void ThrowErrorIfSessionTerminated(bool is_session_terminated) {
 
 namespace Generators {
 
-#if USE_CUDA
-// TODO: Remove once we remove all dependencies
-void OnCudaError(cudaError_t error) { assert(false); }
-#endif
-
 static bool _ = (Ort::InitApi(), false);
 
 static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
@@ -57,14 +52,16 @@ OrtGlobals::OrtGlobals()
   auto arena_config = OrtArenaCfg::Create(0, -1, -1, -1);
   Ort::Allocator& allocator_cpu{Ort::Allocator::GetWithDefaultOptions()};
   env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
+
+  // Init the CPU device (special case because it always exists, and its allocator is special
+  GetDeviceInterface(DeviceType::CPU)->InitOrt(*Ort::api, allocator_cpu);
 }
 
 // Ensure Shutdown() has been called before process exit
-struct ValidateShutdown {
-  ~ValidateShutdown() {
+struct EnsureShutdown {
+  ~EnsureShutdown() {
     if (GetOrtGlobals()) {
-      std::cerr << "OGA Error: Shutdown must be called before process exit, please check the documentation for the proper API to call to ensure clean shutdown." << std::endl;
-      std::abort();
+      Shutdown();
     }
   }
 };
@@ -72,7 +69,7 @@ struct ValidateShutdown {
 std::unique_ptr<OrtGlobals>&
 GetOrtGlobals() {
   static auto globals = std::make_unique<OrtGlobals>();
-  static auto validate = std::make_unique<ValidateShutdown>();  // Must be after the above line so the destructor runs before the above destructor
+  static auto validate = std::make_unique<EnsureShutdown>();  // Must be after the above line so the destructor runs before the above destructor
   return globals;
 }
 
@@ -86,7 +83,6 @@ bool LeakTypeList<Types...>::Dump() {
 void Shutdown() {
   if (LeakTypes::Dump()) {
     std::cerr << "    Please see the documentation for the API being used to ensure proper cleanup." << std::endl;
-    std::abort();
   }
 
   GetOrtGlobals().reset();  // Delete now because on process exit is too late
@@ -96,76 +92,108 @@ OrtEnv& GetOrtEnv() {
   return *GetOrtGlobals()->env_;
 }
 
+// Fallback to copy between two separate device buffers by going through CPU memory (slow unless we're the CPU device)
+void CopyThroughCpu(DeviceBuffer& dest, size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) {
+  source.CopyDeviceToCpu();
+  auto source_span = std::span<const uint8_t>(source.p_cpu_ + begin_source, size_in_bytes);
+  // If we're overwriting the entire destination
+  if (dest.size_in_bytes_ == size_in_bytes)
+    dest.AllocateCpu();
+  else
+    dest.CopyDeviceToCpu();  // Overwriting part of destination, so copy over initial contents first
+  std::copy(source_span.begin(), source_span.end(), dest.p_cpu_ + begin_dest);
+  dest.CopyCpuToDevice();
+}
+
 struct GenaiInterfaceImpl : GenaiInterface {
 #if _WIN32
   void* HeapAllocate(size_t size) override { return std::malloc(size); }
   void HeapFree(void* p) override { std::free(p); }
 #endif
 
+  void CopyThroughCpu(DeviceBuffer& dest, size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
+    return Generators::CopyThroughCpu(dest, begin_dest, source, begin_source, size_in_bytes);
+  }
+
   Generators::LogItems& GetLogItems() override { return g_log; }
   std::ostream& operator_leftshift(std::ostream& stream, Generators::SGR sgr_code) override { return stream << sgr_code; }
   std::ostream& Log(std::string_view label, std::string_view text = {}) override { return Log(label, text); }
 
-  void DumpSpan(std::ostream& stream, std::span<const float> values) override { return DumpSpan(stream, values); }
-  void DumpSpan(std::ostream& stream, std::span<const int> values) override { return DumpSpan(stream, values); }
+  void DumpSpan(std::ostream& stream, std::span<const float> values) override { return Generators::DumpSpan(stream, values); }
+  void DumpSpan(std::ostream& stream, std::span<const int> values) override { return Generators::DumpSpan(stream, values); }
 
   void Sequences_AfterAppendNextTokens(Sequences* p_this, DeviceSpan<int32_t> next_tokens, size_t batch_beam_size) override { return p_this->AfterAppendNextTokens(next_tokens, batch_beam_size); }
   void Sequences_RewindTo(Sequences* p_this, size_t new_length) override { return p_this->RewindTo(new_length); }
 } g_genai;
 
-#if USE_CUDA
-CudaInterface* GetCudaInterface() {
-// Load the shared library onnxruntime-genai-cuda.dll
-// This is a workaround to avoid linking the CUDA library to the generator library
-// The CUDA library is only needed for the CUDA allocator
-#ifdef _WIN32
-  static std::unique_ptr<void, void (*)(void*)> cuda_library{LoadLibrary((CurrentModulePath() + "onnxruntime-genai-cuda.dll").c_str()),
-                                                             [](void* h) { FreeLibrary(reinterpret_cast<HMODULE>(h)); }};
-#else
-  static std::unique_ptr<void, void (*)(void*)> cuda_library{dlopen((Ort::GetCurrentModuleDir() + "/libonnxruntime-genai-cuda.so").c_str(), RTLD_NOW | RTLD_DEEPBIND),
-                                                             [](void* h) { dlclose(h); }};
-#endif
+#if defined(_WIN32)
+struct LibraryHandle {
+  LibraryHandle(const char* filename) {
+    auto path = CurrentModulePath() + filename;
+    handle_ = LoadLibrary(path.c_str());
+    if (!handle_)
+      throw std::runtime_error(std::string("Failed to load library: ") + path + " Error: " + std::to_string(GetLastError()));
+  };
 
-  if (!cuda_library) {
-    throw std::runtime_error("Cuda interface not available.");
+  ~LibraryHandle() { FreeLibrary(handle_); }
+
+  FARPROC __stdcall GetSymbol(const char* name) { return ::GetProcAddress(handle_, name); }
+
+  operator HANDLE() { return handle_; }
+
+ private:
+  HMODULE handle_{};
+};
+#elif defined(__linux__) && !defined(__ANDROID__)
+struct LibraryHandle {
+  LibraryHandle(const char* filename) {
+    auto path = Ort::GetCurrentModuleDir() + "/" + filename;
+    handle_ = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    if (!handle_)
+      throw std::runtime_error(std::string("Failed to load library: ") + dlerror());  // dlerror() includes the path
+  }
+  ~LibraryHandle() {
+    dlclose(handle_);
   }
 
-  Generators::CudaInterface* GetInterface(GenaiInterface * p_genai);
-  static CudaInterface* cuda_interface{[] {
-#ifdef _WIN32
-    auto get_cuda_fn = reinterpret_cast<decltype(&GetInterface)>(GetProcAddress(reinterpret_cast<HMODULE>(cuda_library.get()), "GetInterface"));
+  void* GetSymbol(const char* name) { return ::dlsym(handle_, name); }
+
+  operator void*() { return handle_; }
+
+ private:
+  void* handle_{};
+};
 #else
-    auto get_cuda_fn = reinterpret_cast<decltype(&GetInterface)>(dlsym(cuda_library.get(), "GetInterface"));
-#endif
-    return get_cuda_fn(&g_genai);
-  }()};
+struct LibraryHandle {
+  LibraryHandle(const char* filename) {}
+  ~LibraryHandle() {}
 
-  return cuda_interface;
+  void* GetSymbol(const char* name) { return nullptr; }
+
+  operator bool() { return false; }
+};
+#endif
+
+DeviceInterface* GetCudaInterface() {
+  try {
+#if defined(_WIN32)
+    static LibraryHandle library{"onnxruntime-genai-cuda.dll"};
+#elif defined(__linux__) && !defined(__ANDROID__)
+    static LibraryHandle library{"libonnxruntime-genai-cuda.so"};
+#else
+    static LibraryHandle library{""};
+#endif
+    if (!library)
+      throw std::runtime_error("Shared library load failure (see first error)");
+
+    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai);
+    static DeviceInterface* cuda_interface = reinterpret_cast<decltype(&GetInterface)>(library.GetSymbol("GetInterface"))(&g_genai);
+
+    return cuda_interface;
+  } catch (const std::exception& e) {
+    throw std::runtime_error("Cuda interface not available: " + std::string(e.what()));
+  }
 }
-
-namespace cuda {
-void LaunchInt32ToInt64(const int32_t* input, int64_t* output, int count, cudaStream_t stream) { GetCudaInterface()->Int32ToInt64(input, output, count, stream); }
-void LaunchFp16ToFp32(const uint16_t* input, float* output, int count, cudaStream_t stream) { GetCudaInterface()->Fp16ToFp32(input, output, count, stream); }
-void LaunchFp32ToFp16(const float* input, uint16_t* output, int count, cudaStream_t stream) { GetCudaInterface()->Fp32ToFp16(input, output, count, stream); }
-void LaunchExpandAndInt32ToInt64(const int32_t* src, int64_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) { GetCudaInterface()->LaunchExpandAndInt32ToInt64(src, dst, num_beams, batch_size, sequence_length, stream); }
-void LaunchExpand(const int32_t* src, int32_t* dst, int num_beams, int batch_size, int sequence_length, cudaStream_t stream) { GetCudaInterface()->LaunchExpand(src, dst, num_beams, batch_size, sequence_length, stream); }
-template <>
-void Launch_UpdatePositionIds<int32_t>(int32_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, total_length, new_kv_length, stream); }
-template <>
-void Launch_UpdatePositionIds<int64_t>(int64_t* position_ids, int batch_beam_size, int total_length, int new_kv_length, cudaStream_t stream) { GetCudaInterface()->Launch_UpdatePositionIds(position_ids, batch_beam_size, total_length, new_kv_length, stream); }
-template <>
-void Launch_UpdateAttentionMask<int32_t>(int32_t* mask_data, const int32_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_data, batch_beam_size, new_kv_length, total_length, max_length, update_only, stream); }
-template <>
-void Launch_UpdateAttentionMask<int64_t>(int64_t* mask_data, const int64_t* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream) { GetCudaInterface()->Launch_UpdateAttentionMask(mask_data, old_data, batch_beam_size, new_kv_length, total_length, max_length, update_only, stream); }
-void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) { GetCudaInterface()->LaunchHandleEOSArray(batch_logits, batch_beam_size, vocab_size, eos_token_ids, eos_token_ids_count, stream); }
-void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache, const int32_t* src_indir_cache, const int32_t* beam_ids, int batch_size, int beam_width, int input_seq_length, int max_seq_length, int current_length, cudaStream_t stream) { GetCudaInterface()->UpdateCacheIndirectionKernelLauncher(tgt_indir_cache, src_indir_cache, beam_ids, batch_size, beam_width, input_seq_length, max_seq_length, current_length, stream); }
-void ReorderPastStatesKernelLauncher(void* out_buffer, const void* in_buffer, int batch_size, int num_heads, int max_length, int head_size, int chunk_size, cudaStream_t stream) { GetCudaInterface()->ReorderPastStatesKernelLauncher(out_buffer, in_buffer, batch_size, num_heads, max_length, head_size, chunk_size, stream); }
-template <>
-void LaunchCopyCrossQKSingleDecodeStep<float>(cudaStream_t stream, float* cross_qk_buffer_data, float** qk_layer_pointers, int token_index, int batch_beam_size, int num_layers, int num_heads, int num_alignment_heads, const int* alignment_heads, int frames, int max_length) { GetCudaInterface()->LaunchCopyCrossQKSingleDecodeStep(stream, cross_qk_buffer_data, qk_layer_pointers, token_index, batch_beam_size, num_layers, num_heads, num_alignment_heads, alignment_heads, frames, max_length); }
-template <>
-void LaunchFinalizeCrossQK<float>(cudaStream_t stream, int iteration_number, int context_decoding_len, int batch_size, int num_beams, int max_length, int num_alignment_heads, int frames_of_k, const float* cross_qk_buffer_data, float* cross_qk_output, int num_return_sequences, const int* cache_indir_data) { GetCudaInterface()->LaunchFinalizeCrossQK(stream, iteration_number, context_decoding_len, batch_size, num_beams, max_length, num_alignment_heads, frames_of_k, cross_qk_buffer_data, cross_qk_output, num_return_sequences, cache_indir_data); }
-}  // namespace cuda
-#endif
 
 std::string to_string(DeviceType device_type) {
   switch (device_type) {
@@ -179,8 +207,9 @@ std::string to_string(DeviceType device_type) {
       return "WebGpu";
     case DeviceType::QNN:
       return "QnnWithSharedMemory";
+    default:
+      throw std::runtime_error("Unknown device type");
   }
-  throw std::runtime_error("Unknown device type");
 }
 
 DeviceInterface* GetDeviceInterface(DeviceType type) {
@@ -188,10 +217,16 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
     default:
     case DeviceType::CPU:
       return GetCpuInterface();
-#if USE_CUDA
     case DeviceType::CUDA:
       return GetCudaInterface();
+#if USE_DML
+    case DeviceType::DML:
+      return GetDmlInterface();
 #endif
+    case DeviceType::WEBGPU:
+      return GetWebGPUInterface();
+    case DeviceType::QNN:
+      return GetQNNInterface();
   }
 }
 
@@ -202,9 +237,7 @@ GeneratorParams::GeneratorParams(const Config& config)
 
 GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
-      p_device{model.p_device_},
-      device_type{model.device_type_},
-      cuda_stream{model.cuda_stream_},
+      p_device{model.p_device_inputs_},
       is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
   use_cuda_graph = is_cuda_graph_enabled_;
   if (use_cuda_graph) {
@@ -213,12 +246,12 @@ GeneratorParams::GeneratorParams(const Model& model)
 }
 
 void GeneratorParams::TryGraphCapture(int max_bs) {
-  if (!is_cuda_graph_enabled_ || device_type == DeviceType::CPU) {
+  if (!is_cuda_graph_enabled_ || p_device->GetType() == DeviceType::CPU) {
     // no-op
     return;
   }
 
-  if (DeviceType::CUDA == device_type || DeviceType::DML == device_type) {
+  if (DeviceType::CUDA == p_device->GetType() || DeviceType::DML == p_device->GetType()) {
     if (max_bs == 0) {
       throw std::runtime_error("Graph capture is enabled, but max_batch_size is not set.");
     }
@@ -323,8 +356,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   constexpr std::array<DeviceType, 3> devices_supporting_continuous_decoding{DeviceType::CPU, DeviceType::CUDA, DeviceType::WEBGPU};
   if (search_->GetSequenceLength() != 0 &&
       std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
-                   [this](DeviceType device_type) { return device_type == state_->params_->device_type; }))
-    throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->params_->device_type) +
+                   [this](DeviceType device_type) { return device_type == state_->params_->p_device->GetType(); }))
+    throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->params_->p_device->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
   if (last_action_ == Action::generated) {
@@ -432,7 +465,7 @@ void Generator::GenerateNextToken() {
   }
 
   last_action_ = Action::generated;
-  if (!search.do_sample || search.top_k == 1) {
+  if (!search.do_sample || search.top_k == 1 || search.temperature == 0) {
     search_->SelectTop();
     return;
   }
@@ -446,8 +479,6 @@ void Generator::GenerateNextToken() {
     throw std::runtime_error("top_p must be between 0.0 and 1.0");
   if (search.top_k < 0)
     throw std::runtime_error("top_k must be 0 or greater");
-  if (search.temperature <= 0.0f)
-    throw std::runtime_error("temperature must be greater than 0");
 
   if (search.top_p > 0.0f && search.top_p < 1.0f && search.top_k > 1) {
     search_->SampleTopKTopP(search.top_k, search.top_p, search.temperature);
@@ -487,10 +518,3 @@ DeviceSpan<int32_t> Generator::GetSequence(size_t index) const {
 }
 
 }  // namespace Generators
-
-#if USE_CUDA
-cudaError_t cudaMemcpyAsync(void* dst, const void* src, size_t count, cudaMemcpyKind kind, cudaStream_t stream) { return Generators::GetCudaInterface()->cudaMemcpyAsync(dst, src, count, kind, stream); }
-cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind) { return Generators::GetCudaInterface()->cudaMemcpy(dst, src, count, kind); }
-cudaError_t cudaMemsetAsync(void* ptr, int value, size_t count, cudaStream_t stream) { return Generators::GetCudaInterface()->cudaMemsetAsync(ptr, value, count, stream); }
-cudaError_t cudaMemset(void* ptr, int value, size_t count) { return Generators::GetCudaInterface()->cudaMemset(ptr, value, count); }
-#endif

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include "generators.h"
 #include "search.h"
 #include "search_cuda.h"
@@ -8,7 +11,7 @@
 namespace Generators {
 
 BeamSearchScorer_Cuda::BeamSearchScorer_Cuda(const GeneratorParams& parameters)
-    : stream_{parameters.cuda_stream} {
+    : stream_{GetStream()} {
   state_cpu_ = CudaMallocHostArray<cuda::BeamScorerState>(1);
   state_cpu_->batch_size_ = static_cast<size_t>(parameters.search.batch_size);
   state_cpu_->num_beams_ = static_cast<size_t>(parameters.search.num_beams);

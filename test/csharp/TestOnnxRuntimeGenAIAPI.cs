@@ -2,12 +2,15 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
-using System.Runtime.CompilerServices;
+using System.Text;
+using System.Threading.Tasks;
 using Xunit;
 using Xunit.Abstractions;
+using Microsoft.Extensions.AI;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 {
@@ -90,11 +93,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
         public OnnxRuntimeGenAITests(ITestOutputHelper o)
         {
+            Console.WriteLine("**** Running OnnxRuntimeGenAITests constructor");
             // Initialize GenAI and register a handler to dispose it on process exit
             ogaHandle = new OgaHandle();
             AppDomain.CurrentDomain.ProcessExit += (sender, e) => ogaHandle.Dispose();
-
             this.output = o;
+            Console.WriteLine("**** OnnxRuntimeGenAI constructor completed");
         }
 
         private class IgnoreOnModelAbsenceFact : FactAttribute
@@ -353,6 +357,36 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
+        [IgnoreOnModelAbsenceFact(DisplayName = "TestChatClient")]
+        public async Task TestChatClient()
+        {
+            OnnxRuntimeGenAIChatClientOptions options = new()
+            {
+                StopSequences = ["<|system|>", "<|user|>", "<|assistant|>", "<|end|>"],
+                PromptFormatter = static (messages, options) =>
+                {
+                    StringBuilder prompt = new();
+
+                    foreach (var message in messages)
+                        foreach (var content in message.Contents.OfType<TextContent>())
+                            prompt.Append("<|").Append(message.Role.Value).Append("|>\n").Append(content.Text).Append("<|end|>\n");
+
+                    return prompt.Append("<|assistant|>\n").ToString();
+                },
+            };
+
+            using var client = new OnnxRuntimeGenAIChatClient(_phi2Path, options);
+
+            var completion = await client.GetResponseAsync("The quick brown fox jumps over the lazy dog.", new()
+            {
+                MaxOutputTokens = 10,
+                Temperature = 0f,
+                StopSequences = ["."],
+            });
+
+            Assert.NotEmpty(completion.Text);
+        }
+
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTokenizerBatchEncodeDecode")]
         public void TestTokenizerBatchEncodeDecode()
         {
@@ -578,6 +612,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         [IgnoreOnAdaptersAbsentFact(DisplayName = "TestAdapters")]
         public void TestAdapters()
         {
+            Console.WriteLine("**** Running TestAdapters");
+
             string modelPath = _adaptersPath;
             string adapterPath = Path.Combine(modelPath, "adapters.onnx_adapter");
 

@@ -5,65 +5,29 @@ using System;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
-    /// <summary>
-    /// Use Config to set the ORT execution providers (EPs) and their options. The EPs are applied based on
-    /// insertion order.
-    /// </summary>
     public class Config : IDisposable
     {
         private IntPtr _configHandle;
         private bool _disposed = false;
-
-        /// <summary>
-        /// Creates a Config from the given configuration directory.
-        /// </summary>
-        /// <param name="modelPath">The path to the configuration directory.</param>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
         public Config(string modelPath)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateConfig(StringUtils.ToUtf8(modelPath), out _configHandle));
         }
 
         internal IntPtr Handle { get { return _configHandle; } }
-
-        /// <summary>
-        /// Clear the list of providers in the config.
-        /// </summary>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
         public void ClearProviders()
         {
             Result.VerifySuccess(NativeMethods.OgaConfigClearProviders(_configHandle));
         }
 
-        /// <summary>
-        /// Add the provider at the end of the list of providers in the given config if it doesn't already
-        /// exist. If it already exists, does nothing.
-        /// </summary>
-        /// <param name="providerName">Name of the provider</param>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
-        public void AppendProvider(string providerName)
+        public void AppendProvider(string provider)
         {
-            Result.VerifySuccess(NativeMethods.OgaConfigAppendProvider(_configHandle, StringUtils.ToUtf8(providerName)));
+            Result.VerifySuccess(NativeMethods.OgaConfigAppendProvider(_configHandle, StringUtils.ToUtf8(provider)));
         }
 
-        /// <summary>
-        /// Set a provider option.
-        /// </summary>
-        /// <param name="providerName">Name of the provider</param>
-        /// <param name="optionKey">Name of the option</param>
-        /// <param name="optionValue">Value of the option</param>
-        /// <exception cref="OnnxRuntimeGenAIException">
-        /// Thrown when the call to the GenAI native API fails.
-        /// </exception>
-        public void SetProviderOption(string providerName, string optionKey, string optionValue)
+        public void SetProviderOption(string provider, string option, string value)
         {
-            Result.VerifySuccess(NativeMethods.OgaConfigSetProviderOption(_configHandle, StringUtils.ToUtf8(providerName), StringUtils.ToUtf8(optionKey), StringUtils.ToUtf8(optionValue)));
+            Result.VerifySuccess(NativeMethods.OgaConfigSetProviderOption(_configHandle, StringUtils.ToUtf8(provider), StringUtils.ToUtf8(option), StringUtils.ToUtf8(value)));
         }
 
         ~Config()

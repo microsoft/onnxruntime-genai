@@ -1,0 +1,10 @@
+{"messages":[{"role": "system", "content": "You are a helpful assistant. Briefly answer the following: "}, {"role": "user", "content": "What makes a cloud form?"}], "max_tokens": 500}
+{"messages":[{"role": "system", "content": "You are a helpful assistant. Briefly answer the following: "}, {"role": "user", "content": "Can drink and food taste different just by changing its color?"}], "max_tokens": 500}
+{"messages":[{"role": "system", "content": "You are a helpful assistant. Briefly answer the following: "}, {"role": "user", "content": "What makes popcorn pop?"}], "max_tokens": 500}
+{"messages":[{"role": "system", "content": "You are a helpful assistant. Briefly answer the following: "}, {"role": "user", "content": "Does temperature affect seed sprouting?"}], "max_tokens": 500}
+{"messages":[{"role": "system", "content": "You are a helpful assistant. Briefly answer the following: "}, {"role": "user", "content": "Does the color of light affect photosynthesis?"}], "max_tokens": 500}
+{"messages":[{"role": "system", "content": "You are a helpful assistant. Briefly answer the following: "}, {"role": "user", "content": "Does exercise affect memory?"}], "max_tokens": 500}
+{"messages":[{"role": "system", "content": "You are a helpful assistant. Briefly answer the following: "}, {"role": "user", "content": "Can fruits and vegetables generate electricity?"}], "max_tokens": 500}
+{"messages":[{"role": "system", "content": "You are a helpful assistant. Briefly answer the following: "}, {"role": "user", "content": "Can you protect a raw egg from a drop using common materials?"}], "max_tokens": 500}
+{"messages":[{"role": "system", "content": "You are a helpful assistant. Briefly answer the following: "}, {"role": "user", "content": "What happens when a raw egg is put into vinegar?"}], "max_tokens": 500}
+{"messages":[{"role": "system", "content": "You are a helpful assistant. Briefly answer the following: "}, {"role": "user", "content": "What drink causes more stains on teeth?"}], "max_tokens": 500}

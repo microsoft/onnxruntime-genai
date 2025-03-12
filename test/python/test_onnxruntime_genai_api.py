@@ -39,6 +39,26 @@ def test_config(test_data_path):
     config.set_provider_option("quantum", "break_universe", "true")
     config.append_provider("slide rule")
 
+def test_NamedTensors():
+    named_tensors = og.NamedTensors()
+    named_tensors["input_ids"] = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
+    named_tensors["attention_mask"] = np.array([[1, 1, 1, 1], [1, 1, 1, 1]], dtype=np.int32)
+    named_tensors["test1"] = og.Tensor(np.random.rand(2, 2).astype(np.float32))
+    named_tensors["test2"] = og.Tensor(np.random.rand(2, 2).astype(np.float32))
+
+    # List out the tensors:
+    names = named_tensors.keys();
+    print() # To not print on the same line as the test name
+    for name in names:
+        print(name)
+        # Assert that the named tensors contains the name
+        assert name in named_tensors
+        print(named_tensors[name].as_numpy())
+        del named_tensors[name]
+
+    # Test that the named tensors is empty
+    assert len(named_tensors) == 0
+
 @pytest.mark.parametrize(
     "relative_model_path",
     (
@@ -247,6 +267,9 @@ def test_tokenizer_stream(device, phi2_for):
 )
 @pytest.mark.parametrize("device", devices)
 def test_batching(device, phi2_for):
+    if device == "dml":
+        pytest.skip("EP DML does not support batching")
+
     model = og.Model(phi2_for(device))
     tokenizer = og.Tokenizer(model)
 
@@ -254,6 +277,32 @@ def test_batching(device, phi2_for):
         "This is a test.",
         "Rats are awesome pets!",
         "The quick brown fox jumps over the lazy dog.",
+    ]
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=20, batch_size=len(prompts))  # To run faster
+
+    generator = og.Generator(model, params)
+    generator.append_tokens(tokenizer.encode_batch(prompts))
+    while not generator.is_done():
+        generator.generate_next_token()
+    for i in range(len(prompts)):
+        print(tokenizer.decode(generator.get_sequence(0)))
+
+
+# TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
+# requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
+)
+@pytest.mark.parametrize("device", devices)
+def test_e2e(device, phi2_for):
+    model = og.Model(phi2_for(device))
+    tokenizer = og.Tokenizer(model)
+
+    prompts = [
+        "This is a test.",
     ]
 
     params = og.GeneratorParams(model)
@@ -357,6 +406,29 @@ def test_get_output(test_data_path, relative_model_path):
     assert np.allclose(
         logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3
     )
+
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
+)
+@pytest.mark.parametrize("device", devices)
+def test_hidden_states(qwen_for, device):
+    model = og.Model(qwen_for(device))
+
+    search_params = og.GeneratorParams(model)
+    input_ids = np.array(
+        [[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32
+    )
+    search_params.set_search_options(do_sample=False, max_length=10, batch_size=input_ids.shape[0])
+
+    generator = og.Generator(model, search_params)
+    generator.append_tokens(input_ids)
+    generator.generate_next_token()
+    hidden_states = generator.get_output("hidden_states")
+    assert hidden_states.shape == (2, 4, 896)
+    generator.generate_next_token()
+    hidden_states = generator.get_output("hidden_states")
+    assert hidden_states.shape == (2, 1, 896)
 
 @pytest.mark.skipif(
     not og.is_cuda_available(), reason="Pipeline model uses a mix of CPU and CUDA EP."
@@ -617,6 +689,9 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
             adapter_paths.append(adapter_file_name)
 
         return adapter_model_path, adapter_paths
+    
+    if device == "dml":
+        pytest.skip("EP DML does not support adapters")
 
     model_path, adapter_paths = _prepare_adapter_model(test_data_path)
     model = og.Model(model_path)
@@ -691,6 +766,9 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
 
         return extra_inputs_model_path, valid
 
+    if device == "dml":
+        pytest.skip("EP DML does not support preset extra inputs")
+
     model_path, valid_model = _prepare_model(test_data_path)
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
@@ -705,7 +783,7 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
 
     generator = og.Generator(model, params)
     if not valid_model:
-        with pytest.raises(og.OrtException) as exc_info:
+        with pytest.raises(RuntimeError) as exc_info:
             generator.append_tokens(tokenizer.encode_batch(prompts))
 
         assert f"Missing Input: {extra_inputs[0]}" in str(exc_info.value)

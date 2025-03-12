@@ -11,13 +11,6 @@ git clone https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai/examples/c
 ```
 
-If they don't already exist, create folders called `include` and `lib`.
-
-```bash
-mkdir include
-mkdir lib
-```
-
 ## Phi-3.5 mini
 
 ### Download model
@@ -29,6 +22,10 @@ You can clone this entire model repository or download individual model variants
 ```bash
 huggingface-cli download microsoft/Phi-3.5-mini-instruct-onnx --include cpu_and_mobile/cpu-int4-awq-block-128-acc-level-4/* --local-dir .
 ```
+
+### Chat vs Question Answering
+
+The below examples are for scenarios where you can have chat with the model (i.e. model retains the previous conversation), but if you want to run just Question Answering (i.e. model does not remember past conversation) use `-DPHI3_QA` instead of `-DPHI3`. Also, the executable name would be `phi3_qa` instead of `phi3`.
 
 ### Windows x64 CPU
 

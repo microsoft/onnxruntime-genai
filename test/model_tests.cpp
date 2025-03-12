@@ -1,15 +1,15 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cstring>  // for memcmp
 #include <iostream>
 #include <random>
-
 #include <gtest/gtest.h>
 
-#include "generators.h"
-#include "models/model.h"
-#include "search.h"
-#include "smartptrs.h"
+#include "span.h"
+#define OGA_USE_SPAN 1
+#include <ort_genai.h>
+#include <gtest/gtest.h>
 
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
@@ -17,15 +17,11 @@
 #ifndef PHI2_PATH
 #if USE_CUDA
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cuda"
+#elif USE_DML
+#define PHI2_PATH MODEL_PATH "phi-2/int4/dml"
 #else
 #define PHI2_PATH MODEL_PATH "phi-2/int4/cpu"
 #endif
-#endif
-#if USE_DML
-#include <DirectML.h>
-#include <wrl.h>
-#include <d3d12.h>
-#include <dxgi1_6.h>
 #endif
 
 // To generate this file:
@@ -38,7 +34,7 @@ static const std::pair<const char*, const char*> c_tiny_gpt2_model_paths[] = {
 
 #if USE_DML
 TEST(ModelTests, DMLAdapterSelection) {
-#if TEST_PHI2
+#if 0 // TEST_PHI2 TODO: Remove this? Can't access the device directly anymore.
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
   auto d3d12Device = model->GetD3D12Device();
 
@@ -72,25 +68,26 @@ TEST(ModelTests, GreedySearchGptFp32) {
   // To generate this file:
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2 --output tiny_gpt2_greedysearch_fp16.onnx --use_gpu --max_length 20
   // And copy the resulting gpt2_init_past_fp32.onnx file into these two files (as it's the same for gpt2)
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(),
-                                       MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
-  auto params = Generators::CreateGeneratorParams(*model);
-  params->search.max_length = 10;
-  params->search.batch_size = static_cast<int>(input_ids_shape[0]);
+  auto params = OgaGeneratorParams::Create(*model);
+  int max_length = 10;
+  int batch_size = static_cast<int>(input_ids_shape[0]);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
 
-  auto generator = Generators::CreateGenerator(*model, *params);
-  generator->AppendTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids);
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
 
   // Verify outputs match expected outputs
-  for (size_t i = 0; i < static_cast<size_t>(params->search.batch_size); i++) {
-    auto sequence = generator->GetSequence(i).CopyDeviceToCpu();
-    auto* expected_output_start = &expected_output[i * params->search.max_length];
-    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
+  for (size_t i = 0; i < static_cast<size_t>(batch_size); i++) {
+    auto sequence = generator->GetSequence(i);
+    auto* expected_output_start = &expected_output[i * max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
   }
 }
 
@@ -111,25 +108,27 @@ TEST(ModelTests, BeamSearchGptFp32) {
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
 
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
-  auto params = Generators::CreateGeneratorParams(*model);
-  params->search.batch_size = static_cast<int>(input_ids_shape[0]);
-  params->search.max_length = 20;
-  params->search.length_penalty = 1.0f;
-  params->search.num_beams = 4;
+  int max_length = 20;
+  int batch_size = static_cast<int>(input_ids_shape[0]);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+  params->SetSearchOption("num_beams", 4);
+  params->SetSearchOption("length_penalty", 1.0f);
 
-  auto generator = Generators::CreateGenerator(*model, *params);
-  generator->AppendTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids);
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
 
   // Verify outputs match expected outputs
-  for (int i = 0; i < params->search.batch_size; i++) {
-    auto sequence = generator->GetSequence(i).CpuSpan();
-    auto* expected_output_start = &expected_output[static_cast<size_t>(i) * params->search.max_length];
-    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
+  for (int i = 0; i < batch_size; i++) {
+    auto sequence = generator->GetSequence(i);
+    auto* expected_output_start = &expected_output[static_cast<size_t>(i) * max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
   }
 }
 #endif
@@ -144,25 +143,26 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
       0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
       0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
 
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), model_path);
+  auto model = OgaModel::Create(model_path);
 
-  auto params = Generators::CreateGeneratorParams(*model);
-  params->search.batch_size = static_cast<int>(input_ids_shape[0]);
-  params->search.max_length = 10;
+  int max_length = 10;
+  int batch_size = static_cast<int>(input_ids_shape[0]);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
 
-  auto generator = Generators::CreateGenerator(*model, *params);
-  generator->AppendTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids);
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
 
   // Verify outputs match expected outputs
-  for (int i = 0; i < params->search.batch_size; i++) {
-    auto sequence_gpu = generator->GetSequence(i);
-    auto sequence = sequence_gpu.CopyDeviceToCpu();
-    auto* expected_output_start = &expected_output[i * params->search.max_length];
-    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
+  for (int i = 0; i < batch_size; i++) {
+    auto sequence = generator->GetSequence(i);
+    auto* expected_output_start = &expected_output[i * max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
   }
 
   // Test batch size 1 continuous case
@@ -170,31 +170,31 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   input_ids = {0, 0, 195, 731};
   std::vector<int32_t> expected_output_continuous{0, 0, 195, 731, 731, 114, 114, 114, 114, 114};
 
-  params->search.batch_size = static_cast<int>(input_ids_shape[0]);
-  generator = Generators::CreateGenerator(*model, *params);
-  generator->AppendTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
+  batch_size = static_cast<int>(input_ids_shape[0]);
+  params->SetSearchOption("batch_size", batch_size);
+
+  generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids);
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
   
   // Verify outputs match expected outputs
-  auto sequence_gpu = generator->GetSequence(0);
-  auto sequence = sequence_gpu.CopyDeviceToCpu();
+  auto sequence = generator->GetSequence(0);
   auto* expected_output_start = &expected_output_continuous[0];
-  EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
+  EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
 
-  generator->RewindToLength(3);
+  generator->RewindTo(3);
   std::vector<int32_t> next_ids{731, 731};
-  generator->AppendTokens(Generators::cpu_span<int>(next_ids.data(), next_ids.size()));
+  generator->AppendTokens(next_ids);
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
 
   // Verify outputs match expected outputs
-  sequence_gpu = generator->GetSequence(0);
-  sequence = sequence_gpu.CopyDeviceToCpu();
-  EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
+  sequence = generator->GetSequence(0);
+  EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
 }
 
 TEST(ModelTests, GreedySearchGptCuda) {
@@ -218,25 +218,28 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
   // python convert_generation.py --model_type gpt2 -m hf-internal-testing/tiny-random-gpt2
   //        --output tiny_gpt2_beamsearch_fp16.onnx --use_gpu --max_length 20
   // (with separate_gpt2_decoder_for_init_run set to False as it is now set to True by default)
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), model_path);
+  auto model = OgaModel::Create(model_path);
 
-  auto params = Generators::CreateGeneratorParams(*model);
-  params->search.batch_size = static_cast<int>(input_ids_shape[0]);
-  params->search.max_length = 20;
-  params->search.num_beams = 4;
-  params->search.length_penalty = 1.0f;
+  int batch_size = static_cast<int>(input_ids_shape[0]);
+  int max_length = 20;
 
-  auto generator = Generators::CreateGenerator(*model, *params);
-  generator->AppendTokens(Generators::cpu_span<int>(input_ids.data(), input_ids.size()));
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+  params->SetSearchOption("num_beams", 4);
+  params->SetSearchOption("length_penalty", 1.0f);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids);
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
 
   // Verify outputs match expected outputs
-  for (int i = 0; i < params->search.batch_size; i++) {
-    auto sequence = generator->GetSequence(i).CopyDeviceToCpu();
-    auto* expected_output_start = &expected_output[static_cast<size_t>(i) * params->search.max_length];
-    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), params->search.max_length * sizeof(int32_t)));
+  for (int i = 0; i < batch_size; i++) {
+    auto sequence = generator->GetSequence(i);
+    auto* expected_output_start = &expected_output[static_cast<size_t>(i) * max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
   }
 }
 
@@ -244,10 +247,10 @@ TEST(ModelTests, BeamSearchGptCuda) {
   for (auto model_path : c_tiny_gpt2_model_paths)
     Test_BeamSearch_Gpt_Cuda(model_path.first, model_path.second);
 }
+#endif
 
-TEST(ModelTests, TestApiCuda) {
-#if TEST_PHI2
-
+#if TEST_PHI2 && (USE_CUDA || USE_DML)
+TEST(ModelTests, TestApiDevice) {
   auto prompt = R"(
 def print_prime(n):
 '''
@@ -257,25 +260,54 @@ Print all primes between 1 and n
 
   std::cout << "With prompt:" << prompt << "\r\n";
 
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
-  auto tokenizer = model->CreateTokenizer();
-  auto tokens = tokenizer->Encode(prompt);
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto tokens = OgaSequences::Create();
+  tokenizer->Encode(prompt, *tokens);
 
-  auto params = Generators::CreateGeneratorParams(*model);
-  params->search.batch_size = 1;
-  params->search.max_length = 128;
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 128);
+  params->SetSearchOption("batch_size", 1);  // Redundant, but for testing
 
-  // Generator version
-  auto generator = Generators::CreateGenerator(*model, *params);
-  generator->AppendTokens(Generators::cpu_span<int>(tokens.data(), tokens.size()));
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(tokens->Get(0));
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
 
   auto result = generator->GetSequence(0);
 
-  std::cout << tokenizer->Decode(result.CopyDeviceToCpu()) << "\r\n";
-#endif
+  std::cout << tokenizer->Decode(result) << "\r\n";
 }
 
+TEST(ModelTests, TestTopKDevice) {
+  auto prompt = R"(
+def print_prime(n):
+'''
+Print all primes between 1 and n
+'''
+)";
+
+  std::cout << "With prompt:" << prompt << "\r\n";
+
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto tokens = OgaSequences::Create();
+  tokenizer->Encode(prompt, *tokens);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 128);
+  params->SetSearchOption("batch_size", 1);  // Redundant, but for testing
+  params->SetSearchOption("top_k", 3);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(tokens->Get(0));
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  auto result = generator->GetSequence(0);
+
+  std::cout << tokenizer->Decode(result) << "\r\n";
+}
 #endif

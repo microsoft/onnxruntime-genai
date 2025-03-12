@@ -59,6 +59,10 @@ parameters:
   type: string
   default: 'release'
 
+- name: nuget_version_type
+  type: string
+  default: 'stable'
+
 jobs:
 - job: nuget_${{ parameters.ep }}_packaging_dep_qnn_${{ parameters.enable_win_qnn }}
   pool: 'onnxruntime-Win-CPU-2022'
@@ -187,6 +191,8 @@ jobs:
     submodules: recursive
 
   - template: steps/utils/set-genai-version.yml
+    parameters:
+      nuget_version_type: ${{ parameters.nuget_version_type }}
 
   - task: NuGetAuthenticate@1
 
