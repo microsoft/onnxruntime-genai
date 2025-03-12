@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include <stdexcept>
-#include "oga_value.h"
 #include "generators.h"
+#include "oga_value.h"
 #include "models/utils.h"
 
 namespace Generators {

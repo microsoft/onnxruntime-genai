@@ -463,7 +463,7 @@ TEST(CAPITests, SetLogitsCAPI) {
 }
 
 TEST(CAPITests, SetTerminate) {
-#if TEST_PHI2 && !USE_DML
+#if TEST_PHI2
 
   auto GeneratorSetTerminateCall = [](OgaGenerator* generator) {
     // Set Terminate

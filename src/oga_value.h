@@ -6,7 +6,7 @@
 
 namespace Generators {
 
-struct OgaValue {
+struct OgaValue : LeakChecked<OgaValue> {
   OgaValue(DeviceInterface* device, ONNXTensorElementDataType type);
   ~OgaValue();
 
