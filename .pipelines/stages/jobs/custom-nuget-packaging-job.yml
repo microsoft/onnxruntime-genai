@@ -131,9 +131,8 @@ jobs:
       FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
       DoEsrp: 'true'
 
-  - task: Nuget_Packaging
-    outputs:
-    - output: pipelineArtifact
-      path: '$(Build.ArtifactStagingDirectory)\nuget'
-      artifact: $(genai_nuget_package_name)
+  outputs:
+  - output: pipelineArtifact
+    path: '$(Build.ArtifactStagingDirectory)\nuget'
+    artifact: $(genai_nuget_package_name)
       
