@@ -50,7 +50,6 @@ ExtraInputs::ExtraInputs(State& state)
 
   // We don't use graph capture, so simply use the existing pointers
   for (auto& extra_input : state_.params_->extra_inputs) {
-    // TODO(aciddelgado): If we move OgaValue into Tensor, we can call MakeStatic here to make ort tensor static for graph capture
     extra_inputs_.push_back(extra_input.tensor->ort_tensor_.get());
   }
 }

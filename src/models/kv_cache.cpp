@@ -179,7 +179,6 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
   try {
     for (int i = 0; i < layer_count_ * 2; ++i) {
-      // TODO(aciddelgado): Use OgaValue
       presents_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
 
       // Zero the memory so we don't leak any data from the previous run
