@@ -3,7 +3,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Text;
 using Microsoft.Extensions.AI;
 
 #nullable enable
@@ -36,17 +35,6 @@ public sealed class OnnxRuntimeGenAIChatClientOptions
 {
     private IList<string> _stopSequences = [];
 
-    private Func<IEnumerable<ChatMessage>, ChatOptions?, string> _promptFormatter = static (messages, _) =>
-    {
-        StringBuilder sb = new();
-        foreach (var message in messages)
-        {
-            sb.Append(message).AppendLine();
-        }
-
-        return sb.ToString();
-    };
-
     /// <summary>Initializes a new instance of the <see cref="OnnxRuntimeGenAIChatClientOptions"/> class.</summary>
     /// <param name="stopSequences">The stop sequences used by the model.</param>
     /// <param name="promptFormatter">The function to use to format a list of messages for input into the model.</param>
@@ -62,25 +50,18 @@ public sealed class OnnxRuntimeGenAIChatClientOptions
     /// <remarks>
     /// These will apply in addition to any stop sequences that are a part of the <see cref="ChatOptions.StopSequences"/>
     /// provided to the <see cref="IChatClient.GetResponseAsync"/> and <see cref="IChatClient.GetStreamingResponseAsync"/>
-    /// methods.
+    /// methods. If <see langword="null"/>, this will not contribute any additional stop sequences.
     /// </remarks>
-    public IList<string> StopSequences
-    {
-        get => _stopSequences;
-        set => _stopSequences = value ?? throw new ArgumentNullException(nameof(value));
-    }
+    public IList<string>? StopSequences { get; set; }
 
     /// <summary>Gets or sets a delegate that formats a prompt string from a list of chat messages.</summary>
     /// <remarks>
     /// Each time <see cref="IChatClient.GetResponseAsync"/> or <see cref="IChatClient.GetStreamingResponseAsync"/>
     /// is invoked, this delegate will be invoked with the supplied list of messages to produce a string that
-    /// will be tokenized and provided to the underlying <see cref="Generator"/>.
+    /// will be tokenized and provided to the underlying <see cref="Generator"/>. If <see langword="null"/>,
+    /// the <see cref="OnnxRuntimeGenAIChatClient"/> will choose a default prompt formatter to employ.
     /// </remarks>
-    public Func<IEnumerable<ChatMessage>, ChatOptions?, string> PromptFormatter
-    {
-        get => _promptFormatter;
-        set => _promptFormatter = value ?? throw new ArgumentNullException(nameof(value));
-    }
+    public Func<IEnumerable<ChatMessage>, ChatOptions?, string>? PromptFormatter { get; set; }
 
     /// <summary>Gets or sets whether to cache the most recent conversation.</summary>
     /// <remarks>
