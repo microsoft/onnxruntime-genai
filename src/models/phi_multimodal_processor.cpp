@@ -99,40 +99,6 @@ ProcessImageAudioPrompt(const Generators::Tokenizer& tokenizer, const std::strin
   return std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>(std::move(input_ids_value), std::move(audio_projection_mode_value));
 }
 
-std::unique_ptr<OrtValue> ProcessAudioAttentionMask(OrtxTensor* num_frames, OrtxTensor* audio_embeds, Ort::Allocator& allocator) {
-  const int64_t* tensor_data{};
-  const int64_t* tensor_shape{};
-  size_t tensor_num_dims;
-  CheckResult(OrtxGetTensorData(num_frames, reinterpret_cast<const void**>(&tensor_data),
-                                &tensor_shape, &tensor_num_dims));
-
-  const int64_t tensor_num_elements = std::accumulate(tensor_shape,
-                                                      tensor_shape + tensor_num_dims,
-                                                      1LL, std::multiplies<int64_t>());
-
-  const int64_t max_frames = std::accumulate(tensor_data, tensor_data + tensor_num_elements,
-                                             tensor_data[0], [](int64_t a, int64_t b) {
-                                               return std::max(a, b);
-                                             });
-
-  const std::vector<int64_t> shape{tensor_shape[0], max_frames};
-  auto audio_attention_mask = OrtValue::CreateTensor<bool>(allocator, shape);
-
-  auto audio_attention_mask_data = audio_attention_mask->GetTensorMutableData<bool>();
-
-  for (int64_t audio_batch_idx = 0; audio_batch_idx < tensor_shape[0]; ++audio_batch_idx) {
-    for (int64_t frame_idx = 0; frame_idx < max_frames; ++frame_idx) {
-      if (frame_idx < tensor_data[audio_batch_idx]) {
-        audio_attention_mask_data[audio_batch_idx * max_frames + frame_idx] = true;
-      } else {
-        audio_attention_mask_data[audio_batch_idx * max_frames + frame_idx] = false;
-      }
-    }
-  }
-
-  return audio_attention_mask;
-}
-
 }  // namespace
 
 PhiMultiModalProcessor::PhiMultiModalProcessor(Config& config, const SessionInfo& session_info)
@@ -173,12 +139,12 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
   }
 
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> audio_result;
-  OrtxTensor *audio_embeds{}, *num_frames{}, *audio_sizes{};
+  OrtxTensor *audio_embeds{}, *audio_attention_mask{}, *audio_sizes{};
   if (payload.audios) {
     CheckResult(OrtxFeatureExtraction(audio_processor_.get(), payload.audios->audios_.get(), audio_result.ToBeAssigned()));
 
     CheckResult(OrtxTensorResultGetAt(audio_result.get(), 0, &audio_embeds));
-    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 1, &num_frames));
+    CheckResult(OrtxTensorResultGetAt(audio_result.get(), 1, &audio_attention_mask));
     CheckResult(OrtxTensorResultGetAt(audio_result.get(), 2, &audio_sizes));
   }
 
@@ -219,7 +185,7 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
     }
 
     named_tensors->emplace(std::string(Config::Defaults::AudioAttentionMaskName),
-                           std::make_shared<Tensor>(ProcessAudioAttentionMask(num_frames, audio_embeds, allocator)));
+                           std::make_shared<Tensor>(ProcessTensor<bool>(audio_attention_mask, allocator)));
 
     named_tensors->emplace(std::string(Config::Defaults::AudioSizesName),
                            std::make_shared<Tensor>(ProcessTensor<float, int64_t>(audio_sizes, allocator)));
