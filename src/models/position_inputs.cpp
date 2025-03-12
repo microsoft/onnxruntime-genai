@@ -347,7 +347,15 @@ void WindowedPositionInputs::Add() {
 }
 
 void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
+  if (!has_posid_input_ && !has_mask_input_) {
+    return;
+  }
+
   if (window_index_ == 0) {
+    if (window_size_ == 0) {
+      throw std::runtime_error("Window size must be greater than 0");
+    }
+
     num_windows_ = (next_tokens.size() + window_size_ - 1) / window_size_;
     if (has_posid_input_) {
       position_ids_ = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, position_ids_type_);
