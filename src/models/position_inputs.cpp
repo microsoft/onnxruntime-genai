@@ -313,6 +313,10 @@ WindowedPositionInputs::WindowedPositionInputs(State& state)
       throw std::runtime_error("Sliding a window over position_ids and attention_mask requires sliding_window to be set in the genai_config.json.");
     }
     window_size_ = model_.config_->model.decoder.sliding_window->window_size;
+
+    if (window_size_ == 0) {
+      throw std::runtime_error("Window size must be greater than 0");
+    }
   }
 
   if (has_posid_input_) {
@@ -347,6 +351,10 @@ void WindowedPositionInputs::Add() {
 }
 
 void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
+  if (!has_posid_input_ && !has_mask_input_) {
+    return;
+  }
+
   if (window_index_ == 0) {
     num_windows_ = (next_tokens.size() + window_size_ - 1) / window_size_;
     if (has_posid_input_) {
