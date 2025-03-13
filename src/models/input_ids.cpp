@@ -174,10 +174,6 @@ void WindowedInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
     // window_index = 0, value_ -> [0, a, b]
     std::copy_n(new_tokens.Span().begin(), window_size_, value_->GetTensorMutableData<int32_t>());
 
-    if (type_ == Ort::TypeToTensorType<int64_t>) {
-      Cast(*value_, cast_value_, *model_.p_device_inputs_, type_);
-    }
-
     if (past_sequence_length_)
       *past_sequence_length_->GetTensorMutableData<int32_t>() += static_cast<int32_t>(window_size_);
   } else if (window_index_ < num_windows_) {
@@ -185,10 +181,6 @@ void WindowedInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
     // window_size = 3, num_windows = 2
     // window_index = 1, value_ -> [c, d, e]
     std::copy_n(new_tokens.Span().begin() + window_index_ * window_size_, window_size_, value_->GetTensorMutableData<int32_t>());
-
-    if (type_ == Ort::TypeToTensorType<int64_t>) {
-      Cast(*value_, cast_value_, *model_.p_device_inputs_, type_);
-    }
 
     if (past_sequence_length_)
       *past_sequence_length_->GetTensorMutableData<int32_t>() += static_cast<int32_t>(window_size_);
@@ -212,14 +204,12 @@ void WindowedInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
     }
 
     value_->GetTensorMutableData<int32_t>()[0] = new_tokens.Span()[0];
-
-    if (type_ == Ort::TypeToTensorType<int64_t>) {
-      cast_value_->GetTensorMutableData<int64_t>()[0] = static_cast<int64_t>(new_tokens.Span()[0]);
-    }
   }
 
   state_.inputs_[input_index_] = value_.get();
+
   if (type_ == Ort::TypeToTensorType<int64_t>) {
+    Cast(*value_, cast_value_, *model_.p_device_inputs_, type_);
     state_.inputs_[input_index_] = cast_value_.get();
   }
   window_index_++;
