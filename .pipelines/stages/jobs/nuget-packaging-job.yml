@@ -323,5 +323,6 @@ jobs:
       DoEsrp: 'true'
 
   - task: pipelineArtifact
-    path: '$(Build.ArtifactStagingDirectory)\nuget'
-    artifact: $(artifactName)-nuget
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)\nuget'
+      ArtifactName: $(artifactName)-nuget
