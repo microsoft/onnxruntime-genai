@@ -50,7 +50,7 @@ steps:
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - task: PublishBuildArtifacts@1
+  - task: pipelineArtifact
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
       ArtifactName: $(artifactName)-capi
@@ -87,7 +87,7 @@ steps:
       Contents: '*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)/wheel'
 
-  - task: PublishBuildArtifacts@1
+  - task: pipelineArtifact
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
     inputs:
       ArtifactName: $(artifactName)-wheel

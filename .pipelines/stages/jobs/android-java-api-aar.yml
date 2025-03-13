@@ -55,7 +55,7 @@ jobs:
         cp ${BASE_PATH}/${PACKAGE_NAME}-${GENAI_VERSION}.pom          $ARTIFACTS_DIR
       workingDirectory: $(Build.SourcesDirectory)
 
-  - task: PublishBuildArtifacts@1
+  - task: pipelineArtifact
     inputs:
       pathtoPublish: $(Build.ArtifactStagingDirectory)
       artifactName: drop-android
