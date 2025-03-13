@@ -131,7 +131,12 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
     CreateNextPositionIDsTensor();
     state_.inputs_[posid_input_index_] = position_ids_->GetOrtValue();
   }
-  model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetMutableRawData(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
+  // Try to update position ids on the device. If it fails, copy to CPU, update there, and copy back to device.
+  if (!model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetMutableRawData(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_)) {
+    auto position_ids_span = position_ids_->GetByteSpan();
+    GetDeviceInterface(DeviceType::CPU)->UpdatePositionIds(position_ids_span.CopyDeviceToCpu().data(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_);
+    position_ids_span.CopyCpuToDevice();
+  }
 }
 
 void DefaultPositionInputs::CreateNextAttentionMaskTensor(int total_length) {
@@ -147,14 +152,32 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
 
   CreateNextAttentionMaskTensor(total_length);
 
-  model_.p_device_inputs_->UpdateAttentionMask(state_.params_->use_graph_capture ? nullptr : attention_mask_next_->GetMutableRawData(),
-                                               attention_mask_->GetMutableRawData(),
-                                               static_cast<int>(attention_mask_shape_[0]),
-                                               new_kv_length,
-                                               total_length,
-                                               state_.params_->search.max_length,
-                                               state_.params_->use_graph_capture,
-                                               type_);
+  // Update the attention mask on the device. If it fails, copy to CPU, update there, and copy back to device.
+  if (!model_.p_device_inputs_->UpdateAttentionMask(state_.params_->use_graph_capture ? nullptr : attention_mask_next_->GetMutableRawData(),
+                                                    attention_mask_->GetMutableRawData(),
+                                                    static_cast<int>(attention_mask_shape_[0]),
+                                                    new_kv_length,
+                                                    total_length,
+                                                    state_.params_->search.max_length,
+                                                    state_.params_->use_graph_capture,
+                                                    type_)) {
+    // auto* attention_mask_next_span = state_.params_->use_graph_capture ? &attention_mask_next_->GetByteSpan() : nullptr;
+    DeviceSpan<uint8_t> attention_mask_next_span;
+    if (!state_.params_->use_graph_capture)
+      attention_mask_next_span = attention_mask_next_->GetByteSpan();
+    auto attention_mask_span = attention_mask_->GetByteSpan();
+    GetDeviceInterface(DeviceType::CPU)->UpdateAttentionMask(state_.params_->use_graph_capture ? nullptr : attention_mask_next_span.CopyDeviceToCpu().data(),
+                                                             attention_mask_span.CopyDeviceToCpu().data(),
+                                                             static_cast<int>(attention_mask_shape_[0]),
+                                                             new_kv_length,
+                                                             total_length,
+                                                             state_.params_->search.max_length,
+                                                             state_.params_->use_graph_capture,
+                                                             type_);
+    if (!state_.params_->use_graph_capture)
+      attention_mask_next_span.CopyCpuToDevice();
+    attention_mask_span.CopyCpuToDevice();
+  }
 
   if (!state_.params_->use_graph_capture) {
     attention_mask_->ort_value_ = std::move(attention_mask_next_->ort_value_);
@@ -200,7 +223,7 @@ void DefaultPositionInputs::InitializeStaticMask(OrtValue& cpu_attention_mask) {
   attention_mask_shape_[0] *= state_.params_->search.num_beams;
   attention_mask_shape_[1] = state_.params_->search.max_length;
   attention_mask_->CreateTensor(attention_mask_shape_, true);
-  auto output_span = WrapTensor<T>(*attention_mask_);
+  auto output_span = attention_mask_->GetDeviceSpan<T>();
   output_span.Zero();
   // Copy the first new_kv_length elements of each sequence num_beams times each
   auto input_span = WrapTensor<T>(*GetDeviceInterface(DeviceType::CPU), cpu_attention_mask);

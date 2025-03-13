@@ -102,10 +102,11 @@ struct CpuInterface : DeviceInterface {
     }
   }
 
-  void UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
+  bool UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
     type == Ort::TypeToTensorType<int32_t>
         ? UpdatePositionIds<int32_t>(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length)
         : UpdatePositionIds<int64_t>(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length);
+    return true;
   }
 
   template <typename T>
@@ -125,11 +126,28 @@ struct CpuInterface : DeviceInterface {
     }
   }
 
-  void UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
-    if (type == Ort::TypeToTensorType<int32_t>)
-      UpdateAttentionMask(static_cast<int32_t*>(next_mask_data), static_cast<int32_t*>(mask_data), batch_beam_size, total_length);
-    else
-      UpdateAttentionMask(static_cast<int64_t*>(next_mask_data), static_cast<int64_t*>(mask_data), batch_beam_size, total_length);
+  template <typename T>
+  void UpdateAttentionMaskStatic(T* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length) {
+    for (int i = 0; i < batch_beam_size; i++) {
+      for (int j = total_length - new_kv_length; j < total_length; j++) {
+        mask_data[i * max_length + j] = 1;
+      }
+    }
+  }
+
+  bool UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
+    if (update_only) {
+      if (type == Ort::TypeToTensorType<int32_t>)
+        UpdateAttentionMaskStatic(static_cast<int32_t*>(mask_data), batch_beam_size, new_kv_length, total_length, max_length);
+      else
+        UpdateAttentionMaskStatic(static_cast<int64_t*>(mask_data), batch_beam_size, new_kv_length, total_length, max_length);
+    } else {
+      if (type == Ort::TypeToTensorType<int32_t>)
+        UpdateAttentionMask(static_cast<int32_t*>(next_mask_data), static_cast<int32_t*>(mask_data), batch_beam_size, total_length);
+      else
+        UpdateAttentionMask(static_cast<int64_t*>(next_mask_data), static_cast<int64_t*>(mask_data), batch_beam_size, total_length);
+    }
+    return true;
   }
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }

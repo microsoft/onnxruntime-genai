@@ -44,7 +44,7 @@ DeviceSpan<float> Logits::Get() {
     size_t element_size = SizeOf(type_);
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
-    auto logits_raw = ByteWrapTensor(*output_raw_);
+    auto logits_raw = output_raw_->GetByteSpan();
     auto logits_last_tokens = ByteWrapTensor(*model_.p_device_inputs_, *logits_of_last_token);
 
     for (int batch_index = 0; batch_index < state_.params_->search.batch_size; batch_index++) {

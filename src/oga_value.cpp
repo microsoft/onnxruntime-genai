@@ -46,7 +46,7 @@ void OgaValue::MakeStatic() {
   // Copy the data to the static buffer
   auto new_static_tensor = OrtValue::CreateTensor(p_device_->GetAllocator().GetInfo(), buffer_, new_bytes, GetShape(), type_);
   auto new_static_span = ByteWrapTensor(*p_device_, *new_static_tensor);
-  auto old_static_span = ByteWrapTensor(*p_device_, *ort_value_);
+  auto old_static_span = GetByteSpan();
   new_static_span.CopyFrom(old_static_span);
   ort_value_ = std::move(new_static_tensor);
   is_static_ = true;
@@ -57,6 +57,13 @@ OrtValue* OgaValue::GetOrtValue() {
     return nullptr;
   }
   return ort_value_.get();
+}
+
+DeviceSpan<uint8_t> OgaValue::GetByteSpan() {
+  if (ort_value_ == nullptr) {
+    throw std::runtime_error("OgaValue: GetByteSpan called before CreateTensor");
+  }
+  return ByteWrapTensor(*p_device_, *ort_value_);
 }
 
 void* OgaValue::GetMutableRawData() {

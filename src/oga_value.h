@@ -19,6 +19,15 @@ struct OgaValue : LeakChecked<OgaValue> {
   OrtValue* GetOrtValue();
 
   template <typename T>
+  DeviceSpan<T> GetDeviceSpan() {
+    if (ort_value_ == nullptr)
+      throw std::runtime_error("OgaValue: GetDeviceSpan called before CreateTensor");
+    return p_device_->WrapMemory(std::span<T>{ort_value_->GetTensorMutableData<T>(), GetElementCount()});
+  }
+
+  DeviceSpan<uint8_t> GetByteSpan();
+
+  template <typename T>
   T* GetMutableData() {
     if (ort_value_ == nullptr)
       throw std::runtime_error("OgaValue: GetMutableData called before CreateTensor");
