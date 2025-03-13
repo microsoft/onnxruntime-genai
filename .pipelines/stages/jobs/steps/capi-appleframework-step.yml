@@ -37,8 +37,8 @@ steps:
   displayName: 'Build Apple XCFramework'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
-- task: pipelineArtifact
+- task: CopyFiles@2
   displayName: 'Publish Artifact: ONNXRuntime GenAI XCFramework'
   inputs:
-    ArtifactName: onnxruntime-genai-ios-xcframework
-    PathtoPublish: '$(Build.BinariesDirectory)/artifacts'
+    TargetFolder: onnxruntime-genai-ios-xcframework
+    SourceFolder: '$(Build.BinariesDirectory)/artifacts'
