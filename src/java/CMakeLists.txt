@@ -184,7 +184,7 @@ if (ANDROID)
   # Copy the test model to the assets folder in the test app
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                      COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different
-                       ${REPO_ROOT}/test/test_models/hf-internal-testing/tiny-random-gpt2-fp32
+                       ${REPO_ROOT}/test/test_models/hf-internal-testing/tiny-random-LlamaForCausalLM-fp32
                        ${ANDROID_TEST_PACKAGE_APP_ASSETS_DIR}/model)
 
   # Copy the Android AAR package we built to the libs folder of our test app
