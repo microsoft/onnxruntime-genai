@@ -85,7 +85,7 @@ steps:
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - task: 1ES.PublisPipelineArtifacts@1
+  - task: 1ES.PublishPipelineArtifacts@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
       artifactName: $(artifactName)-capi
