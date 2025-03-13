@@ -59,18 +59,17 @@ std::string SLMEngine::ModelTypeToString(SLMEngine::SupportedModelType model_typ
   }
 }
 
-std::unique_ptr<SLMEngine> SLMEngine::CreateEngine(
+std::unique_ptr<SLMEngine> SLMEngine::Create(
     const char* model_path, bool verbose) {
   auto new_obj = std::unique_ptr<SLMEngine>(new SLMEngine(verbose));
   if (!new_obj->load_model(model_path)) {
     cout << RED << "Error creating the SLM Engine" << CLEAR << endl;
     return nullptr;
   }
-
   return std::move(new_obj);
 }
 
-std::unique_ptr<SLMEngine> SLMEngine::CreateEngineWithAdapters(
+std::unique_ptr<SLMEngine> SLMEngine::Create(
     const char* model_path,
     const std::vector<LoRAAdapter> adapters,
     bool verbose, Status& status_msg) {
@@ -110,7 +109,17 @@ std::unique_ptr<SLMEngine> SLMEngine::CreateEngineWithAdapters(
                                      adapter.name.c_str());
   }
 
+  new_obj->m_adapters_list = adapters;
+
   return std::move(new_obj);
+}
+
+std::vector<SLMEngine::LoRAAdapter> SLMEngine::get_adapter_list() {
+  std::vector<SLMEngine::LoRAAdapter> adapter_list;
+  for (const auto& adapter : m_adapters_list) {
+    adapter_list.emplace_back(adapter.name, adapter.adapter_path);
+  }
+  return adapter_list;
 }
 
 void SLMEngine::GetVersion(std::string& slm_version, std::string& ortga_version,
@@ -170,28 +179,28 @@ std::unique_ptr<OgaGenerator> SLMEngine::create_generator(
     const std::string& formatted_prompt,
     const GenerationOptions& generation_options,
     uint32_t& time_to_prefill) {
-  m_generator_params = OgaGeneratorParams::Create(*m_onnx_model);
-  if (!m_generator_params) {
+  auto generator_params = OgaGeneratorParams::Create(*m_onnx_model);
+  if (!generator_params) {
     return nullptr;
   }
 
-  m_generator_params->SetSearchOption("max_length", generation_options.MaxGeneratedTokens);
-  m_generator_params->SetSearchOption("temperature", generation_options.Temperature);
-  m_generator_params->SetSearchOption("top_k", generation_options.TopK);
-  m_generator_params->SetSearchOption("top_p", generation_options.TopP);
+  generator_params->SetSearchOption("max_length", generation_options.MaxGeneratedTokens);
+  generator_params->SetSearchOption("temperature", generation_options.Temperature);
+  generator_params->SetSearchOption("top_k", generation_options.TopK);
+  generator_params->SetSearchOption("top_p", generation_options.TopP);
 
   auto mem_before = GetMemoryUsage();
 
   // Create the generator
-  auto generator = OgaGenerator::Create(*m_onnx_model, *m_generator_params);
+  auto generator = OgaGenerator::Create(*m_onnx_model, *generator_params);
   if (!generator) {
     return nullptr;
   }
 
-  m_sequences = OgaSequences::Create();
+  auto sequences = OgaSequences::Create();
 
   auto start = std::chrono::steady_clock::now();
-  m_tokenizer->Encode(formatted_prompt.c_str(), *m_sequences);
+  m_tokenizer->Encode(formatted_prompt.c_str(), *sequences);
   auto time_to_encode =
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now() - start)
@@ -199,7 +208,7 @@ std::unique_ptr<OgaGenerator> SLMEngine::create_generator(
 
   start = std::chrono::steady_clock::now();
 
-  generator->AppendTokenSequences(*m_sequences);
+  generator->AppendTokenSequences(*sequences);
   time_to_prefill =
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now() - start)
@@ -209,7 +218,8 @@ std::unique_ptr<OgaGenerator> SLMEngine::create_generator(
 
   if (m_verbose) {
     cout << BLUE << "Time to encode: " << time_to_encode
-         << " ms Initial Tokens: " << generator->GetSequenceCount(0) << " Time to append: " << time_to_prefill << " ms" << CLEAR << endl;
+         << " ms Initial Tokens: " << generator->GetSequenceCount(0)
+         << " Time to append: " << time_to_prefill << " ms" << CLEAR << endl;
 
     cout << BLUE << "Memory used: " << mem_after - mem_before << " bytes" << CLEAR << endl;
   }
@@ -541,8 +551,11 @@ bool SLMEngine::load_model(const char* model_path) {
          << CLEAR << endl;
   }
 
+  m_model_path = model_path;
+  m_model_type = GetModelFamily(m_model_path);
+
   // Convert the model name to the SupportedModelType
-  auto model_type = StringToModelType(GetModelFamily(model_path));
+  auto model_type = StringToModelType(m_model_type);
   if (model_type == SupportedModelType::UNKNOWN) {
     cout << RED << "Error! Cannot detect the model type for model: " << model_path << CLEAR
          << endl;
@@ -552,8 +565,8 @@ bool SLMEngine::load_model(const char* model_path) {
   m_onnx_model = OgaModel::Create(model_path);
   m_tokenizer = OgaTokenizer::Create(*m_onnx_model);
   m_tokenizer_stream = OgaTokenizerStream::Create(*m_tokenizer);
-  m_generator_params = OgaGeneratorParams::Create(*m_onnx_model);
-  m_sequences = OgaSequences::Create();
+  // m_generator_params = OgaGeneratorParams::Create(*m_onnx_model);
+  // m_sequences = OgaSequences::Create();
 
   m_input_decoder = InputDecoder::CreateDecoder("openai");
   if (m_input_decoder == nullptr) {

@@ -44,11 +44,8 @@ namespace slm_engine {
 /// provides a complete() function that takes a user prompt and returns the
 /// generated response.
 ///
-/// The class also provides a CreateEngine() function to create a new instance
+/// The class provides a Create() function to create a new instance
 /// of the SLM Engine and initialize it.
-///
-/// The class also provides utility functions to convert between the model type
-/// enum and string representations.
 ///
 /// The class also provides a struct to hold the runtime performance metrics
 /// of the SLM Engine.
@@ -56,7 +53,7 @@ namespace slm_engine {
 /// Example Usage:
 /// @code
 /// // Create a new instance of the SLM Engine
-/// auto slm_engine = SLMEngine::CreateEngine("path/to/model", "phi", true);
+/// auto slm_engine = SLMEngine::Create("path/to/model", true);
 /// if (!slm_engine) {
 ///     std::cout << "Error creating the SLM Engine" << std::endl;
 ///     return -1;
@@ -81,27 +78,20 @@ class SLM_ENGINE_EXPORT SLMEngine {
     std::string message;
   };
 
-  /// @brief Enum to define the supported model types
-  enum class SupportedModelType { PHI,
-                                  Llama,
-                                  CUSTOM,
-                                  UNKNOWN };
-
-  /// @param model_type String representation of the model type
-  /// @return SupportedModelType enum value
-  /// @note The string comparison is case-insensitive
-  static SupportedModelType StringToModelType(const std::string& model_type);
-
-  /// @brief  Converts SupportedModelType enum to string
-  /// @param model_type SupportedModelType enum value
-  /// @note The string representation is in lowercase
-  static std::string ModelTypeToString(SupportedModelType model_type);
+  /// @brief Get the version of the SLM Engine
+  /// @param slm_version SLM Engine version
+  /// @param ortga_version ORT GenAI version
+  /// @param ort_version ORT version
+  static void GetVersion(
+      std::string& slm_version,
+      std::string& ortga_version,
+      std::string& ort_version);
 
   /// @brief Creates a new instance of the SLM Engine and initializes it
   /// @param model_path Path to ONNX GenAI Model Directory
   /// @param verbose When set, the LLM Generated output is displayed on stdout
   /// @return New object or null if unsuccessful
-  static std::unique_ptr<SLMEngine> CreateEngine(
+  static std::unique_ptr<SLMEngine> Create(
       const char* model_path, bool verbose);
 
   struct SLM_ENGINE_EXPORT LoRAAdapter {
@@ -123,11 +113,23 @@ class SLM_ENGINE_EXPORT SLMEngine {
   ///         adapters when applicable.
   /// @return A new object or nullptr if unsuccessful. When unsuccessful, status_msg
   ///         will contain information about the cause of failure.
-  static std::unique_ptr<SLMEngine> CreateEngineWithAdapters(
+  static std::unique_ptr<SLMEngine> Create(
       const char* model_path,
       const std::vector<LoRAAdapter> adapters,
       bool verbose,
       Status& status_msg);
+
+  /// @brief  Get the current memory usage of the SLM Engine
+  /// @return Current memory usage in MB
+  static uint32_t GetMemoryUsage();
+
+  /// @brief Get the model family from the model path
+  /// @param model_path Path to the model file
+  /// @return Model family as a string
+  static std::string GetModelFamily(const std::string& model_path);
+
+  std::string get_model_path() const { return m_model_path; }
+  std::vector<LoRAAdapter> get_adapter_list();
 
   /// @brief Generates a response to the user prompt using the GenAI Model
   /// @param prompt User prompt to generate response for. The format for this
@@ -267,39 +269,20 @@ class SLM_ENGINE_EXPORT SLMEngine {
       std::string& response_str,
       RuntimePerf& kpi);
 
-  SLMEngine(const SLMEngine&) = delete;
-  SLMEngine& operator=(const SLMEngine&) = delete;
-
-  /// @brief Get the version of the SLM Engine
-  /// @param slm_version SLM Engine version
-  /// @param ortga_version ORT GenAI version
-  /// @param ort_version ORT version
-  static void GetVersion(
-      std::string& slm_version,
-      std::string& ortga_version,
-      std::string& ort_version);
-
-  /// @brief Destructor for the SLM Engine
-  ~SLMEngine();
-
-  /// @brief  Get the current memory usage of the SLM Engine
-  /// @return Current memory usage in MB
-  static uint32_t GetMemoryUsage();
-
-  /// @brief Get the model family from the model path
-  /// @param model_path Path to the model file
-  /// @return Model family as a string
-  static std::string GetModelFamily(const std::string& model_path);
-
-  /// @brief Givn a system and an user prompt, formats the prompt by adding the
+  /// @brief Given a system and an user prompt, formats the prompt by adding the
   /// necessary control strings for the current LLM Model
-
   /// @param system_prompt
   /// @param user_prompt
   /// @return
   std::string format_prompt(
       const std::string& system_prompt,
       const std::string& user_prompt);
+
+  SLMEngine(const SLMEngine&) = delete;
+  SLMEngine& operator=(const SLMEngine&) = delete;
+
+  /// @brief Destructor for the SLM Engine
+  ~SLMEngine();
 
  private:
   SLMEngine(bool verbose) : m_verbose(verbose) {}
@@ -326,6 +309,22 @@ class SLM_ENGINE_EXPORT SLMEngine {
     std::map<InputDecoder::InputParams::Role, PromptFormat> prompt_format;
   };
 
+  /// @brief Enum to define the supported model types
+  enum class SupportedModelType { PHI,
+                                  Llama,
+                                  CUSTOM,
+                                  UNKNOWN };
+
+  /// @param model_type String representation of the model type
+  /// @return SupportedModelType enum value
+  /// @note The string comparison is case-insensitive
+  static SupportedModelType StringToModelType(const std::string& model_type);
+
+  /// @brief  Converts SupportedModelType enum to string
+  /// @param model_type SupportedModelType enum value
+  /// @note The string representation is in lowercase
+  static std::string ModelTypeToString(SupportedModelType model_type);
+
   bool parse_prompt_format_dict(SupportedModelType model_type,
                                 const std::string& json_dict,
                                 PromptFormatDictionary& prompt_format_dict);
@@ -350,13 +349,15 @@ class SLM_ENGINE_EXPORT SLMEngine {
       RuntimePerf& kpi);
 
   std::unique_ptr<OgaModel> m_onnx_model;
-  std::unique_ptr<OgaGeneratorParams> m_generator_params;
-  std::unique_ptr<OgaSequences> m_sequences;
   std::unique_ptr<OgaAdapters> m_adapters;
   std::unique_ptr<OgaTokenizer> m_tokenizer;
   std::unique_ptr<OgaTokenizerStream> m_tokenizer_stream;
   std::unique_ptr<InputDecoder> m_input_decoder;
   PromptFormatDictionary m_prompt_format;
+
+  std::vector<LoRAAdapter> m_adapters_list;
+  std::string m_model_path;
+  std::string m_model_type;
 
   bool m_verbose;
   std::ofstream m_llm_input_dbg_stream;

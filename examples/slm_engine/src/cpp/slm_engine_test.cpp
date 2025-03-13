@@ -90,7 +90,7 @@ TEST(SLMEngineTest, LoadUnloadModel) {
     cout << "Before Engine Create Memory Usage: "
          << microsoft::slm_engine::SLMEngine::GetMemoryUsage() << " MB"
          << endl;
-    auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
+    auto slm_engine = microsoft::slm_engine::SLMEngine::Create(
         MODEL_FILE_PATH, false);
 
     cout << "After Loading Model Memory Usage: "
@@ -154,7 +154,7 @@ const TestPrompt TEST_PROMPTS[] = {
 TEST(SLMEngineTest, TestGeneration) {
   ASSERT_TRUE(MODEL_FILE_PATH != nullptr) << "MODEL_FILE_PATH is not set";
 
-  auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
+  auto slm_engine = microsoft::slm_engine::SLMEngine::Create(
       MODEL_FILE_PATH, false);
   ASSERT_NE(slm_engine, nullptr);
 
@@ -219,7 +219,7 @@ TEST(SLMEngineTest, CaptureMemoryUsage) {
 
   overall_status_json["memory_before_run"] = SLMEngine::GetMemoryUsage();
 
-  auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
+  auto slm_engine = microsoft::slm_engine::SLMEngine::Create(
       MODEL_FILE_PATH, false);
   ASSERT_NE(slm_engine, nullptr) << "Failed to create SLMEngine";
   overall_status_json["memory_after_load"] = SLMEngine::GetMemoryUsage();
@@ -299,10 +299,18 @@ TEST(SLMEngineTest, LoRAAdapterTest) {
       string(ADAPTER_ROOT_DIR) + "/function_calling.onnx_adapter"));
 
   SLMEngine::Status status;
-  auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngineWithAdapters(
+  auto slm_engine = microsoft::slm_engine::SLMEngine::Create(
       (string(ADAPTER_ROOT_DIR) + "/adapted_model").c_str(), adapters, false, status);
 
   ASSERT_NE(slm_engine, nullptr) << "Failed to create SLMEngine with adapters: " << status.message;
+
+  adapters.clear();
+  adapters = slm_engine->get_adapter_list();
+  ASSERT_EQ(adapters.size(), 1) << "Adapter list size mismatch";
+  ASSERT_EQ(adapters[0].name, "function_caller") << "Adapter name mismatch";
+  ASSERT_EQ(adapters[0].adapter_path,
+            string(ADAPTER_ROOT_DIR) + "/function_calling.onnx_adapter")
+      << "Adapter path mismatch";
 
   // Send some test data
   const char* SYS_PROMPT =

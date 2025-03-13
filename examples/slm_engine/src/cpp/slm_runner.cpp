@@ -54,7 +54,7 @@ int run_test(const string& model_path,
   std::unique_ptr<microsoft::slm_engine::SLMEngine> slm_engine;
 
   if (adapter_files.empty()) {
-    slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
+    slm_engine = microsoft::slm_engine::SLMEngine::Create(
         model_path.c_str(), verbose);
   } else {
     vector<microsoft::slm_engine::SLMEngine::LoRAAdapter> adapters;
@@ -79,7 +79,7 @@ int run_test(const string& model_path,
     }
 
     microsoft::slm_engine::SLMEngine::Status status;
-    slm_engine = microsoft::slm_engine::SLMEngine::CreateEngineWithAdapters(
+    slm_engine = microsoft::slm_engine::SLMEngine::Create(
         model_path.c_str(), adapters, verbose, status);
   }
 
