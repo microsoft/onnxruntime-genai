@@ -608,7 +608,7 @@ void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& d
 
   if (element_count != output->GetTensorTypeAndShapeInfo()->GetElementCount())
     throw std::runtime_error("Cast: input and output element count mismatch");
-  
+
   void* input_data = input.GetTensorMutableRawData();
   void* output_data = output->GetTensorMutableRawData();
   if (!device.Cast(input_data, output_data, input_type, output_type, element_count)) {

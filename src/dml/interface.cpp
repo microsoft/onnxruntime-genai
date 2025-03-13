@@ -206,9 +206,7 @@ struct InterfaceImpl : DeviceInterface {
   }
 #endif
 
-  void Synchronize() override {
-  }
-
+  void Synchronize() override {}
 };
 
 }  // namespace Dml

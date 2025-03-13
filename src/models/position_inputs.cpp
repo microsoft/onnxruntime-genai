@@ -166,14 +166,7 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
     if (!state_.params_->use_graph_capture)
       attention_mask_next_span = attention_mask_next_->GetByteSpan();
     auto attention_mask_span = attention_mask_->GetByteSpan();
-    GetDeviceInterface(DeviceType::CPU)->UpdateAttentionMask(state_.params_->use_graph_capture ? nullptr : attention_mask_next_span.CopyDeviceToCpu().data(),
-                                                             attention_mask_span.CopyDeviceToCpu().data(),
-                                                             static_cast<int>(attention_mask_shape_[0]),
-                                                             new_kv_length,
-                                                             total_length,
-                                                             state_.params_->search.max_length,
-                                                             state_.params_->use_graph_capture,
-                                                             type_);
+    GetDeviceInterface(DeviceType::CPU)->UpdateAttentionMask(state_.params_->use_graph_capture ? nullptr : attention_mask_next_span.CopyDeviceToCpu().data(), attention_mask_span.CopyDeviceToCpu().data(), static_cast<int>(attention_mask_shape_[0]), new_kv_length, total_length, state_.params_->search.max_length, state_.params_->use_graph_capture, type_);
     if (!state_.params_->use_graph_capture)
       attention_mask_next_span.CopyCpuToDevice();
     attention_mask_span.CopyCpuToDevice();
