@@ -65,36 +65,88 @@ struct CpuInterface : DeviceInterface {
     return std::make_shared<CpuMemory>(p, size);
   }
 
-  bool Cast(OrtValue& input, OrtValue& output) override {
-    auto input_info = input.GetTensorTypeAndShapeInfo();
-    auto output_info = output.GetTensorTypeAndShapeInfo();
-
-    auto input_type = input_info->GetElementType();
-    auto output_type = output_info->GetElementType();
-
-    auto element_count = input_info->GetElementCount();
-    if (element_count != output_info->GetElementCount())
-      throw std::runtime_error("Cast - input and output element counts do not match");
+  bool Cast(void* input_data, void* output_data, ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type, size_t element_count) override {
     if (input_type == output_type)
       throw std::runtime_error("Cast - input and output types are the same");
 
     if (input_type == Ort::TypeToTensorType<float> && output_type == Ort::TypeToTensorType<Ort::Float16_t>) {
-      auto* fp32 = input.GetTensorData<float>();
-      auto* fp16 = output.GetTensorMutableData<uint16_t>();
+      auto* fp32 = static_cast<float*>(input_data);
+      auto* fp16 = static_cast<uint16_t*>(output_data);
       for (size_t i = 0; i < element_count; i++)
         fp16[i] = FastFloat32ToFloat16(fp32[i]);
     } else if (input_type == Ort::TypeToTensorType<Ort::Float16_t> && output_type == Ort::TypeToTensorType<float>) {
-      auto* fp16 = input.GetTensorData<uint16_t>();
-      auto* fp32 = output.GetTensorMutableData<float>();
+      auto* fp16 = static_cast<uint16_t*>(input_data);
+      auto* fp32 = static_cast<float*>(output_data);
       for (size_t i = 0; i < element_count; i++)
         fp32[i] = FastFloat16ToFloat32(fp16[i]);
     } else if (input_type == Ort::TypeToTensorType<int32_t> && output_type == Ort::TypeToTensorType<int64_t>) {
-      auto* input_data = input.GetTensorData<int32_t>();
-      auto* output_data = output.GetTensorMutableData<int64_t>();
+      auto* int32 = static_cast<int32_t*>(input_data);
+      auto* int64 = static_cast<int64_t*>(output_data);
       for (size_t i = 0; i < element_count; i++)
-        output_data[i] = input_data[i];
+        int64[i] = int32[i];
     } else
       throw std::runtime_error("Cast - Unimplemented cast");
+    return true;
+  }
+
+  template <typename T>
+  void UpdatePositionIds(T* position_ids, int batch_beam_size, int total_length, int new_kv_length) {
+    if (batch_beam_size == 1) {
+      // For batch size == 1 we calculate position ids with total length and new kv length for continuous decoding
+      for (int i = 0; i < new_kv_length; i++)
+        position_ids[i] = i + total_length - new_kv_length;
+    } else {
+      // For batch size > 1 we increment position ids by 1... continuous decoding is not supported
+      for (int i = 0; i < batch_beam_size; i++)
+        position_ids[i]++;
+    }
+  }
+
+  bool UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
+    type == Ort::TypeToTensorType<int32_t>
+        ? UpdatePositionIds<int32_t>(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length)
+        : UpdatePositionIds<int64_t>(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length);
+    return true;
+  }
+
+  template <typename T>
+  void UpdateAttentionMask(T* next_mask_data, T* mask_data, int batch_beam_size, int total_length) {
+    if (batch_beam_size == 1) {
+      // For batch size == 1 we assume no padding. We make this explicit for continuous decoding.
+      for (int i = 0; i < total_length; i++)
+        next_mask_data[i] = 1;
+    } else {
+      // For batch size > 1 we increment attention mask by 1... continuous decoding is not supported
+      for (int i = 0; i < batch_beam_size; i++) {
+        for (int j = 0; j < total_length - 1; j++) {
+          next_mask_data[i * total_length + j] = mask_data[i * (total_length - 1) + j];
+        }
+        next_mask_data[i * total_length + total_length - 1] = 1;
+      }
+    }
+  }
+
+  template <typename T>
+  void UpdateAttentionMaskStatic(T* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length) {
+    for (int i = 0; i < batch_beam_size; i++) {
+      for (int j = total_length - new_kv_length; j < total_length; j++) {
+        mask_data[i * max_length + j] = 1;
+      }
+    }
+  }
+
+  bool UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
+    if (update_only) {
+      if (type == Ort::TypeToTensorType<int32_t>)
+        UpdateAttentionMaskStatic(static_cast<int32_t*>(mask_data), batch_beam_size, new_kv_length, total_length, max_length);
+      else
+        UpdateAttentionMaskStatic(static_cast<int64_t*>(mask_data), batch_beam_size, new_kv_length, total_length, max_length);
+    } else {
+      if (type == Ort::TypeToTensorType<int32_t>)
+        UpdateAttentionMask(static_cast<int32_t*>(next_mask_data), static_cast<int32_t*>(mask_data), batch_beam_size, total_length);
+      else
+        UpdateAttentionMask(static_cast<int64_t*>(next_mask_data), static_cast<int64_t*>(mask_data), batch_beam_size, total_length);
+    }
     return true;
   }
 

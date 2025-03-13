@@ -1,6 +1,6 @@
 #pragma once
 
-#include "static_buffer.h"
+#include "../oga_value.h"
 
 namespace Generators {
 
@@ -26,7 +26,7 @@ struct DefaultInputIDs : InputIDs {
   std::array<int64_t, 2> GetShape() const override { return shape_; }
   const char* name_;
 
-  OrtValue* Get() { return value_.get(); }
+  OrtValue* Get() { return value_->GetOrtValue(); }
 
  private:
   State& state_;
@@ -37,8 +37,8 @@ struct DefaultInputIDs : InputIDs {
 
   std::array<int64_t, 2> shape_{};
   ONNXTensorElementDataType type_;
-  std::unique_ptr<OrtValue> value_;
-  std::unique_ptr<OrtValue> cast_value_;
+  std::unique_ptr<OgaValue> value_;
+  std::unique_ptr<OgaValue> cast_value_;
 
   std::unique_ptr<OrtValue> current_sequence_length_;
   std::unique_ptr<OrtValue> past_sequence_length_;

@@ -11,6 +11,7 @@ namespace Generators {
 struct GeneratorParams;
 struct Generator;
 struct Model;
+struct OgaValue;
 struct Search;
 struct Tensor;
 struct Tokenizer;
@@ -23,7 +24,7 @@ struct LeakTypeList {
   static bool Dump();
 };
 
-using LeakTypes = LeakTypeList<GeneratorParams, Generator, Model, Search, Tensor, Tokenizer, TokenizerStream>;
+using LeakTypes = LeakTypeList<GeneratorParams, Generator, Model, OgaValue, Search, Tensor, Tokenizer, TokenizerStream>;
 
 template <typename T>
 struct LeakChecked {

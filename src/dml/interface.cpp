@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "../search.h"
+#include "../models/utils.h"
 #include "../cpu/interface.h"
 #include "interface.h"
 #include <cstdarg>
@@ -205,8 +206,7 @@ struct InterfaceImpl : DeviceInterface {
   }
 #endif
 
-  void Synchronize() override {
-  }
+  void Synchronize() override {}
 };
 
 }  // namespace Dml

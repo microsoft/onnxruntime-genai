@@ -21,6 +21,7 @@ example-models
 *.onnx.data
 __pycache__
 benchmark/python/*.csv
+benchmark/python/*.json
 models_outputs
 models_outputs_cpu
 benchmark/python/output

@@ -111,19 +111,7 @@ struct CudaInterfaceImpl final : DeviceInterface {
     return GetStream();
   }
 
-  bool Cast(OrtValue& input, OrtValue& output) override {
-    auto input_info = input.GetTensorTypeAndShapeInfo();
-    auto output_info = output.GetTensorTypeAndShapeInfo();
-
-    auto input_type = input_info->GetElementType();
-    auto output_type = output_info->GetElementType();
-
-    auto input_data = input.GetTensorRawData();
-    auto output_data = output.GetTensorMutableRawData();
-
-    auto element_count = input_info->GetElementCount();
-    if (element_count != output_info->GetElementCount())
-      throw std::runtime_error("Cast - input and output element counts do not match");
+  bool Cast(void* input_data, void* output_data, ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type, size_t element_count) override {
     if (input_type == output_type)
       throw std::runtime_error("Cast - input and output types are the same");
 
@@ -138,18 +126,20 @@ struct CudaInterfaceImpl final : DeviceInterface {
     return true;
   }
 
-  void UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
+  bool UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
     if (type == Ort::TypeToTensorType<int32_t>)
       cuda::Launch_UpdatePositionIds(static_cast<int32_t*>(position_ids), batch_beam_size, total_length, new_kv_length, GetStream());
     else
       cuda::Launch_UpdatePositionIds(static_cast<int64_t*>(position_ids), batch_beam_size, total_length, new_kv_length, GetStream());
+    return true;
   }
 
-  void UpdateAttentionMask(void* mask_data, const void* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
+  bool UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
     if (type == Ort::TypeToTensorType<int32_t>)
-      cuda::Launch_UpdateAttentionMask(static_cast<int32_t*>(mask_data), static_cast<const int32_t*>(old_data), batch_beam_size, new_kv_length, total_length, max_length, update_only, GetStream());
+      cuda::Launch_UpdateAttentionMask(static_cast<int32_t*>(next_mask_data), static_cast<int32_t*>(mask_data), batch_beam_size, new_kv_length, total_length, max_length, update_only, GetStream());
     else
-      cuda::Launch_UpdateAttentionMask(static_cast<int64_t*>(mask_data), static_cast<const int64_t*>(old_data), batch_beam_size, new_kv_length, total_length, max_length, update_only, GetStream());
+      cuda::Launch_UpdateAttentionMask(static_cast<int64_t*>(next_mask_data), static_cast<int64_t*>(mask_data), batch_beam_size, new_kv_length, total_length, max_length, update_only, GetStream());
+    return true;
   }
 
   void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count) override {

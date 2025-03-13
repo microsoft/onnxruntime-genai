@@ -5,6 +5,8 @@
 
 namespace Generators {
 
+struct Model;
+
 struct Embeddings {
   enum struct Mode {
     Input = 0,
@@ -34,7 +36,6 @@ struct Embeddings {
   const std::string name_;
   std::unique_ptr<OrtValue> embeddings_;
   size_t index_{};
-  StaticBuffer* sb_embeddings_{};
 };
 
 }  // namespace Generators

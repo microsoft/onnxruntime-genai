@@ -6,6 +6,9 @@
 
 namespace Generators {
 
+struct Config;
+struct SessionInfo;
+
 struct PhiImageProcessor : Processor {
   PhiImageProcessor(Config& config, const SessionInfo& session_info);
 
