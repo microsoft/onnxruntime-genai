@@ -85,13 +85,11 @@ steps:
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-jobs:
-- job: 'Publish Artifact: ONNXRuntime Genai capi'
-  templateContext:
-    outputs:
-    - output: pipelineArtifact
-      artifact: $(artifactName)-capi
-      path: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\package'
+  - task: 1ES.PublisPipelineArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai capi'
+    inputs:
+      ArtifactName: $(artifactName)-capi
+      PathtoPublish: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\package'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - task: BinSkim@4
