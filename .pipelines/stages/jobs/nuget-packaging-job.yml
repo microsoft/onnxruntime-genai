@@ -323,6 +323,7 @@ jobs:
       DoEsrp: 'true'
 
   - task: 1ES.PublishPipelineArtifact@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai NuGet'
     inputs:
       targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
       artifactName: $(artifactName)-nuget
