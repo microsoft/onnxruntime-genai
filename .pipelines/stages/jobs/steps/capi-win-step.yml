@@ -124,12 +124,11 @@ steps:
       Contents: '*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)\wheel'
 
-  - task: CopyFiles@2
+  - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
     inputs:
-      TargetFolder: $(artifactName)-wheel
-      Contents: "**"
-      SourceFolder: '$(Build.ArtifactStagingDirectory)\wheel'
+      artifactName: $(artifactName)-wheel
+      targetPath: '$(Build.ArtifactStagingDirectory)\wheel'
 
   - task: PublishSymbols@2
     displayName: 'Publish Build Symbols'

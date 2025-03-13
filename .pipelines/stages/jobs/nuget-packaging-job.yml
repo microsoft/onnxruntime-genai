@@ -322,7 +322,7 @@ jobs:
       FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
       DoEsrp: 'true'
 
-  - task: CopyFiles@2
+  - task: 1ES.PublishPipelineArtifact@1
     inputs:
-      SourceFolder: '$(Build.ArtifactStagingDirectory)\nuget'
-      TargetFolder: $(artifactName)-nuget
+      targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      artifactName: $(artifactName)-nuget
