@@ -131,8 +131,8 @@ jobs:
       FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
       DoEsrp: 'true'
 
-  outputs:
-  - output: pipelineArtifact
-    path: '$(Build.ArtifactStagingDirectory)\nuget'
-    artifact: $(genai_nuget_package_name)
+  - task: CopyFiles@2
+    inputs:
+      SourceFolder: '$(Build.ArtifactStagingDirectory)\nuget'
+      TargetFolder: $(genai_nuget_package_name)
       

@@ -85,11 +85,10 @@ steps:
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - task: CopyFiles@2
+  - output: pipelineArtifact
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
-    inputs:
-      TargetFolder: $(artifactName)-capi
-      SourceFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\package'
+    artifact: $(artifactName)-capi
+    path: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\package'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - task: BinSkim@4
