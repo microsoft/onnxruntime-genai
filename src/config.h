@@ -69,6 +69,7 @@ struct Config {
     //                     Identify the reason for the crash to enable allocator sharing by default.
     bool use_env_allocators{};
 
+    std::optional<std::string> custom_ops_library;
     std::vector<ProviderOptions> provider_options;
     std::optional<GraphOptimizationLevel> graph_optimization_level;
   };
