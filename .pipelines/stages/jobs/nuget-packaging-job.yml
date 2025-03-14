@@ -322,8 +322,8 @@ jobs:
       FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
       DoEsrp: 'true'
 
-  - task: PublishBuildArtifacts@1
+  - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime Genai NuGet'
     inputs:
-      PathtoPublish: '$(Build.ArtifactStagingDirectory)\nuget'
-      ArtifactName: $(artifactName)-nuget
+      targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      artifactName: $(artifactName)-nuget
