@@ -306,8 +306,7 @@ class Model:
         }
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
-            self.quant_attrs["bits"] = config.quantization_config["bits"]
-            self.quant_attrs["group_size"] = config.quantization_config["group_size"]
+            self.quant_attrs["config"] = config.quantization_config
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
@@ -2100,7 +2099,15 @@ class Model:
                 from onnxruntime_genai.models.quantized_model import QuantModel
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
-            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs["bits"], self.quant_attrs["group_size"], self.quant_attrs["use_g_idx"], q_size, kv_size, self.intermediate_size, self.num_layers)
+            model = QuantModel.from_pretrained(
+                self.quant_type,
+                input_path = input_path,
+                quant_attrs = self.quant_attrs,
+                q_size = q_size,
+                kv_size = kv_size,
+                intermediate_size = self.intermediate_size,
+                num_layers = self.num_layers,
+            )
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
