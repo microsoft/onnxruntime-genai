@@ -21,6 +21,7 @@ struct Images {
 };
 
 std::unique_ptr<Images> LoadImages(std::span<const char* const> image_paths);
+std::unique_ptr<Images> LoadImagesFromBuffers(std::span<const void*> image_data, std::span<const size_t> image_data_sizes);
 
 struct Audios {
   Audios(ort_extensions::OrtxObjectPtr<OrtxRawAudios> audios, size_t num_audios)
@@ -35,6 +36,7 @@ struct Audios {
 };
 
 std::unique_ptr<Audios> LoadAudios(const std::span<const char* const>& audio_paths);
+std::unique_ptr<Audios> LoadAudiosFromBuffers(std::span<const void*> audio_data, std::span<const size_t> audio_data_sizes);
 
 struct Payload {
   const std::string& prompt;
