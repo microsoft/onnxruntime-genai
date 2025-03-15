@@ -5,7 +5,10 @@
 
 #include <cstdlib>
 #include <charconv>
+#include <fstream>
 #include <iostream>
+#include <iterator>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -17,7 +20,9 @@ namespace benchmark {
 namespace {
 
 [[noreturn]] void PrintHelpAndExit(const char* program_name, int exit_code) {
-  Options defaults{};
+  const Options defaults{};
+  const auto default_prompt_num_tokens = std::get<size_t>(defaults.prompt_num_tokens_or_content);
+
   std::ostringstream s;
 
   s << "Usage: " << program_name << " -i <model path> <other options>\n"
@@ -26,8 +31,14 @@ namespace {
     << "      Path to the ONNX model directory to benchmark, compatible with onnxruntime-genai.\n"
     << "    -b,--batch_size <number>\n"
     << "      Number of sequences to generate in parallel. Default: " << defaults.batch_size << "\n"
-    << "    -l,--prompt_length <number>\n"
-    << "      Number of tokens in the prompt. Default: " << defaults.num_prompt_tokens << "\n"
+    << "    Prompt options:\n"
+    << "      -l,--prompt_length <number>\n"
+    << "        Number of tokens in the generated prompt. Default: " << default_prompt_num_tokens << "\n"
+    << "      --prompt <prompt text>\n"
+    << "        Prompt text to use. Default: See --prompt_length.\n"
+    << "      --prompt_file <file containing prompt text>\n"
+    << "        Path to file containing prompt text to use. Default: See --prompt_length.\n"
+    << "      Note: --prompt_length, --prompt, and --prompt_file are mutually exclusive.\n"
     << "    -g,--generation_length <number>\n"
     << "      Number of tokens to generate. Default: " << defaults.num_tokens_to_generate << "\n"
     << "    -r,--repetitions <number>\n"
@@ -54,6 +65,17 @@ T ParseNumber(std::string_view s) {
   return n;
 }
 
+std::string ReadFileContent(std::string_view file_path) {
+  // `file_path` is assumed to be a null-terminated string.
+  std::ifstream input_stream{file_path.data()};
+  if (!input_stream) {
+    throw std::runtime_error(std::string{"Failed to read file: "}.append(file_path));
+  }
+
+  std::istreambuf_iterator<char> input_begin{input_stream}, input_end{};
+  return std::string{input_begin, input_end};
+}
+
 void VerifyOptions(const Options& opts) {
   if (opts.model_path.empty()) {
     throw std::runtime_error("ONNX model directory path must be provided.");
@@ -74,6 +96,8 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
       return std::string_view{argv[++idx]};
     };
 
+    std::optional<PromptNumberOfTokensOrContent> prompt_num_tokens_or_content{};
+
     for (int i = 1; i < argc; ++i) {
       std::string_view arg{argv[i]};
 
@@ -82,7 +106,11 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
       } else if (arg == "-b" || arg == "--batch_size") {
         opts.batch_size = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-l" || arg == "--prompt_length") {
-        opts.num_prompt_tokens = ParseNumber<size_t>(next_arg(i));
+        prompt_num_tokens_or_content = ParseNumber<size_t>(next_arg(i));
+      } else if (arg == "--prompt") {
+        prompt_num_tokens_or_content = std::string{next_arg(i)};
+      } else if (arg == "--prompt_file") {
+        prompt_num_tokens_or_content = ReadFileContent(next_arg(i));
       } else if (arg == "-g" || arg == "--generation_length") {
         opts.num_tokens_to_generate = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-r" || arg == "--repetitions") {
@@ -96,6 +124,10 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
       } else {
         throw std::runtime_error(std::string{"Unknown option: "}.append(arg));
       }
+    }
+
+    if (prompt_num_tokens_or_content.has_value()) {
+      opts.prompt_num_tokens_or_content = std::move(*prompt_num_tokens_or_content);
     }
 
     VerifyOptions(opts);
