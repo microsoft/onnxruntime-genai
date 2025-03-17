@@ -160,8 +160,8 @@ Change into the `onnxruntime-genai\examples\c` folder.
    ```cmd
    mkdir onnxruntime-win-arm64-directml
    cd onnxruntime-win-arm64-directml
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/Microsoft.ML.OnnxRuntime.DirectML.1.20.1.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.20.1.nupkg
-   tar -xvf Microsoft.ML.OnnxRuntime.DirectML.1.20.1.nupkg
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg
+   tar -xvf Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg
    copy build\native\include\* ..\include
    copy runtimes\win-arm64\native\* ..\lib
    cd ..
