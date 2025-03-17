@@ -166,9 +166,6 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
     params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
 
-    if args.use_graph_capture:
-        params.try_graph_capture_with_max_batch_size(1)
-
     if args.verbose: print("Processed inputs, running warmup runs...")
     for _ in tqdm(range(args.warmup)):
         generator = og.Generator(model, params)
@@ -199,9 +196,6 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
         params = og.GeneratorParams(model)
         params.set_inputs(inputs)
         params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
-
-        if args.use_graph_capture:
-            params.try_graph_capture_with_max_batch_size(1)
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
@@ -339,6 +333,5 @@ if __name__ == "__main__":
     parser.add_argument('-o', '--output', type=str, default='genai_e2e.csv', help='Output CSV file name or path (with .csv extension)')
     parser.add_argument('-v', '--verbose', action='store_true', help='Print extra information')
     parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
-    parser.add_argument('-gc', '--use_graph_capture', action='store_true', help='Use the graph capture feature for CUDA or DML')
     args = parser.parse_args()
     main(args)
