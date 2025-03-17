@@ -131,8 +131,9 @@ jobs:
       FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
       DoEsrp: 'true'
 
-  - task: CopyFiles@2
+  - task: 1ES.PublishPipelineArtifact@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai NuGet'
     inputs:
-      SourceFolder: '$(Build.ArtifactStagingDirectory)\nuget'
-      TargetFolder: $(genai_nuget_package_name)
+      targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      artifactName: $(genai_nuget_package_name)
       

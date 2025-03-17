@@ -118,9 +118,16 @@ extends:
   template: v1/1ES.Official.PipelineTemplate.yml@1esPipelines
   parameters:
     # Update the pool with your team's 1ES hosted pool.
-    pool:
-      name: 'onnxruntime-Win-CPU-2022'  # Name of your hosted pool
-      os: windows  # OS of the image. This value cannot be a variable. Allowed values: windows, linux, macOS
+    # pool:
+    #   name: 'onnxruntime-Win-CPU-2022'  # Name of your hosted pool
+    #   os: windows  # OS of the image. This value cannot be a variable. Allowed values: windows, linux, macOS
+    sdl:
+      sourceRepositoriesToScan:
+        include:
+        - repository: manylinux
+      sourceAnalysisPool:
+        name: onnxruntime-Win-CPU-2022
+        os: linux
     stages:
     - template: stages/capi-packaging-stage.yml
       parameters:
