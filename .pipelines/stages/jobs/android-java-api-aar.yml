@@ -16,7 +16,9 @@ jobs:
   workspace:
     clean: all
   #pool: 'ubuntu-latest'
-  pool: onnxruntime-Ubuntu2204-AMD-CPU
+  pool:
+    name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+    os: linux
 
 
   steps:
