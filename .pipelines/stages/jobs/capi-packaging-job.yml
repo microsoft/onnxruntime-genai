@@ -44,7 +44,7 @@ jobs:
   ${{ if or(eq(parameters.os, 'osx'), eq(parameters.os, 'ios')) }}:
     pool:
       name: 'Azure Pipelines'
-      # name: 'macOS-latest'
+      image: 'macOS-latest'
       os: 'macOS'
 
   timeoutInMinutes: 180
