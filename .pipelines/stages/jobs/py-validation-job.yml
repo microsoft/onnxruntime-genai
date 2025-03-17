@@ -118,10 +118,8 @@ jobs:
       value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
 
   - name: cuda_docker_image
-    ${{ if eq(parameters.cuda_version, '11.8') }}:
-      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20250109.1
-    ${{ else }}:
-      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_ubi8_gcc12:20250109.1
+    value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_ubi8_gcc12:20250109.1
+
 
   steps:
   - checkout: self

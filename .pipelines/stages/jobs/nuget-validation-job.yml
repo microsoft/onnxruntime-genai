@@ -99,10 +99,8 @@ jobs:
       value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
 
   - name: cuda_docker_image
-    ${{ if eq(parameters.cuda_version, '11.8') }}:
-      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20250109.1
-    ${{ else }}:
-      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_ubi8_gcc12:20250109.1
+    value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_ubi8_gcc12:20250109.1
+
 
   workspace:
     clean: all
@@ -171,7 +169,7 @@ jobs:
       CsprojConfiguration: $(csproj_configuration)
       LocalFolder: 'phi3.5-vision'
       ModelFolder: $(prebuild_phi3_5_vision_model_folder)
-  
+
   - template: steps/utils/download-huggingface-model.yml
     parameters:
       HuggingFaceRepo: 'microsoft/Phi-4-multimodal-instruct-onnx'
