@@ -40,10 +40,12 @@ jobs:
         hostArchitecture: 'Arm64'
       ${{ else }}:
         name: 'onnxruntime-Win-CPU-2022'
+      os: windows
   ${{ if or(eq(parameters.os, 'osx'), eq(parameters.os, 'ios')) }}:
     pool:
-      name: 'Azure Pipelines'
-      os: 'macOS-latest'
+      # name: 'Azure Pipelines'
+      name: 'macOS-latest'
+      os: 'macOS'
 
   timeoutInMinutes: 180
   #  set variables here to be used in the template and steps
