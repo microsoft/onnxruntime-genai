@@ -29,14 +29,14 @@ DefaultInputIDs::DefaultInputIDs(State& state)
     *past_sequence_length_->GetTensorMutableData<int32_t>() = -1;
   }
 
-  value_ = std::make_unique<OgaValue>(model_.p_device_inputs_, Ort::TypeToTensorType<int32_t>);
-  cast_value_ = std::make_unique<OgaValue>(model_.p_device_inputs_, Ort::TypeToTensorType<int64_t>);
+  value_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int32_t>);
+  cast_value_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int64_t>);
 }
 
 void DefaultInputIDs::Add() {
   input_index_ = state_.inputs_.size();
 
-  state_.inputs_.push_back(value_->GetOrtValue());
+  state_.inputs_.push_back(value_->GetOrtTensor());
   state_.input_names_.push_back(name_);
 
   if (current_sequence_length_ && past_sequence_length_) {
@@ -75,7 +75,7 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   if (static_cast<size_t>(shape_[1]) != sequence_length) {
     shape_[1] = sequence_length;
     value_->CreateTensor(shape_, state_.params_->use_graph_capture && shape_[1] == 1);
-    state_.inputs_[input_index_] = value_->GetOrtValue();
+    state_.inputs_[input_index_] = value_->GetOrtTensor();
   }
 
   // Update input_ids with next tokens
@@ -94,10 +94,10 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   }
 
   if (type_ == Ort::TypeToTensorType<int64_t>) {
-    if (!cast_value_->ort_value_ || static_cast<size_t>(cast_value_->GetShape()[1]) != sequence_length)
+    if (!cast_value_->ort_tensor_ || static_cast<size_t>(cast_value_->GetShape()[1]) != sequence_length)
       cast_value_->CreateTensor(shape_, state_.params_->use_graph_capture && shape_[1] == 1);
-    Cast(*value_->GetOrtValue(), cast_value_->ort_value_, *model_.p_device_inputs_, type_);
-    state_.inputs_[input_index_] = cast_value_->GetOrtValue();
+    Cast(*value_->GetOrtTensor(), cast_value_->ort_tensor_, *model_.p_device_inputs_, type_);
+    state_.inputs_[input_index_] = cast_value_->GetOrtTensor();
   }
 
   is_prompt_ = false;

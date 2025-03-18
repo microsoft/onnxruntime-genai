@@ -225,10 +225,10 @@ std::shared_ptr<Tensor> Tokenizer::EncodeBatch(std::span<const char*> strings) c
 
   auto encoded = PadInputs(span_sequences, pad_token_id_);  // TODO: Pad directly into tensor vs copying?
 
-  auto tensor = std::make_shared<Tensor>();
   auto shape = std::array<int64_t, 2>{static_cast<int64_t>(strings.size()), static_cast<int64_t>(encoded.size() / strings.size())};
-  tensor->ort_tensor_ = OrtValue::CreateTensor<int32_t>(Ort::Allocator::GetWithDefaultOptions(), shape);
-  std::copy(encoded.begin(), encoded.end(), tensor->ort_tensor_->GetTensorMutableData<int32_t>());
+  auto ort_tensor_ = OrtValue::CreateTensor<int32_t>(Ort::Allocator::GetWithDefaultOptions(), shape);
+  auto tensor = std::make_shared<Tensor>(std::move(ort_tensor_));
+  std::copy(encoded.begin(), encoded.end(), tensor->GetMutableData<int32_t>());
 
   return tensor;
 }

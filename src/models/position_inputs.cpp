@@ -38,10 +38,10 @@ DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, D
   position_ids_shape_ = shape;
   attention_mask_shape_ = shape;
 
-  position_ids_ = std::make_unique<OgaValue>(model_.p_device_inputs_, type_);
-  position_ids_next_ = std::make_unique<OgaValue>(model_.p_device_inputs_, type_);
-  attention_mask_ = std::make_unique<OgaValue>(model_.p_device_inputs_, type_);
-  attention_mask_next_ = std::make_unique<OgaValue>(model_.p_device_inputs_, type_);
+  position_ids_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
+  position_ids_next_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
+  attention_mask_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
+  attention_mask_next_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
 }
 
 void DefaultPositionInputs::Add() {
@@ -87,7 +87,7 @@ void DefaultPositionInputs::RewindTo(size_t index) {
     is_first_update_ = true;
     // Position ids next is set to nullptr after the first Run() call. This restores it
     if (has_posid_input_)
-      position_ids_next_ = std::make_unique<OgaValue>(model_.p_device_inputs_, type_);
+      position_ids_next_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
     // Rewind the mask input to a previous state
   } else if (has_mask_input_) {
     if (attention_mask_shape_[0] == 1) {
@@ -100,14 +100,14 @@ void DefaultPositionInputs::RewindTo(size_t index) {
 void DefaultPositionInputs::AddAttentionMask() {
   mask_input_index_ = state_.inputs_.size();
 
-  state_.inputs_.push_back(attention_mask_->GetOrtValue());
+  state_.inputs_.push_back(attention_mask_->GetOrtTensor());
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.attention_mask.c_str());
 }
 
 void DefaultPositionInputs::AddPositionIDs() {
   posid_input_index_ = state_.inputs_.size();
 
-  state_.inputs_.push_back(position_ids_->GetOrtValue());
+  state_.inputs_.push_back(position_ids_->GetOrtTensor());
   state_.input_names_.push_back(model_.config_->model.decoder.inputs.position_ids.c_str());
 }
 
@@ -129,7 +129,7 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
   if (position_ids_shape_[1] != new_kv_length) {
     position_ids_shape_[1] = new_kv_length;
     CreateNextPositionIDsTensor();
-    state_.inputs_[posid_input_index_] = position_ids_->GetOrtValue();
+    state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
   }
   // Try to update position ids on the device. If it fails, copy to CPU, update there, and copy back to device.
   if (!model_.p_device_inputs_->UpdatePositionIds(position_ids_->GetMutableRawData(), static_cast<int>(position_ids_shape_[0]), total_length, new_kv_length, type_)) {
@@ -173,8 +173,8 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
   }
 
   if (!state_.params_->use_graph_capture) {
-    attention_mask_->ort_value_ = std::move(attention_mask_next_->ort_value_);
-    state_.inputs_[mask_input_index_] = attention_mask_->GetOrtValue();
+    attention_mask_->ort_tensor_ = std::move(attention_mask_next_->ort_tensor_);
+    state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
   }
 }
 
@@ -201,12 +201,12 @@ void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> n
   }
 
   // Move tensors to appropriate device and expand by num_beams
-  position_ids_->ort_value_ = model_.ExpandInputs(position_ids, state_.params_->search.num_beams);
-  position_ids_next_->ort_value_ = model_.ExpandInputs(position_ids_next, state_.params_->search.num_beams);
+  position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, state_.params_->search.num_beams);
+  position_ids_next_->ort_tensor_ = model_.ExpandInputs(position_ids_next, state_.params_->search.num_beams);
   if (state_.params_->use_graph_capture)
     position_ids_next_->MakeStatic();
   position_ids_shape_[0] *= state_.params_->search.num_beams;
-  state_.inputs_[posid_input_index_] = position_ids_->GetOrtValue();
+  state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 }
 
 // Initialize a static attention mask of size max_length and expanded by num_beams
@@ -259,10 +259,10 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     InitializeStaticMask<T>(*attention_mask);
   } else {
     attention_mask = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
-    attention_mask_->ort_value_ = std::move(attention_mask);
+    attention_mask_->ort_tensor_ = std::move(attention_mask);
     attention_mask_shape_[0] *= state_.params_->search.num_beams;
   }
-  state_.inputs_[mask_input_index_] = attention_mask_->GetOrtValue();
+  state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
 template <typename T>

@@ -33,7 +33,7 @@
 #include "logging.h"
 #include "runtime_settings.h"
 #include "tensor.h"
-#include "oga_value.h"
+// #include "oga_value.h"
 
 void ThrowErrorIfSessionTerminated(bool is_session_terminated);
 
@@ -51,17 +51,6 @@ DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
 }
 
 DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value);
-
-template <typename T>
-struct OrtTensor {
-  OrtTensor(std::unique_ptr<OrtValue> ort_value, DeviceInterface& device)
-      : ort_value_{std::move(ort_value)}, device_span_{WrapTensor<T>(device, *ort_value_)} {}
-
-  operator OrtValue*() { return ort_value_.get(); }
-
-  std::unique_ptr<OrtValue> ort_value_;
-  DeviceSpan<T> device_span_;
-};
 
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
