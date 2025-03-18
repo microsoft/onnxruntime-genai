@@ -7,6 +7,7 @@
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
 #include "phi_multimodal_processor.h"
+#include "gemma_image_processor.h"
 #include "adapters.h"
 #include "extra_outputs.h"
 
@@ -100,6 +101,9 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, 
 
   std::shared_ptr<Tokenizer> tokenizer_;
   std::shared_ptr<Processor> processor_;
+
+ private:
+  std::unordered_map<std::string, std::function<std::shared_ptr<Processor>(Config&, const SessionInfo&)>> processor_factory_;
 };
 
 struct SessionInfo {

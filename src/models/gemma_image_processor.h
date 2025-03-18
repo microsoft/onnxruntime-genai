@@ -6,19 +6,18 @@
 
 namespace Generators {
 
-struct PhiImageProcessor : Processor {
-  PhiImageProcessor(Config& config, const SessionInfo& session_info);
-
-  PhiImageProcessor() = delete;
-  PhiImageProcessor(const PhiImageProcessor&) = delete;
-  PhiImageProcessor& operator=(const PhiImageProcessor&) = delete;
+struct GemmaImageProcessor : Processor {
+  GemmaImageProcessor(Config& config, const SessionInfo& session_info);
 
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 
  private:
-  ort_extensions::OrtxObjectPtr<OrtxProcessor> processor_;
+  ort_extensions::OrtxObjectPtr<OrtxProcessor> image_processor_;
 
   ONNXTensorElementDataType pixel_values_type_;
+  ONNXTensorElementDataType attention_mask_type_;
+  ONNXTensorElementDataType audio_features_type_;
+  ONNXTensorElementDataType audio_sizes_type_;
 };
 
 }  // namespace Generators

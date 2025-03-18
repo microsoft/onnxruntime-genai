@@ -626,15 +626,17 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 }
 
 MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
-    : tokenizer_{std::make_shared<Tokenizer>(config)} {
-  if (config.model.type == "phi3v") {
-    processor_ = std::make_shared<PhiImageProcessor>(config, session_info);
-  } else if (config.model.type == "whisper") {
-    processor_ = std::make_shared<WhisperProcessor>(config, session_info);
-  } else if (config.model.type == "phi4mm") {
-    processor_ = std::make_shared<PhiMultiModalProcessor>(config, session_info);
+    : tokenizer_{std::make_shared<Tokenizer>(config)},
+      processor_factory_{
+          {"phi3v", Processor::Create<PhiImageProcessor>},
+          {"whisper", Processor::Create<WhisperProcessor>},
+          {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
+          {"gemma3", Processor::Create<GemmaImageProcessor>}} {
+  auto processor = processor_factory_.find(config.model.type);
+  if (processor != processor_factory_.end()) {
+    processor_ = processor->second(config, session_info);
   } else {
-    throw std::runtime_error("MultiModalProcessor cannot be created. Expected a multimodal model. Actual: " + config.model.type);
+    throw std::runtime_error("MultiModalProcessor cannot be created. " + config.model.type + " is not a registered multi-modal model type.");
   }
 }
 
