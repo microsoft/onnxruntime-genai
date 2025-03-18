@@ -164,6 +164,8 @@ struct Inputs_Element : JSON::Element {
       v_.current_sequence_length = JSON::Get<std::string_view>(value);
     } else if (name == "past_sequence_length") {
       v_.past_sequence_length = JSON::Get<std::string_view>(value);
+    } else if (name == "total_sequence_length") {
+      v_.total_sequence_length = JSON::Get<std::string_view>(value);
     } else
       throw JSON::unknown_value_error{};
   }
@@ -294,6 +296,10 @@ struct SlidingWindow_Element : JSON::Element {
       v_->window_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "pad_value") {
       v_->pad_value = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "alignment") {
+      v_->alignment = JSON::Get<std::string_view>(value);
+    } else if (name == "slide_key_value_cache") {
+      v_->slide_key_value_cache = JSON::Get<bool>(value);
     } else
       throw JSON::unknown_value_error{};
   }

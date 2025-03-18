@@ -389,7 +389,8 @@ std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
     return nullptr;
   }
 
-  if (state.model_.config_->model.decoder.sliding_window) {
+  if (state.model_.config_->model.decoder.sliding_window &&
+      state.model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
     return std::make_unique<WindowedKeyValueCache>(state);
   } else {
     return std::make_unique<DefaultKeyValueCache>(state);

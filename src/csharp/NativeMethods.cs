@@ -170,6 +170,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                      UIntPtr /* size_t */ sequenceIndex);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaAppendTokenToSequence(int token /* int32_t */,
+                                                                              IntPtr /* const OgaSequences* */ sequences,
+                                                                              UIntPtr /* size_t** */ sequenceIndex);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateTokenizer(IntPtr /* const OgaModel* */ model,
                                                                         out IntPtr /* OgaTokenizer** */ tokenizer);
 

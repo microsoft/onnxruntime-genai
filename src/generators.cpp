@@ -302,10 +302,17 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
     const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
     padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
   }
+
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
-  std::fill_n(cpu_span.begin(), padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
-  std::copy_backward(input_ids.begin(), input_ids.end(), cpu_span.end());
+  auto padding_begin = cpu_span.begin();
+  auto data_end = cpu_span.end();
+  if (model_->config_->model.decoder.sliding_window.has_value() && model_->config_->model.decoder.sliding_window->alignment == "left") {
+    padding_begin = cpu_span.begin() + input_ids.size();
+    data_end = padding_begin;
+  }
+  std::fill_n(padding_begin, padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
+  std::copy_backward(input_ids.begin(), input_ids.end(), data_end);
   input_ids_device.CopyCpuToDevice();
   return input_ids_device;
 }
