@@ -174,7 +174,8 @@ class Model:
         rotemb_dim = int(self.head_size * partial_rotary_factor) if partial_rotary_factor != 1.0 else 0
         rope_theta = config.rope_theta if hasattr(config, "rope_theta") else config.rope_embedding_base if hasattr(config, "rope_embedding_base") else 10000
         self.rotemb_attrs = {
-            "create_rotary_embedding_caches": True,          # Create cos/sin caches for rotary embeddings
+            "create_caches": True,                           # Create cos/sin caches for rotary embeddings
+            "save_caches": True,                             # Auto-save cos/sin caches for rotary embeddings after creation
             "cache_length": self.context_length,             # Cache length to use when creating cos/sin caches for rotary embeddings
             "theta": rope_theta,                             # Base value if calculating cos/sin caches from scratch
             "partial_rotary_factor": partial_rotary_factor,  # Factor for partial rotary embeddings
@@ -216,7 +217,7 @@ class Model:
                 }
 
         # Attention-specific variables (MHA, GQA, GQA + Rot.Emb., etc.)
-        softcap = config.attn_logit_softcapping if hasattr(config, "attn_logit_softcapping") else 0.0  # default is 0.0 in GroupQueryAttention kernel
+        attn_softcap = config.attn_logit_softcapping if hasattr(config, "attn_logit_softcapping") and config.attn_logit_softcapping is not None else 0.0  # default is 0.0 in GroupQueryAttention kernel
 
         # Block-sparse attention-specific variables
         sparse_block_size = config.blocksparse_block_size if hasattr(config, "blocksparse_block_size") else 0
@@ -230,8 +231,8 @@ class Model:
             "v_path": "",                                    # V path to attention
             "op_type": "MultiHeadAttention",                 # Attention op to use
             "scale": 1 / np.sqrt(self.head_size),            # Scale value after calculating Q x K' in attention
-            "softcap": softcap,                              # Softcap value to prevent values from exploding in attention
-            "use_rotemb_in_attn": False,                     # Use rotary embeddings within attention (instead of a separate RotaryEmbedding op)
+            "softcap": attn_softcap,                         # Softcap value to prevent values from exploding in attention
+            "use_rope_in_attn": False,                       # Use rotary embeddings within attention (instead of a separate RotaryEmbedding op)
             "use_packed_matmul": False,                      # Use packed MatMul (instead of 3 separate MatMuls for Q/K/V)
             "block_sparse": {                                # Block-sparse attention-specific variables
                 "sparse_block_size": sparse_block_size,      # Sparse block size for SparseAttention op
@@ -239,31 +240,11 @@ class Model:
                 "local_blocks": local_blocks,                # Number of local blocks for sparse attention
                 "vert_stride": vert_block_stride,            # Vertical stride to use for sparse attention
                 "homo_head": homo_head,                      # Use homo head pattern for sparse attention
-            }
+            },
+            "q_norm": False,                                 # LayerNorm after MatMul in Q path
+            "k_norm": False,                                 # LayerNorm after MatMul in K path
         }
-        valid_gqa_configurations = [
-            ("cpu", TensorProto.FLOAT),
-            ("cuda", TensorProto.FLOAT16),
-            ("rocm", TensorProto.FLOAT16),
-            ("dml", TensorProto.FLOAT16),
-            ("webgpu", TensorProto.FLOAT16),
-            ("webgpu", TensorProto.FLOAT),
-        ]
-        if (self.ep, self.io_dtype) in valid_gqa_configurations:
-            # Change model settings for GroupQueryAttention
-            self.attention_attrs["op_type"] = "GroupQueryAttention"
-            print("GroupQueryAttention (GQA) is used in this model.")
-
-            # DML doesn't support packed Q/K/V for GQA yet
-            # Packed MatMul with LoRA/QLoRA is not currently supported
-            self.attention_attrs["use_packed_matmul"] = self.ep not in ["dml", "webgpu"] and not self.matmul_attrs["use_lora"]
-
-            # GQA + Rot.Emb. does not require `position ids` as input
-            if self.ep not in ["dml", "webgpu"]:
-                self.attention_attrs["use_rotemb_in_attn"] = True
-                self.input_names.remove("position_ids")
-
-        self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
+        self.make_attention_init()
 
         # MLP-specific variables
         self.mlp_attrs = {
@@ -284,9 +265,11 @@ class Model:
         }
 
         # LM head-specific variables
+        lm_head_softcap = config.final_logit_softcapping if hasattr(config, "final_logit_softcapping") and config.final_logit_softcapping is not None else 0.0  # default is 0.0 in GroupQueryAttention kernel
         self.lm_head_attrs = {
-            "scale": 1,                 # Scale value to multiply output of LM head by
-            "mask": None,               # LM head mask for tokens in the vocabulary
+            "scale": 1,                  # Scale value to multiply output of LM head by
+            "mask": None,                # LM head mask for tokens in the vocabulary
+            "softcap": lm_head_softcap,  # Softcap value to prevent values from exploding in LM head
         }
         if hasattr(config, "dummy_token_indices"):
             # Create LM head mask for tokens in the vocabulary
@@ -309,6 +292,41 @@ class Model:
             self.quant_attrs["bits"] = config.quantization_config["bits"]
             self.quant_attrs["group_size"] = config.quantization_config["group_size"]
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
+
+    def make_attention_init(self):
+        valid_gqa_configurations = [
+            ("cpu", TensorProto.FLOAT),
+            ("cuda", TensorProto.FLOAT16),
+            ("rocm", TensorProto.FLOAT16),
+            ("dml", TensorProto.FLOAT16),
+            ("webgpu", TensorProto.FLOAT16),
+            ("webgpu", TensorProto.FLOAT),
+        ]
+        if (self.ep, self.io_dtype) in valid_gqa_configurations:
+            # Change model settings for GroupQueryAttention
+            self.attention_attrs["op_type"] = "GroupQueryAttention"
+            print("GroupQueryAttention (GQA) is used in this model.")
+
+            # Some EPs don't support packed Q/K/V for GQA yet
+            # Packed MatMul with LoRA/QLoRA is not currently supported
+            self.attention_attrs["use_packed_matmul"] = (
+                self.ep not in ["dml", "webgpu"]
+                and not self.matmul_attrs["use_lora"]
+                and not self.attention_attrs["q_norm"]
+                and not self.attention_attrs["k_norm"]
+            )
+
+            # Some EPs don't support fusing rotary embeddings inside GQA yet
+            self.attention_attrs["use_rope_in_attn"] = (
+                self.ep not in ["dml", "webgpu"]
+                and not self.attention_attrs["q_norm"]
+                and not self.attention_attrs["k_norm"]
+            )
+            if self.attention_attrs["use_rope_in_attn"]:
+                # GQA + Rot.Emb. does not require `position_ids` as input
+                self.input_names.remove("position_ids")
+
+        self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         try:
@@ -1041,8 +1059,6 @@ class Model:
             # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
 
-        return output_0
-
     def make_mscale_su(self, mscale):
         if mscale <= 1.0:
             return 1.0
@@ -1100,7 +1116,7 @@ class Model:
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
         sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
 
-        if self.rotemb_attrs["create_rotary_embedding_caches"]:
+        if self.rotemb_attrs["create_caches"]:
             # Create cos/sin caches if not already created
             cos_cache, sin_cache = self.make_rotary_embedding_caches_from_scratch()
 
@@ -1116,7 +1132,7 @@ class Model:
                 cos_cache = cos_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
                 sin_cache = sin_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
 
-            if "cos_cache_name" not in kwargs and "sin_cache_name" not in kwargs:
+            if self.rotemb_attrs["save_caches"]:
                 # Save cos/sin caches to disk
                 self.make_external_tensor(cos_cache, cos_cache_name)
                 self.make_external_tensor(sin_cache, sin_cache_name)
@@ -1124,7 +1140,7 @@ class Model:
                 # Return cos/sin caches since they will be custom-saved
                 return cos_cache, sin_cache
 
-            self.rotemb_attrs["create_rotary_embedding_caches"] = False
+            self.rotemb_attrs["create_caches"] = False
 
         return cos_cache_name, sin_cache_name
 
@@ -1156,6 +1172,8 @@ class Model:
             self.make_value_info(if_sin_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
             return
 
+        self.rotemb_attrs["save_caches"] = False
+
         cos_cache_large_name, sin_cache_large_name = "cos_cache_large", "sin_cache_large"
         cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_large_name, sin_cache_name=sin_cache_large_name)
 
@@ -1166,7 +1184,7 @@ class Model:
         cos_cache_small_name, sin_cache_small_name = "cos_cache_small", "sin_cache_small"
         cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
 
-        self.rotemb_attrs["create_rotary_embedding_caches"] = False
+        self.rotemb_attrs["create_caches"] = False
 
         # Make the following subgraph to decide which cos/sin caches to use in the rotary embeddings
         #
@@ -1434,8 +1452,8 @@ class Model:
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
         self.make_node(
             "GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
-            num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], # local_window_size=self.window_size,  # Disable sliding window attribute temporarily
-            softcap=self.attention_attrs["softcap"], do_rotary=self.attention_attrs["use_rotemb_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
+            num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], local_window_size=self.window_size,
+            softcap=self.attention_attrs["softcap"], do_rotary=self.attention_attrs["use_rope_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
 
@@ -1452,7 +1470,7 @@ class Model:
         self.make_node(
             "SparseAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
             num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], sparse_block_size=self.attention_attrs["block_sparse"]["sparse_block_size"],
-            do_rotary=self.attention_attrs["use_rotemb_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
+            do_rotary=self.attention_attrs["use_rope_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
         )
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
@@ -1535,9 +1553,26 @@ class Model:
                 self.make_add_bias(attention.v_proj.bias.detach().numpy(), v_add_name, root_input=self.attention_attrs["v_path"])
                 self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
 
+        # Make Q/K SimplifiedLayerNorm nodes
+        if self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"]:
+            # Save original root_input and skip_input
+            original_root_input, original_skip_input = self.layernorm_attrs["root_input"], self.layernorm_attrs["skip_input"]
+
+            self.layernorm_attrs["root_input"] = self.attention_attrs["q_path"]
+            self.make_layernorm(layer_id, attention.q_norm, skip=False, simple=self.layernorm_attrs["simple"], location="attn_q")
+            self.attention_attrs["q_path"] = self.layernorm_attrs["output_0"]
+
+            self.layernorm_attrs["root_input"] = self.attention_attrs["k_path"]
+            self.make_layernorm(layer_id, attention.k_norm, skip=False, simple=self.layernorm_attrs["simple"], location="attn_k")
+            self.attention_attrs["k_path"] = self.layernorm_attrs["output_0"]
+
+            # Set root_input and skip_input to their original values for subsequent LayerNorm nodes
+            self.layernorm_attrs["root_input"] = original_root_input
+            self.layernorm_attrs["skip_input"] = original_skip_input
+
         # Make RotaryEmbedding nodes
         cos_cache_name, sin_cache_name = "", ""
-        if self.attention_attrs["use_rotemb_in_attn"]:
+        if self.attention_attrs["use_rope_in_attn"]:
             cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
         else:
             q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
@@ -2032,21 +2067,22 @@ class Model:
         bias_exists = lm_head.bias is not None
         scale_exists = self.lm_head_attrs["scale"] != 1
         mask_exists = self.lm_head_attrs["mask"] is not None
+        softcap_exists = self.lm_head_attrs["softcap"] != 0.0
 
         matmul_basename = "/lm_head/MatMul"
         root_input = self.layernorm_attrs["output_0"]
-        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not(bias_exists or scale_exists or mask_exists))
+        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not(bias_exists or scale_exists or mask_exists or softcap_exists))
         lm_name = matmul_name
 
         if bias_exists:
             add_name = "/lm_head/Add"
-            self.make_add_bias(lm_head.bias.detach().numpy(), add_name, root_input=f"{lm_name}/output_0", logits=not(scale_exists or mask_exists))
+            self.make_add_bias(lm_head.bias.detach().numpy(), add_name, root_input=f"{lm_name}/output_0", logits=not(scale_exists or mask_exists or softcap_exists))
             lm_name = add_name
 
         if scale_exists:
             mul_name = "/lm_head/Mul"
             mul_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
-            mul_output = "logits" if not mask_exists else f"{mul_name}/output_0"
+            mul_output = "logits" if not(mask_exists or softcap_exists) else f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
             self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
             lm_name = mul_name
@@ -2058,10 +2094,26 @@ class Model:
 
             where_name = "/lm_head/Where"
             where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{lm_name}/output_0"]
-            where_output = "logits"
+            where_output = "logits" if not softcap_exists else f"{where_name}/output_0"
             self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
             self.make_value_info(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
             lm_name = where_name
+
+        if softcap_exists:
+            # Add final logit softcapping (Div --> Tanh --> Mul)
+            div_name = "/lm_head/Div"
+            div_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['softcap']}"]
+            self.make_div(div_name, div_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
+
+            tanh_name = "/lm_head/Tanh"
+            self.make_tanh(tanh_name, f"{div_name}/output_0", dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
+
+            mul_name = "/lm_head/Mul"
+            mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['softcap']}"]
+            mul_output = "logits"
+            self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
+            self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
+            lm_head = mul_name
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
@@ -2603,7 +2655,7 @@ class LlamaModel(Model):
 class MistralModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.position_ids_name = f"{self.make_position_ids_reformatting()}/output_0" if not self.attention_attrs["use_rotemb_in_attn"] else "position_ids"
+        self.position_ids_name = f"{self.make_position_ids_reformatting()}/output_0" if not self.attention_attrs["use_rope_in_attn"] else "position_ids"
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
@@ -2651,7 +2703,8 @@ class Gemma2Model(GemmaModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
-        self.lm_head_attrs["scale"] = config.final_logit_softcapping
+        self.lm_head_attrs["scale"] = config.final_logit_softcapping if config.final_logit_softcapping is not None else 1.0
+        self.is_local = lambda layer_id: layer_id % 2 == 1
 
     def make_layer(self, layer_id, layer):
         # Gemma2 decoder layer is typically defined as:
@@ -2685,28 +2738,9 @@ class Gemma2Model(GemmaModel):
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         original_window_size = self.window_size
-        self.window_size = original_window_size if layer_id % 2 == 1 else -1  # default is -1 in GroupQueryAttention kernel
+        self.window_size = original_window_size if self.is_local(layer_id) else -1  # default is -1 in GroupQueryAttention kernel
         super().make_attention(layer_id, attention, root_input, **kwargs)
         self.window_size = original_window_size
-
-    def make_lm_head(self, lm_head):
-        matmul_basename = "/lm_head/MatMul"
-        root_input = self.layernorm_attrs["output_0"]
-        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=False)
-
-        # Add final logit softcapping (Div --> Tanh --> Mul)
-        div_name = "/lm_head/Div"
-        div_inputs = [f"{matmul_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
-        self.make_div(div_name, div_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.vocab_size])
-
-        tanh_name = "/lm_head/Tanh"
-        self.make_tanh(tanh_name, f"{div_name}/output_0", dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.vocab_size])
-
-        mul_name = "/lm_head/Mul"
-        mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
-        mul_output = "logits"
-        self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-        self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
 
 class Phi3MiniModel(MistralModel):
@@ -2750,13 +2784,15 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
         sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
 
-        if self.rotemb_attrs["create_rotary_embedding_caches"]:
-            # Concat 4K and 128K cos/sin caches for DML EP only
+        if self.rotemb_attrs["create_caches"]:
+            # Create 4K and 128K cos/sin caches
             cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches_from_scratch()
             self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
             self.rotemb_attrs["cache_length"] = self.original_context_length
             self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["short_mscale"]
             cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches_from_scratch()
+
+            # Concat 4K and 128K cos/sin caches for DML EP only
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
             sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
 
@@ -2772,7 +2808,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
                 cos_cache = cos_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
                 sin_cache = sin_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
 
-            if "cos_cache_name" not in kwargs and "sin_cache_name" not in kwargs:
+            if self.rotemb_attrs["save_caches"]:
                 # Save cos/sin caches to disk
                 self.make_external_tensor(cos_cache, cos_cache_name)
                 self.make_external_tensor(sin_cache, sin_cache_name)
@@ -2780,7 +2816,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
                 # Return cos/sin caches since they will be custom-saved
                 return cos_cache, sin_cache
 
-            self.rotemb_attrs["create_rotary_embedding_caches"] = False
+            self.rotemb_attrs["create_caches"] = False
 
         return cos_cache_name, sin_cache_name
 
@@ -3143,6 +3179,35 @@ class Phi4MMModel(Phi3VModel):
         super().make_layer(layer_id, layer)
 
 
+class Gemma3Model(Gemma2Model):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.is_local = lambda layer_id: bool((layer_id + 1) % config.sliding_window_pattern)
+        self.rope_local_theta = config.rope_local_base_freq
+        self.make_rotary_embedding_multi_cache()
+
+    def make_attention_init(self):
+        self.attention_attrs["q_norm"] = True
+        self.attention_attrs["k_norm"] = True
+        super().make_attention_init()
+
+    def make_rotary_embedding_multi_cache(self):
+        self.cos_cache_global_name, self.sin_cache_global_name = "cos_cache_global", "sin_cache_global"
+        super().make_rotary_embedding_caches(cos_cache_name=self.cos_cache_global_name, sin_cache_name=self.sin_cache_global_name)
+
+        # Create the new cos/sin caches for local attention layers with its own theta value
+        self.rotemb_attrs["create_caches"] = True
+        self.rotemb_attrs["theta"] = self.rope_local_theta
+
+        self.cos_cache_local_name, self.sin_cache_local_name = "cos_cache_local", "sin_cache_local"
+        super().make_rotary_embedding_caches(cos_cache_name=self.cos_cache_local_name, sin_cache_name=self.sin_cache_local_name)
+
+    def make_rotary_embedding_caches(self, **kwargs):
+        cos_cache_name = kwargs.get("cos_cache_name", self.cos_cache_global_name if self.window_size == -1 else self.cos_cache_local_name)
+        sin_cache_name = kwargs.get("sin_cache_name", self.sin_cache_global_name if self.window_size == -1 else self.sin_cache_local_name)
+        return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)
+
+
 def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
@@ -3232,6 +3297,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
             onnx_model = Gemma2Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Gemma3ForCausalLM":
+            onnx_model = Gemma3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GraniteForCausalLM":
             onnx_model = GraniteModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "LlamaForCausalLM":
