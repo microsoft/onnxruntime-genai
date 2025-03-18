@@ -877,6 +877,8 @@ class QuarkModel(QuantizedModel):
         transpose = module.qweight.shape != expected_shape
         module.qweight = self.unpack_on_row(module.qweight.T, module.bits, transpose)
         module.qweight = self.reverse_reorder_tensor(module.qweight.T, module.bits)
+        # Padding might happen on the last dimension.
+        module.qweight = module.qweight[:, : module.out_features]
 
     def unpack_qzeros(self, module):
         """
@@ -884,6 +886,8 @@ class QuarkModel(QuantizedModel):
         """
         super().unpack_qzeros(module)
         module.qzeros = self.reverse_reorder_tensor(module.qzeros, module.bits)
+        # Padding might happen on the last dimension.
+        module.qzeros = module.qzeros[:, : module.out_features]
 
     def reverse_reorder_tensor(self, tensor, bits):
         """
