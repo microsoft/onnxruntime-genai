@@ -120,6 +120,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.use_env_allocators = JSON::Get<bool>(value);
     else if (name == "graph_optimization_level")
       v_.graph_optimization_level = GetGraphOptimizationLevel(JSON::Get<std::string_view>(value));
+    else if (name == "custom_ops_library")
+      v_.custom_ops_library = JSON::Get<std::string_view>(value);
     else
       throw JSON::unknown_value_error{};
   }

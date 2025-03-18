@@ -594,13 +594,15 @@ struct OrtSessionOptions {
   OrtSessionOptions& AppendExecutionProvider_MIGraphX(const OrtMIGraphXProviderOptions& provider_options);       ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_MIGraphX
   ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_CANN
   OrtSessionOptions& AppendExecutionProvider_CANN(const OrtCANNProviderOptions& provider_options);
+  OrtSessionOptions& AppendExecutionProvider_VitisAI(const std::unordered_map<std::string, std::string>& provider_options = {});  ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_VitisAI
   /// Wraps OrtApi::SessionOptionsAppendExecutionProvider. Currently supports SNPE and XNNPACK.
   OrtSessionOptions& AppendExecutionProvider(const std::string& provider_name, const char* const* keys, const char* const* values, size_t num_keys);
 
   OrtSessionOptions& SetCustomCreateThreadFn(OrtCustomCreateThreadFn ort_custom_create_thread_fn);  ///< Wraps OrtApi::SessionOptionsSetCustomCreateThreadFn
   OrtSessionOptions& SetCustomThreadCreationOptions(void* ort_custom_thread_creation_options);      ///< Wraps OrtApi::SessionOptionsSetCustomThreadCreationOptions
   OrtSessionOptions& SetCustomJoinThreadFn(OrtCustomJoinThreadFn ort_custom_join_thread_fn);        ///< Wraps OrtApi::SessionOptionsSetCustomJoinThreadFn
-
+  OrtSessionOptions& RegisterCustomOpsLibrary(const ORTCHAR_T* library_file_prefix);                ///< Wraps OrtApi::SessionOptionsRegisterCustomOpsLibrary
+  
   static void operator delete(void* p) { Ort::api->ReleaseSessionOptions(reinterpret_cast<OrtSessionOptions*>(p)); }
   Ort::Abstract make_abstract;
 };
