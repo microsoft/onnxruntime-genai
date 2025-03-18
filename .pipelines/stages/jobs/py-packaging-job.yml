@@ -23,22 +23,28 @@ parameters:
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_packaging
   ${{ if eq(parameters.os, 'linux') }}:
-    ${{ if eq(parameters.arch, 'x64') }}:
-      pool: 'onnxruntime-Ubuntu2204-AMD-CPU'
-    ${{ elseif eq(parameters.arch, 'arm64') }}:
-      pool: 'onnxruntime-genai-Ubuntu2004-ARM-CPU'
-    ${{ else }}:
-      pool: 'nnxruntime-Ubuntu2204-AMD-CPU'
+    pool:
+      ${{ if eq(parameters.arch, 'x64') }}:
+        name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+      ${{ elseif eq(parameters.arch, 'arm64') }}:
+        name: 'onnxruntime-genai-Ubuntu2004-ARM-CPU'
+      ${{ else }}:
+        name: 'nnxruntime-Ubuntu2204-AMD-CPU'
+      os: linux
   ${{ if eq(parameters.os, 'win') }}:
-    ${{ if eq(parameters.arch, 'x64') }}:
-      pool: 'onnxruntime-Win-CPU-2022'
-    ${{ elseif eq(parameters.arch, 'arm64') }}:
-      pool: 'onnxruntime-genai-windows-vs-2022-arm64'
-    ${{ else }}:
-      pool: 'onnxruntime-Win-CPU-2022'
+    pool:
+      ${{ if eq(parameters.arch, 'x64') }}:
+        name: 'onnxruntime-Win-CPU-2022'
+      ${{ elseif eq(parameters.arch, 'arm64') }}:
+        name: 'onnxruntime-genai-windows-vs-2022-arm64'
+      ${{ else }}:
+        name: 'onnxruntime-Win-CPU-2022'
+      os: windows
   ${{ if eq(parameters.os, 'osx') }}:
     pool:
-      vmImage: 'macOS-latest'
+      name: 'Azure Pipelines'
+      image: 'macOS-latest'
+      os: 'macOS'
 
   strategy:
     ${{ if and(eq(parameters.os, 'win'), eq(parameters.arch, 'arm64')) }}: # Older Python versions don't have official win-arm64 build.
