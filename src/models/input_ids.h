@@ -1,7 +1,5 @@
 #pragma once
 
-#include "../oga_value.h"
-
 namespace Generators {
 
 struct InputIDs {
