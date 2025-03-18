@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 #pragma once
 
-
 namespace Generators {
 
 struct Logits {

@@ -51,7 +51,7 @@ struct DefaultPositionInputs : PositionInputs {
 
   std::array<int64_t, 2> position_ids_shape_{};  // {params.batch_size*params.beam_size, params.sequence_length}
   std::unique_ptr<Tensor> position_ids_;
-  std::unique_ptr<Tensor> position_ids_next_;    // Replaces position_ids_ after the first Run() call
+  std::unique_ptr<Tensor> position_ids_next_;      // Replaces position_ids_ after the first Run() call
   std::array<int64_t, 2> attention_mask_shape_{};  // {params.batch_size*params.beam_size, params.sequence_length}
   std::unique_ptr<Tensor> attention_mask_;
   std::unique_ptr<Tensor> attention_mask_next_;  // Replaces attention_mask_ after each run
