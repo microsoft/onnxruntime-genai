@@ -66,6 +66,11 @@ def _parse_args():
     )
 
     parser.add_argument(
+        "--use_binskim_compliant_compile_flags",
+        action="store_true",
+        help="Use compile flags compliant with BinSkim.")
+
+    parser.add_argument(
         "--config",
         default="RelWithDebInfo",
         type=str,
