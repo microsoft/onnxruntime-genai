@@ -1237,6 +1237,62 @@ class Model:
         self.make_value_info(if_cos_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value_info(if_sin_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
+    def make_qk_norm(self, layer_id, attention):
+        # Make subgraph to compute SimplifiedLayerNorm after Q and K MatMuls in attention:
+        #
+        #     root_input (BxSxD)
+        #          |
+        #       Reshape (BxSxNxH)
+        #          |
+        #  SimplifiedLayerNorm (BxSxNxH)
+        #          |
+        #       Reshape (BxSxD)
+
+        # Save kwargs shared by LayerNorm ops
+        layernorm_kwargs = {"epsilon": self.layernorm_attrs["epsilon"], "axis": -1, "stash_type": 1}
+
+        # Reshape Q MatMul from BxSxD to BxSxNxH before LayerNorm
+        q_reshape_1_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_1"
+        q_reshape_1_inputs = [self.attention_attrs["q_path"], f"/model/constants/TensorProto.INT64/1D/0, 0, {self.num_attn_heads}, {self.head_size}"]
+        q_reshape_1_output = f"{q_reshape_1_name}/output_0"
+        self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads, self.head_size])
+
+        # Make Q LayerNorm
+        q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
+        q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
+        q_layernorm_output = f"{q_layernorm_name}/output_0"
+        self.make_external_tensor(attention.q_norm.weight.detach().numpy().astype(self.to_numpy_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"], q_weight_name)
+        self.make_node("SimplifiedLayerNormalization", inputs=[q_reshape_1_output, q_weight_name], outputs=[q_layernorm_output], name=q_layernorm_name, **layernorm_kwargs)
+        self.make_value_info(q_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads, self.head_size])
+
+        # Reshape Q path after LayerNorm from BxSxNxH to BxSxD
+        q_reshape_2_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
+        q_reshape_2_inputs = [q_layernorm_output, f"/model/constants/TensorProto.INT64/1D/0, 0, -1"]
+        self.make_reshape(q_reshape_2_name, q_reshape_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads * self.head_size])
+
+        # Reshape K MatMul from BxSxD to BxSxNxH before LayerNorm
+        k_reshape_1_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_1"
+        k_reshape_1_inputs = [self.attention_attrs["k_path"], f"/model/constants/TensorProto.INT64/1D/0, 0, {self.num_kv_heads * self.head_size}"]
+        k_reshape_1_output = f"{k_reshape_1_name}/output_0"
+        self.make_reshape(k_reshape_1_name, k_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_kv_heads, self.head_size])
+
+        # Make K LayerNorm
+        k_layernorm_name = f"/model/layers.{layer_id}/attn/k_norm/SimplifiedLayerNormalization"
+        k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
+        k_layernorm_output = f"{k_layernorm_name}/output_0"
+        self.make_external_tensor(attention.k_norm.weight.detach().numpy().astype(self.to_numpy_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"], k_weight_name)
+        self.make_node("SimplifiedLayerNormalization", inputs=[k_reshape_1_output, k_weight_name], outputs=[k_layernorm_output], name=k_layernorm_name, **layernorm_kwargs)
+        self.make_value_info(k_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_kv_heads, self.head_size])
+
+        # Reshape K path after LayerNorm from BxSxNxH to BxSxD
+        k_reshape_2_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_2"
+        k_reshape_2_inputs = [k_layernorm_output, f"/model/constants/TensorProto.INT64/1D/0, 0, -1"]
+        self.make_reshape(k_reshape_2_name, k_reshape_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_kv_heads * self.head_size])
+
+        # Update q_path and k_path now
+        self.attention_attrs["q_path"] = f"{q_reshape_2_name}/output_0"
+        self.attention_attrs["k_path"] = f"{k_reshape_2_name}/output_0"
+
     def make_repeat_kv(self, layer_id, root_input, past_kv, present_kv, **kwargs):
         # Make subgraph that repeats tensor of shape (batch_size, sequence_length, num_kv_heads, head_size)
         # to shape (batch_size, sequence_length, num_attn_heads, head_size) in an interleaved pattern
@@ -1555,20 +1611,7 @@ class Model:
 
         # Make Q/K SimplifiedLayerNorm nodes
         if self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"]:
-            # Save original root_input and skip_input
-            original_root_input, original_skip_input = self.layernorm_attrs["root_input"], self.layernorm_attrs["skip_input"]
-
-            self.layernorm_attrs["root_input"] = self.attention_attrs["q_path"]
-            self.make_layernorm(layer_id, attention.q_norm, skip=False, simple=self.layernorm_attrs["simple"], location="attn_q")
-            self.attention_attrs["q_path"] = self.layernorm_attrs["output_0"]
-
-            self.layernorm_attrs["root_input"] = self.attention_attrs["k_path"]
-            self.make_layernorm(layer_id, attention.k_norm, skip=False, simple=self.layernorm_attrs["simple"], location="attn_k")
-            self.attention_attrs["k_path"] = self.layernorm_attrs["output_0"]
-
-            # Set root_input and skip_input to their original values for subsequent LayerNorm nodes
-            self.layernorm_attrs["root_input"] = original_root_input
-            self.layernorm_attrs["skip_input"] = original_skip_input
+            self.make_qk_norm(layer_id, attention)
 
         # Make RotaryEmbedding nodes
         cos_cache_name, sin_cache_name = "", ""
