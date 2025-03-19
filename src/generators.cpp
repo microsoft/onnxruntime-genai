@@ -237,28 +237,10 @@ GeneratorParams::GeneratorParams(const Config& config)
 
 GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
-      p_device{model.p_device_inputs_},
-      is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
-  use_cuda_graph = is_cuda_graph_enabled_;
-  if (use_cuda_graph) {
+      use_graph_capture{IsGraphCaptureEnabled(model.config_->model.decoder.session_options)},
+      p_device{model.p_device_inputs_} {
+  if (use_graph_capture) {
     max_batch_size = 1;  // set it to 1 by default
-  }
-}
-
-void GeneratorParams::TryGraphCapture(int max_bs) {
-  if (!is_cuda_graph_enabled_ || p_device->GetType() == DeviceType::CPU) {
-    // no-op
-    return;
-  }
-
-  if (DeviceType::CUDA == p_device->GetType() || DeviceType::DML == p_device->GetType()) {
-    if (max_bs == 0) {
-      throw std::runtime_error("Graph capture is enabled, but max_batch_size is not set.");
-    }
-    use_cuda_graph = true;
-    max_batch_size = max_bs;
-  } else {
-    throw std::runtime_error("CUDA graph is not supported on this device");
   }
 }
 

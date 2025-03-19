@@ -51,17 +51,6 @@ DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
 
 DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value);
 
-template <typename T>
-struct OrtTensor {
-  OrtTensor(std::unique_ptr<OrtValue> ort_value, DeviceInterface& device)
-      : ort_value_{std::move(ort_value)}, device_span_{WrapTensor<T>(device, *ort_value_)} {}
-
-  operator OrtValue*() { return ort_value_.get(); }
-
-  std::unique_ptr<OrtValue> ort_value_;
-  DeviceSpan<T> device_span_;
-};
-
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
 
@@ -76,7 +65,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
   int max_batch_size{0};
-  bool use_cuda_graph{};
+  bool use_graph_capture{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
   DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
@@ -98,12 +87,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   // A list of extra model inputs that will be matched at runtime based on name
   std::vector<Input> extra_inputs;
 
-  void TryGraphCapture(int max_bs);
-
   void SetInputs(const NamedTensors& inputs);
-
- private:
-  bool is_cuda_graph_enabled_{};
 };
 
 struct Generator : LeakChecked<Generator> {
