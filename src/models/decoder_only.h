@@ -19,7 +19,6 @@ struct DecoderOnly_Model : Model {
 struct DecoderOnly_State : State {
   DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params);
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
-  const CapturedGraphInfo* GetCapturedGraphInfo() const override { return captured_graph_info_.get(); };
 
   void RewindTo(size_t index) override;
 
@@ -27,7 +26,6 @@ struct DecoderOnly_State : State {
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length);
 
   const DecoderOnly_Model& model_;
-  CapturedGraphInfoPtr captured_graph_info_;
 
   DefaultInputIDs input_ids_{*this};
   Logits logits_{*this};

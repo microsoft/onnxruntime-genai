@@ -308,9 +308,6 @@ def test_e2e(device, phi2_for):
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=20, batch_size=len(prompts))  # To run faster
 
-    if device == "dml":
-        params.try_graph_capture_with_max_batch_size(len(prompts))
-
     generator = og.Generator(model, params)
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
