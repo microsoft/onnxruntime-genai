@@ -1,5 +1,14 @@
 # GenAI architecture
 
+GenAI is divided into a few main sections:
+
+* Models - Manages the input/output OrtValues for an OrtSession for each model type supported
+* Scoring - Greedy & Beam searches, basically takes the logits and figures out the next token
+* IO Processing - Input Tokenizing/Audio & Image encoding and decoding
+* Providers - Provider device specific code to handle device memory management & provider accelerated versions of scoring
+
+The Generator class ties the Model & Scoring together
+
 ```mermaid
 classDiagram
   direction RL
@@ -141,6 +150,20 @@ classDiagram
   Generator --* State
   Generator --* Search
 
+  namespace Providers {
+    class DeviceInterface
+    class CpuInterface
+    class CudaInterface
+    class DmlInterface
+    class WebGPUInterface
+    class QNNInterface
+  }
+  CpuInterface <|-- DeviceInterface
+  CudaInterface <|-- DeviceInterface
+  DmlInterface <|-- DeviceInterface
+  WebGPUInterface <|-- DeviceInterface
+  QNNInterface <|-- DeviceInterface
+  Model --* DeviceInterface
 ```
 
 # C API Objects
