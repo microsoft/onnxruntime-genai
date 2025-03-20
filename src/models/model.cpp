@@ -570,6 +570,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (config->model.type == "phi4mm")
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
+  if (config->model.type == "gemma3")
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }
