@@ -17,7 +17,7 @@ parameters:
   type: boolean
 - name: cuda_versions
   type: string
-  default: '11.8,12.2'
+  default: '12.2'
 - name: build_config
   type: string
   default: 'release'
@@ -50,16 +50,6 @@ stages:
         os: 'win'
         build_config: ${{ parameters.build_config }}
 
-  - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '11.8')) }}:
-    - template: jobs/py-packaging-job.yml
-      parameters:
-        arch: 'x64'
-        cuda_version: '11.8'
-        cuda_display_version: '118'
-        ep: 'cuda'
-        os: 'win'
-        build_config: ${{ parameters.build_config }}
-
   - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '12.2')) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
@@ -75,25 +65,6 @@ stages:
       parameters:
         arch: 'x64'
         ep: 'cpu'
-        os: 'linux'
-        build_config: ${{ parameters.build_config }}
-
-  - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '11.8')) }}:
-    - template: jobs/py-packaging-job.yml
-      parameters:
-        arch: 'x64'
-        cuda_version: '11.8'
-        cuda_display_version: '118'
-        ep: 'cuda'
-        os: 'linux'
-
-  - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '12.2')) }}:
-    - template: jobs/py-packaging-job.yml
-      parameters:
-        arch: 'x64'
-        cuda_version: '12.2'
-        cuda_display_version: '122'
-        ep: 'cuda'
         os: 'linux'
         build_config: ${{ parameters.build_config }}
 
