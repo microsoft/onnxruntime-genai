@@ -57,6 +57,10 @@ classDiagram
       Adapters
     }
     class WhisperState{
+      DefaultInputIDs
+      Logits
+      DefaultKeyValueCache
+      CrossCache
     }
   }
   DecoderOnly_State <|-- State
@@ -80,32 +84,43 @@ classDiagram
   Model --> Tokenizer
   Model --> MultiModalProcessor
   TokenizerStream ..> Tokenizer
-  note for Config "genai_config.json"
-  namespace CPU {
+  namespace CPUScoring {
     class Search_CPU{
     }
     class GreedySearch_CPU{
+       RandomNumberGenerator
+       next_tokens[]
+       +SelectTop()
+       +SampleTopK()
+       +SampleTopP()
+       +SampleTopKTopP()
     }
     class BeamSearch_CPU{
+       +SelectTop()
     }
   }
-  namespace Cuda {
+  namespace CudaScoring {
     class Search_Cuda{
     }
     class GreedySearch_Cuda{
+       +SelectTop()
+       +SampleTopK()
+       +SampleTopP()
+       +SampleTopKTopP()
     }
     class BeamSearch_Cuda{
+       +SelectTop()
     }
+  }
+  class Search{
+    Sequences
+    GeneratorPArams
   }
   class GeneratorParams{
   }
   GeneratorParams --> Config
   class Sequences {
     int32 tokens[]
-  }
-  class Search{
-    Sequences
-    GeneratorPArams
   }
   class Generator{
     State
