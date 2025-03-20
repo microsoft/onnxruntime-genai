@@ -10,7 +10,7 @@ GenAI is divided into a few main sections:
 * Scoring - Takes the logits and figures out the next token
   * Greedy Search - TopK/TopP/Temperature
   * Beam Search
-* IO Processing
+* IO Processing - Mostly implemented through onnxruntime-extensions
   * Tokenizing/Detokenizing
   * Audio & Image Encoding & Decoding
 * Providers - Provider device specific code to handle device memory management & provider accelerated versions of scoring
