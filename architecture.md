@@ -3,11 +3,23 @@
 GenAI is divided into a few main sections:
 
 * Models - Manages the input/output OrtValues for an OrtSession for each model type supported
-* Scoring - Greedy & Beam searches, basically takes the logits and figures out the next token
-* IO Processing - Input Tokenizing/Audio & Image encoding and decoding
+  * DecoderOnly
+  * MultiModal
+  * Pipelined
+  * Whisper (in progress)
+* Scoring - Takes the logits and figures out the next token
+  * Greedy Search - TopK/TopP/Temperature
+  * Beam Search
+* IO Processing
+  * Tokenizing/Detokenizing
+  * Audio & Image Encoding & Decoding
 * Providers - Provider device specific code to handle device memory management & provider accelerated versions of scoring
-
-The Generator class ties the Model & Scoring together
+  * CPU
+  * Cuda - Accelerated scoring and model IO handling
+  * Dml - Accelerated model IO handling
+  * WebGPU - Device memory KV cache storage
+  * QNN - Device memory allocation, but memory is CPU accessible
+* Generator - Ties the model & scoring together and holds the runtime state
 
 ```mermaid
 classDiagram
@@ -20,6 +32,7 @@ classDiagram
       Config
       OrtSessionOptions
       SessionInfo
+      DeviceInterface
     }
     class Adapters{
     }
