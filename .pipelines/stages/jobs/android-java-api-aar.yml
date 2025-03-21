@@ -16,7 +16,9 @@ jobs:
   workspace:
     clean: all
   #pool: 'ubuntu-latest'
-  pool: onnxruntime-Ubuntu2204-AMD-CPU
+  pool:
+    name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+    os: linux
 
 
   steps:
@@ -55,7 +57,7 @@ jobs:
         cp ${BASE_PATH}/${PACKAGE_NAME}-${GENAI_VERSION}.pom          $ARTIFACTS_DIR
       workingDirectory: $(Build.SourcesDirectory)
 
-  - task: PublishBuildArtifacts@1
+  - task: 1ES.PublishPipelineArtifact@1
     inputs:
-      pathtoPublish: $(Build.ArtifactStagingDirectory)
+      targetPath: $(Build.ArtifactStagingDirectory)
       artifactName: drop-android
