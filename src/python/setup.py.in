@@ -55,7 +55,7 @@ setup(
     long_description_content_type='text/markdown',
     packages=['onnxruntime_genai', 'onnxruntime_genai.models'],
     include_package_data=True,
-    package_data={'': ['*.pyd', '*.dll', '*.so*'] + extras},
+    package_data={'': ['*.pyd', '*.dll', '*.so*', '*.dylib'] + extras},
     install_requires=[
         'numpy>=1.21.6',
         _onnxruntime_dependency(),
