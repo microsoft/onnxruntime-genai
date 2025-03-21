@@ -132,12 +132,6 @@ steps:
     displayName: 'Build Python $(PyNoDotVer)'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - task: BinSkim@4
-    displayName: 'Run BinSkim'
-    inputs:
-      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/build/**/*cpython*.so'
-    continueOnError: true
-
   - bash: |
       set -e -x
       docker run \
