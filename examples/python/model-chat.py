@@ -87,6 +87,8 @@ def main(args):
     system_tokens = tokenizer.encode(system_prompt)
     generator.append_tokens(system_tokens)
     system_prompt_length = len(system_tokens)
+    ngram_len_threshold = 10
+    repeat_threshold = 5
 
     # Keep asking for input prompts in a loop
     while True:
@@ -109,6 +111,9 @@ def main(args):
         if args.timings:
             first = True
             new_tokens = []
+            if args.repetition_test:
+                ngram_set = {}
+                cur_idx = 0
 
         print()
         print("Output: ", end='', flush=True)
@@ -123,7 +128,21 @@ def main(args):
 
                 new_token = generator.get_next_tokens()[0]
                 print(tokenizer_stream.decode(new_token), end='', flush=True)
-                if args.timings: new_tokens.append(new_token)
+                if args.timings:
+                    new_tokens.append(new_token)
+                    if args.repetition_test:
+                        if len(new_tokens) >= ngram_len_threshold:
+                            token_concat = " ".join(map(str, new_tokens[cur_idx:cur_idx + ngram_len_threshold]))
+                            ngram_set[token_concat] = ngram_set.get(token_concat, 0) + 1
+                            if ngram_set[token_concat] >= repeat_threshold:
+                                token_decode = " ".join([tokenizer_stream.decode(t) for t in new_tokens[cur_idx:cur_idx + ngram_len_threshold]])
+                                print()
+                                print()
+                                print(f"REPEAT {repeat_threshold} times: " + token_decode, end='', flush=True)
+                                print()
+                                return
+                            cur_idx = cur_idx + 1
+
         except KeyboardInterrupt:
             print("  --control+c pressed, aborting generation--")
         print()
@@ -154,5 +173,6 @@ if __name__ == "__main__":
     parser.add_argument('-c', '--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}')
     parser.add_argument('-s', '--system_prompt', type=str, default='You are a helpful assistant.', help='System prompt to use for the prompt.')
     parser.add_argument('-r', '--rewind', action='store_true', default=False, help='Rewind to the system prompt after each generation. Defaults to false')
+    parser.add_argument('-ret', '--repetition_test', action='store_true', default=False, help='Perform repetition test. Defaults to false')
     args = parser.parse_args()
     main(args)
