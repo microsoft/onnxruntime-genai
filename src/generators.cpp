@@ -244,10 +244,6 @@ GeneratorParams::GeneratorParams(const Model& model)
   }
 }
 
-void GeneratorParams::TryGraphCapture(int max_bs) {
-  std::cerr << "TryGraphCaptureWithMaxBatchSize is deprecated and will be removed." << std::endl;
-}
-
 void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   if (config.model.type == "gpt2" || config.model.type == "llama" || config.model.type == "gemma" || config.model.type == "gemma2" || config.model.type == "mistral" || config.model.type == "phi" || config.model.type == "phi3" || config.model.type == "phi3small" || config.model.type == "phimoe" || config.model.type == "qwen2" || config.model.type == "decoder-pipeline")
     throw std::runtime_error("Please use generator.AppendTokens for " + config.model.type + ". SetInputs is not supported for this model type.");

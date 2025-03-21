@@ -270,8 +270,7 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* gene
 
 OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size) {
   OGA_TRY
-  auto* params = reinterpret_cast<Generators::GeneratorParams*>(generator_params);
-  params->TryGraphCapture(max_batch_size);
+  printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release");
   return nullptr;
   OGA_CATCH
 }

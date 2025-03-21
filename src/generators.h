@@ -87,8 +87,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   // A list of extra model inputs that will be matched at runtime based on name
   std::vector<Input> extra_inputs;
 
-  void TryGraphCapture(int max_bs);
-
   void SetInputs(const NamedTensors& inputs);
 };
 

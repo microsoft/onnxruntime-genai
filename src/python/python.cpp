@@ -201,7 +201,7 @@ struct PyGeneratorParams {
   }
 
   void TryGraphCaptureWithMaxBatchSize(pybind11::int_ max_batch_size) {
-    params_->TryGraphCaptureWithMaxBatchSize(max_batch_size.cast<int>());
+    printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release");
   }
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
