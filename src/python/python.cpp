@@ -6,6 +6,7 @@
 #define OGA_USE_SPAN 1
 #include "../models/onnxruntime_api.h"
 #include "../ort_genai.h"
+#include <iostream>
 
 using namespace pybind11::literals;
 
@@ -200,6 +201,10 @@ struct PyGeneratorParams {
     }
   }
 
+  void TryGraphCaptureWithMaxBatchSize(pybind11::int_ max_batch_size) {
+    std::cerr << "TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release" << std::endl;
+  }
+
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
 
@@ -297,6 +302,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 #endif
       .def("set_inputs", &PyGeneratorParams::SetInputs)
       .def("set_model_input", &PyGeneratorParams::SetModelInput)
+      .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions);  // See config.h 'struct Search' for the options
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
