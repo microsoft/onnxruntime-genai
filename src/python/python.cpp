@@ -6,6 +6,7 @@
 #define OGA_USE_SPAN 1
 #include "../models/onnxruntime_api.h"
 #include "../ort_genai.h"
+#include <iostream>
 
 using namespace pybind11::literals;
 
@@ -201,7 +202,7 @@ struct PyGeneratorParams {
   }
 
   void TryGraphCaptureWithMaxBatchSize(pybind11::int_ max_batch_size) {
-    printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release");
+    std::cerr << "TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release" << std::endl;
   }
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
