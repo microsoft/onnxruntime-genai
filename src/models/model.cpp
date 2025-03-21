@@ -272,20 +272,21 @@ SessionInfo::SessionInfo(OrtSession& session) {
 
 void SessionInfo::Add(OrtSession& session) {
   auto input_names = session.GetInputNames();
-  std::vector<ONNXTensorElementDataType> input_types(input_names.size());
-  for (size_t i = 0; i < input_types.size(); i++) {
-    auto input_type = session.GetInputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
+  for (size_t i = 0; i < input_names.size(); i++) {
+    auto type_info = session.GetInputTypeInfo(i);
+    auto input_type = type_info->GetTensorTypeAndShapeInfo().GetElementType();
     auto found_input = inputs_.find(input_names[i]);
-    if (found_input != inputs_.end() && found_input->second != input_type)
-      throw std::runtime_error("Model input type mismatch: " + input_names[i] + " expected " + std::to_string(found_input->second) + " got " + std::to_string(input_type));
-    inputs_.emplace(std::make_pair(std::move(input_names[i]), input_type));
+    if (found_input != inputs_.end() && found_input->second->GetTensorTypeAndShapeInfo().GetElementType() != input_type)
+      throw std::runtime_error("Model input type mismatch: " + input_names[i] + " expected " +
+                               std::to_string(found_input->second->GetTensorTypeAndShapeInfo().GetElementType()) +
+                               " got " + std::to_string(input_type));
+    inputs_.emplace(std::make_pair(std::move(input_names[i]), std::move(type_info)));
   }
 
   auto output_names = session.GetOutputNames();
-  std::vector<ONNXTensorElementDataType> output_types(output_names.size());
-  for (size_t i = 0; i < output_types.size(); i++) {
-    auto output_type = session.GetOutputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
-    outputs_.emplace(std::make_pair(std::move(output_names[i]), output_type));
+  for (size_t i = 0; i < output_names.size(); i++) {
+    auto type_info = session.GetOutputTypeInfo(i);
+    outputs_.emplace(std::make_pair(std::move(output_names[i]), std::move(type_info)));
   }
 }
 
@@ -301,14 +302,14 @@ ONNXTensorElementDataType SessionInfo::GetInputDataType(const std::string& name)
   auto result = inputs_.find(name);
   if (result == inputs_.end())
     throw std::runtime_error("Model input was not found: " + name);
-  return result->second;
+  return result->second->GetTensorTypeAndShapeInfo().GetElementType();
 }
 
 ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name) const {
   auto result = outputs_.find(name);
   if (result == outputs_.end())
     throw std::runtime_error("Model output was not found: " + name);
-  return result->second;
+  return result->second->GetTensorTypeAndShapeInfo().GetElementType();
 }
 
 std::vector<std::string> SessionInfo::GetInputNames() const {
@@ -317,6 +318,20 @@ std::vector<std::string> SessionInfo::GetInputNames() const {
   for (const auto& input : inputs_)
     names.push_back(input.first);
   return names;
+}
+
+std::vector<const char*> SessionInfo::GetInputSymbolicShape(const std::string& name) const {
+  auto type_info = inputs_.find(name);
+  if (type_info == inputs_.end())
+    throw std::runtime_error("Model input was not found: " + name);
+  return type_info->second->GetTensorTypeAndShapeInfo().GetSymbolicDimensions();
+}
+
+std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& name) const {
+  auto type_info = outputs_.find(name);
+  if (type_info == outputs_.end())
+    throw std::runtime_error("Model output was not found: " + name);
+  return type_info->second->GetTensorTypeAndShapeInfo().GetSymbolicDimensions();
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {

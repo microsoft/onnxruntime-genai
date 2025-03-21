@@ -119,8 +119,11 @@ struct SessionInfo {
 
   std::vector<std::string> GetInputNames() const;
 
+  std::vector<const char*> GetInputSymbolicShape(const std::string& name) const;
+  std::vector<const char*> GetOutputSymbolicShape(const std::string& name) const;
+
  private:
-  std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;
+  std::unordered_map<std::string, std::unique_ptr<OrtTypeInfo>> inputs_, outputs_;
 };
 
 struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, ExternalRefCounted<Model> {

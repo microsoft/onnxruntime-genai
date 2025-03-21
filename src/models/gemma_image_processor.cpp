@@ -10,7 +10,7 @@ namespace Generators {
 
 namespace {
 
-std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
+std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
                    OrtxTensor* pixel_values, Ort::Allocator& allocator) {
   constexpr char boi_token[] = "<start_of_image>";
@@ -41,9 +41,9 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
   const std::regex boi_regex{std::string(boi_token)};
   const auto boi_begin = std::sregex_iterator(text.begin(), text.end(), boi_regex);
   const auto boi_end = std::sregex_iterator();
-  const auto num_img_tokens = std::distance(boi_begin, boi_end);
-  if (num_images != num_img_tokens) {
-    throw std::runtime_error("Prompt contained " + std::to_string(num_img_tokens) + " image tokens but received " +
+  const auto boi_tokens = std::distance(boi_begin, boi_end);
+  if (num_images != boi_tokens) {
+    throw std::runtime_error("Prompt contained " + std::to_string(boi_tokens) + " image tokens but received " +
                              std::to_string(num_images) + " images.");
   }
 
@@ -70,7 +70,10 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
     }
   }
 
-  return {std::move(input_ids_value), std::move(token_type_ids)};
+  std::unique_ptr<OrtValue> num_img_tokens = OrtValue::CreateTensor<int32_t>(allocator, std::vector<int64_t>{1});
+  num_img_tokens->GetTensorMutableData<int32_t>()[0] = static_cast<int32_t>(image_seq_length);
+
+  return {std::move(input_ids_value), std::move(token_type_ids), std::move(num_img_tokens)};
 }
 
 }  // namespace
@@ -91,7 +94,7 @@ std::unique_ptr<NamedTensors> GemmaImageProcessor::Process(const Tokenizer& toke
   auto named_tensors = std::make_unique<NamedTensors>();
 
   if (!images) {
-    [[maybe_unused]] auto [input_ids, token_type_ids] = ProcessImagePrompt(tokenizer, prompt, nullptr, allocator);
+    [[maybe_unused]] auto [input_ids, token_type_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, nullptr, allocator);
     named_tensors->emplace(Config::Defaults::InputIdsName, std::make_shared<Tensor>(std::move(input_ids)));
     return named_tensors;
   }
@@ -102,7 +105,7 @@ std::unique_ptr<NamedTensors> GemmaImageProcessor::Process(const Tokenizer& toke
   OrtxTensor* pixel_values = nullptr;
   CheckResult(OrtxTensorResultGetAt(result.get(), 0, &pixel_values));
 
-  auto [input_ids, token_type_ids] = ProcessImagePrompt(tokenizer, prompt, pixel_values, allocator);
+  auto [input_ids, token_type_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values, allocator);
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
   named_tensors->emplace(std::string(Config::Defaults::TokenTypeIdsName), std::make_shared<Tensor>(std::move(token_type_ids)));
 
@@ -113,6 +116,8 @@ std::unique_ptr<NamedTensors> GemmaImageProcessor::Process(const Tokenizer& toke
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(pixel_values, allocator)));
   }
+
+  named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
 
   return named_tensors;
 }
