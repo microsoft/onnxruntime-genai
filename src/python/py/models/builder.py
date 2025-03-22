@@ -1251,11 +1251,11 @@ class Model:
         # Save kwargs shared by LayerNorm ops
         layernorm_kwargs = {"epsilon": self.layernorm_attrs["epsilon"], "axis": -1, "stash_type": 1}
 
-        # Reshape Q MatMul from BxSxD to BxSxNxH before LayerNorm
+        # Reshape Q MatMul from BxSxD to Bx(SxN)xH before LayerNorm
         q_reshape_1_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_1"
-        q_reshape_1_inputs = [self.attention_attrs["q_path"], f"/model/constants/TensorProto.INT64/1D/0, 0, {self.num_attn_heads}, {self.head_size}"]
+        q_reshape_1_inputs = [self.attention_attrs["q_path"], f"/model/constants/TensorProto.INT64/1D/0, -1, {self.head_size}"]
         q_reshape_1_output = f"{q_reshape_1_name}/output_0"
-        self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads, self.head_size])
+        self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
 
         # Make Q LayerNorm
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
@@ -1263,18 +1263,18 @@ class Model:
         q_layernorm_output = f"{q_layernorm_name}/output_0"
         self.make_external_tensor(attention.q_norm.weight.detach().numpy().astype(self.to_numpy_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"], q_weight_name)
         self.make_node("SimplifiedLayerNormalization", inputs=[q_reshape_1_output, q_weight_name], outputs=[q_layernorm_output], name=q_layernorm_name, **layernorm_kwargs)
-        self.make_value_info(q_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads, self.head_size])
+        self.make_value_info(q_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
 
-        # Reshape Q path after LayerNorm from BxSxNxH to BxSxD
+        # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD
         q_reshape_2_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
-        q_reshape_2_inputs = [q_layernorm_output, f"/model/constants/TensorProto.INT64/1D/0, 0, -1"]
+        q_reshape_2_inputs = [q_layernorm_output, f"/model/constants/TensorProto.INT64/1D/0, -1, {self.hidden_size}"]
         self.make_reshape(q_reshape_2_name, q_reshape_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads * self.head_size])
 
-        # Reshape K MatMul from BxSxD to BxSxNxH before LayerNorm
+        # Reshape K MatMul from BxSxD to Bx(SxN)xH before LayerNorm
         k_reshape_1_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_1"
-        k_reshape_1_inputs = [self.attention_attrs["k_path"], f"/model/constants/TensorProto.INT64/1D/0, 0, {self.num_kv_heads * self.head_size}"]
+        k_reshape_1_inputs = [self.attention_attrs["k_path"], f"/model/constants/TensorProto.INT64/1D/0, -1, {self.head_size}"]
         k_reshape_1_output = f"{k_reshape_1_name}/output_0"
-        self.make_reshape(k_reshape_1_name, k_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_kv_heads, self.head_size])
+        self.make_reshape(k_reshape_1_name, k_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
         # Make K LayerNorm
         k_layernorm_name = f"/model/layers.{layer_id}/attn/k_norm/SimplifiedLayerNormalization"
@@ -1282,11 +1282,11 @@ class Model:
         k_layernorm_output = f"{k_layernorm_name}/output_0"
         self.make_external_tensor(attention.k_norm.weight.detach().numpy().astype(self.to_numpy_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"], k_weight_name)
         self.make_node("SimplifiedLayerNormalization", inputs=[k_reshape_1_output, k_weight_name], outputs=[k_layernorm_output], name=k_layernorm_name, **layernorm_kwargs)
-        self.make_value_info(k_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_kv_heads, self.head_size])
+        self.make_value_info(k_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
-        # Reshape K path after LayerNorm from BxSxNxH to BxSxD
+        # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD
         k_reshape_2_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_2"
-        k_reshape_2_inputs = [k_layernorm_output, f"/model/constants/TensorProto.INT64/1D/0, 0, -1"]
+        k_reshape_2_inputs = [k_layernorm_output, f"/model/constants/TensorProto.INT64/1D/0, -1, {self.hidden_size}"]
         self.make_reshape(k_reshape_2_name, k_reshape_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_kv_heads * self.head_size])
 
         # Update q_path and k_path now
@@ -2671,21 +2671,23 @@ class Model:
         #      position_ids input for RotaryEmbedding
 
         basename = "/model/pos_ids_reformat"
+        proto_dtype = self.input_types["position_ids"]
+        str_dtype = self.to_str_dtype[proto_dtype]
 
         shape_name = f"{basename}/Shape"
         self.make_shape(shape_name, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", shape=[2] if not self.exclude_embeds else [3])
         gather_name = f"{basename}/Gather"
-        gather_inputs = [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
+        gather_inputs = [f"{shape_name}/output_0", f"/model/constants/{str_dtype}/0D/1"]
         self.make_gather(gather_name, gather_inputs, axis=0)
         unsqueeze_name = f"{basename}/Unsqueeze"
-        unsqueeze_inputs = [f"{gather_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_unsqueeze(unsqueeze_name, unsqueeze_inputs, dtype=TensorProto.INT64, shape=[1])
+        unsqueeze_inputs = [f"{gather_name}/output_0", f"/model/constants/{str_dtype}/1D/0"]
+        self.make_unsqueeze(unsqueeze_name, unsqueeze_inputs, dtype=proto_dtype, shape=[1])
         concat_name = f"{basename}/Concat"
-        concat_inputs = ["/model/constants/TensorProto.INT64/1D/-1", f"{unsqueeze_name}/output_0"]
-        self.make_concat(concat_name, concat_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
+        concat_inputs = [f"/model/constants/{str_dtype}/1D/-1", f"{unsqueeze_name}/output_0"]
+        self.make_concat(concat_name, concat_inputs, dtype=proto_dtype, shape=[2], axis=0)
         reshape_name = f"{basename}/Reshape"
         reshape_inputs = ["position_ids", f"{concat_name}/output_0"]
-        self.make_reshape(reshape_name, reshape_inputs, dtype=TensorProto.INT64, shape=None)
+        self.make_reshape(reshape_name, reshape_inputs, dtype=proto_dtype, shape=None)
 
         return reshape_name
 
@@ -2802,20 +2804,23 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
             return position_ids_input_to_rotemb
 
         basename = "/model/pos_ids_reformat"
+        proto_dtype = self.input_types["position_ids"]
+        str_dtype = self.to_str_dtype[proto_dtype]
+
         reduce_max_name = f"{basename}/ReduceMax"
         reduce_max_inputs = ["position_ids"]
-        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=proto_dtype, shape=[1])
         greater_or_equal_name = f"{basename}/GreaterOrEqual"
-        greater_or_equal_inputs = [f"{reduce_max_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.original_context_length}"]
+        greater_or_equal_inputs = [f"{reduce_max_name}/output_0", f"/model/constants/{str_dtype}/0D/{self.original_context_length}"]
         self.make_greater_or_equal(greater_or_equal_name, greater_or_equal_inputs, shape=[])
         cast_name = f"{basename}/Cast"
-        self.make_cast(cast_name, f"{greater_or_equal_name}/output_0", dtype=TensorProto.INT64, shape=None)
+        self.make_cast(cast_name, f"{greater_or_equal_name}/output_0", dtype=proto_dtype, shape=None)
         mul_name = f"{basename}/Mul"
-        mul_inputs = [f"{cast_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.original_context_length}"]
-        self.make_mul(mul_name, mul_inputs, dtype=TensorProto.INT64, shape=None)
+        mul_inputs = [f"{cast_name}/output_0", f"/model/constants/{str_dtype}/0D/{self.original_context_length}"]
+        self.make_mul(mul_name, mul_inputs, dtype=proto_dtype, shape=None)
         add_1_name = f"{basename}/Add_1"
         add_1_inputs = [f"{mul_name}/output_0", "position_ids"]
-        self.make_add(add_1_name, add_1_inputs, dtype=TensorProto.INT64, shape=["batch_size", "sequence_length"])
+        self.make_add(add_1_name, add_1_inputs, dtype=proto_dtype, shape=["batch_size", "sequence_length"])
 
         return add_1_name
         
@@ -3228,6 +3233,24 @@ class Gemma3Model(Gemma2Model):
         self.is_local = lambda layer_id: bool((layer_id + 1) % config.sliding_window_pattern)
         self.rope_local_theta = config.rope_local_base_freq
         self.make_rotary_embedding_multi_cache()
+
+    def make_position_ids_reformatting(self):
+        # Make nodes for the position ids reformatting subgraph
+        #
+        #            position_ids
+        #                 |
+        #                Add
+        #                 |
+        # position_ids input for RotaryEmbedding
+
+        basename = "/model/pos_ids_reformat"
+        proto_dtype = self.input_types["position_ids"]
+        str_dtype = self.to_str_dtype[proto_dtype]
+
+        add_name = f"{basename}/Add"
+        add_inputs = ["position_ids", f"/model/constants/{str_dtype}/0D/1"]
+        self.make_add(add_name, add_inputs, dtype=proto_dtype, shape=['batch_size', 'sequence_length'])
+        return add_name
 
     def make_attention_init(self):
         self.attention_attrs["q_norm"] = True
