@@ -1267,7 +1267,7 @@ class Model:
 
         # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD
         q_reshape_2_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
-        q_reshape_2_inputs = [q_layernorm_output, f"/model/constants/TensorProto.INT64/1D/0, -1, {self.hidden_size}"]
+        q_reshape_2_inputs = [q_layernorm_output, f"/model/constants/TensorProto.INT64/1D/0, -1, {self.num_attn_heads * self.head_size}"]
         self.make_reshape(q_reshape_2_name, q_reshape_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads * self.head_size])
 
         # Reshape K MatMul from BxSxD to Bx(SxN)xH before LayerNorm
@@ -1286,7 +1286,7 @@ class Model:
 
         # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD
         k_reshape_2_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_2"
-        k_reshape_2_inputs = [k_layernorm_output, f"/model/constants/TensorProto.INT64/1D/0, -1, {self.hidden_size}"]
+        k_reshape_2_inputs = [k_layernorm_output, f"/model/constants/TensorProto.INT64/1D/0, -1, {self.num_kv_heads * self.head_size}"]
         self.make_reshape(k_reshape_2_name, k_reshape_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_kv_heads * self.head_size])
 
         # Update q_path and k_path now
