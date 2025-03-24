@@ -55,10 +55,6 @@ jobs:
           python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
           python3 -m pip install build/cpu/wheel/onnxruntime_genai*.whl --no-deps
 
-      - name: Use Dummy HuggingFace Token
-        run: |
-          echo "HF_TOKEN=12345" >> $GITHUB_ENV
-
       - name: Run the python tests
         run: |
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e
@@ -69,7 +65,7 @@ jobs:
           ls -l ${{ github.workspace }}/build
 
       - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: onnxruntime-genai-linux-cpu-x64
           path: ${{ github.workspace }}/build/**/*.a

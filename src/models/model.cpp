@@ -3,6 +3,8 @@
 //
 // Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
 #include <algorithm>
+#include <climits>
+#include <random>
 #include <set>
 #include <string>
 #include <thread>
@@ -13,7 +15,7 @@
 #include "gpt.h"
 #include "decoder_only.h"
 #include "whisper.h"
-#include "multi_modal_vision_model.h"
+#include "multi_modal.h"
 #include "decoder_only_pipeline.h"
 #include "../dml/interface.h"
 
@@ -23,23 +25,28 @@ State::State(const GeneratorParams& params, const Model& model)
     : model_{model},
       params_{params.shared_from_this()},
       run_options_{OrtRunOptions::Create()},
-      extra_outputs_{*this} {}
+      extra_outputs_{*this} {
+  // Generate a random id for graph capture
+  if (params_->use_graph_capture) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(1, INT_MAX);
+    graph_id_ = std::to_string(dis(gen));
+  }
+}
 
-void State::Run(OrtSession& session, int new_batch_size) {
-  auto captured_graph_info = GetCapturedGraphInfo();
+void State::Run(OrtSession& session, bool graph_capture_this_run) {
+  if (params_->use_graph_capture) {
+    if (graph_capture_this_run)
+      run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
+    else
+      run_options_->AddConfigEntry("gpu_graph_id", "-1");
+  }
 
   if (first_run_) {
-    if (captured_graph_info) {
-      run_options_->AddConfigEntry("gpu_graph_id", "-1");
-    }
     extra_outputs_.Add(session.GetOutputNames());
     first_run_ = false;
   } else {
-    if (captured_graph_info && new_batch_size != current_batch_size_) {
-      current_batch_size_ = new_batch_size;
-      auto annotation_id = std::to_string(captured_graph_info->GenerateUniqueAnnotationID(new_batch_size));
-      run_options_->AddConfigEntry("gpu_graph_id", annotation_id.c_str());
-    }
     extra_outputs_.Update();
   }
 
@@ -208,6 +215,24 @@ std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings
   return PadInputs(span_sequences, pad_token_id_);
 }
 
+std::shared_ptr<Tensor> Tokenizer::EncodeBatch(std::span<const char*> strings) const {
+  std::vector<std::vector<int32_t>> sequences;
+  std::vector<std::span<const int32_t>> span_sequences;
+  for (size_t i = 0; i < strings.size(); i++) {
+    sequences.emplace_back(Encode(strings[i]));
+    span_sequences.emplace_back(sequences.back());
+  }
+
+  auto encoded = PadInputs(span_sequences, pad_token_id_);  // TODO: Pad directly into tensor vs copying?
+
+  auto shape = std::array<int64_t, 2>{static_cast<int64_t>(strings.size()), static_cast<int64_t>(encoded.size() / strings.size())};
+  auto ort_tensor_ = OrtValue::CreateTensor<int32_t>(Ort::Allocator::GetWithDefaultOptions(), shape);
+  auto tensor = std::make_shared<Tensor>(std::move(ort_tensor_));
+  std::copy(encoded.begin(), encoded.end(), tensor->GetMutableData<int32_t>());
+
+  return tensor;
+}
+
 std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequences, size_t count) const {
   if (sequences.size() % count != 0)
     throw std::runtime_error("DecodeBatch: sequences must be evenly divisible by the count");
@@ -310,8 +335,8 @@ Model::~Model() = default;
 void Model::InitDeviceAllocator(OrtSession& session) {
   EnsureDeviceOrtInit(session, p_device_->GetType());
 
-  // Only CUDA does every input on the device
-  if (p_device_->GetType() == DeviceType::CUDA)
+  // Only CUDA and DML does every input on the device
+  if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML)
     p_device_inputs_ = p_device_;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
@@ -320,7 +345,6 @@ void Model::InitDeviceAllocator(OrtSession& session) {
   p_device_kvcache_ = p_device_;
 
   session_info_ = std::make_unique<SessionInfo>(session);
-  captured_graph_pool_ = std::make_shared<CapturedGraphPool>(config_.get(), session_info_.get(), &p_device_->GetAllocator());
 }
 
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
@@ -407,6 +431,10 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.AddConfigEntry("session.use_env_allocators", "1");
   }
 
+  if (config_session_options.graph_optimization_level.has_value()) {
+    session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
+  }
+
   for (auto& provider_options : config_session_options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
@@ -455,6 +483,11 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         }
 
         InitDmlInterface(p_device_luid);
+      }
+
+      if (!disable_graph_capture) {
+        session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
+        session_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
       }
 
       SetDmlProvider(session_options);
@@ -543,9 +576,11 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (config->model.type == "whisper")
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (config->model.type == "phi3v")
-    return std::make_shared<MultiModalVisionModel>(std::move(config), ort_env);
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (config->model.type == "decoder-pipeline")
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
+  if (config->model.type == "phi4mm")
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }
@@ -568,8 +603,22 @@ void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& d
   if (!output)
     output = OrtValue::CreateTensor(device.GetAllocator(), shape, output_type);
 
-  if (!device.Cast(input, *output))
-    GetDeviceInterface(DeviceType::CPU)->Cast(input, *output);
+  auto input_type = input_info->GetElementType();
+  auto element_count = input_info->GetElementCount();
+
+  if (element_count != output->GetTensorTypeAndShapeInfo()->GetElementCount())
+    throw std::runtime_error("Cast: input and output element count mismatch");
+
+  void* input_data = input.GetTensorMutableRawData();
+  void* output_data = output->GetTensorMutableRawData();
+  if (!device.Cast(input_data, output_data, input_type, output_type, element_count)) {
+    auto input_span = ByteWrapTensor(device, input);
+    auto output_span = ByteWrapTensor(device, *output);
+    input_data = input_span.CopyDeviceToCpu().data();
+    output_data = output_span.CopyDeviceToCpu().data();
+    GetDeviceInterface(DeviceType::CPU)->Cast(input_data, output_data, input_type, output_type, element_count);
+    output_span.CopyCpuToDevice();
+  }
 }
 
 std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const {
@@ -604,12 +653,18 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
     : tokenizer_{std::make_shared<Tokenizer>(config)} {
   if (config.model.type == "phi3v") {
-    image_processor_ = std::make_shared<ImageProcessor>(config, session_info);
+    processor_ = std::make_shared<PhiImageProcessor>(config, session_info);
   } else if (config.model.type == "whisper") {
-    audio_processor_ = std::make_shared<AudioProcessor>(config, session_info);
+    processor_ = std::make_shared<WhisperProcessor>(config, session_info);
+  } else if (config.model.type == "phi4mm") {
+    processor_ = std::make_shared<PhiMultiModalProcessor>(config, session_info);
   } else {
     throw std::runtime_error("MultiModalProcessor cannot be created. Expected a multimodal model. Actual: " + config.model.type);
   }
 }
 
+std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& prompt, const Images* images, const Audios* audios) const {
+  Payload payload{prompt, images, audios};
+  return processor_->Process(*tokenizer_, payload);
+}
 }  // namespace Generators

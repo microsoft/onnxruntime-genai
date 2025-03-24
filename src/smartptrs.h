@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 #include <assert.h>
+#include <atomic>
 #include <memory>
 #include "span.h"
 
@@ -113,10 +114,10 @@ struct DeviceInterface {
 
   virtual void Synchronize() = 0;  // Synchronize the device, typically used for timing or debugging
 
-  virtual bool Cast(OrtValue& /*input*/, OrtValue& /*output*/) { return false; }
+  virtual bool Cast(void* /*input*/, void* /*output*/, ONNXTensorElementDataType /*input_type*/, ONNXTensorElementDataType /*output_type*/, size_t /*element_count*/) { return false; }
 
-  virtual void UpdatePositionIds(void* /*position_ids*/, int /*batch_beam_size*/, int /*total_length*/, int /*new_kv_length*/, ONNXTensorElementDataType /*type*/) { assert(false); }
-  virtual void UpdateAttentionMask(void* /*mask_data*/, const void* /*old_data*/, int /*batch_beam_size*/, int /*new_kv_length*/, int /*total_length*/, int /*max_length*/, bool /*update_only*/, ONNXTensorElementDataType /*type*/) { assert(false); }
+  virtual bool UpdatePositionIds(void* /*position_ids*/, int /*batch_beam_size*/, int /*total_length*/, int /*new_kv_length*/, ONNXTensorElementDataType /*type*/) { return false; }
+  virtual bool UpdateAttentionMask(void* /*next_mask_data*/, void* /*mask_data*/, int /*batch_beam_size*/, int /*new_kv_length*/, int /*total_length*/, int /*max_length*/, bool /*update_only*/, ONNXTensorElementDataType /*type*/) { return false; }
 
   virtual void HandleEOSArray(float* /*batch_logits*/, int /*batch_beam_size*/, int /*vocab_size*/, const int32_t* /*eos_token_ids*/, int /*eos_token_ids_count*/) { assert(false); }
   virtual void UpdateCacheIndirection(int32_t* /*tgt_indir_cache*/, const int32_t* /*src_indir_cache*/, const int32_t* /*beam_ids*/, int /*batch_size*/, int /*beam_width*/, int /*input_seq_length*/, int /*max_seq_length*/, int /*current_length*/) { assert(false); }
@@ -130,6 +131,25 @@ struct DeviceInterface {
     assert(false);
     return nullptr;
   }  // Temporary until we fully factor out providers
+};
+
+// A shared_ptr based type that we expose through our C API should inherit from this type.
+// ExternalAddRef must be called when returning an object through the C API
+// ExternalRelease must be called on the C API destroy method
+template <typename T>
+struct ExternalRefCounted {
+  void ExternalAddRef() {
+    if (++ref_count_ == 1)  // First reference?
+      external_owner_ = static_cast<T*>(this)->shared_from_this();
+  }
+  void ExternalRelease() {
+    if (--ref_count_ == 0)
+      external_owner_ = nullptr;
+  }
+
+ private:
+  std::shared_ptr<T> external_owner_;  // shared_ptr to ourselves to keep us alive
+  std::atomic<int> ref_count_{};       // C API refcount (can't use only the shared_ptr)
 };
 
 namespace Location {

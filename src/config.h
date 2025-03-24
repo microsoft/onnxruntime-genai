@@ -11,21 +11,30 @@ struct Config {
   Config(const fs::path& path, std::string_view json_overlay);
 
   struct Defaults {
-    // Listed here in alphabetical order
-    static constexpr std::string_view AttentionMaskName = "attention_mask";
-    static constexpr std::string_view AudioFeaturesName = "audio_features";
-    static constexpr std::string_view CacheIndirectionName = "cache_indirection";
-    static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
-    static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
-    static constexpr std::string_view ImageFeaturesName = "image_features";
-    static constexpr std::string_view ImageSizesName = "image_sizes";
+    // Decoder names
     static constexpr std::string_view InputIdsName = "input_ids";
     static constexpr std::string_view InputsEmbedsName = "inputs_embeds";
-    static constexpr std::string_view LogitsName = "logits";
-    static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
-    static constexpr std::string_view PixelValuesName = "pixel_values";
+    static constexpr std::string_view AttentionMaskName = "attention_mask";
     static constexpr std::string_view PositionIdsName = "position_ids";
-    static constexpr std::string_view PromptTemplateName = "{Content}";
+    static constexpr std::string_view PastKeyName = "past_key_values.%d.key";
+    static constexpr std::string_view PastValueName = "past_key_values.%d.value";
+    static constexpr std::string_view LogitsName = "logits";
+    static constexpr std::string_view PresentKeyName = "present.%d.key";
+    static constexpr std::string_view PresentValueName = "present.%d.value";
+
+    // Speech encoder names
+    static constexpr std::string_view AudioFeaturesName = "audio_features";
+    static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
+
+    // Vision encoder names
+    static constexpr std::string_view ImageSizesName = "image_sizes";
+    static constexpr std::string_view ImageFeaturesName = "image_features";
+
+    // Generation names
+    static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
+    static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
+    static constexpr std::string_view CacheIndirectionName = "cache_indirection";
+    static constexpr std::string_view promptTemplate = "{Content}";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -55,6 +64,7 @@ struct Config {
     bool use_env_allocators{};
 
     std::vector<ProviderOptions> provider_options;
+    std::optional<GraphOptimizationLevel> graph_optimization_level;
   };
 
   struct Model {
@@ -98,6 +108,7 @@ struct Config {
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string image_features{Defaults::ImageFeaturesName};
+        std::string audio_features{Defaults::AudioFeaturesName};
       } inputs;
 
       struct Outputs {
@@ -107,16 +118,36 @@ struct Config {
 
     struct Vision {
       std::string filename;
+      std::string config_filename{"processor_config.json"};
+      std::optional<std::string> adapter_filename{};
 
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
         std::string image_sizes{Defaults::ImageSizesName};
+        std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
       } inputs;
 
       struct Outputs {
         std::string image_features{Defaults::ImageFeaturesName};
       } outputs;
     } vision;
+
+    struct Speech {
+      std::string filename;
+      std::string config_filename{"audio_processor_config.json"};
+      std::optional<std::string> adapter_filename{};
+
+      struct Inputs {
+        std::string audio_embeds{Defaults::AudioEmbedsName};
+        std::string attention_mask{Defaults::AudioAttentionMaskName};
+        std::string audio_sizes{Defaults::AudioSizesName};
+        std::string audio_projection_mode{Defaults::AudioProjectionModeName};
+      } inputs;
+
+      struct Outputs {
+        std::string audio_features{Defaults::AudioFeaturesName};
+      } outputs;
+    } speech;
 
     struct Decoder {
       std::string filename;
@@ -128,9 +159,11 @@ struct Config {
       int num_hidden_layers{};
       int head_size{};
 
-      struct SlidingWindow {  // Sliding window parameters for models that process input prompt in chunks
-        int window_size{};    // The size of the window to slide over the input prompt
-        int pad_value{};      // The key-value cache padding value to use for the sliding window for inactive tokens
+      struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
+        int window_size{};                 // The size of the window to slide over the input prompt
+        int pad_value{};                   // The key-value cache padding value to use for the sliding window for inactive tokens
+        std::string alignment{"right"};    // The alignment of the window, either "left" or "right"
+        bool slide_key_value_cache{true};  // Whether to slide the key-value cache along with the input prompt
       };
       std::optional<SlidingWindow> sliding_window;
 
@@ -139,17 +172,21 @@ struct Config {
         std::string embeddings{Defaults::InputsEmbedsName};
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
-        std::string past_key_names{"past_key_values.%d.key"}, past_value_names{"past_key_values.%d.value"};
+        std::string past_key_names{Defaults::PastKeyName};
+        std::string past_value_names{Defaults::PastValueName};
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
-        std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
+
         std::string past_sequence_length{Defaults::PastSequenceLengthName};
+        std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
+        std::string total_sequence_length{Defaults::TotalSequenceLengthName};
         std::string cache_indirection{Defaults::CacheIndirectionName};
       } inputs;
 
       struct Outputs {
         std::string logits{Defaults::LogitsName};
-        std::string present_key_names{"present.%d.key"}, present_value_names{"present.%d.value"};
+        std::string present_key_names{Defaults::PresentKeyName};
+        std::string present_value_names{Defaults::PresentValueName};
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{"output_cross_qk_%d"};
       } outputs;
@@ -210,6 +247,7 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
-bool IsCudaGraphEnabled(Config::SessionOptions& session_options);
+void OverlayConfig(Config& config, std::string_view json);
+bool IsGraphCaptureEnabled(Config::SessionOptions& session_options);
 
 }  // namespace Generators

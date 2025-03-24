@@ -1,0 +1,139 @@
+parameters:
+- name: custom_ort_package_versioned_name
+  displayName: 'Custom ort package name.'
+  type: string
+  default: ''
+
+- name: nuget_version_type
+  type: string
+  default: 'stable'
+
+jobs:
+- job: custom_nuget_packaging
+  displayName: 'Custom NuGet Packaging'
+  pool: 'onnxruntime-Win-CPU-2022'
+  
+  steps:
+  - template: steps/utils/flex-download-pipeline-artifact.yml
+    parameters:
+      StepName: 'Download win-cuda-x64 capi Artifacts'
+      ArtifactName: onnxruntime-genai-win-cuda-x64-capi
+      TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  - template: steps/utils/flex-download-pipeline-artifact.yml
+    parameters:
+      StepName: 'Download win-cpu-arm64 capi Artifacts'
+      ArtifactName: onnxruntime-genai-win-cpu-arm64-capi
+      TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  - checkout: self
+    path: onnxruntime-genai
+    clean: true
+    submodules: recursive
+
+  - template: steps/utils/set-genai-version.yml
+    parameters:
+      nuget_version_type: ${{ parameters.nuget_version_type }}
+
+  - powershell: |
+      $artifacts_dir = '$(Build.BinariesDirectory)/artifact-downloads'
+      Write-Host "List downloaded artifacts"
+      $artifacts = Get-ChildItem -Path $artifacts_dir/* -Include *.zip,*.tar.gz,*.aar
+      Write-Host $artifacts
+
+      $outputDir = '$(Build.BinariesDirectory)/artifact-downloads'
+      Write-Host "List extracted artifacts"
+      Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads' -Recurse
+
+      mkdir -Force $outputDir
+      foreach ($file in $artifacts) {
+        $a = $file.Name
+        Write-Host "Extracting " $a
+        $rid_match = $a -match "onnxruntime-genai-\d+\.\d+\.\d+(?:-[^-\s]+-)(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
+        if ($rid_match) {
+          $rid = $Matches.1
+        }
+        else {
+          Write-Host "Invalid artifact name" $file
+          return
+        }
+
+        mkdir -Force $outputDir/$rid
+        if ($a -like "*.zip") {
+          Expand-Archive -Path $file -DestinationPath $outputDir/$rid
+        }
+        elseif ($a -like "*.tar.gz") {
+          tar -xf $file -C $outputDir/$rid
+        }
+
+        Get-ChildItem -Path $outputDir/$rid -Recurse
+      }
+
+    displayName: 'Extract Artifacts'
+    workingDirectory: '$(Build.BinariesDirectory)/artifact-downloads'
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: 3.10
+      addToPath: true
+
+  - powershell: |
+      $pattern = "Microsoft\.ML\.OnnxRuntime\.[\w-]+"
+      $versioned_name = "${{ parameters.custom_ort_package_versioned_name }}"
+      Write-Host "Versioned name " $versioned_name
+      $match = [regex]::Match($versioned_name, $pattern)
+      if ($match.Success) {
+        $ort_nuget_package_name = $match.Value
+      }
+      else {
+        Write-Host "Invalid ort package name" $versioned_name
+        exit 1
+      }
+      $genai_nuget_package_suffix = $ort_nuget_package_name.Substring("Microsoft.ML.OnnxRuntime.".Length)
+      $genai_nuget_package_name = "Microsoft.ML.OnnxRuntimeGenAI.$genai_nuget_package_suffix"
+
+      Write-Host "##vso[task.setvariable variable=genai_nuget_package_name;]$genai_nuget_package_name"
+
+      $win_x64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads/win-x64/')[0].FullName
+      $win_arm64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads/win-arm64/')[0].FullName
+
+      Write-Host "Win x64 artifact path " $win_x64_artifact_path
+      Write-Host "Win arm64 artifact path " $win_arm64_artifact_path
+
+      $ort_package_version = $versioned_name.Substring($ort_nuget_package_name.Length + 1, $versioned_name.Length - $ort_nuget_package_name.Length - 1 - ".nupkg".Length)
+      python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_custom_nuget.py `
+        --package_name $genai_nuget_package_name `
+        --package_version $(genai_version) `
+        --ort_package_name $ort_nuget_package_name  `
+        --ort_package_version $ort_package_version `
+        --root_dir $(Build.Repository.LocalPath) `
+        --nuspec_path $(Build.Repository.LocalPath)/nuget/$genai_nuget_package_name.nuspec `
+        --win_x64 $win_x64_artifact_path `
+        --win_arm64 $win_arm64_artifact_path `
+        --commit_id $(Build.SourceVersion)
+
+      cat $(Build.Repository.LocalPath)\nuget\$genai_nuget_package_name.nuspec
+
+      Write-Host "##vso[task.setvariable variable=nuspec_path;]$(Build.Repository.LocalPath)/nuget/$genai_nuget_package_name.nuspec"
+
+    displayName: 'Generate Nuspec for custom package'
+
+  - task: NuGetCommand@2
+    displayName: 'Nuget Packaging'
+    inputs:
+      command: 'pack'
+      packagesToPack: $(nuspec_path)
+      packDestination: $(Build.ArtifactStagingDirectory)\nuget
+
+  - template: steps/compliant/esrp_nuget.yml
+    parameters:
+      DisplayName: 'ESRP - sign NuGet package'
+      FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      DoEsrp: 'true'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Artifact: ONNXRuntime Genai NuGet'
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)\nuget'
+      ArtifactName: $(genai_nuget_package_name)
+      

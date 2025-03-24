@@ -1,16 +1,14 @@
 ## About
 
-Run Llama, Phi (Language + Vision!), Gemma, Mistral with ONNX Runtime.
+Run Llama, Phi (language and multi modal!), DeepSeek, Gemma, Mistral with ONNX Runtime.
 
 This API gives you an easy, flexible and performant way of running LLMs on device using .NET/C#. 
 
 It implements the generative AI loop for ONNX models, including pre and post processing, inference with ONNX Runtime, logits processing, search and sampling, and KV cache management.
 
-You can call a high level `generate()` method to generate all of the output at once, or stream the output one token at a time.
-
 ## Key Features
 
-* Language and vision pre and post processing
+* Language, vision, and audio pre and post processing
 * Inference using ONNX Runtime
 * Generation tuning with greedy, beam search and random sampling
 * KV cache management to optimize performance
@@ -32,6 +30,7 @@ Console.WriteLine("Model path: " + modelPath);
 
 using Model model = new Model(modelPath);
 using Tokenizer tokenizer = new Tokenizer(model);
+using var tokenizerStream = tokenizer.CreateStream();
 
 // Set your prompt here
 string prompt = "public static bool IsPrime(int number)";
@@ -39,13 +38,12 @@ var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
 
 using GeneratorParams generatorParams = new GeneratorParams(model);
 generatorParams.SetSearchOption("max_length", 512);
-generatorParams.SetInputSequences(sequences);
 
-using var tokenizerStream = tokenizer.CreateStream();
 using var generator = new Generator(model, generatorParams);
+generator.AppendTokenSequences(sequences);
+.
 while (!generator.IsDone())
 {
-    generator.ComputeLogits();
     generator.GenerateNextToken();
     Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
 }
@@ -121,11 +119,11 @@ This implementation checks if a number is prime by iterating only up to the squa
 ## Source code repository
 
 ONNX Runtime is an open source project. See:
-* (ONNX Runtime)[https://github.com/microsoft/onnxruntime]
-* (ONNX Runtime GenAI)[https://github.com/microsoft/onnxruntime-genai]
+* [ONNX Runtime](https://github.com/microsoft/onnxruntime)
+* [ONNX Runtime GenAI](https://github.com/microsoft/onnxruntime-genai)
 
 ## Documentation
 
-See (ONNX Runtime GenAI Documentation)[https://onxxruntime.ai/docs/genai]
+See [ONNX Runtime GenAI Documentation](https://onxxruntime.ai/docs/genai)
 
 
