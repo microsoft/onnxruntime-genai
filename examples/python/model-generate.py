@@ -46,10 +46,6 @@ def main(args):
     if (args.verbose): print(f'Search options: {search_options}')
 
     params.set_search_options(**search_options)
-    # Set the batch size for the CUDA graph to the number of prompts if the user didn't specify a batch size
-    params.try_graph_capture_with_max_batch_size(len(prompts))
-    if args.batch_size_for_cuda_graph:
-        params.try_graph_capture_with_max_batch_size(args.batch_size_for_cuda_graph)
     if args.verbose: print("GeneratorParams created")
 
     generator = og.Generator(model, params)
@@ -82,7 +78,7 @@ if __name__ == "__main__":
     parser.add_argument('-pr', '--prompts', nargs='*', required=False, help='Input prompts to generate tokens from. Provide this parameter multiple times to batch multiple prompts')
     parser.add_argument('-i', '--min_length', type=int, default=25, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, default=50, help='Max number of tokens to generate including the prompt')
-    parser.add_argument('-ds', '--do_random_sampling', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
+    parser.add_argument('-ds', '--do_sample', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
     parser.add_argument('--top_p', type=float, help='Top p probability to sample with')
     parser.add_argument('-k', '--top_k', type=int, help='Top k tokens to sample from')
     parser.add_argument('-t', '--temperature', type=float, help='Temperature to sample with')
