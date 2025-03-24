@@ -1,2 +1,2 @@
--f https://download.pytorch.org/whl/torch_stable.html
+--index-url https://download.pytorch.org/whl/cu124
 torch==2.5.1+cu124
