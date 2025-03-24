@@ -125,9 +125,6 @@ extends:
       sourceRepositoriesToScan:
         include:
         - repository: manylinux
-      # sourceAnalysisPool:
-      #   name: onnxruntime-Win-CPU-2022
-      #   os: linux
     stages:
     - template: stages/capi-packaging-stage.yml
       parameters:
