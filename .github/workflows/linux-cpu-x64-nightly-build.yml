@@ -22,19 +22,6 @@ jobs:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v2
 
-      - name: Download OnnxRuntime
-        run: |
-          curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
-
-      - name: Unzip OnnxRuntime
-        run: |
-          tar -xzf ${{ env.ort_zip }}
-          rm ${{ env.ort_zip }}
-
-      - name: Rename OnnxRuntime to ort
-        run: |
-          mv ${{ env.ort_dir }} ort
-
       - name: Git Submodule Update
         run: |
           git submodule update --init --recursive
