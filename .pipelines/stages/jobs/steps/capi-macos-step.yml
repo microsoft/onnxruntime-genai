@@ -90,5 +90,5 @@ steps:
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
     inputs:
-      artifactName: $(artifactName)-wheel
+      artifactName: $(artifactName)-$(PyNoDotVer)-wheel
       targetPath: '$(Build.ArtifactStagingDirectory)/wheel'
