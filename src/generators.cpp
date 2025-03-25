@@ -30,6 +30,8 @@ std::string CurrentModulePath() {
 
   return out_path;
 }
+
+#include "dll_load_error.h"
 #endif
 
 void ThrowErrorIfSessionTerminated(bool is_session_terminated) {
@@ -132,7 +134,7 @@ struct LibraryHandle {
     auto path = CurrentModulePath() + filename;
     handle_ = LoadLibrary(path.c_str());
     if (!handle_)
-      throw std::runtime_error(std::string("Failed to load library: ") + path + " Error: " + std::to_string(GetLastError()));
+      throw std::runtime_error(std::string("Failed to load library: ") + DetermineLoadLibraryError(filename));
   };
 
   ~LibraryHandle() { FreeLibrary(handle_); }
