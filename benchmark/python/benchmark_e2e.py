@@ -67,15 +67,12 @@ def monitor_cpu_memory():
         time.sleep(0.1)
 
 # Use input model to generate prompt
-def generate_prompt(model, tokenizer, prompt_length, use_graph_capture) -> str:
+def generate_prompt(model, tokenizer, prompt_length) -> str:
     prompt = "a"
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
     max_length_to_use = prompt_length + len(tokens)
     params.set_search_options(max_length=max_length_to_use, min_length=prompt_length)
-
-    if use_graph_capture:
-        params.try_graph_capture_with_max_batch_size(1)
 
     generator=og.Generator(model, params)
     generator.append_tokens(tokens)
@@ -254,15 +251,17 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     # Generate prompt
     if args.use_random_tokens:
         # use random tokens instead of generating a prompt using the model and then tokenizing it
-        tokens = np.random.randint(100, size=(batch_size, prompt_length))
+        _random_tokens = np.random.randint(100, size=(batch_size, prompt_length))
+        tokens = _random_tokens
         text = [tokenizer.decode(tokens[0])] * batch_size
         prompt = f'{args.chat_template.format(input=text)}'
+        prompt_length = batch_size*prompt_length
     elif args.use_prompt_set:
         text = [get_prompt_by_length(prompt_length)] * batch_size
         prompt = f'{args.chat_template.format(input=text)}'
         tokens = tokenizer.encode(prompt)
     else:
-        text = [generate_prompt(model, tokenizer, prompt_length, args.use_graph_capture)] * batch_size
+        text = [generate_prompt(model, tokenizer, prompt_length)] * batch_size
         prompt = f'{args.chat_template.format(input=text)}'
         tokens = tokenizer.encode(prompt)
         prompt_length = len(tokens)
@@ -271,9 +270,6 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     params = og.GeneratorParams(model)
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
     params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length, batch_size=batch_size)
-
-    if args.use_graph_capture:
-        params.try_graph_capture_with_max_batch_size(batch_size)
 
     if args.verbose: print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
@@ -300,12 +296,12 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         tokenize_end_time = time.perf_counter()
         tokenize_times.append(tokenize_end_time - tokenize_start_time)
 
+        if args.use_random_tokens:
+            tokens = _random_tokens
+
         # Prepare run
         params = og.GeneratorParams(model)
         params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length, batch_size=batch_size)
-
-        if args.use_graph_capture:
-            params.try_graph_capture_with_max_batch_size(batch_size)
 
         generator = og.Generator(model, params)
 
@@ -445,7 +441,6 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--verbose', action='store_true', help='Print extra information')
     parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
     parser.add_argument('-pm', '--print_memory_usage', default=False, help='Print memory footprint')
-    parser.add_argument('-gc', '--use_graph_capture', action='store_true', help='Use the graph capture feature for CUDA or DML')
     parser.add_argument('-mn', '--model_name', type=str, default='model_name', help='Model name defined by users')
     parser.add_argument('-pr', '--precision', type=str, default='fp16', help='Model precision for metrics info')
     parser.add_argument('--use_random_tokens', action='store_true', help='Use random tokens instead of generating a prompt')

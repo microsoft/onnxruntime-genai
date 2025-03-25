@@ -61,6 +61,7 @@ parameters:
 
 - name: nuget_version_type
   type: string
+  default: 'stable'
 
 jobs:
 - job: nuget_${{ parameters.ep }}_packaging_dep_qnn_${{ parameters.enable_win_qnn }}
@@ -321,8 +322,8 @@ jobs:
       FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
       DoEsrp: 'true'
 
-  - task: PublishBuildArtifacts@1
+  - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime Genai NuGet'
     inputs:
-      PathtoPublish: '$(Build.ArtifactStagingDirectory)\nuget'
-      ArtifactName: $(artifactName)-nuget
+      targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
+      artifactName: $(artifactName)-nuget

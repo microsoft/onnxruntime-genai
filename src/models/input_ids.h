@@ -1,7 +1,5 @@
 #pragma once
 
-#include "static_buffer.h"
-
 namespace Generators {
 
 struct InputIDs {
@@ -26,7 +24,7 @@ struct DefaultInputIDs : InputIDs {
   std::array<int64_t, 2> GetShape() const override { return shape_; }
   const char* name_;
 
-  OrtValue* Get() { return value_.get(); }
+  OrtValue* Get() { return value_->GetOrtTensor(); }
 
  private:
   State& state_;
@@ -37,8 +35,8 @@ struct DefaultInputIDs : InputIDs {
 
   std::array<int64_t, 2> shape_{};
   ONNXTensorElementDataType type_;
-  std::unique_ptr<OrtValue> value_;
-  std::unique_ptr<OrtValue> cast_value_;
+  std::unique_ptr<Tensor> value_;
+  std::unique_ptr<Tensor> cast_value_;
 
   std::unique_ptr<OrtValue> current_sequence_length_;
   std::unique_ptr<OrtValue> past_sequence_length_;
@@ -72,6 +70,10 @@ struct WindowedInputIDs : public InputIDs {
   ONNXTensorElementDataType type_;
 
   std::unique_ptr<OrtValue> value_;
+  std::unique_ptr<OrtValue> cast_value_;
+  std::unique_ptr<OrtValue> total_sequence_length_;
+  std::unique_ptr<OrtValue> past_sequence_length_;
+  int32_t initial_num_tokens_{};
 };
 
 std::unique_ptr<InputIDs> CreateInputIDs(State& state);

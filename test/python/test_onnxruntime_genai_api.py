@@ -39,6 +39,26 @@ def test_config(test_data_path):
     config.set_provider_option("quantum", "break_universe", "true")
     config.append_provider("slide rule")
 
+def test_NamedTensors():
+    named_tensors = og.NamedTensors()
+    named_tensors["input_ids"] = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
+    named_tensors["attention_mask"] = np.array([[1, 1, 1, 1], [1, 1, 1, 1]], dtype=np.int32)
+    named_tensors["test1"] = og.Tensor(np.random.rand(2, 2).astype(np.float32))
+    named_tensors["test2"] = og.Tensor(np.random.rand(2, 2).astype(np.float32))
+
+    # List out the tensors:
+    names = named_tensors.keys();
+    print() # To not print on the same line as the test name
+    for name in names:
+        print(name)
+        # Assert that the named tensors contains the name
+        assert name in named_tensors
+        print(named_tensors[name].as_numpy())
+        del named_tensors[name]
+
+    # Test that the named tensors is empty
+    assert len(named_tensors) == 0
+
 @pytest.mark.parametrize(
     "relative_model_path",
     (
@@ -287,9 +307,6 @@ def test_e2e(device, phi2_for):
 
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=20, batch_size=len(prompts))  # To run faster
-
-    if device == "dml":
-        params.try_graph_capture_with_max_batch_size(len(prompts))
 
     generator = og.Generator(model, params)
     generator.append_tokens(tokenizer.encode_batch(prompts))
@@ -763,7 +780,7 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
 
     generator = og.Generator(model, params)
     if not valid_model:
-        with pytest.raises(og.OrtException) as exc_info:
+        with pytest.raises(RuntimeError) as exc_info:
             generator.append_tokens(tokenizer.encode_batch(prompts))
 
         assert f"Missing Input: {extra_inputs[0]}" in str(exc_info.value)

@@ -164,6 +164,8 @@ struct Inputs_Element : JSON::Element {
       v_.current_sequence_length = JSON::Get<std::string_view>(value);
     } else if (name == "past_sequence_length") {
       v_.past_sequence_length = JSON::Get<std::string_view>(value);
+    } else if (name == "total_sequence_length") {
+      v_.total_sequence_length = JSON::Get<std::string_view>(value);
     } else
       throw JSON::unknown_value_error{};
   }
@@ -294,6 +296,10 @@ struct SlidingWindow_Element : JSON::Element {
       v_->window_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "pad_value") {
       v_->pad_value = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "alignment") {
+      v_->alignment = JSON::Get<std::string_view>(value);
+    } else if (name == "slide_key_value_cache") {
+      v_->slide_key_value_cache = JSON::Get<bool>(value);
     } else
       throw JSON::unknown_value_error{};
   }
@@ -700,11 +706,19 @@ struct Search_Element : JSON::Element {
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value) {
-  Search_Element(search).OnValue(name, value);
+  try {
+    Search_Element(search).OnValue(name, value);
+  } catch (...) {
+    JSON::TranslateException(name);
+  }
 }
 
 void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
-  Search_Element(search).OnValue(name, value);
+  try {
+    Search_Element(search).OnValue(name, value);
+  } catch (...) {
+    JSON::TranslateException(name);
+  }
 }
 
 void ClearProviders(Config& config) {
@@ -722,12 +736,13 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
   JSON::Parse(element, json.str());
 }
 
-bool IsCudaGraphEnabled(Config::SessionOptions& session_options) {
+bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
   for (const auto& provider_options : session_options.provider_options) {
     if (provider_options.name == "cuda") {
+      // Graph Capture is currently broken for CUDA
       for (const auto& value : provider_options.options) {
-        if (value.first == "enable_cuda_graph") {
-          return value.second == "1";
+        if (value.first == "enable_cuda_graph" && value.second == "1") {
+          throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
         }
       }
     } else if (provider_options.name == "dml") {
@@ -800,6 +815,12 @@ void ParseConfig(const fs::path& filename, std::string_view json_overlay, Config
       throw std::runtime_error(oss.str());
     }
   }
+}
+
+void OverlayConfig(Config& config, std::string_view json) {
+  Root_Element root{config};
+  RootObject_Element element{root};
+  JSON::Parse(element, json);
 }
 
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {

@@ -1,17 +1,18 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cstring>  // for memcmp
+#include <numeric>
 #include <iostream>
 #include <thread>
 #include <vector>
+#include "span.h"
+
+#define OGA_USE_SPAN 1
+#include "models/onnxruntime_api.h"
+#include "ort_genai.h"
 
 #include <gtest/gtest.h>
-
-#include "generators.h"
-#include "models/model.h"
-#include "ort_genai.h"
-#include "search.h"
-#include "span.h"
 
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
@@ -225,19 +226,15 @@ TEST(CAPITests, EndToEndPhi) {
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
 
-  const char* input_strings[] = {
-      "This is a test."
-  };
-
-  auto input_sequences = OgaSequences::Create();
-  for (auto& string : input_strings)
-    tokenizer->Encode(string, *input_sequences);
+  const char* input_string = "This is a test.";
+  auto input_sequence = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequence);
 
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 40);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokenSequences(*input_sequences);
+  generator->AppendTokenSequences(*input_sequence);
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
@@ -474,14 +471,11 @@ TEST(CAPITests, SetTerminate) {
   };
 
   auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
-    try {
+    EXPECT_THROW({
       while (!generator->IsDone()) {
         generator->GenerateNextToken();
       }
-    } catch (const std::exception& e) {
-      EXPECT_EQ(generator->IsSessionTerminated(), true);
-      std::cout << "Session Terminated: " << e.what() << std::endl;
-    }
+    }, std::runtime_error);
   };
 
   auto model = OgaModel::Create(PHI2_PATH);
@@ -502,7 +496,6 @@ TEST(CAPITests, SetTerminate) {
   threads.push_back(std::thread(GeneratorSetTerminateCall, generator.get()));
 
   for (auto& th : threads) {
-    std::cout << "Waiting for threads completion" << std::endl;
     th.join();  // Wait for each thread to finish
   }
   EXPECT_EQ(generator->IsSessionTerminated(), true);
@@ -591,14 +584,9 @@ TEST(CAPITests, TopKTopPCAPI) {
   test.Run();
 }
 
-#endif  // TEST_PHI2 && !USE_DML
-
-#if TEST_PHI2
 TEST(CAPITests, AdaptersTest) {
 #ifdef USE_CUDA
   using OutputType = Ort::Float16_t;
-#elif defined(USE_DML)
-  using OutputType = Ort::Float16_t; 
 #else
   using OutputType = float;
 #endif
@@ -676,10 +664,8 @@ TEST(CAPITests, AdaptersTest) {
   // So, the generator must go out of scope before the adapter can be unloaded.
   adapters->UnloadAdapter("adapters_a_and_b");
 }
-#endif
 
 TEST(CAPITests, AdaptersTestMultipleAdapters) {
-#if TEST_PHI2
   // The python unit tests create the adapter model.
   // In order to run this test, the python unit test must have been run first.
   auto model = OgaModel::Create(MODEL_PATH "multiple_adapters");
@@ -718,8 +704,8 @@ TEST(CAPITests, AdaptersTestMultipleAdapters) {
   // So, the generator must go out of scope before the adapter can be unloaded.
   adapters->UnloadAdapter("adapter_a");
   adapters->UnloadAdapter("adapter_b");
-#endif
 }
+#endif  // TEST_PHI2 && !USE_DML
 
 void CheckResult(OgaResult* result) {
   if (result) {
@@ -729,6 +715,7 @@ void CheckResult(OgaResult* result) {
   }
 }
 
+#if !USE_DML
 TEST(CAPITests, BatchedRewindGptFp32CAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -847,3 +834,4 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 }
+#endif

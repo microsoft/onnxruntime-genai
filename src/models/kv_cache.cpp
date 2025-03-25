@@ -166,26 +166,21 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
   // Derive the KV data type from the KV input 0
   type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
-
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
-  // Set the size after empty_past_ has been created with 0 for this field
-  if (past_present_share_buffer_) {
-    shape_[2] = state_.params_->search.max_length;
-
-    if (state_.GetCapturedGraphInfo()) {
-      sb_kv_caches_.reserve(layer_count_ * 2);
-      for (int i = 0; i < layer_count_ * 2; ++i) {
-        sb_kv_caches_.push_back(state_.GetCapturedGraphInfo()->sb_kv_caches_[i].get());
-      }
-    }
+  if (state_.params_->use_graph_capture && !past_present_share_buffer_) {
+    // share buffer is a precondition for graph capture
+    throw std::runtime_error("Graph capture is not supported with past_present_share_buffer set to false.");
   }
+
+  // Set the size after empty_past_ has been created with 0 for this field
+  if (past_present_share_buffer_)
+    shape_[2] = state_.params_->search.max_length;
 
   try {
     for (int i = 0; i < layer_count_ * 2; ++i) {
-      presents_.push_back(
-          sb_kv_caches_.empty() ? OrtValue::CreateTensor(Allocator(), shape_, type_)
-                                : sb_kv_caches_[i]->CreateTensorOnStaticBuffer(shape_, type_));
+      presents_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
+
       // Zero the memory so we don't leak any data from the previous run
       // WebGPU device has no Zero() implementation yet. Since this zeroing is optional we disable it for WebGPU for now
       if (Device().GetType() != DeviceType::WEBGPU) {
@@ -394,7 +389,8 @@ std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
     return nullptr;
   }
 
-  if (state.model_.config_->model.decoder.sliding_window) {
+  if (state.model_.config_->model.decoder.sliding_window &&
+      state.model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
     return std::make_unique<WindowedKeyValueCache>(state);
   } else {
     return std::make_unique<DefaultKeyValueCache>(state);
