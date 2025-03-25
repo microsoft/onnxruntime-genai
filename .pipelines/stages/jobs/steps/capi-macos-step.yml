@@ -50,11 +50,11 @@ steps:
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - task: PublishBuildArtifacts@1
+  - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
-      ArtifactName: $(artifactName)-capi
-      PathtoPublish: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package'
+      artifactName: $(artifactName)-capi
+      targetPath: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - powershell: |
@@ -87,8 +87,8 @@ steps:
       Contents: '*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)/wheel'
 
-  - task: PublishBuildArtifacts@1
+  - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
     inputs:
-      ArtifactName: $(artifactName)-wheel
-      PathtoPublish: '$(Build.ArtifactStagingDirectory)/wheel'
+      artifactName: $(artifactName)-$(PyNoDotVer)-wheel
+      targetPath: '$(Build.ArtifactStagingDirectory)/wheel'

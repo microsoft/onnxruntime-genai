@@ -14,9 +14,26 @@ parameters:
   - 'Release'
   - 'MinSizeRel'
 
+resources:
+  repositories:
+  - repository: 1esPipelines
+    type: git
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/tags/release
+
 trigger: none
-stages:
-- template: stages/macos-ios-cocoapods-packaging-stage.yml
+extends:
+  # The pipeline extends the 1ES PT which will inject different SDL and compliance tasks.
+  # For non-production pipelines, use "Unofficial" as defined below.
+  # For productions pipelines, use "Official".
+  template: v1/1ES.Official.PipelineTemplate.yml@1esPipelines
   parameters:
-    ort_version: ${{ parameters.ort_version }}
-    build_config: ${{ parameters.build_config }}
+    # Update the pool with your team's 1ES hosted pool.
+    pool:
+      name: 'onnxruntime-Win-CPU-2022'  # Name of your hosted pool
+      os: windows  # OS of the image. This value cannot be a variable. Allowed values: windows, linux, macOS
+    stages:
+    - template: stages/macos-ios-cocoapods-packaging-stage.yml
+      parameters:
+        ort_version: ${{ parameters.ort_version }}
+        build_config: ${{ parameters.build_config }}
