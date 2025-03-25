@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 #include "../generators.h"
 #include "whisper.h"
-#include "kernels.h"
 
 namespace Generators {
 
@@ -32,9 +31,8 @@ AudioEncoderState::AudioEncoderState(const WhisperModel& model, const GeneratorP
   output_names_.push_back(model_.config_->model.encoder.outputs.hidden_states.c_str());
 }
 
-DeviceSpan<float> AudioEncoderState::Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) {
-  int batch_size = static_cast<int>(audio_features_.GetShape()[0]);
-  State::Run(*model_.session_encoder_, *model_.run_options_, batch_size);
+DeviceSpan<float> AudioEncoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  State::Run(*model_.session_encoder_);
   return {};
 }
 
@@ -49,7 +47,7 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
   if (model_.session_info_->HasInput(model_.config_->model.decoder.inputs.past_sequence_length)) {
     auto past_sequence_length_type = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length);
     auto past_sequence_length_shape = std::array<int64_t, 1>{1};
-    past_sequence_length_ = OrtValue::CreateTensor(GetDeviceInterface(DeviceType::CPU).GetAllocator(), past_sequence_length_shape, past_sequence_length_type);
+    past_sequence_length_ = OrtValue::CreateTensor(GetDeviceInterface(DeviceType::CPU)->GetAllocator(), past_sequence_length_shape, past_sequence_length_type);
     auto data = past_sequence_length_->GetTensorMutableData<int32_t>();
     *data = 0;
 
@@ -60,7 +58,7 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
   // Add cache indirection
   if (model_.session_info_->HasInput(model_.config_->model.decoder.inputs.cache_indirection)) {
     auto cache_indirection_type = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.cache_indirection);
-    auto cache_indirection_shape = std::array<int64_t, 3>{params_->batch_size, params_->search.num_beams, params_->search.max_length};
+    auto cache_indirection_shape = std::array<int64_t, 3>{params_->search.batch_size, params_->search.num_beams, params_->search.max_length};
     auto cache_indirection_size = cache_indirection_shape[0] * cache_indirection_shape[1] * cache_indirection_shape[2];
     cache_indirection_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cache_indirection_shape, cache_indirection_type);
     cache_indirection_index_ = inputs_.size();
@@ -68,7 +66,7 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
     input_names_.push_back(model_.config_->model.decoder.inputs.cache_indirection.c_str());
     inputs_.push_back(cache_indirection_.get());
 
-    ByteWrapTensor(*model_.p_device_inputs_, cache_indirection_).Zero();
+    ByteWrapTensor(*model_.p_device_inputs_, *cache_indirection_).Zero();
   }
 
   // Add output QK
@@ -89,16 +87,17 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
   }
 }
 
-DeviceSpan<float> WhisperDecoderState::Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) {
-  int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
-  State::Run(*model_.session_decoder_, *model_.run_options_, batch_size);
+DeviceSpan<float> WhisperDecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  State::Run(*model_.session_decoder_);
   return logits_.Get();
 }
 
-void WhisperDecoderState::UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens_unk, DeviceSpan<int32_t> beam_indices, int current_length, bool first_update) {
-  input_ids_.Update(next_tokens_unk);
-  kv_cache_.Update(beam_indices.GetCPU(), current_length);
-  logits_.Update();
+void WhisperDecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int current_length, bool first_update) {
+  int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
+  size_t new_length = next_tokens.size() / batch_size;
+  input_ids_.Update(next_tokens);
+  kv_cache_.Update(beam_indices, current_length);
+  logits_.Update(next_tokens, new_length);
 
   if (past_sequence_length_) {
     auto data = past_sequence_length_->GetTensorMutableData<int32_t>();
@@ -114,7 +113,7 @@ void WhisperDecoderState::UpdateInputsOutputs(const DeviceSpan<int32_t>& next_to
     }
     std::unique_ptr<OrtValue> new_cache_indirection;
     auto cache_indirection_type = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.cache_indirection);
-    auto cache_indirection_shape = std::array<int64_t, 3>{params_->batch_size, params_->search.num_beams, params_->search.max_length};
+    auto cache_indirection_shape = std::array<int64_t, 3>{params_->search.batch_size, params_->search.num_beams, params_->search.max_length};
     new_cache_indirection = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cache_indirection_shape, cache_indirection_type);
 
     model_.p_device_inputs_->UpdateCacheIndirection(new_cache_indirection->GetTensorMutableData<int32_t>(),
@@ -145,7 +144,7 @@ WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& par
     : State{params, model},
       model_{model} {
   encoder_state_ = std::make_unique<AudioEncoderState>(model, params);
-  cross_cache_ = std::make_unique<Cross_Cache>(*this, encoder_state_->GetNumFrames() / 2);
+  cross_cache_ = std::make_unique<CrossCache>(*this, encoder_state_->GetNumFrames() / 2);
   encoder_state_->AddCrossCache(cross_cache_);
   decoder_state_ = std::make_unique<WhisperDecoderState>(model, params, encoder_state_->GetNumFrames());
   decoder_state_->AddCrossCache(cross_cache_);
@@ -154,7 +153,7 @@ WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& par
 
   auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
   if (decoder_state_->output_cross_qk_.size() && inputs.alignment_heads) {
-    if (model_.p_device_inputs_->Type() == DeviceType::CPU) {
+    if (model_.p_device_inputs_->GetType() == DeviceType::CPU) {
       alignment_heads_ = std::move(inputs.alignment_heads->ort_tensor_);
     } else {
       auto alignment_heads_type_and_shape_info = inputs.alignment_heads->ort_tensor_->GetTensorTypeAndShapeInfo();
@@ -181,7 +180,7 @@ void WhisperState::TransposeKCaches(std::vector<std::unique_ptr<OrtValue>>& kv_c
   // Kernel is invoked for FP16 CUDA only
   auto kv_cache_info = kv_caches[0]->GetTensorTypeAndShapeInfo();
   auto kv_cache_type = kv_cache_info->GetElementType();
-  if (kv_cache_type != Ort::TypeToTensorType<Ort::Float16_t> || model_.p_device_inputs_->Type() != DeviceType::CUDA) {
+  if (kv_cache_type != Ort::TypeToTensorType<Ort::Float16_t> || model_.p_device_inputs_->GetType() != DeviceType::CUDA) {
     return;
   }
 
@@ -228,7 +227,7 @@ void WhisperState::TransposeKCaches(std::vector<std::unique_ptr<OrtValue>>& kv_c
 template <typename T>
 void WhisperState::UpdateCrossQKSearchBuffer(int current_length) {
   auto output_cross_qk_size = decoder_state_->output_cross_qk_.size();
-  if (output_cross_qk_size && alignment_heads_ && model_.p_device_inputs_->Type() == DeviceType::CUDA) {
+  if (output_cross_qk_size && alignment_heads_ && model_.p_device_inputs_->GetType() == DeviceType::CUDA) {
     // Collect a GPU array of T* pointers from the list of OrtValues to pass to the kernel
     auto cross_qk_ptrs_cpu = cross_qk_ptrs_.CpuSpan();
     for (int i = 0; i < output_cross_qk_size; i++) {
@@ -252,10 +251,10 @@ void WhisperState::UpdateCrossQKSearchBuffer(int current_length) {
 
 template <typename T>
 void WhisperState::FinalizeCrossQK(int current_length) {
-  if (decoder_state_->output_cross_qk_.size() && alignment_heads_ && decoder_state_->cache_indirection_ && model_.p_device_inputs_->Type() == DeviceType::CUDA) {
+  if (decoder_state_->output_cross_qk_.size() && alignment_heads_ && decoder_state_->cache_indirection_ && model_.p_device_inputs_->GetType() == DeviceType::CUDA) {
     // Instantiate final output for cross QKs
     auto num_alignment_heads = alignment_heads_->GetTensorTypeAndShapeInfo()->GetShape()[0];
-    auto cross_qk_shape = std::array<int64_t, 5>{params_->batch_size, params_->search.num_return_sequences, num_alignment_heads, current_length - 1, encoder_state_->GetNumFrames() / 2};
+    auto cross_qk_shape = std::array<int64_t, 5>{params_->search.batch_size, params_->search.num_return_sequences, num_alignment_heads, current_length - 1, encoder_state_->GetNumFrames() / 2};
     cross_qk_final_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cross_qk_shape, decoder_state_->output_cross_qk_type_);
 
     model_.p_device_inputs_->FinalizeCrossQK(current_length - 1,
@@ -272,7 +271,7 @@ void WhisperState::FinalizeCrossQK(int current_length) {
   }
 }
 
-DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t> next_tokens, DeviceSpan<int32_t> next_indices) {
+DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   if (encoder_state_->first_run_) {
     // Run encoder
     encoder_state_->Run(current_length, next_tokens, next_indices);

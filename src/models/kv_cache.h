@@ -11,8 +11,6 @@ struct KeyValueCache {
 
   virtual void Add() = 0;
 
-  virtual void AddEncoder() = 0;
-
   virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) = 0;
 
   virtual void RewindTo(size_t index) = 0;
@@ -33,9 +31,6 @@ struct CombinedKeyValueCache : KeyValueCache {
   CombinedKeyValueCache(State& state);
 
   void Add() override;  // Add to state inputs/outputs
-  void AddEncoder() override {
-    throw std::runtime_error("CombinedKeyValueCache does not support AddEncoder.");
-  };
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   void RewindTo(size_t index) override;
 
@@ -108,7 +103,7 @@ struct DefaultKeyValueCache : KeyValueCache {
 
 // Very similar to the DefaultKeyValueCache, but is only created once at the encoder step, then used without modification for every decoder step
 struct CrossCache {
-  CrossCache(State& state);
+  CrossCache(State& state, int sequence_length);
 
   void AddOutputs(State& state);
   void AddInputs(State& state);

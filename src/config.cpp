@@ -106,7 +106,7 @@ struct SessionOptions_Element : JSON::Element {
       v_.ep_context_enable = JSON::Get<bool>(value);
     } else if (name == "use_env_allocators") {
       v_.use_env_allocators = JSON::Get<bool>(value);
-    else if (name == "graph_optimization_level") {
+    } else if (name == "graph_optimization_level") {
       v_.graph_optimization_level = GetGraphOptimizationLevel(JSON::Get<std::string_view>(value));
     } else {
       throw JSON::unknown_value_error{};
@@ -512,8 +512,9 @@ struct SpeechInputs_Element : JSON::Element {
       v_.audio_sizes = JSON::Get<std::string_view>(value);
     } else if (name == "audio_projection_mode") {
       v_.audio_projection_mode = JSON::Get<std::string_view>(value);
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
  private:
@@ -526,8 +527,9 @@ struct SpeechOutputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "audio_features") {
       v_.audio_features = JSON::Get<std::string_view>(value);
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
  private:
@@ -544,8 +546,9 @@ struct Speech_Element : JSON::Element {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
       v_.adapter_filename = JSON::Get<std::string_view>(value);
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
   Element& OnObject(std::string_view name) override {
@@ -556,69 +559,6 @@ struct Speech_Element : JSON::Element {
     } else {
       throw JSON::unknown_value_error{};
     }
-  }
-
- private:
-  Config::Model::Speech& v_;
-  SpeechInputs_Element inputs_{v_.inputs};
-  SpeechOutputs_Element outputs_{v_.outputs};
-};
-
-struct SpeechInputs_Element : JSON::Element {
-  explicit SpeechInputs_Element(Config::Model::Speech::Inputs& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "audio_embeds") {
-      v_.audio_embeds = JSON::Get<std::string_view>(value);
-    } else if (name == "attention_mask") {
-      v_.attention_mask = JSON::Get<std::string_view>(value);
-    } else if (name == "audio_sizes") {
-      v_.audio_sizes = JSON::Get<std::string_view>(value);
-    } else if (name == "audio_projection_mode") {
-      v_.audio_projection_mode = JSON::Get<std::string_view>(value);
-    } else
-      throw JSON::unknown_value_error{};
-  }
-
- private:
-  Config::Model::Speech::Inputs& v_;
-};
-
-struct SpeechOutputs_Element : JSON::Element {
-  explicit SpeechOutputs_Element(Config::Model::Speech::Outputs& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "audio_features") {
-      v_.audio_features = JSON::Get<std::string_view>(value);
-    } else
-      throw JSON::unknown_value_error{};
-  }
-
- private:
-  Config::Model::Speech::Outputs& v_;
-};
-
-struct Speech_Element : JSON::Element {
-  explicit Speech_Element(Config::Model::Speech& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "filename") {
-      v_.filename = JSON::Get<std::string_view>(value);
-    } else if (name == "config_filename") {
-      v_.config_filename = JSON::Get<std::string_view>(value);
-    } else if (name == "adapter_filename") {
-      v_.adapter_filename = JSON::Get<std::string_view>(value);
-    } else
-      throw JSON::unknown_value_error{};
-  }
-
-  Element& OnObject(std::string_view name) override {
-    if (name == "inputs") {
-      return inputs_;
-    } else if (name == "outputs") {
-      return outputs_;
-    } else
-      throw JSON::unknown_value_error{};
   }
 
  private:

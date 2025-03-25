@@ -13,7 +13,6 @@ struct Config {
   struct Defaults {
     // Decoder names
     static constexpr std::string_view InputIdsName = "input_ids";
-    static constexpr std::string_view InputsEmbedsName = "inputs_embeds";
     static constexpr std::string_view AttentionMaskName = "attention_mask";
     static constexpr std::string_view PositionIdsName = "position_ids";
     static constexpr std::string_view PastKeyName = "past_key_values.%d.key";
@@ -23,18 +22,31 @@ struct Config {
     static constexpr std::string_view PresentValueName = "present.%d.value";
 
     // Speech encoder names
+    static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
+    static constexpr std::string_view AudioSizesName = "audio_sizes";
+    static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
     static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
+    static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
 
     // Vision encoder names
+    static constexpr std::string_view PixelValuesName = "pixel_values";
     static constexpr std::string_view ImageSizesName = "image_sizes";
+    static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
     static constexpr std::string_view ImageFeaturesName = "image_features";
+    static constexpr std::string_view NumImageTokens = "num_image_tokens";
+
+    // Embedding names
+    static constexpr std::string_view AudioEmbedsName = "audio_embeds";
+    static constexpr std::string_view InputsEmbedsName = "inputs_embeds";
 
     // Generation names
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
+    static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
     static constexpr std::string_view CacheIndirectionName = "cache_indirection";
-    static constexpr std::string_view promptTemplate = "{Content}";
+
+    static constexpr std::string_view PromptTemplateName = "{Content}";
   };
 
   fs::path config_path;  // Path of the config directory
