@@ -83,22 +83,22 @@ void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool 
   stream << SGR::Fg_Green << " Location: " << SGR::Reset;
 
   const auto& memory_info = value->GetTensorMemoryInfo();
-  switch (memory_info.GetDeviceType()) {
-    case OrtMemoryInfoDeviceType_CPU:
-      stream << "CPU\r\n";
+  if (memory_info.GetDeviceType() == OrtMemoryInfoDeviceType_CPU) {
+    stream << "CPU\r\n";
+    if (dump_value) {
       DumpValues(stream, type_info->GetElementType(), value->GetTensorRawData(), element_count);
-      break;
-    case OrtMemoryInfoDeviceType_GPU: {
-      stream << "GPU\r\n";
-      auto type = type_info->GetElementType();
-      auto tensor_span = std::span<uint8_t>{const_cast<OrtValue*>(value)->GetTensorMutableData<uint8_t>(), SizeOf(type) * element_count};
-      auto device_span = model.p_device_->WrapMemory<uint8_t>(tensor_span);
-      DumpValues(stream, type, device_span.CopyDeviceToCpu().data(), element_count);
-      break;
     }
-    default:
-      stream << "Unhandled device type: " << static_cast<int>(memory_info.GetDeviceType()) << "\r\n";
-      break;
+  } else if (memory_info.GetDeviceType() == OrtMemoryInfoDeviceType_GPU || memory_info.GetDeviceType() == 4) {
+    if (memory_info.GetDeviceType() == OrtMemoryInfoDeviceType_GPU)
+      stream << "GPU\r\n";
+    else
+      stream << "DML\r\n";
+    auto type = type_info->GetElementType();
+    auto tensor_span = std::span<uint8_t>{const_cast<OrtValue*>(value)->GetTensorMutableData<uint8_t>(), SizeOf(type) * element_count};
+    auto device_span = model.p_device_->WrapMemory<uint8_t>(tensor_span);
+    DumpValues(stream, type, device_span.CopyDeviceToCpu().data(), element_count);
+  } else {
+    stream << "Unhandled device type: " << static_cast<int>(memory_info.GetDeviceType()) << "\r\n";
   }
 }
 
