@@ -38,6 +38,7 @@ struct Config {
     static constexpr std::string_view InputFeaturesName = "encoder_input_ids";
     static constexpr std::string_view AudioEmbedsName = "audio_embeds";
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
+    static constexpr std::string_view EncoderAttentionMaskName = "encoder_attention_mask";
     static constexpr std::string_view AudioSizesName = "audio_sizes";
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
@@ -92,6 +93,7 @@ struct Config {
 
       struct Inputs {
         std::string input_features{Defaults::InputFeaturesName};
+        std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
       } inputs;
     } encoder_decoder_init;
 
@@ -102,6 +104,8 @@ struct Config {
         std::string input_ids{Defaults::InputIdsName};
         std::string image_features{Defaults::ImageFeaturesName};
         std::string audio_features{Defaults::AudioFeaturesName};
+        std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
+        std::string input_features{Defaults::InputFeaturesName};
       } inputs;
 
       struct Outputs {
@@ -172,6 +176,7 @@ struct Config {
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
         std::string past_sequence_length{Defaults::PastSequenceLengthName};
         std::string total_sequence_length{Defaults::TotalSequenceLengthName};
+        std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
       } inputs;
 
       struct Outputs {

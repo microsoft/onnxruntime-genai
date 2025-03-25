@@ -18,6 +18,7 @@
 #include "multi_modal.h"
 #include "decoder_only_pipeline.h"
 #include "../dml/interface.h"
+#include "encoder_decoder.h"
 
 namespace Generators {
 
@@ -581,6 +582,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (config->model.type == "phi4mm")
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
+  if (config->model.type == "t5")
+    return std::make_shared<EncoderDecoderModel>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }
