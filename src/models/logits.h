@@ -2,8 +2,6 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include "static_buffer.h"
-
 namespace Generators {
 
 struct Logits {
@@ -33,7 +31,7 @@ struct Logits {
   std::unique_ptr<OrtValue> output_last_tokens_;
   std::unique_ptr<OrtValue> logits_of_last_token_fp32_;
 
-  std::unique_ptr<OrtValue> output_raw_;  // Raw logits output from model
+  std::unique_ptr<Tensor> output_raw_;  // Raw logits output from model
 
   std::vector<int> input_sequence_lengths;
   // OrtValue wrapped in a DeviceMemory object to make it universal

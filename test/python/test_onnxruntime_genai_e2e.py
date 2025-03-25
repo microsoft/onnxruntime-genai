@@ -28,7 +28,6 @@ def run_model(model_path: str | bytes | os.PathLike):
     sequences = tokenizer.encode_batch(prompts)
     params = og.GeneratorParams(model)
     params.set_search_options(batch_size=3, max_length=200)
-    params.try_graph_capture_with_max_batch_size(3)
 
     generator = og.Generator(model, params)
     generator.append_tokens(sequences)

@@ -25,6 +25,7 @@ struct Config {
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
     static constexpr std::string_view promptTemplate = "{Content}";
+    static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
 
     // Vision names
     static constexpr std::string_view PixelValuesName = "pixel_values";
@@ -151,9 +152,11 @@ struct Config {
       int num_hidden_layers{};
       int head_size{};
 
-      struct SlidingWindow {  // Sliding window parameters for models that process input prompt in chunks
-        int window_size{};    // The size of the window to slide over the input prompt
-        int pad_value{};      // The key-value cache padding value to use for the sliding window for inactive tokens
+      struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
+        int window_size{};                 // The size of the window to slide over the input prompt
+        int pad_value{};                   // The key-value cache padding value to use for the sliding window for inactive tokens
+        std::string alignment{"right"};    // The alignment of the window, either "left" or "right"
+        bool slide_key_value_cache{true};  // Whether to slide the key-value cache along with the input prompt
       };
       std::optional<SlidingWindow> sliding_window;
 
@@ -168,6 +171,7 @@ struct Config {
         std::string cross_past_key_names, cross_past_value_names;
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
         std::string past_sequence_length{Defaults::PastSequenceLengthName};
+        std::string total_sequence_length{Defaults::TotalSequenceLengthName};
       } inputs;
 
       struct Outputs {
@@ -235,6 +239,6 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
-bool IsCudaGraphEnabled(Config::SessionOptions& session_options);
+bool IsGraphCaptureEnabled(Config::SessionOptions& session_options);
 
 }  // namespace Generators

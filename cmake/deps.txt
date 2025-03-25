@@ -14,4 +14,4 @@ pybind11;https://github.com/pybind/pybind11/archive/refs/tags/v2.10.1.zip;769b6a
 googletest;https://github.com/google/googletest/archive/530d5c8c84abd2a46f38583ee817743c9b3a42b4.zip;5e3a61db2aa975cfd0f97ba92c818744e7fa7034
 microsoft_wil;https://github.com/microsoft/wil/archive/refs/tags/v1.0.230629.1.zip;e4a542a323c070376f7c2d1973d0f7ddbc1d2fa5
 directx_headers;https://github.com/microsoft/DirectX-Headers/archive/refs/tags/v1.613.1.zip;47653509a3371eabb156360f42faf582f314bf2e
-onnxruntime_extensions;https://github.com/microsoft/onnxruntime-extensions.git;e441b4052ac41f164fb381ef318171a48a09c115
+onnxruntime_extensions;https://github.com/microsoft/onnxruntime-extensions.git;04b555861f9e7cfe7972b4a67d3fa40f56ebac8f

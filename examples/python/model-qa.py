@@ -137,7 +137,7 @@ if __name__ == "__main__":
     parser.add_argument('-e', '--execution_provider', type=str, required=True, choices=["cpu", "cuda", "dml"], help="Execution provider to run ONNX model with")
     parser.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, help='Max number of tokens to generate including the prompt')
-    parser.add_argument('-ds', '--do_random_sampling', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
+    parser.add_argument('-ds', '--do_sample', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
     parser.add_argument('-p', '--top_p', type=float, help='Top p probability to sample with')
     parser.add_argument('-k', '--top_k', type=int, help='Top k tokens to sample from')
     parser.add_argument('-t', '--temperature', type=float, help='Temperature to sample with')
