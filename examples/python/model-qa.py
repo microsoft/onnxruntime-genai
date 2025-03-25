@@ -52,6 +52,8 @@ def main(args):
             print("Using Chat Template for LLAMA 3, if you are using LLAMA  2 please pass the argument --chat_template '{input} [/INST]')")
         elif model_type.startswith("qwen2"):
             args.chat_template = '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
+        elif model_type == "gemma3_text":
+            args.chat_template = '<bos><start_of_turn>user\n{input}<end_of_turn>\n<start_of_turn>model\n'
         else:
             raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
 
@@ -69,6 +71,8 @@ def main(args):
             print("Using System Prompt for LLAMA 3, if you are using LLAMA  2 please pass the argument --system_prompt '<s>[INST] <<SYS>>\\n{args.system_prompt}\\n<</SYS>>')")
         elif model_type.startswith("qwen2"):
             system_prompt = f"<|im_start|>system\n{args.system_prompt}<|im_end|>\n"
+        elif model_type == "gemma3_text":
+            system_prompt = f""
         else:
             system_prompt = args.system_prompt
 
@@ -115,6 +119,7 @@ def main(args):
                         first = False
 
                 new_token = generator.get_next_tokens()[0]
+                print(new_token, end='', flush=True)
                 print(tokenizer_stream.decode(new_token), end='', flush=True)
                 if args.timings: new_tokens.append(new_token)
         except KeyboardInterrupt:
@@ -137,7 +142,7 @@ if __name__ == "__main__":
     parser.add_argument('-e', '--execution_provider', type=str, required=True, choices=["cpu", "cuda", "dml"], help="Execution provider to run ONNX model with")
     parser.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, help='Max number of tokens to generate including the prompt')
-    parser.add_argument('-ds', '--do_random_sampling', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
+    parser.add_argument('-ds', '--do_sample', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
     parser.add_argument('-p', '--top_p', type=float, help='Top p probability to sample with')
     parser.add_argument('-k', '--top_k', type=int, help='Top k tokens to sample from')
     parser.add_argument('-t', '--temperature', type=float, help='Temperature to sample with')
