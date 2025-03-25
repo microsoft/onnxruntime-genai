@@ -192,6 +192,7 @@ struct Config {
         std::unordered_map<std::string, std::string> output_names_forwarder;
         bool run_on_prompt{true};
         bool run_on_token_gen{true};
+        int32_t reset_session_idx{-1};
       };
 
       std::vector<PipelineModel> pipeline;
