@@ -32,7 +32,7 @@ steps:
           $(Build.BinariesDirectory)/artifacts_staging/
     pushd $(Build.BinariesDirectory)/artifacts_staging
     zip -vr $(Build.BinariesDirectory)/artifacts/onnxruntime-genai-ios-$(genai_version).zip \
-          onnxruntime-genai.xcframework
+          onnxruntime-genai.xcframework --symlinks
     popd
   displayName: 'Build Apple XCFramework'
   workingDirectory: '$(Build.Repository.LocalPath)'
