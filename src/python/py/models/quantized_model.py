@@ -99,7 +99,7 @@ class QuantizedModel:
         self.layers = {}
         self.num_layers = num_layers
         self._quant_attrs = quant_attrs
-        self._load_quant_config(quant_attrs)  # noqa
+        self._load_quant_config(quant_attrs)  # codeql[py/init-calls-subclass]
 
         for weight_file in os.listdir(input_path):
             if weight_file.endswith(".safetensors"):
@@ -109,8 +109,8 @@ class QuantizedModel:
                 for name, tensor in weights.items():
 
                     # Per-layer quantization support
-                    local_bits = self.get_layer_bits(name)  # noqa
-                    local_group_size = self.get_layer_group_size(name)  # noqa
+                    local_bits = self.get_layer_bits(name)  # codeql[py/init-calls-subclass]
+                    local_group_size = self.get_layer_group_size(name)  # codeql[py/init-calls-subclass]
 
                     if tensor.dtype == torch.bfloat16:
                         # Cast bfloat16 to float32 since NumPy does not support bfloat16
