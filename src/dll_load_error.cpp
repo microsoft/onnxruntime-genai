@@ -4,7 +4,7 @@
 
 #include <Windows.h>
 #include <dbghelp.h>
-#include <iostream>
+#include <memory>
 #include <string>
 #pragma comment(lib, "dbghelp.lib")
 
