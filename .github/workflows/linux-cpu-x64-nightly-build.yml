@@ -22,21 +22,6 @@ jobs:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v2
 
-
-
-      - name: Download OnnxRuntime
-        run: |
-          curl -L -o ${{ env.ort_zip }} ${{ env.ort_url }} 
-
-      - name: Unzip OnnxRuntime
-        run: |
-          tar -xzf ${{ env.ort_zip }}
-          rm ${{ env.ort_zip }}
-
-      - name: Rename OnnxRuntime to ort
-        run: |
-          mv ${{ env.ort_dir }} ort
-
       - name: Git Submodule Update
         run: |
           git submodule update --init --recursive
@@ -58,6 +43,17 @@ jobs:
       - name: Run the python tests
         run: |
           python3 test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e
+
+      - name: Run Q&A Example
+        run: |
+          python3 -m onnxruntime_genai.models.builder -i /data/ortgenai/pytorch/qwen2.5-0.5b-instruct -e cpu -p int4 -o ./example-models/qwen2.5-0.5b-instruct
+          python3 examples/python/model-qa.py -m ./example-models/qwen2.5-0.5b-instruct -e cpu --input_prompt "what is 10+4?" > output.log 2>&1
+          if cat output.log | grep -Eq "14|fourteen"; then
+            echo "Result seems correct"
+          else
+            echo "Result seems incorrect!"
+            exit 1
+          fi
 
       - name: Verify Build Artifacts
         if: always()

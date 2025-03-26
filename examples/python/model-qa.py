@@ -43,10 +43,10 @@ def main(args):
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
             raise ValueError("Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
     else:
-        if model_type.startswith("phi2") or model_type.startswith("phi3"):
-            args.chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
-        elif model_type.startswith("phi4"):
+        if model_type.startswith("phi4"):
             args.chat_template = '<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>'
+        elif model_type.startswith("phi"): # For Phi2 and Phi3
+            args.chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
         elif model_type.startswith("llama"):
             args.chat_template = '<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
             print("Using Chat Template for LLAMA 3, if you are using LLAMA  2 please pass the argument --chat_template '{input} [/INST]')")
@@ -60,10 +60,10 @@ def main(args):
         # User-provided system template already has tags
         system_prompt = args.system_prompt
     else:
-        if model_type.startswith('phi2') or model_type.startswith('phi3'):
-            system_prompt = f"<|system|>\n{args.system_prompt}<|end|>"
-        elif model_type.startswith('phi4'):
+        if model_type.startswith('phi4'):
             system_prompt = f"<|im_start|>system<|im_sep|>\n{args.system_prompt}<|im_end|>"
+        elif model_type.startswith('phi'): # For Phi2 and Phi3
+            system_prompt = f"<|system|>\n{args.system_prompt}<|end|>"
         elif model_type.startswith("llama"):
             system_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{args.system_prompt}<|eot_id|>"
             print("Using System Prompt for LLAMA 3, if you are using LLAMA  2 please pass the argument --system_prompt '<s>[INST] <<SYS>>\\n{args.system_prompt}\\n<</SYS>>')")
@@ -77,7 +77,10 @@ def main(args):
 
     # Keep asking for input prompts in a loop
     while True:
-        text = input("Prompt (Use quit() to exit): ")
+        if args.input_prompt:
+            text = args.input_prompt
+        else:
+            text = input("Prompt (Use quit() to exit): ")
         if not text:
             print("Error, input cannot be empty")
             continue
@@ -130,6 +133,9 @@ def main(args):
             prompt_time = first_token_timestamp - started_timestamp
             run_time = time.time() - first_token_timestamp
             print(f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens)/prompt_time:.2f} tps, New tokens per second: {len(new_tokens)/run_time:.2f} tps")
+        # If Input prompt is provided it will just run the model for the input prompt and exit
+        if args.input_prompt:
+            break
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")
@@ -146,5 +152,6 @@ if __name__ == "__main__":
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
     parser.add_argument('-c', '--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}')
     parser.add_argument('-s', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the prompt.')
+    parser.add_argument('-inp', '--input_prompt', type=str, default='', help='Input Prompt, if provided it will just run the prompt and exit')
     args = parser.parse_args()
     main(args)
