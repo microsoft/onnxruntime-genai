@@ -107,11 +107,11 @@ steps:
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - task: PublishBuildArtifacts@1
+  - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:
-      ArtifactName: $(artifactName)-capi
-      PathtoPublish: '$(Build.Repository.LocalPath)/build/$(ep)/package'
+      artifactName: $(artifactName)-capi
+      targetPath: '$(Build.Repository.LocalPath)/build/$(ep)/package'
 
 - ${{ if eq(parameters.target, 'python') }}:
   - bash: |
@@ -131,12 +131,6 @@ steps:
             --target python"
     displayName: 'Build Python $(PyNoDotVer)'
     workingDirectory: '$(Build.Repository.LocalPath)'
-
-  - task: BinSkim@4
-    displayName: 'Run BinSkim'
-    inputs:
-      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/build/**/*cpython*.so'
-    continueOnError: true
 
   - bash: |
       set -e -x
@@ -163,11 +157,11 @@ steps:
       Contents: '*manylinux*.whl'
       TargetFolder: '$(Build.ArtifactStagingDirectory)/wheel'
 
-  - task: PublishBuildArtifacts@1
+  - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime python wheel'
     inputs:
-      ArtifactName: $(artifactName)-wheel
-      PathtoPublish: '$(Build.ArtifactStagingDirectory)/wheel'
+      artifactName: $(artifactName)-$(PyNoDotVer)-wheel
+      targetPath: '$(Build.ArtifactStagingDirectory)/wheel'
 
 - script: |
     ls $(Build.Repository.LocalPath) -R

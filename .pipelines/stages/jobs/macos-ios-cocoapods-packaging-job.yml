@@ -7,7 +7,9 @@ parameters:
 jobs:
 - job: macos_ios_cocoapods_packaging
   pool:
-    vmImage: 'macOS-latest'
+    name: 'Azure Pipelines'
+    image: 'macOS-latest'
+    os: 'macOS'
   variables:
     buildSettingsFile: "tools/ci_build/github/apple/default_full_apple_framework_build_settings.json"
     cPodName: onnxruntime-genai-c
@@ -63,6 +65,8 @@ jobs:
         ls -R "$(Build.ArtifactStagingDirectory)"
       displayName: "List staged artifacts"
 
-    - publish: "$(Build.ArtifactStagingDirectory)"
-      artifact: "macos_ios_cocoapods_packaging_artifacts"
+    - task: 1ES.PublishPipelineArtifact@1
       displayName: "Publish artifacts"
+      inputs:
+        targetPath: "$(Build.ArtifactStagingDirectory)"
+        artifactName: "macos_ios_cocoapods_packaging_artifacts"
