@@ -192,7 +192,8 @@ struct Config {
         std::unordered_map<std::string, std::string> output_names_forwarder;
         bool run_on_prompt{true};
         bool run_on_token_gen{true};
-        int32_t reset_session_idx{-1};
+        int reset_session_idx{-1};  // Some models cannot keeo all the ort sessions in memory at once due to memory constraints.
+                                    // This is the index of the session that needs to be reset during the execution of the current session.
       };
 
       std::vector<PipelineModel> pipeline;

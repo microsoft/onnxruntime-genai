@@ -181,7 +181,13 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
       continue;
     }
 
-    if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx != -1) {
+    if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx > -1) {
+      if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx >=
+          static_cast<int>(model_.sessions_.size())) {
+        throw std::runtime_error(
+            MakeString("Invalid reset_session_idx ", model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx,
+                       " for pipeline model ", model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id));
+      }
       (const_cast<DecoderOnlyPipelineModel*>(&model_))->sessions_[model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx].reset();
     }
 
