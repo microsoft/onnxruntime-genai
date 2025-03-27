@@ -17,6 +17,7 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     : State{params, model},
       model_{model},
       position_inputs_{model, *this, sequence_lengths_unk} {
+  std::cout<<"Inside of DecoderOnly_State constructor"<<std::endl;
   input_ids_.Add();
   position_inputs_.Add();
   logits_.Add();

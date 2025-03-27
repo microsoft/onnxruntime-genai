@@ -34,6 +34,7 @@ def main(args):
         prompts[:] = [f'{args.chat_template.format(input=text)}' for text in prompts]
 
     input_tokens = tokenizer.encode_batch(prompts)
+    print("Input tokens = ", type(input_tokens))
     if args.verbose: print(f'Prompt(s) encoded: {prompts}')
 
     params = og.GeneratorParams(model)

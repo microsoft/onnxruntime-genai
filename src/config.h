@@ -39,6 +39,7 @@ struct Config {
     static constexpr std::string_view AudioEmbedsName = "audio_embeds";
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
     static constexpr std::string_view EncoderAttentionMaskName = "encoder_attention_mask";
+    static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
     static constexpr std::string_view AudioSizesName = "audio_sizes";
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
@@ -90,11 +91,23 @@ struct Config {
     // For models like whisper
     struct EncoderDecoderInit {
       std::string filename;
+      SessionOptions session_options;
+
+      int hidden_size{};
+      int num_attention_heads{};
+      int num_hidden_layers{};
+      int head_size{};
 
       struct Inputs {
         std::string input_features{Defaults::InputFeaturesName};
         std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
       } inputs;
+
+      struct Outputs {
+        std::string hidden_states{Defaults::EncoderHiddenStatesName};
+        std::string cross_present_key_names{"present_key_cross_%d"}, cross_present_value_names{"present_value_cross_%d"};
+      } outputs;
+
     } encoder_decoder_init;
 
     struct Embedding {

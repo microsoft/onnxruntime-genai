@@ -331,19 +331,19 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int i
 CrossCache::CrossCache(State& state)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 1500, model_.config_->model.decoder.head_size} {
+      shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_attention_heads, 1500, model_.config_->model.decoder.head_size} {
   values_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {
+    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.encoder_decoder_init.outputs.cross_present_key_names, i));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.encoder_decoder_init.outputs.cross_present_value_names, i));
+
     input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.cross_past_key_names, i));
     input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.cross_past_value_names, i));
-
-    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.cross_present_key_names, i));
-    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.cross_present_value_names, i));
   }
 
   // Derive the KV data type from the KV input 0
-  type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
+  type_ = model_.session_info_->GetOutputDataType(output_name_strings_[0]);
 
   for (int i = 0; i < layer_count_; ++i) {
     values_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));

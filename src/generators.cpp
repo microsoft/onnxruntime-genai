@@ -274,6 +274,7 @@ std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorPa
 std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
   if (params.search.num_beams > 1)
     return params.p_device->CreateBeam(params);
+  std::cout<<"Inside of CreateSearch"<<std::endl;
   return params.p_device->CreateGreedy(params);
 }
 
@@ -287,8 +288,11 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   if (params.config.model.vocab_size < 1)
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
 
+  std::cout<<"Inside of Generator constructor"<<std::endl;
   search_ = CreateSearch(params);
+  std::cout<<"After CreateSearch"<<std::endl;
   state_ = model.CreateState(search_->GetSequenceLengths(), params);  // Search sequence lengths set when creating state
+  std::cout<<"After model.CreateState"<<std::endl;
 
   // Temporary solution for multimodal and whisper models
   if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
@@ -296,13 +300,13 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   }
 }
 
-DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
-  size_t padded_input_ids_size = input_ids.size();
+DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_features) {
+  size_t padded_input_ids_size = input_features.size();
   if (model_->config_->model.decoder.sliding_window.has_value()) {
     // If the model has a sliding window, pad the input_ids to the next multiple of the window size
     // so that the input_ids can be divided into window size chunks.
     const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
-    padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
+    padded_input_ids_size = ((input_features.size() + window_size - 1) / window_size) * window_size;
   }
 
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
@@ -310,40 +314,42 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
   auto padding_begin = cpu_span.begin();
   auto data_end = cpu_span.end();
   if (model_->config_->model.decoder.sliding_window.has_value() && model_->config_->model.decoder.sliding_window->alignment == "left") {
-    padding_begin = cpu_span.begin() + input_ids.size();
+    padding_begin = cpu_span.begin() + input_features.size();
     data_end = padding_begin;
   }
-  std::fill_n(padding_begin, padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
-  std::copy_backward(input_ids.begin(), input_ids.end(), data_end);
+  std::fill_n(padding_begin, padded_input_ids_size - input_features.size(), model_->config_->model.pad_token_id);
+  std::copy_backward(input_features.begin(), input_features.end(), data_end);
   input_ids_device.CopyCpuToDevice();
   return input_ids_device;
 }
 
 // TODO(aciddelgado): Remove this function once SetInputs is moved to generator
-void Generator::AuxAppendTokens(cpu_span<const int32_t> input_ids) {
+void Generator::AuxAppendTokens(cpu_span<const int32_t> input_features) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
-  if (input_ids.size() == 0)
+  if (input_features.size() == 0)
     throw std::runtime_error("input_ids is empty");
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
-  auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
+  auto input_ids_device = AllocateInputIdsOnDevice(input_features);
   search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
   ComputeLogits(input_ids_device);
 }
 
-void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
+void Generator::AppendTokens(cpu_span<const int32_t> input_features) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
-  if (input_ids.size() == 0)
-    throw std::runtime_error("input_ids is empty");
-  if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
-    throw std::runtime_error("input_ids size (" + std::to_string(input_ids.size()) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
+  std::cout<<"Input size = "<<input_features.size()<<std::endl;
+  if (input_features.size() == 0)
+    throw std::runtime_error("input_features is empty");
+  if ((input_features.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
+    throw std::runtime_error("input_features size (" + std::to_string(input_features.size()) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
   if (model_->config_->model.type == "whisper" || model_->config_->model.type == "phi3v")
     throw std::runtime_error("Please use params.SetInputs for " + model_->config_->model.type + ". AppendTokens is not supported for this model type.");
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
+  std::cout<<"Inside of AppendTokens"<<std::endl;
   constexpr std::array<DeviceType, 3> devices_supporting_continuous_decoding{DeviceType::CPU, DeviceType::CUDA, DeviceType::WEBGPU};
   if (search_->GetSequenceLength() != 0 &&
       std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
@@ -351,28 +357,40 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->params_->p_device->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
+  std::cout<<"Before next tokens"<<std::endl;
   if (last_action_ == Action::generated) {
     ComputeLogits(search_->GetNextTokens());
   }
 
-  auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
+  std::cout<<"Before AllocateInputIdsOnDevice"<<std::endl;
+  auto input_ids_device = AllocateInputIdsOnDevice(input_features);
+  std::cout<<"After AllocateInputIdsOnDevice"<<std::endl;
   search_->AppendTokens(input_ids_device);
+  std::cout<<"After AppendTokens"<<std::endl;
   computed_logits_ = false;
+  std::cout<<"Before ComputeLogits "<<std::endl;
   ComputeLogits(input_ids_device);
+  std::cout<<"After ComputeLogits"<<std::endl;
 }
 
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
+  std::cout<<"Inside of ComputeLogits"<<std::endl;
+
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
+  std::cout<<"After state_->Run "<<std::endl;
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
     DumpSpan(stream, logits.CopyDeviceToCpu());
     stream << std::endl;
   }
+  std::cout<<"Dump Stream"<<std::endl;
   SetLogits(logits);
+  std::cout<<"SetLogits"<<std::endl;
   last_action_ = Action::standard;
+
   computed_logits_ = true;
 }
 

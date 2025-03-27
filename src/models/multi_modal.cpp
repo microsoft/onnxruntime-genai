@@ -140,7 +140,7 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
   return {};
 }
 
-DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
+MMDecoderState::MMDecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
       position_inputs_{model, *this, sequence_lengths} {
@@ -150,13 +150,13 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
   kv_cache_.Add();
 }
 
-DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+DeviceSpan<float> MMDecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   bool graph_capture_this_run = params_->use_graph_capture && inputs_embeds_.GetShape()[1] == 1;
   State::Run(*model_.decoder_session_, graph_capture_this_run);
   return logits_.Get();
 }
 
-void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
+void MMDecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
   position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
@@ -178,7 +178,7 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
     speech_state_ = std::make_unique<SpeechState>(model_, params, num_audio_tokens_);
   }
   embedding_state_ = std::make_unique<EmbeddingState>(model, params, num_image_tokens_, num_audio_tokens_);
-  decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
+  decoder_state_ = std::make_unique<MMDecoderState>(model_, sequence_lengths, params);
 
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
     const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.vision.adapter_filename));

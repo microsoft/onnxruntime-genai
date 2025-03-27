@@ -45,34 +45,39 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   }
 
   if (first_run_) {
+    std::cout<<"First run of the model, registering inputs and outputs."<<std::endl;
     extra_outputs_.Add(session.GetOutputNames());
     first_run_ = false;
   } else {
+    std::cout<<"Not the first run of the model, registering inputs and outputs."<<std::endl;
     extra_outputs_.Update();
   }
 
-  if (g_log.enabled && g_log.model_input_values) {
+  // if (g_log.enabled && g_log.model_input_values) {
+    std::cout<<"Dumping model input values."<<std::endl;
     auto& stream = Log("model_input_values");
     stream << std::endl;
     DumpTensors(model_, stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
-  }
+  // }
 
-  if (g_log.enabled && g_log.model_output_shapes) {
-    auto& stream = Log("model_output_shapes");
-    stream << std::endl;
-    DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
-  }
+  std::cout<<"Dumping model output shapes."<<std::endl;
+  // if (g_log.enabled && g_log.model_output_shapes) {
+    auto& outstream = Log("model_output_shapes");
+    outstream << std::endl;
+    DumpTensors(model_, outstream, outputs_.data(), output_names_.data(), output_names_.size(), false);
+  // }
 
+  std::cout<<"Running the model."<<std::endl;
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
 
   extra_outputs_.RegisterOutputs();
 
-  if (g_log.enabled && g_log.model_output_values) {
-    auto& stream = Log("model_output_values");
-    stream << std::endl;
-    DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
-  }
+  // if (g_log.enabled && g_log.model_output_values) {
+    auto& stream_output = Log("model_output_values");
+    stream_output << std::endl;
+    DumpTensors(model_, stream_output, outputs_.data(), output_names_.data(), output_names_.size(), true);
+  // }
 }
 
 void State::SetTerminate() {
@@ -583,6 +588,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (config->model.type == "phi4mm")
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
   if (config->model.type == "t5")
+    std::cout<<"Creating EncoderDecoderModel"<<std::endl;
     return std::make_shared<EncoderDecoderModel>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);

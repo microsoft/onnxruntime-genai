@@ -70,6 +70,9 @@ struct DefaultKeyValueCache : KeyValueCache {
   // Register input_ids as ORT session input.
   // Called only once during initialization of state.
   void Add() override;
+  auto& GetShape() const { return shape_; }
+  auto& GetType() const { return type_; }
+  auto& GetPresents() { return presents_; }
   // Move present to past. Prepare present output for next generation iteration.
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   void RewindTo(size_t index) override;
@@ -107,6 +110,9 @@ struct CrossCache {
 
   void AddOutputs();
   void AddInputs();
+  auto& GetShape() const { return shape_; }
+  auto& GetType() const { return type_; }
+  auto& GetValues() { return values_; }
 
  private:
   DeviceInterface& Device() { return *model_.p_device_kvcache_; }

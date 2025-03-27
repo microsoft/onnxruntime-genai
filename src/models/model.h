@@ -27,11 +27,13 @@ struct State {
   void SetTerminate();
   void UnsetTerminate();
   bool session_terminated_{};
-  OrtValue* GetInput(const char* name);
 
   virtual void RewindTo(size_t index) { (void)index; };
 
+  virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
+
+  DeviceSpan<float> MakeDummy() { return DeviceSpan<float>(); }
 
   void ClearIO();  // Clear all inputs/outputs
 

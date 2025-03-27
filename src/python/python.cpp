@@ -216,6 +216,10 @@ struct PyGenerator {
     return ToPython(generator_->GetSequence(index));
   }
 
+  pybind11::array GetInput(const std::string& name) {
+    return ToNumpy(*generator_->GetOutput(name.c_str()));
+  }
+
   pybind11::array GetOutput(const std::string& name) {
     return ToNumpy(*generator_->GetOutput(name.c_str()));
   }
@@ -379,6 +383,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<const OgaModel&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
+      .def("get_input", &PyGenerator::GetInput)
       .def("get_output", &PyGenerator::GetOutput)
       .def("append_tokens", pybind11::overload_cast<pybind11::array_t<int32_t>&>(&PyGenerator::AppendTokens))
       .def("append_tokens", pybind11::overload_cast<OgaTensor&>(&PyGenerator::AppendTokens))

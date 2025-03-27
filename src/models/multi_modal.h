@@ -85,11 +85,11 @@ struct EmbeddingState : State {
                             model_.config_->model.embedding.outputs.embeddings};
 };
 
-struct DecoderState : State {
-  DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths,
+struct MMDecoderState : State {
+  MMDecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths,
                const GeneratorParams& params);
-  DecoderState(const DecoderState&) = delete;
-  DecoderState& operator=(const DecoderState&) = delete;
+  MMDecoderState(const MMDecoderState&) = delete;
+  MMDecoderState& operator=(const MMDecoderState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
 
@@ -127,7 +127,7 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<VisionState> vision_state_;
   std::unique_ptr<SpeechState> speech_state_;
   std::unique_ptr<EmbeddingState> embedding_state_;
-  std::unique_ptr<DecoderState> decoder_state_;
+  std::unique_ptr<MMDecoderState> decoder_state_;
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
 

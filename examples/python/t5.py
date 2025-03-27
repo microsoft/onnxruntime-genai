@@ -1,132 +1,87 @@
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT License
-
-import argparse
-import os
-import glob
-import time
-from pathlib import Path
-
 import onnxruntime_genai as og
+import argparse
+import time
 
-# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
+def main(args):
+    if args.verbose: print("Loading model...")
+    config = og.Config(args.model_path)
+    config.clear_providers()
+    if args.execution_provider != "cpu":
+        if args.verbose:
+            print(f"Setting model to {args.execution_provider}...")
+        config.append_provider(args.execution_provider)
+    model = og.Model(config)
 
-def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
-    curr_path = Path(current_dir).absolute()
-    target_dir = glob.glob(target_dir_name, root_dir=curr_path)
-    if target_dir:
-        return Path(curr_path / target_dir[0]).absolute()
-    else:
-        if curr_path.parent == curr_path:
-            # Root dir
-            return None
-        return _find_dir_contains_sub_dir(curr_path / '..', target_dir_name)
-
-
-def _complete(text, state):
-    return (glob.glob(text + "*") + [None])[state]
-
-
-def get_paths(modality, user_provided_paths, default_paths, interactive):
-    paths = None
-
-    if interactive:
-        try:
-            import readline
-            readline.set_completer_delims(" \t\n;")
-            readline.parse_and_bind("tab: complete")
-            readline.set_completer(_complete)
-        except ImportError:
-            # Not available on some platforms. Ignore it.
-            pass
-        paths = [
-            path.strip()
-            for path in input(
-                f"{modality.capitalize()} Path (comma separated; leave empty if no {modality}): "
-            ).split(",")
-        ]
-    else:
-        paths = user_provided_paths if user_provided_paths else default_paths
-
-    paths = [path for path in paths if path]
-    return paths
-
-
-def run(args: argparse.Namespace):
-    print("Loading model...")
-    model = og.Model(args.model_path)
-    print("Model loaded")
-
-    # processor = model.create_multimodal_processor()
-    # tokenizer_stream = processor.create_stream()
+    if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
-    tokenizer_stream = tokenizer.create_stream()
+    if args.verbose: print("Tokenizer created")
+    print("Tokenizer = ", tokenizer)
 
-    interactive = not args.non_interactive
-
-    while True:
-        prompt = "<|user|>\n"
-
-        if interactive:
-            text = input("Prompt: ")
+    if hasattr(args, 'prompts'):
+        prompts = args.prompts
+    else:
+        if args.non_interactive:
+            prompts = ["The first 4 digits of pi are",
+                       "The square root of 2 is",
+                       "The first 6 numbers of the Fibonacci sequence are",]
         else:
-            if args.prompt:
-                text = args.prompt
-            else:
-                text = "Does the audio summarize what is shown in the image? If not, what is different?"
-        prompt += f"{text}<|end|>\n<|assistant|>\n"
-        
-        print("Processing inputs...")
-        inputs = tokenizer.encode(prompt)
-        print("Processor complete.")
+            text = input("Input: ")
+            prompts = [text]
 
-        print("Generating response...")
-        params = og.GeneratorParams(model)
-        params.set_inputs(inputs)
-        params.set_search_options(max_length=7680)
+    input_tokens = tokenizer.encode_batch(prompts)
+    if args.verbose: print(f'Prompt(s) encoded: {prompts}')
 
-        generator = og.Generator(model, params)
-        start_time = time.time()
+    params = og.GeneratorParams(model)
 
-        while not generator.is_done():
-            generator.generate_next_token()
+    search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args} 
+    search_options['batch_size'] = len(prompts)
+    search_options['num_beams'] = 3
 
-            new_token = generator.get_next_tokens()[0]
-            print(tokenizer_stream.decode(new_token), end="", flush=True)
+    if (args.verbose): print(f'Args: {args}')
+    if (args.verbose): print(f'Search options: {search_options}')
 
+    params.set_search_options(**search_options)
+    if args.verbose: print("GeneratorParams created")
+
+    generator = og.Generator(model, params)
+    if args.verbose: print("Generator created")
+    
+    generator.append_tokens(input_tokens)
+    if args.verbose: print("Input tokens added")
+
+    if args.verbose: print("Generating tokens ...\n")
+    start_time = time.time()
+    while not generator.is_done():
+        generator.generate_next_token()
+    run_time = time.time() - start_time
+
+    for i in range(len(prompts)):
+        print(f'Prompt #{i}: {prompts[i]}')
         print()
-        total_run_time = time.time() - start_time
-        print(f"Total Time : {total_run_time:.2f}")
+        print(tokenizer.decode(generator.get_sequence(i)))
+        print()
 
-        for _ in range(3):
-            print()
-
-        # Delete the generator to free the captured graph before creating another one
-        del generator
-
-        if not interactive:
-            break
-
+    print()
+    total_tokens = sum(len(generator.get_sequence(i)) for i in range(len(prompts)))
+    print(f"Tokens: {total_tokens} Time: {run_time:.2f} Tokens per second: {total_tokens/run_time:.2f}")
+    print()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-m", "--model_path", type=str, required=True, help="Path to the folder containing the model"
-    )
-    parser.add_argument(
-        "-e", "--execution_provider", type=str, required=True, choices=["cpu", "cuda", "dml"], help="Execution provider to run model"
-    )
-    parser.add_argument(
-        "--image_paths", nargs='*', type=str, required=False, help="Path to the images, mainly for CI usage"
-    )
-    parser.add_argument(
-        "--audio_paths", nargs='*', type=str, required=False, help="Path to the audios, mainly for CI usage"
-    )
-    parser.add_argument(
-        '-pr', '--prompt', required=False, help='Input prompts to generate tokens from, mainly for CI usage'
-    )
-    parser.add_argument(
-        '--non-interactive', action=argparse.BooleanOptionalAction, required=False, help='Non-interactive mode, mainly for CI usage'
-    )
+    parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end token generation loop example for gen-ai")
+    parser.add_argument('-m', '--model_path', type=str, required=True, help='Onnx model folder path (must contain genai_config.json and model.onnx)')
+    parser.add_argument("-e", "--execution_provider", type=str, required=True, choices=["cpu", "cuda", "dml"], help="Provider to run model")
+    parser.add_argument('-pr', '--prompts', nargs='*', required=False, help='Input prompts to generate tokens from. Provide this parameter multiple times to batch multiple prompts')
+    parser.add_argument('-i', '--min_length', type=int, default=25, help='Min number of tokens to generate including the prompt')
+    parser.add_argument('-l', '--max_length', type=int, default=50, help='Max number of tokens to generate including the prompt')
+    parser.add_argument('-ds', '--do_sample', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
+    parser.add_argument('--top_p', type=float, help='Top p probability to sample with')
+    parser.add_argument('-k', '--top_k', type=int, help='Top k tokens to sample from')
+    parser.add_argument('-t', '--temperature', type=float, help='Temperature to sample with')
+    parser.add_argument('-r', '--repetition_penalty', type=float, help='Repetition penalty to sample with')
+    parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
+    parser.add_argument('-b', '--batch_size_for_cuda_graph', type=int, default=1, help='Max batch size for CUDA graph')
+    parser.add_argument('-c', '--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}. If not set, the prompt is used as is.')
+    parser.add_argument('--non-interactive', action=argparse.BooleanOptionalAction, required=False, default=False, help='Non-interactive mode, mainly for CI usage')
+
     args = parser.parse_args()
-    run(args)
+    main(args)

@@ -79,6 +79,13 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   std::variant<Whisper> inputs;
 
+  struct EncoderDecoder {
+    std::shared_ptr<Tensor> input_features;
+    std::shared_ptr<Tensor> encoder_attention_mask;  // int32 [batch_size, sequence_length]
+  };
+
+  std::variant<EncoderDecoder> encoderdecoder_inputs;
+
   struct Input {
     std::string name;
     std::shared_ptr<Tensor> tensor;
@@ -94,7 +101,7 @@ struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
   bool IsDone() const;
-  void AppendTokens(cpu_span<const int32_t> input_ids);
+  void AppendTokens(cpu_span<const int32_t> input_features);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
   DeviceSpan<float> GetLogits();
@@ -110,8 +117,8 @@ struct Generator : LeakChecked<Generator> {
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
 
  private:
-  DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
-  void AuxAppendTokens(cpu_span<const int32_t> input_ids);
+  DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_features);
+  void AuxAppendTokens(cpu_span<const int32_t> input_features);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   enum Action { standard,   // Default, set in any other case
                 generated,  // Set after GenerateNextToken
