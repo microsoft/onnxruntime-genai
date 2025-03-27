@@ -29,7 +29,7 @@ void SetLogString(std::string_view name, std::string_view value);
 
 struct LogItems {
   // Special log related entries
-  bool enabled{};        // Global on/off for all logging
+  bool enabled{true};        // Global on/off for all logging
   bool ansi_tags{true};  // Use ansi SGR color & style tags to make console output easier to read
   bool warning{true};    // warning messages, like options that were set but don't apply
 
@@ -41,8 +41,9 @@ struct LogItems {
   bool model_input_values{};   // Dump the input tensor shapes & values before the model runs
   bool model_output_shapes{};  // Before the model runs there are only the output shapes, no values in them. Useful for pre Session::Run debugging
   bool model_output_values{};  // After the model runs the output tensor values can be displayed
-  bool model_logits{};         // Same as model_output_values but only for the logits
+  bool model_logits{true};     // Same as model_output_values but only for the logits
   bool ort_lib{};              // Log the onnxruntime library loading and api calls.
+  bool value_stats{true};      // When logging float values, also dump some basic stats about the values (min, max, mean, std dev, and if there are any NaN or Inf values)
 };
 
 extern LogItems g_log;
