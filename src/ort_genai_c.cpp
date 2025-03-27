@@ -270,8 +270,7 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* gene
 
 OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size) {
   OGA_TRY
-  auto* params = reinterpret_cast<Generators::GeneratorParams*>(generator_params);
-  params->TryGraphCapture(max_batch_size);
+  printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
   return nullptr;
   OGA_CATCH
 }
@@ -425,8 +424,8 @@ OgaResult* OGA_API_CALL OgaGenerator_SetLogits(OgaGenerator* oga_generator, OgaT
   if (!generator->computed_logits_ && logits.size() != 0) {
     throw std::runtime_error("logits are not computed yet. Please call GenerateNextToken or AppendTokens before calling SetLogits.");
   }
-  size_t element_count = tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount();
-  auto new_logits_span = std::span<const float>(tensor->ort_tensor_->GetTensorData<float>(), element_count);
+  size_t element_count = tensor->GetElementCount();
+  auto new_logits_span = std::span<const float>(tensor->GetData<float>(), element_count);
   if (logits.size() == 0) {
     logits = generator->model_->p_device_inputs_->Allocate<float>(element_count);
     generator->SetLogits(logits);
@@ -499,11 +498,10 @@ OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer* p, const Oga
   OGA_TRY
   auto& tokenizer = *reinterpret_cast<const Generators::Tokenizer*>(p);
   auto& tensor = *reinterpret_cast<const Generators::Tensor*>(oga_tensor);
-  auto shape_info = tensor.ort_tensor_->GetTensorTypeAndShapeInfo();
-  auto shape = shape_info->GetShape();
+  auto shape = tensor.GetShape();
   if (shape.size() != 2)
     throw std::runtime_error("Expected a 2D tensor");
-  auto strings = tokenizer.DecodeBatch(std::span<const int32_t>{tensor.ort_tensor_->GetTensorData<int32_t>(), shape_info->GetElementCount()}, shape[0]);
+  auto strings = tokenizer.DecodeBatch(std::span<const int32_t>{tensor.GetData<int32_t>(), tensor.GetElementCount()}, shape[0]);
   auto string_array = std::make_unique<std::vector<std::string>>(std::move(strings));
   *out = reinterpret_cast<OgaStringArray*>(string_array.release());
   return nullptr;
@@ -545,18 +543,18 @@ OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t 
 
 OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* shape_dims, size_t shape_dims_count, OgaElementType element_type, OgaTensor** out) {
   OGA_TRY
-  auto tensor = std::make_shared<Generators::Tensor>();
   auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   auto ort_element_type = static_cast<ONNXTensorElementDataType>(element_type);
   size_t byte_count = Ort::SizeOf(ort_element_type);
   auto shape = std::span<const int64_t>{shape_dims, shape_dims_count};
   for (size_t i = 0; i < shape_dims_count; i++)
     byte_count *= shape_dims[i];
+  std::unique_ptr<OrtValue> ort_tensor;
   if (data)
-    tensor->ort_tensor_ = OrtValue::CreateTensor(*p_memory_info, data, byte_count, shape, ort_element_type);
+    ort_tensor = OrtValue::CreateTensor(*p_memory_info, data, byte_count, shape, ort_element_type);
   else
-    tensor->ort_tensor_ = OrtValue::CreateTensor(Ort::Allocator::GetWithDefaultOptions(), shape, ort_element_type);
-
+    ort_tensor = OrtValue::CreateTensor(Ort::Allocator::GetWithDefaultOptions(), shape, ort_element_type);
+  auto tensor = std::make_shared<Generators::Tensor>(std::move(ort_tensor));
   tensor->ExternalAddRef();
   *out = reinterpret_cast<OgaTensor*>(tensor.get());
   return nullptr;
@@ -565,21 +563,21 @@ OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* sha
 
 OgaResult* OGA_API_CALL OgaTensorGetType(OgaTensor* tensor, OgaElementType* out) {
   OGA_TRY
-  *out = static_cast<OgaElementType>(reinterpret_cast<Generators::Tensor*>(tensor)->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementType());
+  *out = static_cast<OgaElementType>(reinterpret_cast<Generators::Tensor*>(tensor)->GetType());
   return nullptr;
   OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaTensorGetShapeRank(OgaTensor* tensor, size_t* out) {
   OGA_TRY
-  *out = reinterpret_cast<Generators::Tensor*>(tensor)->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape().size();
+  *out = reinterpret_cast<Generators::Tensor*>(tensor)->GetShape().size();
   return nullptr;
   OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaTensorGetShape(OgaTensor* tensor, int64_t* shape_dims, size_t rank) {
   OGA_TRY
-  auto shape = reinterpret_cast<Generators::Tensor*>(tensor)->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
+  auto shape = reinterpret_cast<Generators::Tensor*>(tensor)->GetShape();
   if (rank != shape.size())
     throw std::runtime_error("shape_dims_count doesn't match result of OgaTensorGetShapeRank");
   std::copy(shape.begin(), shape.end(), shape_dims);
@@ -589,7 +587,7 @@ OgaResult* OGA_API_CALL OgaTensorGetShape(OgaTensor* tensor, int64_t* shape_dims
 
 OgaResult* OGA_API_CALL OgaTensorGetData(OgaTensor* tensor, void** out) {
   OGA_TRY
-  *out = reinterpret_cast<Generators::Tensor*>(tensor)->ort_tensor_->GetTensorMutableRawData();
+  *out = reinterpret_cast<Generators::Tensor*>(tensor)->GetMutableRawData();
   return nullptr;
   OGA_CATCH
 }

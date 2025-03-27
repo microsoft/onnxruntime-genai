@@ -30,6 +30,8 @@ std::string CurrentModulePath() {
 
   return out_path;
 }
+
+#include "dll_load_error.h"
 #endif
 
 void ThrowErrorIfSessionTerminated(bool is_session_terminated) {
@@ -132,7 +134,7 @@ struct LibraryHandle {
     auto path = CurrentModulePath() + filename;
     handle_ = LoadLibrary(path.c_str());
     if (!handle_)
-      throw std::runtime_error(std::string("Failed to load library: ") + path + " Error: " + std::to_string(GetLastError()));
+      throw std::runtime_error(std::string("Failed to load library: ") + DetermineLoadLibraryError(filename));
   };
 
   ~LibraryHandle() { FreeLibrary(handle_); }
@@ -237,28 +239,10 @@ GeneratorParams::GeneratorParams(const Config& config)
 
 GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
-      p_device{model.p_device_inputs_},
-      is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
-  use_cuda_graph = is_cuda_graph_enabled_;
-  if (use_cuda_graph) {
+      use_graph_capture{IsGraphCaptureEnabled(model.config_->model.decoder.session_options)},
+      p_device{model.p_device_inputs_} {
+  if (use_graph_capture) {
     max_batch_size = 1;  // set it to 1 by default
-  }
-}
-
-void GeneratorParams::TryGraphCapture(int max_bs) {
-  if (!is_cuda_graph_enabled_ || p_device->GetType() == DeviceType::CPU) {
-    // no-op
-    return;
-  }
-
-  if (DeviceType::CUDA == p_device->GetType() || DeviceType::DML == p_device->GetType()) {
-    if (max_bs == 0) {
-      throw std::runtime_error("Graph capture is enabled, but max_batch_size is not set.");
-    }
-    use_cuda_graph = true;
-    max_batch_size = max_bs;
-  } else {
-    throw std::runtime_error("CUDA graph is not supported on this device");
   }
 }
 
@@ -384,7 +368,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
-    DumpSpan(stream, logits.CopyDeviceToCpu());
+    DumpValues(stream, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
     stream << std::endl;
   }
   SetLogits(logits);

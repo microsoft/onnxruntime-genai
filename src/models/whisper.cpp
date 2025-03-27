@@ -129,11 +129,9 @@ void TransposeKCacheForDMMHA(T* dest_data,
 #endif
 
 DeviceSpan<float> Whisper_State::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  int batch_size = static_cast<int>(decoder_input_ids_.GetShape()[0]);
-
   switch (run_state_) {
     case RunState::Encoder_Decoder_Init:
-      State::Run(*model_.session_encoder_, batch_size);
+      State::Run(*model_.session_encoder_);
 
       run_state_ = RunState::Decoder_First;
       return logits_.Get();
@@ -303,7 +301,7 @@ DeviceSpan<float> Whisper_State::Run(int current_length, DeviceSpan<int32_t>& ne
     }
   }
 
-  State::Run(*model_.session_decoder_, batch_size);
+  State::Run(*model_.session_decoder_);
   return logits_.Get();
 }
 

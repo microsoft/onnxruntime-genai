@@ -192,6 +192,10 @@ struct Config {
         std::unordered_map<std::string, std::string> output_names_forwarder;
         bool run_on_prompt{true};
         bool run_on_token_gen{true};
+        int reset_session_idx{-1};  // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
+                                    // This is the index of the session that needs to be reset during the execution of the current session.
+                                    // This is a temporary solution until the QNN driver updates are available.
+                                    // Once the driver updates are available, this option will be deprecated.
       };
 
       std::vector<PipelineModel> pipeline;
@@ -239,6 +243,6 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
-bool IsCudaGraphEnabled(Config::SessionOptions& session_options);
+bool IsGraphCaptureEnabled(Config::SessionOptions& session_options);
 
 }  // namespace Generators

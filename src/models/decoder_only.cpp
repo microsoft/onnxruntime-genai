@@ -16,7 +16,6 @@ std::unique_ptr<State> DecoderOnly_Model::CreateState(DeviceSpan<int32_t> sequen
 DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      captured_graph_info_(model.GetCapturedGraphPool()->ReserveCapturedGraph(model, params)),
       position_inputs_{model, *this, sequence_lengths_unk} {
   input_ids_.Add();
   position_inputs_.Add();
@@ -28,8 +27,9 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
-  int batch_size = static_cast<int>(input_ids_.GetShape()[0]);
-  State::Run(*model_.session_decoder_, batch_size);
+  // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
+  bool graph_capture_this_run = params_->use_graph_capture && input_ids_.GetShape()[1] == 1;
+  State::Run(*model_.session_decoder_, graph_capture_this_run);
 
   return logits_.Get();
 }

@@ -353,7 +353,7 @@ struct OgaGeneratorParams : OgaAbstract {
   }
 
   void TryGraphCaptureWithMaxBatchSize(int max_batch_size) {
-    OgaCheckResult(OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(this, max_batch_size));
+    printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
   }
 
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }

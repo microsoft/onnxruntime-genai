@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 #pragma once
 #include "ortx_tokenizer.h"
-#include "captured_graph_pool.h"
+#include "../generators.h"
 #include "utils.h"
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
@@ -22,12 +22,11 @@ struct State {
   virtual ~State();
 
   virtual DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
-  virtual const CapturedGraphInfo* GetCapturedGraphInfo() const { return nullptr; }
   virtual void Finalize() {}
 
   void SetTerminate();
   void UnsetTerminate();
-  mutable bool session_terminated_{};
+  bool session_terminated_{};
   OrtValue* GetInput(const char* name);
 
   virtual void RewindTo(size_t index) { (void)index; };
@@ -47,13 +46,13 @@ struct State {
   std::vector<OrtValue*> inputs_, outputs_;
 
  protected:
-  void Run(OrtSession& session, int new_batch_size);  // Uses the inputs below to run
+  void Run(OrtSession& session, bool graph_capture_this_run = false);  // Uses the inputs below to run
   bool first_run_{true};
 
   std::unique_ptr<OrtRunOptions> run_options_;
 
  private:
-  int current_batch_size_{0};
+  std::string graph_id_{};
   std::shared_ptr<Adapters> adapters_;
   ExtraOutputs extra_outputs_;
 };
@@ -131,16 +130,14 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 
-  CapturedGraphPool* GetCapturedGraphPool() const { return captured_graph_pool_.get(); }
-
   OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
 
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
 
-  mutable DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices
-  mutable DeviceInterface* p_device_inputs_{};   // For some model inputs, the device might be the CPU device (all but KV cache currently for WebGPU and DML)
-  mutable DeviceInterface* p_device_kvcache_{};  // The kvcache is always allocated in device memory  (TODO: Remove in favor of just p_device_?)
+  DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices
+  DeviceInterface* p_device_inputs_{};   // For some model inputs, the device might be the CPU device (all but KV cache currently for WebGPU and DML)
+  DeviceInterface* p_device_kvcache_{};  // The kvcache is always allocated in device memory  (TODO: Remove in favor of just p_device_?)
 
   Ort::Allocator& allocator_cpu_{GetDeviceInterface(DeviceType::CPU)->GetAllocator()};
 
@@ -155,7 +152,6 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                       bool is_primary_session_options,
                                       bool disable_graph_capture);
 
-  std::shared_ptr<CapturedGraphPool> captured_graph_pool_;
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };
 
