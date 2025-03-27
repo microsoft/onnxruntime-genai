@@ -230,6 +230,8 @@ struct PipelineModel_Element : JSON::Element {
       v_.run_on_prompt = JSON::Get<bool>(value);
     } else if (name == "run_on_token_gen") {
       v_.run_on_token_gen = JSON::Get<bool>(value);
+    } else if (name == "reset_session_idx") {
+      v_.reset_session_idx = static_cast<int>(JSON::Get<double>(value));
     } else
       throw JSON::unknown_value_error{};
   }
