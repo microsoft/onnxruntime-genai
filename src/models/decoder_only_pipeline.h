@@ -27,6 +27,7 @@ struct DecoderOnlyPipelineModel : Model {
                                      const GeneratorParams& params) const override;
 
   std::vector<std::unique_ptr<OrtSession>> sessions_;
+  OrtEnv& ort_env_;
 };
 
 struct IntermediatePipelineState : State {
