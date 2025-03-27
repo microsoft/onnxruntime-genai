@@ -16,7 +16,7 @@ struct Stats {
   float sum_of_squares{};
   size_t count{};
 
-  bool found_non_finite {};
+  bool found_non_finite{};
   size_t first_non_finite_index{};
   float non_finite_value{};
   size_t non_finite_count{};
@@ -28,7 +28,7 @@ struct Stats {
     stream << std::endl;
   }
 
-  Stats &operator<<(float value) {
+  Stats& operator<<(float value) {
     min = std::min(min, value);
     max = std::max(max, value);
     sum += value;

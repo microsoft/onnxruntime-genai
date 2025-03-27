@@ -59,13 +59,13 @@ float TFloatToFloat32(uint16_t v) {
 
   // Handle special cases
   if (exponent == 0) {
-    if (fraction == 0) // Zero
+    if (fraction == 0)  // Zero
       return sign != 0 ? -0.0f : 0.0f;
     // Subnormal number
     return std::ldexp((sign != 0 ? -1.0f : 1.0f) * static_cast<float>(fraction) / (1 << fraction_bits), 1 - exponent_bias);
   }
   if (exponent == (1 << exponent_bits) - 1) {
-    if (fraction == 0) // Infinity
+    if (fraction == 0)  // Infinity
       return sign != 0 ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
     // NaN
     return std::numeric_limits<float>::quiet_NaN();
