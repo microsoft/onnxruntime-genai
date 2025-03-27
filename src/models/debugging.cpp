@@ -11,7 +11,9 @@ static constexpr size_t c_value_count = 10;  // Dump this many values at the sta
 // Tensor value statistics to help easily eyeball if the values in a tensor are reasonable.
 struct Stats {
   float min = std::numeric_limits<float>::max();
+  size_t min_index{};
   float max = std::numeric_limits<float>::lowest();
+  size_t max_index{};
   float sum{};
   float sum_of_squares{};
   size_t count{};
@@ -22,15 +24,24 @@ struct Stats {
   size_t non_finite_count{};
 
   void Dump(std::ostream& stream) const {
-    stream << SGR::Fg_Cyan << " Min: " << SGR::Reset << min << SGR::Fg_Cyan << " Max: " << SGR::Reset << max << SGR::Fg_Cyan << " Mean: " << SGR::Reset << Mean() << SGR::Fg_Cyan << " StdDev: " << SGR::Reset << StdDev();
+    stream << SGR::Fg_Cyan << " Min: " << SGR::Reset << min << " at index[" << min_index << "]"
+           << SGR::Fg_Cyan << " Max: " << SGR::Reset << max << " at index[" << max_index << "]"
+           << SGR::Fg_Cyan << " Mean: " << SGR::Reset << Mean()
+           << SGR::Fg_Cyan << " StdDev: " << SGR::Reset << StdDev();
     if (found_non_finite)
       stream << " " << SGR::Bg_Red << "First non-finite value at index " << first_non_finite_index << ": " << non_finite_value << " Count of non-finite values: " << non_finite_count << SGR::Reset;
     stream << std::endl;
   }
 
   Stats& operator<<(float value) {
-    min = std::min(min, value);
-    max = std::max(max, value);
+    if (min > value) {
+      min = value;
+      min_index = count;
+    }
+    if (max < value) {
+      max = value;
+      max_index = count;
+    }
     sum += value;
     sum_of_squares += value * value;
     count++;
