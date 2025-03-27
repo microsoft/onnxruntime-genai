@@ -29,7 +29,7 @@ void SetLogString(std::string_view name, std::string_view value);
 
 struct LogItems {
   // Special log related entries
-  bool enabled{true};        // Global on/off for all logging
+  bool enabled{};        // Global on/off for all logging
   bool ansi_tags{true};  // Use ansi SGR color & style tags to make console output easier to read
   bool warning{true};    // warning messages, like options that were set but don't apply
 
