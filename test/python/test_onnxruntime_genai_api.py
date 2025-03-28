@@ -789,3 +789,43 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
 
         while not generator.is_done():
             generator.generate_next_token()
+
+
+@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_audio_path", [Path("audios") / "1272-141231-0002.mp3"])
+def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio_path):
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model = og.Model(model_path)
+
+    processor = model.create_multimodal_processor()
+    tokenizer = og.Tokenizer(model)
+
+    audio_paths = [os.fspath(Path(test_data_path) / relative_audio_path)]
+    audios = og.Audios.open(*audio_paths)
+    _ = processor(audios=audios)
+
+    decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
+    _ = [[tokenizer.to_token_id(token) for token in decoder_prompt_tokens]]
+
+
+@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize(
+    "relative_audio_paths",
+    [[Path("audios") / "1272-141231-0002.mp3"], [Path("audios") / "jfk.flac"]],
+)
+def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path, relative_audio_paths):
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model = og.Model(model_path)
+
+    processor = model.create_multimodal_processor()
+    tokenizer = og.Tokenizer(model)
+
+    audio_paths = [
+        os.fspath(Path(test_data_path) / relative_audio_path)
+        for relative_audio_path in relative_audio_paths
+    ]
+    audios = og.Audios.open(*audio_paths)
+    _ = processor(audios=audios)
+
+    decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
+    _ = [[tokenizer.to_token_id(token) for token in decoder_prompt_tokens]]

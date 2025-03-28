@@ -21,27 +21,32 @@ struct Config {
     static constexpr std::string_view PresentKeyName = "present.%d.key";
     static constexpr std::string_view PresentValueName = "present.%d.value";
 
-    static constexpr std::string_view InputsEmbedsName = "inputs_embeds";
-    static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
-    static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
-    static constexpr std::string_view promptTemplate = "{Content}";
-    static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
-
-    // Vision names
-    static constexpr std::string_view PixelValuesName = "pixel_values";
-    static constexpr std::string_view ImageSizesName = "image_sizes";
-    static constexpr std::string_view ImageFeaturesName = "image_features";
-    static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
-    static constexpr std::string_view NumImageTokens = "num_image_tokens";
-
-    // Speech names
-    static constexpr std::string_view InputFeaturesName = "encoder_input_ids";
-    static constexpr std::string_view AudioEmbedsName = "audio_embeds";
+    // Speech encoder names
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
     static constexpr std::string_view AudioSizesName = "audio_sizes";
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
+    static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
     static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
+
+    // Vision encoder names
+    static constexpr std::string_view PixelValuesName = "pixel_values";
+    static constexpr std::string_view ImageSizesName = "image_sizes";
+    static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
+    static constexpr std::string_view ImageFeaturesName = "image_features";
+    static constexpr std::string_view NumImageTokens = "num_image_tokens";
+
+    // Embedding names
+    static constexpr std::string_view AudioEmbedsName = "audio_embeds";
+    static constexpr std::string_view InputsEmbedsName = "inputs_embeds";
+
+    // Generation names
+    static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
+    static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
+    static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
+    static constexpr std::string_view CacheIndirectionName = "cache_indirection";
+
+    static constexpr std::string_view PromptTemplateName = "{Content}";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -86,14 +91,28 @@ struct Config {
     int vocab_size{};
     int context_length{};
 
-    // For models like whisper
-    struct EncoderDecoderInit {
+    struct Encoder {
       std::string filename;
+      SessionOptions session_options;
+
+      int hidden_size{};
+      int num_attention_heads{};
+      int num_hidden_layers{};
+      int head_size{};
 
       struct Inputs {
-        std::string input_features{Defaults::InputFeaturesName};
+        std::string input_ids{Defaults::InputIdsName};
+        std::string embeddings{Defaults::InputsEmbedsName};
+        std::string attention_mask{Defaults::AttentionMaskName};
+        std::string position_ids{Defaults::PositionIdsName};
+        std::string audio_features{Defaults::AudioFeaturesName};
       } inputs;
-    } encoder_decoder_init;
+
+      struct Outputs {
+        std::string hidden_states{Defaults::EncoderHiddenStatesName};
+        std::string cross_present_key_names{"present_key_cross_%d"}, cross_present_value_names{"present_value_cross_%d"};
+      } outputs;
+    } encoder;
 
     struct Embedding {
       std::string filename;
@@ -163,15 +182,17 @@ struct Config {
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string embeddings{Defaults::InputsEmbedsName};
-        std::string position_ids{Defaults::PositionIdsName};
         std::string attention_mask{Defaults::AttentionMaskName};
+        std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
         std::string past_value_names{Defaults::PastValueName};
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
-        std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
+
         std::string past_sequence_length{Defaults::PastSequenceLengthName};
+        std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
         std::string total_sequence_length{Defaults::TotalSequenceLengthName};
+        std::string cache_indirection{Defaults::CacheIndirectionName};
       } inputs;
 
       struct Outputs {
@@ -179,7 +200,7 @@ struct Config {
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
         std::string present_names;  // When key/value pairs are combined
-        std::string cross_present_key_names, cross_present_value_names;
+        std::string output_cross_qk_names{"output_cross_qk_%d"};
       } outputs;
 
       struct PipelineModel {
@@ -203,10 +224,10 @@ struct Config {
     } decoder;
 
     struct PromptTemplates {
-      std::string assistant{Defaults::promptTemplate};
-      std::string prompt{Defaults::promptTemplate};
-      std::string system{Defaults::promptTemplate};
-      std::string user{Defaults::promptTemplate};
+      std::string assistant{Defaults::PromptTemplateName};
+      std::string prompt{Defaults::PromptTemplateName};
+      std::string system{Defaults::PromptTemplateName};
+      std::string user{Defaults::PromptTemplateName};
     };
     std::optional<PromptTemplates> prompt_templates;
   } model;

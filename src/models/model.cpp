@@ -574,7 +574,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (llm_types.find(config->model.type) != llm_types.end())
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
-    return std::make_shared<Whisper_Model>(std::move(config), ort_env);
+    return std::make_shared<WhisperModel>(std::move(config), ort_env);
   if (config->model.type == "phi3v")
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (config->model.type == "decoder-pipeline")
