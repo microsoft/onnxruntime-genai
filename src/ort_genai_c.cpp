@@ -371,24 +371,32 @@ OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, c
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator, const char* name, OgaTensor** out) {
+OgaResult* OGA_API_CALL OgaGenerator_GetInputOutput(const OgaGenerator* oga_generator, const char* name, bool is_input, OgaTensor** out) {
   OGA_TRY
   auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
-  auto* ortvalue_output = generator.state_->GetOutput(name);
-  auto type_info = ortvalue_output->GetTensorTypeAndShapeInfo();
+  auto* ortvalue = is_input ? generator.state_->GetInput(name) : generator.state_->GetOutput(name);
+  auto type_info = ortvalue->GetTensorTypeAndShapeInfo();
   auto ortvalue_clone = OrtValue::CreateTensor(generator.model_->allocator_cpu_, type_info->GetShape(), type_info->GetElementType());
 
   // Copy data to ortvalue_clone
-  bool is_cpu = ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
-  auto output_span = Generators::ByteWrapTensor(is_cpu ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU) : *generator.model_->p_device_, *ortvalue_output);
+  bool is_cpu = ortvalue->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
+  auto tensor_span = Generators::ByteWrapTensor(is_cpu ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU) : *generator.model_->p_device_, *ortvalue);
   auto copy_span = Generators::ByteWrapTensor(*Generators::GetDeviceInterface(Generators::DeviceType::CPU), *ortvalue_clone);
-  copy_span.CopyFrom(output_span);
+  copy_span.CopyFrom(tensor_span);
 
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
   tensor->ExternalAddRef();
   *out = reinterpret_cast<OgaTensor*>(tensor.get());
   return nullptr;
   OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_GetInput(const OgaGenerator* oga_generator, const char* name, OgaTensor** out) {
+  return OgaGenerator_GetInputOutput(oga_generator, name, true, out);
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* oga_generator, const char* name, OgaTensor** out) {
+  return OgaGenerator_GetInputOutput(oga_generator, name, false, out);
 }
 
 OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* oga_generator, OgaTensor** out) {

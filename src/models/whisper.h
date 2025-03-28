@@ -63,9 +63,11 @@ struct WhisperDecoderState : State {
 
   // Properties about cross attention's QK outputs
   std::vector<std::string> output_cross_qk_names_;          // Formatted names to check if cross attention's QK outputs exist in model
+  std::string output_cross_qk_name_;                        // Format for name of cross attention's QK output
   std::array<int64_t, 4> output_cross_qk_shape_;            // Shape of cross attention's QK outputs
   ONNXTensorElementDataType output_cross_qk_type_;          // Type of cross attention's QK outputs
 
+  const int num_frames_{};
   size_t cache_indirection_index_{~0U};
   size_t output_cross_qk_index_{~0U};
 };
@@ -87,6 +89,7 @@ private:
   void Finalize(int current_length) override;
 
   const WhisperModel& model_;
+  int prompt_length_{};
 
   std::unique_ptr<AudioEncoderState> encoder_state_;
   std::unique_ptr<CrossCache> cross_cache_;            // Model output for encoder, constant input for decoder

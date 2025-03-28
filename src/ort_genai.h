@@ -413,6 +413,12 @@ struct OgaGenerator : OgaAbstract {
     return OgaGenerator_GetSequenceData(this, index);
   }
 
+  std::unique_ptr<OgaTensor> GetInput(const char* name) {
+    OgaTensor* out;
+    OgaCheckResult(OgaGenerator_GetInput(this, name, &out));
+    return std::unique_ptr<OgaTensor>(out);
+  }
+
   std::unique_ptr<OgaTensor> GetOutput(const char* name) {
     OgaTensor* out;
     OgaCheckResult(OgaGenerator_GetOutput(this, name, &out));

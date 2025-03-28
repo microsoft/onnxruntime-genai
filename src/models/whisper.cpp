@@ -38,7 +38,8 @@ DeviceSpan<float> AudioEncoderState::Run(int current_length, DeviceSpan<int32_t>
 
 WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const GeneratorParams& params, const int num_frames)
     : State{params, model},
-      model_{model} {
+      model_{model},
+      num_frames_{num_frames} {
   input_ids_.Add();
   logits_.Add();
   kv_cache_.Add();
@@ -69,12 +70,14 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
     ByteWrapTensor(*model_.p_device_inputs_, *cache_indirection_).Zero();
   }
 
-  // Add output QK
-  std::string output_cross_qk_name = ComposeKeyValueName(model_.config_->model.decoder.outputs.output_cross_qk_names, 0);
+  output_cross_qk_name_ = ComposeKeyValueName(model_.config_->model.decoder.outputs.output_cross_qk_names, 0);
+}
 
-  if (model_.session_info_->HasOutput(output_cross_qk_name)) {
-    output_cross_qk_type_ = model_.session_info_->GetOutputDataType(output_cross_qk_name);
-    output_cross_qk_shape_ = std::array<int64_t, 4>{params_->BatchBeamSize(), model_.config_->model.decoder.num_attention_heads, params_->sequence_length, num_frames / 2};
+DeviceSpan<float> WhisperDecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  // Add output QK on first run
+  if (first_run_ && model_.session_info_->HasOutput(output_cross_qk_name_)) {
+    output_cross_qk_type_ = model_.session_info_->GetOutputDataType(output_cross_qk_name_);
+    output_cross_qk_shape_ = std::array<int64_t, 4>{params_->BatchBeamSize(), model_.config_->model.decoder.num_attention_heads, current_length, num_frames_ / 2};
     output_cross_qk_index_ = outputs_.size();
 
     for (int i = 0; i < model_.config_->model.decoder.num_hidden_layers; i++) {
@@ -85,9 +88,7 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
       outputs_.emplace_back(output_cross_qk_.back().get());
     }
   }
-}
 
-DeviceSpan<float> WhisperDecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   State::Run(*model_.session_decoder_);
   return logits_.Get();
 }
@@ -236,8 +237,8 @@ void WhisperState::UpdateCrossQKSearchBuffer(int current_length) {
     cross_qk_ptrs_.CopyCpuToDevice();
 
     model_.p_device_inputs_->CopyCrossQK(cross_qk_search_buffer_->GetTensorMutableData<T>(),
-                                         cross_qk_ptrs_.Span(),
-                                         current_length - (first_run_ ? (params_->sequence_length) : 1),
+                                         cross_qk_ptrs_.Span().data(),
+                                         current_length - (first_run_ ? prompt_length_ : 1),
                                          params_->BatchBeamSize(),
                                          model_.config_->model.decoder.num_hidden_layers,
                                          static_cast<int32_t>(decoder_state_->output_cross_qk_shape_[1]),
@@ -245,7 +246,7 @@ void WhisperState::UpdateCrossQKSearchBuffer(int current_length) {
                                          alignment_heads_->GetTensorData<int32_t>(),
                                          static_cast<int32_t>(decoder_state_->output_cross_qk_shape_[3]),
                                          params_->search.max_length,
-                                         first_run_ ? (params_->sequence_length) : 1);
+                                         first_run_ ? prompt_length_ : 1);
   }
 }
 
@@ -258,7 +259,7 @@ void WhisperState::FinalizeCrossQK(int current_length) {
     cross_qk_final_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cross_qk_shape, decoder_state_->output_cross_qk_type_);
 
     model_.p_device_inputs_->FinalizeCrossQK(current_length - 1,
-                                             params_->sequence_length,
+                                             prompt_length_,
                                              static_cast<int32_t>(decoder_state_->output_cross_qk_shape_[0]),
                                              params_->search.num_beams,
                                              params_->search.max_length,
@@ -278,6 +279,10 @@ DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t>& nex
 
     // Run decoder-init
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
+
+    if (first_run_ && decoder_state_->model_.session_info_->HasOutput(decoder_state_->output_cross_qk_name_)) {
+      prompt_length_ = decoder_state_->output_cross_qk_shape_[2];
+    }
 
     if (decoder_state_->output_cross_qk_type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
       UpdateCrossQKSearchBuffer<Ort::Float16_t>(current_length);
