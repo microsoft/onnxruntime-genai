@@ -99,7 +99,7 @@ def main(args):
         if args.verbose: print("Generator created")
 
         # Append system and input tokens to the generator
-        generator.append_tokens(system_tokens + input_tokens)
+        generator.append_tokens(list(system_tokens) + list(input_tokens))
 
         if args.verbose: print("Running generation loop ...")
         if args.timings:
