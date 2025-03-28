@@ -9,7 +9,7 @@
 namespace Generators {
 
 DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
-    : Model{std::move(config)} {
+    : Model{std::move(config)}, ort_env_{ort_env} {
   for (const auto& model : config_->model.decoder.pipeline) {
     sessions_.emplace_back(OrtSession::Create(ort_env, (config_->config_path / fs::path(model.filename)).c_str(),
                                               GetSessionOptions(model.model_id)));
@@ -83,6 +83,11 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 
 DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
+  if (!model_.sessions_[id_]) {
+    const_cast<DecoderOnlyPipelineModel*>(&model_)->sessions_[id_] =
+        OrtSession::Create(model_.ort_env_, (model_.config_->config_path / fs::path(model_.config_->model.decoder.pipeline[id_].filename)).c_str(),
+                           model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
+  }
   State::Run(*model_.sessions_[id_]);
   return {};
 }
@@ -174,6 +179,16 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
       continue;
     } else if (!first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
       continue;
+    }
+
+    if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx > -1) {
+      if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx >=
+          static_cast<int>(model_.sessions_.size())) {
+        throw std::runtime_error(
+            MakeString("Invalid reset_session_idx ", model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx,
+                       " for pipeline model ", model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id));
+      }
+      (const_cast<DecoderOnlyPipelineModel*>(&model_))->sessions_[model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx].reset();
     }
 
     // Clear the intermediate pipeline state outputs from the previous runs.

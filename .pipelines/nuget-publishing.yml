@@ -100,6 +100,10 @@ parameters:
 
 resources:
   repositories:
+  - repository: 1esPipelines
+    type: git
+    name: 1ESPipelineTemplates/1ESPipelineTemplates
+    ref: refs/tags/release
   - repository: manylinux
     type: Github
     endpoint: Microsoft
@@ -107,60 +111,74 @@ resources:
     ref: 5eda9aded5462201e6310105728d33016e637ea7
 
 trigger: none
-stages:
-- template: stages/capi-packaging-stage.yml
+extends:
+  # The pipeline extends the 1ES PT which will inject different SDL and compliance tasks.
+  # For non-production pipelines, use "Unofficial" as defined below.
+  # For productions pipelines, use "Official".
+  template: v1/1ES.Official.PipelineTemplate.yml@1esPipelines
   parameters:
-    enable_win_cpu: ${{ parameters.enable_win_cpu }}
-    enable_win_cuda: ${{ parameters.enable_win_cuda }}
-    enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
-    enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
-    enable_win_dml: ${{ parameters.enable_win_dml }}
-    enable_win_arm64: ${{ parameters.enable_win_arm64 }}
-    enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
-    enable_android: ${{ parameters.enable_android }}
-    enable_apple_framework: ${{ parameters.enable_apple_framework }}
-    ort_version: ${{ parameters.ort_version }}
-    ort_cuda_version: ${{ parameters.ort_cuda_version }}
-    ort_dml_version: ${{ parameters.ort_dml_version }}
-    cuda_version: ${{ parameters.cuda_version }}
-    build_config: ${{ parameters.build_config }}
+    # Update the pool with your team's 1ES hosted pool.
+    pool:
+      name: 'onnxruntime-Win-CPU-2022'  # Name of your hosted pool
+      os: windows  # OS of the image. This value cannot be a variable. Allowed values: windows, linux, macOS
+    sdl:
+      sourceRepositoriesToScan:
+        include:
+        - repository: manylinux
+    stages:
+    - template: stages/capi-packaging-stage.yml
+      parameters:
+        enable_win_cpu: ${{ parameters.enable_win_cpu }}
+        enable_win_cuda: ${{ parameters.enable_win_cuda }}
+        enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+        enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+        enable_win_dml: ${{ parameters.enable_win_dml }}
+        enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+        enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+        enable_android: ${{ parameters.enable_android }}
+        enable_apple_framework: ${{ parameters.enable_apple_framework }}
+        ort_version: ${{ parameters.ort_version }}
+        ort_cuda_version: ${{ parameters.ort_cuda_version }}
+        ort_dml_version: ${{ parameters.ort_dml_version }}
+        cuda_version: ${{ parameters.cuda_version }}
+        build_config: ${{ parameters.build_config }}
 
-- template: stages/nuget-packaging-stage.yml
-  parameters:
-    enable_win_cpu: ${{ parameters.enable_win_cpu }}
-    enable_win_cuda: ${{ parameters.enable_win_cuda }}
-    enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
-    enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
-    enable_win_dml: ${{ parameters.enable_win_dml }}
-    enable_win_arm64: ${{ parameters.enable_win_arm64 }}
-    enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
-    enable_android: ${{ parameters.enable_android }}
-    enable_apple_framework: ${{ parameters.enable_apple_framework }}
-    ort_version: ${{ parameters.ort_version }}
-    ort_cuda_version: ${{ parameters.ort_cuda_version }}
-    ort_dml_version: ${{ parameters.ort_dml_version }}
-    build_config: ${{ parameters.build_config }}
-    enable_win_qnn: ${{ parameters.enable_win_qnn }}
-    nuget_version_type: ${{ parameters.nuget_version_type }}
+    - template: stages/nuget-packaging-stage.yml
+      parameters:
+        enable_win_cpu: ${{ parameters.enable_win_cpu }}
+        enable_win_cuda: ${{ parameters.enable_win_cuda }}
+        enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+        enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+        enable_win_dml: ${{ parameters.enable_win_dml }}
+        enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+        enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+        enable_android: ${{ parameters.enable_android }}
+        enable_apple_framework: ${{ parameters.enable_apple_framework }}
+        ort_version: ${{ parameters.ort_version }}
+        ort_cuda_version: ${{ parameters.ort_cuda_version }}
+        ort_dml_version: ${{ parameters.ort_dml_version }}
+        build_config: ${{ parameters.build_config }}
+        enable_win_qnn: ${{ parameters.enable_win_qnn }}
+        nuget_version_type: ${{ parameters.nuget_version_type }}
 
-- ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
-  - template: stages/nuget-validation-stage.yml
-    parameters:
-      enable_win_cpu: ${{ parameters.enable_win_cpu }}
-      enable_win_cuda: ${{ parameters.enable_win_cuda }}
-      enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
-      enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
-      enable_win_dml: ${{ parameters.enable_win_dml }}
-      enable_win_arm64: ${{ parameters.enable_win_arm64 }}
-      enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
-      ort_version: ${{ parameters.ort_version }}
-      ort_cuda_version: ${{ parameters.ort_cuda_version }}
-      ort_dml_version: ${{ parameters.ort_dml_version }}
-      cuda_version: ${{ parameters.cuda_version }}
-      SpecificArtifact: false
+    - ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
+      - template: stages/nuget-validation-stage.yml
+        parameters:
+          enable_win_cpu: ${{ parameters.enable_win_cpu }}
+          enable_win_cuda: ${{ parameters.enable_win_cuda }}
+          enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+          enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+          enable_win_dml: ${{ parameters.enable_win_dml }}
+          enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+          enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+          ort_version: ${{ parameters.ort_version }}
+          ort_cuda_version: ${{ parameters.ort_cuda_version }}
+          ort_dml_version: ${{ parameters.ort_dml_version }}
+          cuda_version: ${{ parameters.cuda_version }}
+          SpecificArtifact: false
 
-- ${{ if and(and(ne(parameters.custom_ort_package_versioned_name, ''), eq(parameters.enable_win_arm64, true)), eq(parameters.enable_win_cuda, true)) }}:
-  - template: stages/custom-nuget-packaging-stage.yml
-    parameters:
-      custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
-      nuget_version_type: ${{ parameters.nuget_version_type }}
+    - ${{ if and(and(ne(parameters.custom_ort_package_versioned_name, ''), eq(parameters.enable_win_arm64, true)), eq(parameters.enable_win_cuda, true)) }}:
+      - template: stages/custom-nuget-packaging-stage.yml
+        parameters:
+          custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
+          nuget_version_type: ${{ parameters.nuget_version_type }}
