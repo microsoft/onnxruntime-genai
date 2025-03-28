@@ -2208,7 +2208,6 @@ class Model:
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
         for module in model.modules():
-
             if isinstance(module, torch.nn.Embedding) or (hasattr(model, "embedding") and module == model.embedding):
                 # Checks (Hugging Face logic) or (GGUF logic)
                 if not self.exclude_embeds:
@@ -3233,24 +3232,6 @@ class Gemma3Model(Gemma2Model):
         self.is_local = lambda layer_id: bool((layer_id + 1) % config.sliding_window_pattern)
         self.rope_local_theta = config.rope_local_base_freq
         self.make_rotary_embedding_multi_cache()
-
-    def make_position_ids_reformatting(self):
-        # Make nodes for the position ids reformatting subgraph
-        #
-        #            position_ids
-        #                 |
-        #                Add
-        #                 |
-        # position_ids input for RotaryEmbedding
-
-        basename = "/model/pos_ids_reformat"
-        proto_dtype = self.input_types["position_ids"]
-        str_dtype = self.to_str_dtype[proto_dtype]
-
-        add_name = f"{basename}/Add"
-        add_inputs = ["position_ids", f"/model/constants/{str_dtype}/0D/1"]
-        self.make_add(add_name, add_inputs, dtype=proto_dtype, shape=['batch_size', 'sequence_length'])
-        return add_name
 
     def make_attention_init(self):
         self.attention_attrs["q_norm"] = True
