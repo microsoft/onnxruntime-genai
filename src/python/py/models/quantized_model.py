@@ -148,7 +148,7 @@ class QuantizedModel:
                         layer_id = int(name.split(".")[2])
                         module = self.layers.setdefault(layer_id, QuantizedDecoderLayer(layer_id, local_bits, local_group_size))
                         if local_bits != module.bits or local_group_size != module.group_size:
-                            raise NotImplementedError("Setting different bits or group sizes for various linear modules within a decoder layer is not yet supported in the builder.")
+                            raise NotImplementedError("Setting different bits or group sizes for various linear modules within a decoder layer is not yet supported in the model builder.")
 
                         # Map weights and biases of norm, attention, and feed-forward network
                         # Graph order is input_layernorm --> q_proj/k_proj/v_proj --> o_proj --> post_attention_layernorm --> gate_proj/up_proj --> down_proj
