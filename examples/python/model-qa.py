@@ -1,6 +1,7 @@
 ﻿import onnxruntime_genai as og
 import argparse
 import time
+import numpy as np
 
 def main(args):
     if args.verbose: print("Loading model...")
@@ -99,7 +100,7 @@ def main(args):
         if args.verbose: print("Generator created")
 
         # Append system and input tokens to the generator
-        generator.append_tokens(system_tokens + input_tokens)
+        generator.append_tokens(np.concatenate([system_tokens, input_tokens]))
 
         if args.verbose: print("Running generation loop ...")
         if args.timings:
