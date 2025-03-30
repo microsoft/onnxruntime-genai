@@ -1,15 +1,16 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "../generators.h"
+#include "../session.h"
 #include "whisper.h"
 #include <vector>
 
 namespace Generators {
 
-Whisper_Model::Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
+Whisper_Model::Whisper_Model(std::unique_ptr<Config> config)
     : Model{std::move(config)} {
-  session_encoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.encoder_decoder_init.filename)).c_str(), session_options_.get());
-  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
+  session_encoder_ = Session::Create((config_->config_path / fs::path(config_->model.encoder_decoder_init.filename)).c_str(), session_options_.get());
+  session_decoder_ = Session::Create((config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
 
   InitDeviceAllocator(*session_decoder_);
   session_info_->Add(*session_encoder_);

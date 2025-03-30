@@ -10,7 +10,7 @@
 namespace Generators {
 struct GeneratorParams;
 struct Generator;
-struct Model;
+class Model;
 struct Search;
 struct Tensor;
 struct Tokenizer;

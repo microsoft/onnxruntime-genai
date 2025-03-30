@@ -1,17 +1,19 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
-#include "ortx_tokenizer.h"
 #include "../generators.h"
-#include "utils.h"
-#include "phi_image_processor.h"
-#include "whisper_processor.h"
-#include "phi_multimodal_processor.h"
+#include "../utils.h"
 #include "adapters.h"
 #include "extra_outputs.h"
+#include "ortx_tokenizer.h"
+#include "phi_image_processor.h"
+#include "phi_multimodal_processor.h"
+#include "whisper_processor.h"
+
+struct OrtSessionOptions;
 
 namespace Generators {
-
+class Session;
 struct Tokenizer;
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
@@ -46,7 +48,7 @@ struct State {
   std::vector<OrtValue*> inputs_, outputs_;
 
  protected:
-  void Run(OrtSession& session, bool graph_capture_this_run = false);  // Uses the inputs below to run
+  void Run(Session& session, bool graph_capture_this_run = false);  // Uses the inputs below to run
   bool first_run_{true};
 
   std::unique_ptr<OrtRunOptions> run_options_;
@@ -102,9 +104,9 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, 
 };
 
 struct SessionInfo {
-  SessionInfo(OrtSession& session);
+  SessionInfo(const Session& session);
 
-  void Add(OrtSession& session);
+  void Add(const Session& session);
 
   bool HasInput(const std::string& name) const;
   bool HasOutput(const std::string& name) const;
@@ -118,7 +120,8 @@ struct SessionInfo {
   std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;
 };
 
-struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, ExternalRefCounted<Model> {
+class Model : public std::enable_shared_from_this<Model>, LeakChecked<Model>, ExternalRefCounted<Model> {
+ public:
   Model(std::unique_ptr<Config> config);
   virtual ~Model();
 
@@ -144,13 +147,16 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   std::unique_ptr<SessionInfo> session_info_;
 
  protected:
-  void InitDeviceAllocator(OrtSession& session);
+  void InitDeviceAllocator(Session& session);
   void CreateSessionOptions();
 
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                       OrtSessionOptions& session_options,
                                       bool is_primary_session_options,
                                       bool disable_graph_capture);
+
+ private:
+  void EnsureDeviceOrtInit(Session& session, DeviceType type);
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 };

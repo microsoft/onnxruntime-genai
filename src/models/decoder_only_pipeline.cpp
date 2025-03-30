@@ -8,11 +8,11 @@
 
 namespace Generators {
 
-DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
-    : Model{std::move(config)}, ort_env_{ort_env} {
+DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config)
+    : Model{std::move(config)} {
   for (const auto& model : config_->model.decoder.pipeline) {
-    sessions_.emplace_back(OrtSession::Create(ort_env, (config_->config_path / fs::path(model.filename)).c_str(),
-                                              GetSessionOptions(model.model_id)));
+    sessions_.emplace_back(Session::Create((config_->config_path / fs::path(model.filename)).c_str(),
+                                           GetSessionOptions(model.model_id)));
 
     if (!p_device_inputs_ && model.session_options.has_value()) {
       const auto& provider_options = (*model.session_options).provider_options;
@@ -85,8 +85,8 @@ DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<in
                                                  DeviceSpan<int32_t> next_indices) {
   if (!model_.sessions_[id_]) {
     const_cast<DecoderOnlyPipelineModel*>(&model_)->sessions_[id_] =
-        OrtSession::Create(model_.ort_env_, (model_.config_->config_path / fs::path(model_.config_->model.decoder.pipeline[id_].filename)).c_str(),
-                           model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
+        Session::Create((model_.config_->config_path / fs::path(model_.config_->model.decoder.pipeline[id_].filename)).c_str(),
+                        model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
   }
   State::Run(*model_.sessions_[id_]);
   return {};

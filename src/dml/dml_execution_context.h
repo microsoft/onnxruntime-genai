@@ -7,7 +7,7 @@
 #include <d3dx12.h>
 #include "dml_command_recorder.h"
 #include "dml_gpu_event.h"
-#include "../models/onnxruntime_api.h"
+#include "../onnxruntime_api.h"
 
 // Asynchronously performs GPU work, and automatically manages command list recording and submission to queues.
 // Work submitted to the DmlExecutionContext is typically recorded onto a command list and may not immediately begin

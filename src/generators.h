@@ -24,20 +24,21 @@
 #include <variant>
 #include <vector>
 
-#include "leakcheck.h"
-#include "make_string.h"
-#include "models/onnxruntime_api.h"
-#include "smartptrs.h"
-#include "models/debugging.h"
 #include "config.h"
+// #include "debugging.h"
+#include "device.h"
+#include "leakcheck.h"
 #include "logging.h"
+#include "make_string.h"
+#include "onnxruntime_api.h"
 #include "runtime_settings.h"
 #include "tensor.h"
+#include "utils.h"
 
 void ThrowErrorIfSessionTerminated(bool is_session_terminated);
 
 namespace Generators {
-struct Model;
+class Model;
 struct State;
 struct Search;
 struct Tokenizer;
@@ -54,7 +55,6 @@ DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value);
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
 
-std::string to_string(DeviceType device_type);
 DeviceInterface* GetDeviceInterface(DeviceType type);
 
 struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams>, ExternalRefCounted<GeneratorParams> {
@@ -121,21 +121,35 @@ struct Generator : LeakChecked<Generator> {
 
 struct OrtGlobals {
   OrtGlobals();
+  OrtEnv& Env() { return *env_; }
+  Ort::Allocator& CpuAllocator() { return allocator_cpu_; }
 
-  std::unique_ptr<OrtEnv> env_;
-  std::unique_ptr<Ort::Allocator> allocator_device_[static_cast<int>(DeviceType::MAX)];
+  ~OrtGlobals() {
+    if (LeakTypes::Dump()) {
+      std::cerr << "    Please see the documentation for the API being used to ensure proper cleanup." << std::endl;
+    }
+  }
 
  private:
+  std::unique_ptr<OrtEnv> env_;
+  Ort::Allocator& allocator_cpu_;
+
   OrtGlobals(const OrtGlobals&) = delete;
+  OrtGlobals(OrtGlobals&&) = delete;
   void operator=(const OrtGlobals&) = delete;
+  void operator=(OrtGlobals&&) = delete;
 };
 
-std::unique_ptr<OrtGlobals>& GetOrtGlobals();
-void Shutdown();  // Do this once at exit, Ort code will fail after this call
-OrtEnv& GetOrtEnv();
+OrtGlobals& GetOrtGlobals();
+// Call this once at exit, Ort code will fail after this call
+void ReleaseOrtGlobals();
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings = nullptr);
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config);
+// convenience helpers
+inline OrtEnv& GetOrtEnv() { return GetOrtGlobals().Env(); }
+inline void Shutdown() { ReleaseOrtGlobals(); }
+
+std::shared_ptr<Model> CreateModel(const char* config_path, const RuntimeSettings* settings = nullptr);
+std::shared_ptr<Model> CreateModel(std::unique_ptr<Config> config);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Model& model);
 std::shared_ptr<GeneratorParams> CreateGeneratorParams(const Config& config);  // For benchmarking purposes only
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params);

@@ -1,6 +1,13 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+
+#include <iostream>
+#include "span.h"
+
+#include "../onnxruntime_api.h"
+
 namespace Generators {
+class Model;
 
 void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool dump_value);
 void DumpTensors(const Model& model, std::ostream& stream, OrtValue** values, const char** names, size_t count, bool dump_values);

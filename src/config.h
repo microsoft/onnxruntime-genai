@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 #pragma once
 
+#include "onnxruntime_api.h"
+
 namespace Generators {
 
 struct RuntimeSettings;

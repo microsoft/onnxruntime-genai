@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #pragma once
 #include "model.h"
 #include "input_ids.h"
@@ -5,15 +8,16 @@
 #include "kv_cache.h"
 #include "position_inputs.h"
 #include "extra_inputs.h"
+#include "../session.h"
 
 namespace Generators {
 
 struct DecoderOnly_Model : Model {
-  DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
+  DecoderOnly_Model(std::unique_ptr<Config> config);
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params) const override;
 
-  std::unique_ptr<OrtSession> session_decoder_;
+  std::unique_ptr<Session> session_decoder_;
 };
 
 struct DecoderOnly_State : State {

@@ -1,9 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-#include "../generators.h"
-#include "utils.h"
 #include <cinttypes>
-#include "model.h"
+
+#include "generators.h"
+#include "models/model.h"
+#include "utils.h"
 
 namespace Generators {
 static constexpr size_t c_value_count = 10;  // Dump this many values at the start & end of a tensor (with '...' in between)

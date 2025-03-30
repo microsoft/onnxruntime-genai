@@ -9,7 +9,7 @@
 #include "span.h"
 
 #define OGA_USE_SPAN 1
-#include "models/onnxruntime_api.h"
+#include "onnxruntime_api.h"
 #include "ort_genai.h"
 
 #include <gtest/gtest.h>

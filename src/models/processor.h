@@ -3,11 +3,11 @@
 #pragma once
 
 #include "image_processor.h"
+#include "model.h"
 #include "ortx_cpp_helper.h"
 #include "speech_extractor.h"
-#include "utils.h"
+#include "../utils.h"
 #include "../generators.h"
-#include "model.h"
 
 namespace Generators {
 

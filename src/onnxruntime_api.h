@@ -51,7 +51,7 @@ std::unique_ptr<OrtMemoryInfo> p_memory_info = OrtMemoryInfo::CreateCpu(OrtDevic
 std::unique_ptr<OrtValue> p_input_tensor = OrtValue::CreateTensor<float>(*p_memory_info, input_image_.data(), input_image_.size(), input_shape_.data(), input_shape_.size());
 std::unique_ptr<OrtValue> p_output_tensor = OrtValue::CreateTensor<float>(*p_memory_info, results_.data(), results_.size(), output_shape_.data(), output_shape_.size());
 
-std::unique_ptr<OrtSession> p_session_ = OrtSession::Create(*p_env, L"model.onnx", nullptr)};
+std::unique_ptr<OrtSession> p_session_ = Session::Create(*p_env, L"model.onnx", nullptr)};
 
 const char *input_names[] = { "Example Input Name" };
 const char *output_names[] = { "Example Output Name" };
@@ -66,13 +66,14 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #pragma once
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <vector>
 #include <unordered_map>
 #include <array>
 
 #include "onnxruntime_c_api.h"
-#include "../span.h"
-#include "../logging.h"
+#include "span.h"
+#include "logging.h"
 #include "env_utils.h"
 
 #if defined(__linux__)

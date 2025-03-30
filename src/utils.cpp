@@ -1,7 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-#include "../generators.h"
 #include "utils.h"
+
+#include "device.h"
+#include "generators.h"
+#include "onnxruntime_api.h"
 
 namespace Generators {
 
@@ -109,4 +112,20 @@ uint16_t FastFloat32ToFloat16(float v) {
   return static_cast<uint16_t>((b & 0x80000000) >> 16 | (e > 112) * ((((e - 112) << 10) & 0x7C00) | m >> 13) | ((e < 113) & (e > 101)) * ((((0x007FF000 + m) >> (125 - e)) + 1) >> 1) | (e > 143) * 0x7FFF);  // sign : normalized : denormalized : saturate
 }
 
+std::string DeviceTypeToName(DeviceType device_type) {
+  switch (device_type) {
+    case DeviceType::CPU:
+      return "CPU";
+    case DeviceType::CUDA:
+      return "CUDA";
+    case DeviceType::DML:
+      return "DirectML";
+    case DeviceType::WEBGPU:
+      return "WebGpu";
+    case DeviceType::QNN:
+      return "QnnWithSharedMemory";
+    default:
+      throw std::runtime_error("Unknown device type");
+  }
+}
 }  // namespace Generators

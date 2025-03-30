@@ -2,11 +2,15 @@
 // Licensed under the MIT License.
 
 #include "generators.h"
-#include "sequences.h"
-#include "models/env_utils.h"
-#include "models/model.h"
+
+#include "device.h"
+#include "env_utils.h"
+#include "models/debugging.h"
 #include "models/decoder_only.h"
+#include "models/model.h"
 #include "search.h"
+#include "sequences.h"
+
 #include "cpu/interface.h"
 #include "cuda/interface.h"
 #include "dml/interface.h"
@@ -50,29 +54,40 @@ static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
 }
 
 OrtGlobals::OrtGlobals()
-    : env_{OrtEnv::Create(GetDefaultOrtLoggingLevel())} {
+    : env_{OrtEnv::Create(GetDefaultOrtLoggingLevel())},
+      allocator_cpu_{Ort::Allocator::GetWithDefaultOptions()} {
+  // register a shared allocator. note that this is a separate instance to allocator_cpu_.
+  // as allocator_cpu_ is OrtDeviceAllocator the arena config won't actually be used
   auto arena_config = OrtArenaCfg::Create(0, -1, -1, -1);
-  Ort::Allocator& allocator_cpu{Ort::Allocator::GetWithDefaultOptions()};
-  env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
-
-  // Init the CPU device (special case because it always exists, and its allocator is special
-  GetDeviceInterface(DeviceType::CPU)->InitOrt(*Ort::api, allocator_cpu);
+  env_->CreateAndRegisterAllocator(allocator_cpu_.GetInfo(), *arena_config);
 }
 
 // Ensure Shutdown() has been called before process exit
 struct EnsureShutdown {
   ~EnsureShutdown() {
-    if (GetOrtGlobals()) {
-      Shutdown();
-    }
+    Shutdown();
   }
 };
 
-std::unique_ptr<OrtGlobals>&
-GetOrtGlobals() {
+// local function to scope the instances and restrict access to the unique_ptr
+std::unique_ptr<OrtGlobals>& OrtGlobalsInstance() {
   static auto globals = std::make_unique<OrtGlobals>();
   static auto validate = std::make_unique<EnsureShutdown>();  // Must be after the above line so the destructor runs before the above destructor
+
   return globals;
+}
+
+OrtGlobals& GetOrtGlobals() {
+  auto& globals = OrtGlobalsInstance();
+  if (!globals) {
+    throw std::runtime_error("Attempted usage of OrtGlobals after they were freed");
+  }
+
+  return *globals;
+}
+
+void ReleaseOrtGlobals() {
+  OrtGlobalsInstance().reset();
 }
 
 // Used by Shutdown() to display the counts and types of any leaked objects
@@ -80,18 +95,6 @@ template <typename... Types>
 bool LeakTypeList<Types...>::Dump() {
   ((LeakChecked<Types>::Count() != 0 ? std::cerr << "OGA Error: " << LeakChecked<Types>::Count() << " instances of " << typeid(Types).name() << " were leaked." << std::endl : std::cerr), ...);
   return ((LeakChecked<Types>::Count() != 0) || ...);
-}
-
-void Shutdown() {
-  if (LeakTypes::Dump()) {
-    std::cerr << "    Please see the documentation for the API being used to ensure proper cleanup." << std::endl;
-  }
-
-  GetOrtGlobals().reset();  // Delete now because on process exit is too late
-}
-
-OrtEnv& GetOrtEnv() {
-  return *GetOrtGlobals()->env_;
 }
 
 // Fallback to copy between two separate device buffers by going through CPU memory (slow unless we're the CPU device)
@@ -194,23 +197,6 @@ DeviceInterface* GetCudaInterface() {
     return cuda_interface;
   } catch (const std::exception& e) {
     throw std::runtime_error("Cuda interface not available: " + std::string(e.what()));
-  }
-}
-
-std::string to_string(DeviceType device_type) {
-  switch (device_type) {
-    case DeviceType::CPU:
-      return "CPU";
-    case DeviceType::CUDA:
-      return "CUDA";
-    case DeviceType::DML:
-      return "DirectML";
-    case DeviceType::WEBGPU:
-      return "WebGpu";
-    case DeviceType::QNN:
-      return "QnnWithSharedMemory";
-    default:
-      throw std::runtime_error("Unknown device type");
   }
 }
 
@@ -348,7 +334,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   if (search_->GetSequenceLength() != 0 &&
       std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
                    [this](DeviceType device_type) { return device_type == state_->params_->p_device->GetType(); }))
-    throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->params_->p_device->GetType()) +
+    throw std::runtime_error("Continuous decoding is not supported on the selected device type (" +
+                             std::string(DeviceTypeToName(state_->params_->p_device->GetType())) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
   if (last_action_ == Action::generated) {

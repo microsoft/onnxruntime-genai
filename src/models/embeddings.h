@@ -5,7 +5,7 @@
 
 namespace Generators {
 
-struct Model;
+class Model;
 
 struct Embeddings {
   enum struct Mode {

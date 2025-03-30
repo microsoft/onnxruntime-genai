@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 namespace Generators {
+struct DeviceInterface;
 
 DeviceInterface* GetCpuInterface();
-
-}
+}  // namespace Generators

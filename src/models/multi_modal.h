@@ -12,18 +12,19 @@
 #include "position_inputs.h"
 
 namespace Generators {
+class Session;
 
 struct MultiModalLanguageModel : Model {
-  MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech);
+  MultiModalLanguageModel(std::unique_ptr<Config> config, bool vision, bool speech);
   MultiModalLanguageModel(const MultiModalLanguageModel&) = delete;
   MultiModalLanguageModel& operator=(const MultiModalLanguageModel&) = delete;
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const;
 
-  std::unique_ptr<OrtSession> vision_session_;     // pixel_values, [image_attention_mask], image_sizes -> image_features
-  std::unique_ptr<OrtSession> speech_session_;     // audio_embeds, audio_sizes, audio_projection_mode -> audio_features
-  std::unique_ptr<OrtSession> embedding_session_;  // input_ids, image_features, audio_features -> inputs_embeds
-  std::unique_ptr<OrtSession> decoder_session_;    // inputs_embeds, attention_mask, kv_cache -> logits
+  std::unique_ptr<Session> vision_session_;     // pixel_values, [image_attention_mask], image_sizes -> image_features
+  std::unique_ptr<Session> speech_session_;     // audio_embeds, audio_sizes, audio_projection_mode -> audio_features
+  std::unique_ptr<Session> embedding_session_;  // input_ids, image_features, audio_features -> inputs_embeds
+  std::unique_ptr<Session> decoder_session_;    // inputs_embeds, attention_mask, kv_cache -> logits
 };
 
 struct VisionState : State {

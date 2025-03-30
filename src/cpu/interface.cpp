@@ -1,10 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include "interface.h"
+
+#include "../device.h"
 #include "../generators.h"
 #include "../search.h"
-#include "../models/utils.h"
-#include "interface.h"
+#include "../utils.h"
 
 namespace Generators {
 

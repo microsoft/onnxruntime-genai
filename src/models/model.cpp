@@ -9,15 +9,17 @@
 #include <string>
 #include <thread>
 
+#include "../dml/interface.h"
 #include "../generators.h"
 #include "../search.h"
-#include "model.h"
-#include "gpt.h"
+#include "../session.h"
+#include "debugging.h"
 #include "decoder_only.h"
-#include "whisper.h"
-#include "multi_modal.h"
 #include "decoder_only_pipeline.h"
-#include "../dml/interface.h"
+#include "gpt.h"
+#include "model.h"
+#include "multi_modal.h"
+#include "whisper.h"
 
 namespace Generators {
 
@@ -35,7 +37,8 @@ State::State(const GeneratorParams& params, const Model& model)
   }
 }
 
-void State::Run(OrtSession& session, bool graph_capture_this_run) {
+void State::Run(Session& session, bool graph_capture_this_run) {
+  OrtSession& ort_session = session.GetOrtSession();
   if (params_->use_graph_capture) {
     if (graph_capture_this_run)
       run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
@@ -44,7 +47,7 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   }
 
   if (first_run_) {
-    extra_outputs_.Add(session.GetOutputNames());
+    extra_outputs_.Add(ort_session.GetOutputNames());
     first_run_ = false;
   } else {
     extra_outputs_.Update();
@@ -62,8 +65,8 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
     DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
   }
 
-  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
-              output_names_.data(), outputs_.data(), output_names_.size());
+  ort_session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+                  output_names_.data(), outputs_.data(), output_names_.size());
 
   extra_outputs_.RegisterOutputs();
 
@@ -249,49 +252,27 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   return token_id;
 }
 
-// Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
-// the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
-// has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
-// arena already being destroyed.
-void EnsureDeviceOrtInit(OrtSession& session, DeviceType type) {
-  // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
-  if (type == DeviceType::CPU)
-    return;
-
-  auto& device = GetOrtGlobals()->allocator_device_[static_cast<int>(type)];
-  if (device)
-    return;
-
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared"};
-  static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
-
-  auto name = device_type_names[static_cast<int>(type)];
-  auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-  device = Ort::Allocator::Create(session, *memory_info);
-  if (!device)
-    throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
-  GetDeviceInterface(type)->InitOrt(*Ort::api, *device);  // Necessary for any shared library providers so they can access Ort::api
-}
-
-SessionInfo::SessionInfo(OrtSession& session) {
+SessionInfo::SessionInfo(const Session& session) {
   Add(session);
 }
 
-void SessionInfo::Add(OrtSession& session) {
-  auto input_names = session.GetInputNames();
+void SessionInfo::Add(const Session& session) {
+  const OrtSession& ort_session = session.GetOrtSession();
+
+  auto input_names = ort_session.GetInputNames();
   std::vector<ONNXTensorElementDataType> input_types(input_names.size());
   for (size_t i = 0; i < input_types.size(); i++) {
-    auto input_type = session.GetInputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
+    auto input_type = ort_session.GetInputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
     auto found_input = inputs_.find(input_names[i]);
     if (found_input != inputs_.end() && found_input->second != input_type)
       throw std::runtime_error("Model input type mismatch: " + input_names[i] + " expected " + std::to_string(found_input->second) + " got " + std::to_string(input_type));
     inputs_.emplace(std::make_pair(std::move(input_names[i]), input_type));
   }
 
-  auto output_names = session.GetOutputNames();
+  auto output_names = ort_session.GetOutputNames();
   std::vector<ONNXTensorElementDataType> output_types(output_names.size());
   for (size_t i = 0; i < output_types.size(); i++) {
-    auto output_type = session.GetOutputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
+    auto output_type = ort_session.GetOutputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
     outputs_.emplace(std::make_pair(std::move(output_names[i]), output_type));
   }
 }
@@ -332,7 +313,7 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
 Model::~Model() = default;
 
-void Model::InitDeviceAllocator(OrtSession& session) {
+void Model::InitDeviceAllocator(Session& session) {
   EnsureDeviceOrtInit(session, p_device_->GetType());
 
   // Only CUDA and DML does every input on the device
@@ -345,6 +326,21 @@ void Model::InitDeviceAllocator(OrtSession& session) {
   p_device_kvcache_ = p_device_;
 
   session_info_ = std::make_unique<SessionInfo>(session);
+}
+
+// Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
+// the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
+// has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
+// arena already being destroyed.
+void Model::EnsureDeviceOrtInit(Session& session, DeviceType type) {
+  // CPU uses a default allocator that is not per-session
+  if (type == DeviceType::CPU)
+    return;
+
+  Ort::Allocator& allocator = session.CreateAllocator(type);
+
+  // Necessary for any shared library providers so they can access Ort::api
+  GetDeviceInterface(type)->InitOrt(*Ort::api, allocator);
 }
 
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
@@ -558,29 +554,29 @@ std::shared_ptr<MultiModalProcessor> Model::CreateMultiModalProcessor() const {
   return std::make_shared<MultiModalProcessor>(*config_, *session_info_);
 }
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
+std::shared_ptr<Model> CreateModel(const char* config_path, const RuntimeSettings* settings /*= nullptr*/) {
   std::string config_overlay;
   if (settings) {
     config_overlay = settings->GenerateConfigOverlay();
   }
   auto config = std::make_unique<Config>(fs::path(config_path), config_overlay);
-  return CreateModel(ort_env, std::move(config));
+  return CreateModel(std::move(config));
 }
 
-std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+std::shared_ptr<Model> CreateModel(std::unique_ptr<Config> config) {
   std::set<std::string> llm_types = {"chatglm", "decoder", "gemma", "gemma2", "granite", "llama", "mistral", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2"};
   if (config->model.type == "gpt2")
-    return std::make_shared<Gpt_Model>(std::move(config), ort_env);
+    return std::make_shared<Gpt_Model>(std::move(config));
   if (llm_types.find(config->model.type) != llm_types.end())
-    return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
+    return std::make_shared<DecoderOnly_Model>(std::move(config));
   if (config->model.type == "whisper")
-    return std::make_shared<Whisper_Model>(std::move(config), ort_env);
+    return std::make_shared<Whisper_Model>(std::move(config));
   if (config->model.type == "phi3v")
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), true, false);
   if (config->model.type == "decoder-pipeline")
-    return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
+    return std::make_shared<DecoderOnlyPipelineModel>(std::move(config));
   if (config->model.type == "phi4mm")
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), true, true);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }

@@ -4,7 +4,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 #define OGA_USE_SPAN 1
-#include "../models/onnxruntime_api.h"
+#include "../onnxruntime_api.h"
 #include "../ort_genai.h"
 #include <iostream>
 

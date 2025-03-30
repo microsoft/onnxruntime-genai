@@ -6,7 +6,7 @@
 #include <wil/result.h>
 #include "dml_command_recorder.h"
 #include "dml_command_queue.h"
-#include "../models/onnxruntime_api.h"
+#include "../onnxruntime_api.h"
 
 DmlCommandRecorder::DmlCommandRecorder(
     ID3D12Device* d3d_device,

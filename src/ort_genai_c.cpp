@@ -4,13 +4,14 @@
 #include <stdexcept>
 #include <cstdint>
 #include <cstddef>
+#include "device.h"
 #include "span.h"
 #include "ort_genai_c.h"
 #include "generators.h"
 #include "models/model.h"
 #include "runtime_settings.h"
 #include "search.h"
-#include "smartptrs.h"
+#include "utils.h"
 
 namespace Generators {
 
@@ -167,7 +168,7 @@ OgaResult* OGA_API_CALL OgaCreateRuntimeSettings(OgaRuntimeSettings** out) {
 
 OgaResult* OGA_API_CALL OgaCreateModelWithRuntimeSettings(const char* config_path, const OgaRuntimeSettings* settings, OgaModel** out) {
   OGA_TRY
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), config_path, reinterpret_cast<const Generators::RuntimeSettings*>(settings));
+  auto model = Generators::CreateModel(config_path, reinterpret_cast<const Generators::RuntimeSettings*>(settings));
   model->ExternalAddRef();
   *out = reinterpret_cast<OgaModel*>(model.get());
   return nullptr;
@@ -212,7 +213,7 @@ OgaResult* OGA_API_CALL OgaConfigOverlay(OgaConfig* config, const char* json) {
 OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
   OGA_TRY
   auto config_copy = std::make_unique<Generators::Config>(*reinterpret_cast<const Generators::Config*>(config));
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), std::move(config_copy));
+  auto model = Generators::CreateModel(std::move(config_copy));
   model->ExternalAddRef();
   *out = reinterpret_cast<OgaModel*>(model.get());
   return nullptr;
@@ -232,7 +233,7 @@ OgaResult* OGA_API_CALL OgaModelGetType(const OgaModel* model, const char** out)
 
 OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char** out) {
   OGA_TRY
-  *out = AllocOgaString(to_string(reinterpret_cast<const Generators::Model*>(model)->p_device_->GetType()));
+  *out = AllocOgaString(DeviceTypeToName(reinterpret_cast<const Generators::Model*>(model)->p_device_->GetType()));
   return nullptr;
   OGA_CATCH
 }
