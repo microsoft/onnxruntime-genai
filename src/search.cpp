@@ -158,7 +158,7 @@ void GreedySearch_Cpu::SelectTop() {
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    SoftMax(scores, temperature);
+    Softmax(scores, temperature);
     // Find the top K scores
     std::vector<int> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);
@@ -180,7 +180,7 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
       continue;
     }
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    SoftMax(scores, temperature);
+    Softmax(scores, temperature);
     // Sort an array of indices into the scores
     std::vector<int32_t> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);
@@ -209,17 +209,25 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
       continue;
     }
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    SoftMax(scores, temperature);
     // Find the top K scores
     std::vector<int> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);
     std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
+    std::vector<float> scores_top_k(k, 0.0f);
+    for (int i = 0; i < k; i++) {
+      scores_top_k[i] = scores[indices[i]];
+    }
+    if (k > 1) {
+      SoftmaxWithMax(scores_top_k, temperature, scores_top_k[0]);
+    } else {
+      scores_top_k[0] = 1.0f;
+    }
     // Sample a probability threshold
     float threshold = dis(gen_);
     int32_t token = indices[k - 1];
     // Find the first token where the cumulative probability exceeds the threshold
-    for (int i = 0; i < k; i++) {
-      threshold -= scores[indices[i]];
+    for (int i = 0; i < k - 1; i++) {
+      threshold -= scores_top_k[i];
       if (threshold > 0) {
         continue;
       }
