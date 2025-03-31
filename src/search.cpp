@@ -209,17 +209,20 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
       continue;
     }
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    SoftMax(scores, temperature);
     // Find the top K scores
     std::vector<int> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);
     std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
-    // Sample a probability threshold
+    std::vector<float> top_k_scores(k);
+    for (int i = 0; i < k; i++)
+      top_k_scores[i] = scores[indices[i]];
+    // Top P sample on the top K tokens
+    SoftMax(top_k_scores, temperature);
     float threshold = dis(gen_);
     int32_t token = indices[k - 1];
     // Find the first token where the cumulative probability exceeds the threshold
     for (int i = 0; i < k; i++) {
-      threshold -= scores[indices[i]];
+      threshold -= top_k_scores[i];
       if (threshold > 0) {
         continue;
       }
