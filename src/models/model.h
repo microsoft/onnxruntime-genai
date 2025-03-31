@@ -143,13 +143,12 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<SessionInfo> session_info_;
 
-  // get per-Model DeviceInterface
-  // Called by Generators::GetDeviceInterface when needed.
+  // get DeviceInterface. this should be preferred over Generators::GetDeviceInterface in order to handle EPs that
+  // have per-Model allocators.
   DeviceInterface* GetDeviceInterface(DeviceType type) const;
 
  protected:
   void InitDeviceAllocator(OrtSession& session);
-  void EnsureDeviceOrtInit(OrtSession& session, DeviceType type);
 
   void CreateSessionOptions();
 
@@ -161,6 +160,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 
  private:
+  void EnsureDeviceOrtInit(OrtSession& session, DeviceType type);
+
   // Allocators and DeviceInterface instances this model owns
   std::unordered_map<DeviceType, std::unique_ptr<Ort::Allocator>> device_allocators_;
   std::unordered_map<DeviceType, std::unique_ptr<DeviceInterface>> device_interfaces_;

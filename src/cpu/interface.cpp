@@ -159,6 +159,6 @@ struct CpuInterface : DeviceInterface {
 DeviceInterface* GetCpuInterface() {
   static std::unique_ptr<CpuInterface> g_cpu = std::make_unique<CpuInterface>();
   return g_cpu.get();
-}   
+}
 
 }  // namespace Generators
