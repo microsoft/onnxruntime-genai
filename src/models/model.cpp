@@ -331,12 +331,22 @@ void Model::EnsureDeviceOrtInit(OrtSession& session, DeviceType type) {
   if (!device)
     throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
 
+  // save in case we std::move device
+  Ort::Allocator* allocator = device.get();
+
+  // special-case WebGPU where the DeviceInterface and allocator is per-Model.
+  // TODO: it really needs to be per-Session to be safe...
+  if (type == DeviceType::WEBGPU) {
+    device_allocators_[type] = std::move(device);
+    device_interfaces_[type] = CreateWebGPUInterface();
+  }
+
   // Necessary for any shared library providers so they can
-  GetDeviceInterface(type)->InitOrt(*Ort::api, *device);
+  GetDeviceInterface(type)->InitOrt(*Ort::api, *allocator);
 }
 
 void Model::InitDeviceAllocator(OrtSession& session) {
-  EnsureDeviceOrtInit(*this, session, p_device_->GetType());
+  EnsureDeviceOrtInit(session, p_device_->GetType());
 
   // Only CUDA and DML does every input on the device
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML)
@@ -350,7 +360,7 @@ void Model::InitDeviceAllocator(OrtSession& session) {
   session_info_ = std::make_unique<SessionInfo>(session);
 }
 
-DeviceInterface* Model::GetDeviceInterface(DeviceType type) {
+DeviceInterface* Model::GetDeviceInterface(DeviceType type) const {
   DeviceInterface* result = nullptr;
 
   switch (type) {
@@ -358,18 +368,17 @@ DeviceInterface* Model::GetDeviceInterface(DeviceType type) {
     default:
     case DeviceType::CPU:
     case DeviceType::CUDA:
-#if USE_DML
     case DeviceType::DML:
-#endif
     case DeviceType::QNN:
       result = Generators::GetDeviceInterface(type);
       break;
     case DeviceType::WEBGPU:
-      if (device_interfaces_.find(type) != device_interfaces_.end())
-        return device_interfaces_[type].get();
-      auto device_interface = CreateWebGPUInterface();
-      result = device_interface.get();
-      device_interfaces_[type] = std::move(device_interface);
+      auto it = device_interfaces_.find(type);
+      if (it == device_interfaces_.end())
+        // this should have been created in EnsureDeviceOrtInit
+        throw std::runtime_error("WebGPU device interface not found");
+
+      result = it->second.get();
       break;
   }
 

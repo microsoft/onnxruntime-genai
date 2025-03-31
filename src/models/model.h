@@ -161,7 +161,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
 
  private:
-  // DeviceInterface instances this model owns
+  // Allocators and DeviceInterface instances this model owns
+  std::unordered_map<DeviceType, std::unique_ptr<Ort::Allocator>> device_allocators_;
   std::unordered_map<DeviceType, std::unique_ptr<DeviceInterface>> device_interfaces_;
 };
 
