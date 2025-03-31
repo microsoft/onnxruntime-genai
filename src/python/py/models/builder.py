@@ -3254,6 +3254,59 @@ class Gemma3Model(Gemma2Model):
         sin_cache_name = kwargs.get("sin_cache_name", self.sin_cache_global_name if self.window_size == -1 else self.sin_cache_local_name)
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)
 
+    def make_group_query_attention(self, name, **kwargs):
+        # Insert `bfloat16 <--> io_dtype` cast nodes around inputs/outputs for GQA op
+        inputs = [
+            kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
+            kwargs.get("past_k", ""), kwargs.get("past_v", ""),
+            kwargs.get("seqlens_k", ""), kwargs.get("total_seq_len", ""),
+            kwargs.get("cos_cache", ""), kwargs.get("sin_cache", ""),
+        ]
+        output = f"{name}/output_0"
+        outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
+
+        # Cast inputs to bfloat16
+        q_cast_name = f"{name}/Q_Cast"
+        self.make_cast(q_cast_name, kwargs["q_path"], dtype=TensorProto.BFLOAT16, shape=["batch_size", "sequence_length", self.head_size * self.num_attn_heads])
+        k_cast_name = f"{name}/K_Cast"
+        self.make_cast(k_cast_name, kwargs["k_path"], dtype=TensorProto.BFLOAT16, shape=["batch_size", "sequence_length", self.head_size * self.num_kv_heads])
+        v_cast_name = f"{name}/V_Cast"
+        self.make_cast(v_cast_name, kwargs["v_path"], dtype=TensorProto.BFLOAT16, shape=["batch_size", "sequence_length", self.head_size * self.num_kv_heads])
+        past_k_cast_name = f"{name}/Past_K_Cast"
+        self.make_cast(past_k_cast_name, kwargs["past_k"], dtype=TensorProto.BFLOAT16, shape=["batch_size", self.num_kv_heads, "sequence_length", self.head_size])
+        past_v_cast_name = f"{name}/Past_V_Cast"
+        self.make_cast(past_v_cast_name, kwargs["past_v"], dtype=TensorProto.BFLOAT16, shape=["batch_size", self.num_kv_heads, "sequence_length", self.head_size])
+
+        new_inputs = [
+            f"{q_cast_name}/output_0", f"{k_cast_name}/output_0", f"{v_cast_name}/output_0",
+            f"{past_k_cast_name}/output_0", f"{past_v_cast_name}/output_0",
+        ]
+        new_inputs += inputs[5:]
+
+        out_bf16_name = f"{name}/Out_BF16"
+        present_k_bf16_name = f"{name}/Present_K_BF16"
+        present_v_bf16_name = f"{name}/Present_V_BF16"
+        new_outputs = [
+            f"{out_bf16_name}/output_0", f"{present_k_bf16_name}/output_0", f"{present_v_bf16_name}/output_0"
+        ]
+        self.make_value_info(new_outputs[0], TensorProto.BFLOAT16, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
+        self.make_value_info(new_outputs[1], TensorProto.BFLOAT16, shape=["batch_size", self.num_kv_heads, "sequence_length", self.head_size])
+        self.make_value_info(new_outputs[2], TensorProto.BFLOAT16, shape=["batch_size", self.num_kv_heads, "sequence_length", self.head_size])
+
+        self.make_node(
+            "GroupQueryAttention", inputs=new_inputs, outputs=new_outputs, name=name, domain="com.microsoft",
+            num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], local_window_size=self.window_size,
+            softcap=self.attention_attrs["softcap"], do_rotary=self.attention_attrs["use_rope_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
+        )
+        self.make_value_info(output, TensorProto.BFLOAT16, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
+
+        # Cast outputs to io_dtype
+        self.make_node("Cast", inputs=[new_outputs[0]], outputs=[outputs[0]], name=out_bf16_name, to=self.io_dtype)
+        self.make_value_info(outputs[0], self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
+        self.make_node("Cast", inputs=[new_outputs[1]], outputs=[outputs[1]], name=present_k_bf16_name, to=self.io_dtype)
+        self.make_value_info(outputs[1], self.io_dtype, shape=["batch_size", self.num_kv_heads, "sequence_length", self.head_size])
+        self.make_node("Cast", inputs=[new_outputs[2]], outputs=[outputs[2]], name=present_v_bf16_name, to=self.io_dtype)
+        self.make_value_info(outputs[2], self.io_dtype, shape=["batch_size", self.num_kv_heads, "sequence_length", self.head_size])
 
 def check_extra_options(kv_pairs):
     """
