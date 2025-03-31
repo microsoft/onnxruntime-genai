@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #include "models/onnxruntime_api.h"
-#include "smartptrs.h"
+#include "utils.h"
 
 namespace Generators {
 namespace cuda {

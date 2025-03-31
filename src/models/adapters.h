@@ -4,7 +4,7 @@
 
 namespace Generators {
 
-struct Model;
+class Model;
 
 struct Adapter {
   Adapter() = delete;

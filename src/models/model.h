@@ -11,7 +11,7 @@
 #include "extra_outputs.h"
 
 namespace Generators {
-
+class Session;
 struct Tokenizer;
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);
@@ -46,7 +46,7 @@ struct State {
   std::vector<OrtValue*> inputs_, outputs_;
 
  protected:
-  void Run(OrtSession& session, bool graph_capture_this_run = false);  // Uses the inputs below to run
+  void Run(Session& session, bool graph_capture_this_run = false);  // Uses the inputs below to run
   bool first_run_{true};
 
   std::unique_ptr<OrtRunOptions> run_options_;
@@ -102,9 +102,9 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, 
 };
 
 struct SessionInfo {
-  SessionInfo(OrtSession& session);
+  SessionInfo(const Session& session);
 
-  void Add(OrtSession& session);
+  void Add(const Session& session);
 
   bool HasInput(const std::string& name) const;
   bool HasOutput(const std::string& name) const;
@@ -118,7 +118,8 @@ struct SessionInfo {
   std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;
 };
 
-struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, ExternalRefCounted<Model> {
+class Model : public std::enable_shared_from_this<Model>, LeakChecked<Model>, public ExternalRefCounted<Model> {
+ public:
   Model(std::unique_ptr<Config> config);
   virtual ~Model();
 
@@ -135,16 +136,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
 
-  DeviceInterface* p_device_{};          // The device we're running on (matches device_type_) used for things that work the same on all devices
-  DeviceInterface* p_device_inputs_{};   // For some model inputs, the device might be the CPU device (all but KV cache currently for WebGPU and DML)
-  DeviceInterface* p_device_kvcache_{};  // The kvcache is always allocated in device memory  (TODO: Remove in favor of just p_device_?)
-
-  Ort::Allocator& allocator_cpu_{GetDeviceInterface(DeviceType::CPU)->GetAllocator()};
-
-  std::unique_ptr<SessionInfo> session_info_;
-
  protected:
-  void InitDeviceAllocator(OrtSession& session);
+  void InitDeviceAllocator(Session& session);
   void CreateSessionOptions();
 
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
@@ -152,7 +145,12 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                       bool is_primary_session_options,
                                       bool disable_graph_capture);
 
+ private:
+  void EnsureDeviceOrtInit(Session& session, DeviceType type);
+
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
+
+  std::unique_ptr<SessionInfo> session_info_;
 };
 
 }  // namespace Generators

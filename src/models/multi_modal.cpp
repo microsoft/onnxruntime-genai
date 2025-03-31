@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "../generators.h"
+#include "../session.h"
 #include "multi_modal.h"
 
 namespace Generators {
@@ -43,30 +44,30 @@ int64_t GetNumAudioTokens(const std::vector<GeneratorParams::Input>& extra_input
 
 }  // namespace
 
-MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
+MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, bool vision, bool speech)
     : Model(std::move(config)) {
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
     auto vision_session_options = OrtSessionOptions::Create();
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *vision_session_options, true, true);
-    vision_session_ = OrtSession::Create(
-        ort_env, (config_->config_path / fs::path(config_->model.vision.filename)).c_str(), vision_session_options.get());
+    vision_session_ = Session::Create(
+        (config_->config_path / fs::path(config_->model.vision.filename)).c_str(), vision_session_options.get());
   }
 
   if (speech) {
     auto speech_session_options = OrtSessionOptions::Create();
     CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *speech_session_options, true, true);
-    speech_session_ = OrtSession::Create(
-        ort_env, (config_->config_path / fs::path(config_->model.speech.filename)).c_str(), speech_session_options.get());
+    speech_session_ = Session::Create(
+        (config_->config_path / fs::path(config_->model.speech.filename)).c_str(), speech_session_options.get());
   }
 
   auto embedding_session_options = OrtSessionOptions::Create();
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *embedding_session_options, true, true);
 
-  embedding_session_ = OrtSession::Create(
-      ort_env, (config_->config_path / fs::path(config_->model.embedding.filename)).c_str(), embedding_session_options.get());
-  decoder_session_ = OrtSession::Create(
-      ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
+  embedding_session_ = Session::Create(
+      (config_->config_path / fs::path(config_->model.embedding.filename)).c_str(), embedding_session_options.get());
+  decoder_session_ = Session::Create(
+      (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
 
   InitDeviceAllocator(*decoder_session_);
   session_info_->Add(*embedding_session_);
@@ -86,7 +87,7 @@ VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorPa
     : State{params, model},
       model_{model},
       num_image_tokens_{num_image_tokens} {
-  extra_inputs_.Add(model_.vision_session_->GetInputNames());
+  extra_inputs_.Add(model_.vision_session_->GetOrtSession().GetInputNames());
   image_features_.Add();
 }
 
@@ -99,7 +100,7 @@ SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorPa
     : State{params, model},
       model_{model},
       num_audio_tokens_{num_audio_tokens} {
-  extra_inputs_.Add(model_.speech_session_->GetInputNames());
+  extra_inputs_.Add(model_.speech_session_->GetOrtSession().GetInputNames());
   audio_features_.Add();
 }
 

@@ -7,14 +7,15 @@
 #include "extra_inputs.h"
 
 namespace Generators {
+class Session;
 
 struct Whisper_Model : Model {
-  Whisper_Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
+  Whisper_Model(std::unique_ptr<Config> config);
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
-  std::unique_ptr<OrtSession> session_encoder_;  // encoder_decoder_init.onnx
-  std::unique_ptr<OrtSession> session_decoder_;  // decoder.onnx
+  std::unique_ptr<Session> session_encoder_;  // encoder_decoder_init.onnx
+  std::unique_ptr<Session> session_decoder_;  // decoder.onnx
 };
 
 struct Whisper_State : State {

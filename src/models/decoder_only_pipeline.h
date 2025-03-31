@@ -14,11 +14,12 @@
 #include "windowed_kv_cache.h"
 #include "position_inputs.h"
 #include "extra_inputs.h"
+#include "../session.h"
 
 namespace Generators {
 
 struct DecoderOnlyPipelineModel : Model {
-  DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
+  DecoderOnlyPipelineModel(std::unique_ptr<Config> config);
 
   DecoderOnlyPipelineModel(const DecoderOnlyPipelineModel&) = delete;
   DecoderOnlyPipelineModel& operator=(const DecoderOnlyPipelineModel&) = delete;
@@ -26,8 +27,7 @@ struct DecoderOnlyPipelineModel : Model {
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
 
-  std::vector<std::unique_ptr<OrtSession>> sessions_;
-  OrtEnv& ort_env_;
+  std::vector<std::unique_ptr<Session>> sessions_;
 };
 
 struct IntermediatePipelineState : State {

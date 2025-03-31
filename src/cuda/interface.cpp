@@ -4,6 +4,7 @@
 #include "generators.h"
 #include "ort_genai_c.h"  // For OGA_EXPORT
 #include "interface.h"
+#include "../device.h"
 #include "../search.h"
 #include "search_cuda.h"
 #include "kernels.h"

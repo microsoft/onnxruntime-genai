@@ -73,7 +73,7 @@ struct InterfaceImpl : DeviceInterface {
 
 }  // namespace WebGPU
 
-DeviceInterface* GetWebGPUInterface() {
+DeviceInterface* GetWebGPUInterface(const Session& session) {
   static std::unique_ptr<DeviceInterface> g_device = std::make_unique<WebGPU::InterfaceImpl>();
   return g_device.get();
 }

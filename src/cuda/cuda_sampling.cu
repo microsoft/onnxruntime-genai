@@ -9,7 +9,7 @@
 #include "beam_search_topk.h"
 #include "cuda_sampling.cuh"
 #include "models/onnxruntime_api.h"
-#include "smartptrs.h"
+#include "utils.h"
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include <iostream>

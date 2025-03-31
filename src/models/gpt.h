@@ -5,15 +5,16 @@
 #include "kv_cache.h"
 #include "position_inputs.h"
 #include "extra_inputs.h"
+#include "../session.h"
 
 namespace Generators {
 
 struct Gpt_Model : Model {
-  Gpt_Model(std::unique_ptr<Config> config, OrtEnv& ort_env);
+  Gpt_Model(std::unique_ptr<Config> config);
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
-  std::unique_ptr<OrtSession> session_decoder_;
+  std::unique_ptr<Session> session_decoder_;
 };
 
 struct Gpt_State : State {
