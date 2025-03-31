@@ -18,6 +18,7 @@
 #include "multi_modal.h"
 #include "decoder_only_pipeline.h"
 #include "../dml/interface.h"
+#include "../webgpu/interface.h"
 
 namespace Generators {
 
@@ -249,30 +250,6 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   return token_id;
 }
 
-// Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
-// the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
-// has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
-// arena already being destroyed.
-void EnsureDeviceOrtInit(OrtSession& session, DeviceType type) {
-  // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
-  if (type == DeviceType::CPU)
-    return;
-
-  auto& device = GetOrtGlobals()->allocator_device_[static_cast<int>(type)];
-  if (device)
-    return;
-
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared"};
-  static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
-
-  auto name = device_type_names[static_cast<int>(type)];
-  auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
-  device = Ort::Allocator::Create(session, *memory_info);
-  if (!device)
-    throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
-  GetDeviceInterface(type)->InitOrt(*Ort::api, *device);  // Necessary for any shared library providers so they can access Ort::api
-}
-
 SessionInfo::SessionInfo(OrtSession& session) {
   Add(session);
 }
@@ -332,8 +309,34 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
 
 Model::~Model() = default;
 
+// Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
+// the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
+// has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
+// arena already being destroyed.
+void Model::EnsureDeviceOrtInit(OrtSession& session, DeviceType type) {
+  // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
+  if (type == DeviceType::CPU)
+    return;
+
+  auto& device = GetOrtGlobals()->allocator_device_[static_cast<int>(type)];
+  if (device)
+    return;
+
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared"};
+  static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
+
+  auto name = device_type_names[static_cast<int>(type)];
+  auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
+  device = Ort::Allocator::Create(session, *memory_info);
+  if (!device)
+    throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
+
+  // Necessary for any shared library providers so they can
+  GetDeviceInterface(type)->InitOrt(*Ort::api, *device);
+}
+
 void Model::InitDeviceAllocator(OrtSession& session) {
-  EnsureDeviceOrtInit(session, p_device_->GetType());
+  EnsureDeviceOrtInit(*this, session, p_device_->GetType());
 
   // Only CUDA and DML does every input on the device
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML)
@@ -345,6 +348,32 @@ void Model::InitDeviceAllocator(OrtSession& session) {
   p_device_kvcache_ = p_device_;
 
   session_info_ = std::make_unique<SessionInfo>(session);
+}
+
+DeviceInterface* Model::GetDeviceInterface(DeviceType type) {
+  DeviceInterface* result = nullptr;
+
+  switch (type) {
+      // these use a global allocator that must remain valid across all sessions
+    default:
+    case DeviceType::CPU:
+    case DeviceType::CUDA:
+#if USE_DML
+    case DeviceType::DML:
+#endif
+    case DeviceType::QNN:
+      result = Generators::GetDeviceInterface(type);
+      break;
+    case DeviceType::WEBGPU:
+      if (device_interfaces_.find(type) != device_interfaces_.end())
+        return device_interfaces_[type].get();
+      auto device_interface = CreateWebGPUInterface();
+      result = device_interface.get();
+      device_interfaces_[type] = std::move(device_interface);
+      break;
+  }
+
+  return result;
 }
 
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,

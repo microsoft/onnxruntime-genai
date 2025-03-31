@@ -55,7 +55,7 @@ DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value);
 using TokenSequences = std::vector<std::vector<int32_t>>;
 
 std::string to_string(DeviceType device_type);
-DeviceInterface* GetDeviceInterface(DeviceType type);
+DeviceInterface* GetDeviceInterface(DeviceType type, const Model* model = nullptr);
 
 struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams>, ExternalRefCounted<GeneratorParams> {
   GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks

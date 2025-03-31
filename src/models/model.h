@@ -143,8 +143,14 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   std::unique_ptr<SessionInfo> session_info_;
 
+  // get per-Model DeviceInterface
+  // Called by Generators::GetDeviceInterface when needed.
+  DeviceInterface* GetDeviceInterface(DeviceType type) const;
+
  protected:
   void InitDeviceAllocator(OrtSession& session);
+  void EnsureDeviceOrtInit(OrtSession& session, DeviceType type);
+
   void CreateSessionOptions();
 
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
@@ -153,6 +159,10 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                       bool disable_graph_capture);
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
+
+ private:
+  // DeviceInterface instances this model owns
+  std::unordered_map<DeviceType, std::unique_ptr<DeviceInterface>> device_interfaces_;
 };
 
 }  // namespace Generators

@@ -3,6 +3,6 @@
 
 namespace Generators {
 
-DeviceInterface* GetWebGPUInterface();
+std::unique_ptr<DeviceInterface> CreateWebGPUInterface();
 
 }  // namespace Generators

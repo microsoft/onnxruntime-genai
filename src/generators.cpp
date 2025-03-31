@@ -214,7 +214,42 @@ std::string to_string(DeviceType device_type) {
   }
 }
 
-DeviceInterface* GetDeviceInterface(DeviceType type) {
+namespace {
+
+using ModelToDeviceInterfaceInstances = std::unordered_map<const void*,
+                                                           std::unordered_map<DeviceType, std::unique_ptr<DeviceInterface>>>;
+
+ModelToDeviceInterfaceInstances& DeviceInterfaceInstances() {
+  static std::unordered_map<const void*, std::unordered_map<DeviceType, std::unique_ptr<DeviceInterface>>> instances;
+  return instances;
+};
+
+DeviceInterface* GetPerModelDeviceInterface(DeviceType type, const Model& model) {
+  auto& model_entry = DeviceInterfaceInstances()[&model];
+  DeviceInterface* result = nullptr;
+
+  if (auto it = model_entry.find(type); it != model_entry.end()) {
+    result = it->second.get();
+  } else {
+    switch (type) {
+      case DeviceType::WEBGPU: {
+        auto webgpu_interface = CreateWebGPUInterface();
+        result = webgpu_interface.get();
+        model_entry[type] = std::move(webgpu_interface);
+        break;
+      }
+      default: {
+        throw std::runtime_error("DeviceType is not setup for per model instances. Type:" +
+                                 std::to_string(static_cast<int>(type)));
+      }
+    }
+  }
+
+  return result;
+}
+}  // namespace
+
+DeviceInterface* GetDeviceInterface(DeviceType type, const Model* model) {
   switch (type) {
     default:
     case DeviceType::CPU:
@@ -226,7 +261,10 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
       return GetDmlInterface();
 #endif
     case DeviceType::WEBGPU:
-      return GetWebGPUInterface();
+      if (!model)
+        throw std::runtime_error("Model is required for WEBGPU device type");
+
+      return model->GetDeviceInterface(type);
     case DeviceType::QNN:
       return GetQNNInterface();
   }
