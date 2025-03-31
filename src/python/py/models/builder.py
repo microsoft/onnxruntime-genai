@@ -302,6 +302,7 @@ class Model:
                 "algo_config": int4_algo_config,
             },
             "use_qdq": extra_options.get("use_qdq", False),
+            "use_channel_wised_quantization": extra_options.get("use_channel_wised_quantization", False),
         }
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
@@ -482,6 +483,7 @@ class Model:
             quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
             op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
             algo_config=self.quant_attrs["int4"]["algo_config"],
+            channel_wised_quantize = self.quant_attrs["use_channel_wised_quantization"],
         )
         quant.process()
         return ir.from_proto(quant.model.model)
@@ -3637,7 +3639,7 @@ def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
     """
-    bools = ["int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "use_8bits_moe", "use_qdq", "use_webgpu_fp32"]
+    bools = ["int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "use_8bits_moe", "use_qdq", "use_webgpu_fp32", "use_channel_wised_quantization"]
     for key in bools:
         if key in kv_pairs:
             if kv_pairs[key] in {"false", "False", "0"}:
@@ -3947,6 +3949,8 @@ def get_args():
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
+                use_channel_wised_quantization = Use channel wised quantization, in which block size = rows (K)
+                    Use this option when you want use K as block size, default is False
             """),
     )
 
