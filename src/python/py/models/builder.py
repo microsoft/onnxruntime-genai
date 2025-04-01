@@ -3346,6 +3346,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = Gemma2Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma3ForCausalLM":
             onnx_model = Gemma3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model.model_type = "gemma3_text"
         elif config.architectures[0] == "Gemma3ForConditionalGeneration":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             text_config = config.text_config
