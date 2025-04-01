@@ -26,11 +26,15 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
 }
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  std::cout<<"Inside of DecoderOnly_State::Run"<<std::endl;
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
+  std::cout<<"Updated inputs and outputs"<<std::endl;
 
   // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
   bool graph_capture_this_run = params_->use_graph_capture && input_ids_.GetShape()[1] == 1;
+  std::cout<<"Graph capture this run = "<<graph_capture_this_run<<std::endl;
   State::Run(*model_.session_decoder_, graph_capture_this_run);
+  std::cout<<"Ran the model"<<std::endl;
 
   return logits_.Get();
 }

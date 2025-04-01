@@ -51,9 +51,11 @@ def main(args):
 
     generator = og.Generator(model, params)
     if args.verbose: print("Generator created")
+    print("Input tokens = ", input_tokens)
     
     generator.append_tokens(input_tokens)
     if args.verbose: print("Input tokens added")
+    time.sleep(60)
 
     if args.verbose: print("Generating tokens ...\n")
     start_time = time.time()

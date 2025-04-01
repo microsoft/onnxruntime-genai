@@ -130,6 +130,7 @@ EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const Gener
 }
 
 void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool is_prompt) {
+  std::cout<<"Updating Embedding State inputs and outputs"<<std::endl;
   input_ids_.Update(next_tokens);
   if (model_.vision_session_) image_features_->Update(is_prompt);
   if (model_.speech_session_) audio_features_->Update(is_prompt);
@@ -234,6 +235,7 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
 }
 
 OrtValue* MultiModalPipelineState::GetInput(const char* name) {
+  std::cout<<"Inside of MultiModalPipelineState::GetInput"<<std::endl;
   if (vision_state_) {
     // Check if input name is in vision state's inputs
     for (size_t i = 0; i < vision_state_->input_names_.size(); i++) {
@@ -254,6 +256,8 @@ OrtValue* MultiModalPipelineState::GetInput(const char* name) {
 
   // Check if input name is in embedding state's inputs
   for (size_t i = 0; i < embedding_state_->input_names_.size(); i++) {
+    std::cout<<"Checking embedding state input names"<<std::endl;
+    std::cout<<"Input name: "<<embedding_state_->input_names_[i]<<std::endl;
     if (std::strcmp(embedding_state_->input_names_[i], name) == 0) {
       return embedding_state_->inputs_[i];
     }
@@ -261,6 +265,8 @@ OrtValue* MultiModalPipelineState::GetInput(const char* name) {
 
   // Check if input name is in decoder state's inputs
   for (size_t i = 0; i < decoder_state_->input_names_.size(); i++) {
+    std::cout<<"Checking decoder state input names"<<std::endl;
+    std::cout<<"Input name: "<<decoder_state_->input_names_[i]<<std::endl;
     if (std::strcmp(decoder_state_->input_names_[i], name) == 0) {
       return decoder_state_->inputs_[i];
     }
@@ -270,6 +276,7 @@ OrtValue* MultiModalPipelineState::GetInput(const char* name) {
 };
 
 OrtValue* MultiModalPipelineState::GetOutput(const char* name) {
+  std::cout<<"Inside of MultiModalPipelineState::GetOutput"<<std::endl;
   if (vision_state_) {
     // Check if output name is in vision state's outputs
     for (size_t i = 0; i < vision_state_->output_names_.size(); i++) {
@@ -290,6 +297,7 @@ OrtValue* MultiModalPipelineState::GetOutput(const char* name) {
 
   // Check if output name is in embedding state's outputs
   for (size_t i = 0; i < embedding_state_->output_names_.size(); i++) {
+    std::cout<<"Checking embedding state output names"<<std::endl;
     if (std::strcmp(embedding_state_->output_names_[i], name) == 0) {
       return embedding_state_->outputs_[i];
     }
@@ -297,6 +305,7 @@ OrtValue* MultiModalPipelineState::GetOutput(const char* name) {
 
   // Check if output name is in decoder state's outputs
   for (size_t i = 0; i < decoder_state_->output_names_.size(); i++) {
+    std::cout<<"Checking decoder state output names"<<std::endl;
     if (std::strcmp(decoder_state_->output_names_[i], name) == 0) {
       return decoder_state_->outputs_[i];
     }

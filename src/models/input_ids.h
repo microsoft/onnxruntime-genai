@@ -42,38 +42,6 @@ struct DefaultInputIDs : InputIDs {
   std::unique_ptr<OrtValue> past_sequence_length_;
 };
 
-struct EncoderInputIDs : InputIDs {
-  EncoderInputIDs(State& state);
-  EncoderInputIDs(const EncoderInputIDs&) = delete;
-  EncoderInputIDs& operator=(const EncoderInputIDs&) = delete;
-
-  // Register input_ids as ORT session input.
-  // Called only once during initialization of state.
-  void Add() override;
-  // Resize input_ids based on size of next_tokens.
-  // Update value with next_tokens.
-  void Update(DeviceSpan<int32_t> next_tokens) override;
-
-  std::array<int64_t, 2> GetShape() const override { return shape_; }
-  const char* name_;
-
-  OrtValue* Get() { return value_->GetOrtTensor(); }
-
- private:
-  State& state_;
-  const Model& model_{state_.model_};
-  size_t input_index_{~0U};
-
-  bool is_prompt_{true};
-
-  std::array<int64_t, 2> shape_{};
-  ONNXTensorElementDataType type_;
-  std::unique_ptr<Tensor> value_;
-  std::unique_ptr<Tensor> cast_value_;
-
-  std::unique_ptr<OrtValue> current_sequence_length_;
-  std::unique_ptr<OrtValue> past_sequence_length_;
-};
 
 // Certain models can only process a fixed number of tokens at a time.
 // For example, given a prompt with 120 tokens, and a model that can only process 20 tokens at a time,
@@ -110,5 +78,6 @@ struct WindowedInputIDs : public InputIDs {
 };
 
 std::unique_ptr<InputIDs> CreateInputIDs(State& state);
+std::unique_ptr<InputIDs> CreateEncoderInputIDs(State& state);
 
 }  // namespace Generators

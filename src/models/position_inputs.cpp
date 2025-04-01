@@ -10,6 +10,8 @@ DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, D
   has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
   has_posid_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.position_ids);
 
+  // std::cout<<"Has Attention mask = "<<has_mask_input_<<" Name "<<model_.config_->model.encoder_decoder_init.inputs.encoder_attention_mask<<std::endl;
+
   type_ = Ort::TypeToTensorType<int32_t>;
   if (has_mask_input_) {
     type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);

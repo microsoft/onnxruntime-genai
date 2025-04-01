@@ -11,6 +11,10 @@ Logits::Logits(State& state)
       shape_{static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.vocab_size},
       type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
+  // std::cout<<"Getting Raw output"<<std::endl;
+  if(output_raw_ == nullptr) {
+    throw std::runtime_error("Logits: output_raw_ is null");
+  }
 
   if (model_.p_device_inputs_->GetType() == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
     auto& cpu_ids = model_.config_->model.eos_token_ids;
@@ -39,12 +43,15 @@ DeviceSpan<float> Logits::Get() {
     if (type_ == Ort::TypeToTensorType<Ort::Float16_t>)
       logits_of_last_token_fp32_ = OrtValue::CreateTensor<float>(model_.p_device_inputs_->GetAllocator(), shape_);
 
+    // std::cout<<"Logits of last token"<<std::endl;
     logits_of_last_token = output_last_tokens_.get();
 
     size_t element_size = SizeOf(type_);
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
+    std::cout<<"Getting logits_raw = "<<output_raw_.get()<<std::endl;
     auto logits_raw = output_raw_->GetByteSpan();
+    // std::cout<<"Donw with logits_raw"<<std::endl;
     auto logits_last_tokens = ByteWrapTensor(*model_.p_device_inputs_, *logits_of_last_token);
 
     for (int batch_index = 0; batch_index < state_.params_->search.batch_size; batch_index++) {

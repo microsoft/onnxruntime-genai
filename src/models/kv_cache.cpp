@@ -331,7 +331,7 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int i
 CrossCache::CrossCache(State& state)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_attention_heads, 1500, model_.config_->model.decoder.head_size} {
+      shape_{state_.params_->BatchBeamSize(), 8, 3, model_.config_->model.decoder.head_size} {
   values_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {

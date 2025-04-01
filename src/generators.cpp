@@ -274,7 +274,7 @@ std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorPa
 std::unique_ptr<Search> CreateSearch(const GeneratorParams& params) {
   if (params.search.num_beams > 1)
     return params.p_device->CreateBeam(params);
-  std::cout<<"Inside of CreateSearch"<<std::endl;
+  // std::cout<<"Inside of CreateSearch"<<std::endl;
   return params.p_device->CreateGreedy(params);
 }
 
@@ -288,11 +288,11 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   if (params.config.model.vocab_size < 1)
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
 
-  std::cout<<"Inside of Generator constructor"<<std::endl;
+  // std::cout<<"Inside of Generator constructor"<<std::endl;
   search_ = CreateSearch(params);
-  std::cout<<"After CreateSearch"<<std::endl;
+  // std::cout<<"After CreateSearch"<<std::endl;
   state_ = model.CreateState(search_->GetSequenceLengths(), params);  // Search sequence lengths set when creating state
-  std::cout<<"After model.CreateState"<<std::endl;
+  // std::cout<<"After model.CreateState"<<std::endl;
 
   // Temporary solution for multimodal and whisper models
   if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
@@ -339,7 +339,7 @@ void Generator::AuxAppendTokens(cpu_span<const int32_t> input_features) {
 
 void Generator::AppendTokens(cpu_span<const int32_t> input_features) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
-  std::cout<<"Input size = "<<input_features.size()<<std::endl;
+  // std::cout<<"Input size = "<<input_features.size()<<std::endl;
   if (input_features.size() == 0)
     throw std::runtime_error("input_features is empty");
   if ((input_features.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
@@ -349,7 +349,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_features) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
-  std::cout<<"Inside of AppendTokens"<<std::endl;
+  // std::cout<<"Inside of AppendTokens"<<std::endl;
   constexpr std::array<DeviceType, 3> devices_supporting_continuous_decoding{DeviceType::CPU, DeviceType::CUDA, DeviceType::WEBGPU};
   if (search_->GetSequenceLength() != 0 &&
       std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
@@ -357,27 +357,27 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_features) {
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->params_->p_device->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
-  std::cout<<"Before next tokens"<<std::endl;
+  // std::cout<<"Before next tokens"<<std::endl;
   if (last_action_ == Action::generated) {
     ComputeLogits(search_->GetNextTokens());
   }
 
-  std::cout<<"Before AllocateInputIdsOnDevice"<<std::endl;
+  // std::cout<<"Before AllocateInputIdsOnDevice = "<<std::endl;
   auto input_ids_device = AllocateInputIdsOnDevice(input_features);
-  std::cout<<"After AllocateInputIdsOnDevice"<<std::endl;
+  // std::cout<<"After AllocateInputIdsOnDevice"<<std::endl;
   search_->AppendTokens(input_ids_device);
-  std::cout<<"After AppendTokens"<<std::endl;
+  // std::cout<<"After AppendTokens"<<std::endl;
   computed_logits_ = false;
-  std::cout<<"Before ComputeLogits "<<std::endl;
+  // std::cout<<"Before ComputeLogits "<<std::endl;
   ComputeLogits(input_ids_device);
-  std::cout<<"After ComputeLogits"<<std::endl;
+  // std::cout<<"After ComputeLogits"<<std::endl;
 }
 
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
-  std::cout<<"Inside of ComputeLogits"<<std::endl;
+  // std::cout<<"Inside of ComputeLogits"<<std::endl;
 
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   std::cout<<"After state_->Run "<<std::endl;
@@ -386,9 +386,9 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
     DumpSpan(stream, logits.CopyDeviceToCpu());
     stream << std::endl;
   }
-  std::cout<<"Dump Stream"<<std::endl;
+  // std::cout<<"Dump Stream"<<std::endl;
   SetLogits(logits);
-  std::cout<<"SetLogits"<<std::endl;
+  // std::cout<<"SetLogits"<<std::endl;
   last_action_ = Action::standard;
 
   computed_logits_ = true;

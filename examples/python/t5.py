@@ -44,7 +44,11 @@ def main(args):
     if args.verbose: print("GeneratorParams created")
 
     generator = og.Generator(model, params)
+    # params.set_inputs(input_tokens)
+    # params.set_search_options(max_length=7680)
     if args.verbose: print("Generator created")
+
+    print("input tokens = ", input_tokens)
     
     generator.append_tokens(input_tokens)
     if args.verbose: print("Input tokens added")
