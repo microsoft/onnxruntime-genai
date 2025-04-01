@@ -166,7 +166,7 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
     for (int i = 0; i < k; i++)
       top_k_scores[i] = scores[indices[i]];
     // Sample a token from the top K
-    SoftMax(top_k_scores, temperature);
+    Softmax(top_k_scores, temperature);
     std::discrete_distribution<> dis(top_k_scores.begin(), top_k_scores.end());
     SetNextToken(batch_id, indices[dis(gen_)]);
   }
