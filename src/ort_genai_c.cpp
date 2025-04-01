@@ -29,27 +29,39 @@ const char* AllocOgaString(const std::string& string) {
   return cstr_buffer.release();
 }
 
+// This type can't be created or copied by value, only by pointer. It's used for the definitions below to ensure nobody
+// accidentally creates/copies one of the types that happens to have a default constructor.
+struct OgaAbstract {
+  OgaAbstract() = delete;
+  OgaAbstract(const OgaAbstract&) = delete;
+  void operator=(const OgaAbstract&) = delete;
+};
+
 // As the Oga* types are just typedefs, we can use them as the actual types in the C API.
 // We still need to cast from internal types to the external ones, but these definitions ensure that the types are correct.
 // But do not use reinterpret_cast!
-struct OgaAdapters : Generators::Adapters {};
-struct OgaAudios : Generators::Audios {};
-struct OgaConfig : Generators::Config {};
-struct OgaGenerator : Generators::Generator {};
-struct OgaGeneratorParams : Generators::GeneratorParams {};
-struct OgaImages : Generators::Images {};
-struct OgaModel : Generators::Model {};
-struct OgaMultiModalProcessor : Generators::MultiModalProcessor {};
-struct OgaNamedTensors : Generators::NamedTensors {};
-struct OgaResult : Generators::Result {};
-struct OgaRuntimeSettings : Generators::RuntimeSettings {};
-struct OgaSequences : Generators::TokenSequences {};
-struct OgaStringArray : std::vector<std::string> {};
-struct OgaTensor : Generators::Tensor {};
-struct OgaTokenizer : Generators::Tokenizer {};
-struct OgaTokenizerStream : Generators::TokenizerStream {};
+struct OgaAdapters : Generators::Adapters, OgaAbstract {};
+struct OgaAudios : Generators::Audios, OgaAbstract {};
+struct OgaConfig : Generators::Config, OgaAbstract {};
+struct OgaGenerator : Generators::Generator, OgaAbstract {};
+struct OgaGeneratorParams : Generators::GeneratorParams, OgaAbstract {};
+struct OgaImages : Generators::Images, OgaAbstract {};
+struct OgaModel : Generators::Model, OgaAbstract {};
+struct OgaMultiModalProcessor : Generators::MultiModalProcessor, OgaAbstract {};
+struct OgaNamedTensors : Generators::NamedTensors, OgaAbstract {};
+struct OgaResult : Generators::Result, OgaAbstract {};
+struct OgaRuntimeSettings : Generators::RuntimeSettings, OgaAbstract {};
+struct OgaSequences : Generators::TokenSequences, OgaAbstract {};
+struct OgaStringArray : std::vector<std::string>, OgaAbstract {};
+struct OgaTensor : Generators::Tensor, OgaAbstract {};
+struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
+struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
 
 // Helper function to return a shared pointer as a raw pointer. It won't compile if the types are wrong.
+// Exposed types that are internally owned by shared_ptrs inherit from ExternalRefCounted. Then we
+// manage external C API ownership through ExternalAddRef/ExternalRelease. This function to return
+// a value to an external C API owner does the ExternalAddRef, and the OgaDestroy* method has the
+// corresponding ExternalRelease.
 template <typename T, typename U>
 T* ReturnShared(std::shared_ptr<U>& p) {
   p->ExternalAddRef();
