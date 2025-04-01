@@ -73,7 +73,7 @@ DeviceSpan<float> Logits::Get() {
   // TODO: This functionality may have to be moved to DeviceInterface to make the code platform agnostic
   if (model_.p_device_inputs_->GetType() == DeviceType::CUDA) {
     if (!cuda_eos_token_ids_.empty())
-      model_.p_device_inputs_->LaunchHandleEOSArray(
+      model_.p_device_inputs_->HandleEOSArray(
           logits_.Span().data(),
           static_cast<int>(shape_[0]) /* batch_beam_size*/,
           static_cast<int>(shape_[2]) /* vocab_size */,

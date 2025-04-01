@@ -22,15 +22,14 @@ struct State {
   virtual ~State();
 
   virtual DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
-  virtual void Finalize() {}
+  virtual void Finalize(int current_length) {}
 
   void SetTerminate();
   void UnsetTerminate();
   bool session_terminated_{};
-  OrtValue* GetInput(const char* name);
 
   virtual void RewindTo(size_t index) { (void)index; };
-
+  virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
 
   void ClearIO();  // Clear all inputs/outputs
