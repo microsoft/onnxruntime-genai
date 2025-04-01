@@ -50,7 +50,7 @@ struct OgaTokenizer : Generators::Tokenizer {};
 struct OgaTokenizerStream : Generators::TokenizerStream {};
 
 // Helper function to return a shared pointer as a raw pointer. It won't compile if the types are wrong.
-template<typename T, typename U>
+template <typename T, typename U>
 T* ReturnShared(std::shared_ptr<U>& p) {
   p->ExternalAddRef();
   return static_cast<T*>(p.get());
@@ -65,9 +65,9 @@ T* ReturnUnique(std::unique_ptr<U> p) {
 extern "C" {
 
 #define OGA_TRY try {
-#define OGA_CATCH                                                                                  \
-  }                                                                                                \
-  catch (const std::exception& e) {                                                                \
+#define OGA_CATCH                                                                   \
+  }                                                                                 \
+  catch (const std::exception& e) {                                                 \
     return ReturnUnique<OgaResult>(std::make_unique<Generators::Result>(e.what())); \
   }
 
@@ -604,8 +604,8 @@ OgaResult* OGA_API_CALL OgaNamedTensorsGet(OgaNamedTensors* named_tensors, const
 }
 
 OgaResult* OGA_API_CALL OgaNamedTensorsSet(OgaNamedTensors* named_tensors, const char* name, OgaTensor* tensor) {
-  OGA_TRY
-  (*named_tensors)[name] = tensor->shared_from_this();
+  OGA_TRY(*named_tensors)
+  [name] = tensor->shared_from_this();
   return nullptr;
   OGA_CATCH
 }
@@ -765,8 +765,8 @@ void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* p) { delete p; }
 void OGA_API_CALL OgaDestroyTokenizer(OgaTokenizer* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream* p) { delete p; }
 void OGA_API_CALL OgaDestroyTensor(OgaTensor* p) { p->ExternalRelease(); }
-void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* p) { p->ExternalRelease();}
-void OGA_API_CALL OgaDestroyImages(OgaImages* p) { delete p;}
+void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* p) { p->ExternalRelease(); }
+void OGA_API_CALL OgaDestroyImages(OgaImages* p) { delete p; }
 void OGA_API_CALL OgaDestroyAudios(OgaAudios* p) { delete p; }
 void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) { delete p; }
 void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) { p->ExternalRelease(); }
