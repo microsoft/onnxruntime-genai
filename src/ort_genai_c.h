@@ -547,7 +547,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateNamedTensors(OgaNamedTensors** out);
  * \param[out] out The tensor with the given name
  * \return OgaResult containing the error message if the tensor with the given name could not be found.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsGet(const OgaNamedTensors* named_tensors, const char* name, OgaTensor** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsGet(OgaNamedTensors* named_tensors, const char* name, OgaTensor** out);
 
 /** \brief Set a tensor in a NamedTensor set by name
  * \param[in] named_tensors The named tensors to set the tensor
