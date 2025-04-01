@@ -89,7 +89,7 @@ if(BUILD_WHEEL)
   endforeach()
 
   # On Linux we need this so the python bindings can load our other shared libraries in the same folder
-  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     set_target_properties(python PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
   endif()
 
