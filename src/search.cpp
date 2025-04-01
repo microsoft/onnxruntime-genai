@@ -158,7 +158,6 @@ void GreedySearch_Cpu::SelectTop() {
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    Softmax(scores, temperature);
     // Find the top K scores
     std::vector<int> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);
@@ -167,6 +166,7 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
     for (int i = 0; i < k; i++)
       top_k_scores[i] = scores[indices[i]];
     // Sample a token from the top K
+    Softmax(top_k_scores, temperature);
     std::discrete_distribution<> dis(top_k_scores.begin(), top_k_scores.end());
     SetNextToken(batch_id, indices[dis(gen_)]);
   }
