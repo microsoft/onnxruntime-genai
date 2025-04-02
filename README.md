@@ -51,7 +51,7 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
 
 3. Run the model
 
-   ### Build from source / Current release (0.7.0)
+   ### Current release (0.7.0)
 
    ```python
    import onnxruntime_genai as og
