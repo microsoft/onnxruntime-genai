@@ -6,7 +6,7 @@ Note: between release candidate 0.7.0-rc2 and release 0.7.0 there is a breaking 
 system_tokens = tokenizer.encode(system_prompt)
 input_tokens = tokenizer.encode(prompt)
 generator.append_tokens(np.concatenate([system_tokens, input_tokens]))
-
+```
 
 [![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed/absoluteLatest)
 
