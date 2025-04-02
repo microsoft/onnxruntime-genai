@@ -64,7 +64,7 @@ jobs:
           set -e -x
           az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
-          python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/aarch64/default/cpu/Dockerfile \
+          python tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/aarch64/default/cpu/Dockerfile \
           --context tools/ci_build/github/linux/docker/inference/aarch64/default/cpu \
           --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
           --container-registry onnxruntimebuildcache \
