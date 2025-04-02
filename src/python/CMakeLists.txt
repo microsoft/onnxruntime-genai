@@ -93,7 +93,7 @@ if(BUILD_WHEEL)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_target_properties(python PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")  # For macOS
-    set_target_properties(python PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "@executable_path")
+    set_target_properties(python PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "@loader_path")
   endif()
 
   if(MANYLINUX)
