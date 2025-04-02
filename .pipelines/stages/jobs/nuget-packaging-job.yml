@@ -87,7 +87,7 @@ jobs:
       value: 'MinSizeRel'
 
   - name: artifactName
-    value: 'onnxruntime-genai-${{ parameters.ep }}'
+    value: 'onnxruntime-genai-${{ parameters.ep }}-dep-qnn-${{ parameters.enable_win_qnn }}'
 
   - name: genai_nuget_package_name
     ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
