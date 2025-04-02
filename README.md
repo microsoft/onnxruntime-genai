@@ -1,6 +1,6 @@
 # ONNX Runtime GenAI
 
-## *Main branch contains new API changes and examples in main branch reflect these changes. For example scripts compatible with current release (0.5.2), [see release branch](https://github.com/microsoft/onnxruntime-genai/tree/rel-0.5.2).*
+## *Main branch contains new API changes and examples in main branch reflect these changes. For example scripts compatible with current release (0.7.0), [see release notes of release branch](https://github.com/microsoft/onnxruntime-genai/tree/rel-0.7.0).*
 
 
 [![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed/absoluteLatest)
