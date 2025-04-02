@@ -74,7 +74,7 @@ jobs:
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/bin/python3 --version && /bin/python3 -m venv genai-venv && source genai-venv/bin/activate && /bin/python3 -m pip install -r test/python/requirements.txt && /bin/python3 -m pip install -r test/python/linux/torch/requirements.txt && /bin/python3 -m pip install -r test/python/linux/ort/requirements.txt && /bin/python3 -m pip install build/cpu/linux-arm64/wheel/onnxruntime_genai*.whl --no-deps && /bin/python3 -m pip list && which -a python3 && /usr/bin/cmake --preset linux_gcc_cpu_release"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/python3 --version && /usr/bin/python3 -m venv genai-venv && source genai-venv/bin/activate && which -a python3 && /usr/bin/cmake --preset linux_gcc_cpu_release"
 
       - name: Docker -- Build with CMake and GCC
         run: |
