@@ -205,9 +205,8 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
 void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
   std::uniform_real_distribution<float> dis(0, p);
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
-    if (PadIfAlreadyEOS(batch_id)) {
+    if (PadIfAlreadyEOS(batch_id))
       continue;
-    }
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     // Find the top K scores
     std::vector<int> indices(scores.size());
@@ -217,11 +216,7 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
     for (int i = 0; i < k; i++) {
       scores_top_k[i] = scores[indices[i]];
     }
-    if (k > 1) {
-      SoftmaxWithMax(scores_top_k, temperature, scores_top_k[0]);
-    } else {
-      scores_top_k[0] = 1.0f;
-    }
+    SoftmaxWithMax(scores_top_k, temperature, scores_top_k[0]);
     // Sample a probability threshold
     float threshold = dis(gen_);
     int32_t token = indices[k - 1];
