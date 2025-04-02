@@ -119,6 +119,10 @@ struct SessionOptions_Element : JSON::Element {
       v_.ep_context_enable = JSON::Get<bool>(value);
     else if (name == "use_env_allocators")
       v_.use_env_allocators = JSON::Get<bool>(value);
+    else if (name == "intra_op_allow_spinning")
+      v_.intra_op_allow_spinning = JSON::Get<bool>(value);
+    else if (name == "inter_op_allow_spinning")
+      v_.inter_op_allow_spinning = JSON::Get<bool>(value);
     else if (name == "graph_optimization_level")
       v_.graph_optimization_level = GetGraphOptimizationLevel(JSON::Get<std::string_view>(value));
     else if (name == "custom_ops_library")
