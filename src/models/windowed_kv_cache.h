@@ -46,8 +46,7 @@ struct WindowedKeyValueCache : KeyValueCache {
   size_t window_index_{};
   size_t input_index_{~0U}, output_index_{~0U};
 
-  std::array<int64_t, 4> key_cache_shape_in_, key_cache_shape_out_;
-  std::array<int64_t, 4> value_cache_shape_in_, value_cache_shape_out_;
+  std::array<int64_t, 4> kv_cache_shape_in_, kv_cache_shape_out_;
   ONNXTensorElementDataType type_;
 
   std::vector<std::unique_ptr<OrtValue>> key_caches_in_, value_caches_in_;
