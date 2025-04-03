@@ -286,6 +286,7 @@ class Model:
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
             },
             "use_qdq": extra_options.get("use_qdq", False),           # Use QDQ format
+            "use_channel_wised_quantization": extra_options.get("use_channel_wised_quantization", False),
         }
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
@@ -489,6 +490,18 @@ class Model:
         )
 
     def to_int4(self, model):
+        quant_config = None
+        if self.quant_attrs["use_channel_wised_quantization"]:
+            from onnxruntime.quantization.matmul_4bits_quantizer import DefaultWeightOnlyQuantConfig
+            quant_config = DefaultWeightOnlyQuantConfig(
+                block_size=self.quant_attrs["int4"]["block_size"],
+                is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
+                accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
+                quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
+                op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
+                channel_wised_quantize = True
+            )
+
         quant = MatMul4BitsQuantizer(
             model=model,
             block_size=self.quant_attrs["int4"]["block_size"],
@@ -497,6 +510,7 @@ class Model:
             nodes_to_exclude=[],
             quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
             op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
+            algo_config=quant_config
         )
         quant.process()
         return quant.model.model
@@ -3266,7 +3280,7 @@ def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
     """
-    bools = ["int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "use_8bits_moe", "use_qdq", "include_prompt_templates"]
+    bools = ["int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "use_8bits_moe", "use_qdq", "include_prompt_templates", "use_channel_wised_quantization"]
     for key in bools:
         if key in kv_pairs:
             if kv_pairs[key] in {"false", "False", "0"}:
@@ -3523,6 +3537,8 @@ def get_args():
                     Use this option for LoRA models.
                 include_prompt_templates = Include prompt templates in the GenAI config file. Default is false.
                     Use this option to include per-role prompt templates in the `genai_config.json` file.
+                use_channel_wised_quantization = Use channel wised quantization, in which block size = rows (K)
+                    Use this option when you want use K as block size, default is False
             """),
     )
 
