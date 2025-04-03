@@ -74,7 +74,7 @@ jobs:
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/cmake --preset linux_gcc_cpu_release"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "python3 --version && /usr/bin/cmake --preset linux_gcc_cpu_release"
 
       - name: Docker -- Build with CMake and GCC
         run: |
