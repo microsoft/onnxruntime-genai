@@ -2,6 +2,8 @@ import onnxruntime_genai as og
 import argparse
 import time
 
+# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
+
 def main(args):
     if args.verbose: print("Loading model...")
     config = og.Config(args.model_path)
@@ -14,6 +16,7 @@ def main(args):
 
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
+    tokenizer_stream = tokenizer.create_stream()
     if args.verbose: print("Tokenizer created")
     print("Tokenizer = ", tokenizer)
 
@@ -21,9 +24,7 @@ def main(args):
         prompts = args.prompts
     else:
         if args.non_interactive:
-            prompts = ["The first 4 digits of pi are",
-                       "The square root of 2 is",
-                       "The first 6 numbers of the Fibonacci sequence are",]
+            prompts = ["Hello"]
         else:
             text = input("Input: ")
             prompts = [text]
@@ -35,7 +36,7 @@ def main(args):
 
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args} 
     search_options['batch_size'] = len(prompts)
-    search_options['num_beams'] = 3
+    search_options['num_beams'] = 4
 
     if (args.verbose): print(f'Args: {args}')
     if (args.verbose): print(f'Search options: {search_options}')
@@ -44,7 +45,6 @@ def main(args):
     if args.verbose: print("GeneratorParams created")
 
     generator = og.Generator(model, params)
-    # params.set_inputs(input_tokens)
     # params.set_search_options(max_length=7680)
     if args.verbose: print("Generator created")
 
@@ -57,6 +57,11 @@ def main(args):
     start_time = time.time()
     while not generator.is_done():
         generator.generate_next_token()
+        new_token = generator.get_next_tokens()[0]
+        # if args.verbose: 
+        #     print(f"Token generated: {new_token}")
+        #     print(tokenizer_stream.decode(new_token), end='', flush=True)
+        # time.sleep(10)
     run_time = time.time() - start_time
 
     for i in range(len(prompts)):

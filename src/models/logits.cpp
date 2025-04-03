@@ -49,7 +49,7 @@ DeviceSpan<float> Logits::Get() {
     size_t element_size = SizeOf(type_);
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
-    std::cout<<"Getting logits_raw = "<<output_raw_.get()<<std::endl;
+    // std::cout<<"Getting logits_raw = "<<output_raw_.get()<<std::endl;
     auto logits_raw = output_raw_->GetByteSpan();
     // std::cout<<"Donw with logits_raw"<<std::endl;
     auto logits_last_tokens = ByteWrapTensor(*model_.p_device_inputs_, *logits_of_last_token);

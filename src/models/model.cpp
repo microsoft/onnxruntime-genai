@@ -45,20 +45,19 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   }
 
   if (first_run_) {
-    std::cout<<"First run of the model, registering inputs and outputs."<<std::endl;
+    // std::cout<<"First run of the model, registering inputs and outputs."<<std::endl;
     extra_outputs_.Add(session.GetOutputNames());
     first_run_ = false;
   } else {
-    std::cout<<"Not the first run of the model, registering inputs and outputs."<<std::endl;
+    // std::cout<<"Not the first run of the model, registering inputs and outputs."<<std::endl;
     extra_outputs_.Update();
   }
 
-  // if (g_log.enabled && g_log.model_input_values) {
-    // std::cout<<"Dumping model input values."<<std::endl;
+  if (g_log.enabled && g_log.model_input_values) {
     auto& stream = Log("model_input_values");
     stream << std::endl;
     DumpTensors(model_, stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
-  // }
+  }
 
   if (g_log.enabled && g_log.model_output_shapes) {
     auto& outstream = Log("model_output_shapes");
@@ -66,17 +65,16 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
     DumpTensors(model_, outstream, outputs_.data(), output_names_.data(), output_names_.size(), false);
   }
 
-  // std::cout<<"Running the model."<<std::endl;
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
 
   extra_outputs_.RegisterOutputs();
 
-  // if (g_log.enabled && g_log.model_output_values) {
+  if (g_log.enabled && g_log.model_output_values) {
     auto& stream_output = Log("model_output_values");
     stream_output << std::endl;
     DumpTensors(model_, stream_output, outputs_.data(), output_names_.data(), output_names_.size(), true);
-  // }
+  }
 }
 
 void State::SetTerminate() {
@@ -284,7 +282,7 @@ SessionInfo::SessionInfo(OrtSession& session) {
 
 void SessionInfo::Add(OrtSession& session) {
   auto input_names = session.GetInputNames();
-  std::cout<<"Getting input names"<<std::endl;
+  // std::cout<<"Getting input names"<<std::endl;
   std::vector<ONNXTensorElementDataType> input_types(input_names.size());
   for (size_t i = 0; i < input_types.size(); i++) {
     auto input_type = session.GetInputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
@@ -588,7 +586,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
   if (config->model.type == "phi4mm")
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
   if (config->model.type == "t5")
-    std::cout<<"Creating EncoderDecoderModel"<<std::endl;
+    // std::cout<<"Creating EncoderDecoderModel"<<std::endl;
     return std::make_shared<EncoderDecoderModel>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
@@ -636,6 +634,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 
   // When num_beams == 1, we don't need to expand the input, but the expand has a side effect of copying from
   // CPU memory to device memory, so we can skip if the p_device_inputs_ is the CPU device
+  // std::cout<<"inside expand INputs"<<std::endl;
   if (num_beams == 1 && p_device_inputs_ == GetDeviceInterface(DeviceType::CPU))
     return std::move(input);
 
@@ -643,6 +642,8 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   auto element_type = input_type_info->GetElementType();
   auto input_shape = input_type_info->GetShape();
   const int64_t batch_size = input_shape[0];
+  // std::cout<<"Batch size = "<<batch_size<<std::endl;
+  // std::cout<<"Num beams = "<<num_beams<<std::endl;
   const int64_t data_size_bytes = input_type_info->GetElementCount() * SizeOf(element_type) / batch_size;
 
   input_shape[0] *= num_beams;

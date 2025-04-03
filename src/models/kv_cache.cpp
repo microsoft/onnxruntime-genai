@@ -175,6 +175,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
   // Set the size after empty_past_ has been created with 0 for this field
   if (past_present_share_buffer_)
+    // std::cout<<"Past present share buffer is true"<<std::endl;
     shape_[2] = state_.params_->search.max_length;
 
   try {
@@ -232,6 +233,7 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
     return;
 
   if (!is_first_update_) {
+    // std::cout<<"Inside of DefaultKeyValueCache::Update"<<std::endl;
     for (int i = 0; i < layer_count_ * 2; i++) {
       if (beam_indices.empty()) {
         pasts_[i] = std::move(presents_[i]);
@@ -241,6 +243,7 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
       state_.inputs_[input_index_ + i] = pasts_[i].get();
     }
   }
+  // std::cout<<"Total length = "<<total_length<<std::endl;
 
   shape_[2] = total_length;
   for (int i = 0; i < layer_count_ * 2; i++) {
@@ -328,11 +331,13 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int i
   }
 }
 
-CrossCache::CrossCache(State& state)
+CrossCache::CrossCache(State& state, int sequence_length)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      shape_{state_.params_->BatchBeamSize(), 8, 3, model_.config_->model.decoder.head_size} {
+      shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, sequence_length, model_.config_->model.decoder.head_size} {
   values_.reserve(layer_count_ * 2);
+
+  // std::cout<<"Inside of CrossCache constructor"<<std::endl;
 
   for (int i = 0; i < layer_count_; ++i) {
     output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.encoder_decoder_init.outputs.cross_present_key_names, i));
@@ -342,6 +347,8 @@ CrossCache::CrossCache(State& state)
     input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.cross_past_value_names, i));
   }
 
+  // std::cout<<"Added cross cache input names = "<<shape_[0]<<" "<<shape_[1]<<" "<<shape_[2]<<std::endl;
+
   // Derive the KV data type from the KV input 0
   type_ = model_.session_info_->GetOutputDataType(output_name_strings_[0]);
 
@@ -349,17 +356,24 @@ CrossCache::CrossCache(State& state)
     values_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
     values_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
   }
+  // std::cout<<"Created cross cache values"<<std::endl;
 }
 
 void CrossCache::AddOutputs() {
+  // std::cout<<"Inside of CrossCache::AddOutputs"<<std::endl;
   for (int i = 0; i < layer_count_ * 2; ++i) {
+    std::cout<<"Name = "<<output_name_strings_[i].c_str()<<std::endl;
+    std::cout<<"Value = "<<values_[i].get()<<std::endl;
     state_.outputs_.push_back(values_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
   }
+  // std::cout<<"Done addingf outputs"<<std::endl;
 }
 
 void CrossCache::AddInputs() {
   for (int i = 0; i < layer_count_ * 2; ++i) {
+    std::cout<<"Name = "<<input_name_strings_[i].c_str()<<std::endl;
+    std::cout<<"Value = "<<values_[i].get()<<std::endl;
     state_.inputs_.push_back(values_[i].get());
     state_.input_names_.push_back(input_name_strings_[i].c_str());
   }

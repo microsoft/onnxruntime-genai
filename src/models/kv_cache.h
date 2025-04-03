@@ -106,7 +106,7 @@ struct DefaultKeyValueCache : KeyValueCache {
 
 // Very similar to the DefaultKeyValueCache, but is only created once at the encoder step, then used without modification for every decoder step
 struct CrossCache {
-  CrossCache(State& state);
+  CrossCache(State& state, int sequence_length = 0);
 
   void AddOutputs();
   void AddInputs();

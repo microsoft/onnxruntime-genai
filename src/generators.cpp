@@ -268,6 +268,7 @@ void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
 }
 
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
+  // std::cout<<"Inside of CreateGenerator"<<std::endl;
   return std::make_unique<Generator>(model, params);
 }
 
@@ -311,6 +312,7 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
 
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
+  // std::cout<<"CPU Span size = "<<std::endl;
   auto padding_begin = cpu_span.begin();
   auto data_end = cpu_span.end();
   if (model_->config_->model.decoder.sliding_window.has_value() && model_->config_->model.decoder.sliding_window->alignment == "left") {
@@ -377,10 +379,10 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
-  // std::cout<<"Inside of ComputeLogits"<<std::endl;
+  // std::cout<<"Inside of ComputeLogits = "<<search_->GetSequenceLength()<<std::endl;
 
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
-  std::cout<<"After state_->Run "<<std::endl;
+  // std::cout<<"After state_->Run "<<std::endl;
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
     DumpSpan(stream, logits.CopyDeviceToCpu());
@@ -453,6 +455,7 @@ void Generator::GenerateNextToken() {
   }
 
   if (!computed_logits_) {
+    // std::cout<<"Inside of GenerateNextToken"<<std::endl;
     auto next_tokens = search_->GetNextTokens();
     if (last_action_ == Action::rewound)
       search_->AppendTokens(next_tokens);
@@ -464,13 +467,13 @@ void Generator::GenerateNextToken() {
   search_->ApplyRepetitionPenalty(search.repetition_penalty);
 
   if (g_log.enabled && g_log.generate_next_token) {
-    auto& stream = Log("generate_next_token");
-    stream << SGR::Fg_Green << "do_sample: " << SGR::Reset << search.do_sample << ' '
-           << SGR::Fg_Green << "top_k: " << SGR::Reset << search.top_k << ' '
-           << SGR::Fg_Green << "top_p: " << SGR::Reset << search.top_p << ' '
-           << SGR::Fg_Green << "temperature: " << SGR::Reset << search.temperature << ' '
-           << SGR::Fg_Cyan << "sequence length: " << SGR::Reset << search_->GetSequenceLength()
-           << std::endl;
+  auto& stream = Log("generate_next_token");
+  stream << SGR::Fg_Green << "do_sample: " << SGR::Reset << search.do_sample << ' '
+          << SGR::Fg_Green << "top_k: " << SGR::Reset << search.top_k << ' '
+          << SGR::Fg_Green << "top_p: " << SGR::Reset << search.top_p << ' '
+          << SGR::Fg_Green << "temperature: " << SGR::Reset << search.temperature << ' '
+          << SGR::Fg_Cyan << "sequence length: " << SGR::Reset << search_->GetSequenceLength()
+          << std::endl;
   }
 
   last_action_ = Action::generated;

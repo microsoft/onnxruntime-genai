@@ -56,9 +56,11 @@ ExtraInputs::ExtraInputs(State& state)
 
 void ExtraInputs::Add(const std::vector<std::string>& required_input_names) {
   std::unordered_set<std::string> required_input_names_set(required_input_names.begin(), required_input_names.end());
+  // std::cout<<"Required input names set size = "<<required_input_names_set.size()<<"What!!"<<state_.params_->extra_inputs.size()<<std::endl;
   // Add extra user inputs
   for (int i = 0; i < state_.params_->extra_inputs.size(); ++i) {
     if (required_input_names_set.empty() || required_input_names_set.count(state_.params_->extra_inputs[i].name)) {
+      // std::cout<<"Extra input name = "<<state_.params_->extra_inputs[i].name<<std::endl;
       state_.input_names_.push_back(state_.params_->extra_inputs[i].name.c_str());
       state_.inputs_.push_back(extra_inputs_[i]);
     }
