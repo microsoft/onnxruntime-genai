@@ -4,6 +4,7 @@ file(GLOB python_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
+find_package(Python COMPONENTS Interpreter Development)
 pybind11_add_module(python ${python_srcs})
 target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(python PRIVATE ${ORT_LIB_DIR})
@@ -91,6 +92,8 @@ if(BUILD_WHEEL)
   # On Linux we need this so the python bindings can load our other shared libraries in the same folder
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_target_properties(python PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")  # For macOS
+    set_target_properties(python PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "@loader_path")
   endif()
 
   if(MANYLINUX)
