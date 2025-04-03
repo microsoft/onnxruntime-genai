@@ -28,7 +28,7 @@ struct WindowedKeyValueCache : KeyValueCache {
 
  private:
   template <typename T>
-  void InitializeCaches(T pad_value);
+  void InitializeCaches();
   void SlideLayer(size_t layer_idx);
   void TransitionToTokenGeneration();
 
