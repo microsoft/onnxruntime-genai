@@ -49,12 +49,12 @@ jobs:
       foreach ($file in $artifacts) {
         $a = $file.Name
         Write-Host "Extracting " $a
-        $rid_match = $a -match "onnxruntime-genai-\d+\.\d+\.\d+(?:-[^-\s]+-)(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
-        if ($rid_match) {
-          $rid = $Matches.1
-        }
-        else {
-          Write-Host "Invalid artifact name" $file
+        if ($a -like "*win-x64*") {
+          $rid = "win-x64"
+        } elseif ($a -like "*win-arm64*") {
+          $rid = "win-arm64"
+        } else {
+          Write-Host "Unknown artifact name" $a
           return
         }
 
