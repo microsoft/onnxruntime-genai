@@ -69,35 +69,9 @@ tar --strip 1 -xf /tmp/src/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz -C /usr
 echo "Adding Python to PATH"
 
 echo $(which python3.12)
-
-if [ -f /opt/python/cp310-cp310/bin/python3 ]; then
-  export PATH=/opt/python/cp310-cp310/bin:$PATH
-  echo "Python 3.10 found, adding to PATH"
-fi
-if [ -f /opt/python/cp311-cp311/bin/python3 ]; then
-  export PATH=/opt/python/cp311-cp311/bin:$PATH
-  echo "Python 3.11 found, adding to PATH"
-fi
-if [ -f /opt/python/cp310-cp310/bin/python ]; then
-  export PATH=/opt/python/cp310-cp310/bin:$PATH
-  echo "Python 3.10 found, adding to PATH"
-fi
-if [ -f /opt/python/cp311-cp311/bin/python ]; then
-  export PATH=/opt/python/cp311-cp311/bin:$PATH
-  echo "Python 3.11 found, adding to PATH"
-fi
-if [ -f /opt/python/cp312-cp312/bin/python3 ]; then
-  export PATH=/opt/python/cp312-cp312/bin:$PATH
-  echo "Python 3.12 found, adding to PATH"
-fi
-if [ -f /opt/python/cp312-cp312/bin/python ]; then
-  export PATH=/opt/python/cp312-cp312/bin:$PATH
-  echo "Python 3.12 found, adding to PATH"
-fi
-if [ -f /opt/python/cp312-cp312/bin/python3.12 ]; then
-  export PATH=/opt/python/cp312-cp312/bin:$PATH
-  echo "Python 3.12 found, adding to PATH"
-fi
+echo $(which python3)
+echo $(which python)
+export PATH=/usr/bin:$PATH
 
 
 cd /
