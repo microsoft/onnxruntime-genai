@@ -70,6 +70,7 @@ echo "Adding Python to PATH"
 
 if [ -f /opt/python/cp312-cp312/bin/python3 ]; then
   export PATH=/opt/python/cp312-cp312/bin:$PATH
+  echo "Python 3.12 found, adding to PATH"
 fi
 
 cd /
