@@ -192,8 +192,8 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
       model_{model},
       num_image_tokens_{GetNumImageTokens(params_->extra_inputs)},
       num_audio_tokens_{GetNumAudioTokens(params_->extra_inputs, model_.config_->model.speech.inputs.audio_sizes)},
-      adapters_{std::make_shared<Adapters>(&model_)},
-      num_images_{GetImageFeatureBatchSize(params_->extra_inputs)} {
+      num_images_{GetImageFeatureBatchSize(params_->extra_inputs)},
+      adapters_{std::make_shared<Adapters>(&model_)} {
   if (model_.vision_session_) {
     vision_state_ = std::make_unique<VisionState>(model_, params, num_images_, num_image_tokens_);
   }
