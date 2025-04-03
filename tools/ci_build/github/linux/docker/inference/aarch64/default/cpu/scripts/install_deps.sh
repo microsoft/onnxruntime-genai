@@ -68,6 +68,8 @@ tar --strip 1 -xf /tmp/src/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz -C /usr
 # Add Python to PATH
 echo "Adding Python to PATH"
 
+echo $(which python3.12)
+
 if [ -f /opt/python/cp310-cp310/bin/python3 ]; then
   export PATH=/opt/python/cp310-cp310/bin:$PATH
   echo "Python 3.10 found, adding to PATH"
