@@ -6,9 +6,6 @@
 
 namespace Generators {
 
-struct Config;
-struct SessionInfo;
-
 struct PhiMultiModalProcessor : Processor {
   PhiMultiModalProcessor(Config& config, const SessionInfo& session_info);
 

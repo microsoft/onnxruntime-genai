@@ -1,7 +1,9 @@
-﻿import onnxruntime_genai as og
+﻿# Copyright (c) Microsoft Corporation. All rights reserved.
+# Licensed under the MIT License
+
+import onnxruntime_genai as og
 import argparse
 import time
-import numpy as np
 
 def main(args):
     if args.verbose: print("Loading model...")
@@ -45,14 +47,16 @@ def main(args):
             raise ValueError("Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
     else:
         if model_type.startswith("phi4"):
-            args.chat_template = '<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>'
+            args.chat_template = '{system_prompt}<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>'
         elif model_type.startswith("phi"): # For Phi2 and Phi3
-            args.chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
+            args.chat_template = '{system_prompt}<|user|>\n{input} <|end|>\n<|assistant|>'
         elif model_type.startswith("llama"):
-            args.chat_template = '<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
+            args.chat_template = '{system_prompt}<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
             print("Using Chat Template for LLAMA 3, if you are using LLAMA  2 please pass the argument --chat_template '{input} [/INST]')")
         elif model_type.startswith("qwen2"):
-            args.chat_template = '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
+            args.chat_template = '{system_prompt}<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
+        elif model_type == "gemma3_text":
+            args.chat_template = '<start_of_turn>user\n{system_prompt}{input}<end_of_turn>\n<start_of_turn>model\n'
         else:
             raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
 
@@ -70,11 +74,10 @@ def main(args):
             print("Using System Prompt for LLAMA 3, if you are using LLAMA  2 please pass the argument --system_prompt '<s>[INST] <<SYS>>\\n{args.system_prompt}\\n<</SYS>>')")
         elif model_type.startswith("qwen2"):
             system_prompt = f"<|im_start|>system\n{args.system_prompt}<|im_end|>\n"
+        elif model_type == "gemma3_text":
+            system_prompt = f"{args.system_prompt}"
         else:
             system_prompt = args.system_prompt
-
-    system_tokens = tokenizer.encode(system_prompt)
-    system_prompt_length = len(system_tokens)
 
     # Keep asking for input prompts in a loop
     while True:
@@ -91,7 +94,7 @@ def main(args):
 
         if args.timings: started_timestamp = time.time()
 
-        prompt = f'{args.chat_template.format(input=text)}'
+        prompt = f'{args.chat_template.format(system_prompt=system_prompt, input=text)}'
         input_tokens = tokenizer.encode(prompt)
 
         params = og.GeneratorParams(model)
@@ -100,7 +103,7 @@ def main(args):
         if args.verbose: print("Generator created")
 
         # Append system and input tokens to the generator
-        generator.append_tokens(np.concatenate([system_tokens, input_tokens]))
+        generator.append_tokens(input_tokens)
 
         if args.verbose: print("Running generation loop ...")
         if args.timings:

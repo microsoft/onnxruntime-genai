@@ -41,6 +41,22 @@ int64_t GetNumAudioTokens(const std::vector<GeneratorParams::Input>& extra_input
   return 0;
 }
 
+int64_t GetImageFeatureBatchSize(const std::vector<GeneratorParams::Input>& extra_inputs) {
+  for (size_t i = 0; i < extra_inputs.size(); ++i) {
+    if (extra_inputs[i].name == Config::Defaults::PixelValuesName) {
+      assert(extra_inputs[i].tensor->ort_tensor_);
+      const auto num_dims = extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape().size();
+      if (num_dims < 3) {
+        return 0;
+      }
+      // If image features have rank 3, the batch size is the first dimension
+      return extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape().front();
+    }
+  }
+
+  return 0;
+}
+
 }  // namespace
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
@@ -82,12 +98,17 @@ std::unique_ptr<State> MultiModalLanguageModel::CreateState(DeviceSpan<int32_t> 
   return std::make_unique<MultiModalPipelineState>(*this, sequence_lengths, params);
 }
 
-VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorParams& params, const int64_t num_image_tokens)
+VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorParams& params,
+                         const int64_t num_images, const int64_t num_image_tokens)
     : State{params, model},
       model_{model},
-      num_image_tokens_{num_image_tokens} {
+      num_image_tokens_{num_image_tokens},
+      num_images_{num_images} {
   extra_inputs_.Add(model_.vision_session_->GetInputNames());
-  image_features_.Add();
+  image_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,  // Optional model input
+                                                         model_.config_->model.vision.outputs.image_features,
+                                                         num_images_, num_image_tokens_);
+  image_features_->Add();
 }
 
 DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
@@ -108,7 +129,8 @@ DeviceSpan<float> SpeechState::Run(int current_length, DeviceSpan<int32_t>& next
   return {};
 }
 
-EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params, const int64_t num_image_tokens, const int64_t num_audio_tokens)
+EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params,
+                               const int64_t num_images, const int64_t num_image_tokens, const int64_t num_audio_tokens)
     : State{params, model},
       model_{model},
       num_image_tokens_{num_image_tokens},
@@ -117,13 +139,13 @@ EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const Gener
   if (model_.vision_session_) {
     image_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,  // Optional model input
                                                            model_.config_->model.embedding.inputs.image_features,
-                                                           num_image_tokens_);
+                                                           num_images, num_image_tokens_);
     image_features_->Add();
   }
   if (model_.speech_session_) {
     audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,  // Optional model input
                                                            model_.config_->model.embedding.inputs.audio_features,
-                                                           num_audio_tokens_);
+                                                           -1, num_audio_tokens_);
     audio_features_->Add();
   }
   inputs_embeds_.Add();
@@ -170,14 +192,15 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
       model_{model},
       num_image_tokens_{GetNumImageTokens(params_->extra_inputs)},
       num_audio_tokens_{GetNumAudioTokens(params_->extra_inputs, model_.config_->model.speech.inputs.audio_sizes)},
+      num_images_{GetImageFeatureBatchSize(params_->extra_inputs)},
       adapters_{std::make_shared<Adapters>(&model_)} {
   if (model_.vision_session_) {
-    vision_state_ = std::make_unique<VisionState>(model_, params, num_image_tokens_);
+    vision_state_ = std::make_unique<VisionState>(model_, params, num_images_, num_image_tokens_);
   }
   if (model_.speech_session_) {
     speech_state_ = std::make_unique<SpeechState>(model_, params, num_audio_tokens_);
   }
-  embedding_state_ = std::make_unique<EmbeddingState>(model, params, num_image_tokens_, num_audio_tokens_);
+  embedding_state_ = std::make_unique<EmbeddingState>(model, params, num_images_, num_image_tokens_, num_audio_tokens_);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
 
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
@@ -214,7 +237,7 @@ DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<in
     if (num_audio_tokens_ > 0 && speech_state_) {
       speech_state_->Run(current_length, next_tokens, next_indices);
     }
-    if (vision_state_) embedding_state_->image_features_->ReuseFeaturesBuffer(vision_state_->image_features_);
+    if (vision_state_) embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
     if (speech_state_) embedding_state_->audio_features_->ReuseFeaturesBuffer(speech_state_->audio_features_);
     embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_state_->inputs_embeds_);
     embedding_state_->Run(current_length, next_tokens, next_indices);

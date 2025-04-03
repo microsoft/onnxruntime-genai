@@ -44,6 +44,9 @@ struct Payload {
   const Audios* audios;
 };
 
+struct Config;
+struct SessionInfo;
+
 template <typename T>
 std::unique_ptr<OrtValue> ProcessTensor(OrtxTensor* tensor, Ort::Allocator& allocator);
 
@@ -53,6 +56,11 @@ struct Processor {
   Processor() = default;
   Processor(const Processor&) = delete;
   Processor& operator=(const Processor&) = delete;
+
+  template <typename ProcessorType>
+  static std::shared_ptr<Processor> Create(Config& config, const SessionInfo& session_info) {
+    return std::make_shared<ProcessorType>(config, session_info);
+  }
 
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const = 0;
 };

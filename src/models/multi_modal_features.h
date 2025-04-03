@@ -11,7 +11,7 @@ struct MultiModalFeatures {
     Output
   };
 
-  MultiModalFeatures(State& state, MultiModalFeatures::Mode mode, const std::string& name, int64_t num_feature_tokens);
+  MultiModalFeatures(State& state, MultiModalFeatures::Mode mode, const std::string& name, int64_t batch_size, int64_t num_feature_tokens);
   MultiModalFeatures(const MultiModalFeatures&) = delete;
   MultiModalFeatures& operator=(const MultiModalFeatures&) = delete;
 
