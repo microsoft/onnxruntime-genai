@@ -603,7 +603,7 @@ struct OrtSessionOptions {
   OrtSessionOptions& SetCustomThreadCreationOptions(void* ort_custom_thread_creation_options);      ///< Wraps OrtApi::SessionOptionsSetCustomThreadCreationOptions
   OrtSessionOptions& SetCustomJoinThreadFn(OrtCustomJoinThreadFn ort_custom_join_thread_fn);        ///< Wraps OrtApi::SessionOptionsSetCustomJoinThreadFn
   OrtSessionOptions& RegisterCustomOpsLibrary(const ORTCHAR_T* library_file_prefix);                ///< Wraps OrtApi::SessionOptionsRegisterCustomOpsLibrary
-  
+
   static void operator delete(void* p) { Ort::api->ReleaseSessionOptions(reinterpret_cast<OrtSessionOptions*>(p)); }
   Ort::Abstract make_abstract;
 };

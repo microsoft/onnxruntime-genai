@@ -454,7 +454,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     fs::path custom_library_file_prefix{config_session_options.custom_ops_library.value()};
     session_options.RegisterCustomOpsLibrary(custom_library_file_prefix.c_str());
   }
-  
+
   if (config_session_options.graph_optimization_level.has_value()) {
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
