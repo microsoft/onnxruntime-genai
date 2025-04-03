@@ -65,5 +65,12 @@ fi
 GetFile https://nodejs.org/dist/v18.17.1/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz /tmp/src/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz
 tar --strip 1 -xf /tmp/src/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz -C /usr
 
+# Add Python to PATH
+echo "Adding Python to PATH"
+
+if [ -f /opt/python/cp312-cp312/bin/python3 ]; then
+  export PATH=/opt/python/cp312-cp312/bin:$PATH
+fi
+
 cd /
 rm -rf /tmp/src
