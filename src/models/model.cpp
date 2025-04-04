@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
+// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #include <algorithm>
 #include <climits>
 #include <random>
@@ -431,6 +431,19 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.AddConfigEntry("session.use_env_allocators", "1");
   }
 
+  if (config_session_options.intra_op_allow_spinning.has_value()) {
+    session_options.AddConfigEntry("session.intra_op.allow_spinning", std::to_string(config_session_options.intra_op_allow_spinning.value()).c_str());
+  }
+
+  if (config_session_options.inter_op_allow_spinning.has_value()) {
+    session_options.AddConfigEntry("session.inter_op.allow_spinning", std::to_string(config_session_options.inter_op_allow_spinning.value()).c_str());
+  }
+
+  if (config_session_options.custom_ops_library.has_value()) {
+    fs::path custom_library_file_prefix{config_session_options.custom_ops_library.value()};
+    session_options.RegisterCustomOpsLibrary(custom_library_file_prefix.c_str());
+  }
+
   if (config_session_options.graph_optimization_level.has_value()) {
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
@@ -518,6 +531,17 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         opts.emplace(option.first, option.second);
       }
       session_options.AppendExecutionProvider("WebGPU", opts);
+    } else if (provider_options.name == "VitisAI") {
+      // Add Provider options
+      std::unordered_map<std::string, std::string> provider_options_map;
+      for (const auto& option : provider_options.options) {
+        provider_options_map[option.first] = option.second;
+      }
+      try {
+        session_options.AppendExecutionProvider("VitisAI", provider_options_map);
+      } catch (std::exception& e) {
+        throw std::runtime_error(e.what());
+      }
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }

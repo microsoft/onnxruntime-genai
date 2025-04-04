@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #pragma once
 
 namespace Generators {
@@ -66,9 +67,12 @@ struct Config {
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
     std::optional<std::string> enable_profiling;
+    std::optional<std::string> custom_ops_library;
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
     //                     Identify the reason for the crash to enable allocator sharing by default.
     bool use_env_allocators{};
+    std::optional<bool> intra_op_allow_spinning;
+    std::optional<bool> inter_op_allow_spinning;
 
     std::vector<ProviderOptions> provider_options;
     std::optional<GraphOptimizationLevel> graph_optimization_level;
