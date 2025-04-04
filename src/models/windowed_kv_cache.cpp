@@ -216,8 +216,8 @@ void WindowedKeyValueCache::TransitionToTokenGeneration() {
       int64_t offset =  j * kv_cache_shape_in_[2] * kv_cache_shape_in_[3];
       int64_t updated_offset = j * updated_kv_cache_shape_in[2] * updated_kv_cache_shape_in[3];
       int64_t num_carry_over = (kv_cache_shape_in_[2] - updated_window_size) * kv_cache_shape_in_[3];
-      int64_t num_left_behind = updated_window_size * kv_cache_shape_in_[3];
       {
+        int64_t num_left_behind = updated_window_size * kv_cache_shape_in_[3];
         // copy over the last (context_length - window_size_ - 1) tokens to the new cache
         cpu_span<T> key_cache_dst(key_cache_data + updated_offset, num_carry_over);
         cpu_span<T> key_cache_src(key_cache_in_data + offset + num_left_behind, num_carry_over);
@@ -229,13 +229,14 @@ void WindowedKeyValueCache::TransitionToTokenGeneration() {
       }
       {
         int64_t output_offset = j * kv_cache_shape_out_[2] * kv_cache_shape_out_[3];
+        int64_t num_copy = window_size_ * kv_cache_shape_out_[3];
         // copy the new window_size_ tokens from the output cache to the new cache
-        cpu_span<T> key_cache_dst(key_cache_data + updated_offset + num_carry_over, num_left_behind);
-        cpu_span<T> key_cache_src(key_cache_out_data + output_offset, num_left_behind);
+        cpu_span<T> key_cache_dst(key_cache_data + updated_offset + num_carry_over, num_copy);
+        cpu_span<T> key_cache_src(key_cache_out_data + output_offset, num_copy);
         std::copy(key_cache_src.begin(), key_cache_src.end(), key_cache_dst.begin());
   
-        cpu_span<T> value_cache_dst(value_cache_data + updated_offset + num_carry_over, num_left_behind);
-        cpu_span<T> value_cache_src(value_cache_out_data + output_offset, num_left_behind);
+        cpu_span<T> value_cache_dst(value_cache_data + updated_offset + num_carry_over, num_copy);
+        cpu_span<T> value_cache_src(value_cache_out_data + output_offset, num_copy);
         std::copy(value_cache_src.begin(), value_cache_src.end(), value_cache_dst.begin());
       }
     }
