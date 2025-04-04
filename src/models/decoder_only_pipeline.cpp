@@ -13,6 +13,10 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
   for (const auto& model : config_->model.decoder.pipeline) {
     sessions_.emplace_back(OrtSession::Create(ort_env, (config_->config_path / fs::path(model.filename)).c_str(),
                                               GetSessionOptions(model.model_id)));
+  }
+
+#if 0
+  // TODO: Baiju, is this still needed?
 
     if (!p_device_inputs_ && model.session_options.has_value()) {
       const auto& provider_options = (*model.session_options).provider_options;
@@ -30,9 +34,10 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
     // Device allocator is guaranteed to be the cpu allocator.
     InitDeviceAllocator(*sessions_.front());
   }
+#endif
 
   for (auto& session : sessions_) {
-    session_info_->Add(*session);
+    session_info_.Add(*session);
   }
 }
 
