@@ -15,27 +15,6 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
                                               GetSessionOptions(model.model_id)));
   }
 
-#if 0
-  // TODO: Baiju, is this still needed?
-
-    if (!p_device_inputs_ && model.session_options.has_value()) {
-      const auto& provider_options = (*model.session_options).provider_options;
-      if (std::any_of(provider_options.begin(), provider_options.end(),
-                      [](const auto& elem) { return !elem.name.empty(); })) {
-        InitDeviceAllocator(*sessions_.back());
-      }
-    }
-  }
-
-  if (!p_device_inputs_) {
-    // If the device allocator has not been created, it implies all
-    // sessions are configured to run on CPU.
-    // Pick any session to create the device allocator.
-    // Device allocator is guaranteed to be the cpu allocator.
-    InitDeviceAllocator(*sessions_.front());
-  }
-#endif
-
   for (auto& session : sessions_) {
     session_info_.Add(*session);
   }

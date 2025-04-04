@@ -368,40 +368,30 @@ void EnsureDeviceOrtInit(DeviceType type) {
   if (allocator.allocator_)
     return;
 
-  auto session_options = OrtSessionOptions::Create();
-
-  const char* device_name{};
-  switch (type) {
-    case DeviceType::CUDA:
-      device_name = "cuda";
-      break;
-    case DeviceType::DML:
-      device_name = "dml";
-      break;
-    case DeviceType::WEBGPU:
-      device_name = "webgpu";
-      break;
-    case DeviceType::QNN:
-      device_name = "qnn";
-      break;
-    default:
-      throw std::runtime_error("Unknown device type");
-  }
-
-  std::vector<Config::ProviderOptions> provider_options_list;
-  provider_options_list.emplace_back(Config::ProviderOptions{device_name, {}});
-
-  SetProviderSessionOptions(*session_options, provider_options_list, true, false);
-  allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared"};
+  // Names for the device types used by 'SetProviderSessionOptions'
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "dml", "webgpu", "qnn"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
-  auto name = device_type_names[static_cast<int>(type)];
+  // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
+  auto session_options = OrtSessionOptions::Create();
+  std::vector<Config::ProviderOptions> provider_options_list;
+  provider_options_list.emplace_back(Config::ProviderOptions{device_type_names[static_cast<int>(type)], {}});
+  SetProviderSessionOptions(*session_options, provider_options_list, true, false);
+  session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
+
+  allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
+
+  // Names for the device memory types used by 'OrtMemoryInfo::Create'
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared"};
+  static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
+
+  // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
+  auto name = device_memory_type_names[static_cast<int>(type)];
   auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
   allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
   if (!allocator.allocator_)
     throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
-  GetDeviceInterface(type)->InitOrt(*Ort::api, *allocator.allocator_);  // Necessary for any shared library providers so they can access Ort::api
+  GetDeviceInterface(type)->InitOrt(*Ort::api, *allocator.allocator_);
 }
 
 void SessionInfo::Add(OrtSession& session) {
