@@ -359,8 +359,9 @@ static const uint8_t g_trivial_model[] = {
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-void EnsureDeviceOrtInit(DeviceType type) {
+void EnsureDeviceOrtInit(DeviceInterface& device) {
   // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
+  auto type = device.GetType();
   if (type == DeviceType::CPU)
     return;
 
@@ -389,9 +390,11 @@ void EnsureDeviceOrtInit(DeviceType type) {
   auto name = device_memory_type_names[static_cast<int>(type)];
   auto memory_info = OrtMemoryInfo::Create(name, OrtAllocatorType::OrtDeviceAllocator, 0, OrtMemType::OrtMemTypeDefault);
   allocator.allocator_ = Ort::Allocator::Create(*allocator.session_, *memory_info);
-  if (!allocator.allocator_)
+  if (!allocator.allocator_) {
+    allocator = {};  // Reset everything just to be safe
     throw std::runtime_error("Unexpected failure to create device memory allocator for " + std::string(name));
-  GetDeviceInterface(type)->InitOrt(*Ort::api, *allocator.allocator_);
+  }
+  device.InitOrt(*Ort::api, *allocator.allocator_);
 }
 
 void SessionInfo::Add(OrtSession& session) {
@@ -445,7 +448,7 @@ std::vector<std::string> SessionInfo::GetInputNames() const {
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
-  EnsureDeviceOrtInit(p_device_->GetType());
+  EnsureDeviceOrtInit(*p_device_);
 
   // Only CUDA and DML does every input on the device
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML)
