@@ -455,7 +455,7 @@ void Generator::GenerateNextToken() {
   }
 
   if (!computed_logits_) {
-    // std::cout<<"Inside of GenerateNextToken"<<std::endl;
+    std::cout<<"Inside of GenerateNextToken"<<std::endl;
     auto next_tokens = search_->GetNextTokens();
     if (last_action_ == Action::rewound)
       search_->AppendTokens(next_tokens);
@@ -466,7 +466,7 @@ void Generator::GenerateNextToken() {
   search_->ApplyMinLength(search.min_length);
   search_->ApplyRepetitionPenalty(search.repetition_penalty);
 
-  if (g_log.enabled && g_log.generate_next_token) {
+  // if (g_log.enabled && g_log.generate_next_token) {
   auto& stream = Log("generate_next_token");
   stream << SGR::Fg_Green << "do_sample: " << SGR::Reset << search.do_sample << ' '
           << SGR::Fg_Green << "top_k: " << SGR::Reset << search.top_k << ' '
@@ -474,7 +474,7 @@ void Generator::GenerateNextToken() {
           << SGR::Fg_Green << "temperature: " << SGR::Reset << search.temperature << ' '
           << SGR::Fg_Cyan << "sequence length: " << SGR::Reset << search_->GetSequenceLength()
           << std::endl;
-  }
+  // }
 
   last_action_ = Action::generated;
   if (!search.do_sample || search.top_k == 1 || search.temperature == 0) {

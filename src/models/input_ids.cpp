@@ -50,6 +50,15 @@ void DefaultInputIDs::Add() {
   }
 }
 
+void DefaultInputIDs::AddDecoderInputs() {
+  input_index_ = state_.inputs_.size();
+  std::cout<<"Nmae of InputIDs in decoder inputs = "<<name_<<std::endl;
+  std::cout<<"Input index of InputIDs in deocder inputs = "<<input_index_<<std::endl;
+  std::cout<<"Value of InputIDs in decoder inputs = "<<value_->GetOrtTensor()<<std::endl;
+  state_.inputs_.push_back(nullptr);
+  state_.input_names_.push_back(name_);
+}
+
 void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   auto new_tokens_cpu = new_tokens.CopyDeviceToCpu();
   // std::cout<<"State inputs = "<<state_.inputs_[0]<<std::endl;
@@ -73,15 +82,15 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
 
   // For beam search, resize input_ids shape based on new_tokens
   size_t sequence_length = static_cast<size_t>(new_tokens.size()) / state_.params_->BatchBeamSize();
-  // std::cout<<"Batch size = "<<state_.params_->BatchBeamSize()<<std::endl;
-  // std::cout<<"Inside of DefaultInputIDs::Update = "<<int(sequence_length)<<std::endl;
-  // std::cout<<"New tokens size = "<<int(new_tokens.size())<<std::endl;
-  // std::cout<<"Number of beams = "<<int(state_.params_->search.num_beams)<<std::endl;
+  std::cout<<"Batch size = "<<state_.params_->BatchBeamSize()<<std::endl;
+  std::cout<<"Inside of DefaultInputIDs::Update = "<<int(sequence_length)<<std::endl;
+  std::cout<<"New tokens size = "<<int(new_tokens.size())<<std::endl;
+  std::cout<<"Number of beams = "<<int(state_.params_->search.num_beams)<<std::endl;
   if (is_prompt_ && state_.params_->search.num_beams > 1)
     sequence_length = static_cast<size_t>(new_tokens.size()) / state_.params_->search.batch_size;
-    // std::cout<<"Batch size beam search = "<<state_.params_->search.batch_size<<std::endl;
-    // std::cout<<"Inside of DefaultInputIDs::Update beam search = "<<int(sequence_length)<<std::endl;
-    // std::cout<<"New tokens size beam search  = "<<int(new_tokens.size())<<std::endl;
+    std::cout<<"Batch size beam search = "<<state_.params_->search.batch_size<<std::endl;
+    std::cout<<"Inside of DefaultInputIDs::Update beam search = "<<int(sequence_length)<<std::endl;
+    std::cout<<"New tokens size beam search  = "<<int(new_tokens.size())<<std::endl;
 
   if (static_cast<size_t>(shape_[1]) != sequence_length) {
     // std::cout<<"Setting the shape_1"<<shape_[1]<<std::endl;
@@ -91,7 +100,7 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
     state_.inputs_[input_index_] = value_->GetOrtTensor();
   }
 
-  // std::cout<<"Shapes match"<<std::endl;
+  std::cout<<"Shapes match"<<std::endl;
 
   // Update input_ids with next tokens
   auto data_span = value_->GetDeviceSpan<int32_t>();

@@ -32,7 +32,8 @@ struct EncoderDecoderState : State {
   DefaultInputIDs encoder_input_ids_{*this};
   DefaultPositionInputs encoder_attention_mask_;
 
-  DefaultInputIDs input_ids_{*this};
+  // DefaultInputIDs input_ids_{*this};
+  std::unique_ptr<OrtValue> decoder_input_ids_, expanded_decoder_input_ids_;
   Logits logits_{*this};
   DefaultKeyValueCache kv_cache_{*this};
 

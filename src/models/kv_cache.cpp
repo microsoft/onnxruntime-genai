@@ -362,8 +362,6 @@ CrossCache::CrossCache(State& state, int sequence_length)
 void CrossCache::AddOutputs() {
   // std::cout<<"Inside of CrossCache::AddOutputs"<<std::endl;
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    std::cout<<"Name = "<<output_name_strings_[i].c_str()<<std::endl;
-    std::cout<<"Value = "<<values_[i].get()<<std::endl;
     state_.outputs_.push_back(values_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
   }
@@ -372,8 +370,6 @@ void CrossCache::AddOutputs() {
 
 void CrossCache::AddInputs() {
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    std::cout<<"Name = "<<input_name_strings_[i].c_str()<<std::endl;
-    std::cout<<"Value = "<<values_[i].get()<<std::endl;
     state_.inputs_.push_back(values_[i].get());
     state_.input_names_.push_back(input_name_strings_[i].c_str());
   }
