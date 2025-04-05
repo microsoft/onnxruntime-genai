@@ -368,6 +368,11 @@ void EnsureDeviceOrtInit(DeviceType type) {
   if (allocator.allocator_)
     return;
 
+  // Allocator lifetime is tied to the execution provider lifetime, which is typically per Session.
+  // We create a global dummy Session using a trivial model with the required EP in order to get the allocator so we can
+  // re-use it for all models.
+  // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
+
   // Names for the device types used by 'SetProviderSessionOptions'
   static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "dml", "webgpu", "qnn"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
