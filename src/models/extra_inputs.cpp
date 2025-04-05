@@ -15,7 +15,7 @@ PresetExtraInputs::PresetExtraInputs(State& state)
            }}} {}
 
 void PresetExtraInputs::Add() {
-  const auto input_names_vector = state_.model_.session_info_->GetInputNames();
+  const auto input_names_vector = state_.model_.session_info_.GetInputNames();
   const std::unordered_set<std::string> input_names(state_.input_names_.begin(), state_.input_names_.end());
   std::vector<std::string> unclaimed_input_names;
   // Add any model input for which we don't have a corresponding input in the state to the unclaimed_input_names

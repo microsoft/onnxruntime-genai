@@ -9,8 +9,8 @@ namespace Generators {
 MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mode, const std::string& name, int64_t num_feature_tokens)
     : state_{state},
       type_{mode == MultiModalFeatures::Mode::Input
-                ? model_.session_info_->GetInputDataType(name)
-                : model_.session_info_->GetOutputDataType(name)},
+                ? model_.session_info_.GetInputDataType(name)
+                : model_.session_info_.GetOutputDataType(name)},
       mode_{mode},
       name_{name} {
   shape_.push_back(num_feature_tokens);
