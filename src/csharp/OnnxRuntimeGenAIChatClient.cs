@@ -20,10 +20,14 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
     private readonly OnnxRuntimeGenAIChatClientOptions? _options;
     /// <summary>The wrapped <see cref="Model"/>.</summary>
     private readonly Model _model;
+    /// <summary>The wrapped <see cref="Config"/>.</summary>
+    private readonly Config? _config;
     /// <summary>The wrapped <see cref="Tokenizer"/>.</summary>
     private readonly Tokenizer _tokenizer;
     /// <summary>Whether to dispose of <see cref="_model"/> when this instance is disposed.</summary>
     private readonly bool _ownsModel;
+    /// <summary>Whether to dispose of <see cref="_config"/> when this instance is disposed.</summary>
+    private readonly bool _ownsConfig;
     /// <summary>Metadata for the chat client.</summary>
     private readonly ChatClientMetadata _metadata;
 
@@ -43,6 +47,8 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
         }
 
         _ownsModel = true;
+        _ownsConfig = false;
+        _config = null;
         _model = new Model(modelPath);
         _tokenizer = new Tokenizer(_model);
         _options = options;
@@ -67,7 +73,35 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
         }
 
         _ownsModel = ownsModel;
+        _ownsConfig = false;
+        _config = null;
         _model = model;
+        _tokenizer = new Tokenizer(_model);
+        _options = options;
+
+        _metadata = new("onnx");
+    }
+
+    /// <summary>Initializes an instance of the <see cref="OnnxRuntimeGenAIChatClient"/> class.</summary>
+    /// <param name="config">The config to employ.</param>
+    /// <param name="ownsConfig">
+    /// <see langword="true"/> if this <see cref="IChatClient"/> owns the <paramref name="config"/> and should
+    /// dispose of it when this <see cref="IChatClient"/> is disposed; otherwise, <see langword="false"/>.
+    /// The default is <see langword="true"/>.
+    /// </param>
+    /// <param name="options">Options used to configure the client instance.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="config"/> is <see langword="null"/>.</exception>
+    public OnnxRuntimeGenAIChatClient(Config config, bool ownsConfig = true, OnnxRuntimeGenAIChatClientOptions? options = null)
+    {
+        if (config is null)
+        {
+            throw new ArgumentNullException(nameof(config));
+        }
+
+        _ownsModel = true;
+        _ownsConfig = ownsConfig;
+        _config = config;
+        _model = new Model(_config);
         _tokenizer = new Tokenizer(_model);
         _options = options;
 
@@ -87,6 +121,11 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
         if (_ownsModel)
         {
             _model.Dispose();
+        }
+
+        if (_ownsConfig)
+        {
+            _config?.Dispose();
         }
     }
 

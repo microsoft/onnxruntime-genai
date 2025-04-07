@@ -558,7 +558,7 @@ struct OgaNamedTensors : OgaAbstract {
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
-  std::unique_ptr<OgaTensor> Get(const char* name) const {
+  std::unique_ptr<OgaTensor> Get(const char* name) {
     OgaTensor* p;
     OgaCheckResult(OgaNamedTensorsGet(this, name, &p));
     return std::unique_ptr<OgaTensor>(p);

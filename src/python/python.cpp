@@ -310,7 +310,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<OgaNamedTensors>(m, "NamedTensors")
       .def(pybind11::init([]() { return OgaNamedTensors::Create(); }))
-      .def("__getitem__", [](const OgaNamedTensors& named_tensors, const std::string& name) {
+      .def("__getitem__", [](OgaNamedTensors& named_tensors, const std::string& name) {
         auto tensor = named_tensors.Get(name.c_str());
         if (!tensor)
           throw std::runtime_error("Tensor with name: " + name + " not found.");
@@ -323,7 +323,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         named_tensors.Set(name.c_str(), value);
       })
       .def("__contains__", [](const OgaNamedTensors& named_tensors, const std::string& name) {
-        return named_tensors.Get(name.c_str()) != nullptr;
+        return const_cast<OgaNamedTensors&>(named_tensors).Get(name.c_str()) != nullptr;
       })
       .def("__delitem__", [](OgaNamedTensors& named_tensors, const std::string& name) {
         named_tensors.Delete(name.c_str());
