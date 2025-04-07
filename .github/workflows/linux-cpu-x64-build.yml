@@ -44,8 +44,8 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           source "$HOME/.cargo/env"
-          rustup install 1.82.0
-          rustup default 1.82.0
+          rustup install 1.82.0-x86_64-unknown-linux-gnu
+          rustup default 1.82.0-x86_64-unknown-linux-gnu
           rustup show active-toolchain
 
       - name: Check rustc
