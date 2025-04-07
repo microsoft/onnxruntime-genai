@@ -39,12 +39,19 @@ jobs:
         with:
           gradle-version: '8.6'
 
-      - name: Install Rust Toolchain
-        uses: actions-rs/toolchain@v1
-        with:
-          toolchain: 1.82.0
-          override: true
-          profile: minimal
+      - name: Install Rust with rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          source "$HOME/.cargo/env"
+          rustup install 1.82.0
+          rustup default 1.82.0
+          rustup show active-toolchain
+
+      - name: Check rustc
+        run: |
+          which rustc
+          rustc --version
 
       - name: Get the Latest OnnxRuntime Nightly Version
         shell: pwsh
