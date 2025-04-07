@@ -20,7 +20,7 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
 
   // If the model expects 3 dimensions, add a batch dimension
   if (dims == 3) {
-    shape_.push_back(1);
+    shape_.push_back(batch_size);
   }
 
   shape_.push_back(num_feature_tokens);
