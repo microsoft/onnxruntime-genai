@@ -162,8 +162,8 @@ struct CudaInterfaceImpl final : DeviceInterface {
     cuda::LaunchFinalizeCrossQK(GetStream(), iteration_number, context_decoding_len, batch_size, num_beams, max_length, num_alignment_heads, frames_of_k, cross_qk_buffer_data, cross_qk_output, num_return_sequences, cache_indir_data);
   }
 
-  void LaunchAddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_size, const uint32_t* logits_mask, cudaStream_t stream) override {
-    cuda::LaunchAddLogitsMask(batch_logits, batch_beam_size, vocab_size, logits_mask, stream);
+  void LaunchAddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_size, const uint32_t* logits_mask) override {
+    cuda::LaunchAddLogitsMask(batch_logits, batch_beam_size, vocab_size, logits_mask, GetStream());
   }
 };
 
