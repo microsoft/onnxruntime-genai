@@ -165,7 +165,6 @@ struct CudaInterfaceImpl final : DeviceInterface {
   void LaunchAddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_size, const uint32_t* logits_mask, cudaStream_t stream) override {
     cuda::LaunchAddLogitsMask(batch_logits, batch_beam_size, vocab_size, logits_mask, stream);
   }
-
 };
 
 std::unique_ptr<DeviceInterface> g_cuda_device;
