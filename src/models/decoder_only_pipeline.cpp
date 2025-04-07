@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "../logging.h"
+#include "../timer.h"
 #include "decoder_only_pipeline.h"
 #include "windowed_kv_cache.h"
 
@@ -88,7 +89,12 @@ DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<in
         OrtSession::Create(model_.ort_env_, (model_.config_->config_path / fs::path(model_.config_->model.decoder.pipeline[id_].filename)).c_str(),
                            model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
   }
+
+  Timer timer{};
   State::Run(*model_.sessions_[id_]);
+  const auto elapsed = timer.Elapsed();
+  LogTiming(MakeString("intermediate pipeline state run [", id_, "]"), timer.Elapsed());
+
   return {};
 }
 
@@ -309,6 +315,8 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
 
 DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                 DeviceSpan<int32_t> next_indices) {
+  Timer timer{};
+
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
   size_t num_chunks{1};
@@ -343,7 +351,12 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
 
   first_run_ = false;
 
-  return logits_.Get();
+  auto logits = logits_.Get();
+
+  const auto elapsed = timer.Elapsed();
+  LogTiming("Run", elapsed);
+
+  return logits;
 }
 
 void DecoderOnlyPipelineState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens,

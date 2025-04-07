@@ -11,6 +11,7 @@
 
 #include "../generators.h"
 #include "../search.h"
+#include "../timer.h"
 #include "model.h"
 #include "gpt.h"
 #include "decoder_only.h"
@@ -62,8 +63,15 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
     DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
   }
 
-  session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
-              output_names_.data(), outputs_.data(), output_names_.size());
+  {
+    Timer timer{};
+
+    session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
+                output_names_.data(), outputs_.data(), output_names_.size());
+
+    const auto elapsed = timer.Elapsed();
+    LogTiming("session.Run", elapsed);
+  }
 
   extra_outputs_.RegisterOutputs();
 
