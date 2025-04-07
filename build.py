@@ -77,7 +77,7 @@ def _parse_args():
     parser.add_argument("--build", action="store_true", help="Build.")
     parser.add_argument("--test", action="store_true", help="Run tests.")
     parser.add_argument(
-        "--clean", action="store_true", help="Run 'cmake --build --target clean' for the selected config/s."
+        "--clean", action="store_true", help="Run 'cmake --build --target clean' for the selected config."
     )
 
     parser.add_argument("--skip_tests", action="store_true", help="Skip all tests. Overrides --test.")
@@ -125,8 +125,6 @@ def _parse_args():
     )
 
     parser.add_argument("--use_rocm", action="store_true", help="Whether to use ROCm. Default is to not use rocm.")
-
-    parser.add_argument("--use_webgpu", action="store_true", help="Whether to use WebGpu. Default is to not use WebGpu.")
 
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
@@ -324,7 +322,7 @@ def _validate_cmake_args(args: argparse.Namespace):
 
 def _validate_args(args: argparse.Namespace):
     # default to all 3 stages
-    if not args.update and not args.build and not args.test:
+    if not any((args.update, args.clean, args.build, args.test)):
         args.update = True
         args.build = True
         args.test = True
@@ -475,7 +473,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
         f"-DUSE_ROCM={'ON' if args.use_rocm else 'OFF'}",
-        f"-DUSE_WEBGPU={'ON' if args.use_webgpu else 'OFF'}",
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
@@ -508,6 +505,13 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             "-DPLATFORM_NAME=" + platform_name,
         ]
 
+        if args.ios or args.macos == "Catalyst" or args.build_apple_framework:
+            command += [
+                "-DENABLE_PYTHON=OFF",
+                "-DENABLE_TESTS=OFF",
+                "-DENABLE_MODEL_BENCHMARK=OFF",
+            ]
+
     if args.macos:
         command += [
             f"-DCMAKE_OSX_SYSROOT={args.apple_sysroot}",
@@ -534,9 +538,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             f"-DIPHONEOS_DEPLOYMENT_TARGET={args.apple_deploy_target}",
             # The following arguments are specific to the OpenCV toolchain file
             f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file()}",
-            "-DENABLE_PYTHON=OFF",
-            "-DENABLE_TESTS=OFF",
-            "-DENABLE_MODEL_BENCHMARK=OFF",
         ]
         if args.use_guidance:
             command += ["-DRust_CARGO_TARGET=aarch64-apple-ios-sim"]
@@ -557,9 +558,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             f"-DCMAKE_CC_FLAGS=--target={macabi_target}",
             f"-DCMAKE_CC_FLAGS_RELEASE=-O3 -DNDEBUG --target={macabi_target}",
             "-DMAC_CATALYST=1",
-            "-DENABLE_PYTHON=OFF",
-            "-DENABLE_TESTS=OFF",
-            "-DENABLE_MODEL_BENCHMARK=OFF",
         ]
 
     if args.arm64:
@@ -646,12 +644,12 @@ def clean(args: argparse.Namespace, env: dict[str, str]):
     Clean the build output.
     """
     log.info("Cleaning targets")
-    cmd_args = [str(args.cmake), "--build", str(args.build_dir), "--config", args.config, "--target", "clean"]
+    cmd_args = [str(args.cmake_path), "--build", str(args.build_dir), "--config", args.config, "--target", "clean"]
     util.run(cmd_args, env=env)
 
 
 if __name__ == "__main__":
-    if not (util.is_windows() or util.is_linux() or util.is_mac()):
+    if not (util.is_windows() or util.is_linux() or util.is_mac() or util.is_aix()):
         raise OSError(f"Unsupported platform {sys.platform}.")
 
     arguments = _parse_args()
@@ -661,6 +659,9 @@ if __name__ == "__main__":
 
     if arguments.update:
         update(arguments, environment)
+
+    if arguments.clean:
+        clean(arguments, environment)
 
     if arguments.build:
         build(arguments, environment)

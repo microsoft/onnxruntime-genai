@@ -3,18 +3,73 @@
 #include "../generators.h"
 #include "utils.h"
 #include <cinttypes>
-
-#if USE_CUDA
-#include "../cuda/cuda_common.h"
-#endif
-
-#if USE_DML
-#include "../dml/dml_helpers.h"
 #include "model.h"
-#endif
 
 namespace Generators {
-static constexpr size_t c_value_count = 10;  // Dump this many values from the start of a tensor
+static constexpr size_t c_value_count = 10;  // Dump this many values at the start & end of a tensor (with '...' in between)
+
+// Tensor value statistics to help easily eyeball if the values in a tensor are reasonable.
+struct Stats {
+  float min = std::numeric_limits<float>::max();
+  size_t min_index{};
+  float max = std::numeric_limits<float>::lowest();
+  size_t max_index{};
+  float sum{};
+  float sum_of_squares{};
+  size_t count{};
+
+  bool found_non_finite{};
+  size_t first_non_finite_index{};
+  float non_finite_value{};
+  size_t non_finite_count{};
+
+  void Dump(std::ostream& stream) const {
+    stream << SGR::Fg_Cyan << " Min: " << SGR::Reset << min << " at index[" << min_index << "]"
+           << SGR::Fg_Cyan << " Max: " << SGR::Reset << max << " at index[" << max_index << "]"
+           << SGR::Fg_Cyan << " Mean: " << SGR::Reset << Mean()
+           << SGR::Fg_Cyan << " StdDev: " << SGR::Reset << StdDev();
+    if (found_non_finite)
+      stream << " " << SGR::Bg_Red << "First non-finite value at index " << first_non_finite_index << ": " << non_finite_value << " Count of non-finite values: " << non_finite_count << SGR::Reset;
+    stream << std::endl;
+  }
+
+  Stats& operator<<(float value) {
+    if (min > value) {
+      min = value;
+      min_index = count;
+    }
+    if (max < value) {
+      max = value;
+      max_index = count;
+    }
+    sum += value;
+    sum_of_squares += value * value;
+    count++;
+
+    // Check if a value is a NaN or Inf and update
+    if (!std::isfinite(value)) {
+      non_finite_count++;
+      if (!found_non_finite) {
+        found_non_finite = true;
+        first_non_finite_index = count;
+        non_finite_value = value;
+      }
+    }
+    return *this;
+  }
+
+  float Mean() const {
+    return sum / count;
+  }
+
+  float Variance() const {
+    return (sum_of_squares - sum * sum / count) / count;
+  }
+
+  float StdDev() const {
+    return std::sqrt(Variance());
+  }
+};
 
 template <typename... Types>
 const char* TypeToString(ONNXTensorElementDataType type, Ort::TypeList<Types...>) {
@@ -33,7 +88,7 @@ std::ostream& operator<<(std::ostream& stream, Ort::Float16_t v) {
 }
 
 std::ostream& operator<<(std::ostream& stream, Ort::BFloat16_t v) {
-  stream << "BF16:" << v.value;  // TODO: implement conversion when useful
+  stream << BFloat16ToFloat32(v);
   return stream;
 }
 
@@ -69,9 +124,36 @@ void DumpValues(std::ostream& stream, ONNXTensorElementDataType type, const void
     stream << SGR::Fg_Red << "Unhandled data type" << SGR::Reset;
 
   stream << SGR::Fg_Green << "]" << SGR::Reset << std::endl;
+
+  if (g_log.value_stats) {
+    Stats stats;
+    if (type == Ort::TypeToTensorType<float>) {
+      auto p_values = reinterpret_cast<const float*>(p_values_raw);
+      for (size_t i = 0; i < count; i++)
+        stats << p_values[i];
+    } else if (type == Ort::TypeToTensorType<double>) {
+      auto p_values = reinterpret_cast<const double*>(p_values_raw);
+      for (size_t i = 0; i < count; i++)
+        stats << static_cast<float>(p_values[i]);
+    } else if (type == Ort::TypeToTensorType<Ort::Float16_t>) {
+      auto p_values = reinterpret_cast<const Ort::Float16_t*>(p_values_raw);
+      for (size_t i = 0; i < count; i++)
+        stats << ToFloat32(p_values[i]);
+    } else if (type == Ort::TypeToTensorType<Ort::BFloat16_t>) {
+      auto p_values = reinterpret_cast<const Ort::BFloat16_t*>(p_values_raw);
+      for (size_t i = 0; i < count; i++)
+        stats << ToFloat32(p_values[i]);
+    }
+
+    if (stats.count)
+      stats.Dump(Log("value_stats"));
+  }
 }
 
 void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool dump_value) {
+  if (!value) {
+    return;
+  }
   auto type_info = value->GetTensorTypeAndShapeInfo();
   auto shape = type_info->GetShape();
   stream << SGR::Fg_Green << "Shape[ " << SGR::Reset;
@@ -95,39 +177,14 @@ void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool 
       break;
     case OrtMemoryInfoDeviceType_GPU: {
       stream << "GPU\r\n";
-#if USE_CUDA
       auto type = type_info->GetElementType();
-      size_t element_size = SizeOf(type);
-      auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
-      CudaCheck() == cudaMemcpy(cpu_copy.get(), value->GetTensorRawData(), element_size * element_count, cudaMemcpyDeviceToHost);
-      DumpValues(stream, type, cpu_copy.get(), element_count);
-#elif USE_DML
-      auto type = type_info->GetElementType();
-      size_t element_size = SizeOf(type);
-      auto cpu_copy = std::make_unique<uint8_t[]>(element_size * element_count);
-
-      if (value->GetTensorMutableRawData()) {
-        ComPtr<ID3D12Resource> gpu_resource;
-        Ort::ThrowOnError(model.GetOrtDmlApi()->GetD3D12ResourceFromAllocation(
-            model.allocator_device_,
-            value->GetTensorMutableRawData(),
-            &gpu_resource));
-
-        model.GetDmlReadbackHeap()->ReadbackFromGpu(
-            std::span(cpu_copy.get(), element_size * element_count),
-            gpu_resource.Get(),
-            0,
-            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-      }
-
-      DumpValues(stream, type, cpu_copy.get(), element_count);
-#else
-      stream << "Unexpected, using GPU memory but not compiled with CUDA or DML?";
-#endif
+      auto tensor_span = std::span<uint8_t>{const_cast<OrtValue*>(value)->GetTensorMutableData<uint8_t>(), SizeOf(type) * element_count};
+      auto device_span = model.p_device_->WrapMemory<uint8_t>(tensor_span);
+      DumpValues(stream, type, device_span.CopyDeviceToCpu().data(), element_count);
       break;
     }
     default:
-      stream << "Unhandled device type";
+      stream << "Unhandled device type: " << static_cast<int>(memory_info.GetDeviceType()) << "\r\n";
       break;
   }
 }

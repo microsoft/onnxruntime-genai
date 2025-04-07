@@ -3,7 +3,7 @@
         "arm64-v8a",
         "x86_64"
     ],
-    "android_min_sdk_version": 21,
+    "android_min_sdk_version": 24,
     "android_target_sdk_version": 33,
     "build_params": [
         "--android",

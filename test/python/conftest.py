@@ -19,7 +19,10 @@ def pytest_addoption(parser):
 
 
 def get_path_for_model(data_path, model_name, precision, device):
-    return os.path.join(data_path, model_name, precision, device)
+    model_path = os.path.join(data_path, model_name, precision, device)
+    if not os.path.exists(model_path):
+        pytest.skip(f"Model {model_name} not found at {model_path}")
+    return model_path
 
 
 @pytest.fixture
@@ -48,6 +51,16 @@ def llama_for(request):
         get_path_for_model,
         request.config.getoption("--test_models"),
         "llama",
+        "int4",
+    )
+
+
+@pytest.fixture
+def qwen_for(request):
+    return functools.partial(
+        get_path_for_model,
+        request.config.getoption("--test_models"),
+        "qwen-2.5",
         "int4",
     )
 

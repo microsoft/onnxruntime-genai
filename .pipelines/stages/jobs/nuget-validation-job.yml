@@ -100,9 +100,9 @@ jobs:
 
   - name: cuda_docker_image
     ${{ if eq(parameters.cuda_version, '11.8') }}:
-      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20240531.1
+      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20250109.1
     ${{ else }}:
-      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_ubi8_gcc12:20240610.1
+      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_ubi8_gcc12:20250109.1
 
   workspace:
     clean: all
@@ -171,5 +171,22 @@ jobs:
       CsprojConfiguration: $(csproj_configuration)
       LocalFolder: 'phi3.5-vision'
       ModelFolder: $(prebuild_phi3_5_vision_model_folder)
+  
+  - template: steps/utils/download-huggingface-model.yml
+    parameters:
+      HuggingFaceRepo: 'microsoft/Phi-4-multimodal-instruct-onnx'
+      LocalFolder: 'phi4-mm'
+      RepoFolder: $(prebuild_phi4_mm_model_folder)
+      WorkingDirectory: '$(Build.Repository.LocalPath)/examples/csharp/HelloPhi4MM'
+      HuggingFaceToken: $(HF_TOKEN)
+      os: ${{ parameters.os }}
+
+  - template: steps/nuget-validation-step.yml
+    parameters:
+      CsprojFolder: "examples/csharp/HelloPhi4MM"
+      CsprojName: "HelloPhi4MM"
+      CsprojConfiguration: $(csproj_configuration)
+      LocalFolder: 'phi4-mm'
+      ModelFolder: $(prebuild_phi4_mm_model_folder)
 
   - template: steps/compliant-and-cleanup-step.yml

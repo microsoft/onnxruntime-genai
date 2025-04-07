@@ -1,4 +1,6 @@
-# ONNX Runtime generate() API C Example
+# ONNX Runtime GenAI C Example
+
+Note: ONNX Runtime GenAI needs to be built from source. The headers and shared libraries that are built need to be copied over to the appropriate folders (i.e. the `include` and `lib` folders). Building from source is necessary because these examples have been updated to run with the latest changes. Once the next version of ONNX Runtime GenAI is released, the below instructions will be accurate again.
 
 ## Setup
 
@@ -9,24 +11,21 @@ git clone https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai/examples/c
 ```
 
-If they don't already exist, create folders called `include` and `lib`.
-
-```bash
-mkdir include
-mkdir lib
-```
-
-## Phi-3 mini
+## Phi-3.5 mini
 
 ### Download model
 
-This example uses the [Phi-3 mini model](https://huggingface.co/microsoft/Phi-3-mini-4k-instruct).
+This example uses the [Phi-3.5 mini model](https://huggingface.co/microsoft/Phi-3.5-mini-instruct).
 
-You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the HuggingFace CLI.
+You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the Hugging Face CLI.
 
 ```bash
-huggingface-cli download microsoft/Phi-3-mini-4k-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
+huggingface-cli download microsoft/Phi-3.5-mini-instruct-onnx --include cpu_and_mobile/cpu-int4-awq-block-128-acc-level-4/* --local-dir .
 ```
+
+### Chat vs Question Answering
+
+The below examples are for scenarios where you can have chat with the model (i.e. model retains the previous conversation), but if you want to run just Question Answering (i.e. model does not remember past conversation) use `-DPHI3_QA` instead of `-DPHI3`. Also, the executable name would be `phi3_qa` instead of `phi3`.
 
 ### Windows x64 CPU
 
@@ -37,22 +36,19 @@ Change into the `onnxruntime-genai\examples\c` folder.
 1. Install onnxruntime
    
    ```cmd
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip -o onnxruntime-win-x64-1.19.2.zip
-   tar xvf onnxruntime-win-x64-1.19.2.zip
-   copy onnxruntime-win-x64-1.19.2\include\* include
-   copy onnxruntime-win-x64-1.19.2\lib\* lib
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-x64-1.20.1.zip -o onnxruntime-win-x64-1.20.1.zip
+   tar -xvf onnxruntime-win-x64-1.20.1.zip
+   copy onnxruntime-win-x64-1.20.1\include\* include
+   copy onnxruntime-win-x64-1.20.1\lib\* lib
    ```
 
 2. Install onnxruntime-genai
 
    ```cmd
-   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-cpu-x64-capi.zip -o onnxruntime-genai-win-cpu-x64-capi.zip
-   tar xvf onnxruntime-genai-win-cpu-x64-capi.zip
-   cd onnxruntime-genai-win-cpu-x64-capi
-   tar xvf onnxruntime-genai-0.4.0-win-x64.zip
-   copy onnxruntime-genai-0.4.0-win-x64\include\* ..\include
-   copy onnxruntime-genai-0.4.0-win-x64\lib\* ..\lib
-   cd ..
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.6.0/onnxruntime-genai-0.6.0-win-x64.zip -o onnxruntime-genai-0.6.0-win-x64.zip
+   tar -xvf onnxruntime-genai-0.6.0-win-x64.zip
+   copy onnxruntime-genai-0.6.0-win-x64\include\* include
+   copy onnxruntime-genai-0.6.0-win-x64\lib\* lib
    ```
 
 #### Build this sample
@@ -67,7 +63,7 @@ cmake --build . --config Release
 
 ```bash
 cd Release
-.\phi3.exe path_to_model
+.\phi3.exe <path_to_model> <execution_provider>
 ```
 
 ### Windows x64 DirectML
@@ -81,8 +77,8 @@ Change into the `onnxruntime-genai\examples\c` folder.
    ```cmd
    mkdir onnxruntime-win-x64-directml
    cd onnxruntime-win-x64-directml
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg
-   tar xvf Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg
+   tar -xvf Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg
    copy build\native\include\* ..\include
    copy runtimes\win-x64\native\* ..\lib
    cd ..
@@ -91,12 +87,10 @@ Change into the `onnxruntime-genai\examples\c` folder.
 2. Install onnxruntime-genai
 
    ```cmd
-   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-directml-x64-capi.zip -o onnxruntime-genai-win-directml-x64-capi.zip
-   tar xvf onnxruntime-genai-win-directml-x64-capi.zip
-   cd onnxruntime-genai-win-directml-x64-capi
-   tar xvf onnxruntime-genai-0.4.0-win-x64-dml.zip
-   copy onnxruntime-genai-0.4.0-win-x64-dml\include\* ..\include
-   copy onnxruntime-genai-0.4.0-win-x64-dml\lib\* ..\lib
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.6.0/onnxruntime-genai-0.6.0-win-x64-dml.zip -o onnxruntime-genai-0.6.0-win-x64-dml.zip
+   tar -xvf onnxruntime-genai-0.6.0-win-x64-dml.zip
+   copy onnxruntime-genai-0.6.0-win-x64-dml\include\* ..\include
+   copy onnxruntime-genai-0.6.0-win-x64-dml\lib\* ..\lib
    cd ..
    ```
 
@@ -112,7 +106,7 @@ cmake --build . --config Release
 
 ```bash
 cd Release
-.\phi3.exe path_to_model
+.\phi3.exe <path_to_model> <execution_provider>
 ```
 
 ### Windows arm64 CPU
@@ -124,21 +118,19 @@ Change into the `onnxruntime-genai\examples\c` folder.
 1. Install onnxruntime
    
    ```cmd
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-arm64-1.19.2.zip -o onnxruntime-win-arm64-1.19.2.zip
-   tar xvf onnxruntime-win-arm64-1.19.2.zip
-   copy onnxruntime-win-arm64-1.19.2\include\* include
-   copy onnxruntime-win-arm64-1.19.2\lib\* lib
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-arm64-1.20.1.zip -o onnxruntime-win-arm64-1.20.1.zip
+   tar -xvf onnxruntime-win-arm64-1.20.1.zip
+   copy onnxruntime-win-arm64-1.20.1\include\* include
+   copy onnxruntime-win-arm64-1.20.1\lib\* lib
    ```
 
 2. Install onnxruntime-genai
 
    ```cmd
-   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-cpu-arm64-capi.zip -o onnxruntime-genai-win-cpu-arm64-capi.zip
-   tar xvf onnxruntime-genai-win-cpu-arm64-capi.zip
-   cd onnxruntime-genai-win-cpu-arm64-capi
-   tar xvf onnxruntime-genai-0.4.0-win-arm64.zip
-   copy onnxruntime-genai-0.4.0-win-arm64\include\* ..\include
-   copy onnxruntime-genai-0.4.0-win-arm64\lib\* ..\lib
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.6.0/onnxruntime-genai-0.6.0-win-arm64.zip -o onnxruntime-genai-0.6.0-win-arm64.zip
+   tar -xvf onnxruntime-genai-0.6.0-win-arm64.zip
+   copy onnxruntime-genai-0.6.0-win-arm64\include\* ..\include
+   copy onnxruntime-genai-0.6.0-win-arm64\lib\* ..\lib
    cd ..
    ```
 
@@ -154,7 +146,7 @@ cmake --build . --config Release
 
 ```bash
 cd Release
-.\phi3.exe path_to_model
+.\phi3.exe <path_to_model> <execution_provider>
 ```
 
 ### Windows arm64 DirectML
@@ -168,8 +160,8 @@ Change into the `onnxruntime-genai\examples\c` folder.
    ```cmd
    mkdir onnxruntime-win-arm64-directml
    cd onnxruntime-win-arm64-directml
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg
-   tar xvf Microsoft.ML.OnnxRuntime.DirectML.1.19.2.nupkg
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg
+   tar -xvf Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg
    copy build\native\include\* ..\include
    copy runtimes\win-arm64\native\* ..\lib
    cd ..
@@ -178,12 +170,10 @@ Change into the `onnxruntime-genai\examples\c` folder.
 2. Install onnxruntime-genai
 
    ```cmd
-   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.4.0/onnxruntime-genai-win-directml-arm64-capi.zip -o onnxruntime-genai-win-directml-arm64-capi.zip
-   tar xvf onnxruntime-genai-win-directml-arm64-capi.zip
-   cd onnxruntime-genai-win-directml-arm64-capi
-   tar xvf onnxruntime-genai-0.4.0-win-arm64-dml.zip
-   copy onnxruntime-genai-0.4.0-win-arm64-dml\include\* ..\include
-   copy onnxruntime-genai-0.4.0-win-arm64-dml\lib\* ..\lib
+   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.6.0/onnxruntime-genai-0.6.0-win-arm64-dml.zip -o onnxruntime-genai-0.6.0-win-arm64-dml.zip
+   tar -xvf onnxruntime-genai-0.6.0-win-arm64-dml.zip
+   copy onnxruntime-genai-0.6.0-win-arm64-dml\include\* ..\include
+   copy onnxruntime-genai-0.6.0-win-arm64-dml\lib\* ..\lib
    cd ..
    ```
 
@@ -199,7 +189,7 @@ cmake --build . --config Release
 
 ```bash
 cd Release
-.\phi3.exe path_to_model
+.\phi3.exe <path_to_model> <execution_provider>
 ```
 
 ### Linux
@@ -212,10 +202,10 @@ Change into the onnxruntime-genai directory.
 
    ```bash
    cd examples/c
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-1.19.2.tgz -o onnxruntime-linux-x64-1.19.2.tgz
-   tar xvzf onnxruntime-linux-x64-1.19.2.tgz
-   cp onnxruntime-linux-x64-1.19.2/include/* include
-   cp onnxruntime-linux-x64-1.19.2/lib/* lib
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz -o onnxruntime-linux-x64-1.20.1.tgz
+   tar xvzf onnxruntime-linux-x64-1.20.1.tgz
+   cp -r onnxruntime-linux-x64-1.20.1/include/* include
+   cp -r onnxruntime-linux-x64-1.20.1/lib/* lib
    cd ../..
    ```
 
@@ -255,19 +245,21 @@ cmake --build . --config Release
 #### Run the sample
 
 ```bash
-./phi3 path_to_model
+./phi3 <path_to_model> <execution_provider>
+# Example for CPU: ./phi3 ../cpu_and_mobile/cpu-int4-awq-block-128-acc-level-4/ cpu
 ```
 
-## Phi-3 vision
+## Phi-3.5 vision
 
 ### Download model
 
-You can use one of the following models for this sample:
-* [Phi-3 vision model for CPU](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-cpu)
-* [Phi-3 vision model for CUDA](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-cuda)
-* [Phi-3 vision model for DirectML](https://huggingface.co/microsoft/Phi-3-vision-128k-instruct-onnx-directml)
-  
-Clone one of the models above.
+This example uses the [Phi-3.5 vision model](https://huggingface.co/microsoft/Phi-3.5-vision-instruct).
+
+You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the Hugging Face CLI.
+
+```bash
+huggingface-cli download microsoft/Phi-3.5-vision-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
+```
 
 ### Run on Windows
 
@@ -279,10 +271,10 @@ Change into the onnxruntime-genai folder.
    
    ```cmd
    cd examples\c
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip -o onnxruntime-win-x64-1.19.2.zip
-   tar xvf onnxruntime-win-x64-1.19.2.zip
-   copy onnxruntime-win-x64-1.19.2\include\* include
-   copy onnxruntime-win-x64-1.19.2\lib\* lib
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-x64-1.20.1.zip -o onnxruntime-win-x64-1.20.1.zip
+   tar -xvf onnxruntime-win-x64-1.20.1.zip
+   copy onnxruntime-win-x64-1.20.1\include\* include
+   copy onnxruntime-win-x64-1.20.1\lib\* lib
    ```
 
 2. Install onnxruntime-genai
@@ -311,7 +303,7 @@ cmake --build . --config Release
 
 ```bash
 cd Release
-.\phi3v.exe path_to_model
+.\phi3v.exe <path_to_model> <execution_provider>
 ```
 
 ### Run on Linux
@@ -324,10 +316,10 @@ Change into the onnxruntime-genai directory.
 
    ```bash
    cd examples/c
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-1.19.2.tgz -o onnxruntime-linux-x64-1.19.2.tgz
-   tar xvzf onnxruntime-linux-x64-1.19.2.tgz
-   cp onnxruntime-linux-x64-1.19.2/include/* include
-   cp onnxruntime-linux-x64-1.19.2/lib/* lib
+   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz -o onnxruntime-linux-x64-1.20.1.tgz
+   tar xvzf onnxruntime-linux-x64-1.20.1.tgz
+   cp -r onnxruntime-linux-x64-1.20.1/include/* include
+   cp -r onnxruntime-linux-x64-1.20.1/lib/* lib
    cd ../..
    ```
 
@@ -366,6 +358,5 @@ cmake --build . --config Release
 
 ```bash
 cd build/Release
-./phi3v path_to_model
+./phi3v <path_to_model> <execution_provider>
 ```
-

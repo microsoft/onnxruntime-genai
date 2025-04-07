@@ -1,4 +1,4 @@
-# Run the Phi-3 models with the ONNX Runtime generate() API
+# Run the Phi-3 models with ONNX Runtime GenAI
 
 ## Steps
 1. [Setup](#setup)
@@ -56,7 +56,7 @@ Are you on a Windows machine with GPU?
    This command downloads the model into a folder called `directml`.
 
 
-2. Install the generate() API
+2. Install ONNX Runtime GenAI
 
    ```bash
    pip install onnxruntime-genai-directml
@@ -66,11 +66,12 @@ Are you on a Windows machine with GPU?
 
 3. Run the model
 
-   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py).
+   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py). If you are using a stable version of ONNX Runtime GenAI then you need to download from the release branch (example for v0.5.2 is given below).
 
    ```bash
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
-   python phi3-qa.py -m directml\directml-int4-awq-block-128
+   # For stable release v0.5.2: curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/v0.5.2/examples/python/phi3-qa.py -o phi3-qa.py
+   python phi3-qa.py -m directml\directml-int4-awq-block-128 -e dml
    ```
 
    Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
@@ -97,7 +98,7 @@ Are you on a Windows machine with GPU?
 
    This command downloads the model into a folder called `cuda`.
 
-2. Install the generate() API
+2. Install ONNX Runtime GenAI
 
    ```bash
    pip install onnxruntime-genai-cuda
@@ -105,11 +106,12 @@ Are you on a Windows machine with GPU?
 
 3. Run the model
 
-   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py).
+   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py). If you are using a stable version of ONNX Runtime GenAI then you need to download from the release branch (example for v0.5.2 is given below).
 
    ```bash
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
-   python phi3-qa.py -m cuda/cuda-int4-rtn-block-32 
+   # For stable release v0.5.2: curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/v0.5.2/examples/python/phi3-qa.py -o phi3-qa.py
+   python phi3-qa.py -m cuda/cuda-int4-rtn-block-32 -e cuda
    ```
 
       Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:
@@ -130,7 +132,7 @@ Are you on a Windows machine with GPU?
 
    This command downloads the model into a folder called `cpu_and_mobile`
 
-2. Install the generate() API for CPU
+2. Install ONNX Runtime GenAI
    
    ```bash
    pip install onnxruntime-genai
@@ -138,11 +140,12 @@ Are you on a Windows machine with GPU?
 
 3. Run the model
 
-   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py).
+   Run the model with [phi3-qa.py](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3-qa.py). If you are using a stable version of ONNX Runtime GenAI then you need to download from the release branch (example for v0.5.2 is given below).
 
    ```bash
    curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/main/examples/python/phi3-qa.py -o phi3-qa.py
-   python phi3-qa.py -m cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4
+   # For stable release v0.5.2: curl https://raw.githubusercontent.com/microsoft/onnxruntime-genai/v0.5.2/examples/python/phi3-qa.py -o phi3-qa.py
+   python phi3-qa.py -m cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4 -e cpu
    ```
 
    Once the script has loaded the model, it will ask you for input in a loop, streaming the output as it is produced the model. For example:

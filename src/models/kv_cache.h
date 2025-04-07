@@ -1,15 +1,30 @@
 #pragma once
 
-#include "static_buffer.h"
+#include "model.h"
 
 namespace Generators {
 
 struct KeyValueCache {
   virtual ~KeyValueCache() = default;
+
   virtual void Add() = 0;
+
   virtual void AddEncoder() = 0;
+
   virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) = 0;
+
   virtual void RewindTo(size_t index) = 0;
+
+  // Note: PartialTokenGenerationUpdate() is mainly for supporting DecoderOnlyPipelineState usage where we update
+  // part of the KV cache after running part of the pipeline.
+  // An alternative may be to have a dedicated KV cache per IntermediatePipelineState.
+
+  virtual bool IsPartialTokenGenerationUpdateSupported() const { return false; }
+
+  virtual void PartialTokenGenerationUpdate(DeviceSpan<int32_t> beam_indices, int total_length,
+                                            std::span<const size_t> layer_indices_to_update) {
+    throw std::runtime_error("PartialTokenGenerationUpdate is not supported.");
+  }
 };
 
 struct CombinedKeyValueCache : KeyValueCache {
@@ -29,6 +44,9 @@ struct CombinedKeyValueCache : KeyValueCache {
 
   template <typename T>
   void RewindPastTensorsTo(size_t index);
+
+  DeviceInterface& Device() { return *model_.p_device_kvcache_; }
+  Ort::Allocator& Allocator() { return model_.p_device_kvcache_->GetAllocator(); }
 
   State& state_;
   const Model& model_{state_.model_};
@@ -64,6 +82,9 @@ struct DefaultKeyValueCache : KeyValueCache {
   template <typename T>
   void RewindPastTensorsTo(size_t index);
 
+  DeviceInterface& Device() { return *model_.p_device_kvcache_; }
+  Ort::Allocator& Allocator() { return model_.p_device_kvcache_->GetAllocator(); }
+
   State& state_;
   const Model& model_{state_.model_};
   int layer_count_;
@@ -78,7 +99,6 @@ struct DefaultKeyValueCache : KeyValueCache {
   std::unique_ptr<OrtValue> empty_past_;
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
-  std::vector<StaticBuffer*> sb_kv_caches_;
 };
 
 // Very similar to the DefaultKeyValueCache, but is only created once at the encoder step, then used without modification for every decoder step
@@ -89,6 +109,9 @@ struct CrossCache {
   void AddInputs();
 
  private:
+  DeviceInterface& Device() { return *model_.p_device_kvcache_; }
+  Ort::Allocator& Allocator() { return model_.p_device_kvcache_->GetAllocator(); }
+
   State& state_;
   const Model& model_{state_.model_};
   int layer_count_;
@@ -100,39 +123,7 @@ struct CrossCache {
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
 
-struct WindowedKeyValueCache : KeyValueCache {
-  WindowedKeyValueCache(State& state);
-
-  void Add() override;
-  void AddEncoder() override {
-    throw std::runtime_error("WindowedKeyValueCache does not support AddEncoder.");
-  };
-  void Update(DeviceSpan<int32_t> beam_indices, int current_length) override;
-  void RewindTo(size_t index) override {
-    throw std::runtime_error("WindowedKeyValueCache does not support RewindTo.");
-  }
-
- private:
-  void Slide();
-
-  State& state_;
-  const Model& model_{state_.model_};
-  int layer_count_{};
-  int window_size_{};
-  size_t num_windows_{};
-  size_t window_index_{};
-  size_t input_index_{~0U}, output_index_{~0U};
-
-  std::array<int64_t, 4> key_cache_shape_in_, key_cache_shape_out_;
-  std::array<int64_t, 4> value_cache_shape_in_, value_cache_shape_out_;
-  ONNXTensorElementDataType type_;
-
-  std::vector<std::unique_ptr<OrtValue>> key_caches_in_, value_caches_in_;
-  std::vector<std::unique_ptr<OrtValue>> key_caches_out_, value_caches_out_;
-  std::vector<std::string> input_name_strings_, output_name_strings_;
-
-  bool is_first_update_{true};
-};
+std::string ComposeKeyValueName(const std::string& template_string, int index);
 
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state);
 

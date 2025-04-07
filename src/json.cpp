@@ -35,6 +35,18 @@ void Parse(Element& element, std::string_view document) {
   JSON{element, document};
 }
 
+void TranslateException(std::string_view name) {
+  try {
+    throw;
+  } catch (const unknown_value_error&) {
+    throw std::runtime_error(" Unknown value \"" + std::string(name) + "\"");
+  } catch (const type_mismatch& e) {
+    throw std::runtime_error(std::string(name) + " - Expected a " + std::string(value_names[e.expected]) + " but saw a " + std::string(value_names[e.seen]));
+  } catch (...) {
+    throw;
+  }
+}
+
 JSON::JSON(Element& element, std::string_view document) : begin_{document.data()}, end_{document.data() + document.size()} {
   try {
     Parse_Value(element, {});
@@ -167,14 +179,12 @@ void JSON::Parse_Value(Element& element, std::string_view name) {
           throw unknown_value_error{};
         break;
     }
-  } catch (const unknown_value_error&) {
-    throw std::runtime_error(" Unknown value \"" + std::string(name) + "\"");
-  } catch (const type_mismatch& e) {
-    throw std::runtime_error(std::string(name) + " - Expected a " + std::string(value_names[e.expected]) + " but saw a " + std::string(value_names[e.seen]));
   } catch (const std::runtime_error& e) {
     if (!name.empty())
       throw std::runtime_error(std::string(name) + ":" + e.what());
     throw;
+  } catch (...) {
+    TranslateException(name);
   }
 
   Parse_Whitespace();

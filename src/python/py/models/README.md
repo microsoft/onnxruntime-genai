@@ -33,11 +33,13 @@ The tool currently supports the following model architectures.
 
 - ChatGLM
 - Gemma
+- Granite
 - LLaMA
 - Mistral
 - Nemotron
 - Phi
 - Qwen
+- AMD OLMo
 
 It is intended for supporting the latest, popular state-of-the-art models.
 

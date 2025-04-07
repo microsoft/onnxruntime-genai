@@ -31,7 +31,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public void TryGraphCaptureWithMaxBatchSize(int maxBatchSize)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(_generatorParamsHandle, maxBatchSize));
+            Console.WriteLine("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release.");
         }
 
         public void SetModelInput(string name, Tensor value)

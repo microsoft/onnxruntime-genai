@@ -11,14 +11,37 @@ struct Config {
   Config(const fs::path& path, std::string_view json_overlay);
 
   struct Defaults {
+    // Decoder names
     static constexpr std::string_view InputIdsName = "input_ids";
-    static constexpr std::string_view PixelValuesName = "pixel_values";
-    static constexpr std::string_view ImageSizesName = "image_sizes";
-    static constexpr std::string_view InputFeaturesName = "encoder_input_ids";
-    static constexpr std::string_view ImageFeaturesName = "image_features";
+    static constexpr std::string_view AttentionMaskName = "attention_mask";
+    static constexpr std::string_view PositionIdsName = "position_ids";
+    static constexpr std::string_view PastKeyName = "past_key_values.%d.key";
+    static constexpr std::string_view PastValueName = "past_key_values.%d.value";
+    static constexpr std::string_view LogitsName = "logits";
+    static constexpr std::string_view PresentKeyName = "present.%d.key";
+    static constexpr std::string_view PresentValueName = "present.%d.value";
+
+    static constexpr std::string_view InputsEmbedsName = "inputs_embeds";
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
     static constexpr std::string_view promptTemplate = "{Content}";
+    static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
+
+    // Vision names
+    static constexpr std::string_view PixelValuesName = "pixel_values";
+    static constexpr std::string_view ImageSizesName = "image_sizes";
+    static constexpr std::string_view ImageFeaturesName = "image_features";
+    static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
+    static constexpr std::string_view NumImageTokens = "num_image_tokens";
+
+    // Speech names
+    static constexpr std::string_view InputFeaturesName = "encoder_input_ids";
+    static constexpr std::string_view AudioEmbedsName = "audio_embeds";
+    static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
+    static constexpr std::string_view AudioSizesName = "audio_sizes";
+    static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
+    static constexpr std::string_view AudioFeaturesName = "audio_features";
+    static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -48,6 +71,7 @@ struct Config {
     bool use_env_allocators{};
 
     std::vector<ProviderOptions> provider_options;
+    std::optional<GraphOptimizationLevel> graph_optimization_level;
   };
 
   struct Model {
@@ -77,25 +101,46 @@ struct Config {
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string image_features{Defaults::ImageFeaturesName};
+        std::string audio_features{Defaults::AudioFeaturesName};
       } inputs;
 
       struct Outputs {
-        std::string embeddings{"inputs_embeds"};
+        std::string embeddings{Defaults::InputsEmbedsName};
       } outputs;
     } embedding;
 
     struct Vision {
       std::string filename;
+      std::string config_filename{"processor_config.json"};
+      std::optional<std::string> adapter_filename{};
 
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
         std::string image_sizes{Defaults::ImageSizesName};
+        std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
       } inputs;
 
       struct Outputs {
         std::string image_features{Defaults::ImageFeaturesName};
       } outputs;
     } vision;
+
+    struct Speech {
+      std::string filename;
+      std::string config_filename{"audio_processor_config.json"};
+      std::optional<std::string> adapter_filename{};
+
+      struct Inputs {
+        std::string audio_embeds{Defaults::AudioEmbedsName};
+        std::string attention_mask{Defaults::AudioAttentionMaskName};
+        std::string audio_sizes{Defaults::AudioSizesName};
+        std::string audio_projection_mode{Defaults::AudioProjectionModeName};
+      } inputs;
+
+      struct Outputs {
+        std::string audio_features{Defaults::AudioFeaturesName};
+      } outputs;
+    } speech;
 
     struct Decoder {
       std::string filename;
@@ -107,27 +152,32 @@ struct Config {
       int num_hidden_layers{};
       int head_size{};
 
-      struct SlidingWindow {  // Sliding window parameters for models that process input prompt in chunks
-        int window_size{};    // The size of the window to slide over the input prompt
-        int pad_value{};      // The key-value cache padding value to use for the sliding window for inactive tokens
+      struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
+        int window_size{};                 // The size of the window to slide over the input prompt
+        int pad_value{};                   // The key-value cache padding value to use for the sliding window for inactive tokens
+        std::string alignment{"right"};    // The alignment of the window, either "left" or "right"
+        bool slide_key_value_cache{true};  // Whether to slide the key-value cache along with the input prompt
       };
       std::optional<SlidingWindow> sliding_window;
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
-        std::string embeddings{"inputs_embeds"};
-        std::string position_ids{"position_ids"};
-        std::string attention_mask{"attention_mask"};
-        std::string past_key_names{"past_key_values.%d.key"}, past_value_names{"past_key_values.%d.value"};
+        std::string embeddings{Defaults::InputsEmbedsName};
+        std::string position_ids{Defaults::PositionIdsName};
+        std::string attention_mask{Defaults::AttentionMaskName};
+        std::string past_key_names{Defaults::PastKeyName};
+        std::string past_value_names{Defaults::PastValueName};
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
         std::string past_sequence_length{Defaults::PastSequenceLengthName};
+        std::string total_sequence_length{Defaults::TotalSequenceLengthName};
       } inputs;
 
       struct Outputs {
-        std::string logits{"logits"};
-        std::string present_key_names{"present.%d.key"}, present_value_names{"present.%d.value"};
+        std::string logits{Defaults::LogitsName};
+        std::string present_key_names{Defaults::PresentKeyName};
+        std::string present_value_names{Defaults::PresentValueName};
         std::string present_names;  // When key/value pairs are combined
         std::string cross_present_key_names, cross_present_value_names;
       } outputs;
@@ -142,6 +192,10 @@ struct Config {
         std::unordered_map<std::string, std::string> output_names_forwarder;
         bool run_on_prompt{true};
         bool run_on_token_gen{true};
+        int reset_session_idx{-1};  // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
+                                    // This is the index of the session that needs to be reset during the execution of the current session.
+                                    // This is a temporary solution until the QNN driver updates are available.
+                                    // Once the driver updates are available, this option will be deprecated.
       };
 
       std::vector<PipelineModel> pipeline;
@@ -188,6 +242,7 @@ void SetSearchNumber(Config::Search& search, std::string_view name, double value
 void SetSearchBool(Config::Search& search, std::string_view name, bool value);
 void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
-bool IsCudaGraphEnabled(Config::SessionOptions& session_options);
+void OverlayConfig(Config& config, std::string_view json);
+bool IsGraphCaptureEnabled(Config::SessionOptions& session_options);
 
 }  // namespace Generators

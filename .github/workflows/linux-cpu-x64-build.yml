@@ -87,10 +87,6 @@ jobs:
           python3 -m pip install -r test/python/cpu/ort/requirements.txt --user
           python3 -m pip install --user --no-index --no-deps --find-links build/cpu/wheel onnxruntime_genai
 
-      - name: Use Dummy HuggingFace Token
-        run: |
-          echo "HF_TOKEN=12345" >> $GITHUB_ENV
-
       - name: Verify Build Artifacts
         if: always()
         continue-on-error: true

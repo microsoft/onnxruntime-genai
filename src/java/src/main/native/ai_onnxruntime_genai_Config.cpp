@@ -42,7 +42,7 @@ Java_ai_onnxruntime_genai_Config_appendProvider(JNIEnv* env, jobject thiz, jlong
 }
 
 JNIEXPORT void JNICALL
-Java_ai_onnxruntime_genai_Config_setProvider(JNIEnv* env, jobject thiz, jlong native_handle, jstring provider_name, jstring option_key, jstring option_value) {
+Java_ai_onnxruntime_genai_Config_setProviderOption(JNIEnv* env, jobject thiz, jlong native_handle, jstring provider_name, jstring option_key, jstring option_value) {
   CString c_provider_name{env, provider_name};
   CString c_option_key{env, option_key};
   CString c_option_value{env, option_value};

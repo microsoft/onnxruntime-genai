@@ -1,8 +1,14 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #include "../generators.h"
+#include "utils.h"
 
 namespace Generators {
+
+DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value) {
+  auto info = value.GetTensorTypeAndShapeInfo();
+  return device.WrapMemory(std::span<uint8_t>{value.GetTensorMutableData<uint8_t>(), info->GetElementCount() * SizeOf(info->GetElementType())});
+}
 
 size_t SizeOf(ONNXTensorElementDataType type) {
   switch (type) {
@@ -37,31 +43,46 @@ size_t SizeOf(ONNXTensorElementDataType type) {
   }
 }
 
-// IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
-float Float16ToFloat32(uint16_t v) {
-  // Extract sign, exponent, and fraction from numpy.float16
-  int const sign = (v & 0x8000) >> 15;
-  int const exponent = (v & 0x7C00) >> 10;
-  int const fraction = v & 0x03FF;
+int64_t ElementCountFromShape(std::span<const int64_t> shape) {
+  return std::accumulate(shape.begin(), shape.end(), int64_t{1}, std::multiplies<int64_t>());
+}
+
+template <int exponent_bits, int fraction_bits>
+float TFloatToFloat32(uint16_t v) {
+  constexpr int exponent_bias = (1 << (exponent_bits - 1)) - 1;
+  constexpr int fraction_mask = (1 << fraction_bits) - 1;
+  constexpr int exponent_mask = ((1 << exponent_bits) - 1) << fraction_bits;
+
+  int sign = v >> (exponent_bits + fraction_bits);
+  int exponent = (v & exponent_mask) >> fraction_bits;
+  int fraction = v & fraction_mask;
 
   // Handle special cases
   if (exponent == 0) {
-    if (fraction == 0) {
-      // Zero
+    if (fraction == 0)  // Zero
       return sign != 0 ? -0.0f : 0.0f;
-    }  // Subnormal number
-    return std::ldexp((sign != 0 ? -1.0f : 1.0f) * static_cast<float>(fraction) / 1024.0f, -14);
+    // Subnormal number
+    return std::ldexp((sign != 0 ? -1.0f : 1.0f) * static_cast<float>(fraction) / (1 << fraction_bits), 1 - exponent_bias);
   }
-  if (exponent == 31) {
-    if (fraction == 0) {
-      // Infinity
+  if (exponent == (1 << exponent_bits) - 1) {
+    if (fraction == 0)  // Infinity
       return sign != 0 ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
-    }  // NaN
+    // NaN
     return std::numeric_limits<float>::quiet_NaN();
   }
 
   // Normalized number
-  return std::ldexp((sign != 0 ? -1.0f : 1.0f) * (1.0f + static_cast<float>(fraction) / 1024.0f), exponent - 15);
+  return std::ldexp((sign != 0 ? -1.0f : 1.0f) * (1.0f + static_cast<float>(fraction) / (1 << fraction_bits)), exponent - exponent_bias);
+}
+
+// IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
+float Float16ToFloat32(uint16_t v) {
+  return TFloatToFloat32<5, 10>(v);
+}
+
+// BFloat16 binary16 format, 1 sign bit, 8 bit exponent, 7 bit fraction
+float BFloat16ToFloat32(uint16_t v) {
+  return TFloatToFloat32<8, 7>(v);
 }
 
 // C++17 compatible version of bit_cast for the code below
