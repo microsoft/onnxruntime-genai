@@ -6,12 +6,8 @@
 
 namespace Generators {
 
-struct PhiImageProcessor : Processor {
-  PhiImageProcessor(Config& config, const SessionInfo& session_info);
-
-  PhiImageProcessor() = delete;
-  PhiImageProcessor(const PhiImageProcessor&) = delete;
-  PhiImageProcessor& operator=(const PhiImageProcessor&) = delete;
+struct GemmaImageProcessor : Processor {
+  GemmaImageProcessor(Config& config, const SessionInfo& session_info);
 
   virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 
