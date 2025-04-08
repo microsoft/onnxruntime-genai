@@ -440,7 +440,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   }
 
   // Turn this into a lambda:
-  auto AppendExecutionProvider=[&](const std::string& name, const Config::ProviderOptions& options) {
+  auto AppendExecutionProvider = [&](const std::string& name, const Config::ProviderOptions& options) {
     std::vector<const char*> keys, values;
     for (auto& option : options.options) {
       keys.emplace_back(option.first.c_str());
