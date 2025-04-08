@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include <logits_processor.h>
 #include <algorithm>
 #include <array>
 #include <cstring>  // for memcmp
@@ -11,6 +10,7 @@
 #define OGA_USE_SPAN 1
 #include <ort_genai.h>
 #include <gtest/gtest.h>
+#include <logits_processor.h>
 
 // Our working directory is generators/build so one up puts us in the root directory:
 #ifndef MODEL_PATH
