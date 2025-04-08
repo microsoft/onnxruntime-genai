@@ -104,9 +104,9 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
   });
 
   // Device Allocate: try removing ifdef
-  if (state.params_->device_type == DeviceType::CUDA) {
-    cuda_logits_mask_ptr_ = state.params_->p_device->Allocate<uint32_t>(batch_size_ * vocab_size_ / 32);
-  }
+  // if (state.params_->device_type == DeviceType::CUDA) {
+  //   cuda_logits_mask_ptr_ = state.params_->p_device->Allocate<uint32_t>(batch_size_ * vocab_size_ / 32);
+  // }
   // cuda_stream_ = state.params_->cuda_stream;
 }
 
