@@ -51,13 +51,15 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   }
 
   if (g_log.enabled && g_log.model_input_values) {
-    auto& stream = Log("model_input_values");
+    auto capture = Log("model_input_values");
+    auto& stream = capture.MessageStream();
     stream << std::endl;
     DumpTensors(model_, stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
   }
 
   if (g_log.enabled && g_log.model_output_shapes) {
-    auto& stream = Log("model_output_shapes");
+    auto capture = Log("model_output_shapes");
+    auto& stream = capture.MessageStream();
     stream << std::endl;
     DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
   }
@@ -68,7 +70,8 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   extra_outputs_.RegisterOutputs();
 
   if (g_log.enabled && g_log.model_output_values) {
-    auto& stream = Log("model_output_values");
+    auto capture = Log("model_output_values");
+    auto& stream = capture.MessageStream();
     stream << std::endl;
     DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
   }

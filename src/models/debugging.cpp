@@ -146,7 +146,7 @@ void DumpValues(std::ostream& stream, ONNXTensorElementDataType type, const void
     }
 
     if (stats.count)
-      stats.Dump(Log("value_stats"));
+      stats.Dump(Log("value_stats").MessageStream());
   }
 }
 

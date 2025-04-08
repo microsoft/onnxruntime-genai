@@ -1,17 +1,20 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "generators.h"
-#include "json.h"
+#include "logging.h"
+
 #include <iostream>
 #include <fstream>
 #include <cstdarg>
 
+#include "generators.h"
+#include "json.h"
+#include "logging/log_sink.h"
+
 namespace Generators {
 
 LogItems g_log;
-static std::ostream* gp_stream{&std::cerr};
-static std::unique_ptr<std::ofstream> gp_logfile;
+static std::unique_ptr<LogSink> g_log_sink = MakeDefaultLogSink();
 
 void SetLogBool(std::string_view name, bool value) {
   if (name == "enabled")
@@ -46,17 +49,12 @@ void SetLogBool(std::string_view name, bool value) {
 
 void SetLogString(std::string_view name, std::string_view value) {
   if (name == "filename") {
-    if (value.empty())
-      gp_logfile.reset();
-    else {
-      fs::path filename{std::string(value)};
-      gp_logfile = std::make_unique<std::ofstream>(filename.open_for_write());
+    if (!value.empty()) {
+      const fs::path log_file{std::string{value}};
+      g_log_sink = MakeFileLogSink(log_file);
+    } else {  // reset to default
+      g_log_sink = MakeDefaultLogSink();
     }
-
-    if (gp_logfile)
-      gp_stream = gp_logfile.get();
-    else
-      gp_stream = &std::cerr;
   } else
     throw JSON::unknown_value_error{};
 }
@@ -82,17 +80,17 @@ void SGRExample(std::ostream& stream) {
 bool RunExample = (SGRExample(std::cerr), false);
 #endif
 
-std::ostream& Log(std::string_view label, std::string_view string) {
-  assert(g_log.enabled);
-
-  // Warnings will be yellow, all other labels will be blue
-  *gp_stream << SGR::Bold << (label == "warning" ? SGR::Bg_Yellow : SGR::Bg_Blue) << "  " << label << "  " << SGR::Reset << ' ';
-  if (!string.empty())
-    *gp_stream << string << std::endl;
-  return *gp_stream;
+LogCapture::~LogCapture() {
+  g_log_sink->Send(*this);
 }
 
-std::ostream& Log(std::string_view label, const char* fmt, ...) {
+LogCapture Log(std::string_view label, std::string_view message) {
+  assert(g_log.enabled);
+
+  return LogCapture{label, message};
+}
+
+void LogF(std::string_view label, const char* fmt, ...) {
   va_list args;
   va_start(args, fmt);
   va_list args_copy;
@@ -104,7 +102,7 @@ std::ostream& Log(std::string_view label, const char* fmt, ...) {
   std::unique_ptr<char[]> buf(new char[len + 1]);
   vsnprintf(buf.get(), len + 1, fmt, args);
   va_end(args);
-  return Log(label, std::string(buf.get(), buf.get() + len));
+  Log(label, std::string(buf.get(), buf.get() + len));
 }
 
 }  // namespace Generators

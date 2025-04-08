@@ -367,9 +367,9 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
-    auto& stream = Log("model_logits");
+    auto capture = Log("model_logits");
+    auto& stream = capture.MessageStream();
     DumpValues(stream, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
-    stream << std::endl;
   }
   SetLogits(logits);
   last_action_ = Action::standard;
@@ -446,13 +446,12 @@ void Generator::GenerateNextToken() {
   search_->ApplyRepetitionPenalty(search.repetition_penalty);
 
   if (g_log.enabled && g_log.generate_next_token) {
-    auto& stream = Log("generate_next_token");
-    stream << SGR::Fg_Green << "do_sample: " << SGR::Reset << search.do_sample << ' '
-           << SGR::Fg_Green << "top_k: " << SGR::Reset << search.top_k << ' '
-           << SGR::Fg_Green << "top_p: " << SGR::Reset << search.top_p << ' '
-           << SGR::Fg_Green << "temperature: " << SGR::Reset << search.temperature << ' '
-           << SGR::Fg_Cyan << "sequence length: " << SGR::Reset << search_->GetSequenceLength()
-           << std::endl;
+    Log("generate_next_token").MessageStream()
+        << SGR::Fg_Green << "do_sample: " << SGR::Reset << search.do_sample << ' '
+        << SGR::Fg_Green << "top_k: " << SGR::Reset << search.top_k << ' '
+        << SGR::Fg_Green << "top_p: " << SGR::Reset << search.top_p << ' '
+        << SGR::Fg_Green << "temperature: " << SGR::Reset << search.temperature << ' '
+        << SGR::Fg_Cyan << "sequence length: " << SGR::Reset << search_->GetSequenceLength();
   }
 
   last_action_ = Action::generated;

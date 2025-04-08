@@ -1,6 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
+
+#include <sstream>
+#include <string_view>
+
 /*
  * General purpose logging for GenAI
  *
@@ -76,7 +80,50 @@ enum struct SGR : int {
 
 std::ostream& operator<<(std::ostream& stream, SGR sgr_code);
 
-std::ostream& Log(std::string_view label, std::string_view text = {});
+// Log severity levels.
+// These values intentionally match the values of OrtLoggingLevel in onnxruntime_c_api.h for consistency.
+enum LogSeverity {
+  Verbose = 0,
+  Info = 1,
+  Warning = 2,
+  Error = 3,
+  Fatal = 4,
+};
 
-std::ostream& Log(std::string_view label, const char* fmt, ...);
+class LogCapture {
+ public:
+  LogCapture(LogSeverity severity, std::string_view label, std::string_view message)
+      : severity_{severity}, label_{label}, message_stream_{std::string{message}} {
+  }
+
+  LogCapture(std::string_view label, std::string_view message)
+      : LogCapture{LogSeverity::Info, label, message} {
+  }
+
+  // no copy or move
+
+  LogCapture(const LogCapture&) = delete;
+  LogCapture(LogCapture&&) = delete;
+  LogCapture& operator=(const LogCapture&) = delete;
+  LogCapture& operator=(LogCapture&&) = delete;
+
+  // Sends this LogCapture to the log.
+  ~LogCapture();
+
+  // Gets the std::ostream that is used to build the log message.
+  std::ostream& MessageStream() { return message_stream_; }
+
+  LogSeverity Severity() const noexcept { return severity_; };
+  std::string Label() const noexcept { return std::string{label_}; };
+  std::string Message() const { return message_stream_.str(); };
+
+ private:
+  LogSeverity severity_;
+  std::string_view label_;
+  std::ostringstream message_stream_;
+};
+
+LogCapture Log(std::string_view label, std::string_view text = {});
+
+void LogF(std::string_view label, const char* fmt, ...);
 }  // namespace Generators

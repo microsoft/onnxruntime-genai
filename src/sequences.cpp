@@ -8,7 +8,8 @@ namespace Generators {
 
 void Sequences::AfterAppendNextTokens(DeviceSpan<int32_t>& next_tokens, size_t batch_beam_size) {
   if (g_log.enabled && g_log.append_next_tokens) {
-    auto& stream = Log("append_next_tokens");
+    auto capture = Log("append_next_tokens");
+    auto& stream = capture.MessageStream();
     DumpSpan(stream, next_tokens.CopyDeviceToCpu());
     stream << std::endl;
   }
