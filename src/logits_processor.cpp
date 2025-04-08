@@ -27,7 +27,7 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     : vocab_size_(state.params_->config.model.vocab_size),
       eos_token_(state.params_->config.model.eos_token_id),
       batch_size_(state.params_->search.batch_size),
-      device_type_(state.params_->device_type),
+      device_type_(state.params_->p_device->GetType()),
       guidance_type_(state.params_->guidance_type),
       guidance_data_(state.params_->guidance_data) {
   if (guidance_type_.empty() || guidance_data_.empty()) {
@@ -103,12 +103,11 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     return ComputeMask();
   });
 
-#if USE_CUDA
+// Device Allocate: try removing ifdef
   if (state.params_->device_type == DeviceType::CUDA) {
     cuda_logits_mask_ptr_ = state.params_->p_device->Allocate<uint32_t>(batch_size_ * vocab_size_ / 32);
   }
   cuda_stream_ = state.params_->cuda_stream;
-#endif
 }
 
 std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
