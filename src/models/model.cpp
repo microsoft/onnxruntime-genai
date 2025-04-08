@@ -431,9 +431,23 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.AddConfigEntry("session.use_env_allocators", "1");
   }
 
+  for (auto& config_entry : config_session_options.config_entries) {
+    session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
+  }
+
   if (config_session_options.graph_optimization_level.has_value()) {
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
+
+  // Turn this into a lambda:
+  auto AppendExecutionProvider=[&](const std::string& name, const Config::ProviderOptions& options) {
+    std::vector<const char*> keys, values;
+    for (auto& option : options.options) {
+      keys.emplace_back(option.first.c_str());
+      values.emplace_back(option.second.c_str());
+    }
+    session_options.AppendExecutionProvider(name.c_str(), keys.data(), values.data(), keys.size());
+  };
 
   for (auto& provider_options : config_session_options.provider_options) {
     if (provider_options.name == "cuda") {
@@ -497,27 +511,19 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 #endif
     } else if (provider_options.name == "qnn") {
       session_options.AddConfigEntry("ep.share_ep_contexts", "1");
-      std::unordered_map<std::string, std::string> opts;
-      for (auto& option : provider_options.options) {
-        opts.emplace(option.first, option.second);
-      }
-
       // TODO set device_type_ in a less hacky way.
       // now, all QNN EP enable_htp_shared_memory_allocator option values had better be consistent...
       // on the other hand, not sure if is_primary_session_options is the right thing to check here.
-      if (const auto opt_it = opts.find("enable_htp_shared_memory_allocator");
-          opt_it != opts.end() && opt_it->second == "1") {
+      if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
+                                           [](const auto& pair) { return pair.first == "enable_htp_shared_memory_allocator"; });
+          opt_it != provider_options.options.end() && opt_it->second == "1") {
         p_device_ = GetDeviceInterface(DeviceType::QNN);
       }
 
-      session_options.AppendExecutionProvider("QNN", opts);
+      AppendExecutionProvider("QNN", provider_options);
     } else if (provider_options.name == "webgpu") {
       p_device_ = GetDeviceInterface(DeviceType::WEBGPU);
-      std::unordered_map<std::string, std::string> opts;
-      for (auto& option : provider_options.options) {
-        opts.emplace(option.first, option.second);
-      }
-      session_options.AppendExecutionProvider("WebGPU", opts);
+      AppendExecutionProvider("WebGPU", provider_options);
     } else
       throw std::runtime_error("Unknown provider type: " + provider_options.name);
   }

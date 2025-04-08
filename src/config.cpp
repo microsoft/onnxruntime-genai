@@ -19,15 +19,15 @@ ONNXTensorElementDataType TranslateTensorType(std::string_view value) {
   throw std::runtime_error("Invalid tensor type: " + std::string(value));
 }
 
-struct ProviderOptions_Element : JSON::Element {
-  explicit ProviderOptions_Element(Config::ProviderOptions& v) : v_{v} {}
+struct NamedStrings_Element : JSON::Element {
+  explicit NamedStrings_Element(std::vector<Config::NamedString>& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    v_.options.emplace_back(name, JSON::Get<std::string_view>(value));
+    v_.emplace_back(name, JSON::Get<std::string_view>(value));
   }
 
  private:
-  Config::ProviderOptions& v_;
+  std::vector<Config::NamedString>& v_;
 };
 
 struct ProviderOptionsObject_Element : JSON::Element {
@@ -36,20 +36,20 @@ struct ProviderOptionsObject_Element : JSON::Element {
   JSON::Element& OnObject(std::string_view name) override {
     for (auto& v : v_) {
       if (v.name == name) {
-        options_element_ = std::make_unique<ProviderOptions_Element>(v);
+        options_element_ = std::make_unique<NamedStrings_Element>(v.options);
         return *options_element_;
       }
     }
 
     auto& options = v_.emplace_back();
     options.name = name;
-    options_element_ = std::make_unique<ProviderOptions_Element>(options);
+    options_element_ = std::make_unique<NamedStrings_Element>(options.options);
     return *options_element_;
   }
 
  private:
   std::vector<Config::ProviderOptions>& v_;
-  std::unique_ptr<ProviderOptions_Element> options_element_;
+  std::unique_ptr<NamedStrings_Element> options_element_;
 };
 
 struct ProviderOptionsArray_Element : JSON::Element {
@@ -113,6 +113,12 @@ struct SessionOptions_Element : JSON::Element {
       throw JSON::unknown_value_error{};
   }
 
+  JSON::Element& OnObject(std::string_view name) override {
+    if (name == "config_entries")
+      return config_entries_;
+    throw JSON::unknown_value_error{};
+  }
+
   JSON::Element& OnArray(std::string_view name) override {
     if (name == "provider_options")
       return provider_options_;
@@ -122,6 +128,7 @@ struct SessionOptions_Element : JSON::Element {
  private:
   Config::SessionOptions& v_;
   ProviderOptionsArray_Element provider_options_{v_.provider_options};
+  NamedStrings_Element config_entries_{v_.config_entries};
 };
 
 struct EncoderDecoderInit_Element : JSON::Element {

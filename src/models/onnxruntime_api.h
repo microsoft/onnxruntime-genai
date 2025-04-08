@@ -595,8 +595,7 @@ struct OrtSessionOptions {
   ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_CANN
   OrtSessionOptions& AppendExecutionProvider_CANN(const OrtCANNProviderOptions& provider_options);
   /// Wraps OrtApi::SessionOptionsAppendExecutionProvider. Currently supports SNPE and XNNPACK.
-  OrtSessionOptions& AppendExecutionProvider(const std::string& provider_name,
-                                             const std::unordered_map<std::string, std::string>& provider_options = {});
+  OrtSessionOptions& AppendExecutionProvider(const std::string& provider_name, const char* const* keys, const char* const* values, size_t num_keys);
 
   OrtSessionOptions& SetCustomCreateThreadFn(OrtCustomCreateThreadFn ort_custom_create_thread_fn);  ///< Wraps OrtApi::SessionOptionsSetCustomCreateThreadFn
   OrtSessionOptions& SetCustomThreadCreationOptions(void* ort_custom_thread_creation_options);      ///< Wraps OrtApi::SessionOptionsSetCustomThreadCreationOptions
