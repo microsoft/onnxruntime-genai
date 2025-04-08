@@ -4,13 +4,13 @@
 #include <gtest/gtest.h>
 #include <generators.h>
 #include <search.h>
-#include <models/model.h>
-#include <logits_processor.h>
 #include <cstdio>
 #include <iostream>
 #include <random>
 #include <fstream>
 #include <regex>
+#include <models/model.h>
+#include <logits_processor.h>
 
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
