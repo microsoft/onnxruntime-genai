@@ -19,7 +19,6 @@
 #endif
 
 #include "logits_processor.h"
-#include "models/model.h"
 
 namespace Generators {
 

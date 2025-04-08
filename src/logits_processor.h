@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <future>
+#include "models/model.h"
 
 #if USE_GUIDANCE
 #include <llguidance.h>
