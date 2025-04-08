@@ -439,16 +439,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
 
-  // Turn this into a lambda:
-  auto AppendExecutionProvider = [&](const std::string& name, const Config::ProviderOptions& options) {
-    std::vector<const char*> keys, values;
-    for (auto& option : options.options) {
-      keys.emplace_back(option.first.c_str());
-      values.emplace_back(option.second.c_str());
-    }
-    session_options.AppendExecutionProvider(name.c_str(), keys.data(), values.data(), keys.size());
-  };
-
   for (auto& provider_options : config_session_options.provider_options) {
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
@@ -509,23 +499,31 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       if (is_primary_session_options)
         p_device_ = GetDeviceInterface(DeviceType::DML);  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
-    } else if (provider_options.name == "qnn") {
-      session_options.AddConfigEntry("ep.share_ep_contexts", "1");
-      // TODO set device_type_ in a less hacky way.
-      // now, all QNN EP enable_htp_shared_memory_allocator option values had better be consistent...
-      // on the other hand, not sure if is_primary_session_options is the right thing to check here.
-      if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
-                                           [](const auto& pair) { return pair.first == "enable_htp_shared_memory_allocator"; });
-          opt_it != provider_options.options.end() && opt_it->second == "1") {
-        p_device_ = GetDeviceInterface(DeviceType::QNN);
+    } else {
+      // For providers that go through the extensible AppendExecutionProvider API:
+
+      if (provider_options.name == "QNN") {
+        session_options.AddConfigEntry("ep.share_ep_contexts", "1");
+        // TODO set device_type_ in a less hacky way.
+        // now, all QNN EP enable_htp_shared_memory_allocator option values had better be consistent...
+        // on the other hand, not sure if is_primary_session_options is the right thing to check here.
+        if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
+                                             [](const auto& pair) { return pair.first == "enable_htp_shared_memory_allocator"; });
+            opt_it != provider_options.options.end() && opt_it->second == "1") {
+          p_device_ = GetDeviceInterface(DeviceType::QNN);
+        }
       }
 
-      AppendExecutionProvider("QNN", provider_options);
-    } else if (provider_options.name == "webgpu") {
-      p_device_ = GetDeviceInterface(DeviceType::WEBGPU);
-      AppendExecutionProvider("WebGPU", provider_options);
-    } else
-      throw std::runtime_error("Unknown provider type: " + provider_options.name);
+      else if (provider_options.name == "WebGPU")
+        p_device_ = GetDeviceInterface(DeviceType::WEBGPU);
+
+      std::vector<const char*> keys, values;
+      for (auto& option : provider_options.options) {
+        keys.emplace_back(option.first.c_str());
+        values.emplace_back(option.second.c_str());
+      }
+      session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
+    }
   }
 
   // Fallback to CPU if no provider specific interface was set

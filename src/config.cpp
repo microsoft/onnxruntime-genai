@@ -57,6 +57,17 @@ struct ProviderOptionsArray_Element : JSON::Element {
 
   JSON::Element& OnObject(std::string_view name) override { return object_; }
 
+  void OnComplete(bool /*empty*/) override {
+    // For backwards compatibility turn our old names like 'qnn' into 'QNN', and 'webgpu' to 'WebGPU'
+    for (auto& v : v_) {
+      if (v.name == "qnn") {
+        v.name = "QNN";
+      } else if (v.name == "webgpu") {
+        v.name = "WebGPU";
+      }
+    }
+  }
+
  private:
   std::vector<Config::ProviderOptions>& v_;
   ProviderOptionsObject_Element object_{v_};
