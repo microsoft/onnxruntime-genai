@@ -6,6 +6,7 @@
 #define OGA_USE_SPAN 1
 #include "../models/onnxruntime_api.h"
 #include "../ort_genai.h"
+#include <iostream>
 #include "../logits_processor.h"
 
 using namespace pybind11::literals;
