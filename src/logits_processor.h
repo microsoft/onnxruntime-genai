@@ -13,8 +13,6 @@
 #include <llguidance.h>
 #endif
 
-#include "models/model.h"
-
 namespace Generators {
 
 struct LogitsProcessor {
