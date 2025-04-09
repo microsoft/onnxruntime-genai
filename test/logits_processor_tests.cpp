@@ -36,13 +36,13 @@ TEST(LogitsProcessorTests, TestRegex) {
   std::string regex = "answer: .*";
   std::string text = "answer: I am a robot";
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  auto tokenizer = model->CreateTokenizer();
+  auto tokenizer = OgaTokenizer::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
   params->SetGuidance("regex", regex);
   auto generator = OgaGenerator::Create(*model, *params);
   // TODO: Need to fix this to use the new API
-  auto processor = std::make_unique<Generators::GuidanceLogitsProcessor>(*generator->state_);
-  auto target_ids = Generators::GuidanceLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(Generators::GuidanceLogitsProcessor::kTokenizePrefixStr).size(),
+  auto processor = std::make_unique<OgaGenerator::GuidanceLogitsProcessor>(*generator->state_);
+  auto target_ids = OgaGenerator::GuidanceLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(OgaGenerator::GuidanceLogitsProcessor::kTokenizePrefixStr).size(),
                                                                           reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
   for (auto id : target_ids) {
     auto mask = processor->GetMask();
@@ -56,13 +56,13 @@ TEST(LogitsProcessorTests, TestJsonSchema) {
   std::string text = read_file(MODEL_PATH "grammars/blog.sample.json");
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
-  auto tokenizer = model->CreateTokenizer();
+  auto tokenizer = OgaTokenizer::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
-  params->SetGuidance("json_schema", json_schema);
+  params->SetGuidance("json_schema", json_schema.c_str());
   auto generator = OgaGenerator::Create(*model, *params);
   // TODO: Need to fix this to use the new API
-  auto processor = std::make_unique<Generators::GuidanceLogitsProcessor>(*generator->state_);
-  auto target_ids = Generators::GuidanceLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(Generators::GuidanceLogitsProcessor::kTokenizePrefixStr).size(),
+  auto processor = std::make_unique<OgaGenerator::GuidanceLogitsProcessor>(*generator->state_);
+  auto target_ids = OgaGenerator::GuidanceLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(OgaGenerator::GuidanceLogitsProcessor::kTokenizePrefixStr).size(),
                                                                           reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
   for (auto id : target_ids) {
     auto mask = processor->GetMask();
