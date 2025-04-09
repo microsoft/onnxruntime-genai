@@ -206,7 +206,7 @@ struct PyGeneratorParams {
   }
 
   void SetGuidance(const std::string& type, const std::string& data) {
-    params_->SetGuidance(type, data);
+    params_->SetGuidance(type.c_str(), data.c_str());
   }
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected

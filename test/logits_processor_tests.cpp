@@ -9,8 +9,7 @@
 #include <random>
 #include <fstream>
 #include <regex>
-#include <models/model.h>
-#include <logits_processor.h>
+#include <ort_genai.h>
 
 #ifndef MODEL_PATH
 #define MODEL_PATH "../../test/test_models/"
@@ -36,11 +35,12 @@ std::string read_file(const char* filePath) {
 TEST(LogitsProcessorTests, TestRegex) {
   std::string regex = "answer: .*";
   std::string text = "answer: I am a robot";
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   auto tokenizer = model->CreateTokenizer();
-  auto params = Generators::CreateGeneratorParams(*model);
+  auto params = OgaGeneratorParams::Create(*model);
   params->SetGuidance("regex", regex);
-  auto generator = Generators::CreateGenerator(*model, *params);
+  auto generator = OgaGenerator::Create(*model, *params);
+  // TODO: Need to fix this to use the new API
   auto processor = std::make_unique<Generators::GuidanceLogitsProcessor>(*generator->state_);
   auto target_ids = Generators::GuidanceLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(Generators::GuidanceLogitsProcessor::kTokenizePrefixStr).size(),
                                                                           reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
@@ -54,12 +54,13 @@ TEST(LogitsProcessorTests, TestRegex) {
 TEST(LogitsProcessorTests, TestJsonSchema) {
   std::string json_schema = read_file(MODEL_PATH "grammars/blog.schema.json");
   std::string text = read_file(MODEL_PATH "grammars/blog.sample.json");
-  auto model = Generators::CreateModel(Generators::GetOrtEnv(), MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   auto tokenizer = model->CreateTokenizer();
-  auto params = Generators::CreateGeneratorParams(*model);
+  auto params = OgaGeneratorParams::Create(*model);
   params->SetGuidance("json_schema", json_schema);
-  auto generator = Generators::CreateGenerator(*model, *params);
+  auto generator = OgaGenerator::Create(*model, *params);
+  // TODO: Need to fix this to use the new API
   auto processor = std::make_unique<Generators::GuidanceLogitsProcessor>(*generator->state_);
   auto target_ids = Generators::GuidanceLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(Generators::GuidanceLogitsProcessor::kTokenizePrefixStr).size(),
                                                                           reinterpret_cast<const uint8_t*>(text.c_str()), text.size());

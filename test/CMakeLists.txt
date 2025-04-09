@@ -16,7 +16,6 @@ target_include_directories(unit_tests PRIVATE
 )
 
 target_link_directories(unit_tests PRIVATE ${ORT_LIB_DIR})
-
 target_link_libraries(unit_tests PRIVATE
   onnxruntime-genai
   GTest::gtest
