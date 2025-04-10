@@ -9,8 +9,6 @@
 namespace Generators {
 namespace OpenVINO {
 
-const char* device_label = "OpenVINO";
-
 struct InterfaceImpl : DeviceInterface {
   InterfaceImpl() {
   }

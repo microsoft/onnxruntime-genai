@@ -255,6 +255,7 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
 // arena already being destroyed.
 void EnsureDeviceOrtInit(OrtSession& session, DeviceType type) {
   // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
+  // OpenVINO delegates to the CPU device allocator
   if (type == DeviceType::CPU || type == DeviceType::OpenVINO)
     return;
 
