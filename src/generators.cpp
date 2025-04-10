@@ -210,7 +210,7 @@ std::string to_string(DeviceType device_type) {
       return "WebGpu";
     case DeviceType::QNN:
       return "QnnWithSharedMemory";
-    case DeviceType::OPENVINO:
+    case DeviceType::OpenVINO:
       return "OpenVINO";
     default:
       throw std::runtime_error("Unknown device type");
@@ -232,7 +232,7 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
       return GetWebGPUInterface();
     case DeviceType::QNN:
       return GetQNNInterface();
-    case DeviceType::OPENVINO:
+    case DeviceType::OpenVINO:
       return GetOpenVINOInterface();
   }
 }

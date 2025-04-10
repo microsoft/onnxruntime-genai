@@ -532,7 +532,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         p_device_ = GetDeviceInterface(DeviceType::WEBGPU);
 
       else if (provider_options.name == "OpenVINO")
-        p_device_ = GetDeviceInterface(DeviceType::OPENVINO);
+        p_device_ = GetDeviceInterface(DeviceType::OpenVINO);
 
       std::vector<const char*> keys, values;
       for (auto& option : provider_options.options) {

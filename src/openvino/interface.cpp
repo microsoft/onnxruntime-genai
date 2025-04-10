@@ -16,7 +16,7 @@ struct InterfaceImpl : DeviceInterface {
   InterfaceImpl() {
   }
 
-  DeviceType GetType() const override { return DeviceType::OPENVINO; }
+  DeviceType GetType() const override { return DeviceType::OpenVINO; }
 
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
     assert(!ort_allocator_);

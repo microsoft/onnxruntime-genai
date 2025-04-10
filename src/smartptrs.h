@@ -90,7 +90,7 @@ enum struct DeviceType {
   DML,
   WEBGPU,
   QNN,
-  OPENVINO,
+  OpenVINO,
   MAX
 };
 
