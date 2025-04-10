@@ -21,7 +21,7 @@ CombinedKeyValueCache::CombinedKeyValueCache(State& state)
   }
 
   // Derive the KV data type from the KV input 0
-  type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
+  type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
 
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
   shape_[3] = 0;
@@ -165,7 +165,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   // Derive the KV data type from the KV input 0
-  type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
+  type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
   if (state_.params_->use_graph_capture && !past_present_share_buffer_) {
@@ -343,7 +343,7 @@ CrossCache::CrossCache(State& state)
   }
 
   // Derive the KV data type from the KV input 0
-  type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
+  type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
 
   for (int i = 0; i < layer_count_; ++i) {
     values_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
@@ -379,7 +379,7 @@ std::string ComposeKeyValueName(const std::string& template_string, int index) {
 namespace {
 
 bool IsCacheNeeded(const Model& model) {
-  return model.session_info_->HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, 0));
+  return model.session_info_.HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, 0));
 }
 
 }  // namespace

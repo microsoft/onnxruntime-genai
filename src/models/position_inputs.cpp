@@ -7,20 +7,20 @@ namespace Generators {
 DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk)
     : model_{model},
       state_{state} {
-  has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
-  has_posid_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.position_ids);
+  has_mask_input_ = model_.session_info_.HasInput(model_.config_->model.decoder.inputs.attention_mask);
+  has_posid_input_ = model_.session_info_.HasInput(model_.config_->model.decoder.inputs.position_ids);
 
   type_ = Ort::TypeToTensorType<int32_t>;
   if (has_mask_input_) {
-    type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
+    type_ = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
   }
   if (has_posid_input_) {
     if (has_mask_input_) {
-      if (model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.position_ids) != type_) {
+      if (model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.position_ids) != type_) {
         throw std::runtime_error("position_ids & attention_mask must have the same data type");
       }
     }
-    type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
+    type_ = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
   }
 
   if (type_ != Ort::TypeToTensorType<int32_t> && type_ != Ort::TypeToTensorType<int64_t>)
@@ -293,8 +293,8 @@ void DefaultPositionInputs::RewindMask(size_t index) {
 // TODO: SlidingWindow does not support graph capture
 WindowedPositionInputs::WindowedPositionInputs(State& state)
     : state_{state} {
-  has_posid_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.position_ids);
-  has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
+  has_posid_input_ = model_.session_info_.HasInput(model_.config_->model.decoder.inputs.position_ids);
+  has_mask_input_ = model_.session_info_.HasInput(model_.config_->model.decoder.inputs.attention_mask);
 
   if (has_posid_input_ || has_mask_input_) {
     if (!model_.config_->model.decoder.sliding_window.has_value()) {
@@ -308,7 +308,7 @@ WindowedPositionInputs::WindowedPositionInputs(State& state)
   }
 
   if (has_posid_input_) {
-    position_ids_type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
+    position_ids_type_ = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
     if (position_ids_type_ != Ort::TypeToTensorType<int32_t>)
       throw std::runtime_error("WindowedPositionInputs only supports int32_t position_ids");
 
@@ -316,7 +316,7 @@ WindowedPositionInputs::WindowedPositionInputs(State& state)
   }
 
   if (has_mask_input_) {
-    attention_mask_type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
+    attention_mask_type_ = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
     if (attention_mask_type_ != Ort::TypeToTensorType<int32_t>)
       throw std::runtime_error("WindowedPositionInputs only supports int32_t attention_mask");
 
