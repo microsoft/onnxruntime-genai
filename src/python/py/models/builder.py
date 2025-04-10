@@ -66,7 +66,7 @@ class Model:
             },
             "dml": {},
             "webgpu": {},
-            "openvino": {},
+            "OpenVINO": {},
         }
 
         # Map input names to their types and shapes
