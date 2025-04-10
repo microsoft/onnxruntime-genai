@@ -255,14 +255,14 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
 // arena already being destroyed.
 void EnsureDeviceOrtInit(OrtSession& session, DeviceType type) {
   // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
-  if (type == DeviceType::CPU)
+  if (type == DeviceType::CPU || type == DeviceType::OpenVINO)
     return;
 
   auto& device = GetOrtGlobals()->allocator_device_[static_cast<int>(type)];
   if (device)
     return;
 
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "Cpu"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   auto name = device_type_names[static_cast<int>(type)];

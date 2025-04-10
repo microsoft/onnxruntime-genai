@@ -9,7 +9,6 @@
 namespace Generators {
 namespace OpenVINO {
 
-static Ort::Allocator* ort_allocator_{};
 const char* device_label = "OpenVINO";
 
 struct InterfaceImpl : DeviceInterface {
@@ -19,12 +18,12 @@ struct InterfaceImpl : DeviceInterface {
   DeviceType GetType() const override { return DeviceType::OpenVINO; }
 
   void InitOrt(const OrtApi& /*api*/, Ort::Allocator& allocator) override {
-    assert(!ort_allocator_);
-    ort_allocator_ = &allocator;
+    // since we use the CPU interface for allocation (right now), InitOrt should not be getting called.
+    assert(false);
   }
 
   Ort::Allocator& GetAllocator() override {
-    return *ort_allocator_;
+    return GetCpuInterface()->GetAllocator();
   }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
