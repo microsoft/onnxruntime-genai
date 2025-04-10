@@ -6,6 +6,9 @@
 
 namespace Generators {
 
+struct Config;
+struct SessionInfo;
+
 struct PhiImageProcessor : Processor {
   PhiImageProcessor(Config& config, const SessionInfo& session_info);
 
@@ -18,7 +21,10 @@ struct PhiImageProcessor : Processor {
  private:
   ort_extensions::OrtxObjectPtr<OrtxProcessor> processor_;
 
+  std::string input_ids_name_;
+  std::string pixel_values_name_;
   ONNXTensorElementDataType pixel_values_type_;
+  std::string image_sizes_name_;
 };
 
 }  // namespace Generators

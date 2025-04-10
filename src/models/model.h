@@ -7,7 +7,6 @@
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
 #include "phi_multimodal_processor.h"
-#include "gemma_image_processor.h"
 #include "adapters.h"
 #include "extra_outputs.h"
 
@@ -100,9 +99,6 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, 
 
   std::shared_ptr<Tokenizer> tokenizer_;
   std::shared_ptr<Processor> processor_;
-
- private:
-  std::unordered_map<std::string, std::function<std::shared_ptr<Processor>(Config&, const SessionInfo&)>> processor_factory_;
 };
 
 struct SessionInfo {
@@ -118,11 +114,8 @@ struct SessionInfo {
 
   std::vector<std::string> GetInputNames() const;
 
-  std::vector<const char*> GetInputSymbolicShape(const std::string& name) const;
-  std::vector<const char*> GetOutputSymbolicShape(const std::string& name) const;
-
  private:
-  std::unordered_map<std::string, std::unique_ptr<OrtTypeInfo>> inputs_, outputs_;
+  std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;
 };
 
 struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, ExternalRefCounted<Model> {

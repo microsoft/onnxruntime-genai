@@ -158,6 +158,10 @@ void GreedySearch_Cpu::SelectTop() {
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
+<<<<<<< HEAD
+=======
+    Softmax(scores, temperature);
+>>>>>>> 25d209dc (Improve and Fix TopKTopP (#1363))
     // Find the top K scores
     std::vector<int> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);

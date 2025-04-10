@@ -26,7 +26,6 @@ struct Config {
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
     static constexpr std::string_view promptTemplate = "{Content}";
     static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
-    static constexpr std::string_view TokenTypeIdsName = "token_type_ids";
 
     // Vision names
     static constexpr std::string_view PixelValuesName = "pixel_values";
