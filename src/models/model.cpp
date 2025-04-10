@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
+// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #include <algorithm>
 #include <climits>
 #include <random>
@@ -450,6 +450,11 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
   }
 
+  if (config_session_options.custom_ops_library.has_value()) {
+    fs::path custom_library_file_prefix{config_session_options.custom_ops_library.value()};
+    session_options.RegisterCustomOpsLibrary(custom_library_file_prefix.c_str());
+  }
+
   if (config_session_options.graph_optimization_level.has_value()) {
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
@@ -533,6 +538,11 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
       else if (provider_options.name == "OpenVINO")
         p_device_ = GetDeviceInterface(DeviceType::OpenVINO);
+
+      else if (provider_options.name == "VitisAI") {
+        session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
+        session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
+      }
 
       std::vector<const char*> keys, values;
       for (auto& option : provider_options.options) {

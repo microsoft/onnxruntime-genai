@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 
 // Do not include this file directly. Please include "onnxruntime_cxx_api.h" instead.
 // If interested in trying out features of the new experimental C++ API, include "experimental_onnxruntime_cxx_api.h" instead.
@@ -697,6 +698,11 @@ inline OrtSessionOptions& OrtSessionOptions::SetCustomJoinThreadFn(OrtCustomJoin
 
 inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_OpenVINO(const OrtOpenVINOProviderOptions& provider_options) {
   Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_OpenVINO(this, &provider_options));
+  return *this;
+}
+
+inline OrtSessionOptions& OrtSessionOptions::RegisterCustomOpsLibrary(const ORTCHAR_T* library_file_prefix) {
+  Ort::ThrowOnError(Ort::api->RegisterCustomOpsLibrary_V2(this, library_file_prefix));
   return *this;
 }
 

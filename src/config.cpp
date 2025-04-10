@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #include "generators.h"
 #include "runtime_settings.h"
 #include "json.h"
@@ -120,6 +121,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.use_env_allocators = JSON::Get<bool>(value);
     else if (name == "graph_optimization_level")
       v_.graph_optimization_level = GetGraphOptimizationLevel(JSON::Get<std::string_view>(value));
+    else if (name == "custom_ops_library")
+      v_.custom_ops_library = JSON::Get<std::string_view>(value);
     else
       throw JSON::unknown_value_error{};
   }
