@@ -4,43 +4,13 @@
 #include "../generators.h"
 #include "../search.h"
 #include "interface.h"
+#include "../cpu/interface.h"
 
 namespace Generators {
 namespace OpenVINO {
 
 static Ort::Allocator* ort_allocator_{};
 const char* device_label = "OpenVINO";
-
-struct OpenVINOMemory final : DeviceBuffer {
-  OpenVINOMemory(size_t size) : owned_{true} {
-    size_in_bytes_ = size;
-    p_cpu_ = p_device_ = static_cast<uint8_t*>(ort_allocator_->Alloc(size_in_bytes_));
-  }
-
-  OpenVINOMemory(void* p, size_t size) : owned_{false} {
-    size_in_bytes_ = size;
-    p_cpu_ = p_device_ = static_cast<uint8_t*>(p);
-  }
-
-  ~OpenVINOMemory() override {
-    if (owned_)
-      ort_allocator_->Free(p_device_);
-  }
-
-  const char* GetType() const override { return device_label; }
-  void AllocateCpu() override {}      // Nothing to do, device memory is CPU accessible
-  void CopyDeviceToCpu() override {}  // Nothing to do, device memory is CPU accessible
-  void CopyCpuToDevice() override {}  // Nothing to do, device memory is CPU accessible
-  void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
-    CopyThroughCpu(*this, begin_dest, source, begin_source, size_in_bytes);
-  }
-
-  void Zero() override {
-    memset(p_device_, 0, size_in_bytes_);
-  }
-
-  bool owned_;
-};
 
 struct InterfaceImpl : DeviceInterface {
   InterfaceImpl() {
@@ -58,11 +28,11 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   std::shared_ptr<DeviceBuffer> AllocateBase(size_t size) override {
-    return std::make_shared<OpenVINOMemory>(size);
+    return GetCpuInterface()->AllocateBase(size);
   }
 
   std::shared_ptr<DeviceBuffer> WrapMemoryBase(void* p, size_t size) override {
-    return std::make_shared<OpenVINOMemory>(p, size);
+    return GetCpuInterface()->WrapMemoryBase(p, size);
   }
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
