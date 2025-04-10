@@ -9,7 +9,6 @@ from pathlib import Path
 
 import onnxruntime_genai as og
 
-
 def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
     curr_path = Path(current_dir).absolute()
     target_dir = glob.glob(target_dir_name, root_dir=curr_path)
@@ -65,8 +64,20 @@ def run(args: argparse.Namespace):
 
         image_paths = [image_path for image_path in image_paths if image_path]
 
+        user_tag = image_tag = assistant_tag = end_tag = ""
+        if model.type == "phi3v":
+            user_tag = "<|user|>\n"
+            image_tag = "<|image_{image_id}|>\n"
+            assistant_tag = "<|assistant|>\n"
+            end_tag = "<|end|>\n"
+        elif model.type == "gemma3":
+            user_tag = "<start_of_turn>user\n"
+            image_tag = "<start_of_image>"
+            assistant_tag = "<start_of_turn>model\n"
+            end_tag = "<end_of_turn>\n"
+
         images = None
-        prompt = "<|user|>\n"
+        prompt = f"{user_tag}"
         if len(image_paths) == 0:
             print("No image provided")
         else:
@@ -74,7 +85,7 @@ def run(args: argparse.Namespace):
                 if not os.path.exists(image_path):
                     raise FileNotFoundError(f"Image file not found: {image_path}")
                 print(f"Using image: {image_path}")
-                prompt += f"<|image_{i+1}|>\n"
+                prompt += f"{image_tag.replace('{image_id}', str(i+1))}"
 
             images = og.Images.open(*image_paths)
 
@@ -85,7 +96,7 @@ def run(args: argparse.Namespace):
                 text = args.prompt
             else:
                 text = "What is shown in this image?"
-        prompt += f"{text}<|end|>\n<|assistant|>\n"
+        prompt += f"{text}{end_tag}{assistant_tag}"
         print("Processing images and prompt...")
         inputs = processor(prompt, images=images)
 

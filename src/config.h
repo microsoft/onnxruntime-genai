@@ -26,6 +26,7 @@ struct Config {
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
     static constexpr std::string_view promptTemplate = "{Content}";
     static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
+    static constexpr std::string_view TokenTypeIdsName = "token_type_ids";
 
     // Vision names
     static constexpr std::string_view PixelValuesName = "pixel_values";
@@ -46,10 +47,10 @@ struct Config {
 
   fs::path config_path;  // Path of the config directory
 
-  using ProviderOption = std::pair<std::string, std::string>;
+  using NamedString = std::pair<std::string, std::string>;
   struct ProviderOptions {
     std::string name;
-    std::vector<ProviderOption> options;
+    std::vector<NamedString> options;
   };
 
   struct SessionOptions {
@@ -69,6 +70,7 @@ struct Config {
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
     //                     Identify the reason for the crash to enable allocator sharing by default.
     bool use_env_allocators{};
+    std::vector<NamedString> config_entries;  // Entries go into OrtSessionOptions::AddConfigEntry
 
     std::vector<ProviderOptions> provider_options;
     std::optional<GraphOptimizationLevel> graph_optimization_level;
