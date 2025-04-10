@@ -71,6 +71,8 @@ typedef struct OgaMultiModalProcessor OgaMultiModalProcessor;
 typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
+typedef struct OgaGeneratorLogitsProcessor OgaGeneratorLogitsProcessor;
+typedef struct OgaState OgaState;
 
 //! @}
 
@@ -197,6 +199,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRuntimeSettings(OgaRuntimeSettings**
  * \param[in] settings The runtime settings to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* settings);
+
+OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorLogitsProcessor(OgaGeneratorLogitsProcessor* p);
 
 /**
  * \brief Sets a specific runtime handle for the runtime settings.
@@ -506,6 +510,8 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  * 'out' is valid until the next call to OgaTokenizerStreamDecode or when the OgaTokenizerStream is destroyed
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateLogitsProcessor(const OgaState* state, OgaGeneratorLogitsProcessor** out);
 
 /** Create an OgaTensor from an optional user owned buffer. If a user owned buffer is supplied, the OgaTensor does
  * not own the memory (as it has no way to free it) so the 'data' parameter must be valid for the lifetime of the OgaTensor.

@@ -38,11 +38,11 @@ TEST(LogitsProcessorTests, TestRegex) {
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   auto tokenizer = OgaTokenizer::Create(*model);
   auto params = OgaGeneratorParams::Create(*model);
-  params->SetGuidance("regex", regex);
+  params->SetGuidance("regex", regex.c_str());
   auto generator = OgaGenerator::Create(*model, *params);
   // TODO: Need to fix this to use the new API
-  auto processor = std::make_unique<OgaGenerator::GuidanceLogitsProcessor>(*generator->state_);
-  auto target_ids = OgaGenerator::GuidanceLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(OgaGenerator::GuidanceLogitsProcessor::kTokenizePrefixStr).size(),
+  auto processor = std::make_unique<OgaGeneratorLogitsProcessor::Create>(*generator->state_);
+  auto target_ids = OgaGeneratorLogitsProcessor::Create::tokenize_partial(tokenizer.get(), tokenizer->Encode(OgaGeneratorLogitsProcessor::Create::kTokenizePrefixStr).size(),
                                                                           reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
   for (auto id : target_ids) {
     auto mask = processor->GetMask();
@@ -61,8 +61,8 @@ TEST(LogitsProcessorTests, TestJsonSchema) {
   params->SetGuidance("json_schema", json_schema.c_str());
   auto generator = OgaGenerator::Create(*model, *params);
   // TODO: Need to fix this to use the new API
-  auto processor = std::make_unique<OgaGenerator::GuidanceLogitsProcessor>(*generator->state_);
-  auto target_ids = OgaGenerator::GuidanceLogitsProcessor::tokenize_partial(tokenizer.get(), tokenizer->Encode(OgaGenerator::GuidanceLogitsProcessor::kTokenizePrefixStr).size(),
+  auto processor = std::make_unique<OgaGeneratorLogitsProcessor::Create>(*generator->state_);
+  auto target_ids = OgaGeneratorLogitsProcessor::Create::tokenize_partial(tokenizer.get(), tokenizer->Encode(OgaGeneratorLogitsProcessor::Create::kTokenizePrefixStr).size(),
                                                                           reinterpret_cast<const uint8_t*>(text.c_str()), text.size());
   for (auto id : target_ids) {
     auto mask = processor->GetMask();
