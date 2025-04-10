@@ -15,8 +15,8 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
       mode_{mode},
       name_{name} {
   const auto dims = mode_ == MultiModalFeatures::Mode::Input
-                        ? model_.session_info_->GetInputSymbolicShape(name).size()
-                        : model_.session_info_->GetOutputSymbolicShape(name).size();
+                        ? model_.session_info_.GetInputSymbolicShape(name).size()
+                        : model_.session_info_.GetOutputSymbolicShape(name).size();
 
   // If the model expects 3 dimensions, add a batch dimension
   if (dims == 3) {
