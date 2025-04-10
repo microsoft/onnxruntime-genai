@@ -154,7 +154,6 @@ struct ExternalRefCounted {
 namespace Location {
 struct CPU {};
 struct GPU {};
-struct NPU {};
 }  // namespace Location
 
 template <typename T>
