@@ -537,6 +537,11 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       else if (provider_options.name == "WebGPU")
         p_device_ = GetDeviceInterface(DeviceType::WEBGPU);
 
+      else if (provider_options.name == "VitisAI") {
+        session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
+        session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
+      }
+
       std::vector<const char*> keys, values;
       for (auto& option : provider_options.options) {
         keys.emplace_back(option.first.c_str());
