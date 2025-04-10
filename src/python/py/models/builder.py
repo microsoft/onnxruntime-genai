@@ -66,7 +66,6 @@ class Model:
             },
             "dml": {},
             "webgpu": {},
-            "OpenVINO": {},
         }
 
         # Map input names to their types and shapes
@@ -3459,7 +3458,7 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "rocm", "dml", "webgpu","openvino"],
+        choices=["cpu", "cuda", "rocm", "dml", "webgpu"],
         help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WEBGPU)",
     )
 

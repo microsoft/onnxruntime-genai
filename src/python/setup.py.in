@@ -41,8 +41,6 @@ def _onnxruntime_dependency() -> str:
         dependency = "onnxruntime-directml"
     elif package_name == "onnxruntime-genai-rocm":
         dependency = "onnxruntime-rocm"
-    elif package_name == "onnxruntime-genai-openvino":
-        dependency = "onnxruntime-openvino"
     else:
         raise ValueError(f'Unable to determine the onnxruntime dependency for {package_name}.')
 
