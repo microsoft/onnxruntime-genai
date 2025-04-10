@@ -30,10 +30,6 @@ def main(args):
 
     chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
 
-    params = og.GeneratorParams(model)
-    params.set_search_options(**search_options)
-    generator = og.Generator(model, params)
-
     # Keep asking for input prompts in a loop
     while True:
         text = input("Input: ")
@@ -47,6 +43,10 @@ def main(args):
         prompt = f'{chat_template.format(input=text)}'
 
         input_tokens = tokenizer.encode(prompt)
+
+        params = og.GeneratorParams(model)
+        params.set_search_options(**search_options)
+        generator = og.Generator(model, params)
 
         generator.append_tokens(input_tokens)
         if args.verbose: print("Generator created")
