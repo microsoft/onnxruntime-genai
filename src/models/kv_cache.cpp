@@ -412,14 +412,10 @@ bool IsCacheNeeded(const Model& model) {
 }  // namespace
 
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
-  if (!IsCacheNeeded(state.model_)) {
-    return nullptr;
-  }
-
-  if (state.model_.config_->model.decoder.sliding_window &&
-      state.model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
-    return std::make_unique<WindowedKeyValueCache>(state);
-  } else if (state.model_.p_device_->GetType() == DeviceType::OpenVINO) {
+  // For OpenVINO Stateful models, they do not contain exposed past/present KV tensors.
+  // In this case, 'IsCacheNeeded' below will return false. But in this case we need to create a
+  // special 'ModelManagedKeyValueCache' object, and so we check this condition first.
+  if (state.model_.p_device_->GetType() == DeviceType::OpenVINO) {
     const auto& provider_options = state.model_.config_->model.decoder.session_options.provider_options;
     for (auto& po : provider_options) {
       if (po.name == "OpenVINO") {
@@ -430,12 +426,20 @@ std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
           if (option.first == "enable_causallm" && option.second == "True") {
             if (g_log.enabled)
               Log("info", "CreateKeyValueCache: Creating ModelManagedKeyValueCache");
-
             return std::make_unique<ModelManagedKeyValueCache>(state);
           }
         }
       }
     }
+  }
+
+  if (!IsCacheNeeded(state.model_)) {
+    return nullptr;
+  }
+
+  if (state.model_.config_->model.decoder.sliding_window &&
+      state.model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
+    return std::make_unique<WindowedKeyValueCache>(state);
   }
 
   return std::make_unique<DefaultKeyValueCache>(state);
