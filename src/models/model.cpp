@@ -62,6 +62,17 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
     DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
   }
 
+  if (!_ep_dynamic_options_next_run.empty()) {
+    std::vector<const char*> keys;
+    std::vector<const char*> values;
+    for (auto& kv_pair : _ep_dynamic_options_next_run) {
+      keys.push_back(kv_pair.first.c_str());
+      values.push_back(kv_pair.second.c_str());
+    }
+    session.SetEpDynamicOptions(keys.data(), values.data(), _ep_dynamic_options_next_run.size());
+    _ep_dynamic_options_next_run.clear();
+  }
+
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
 
