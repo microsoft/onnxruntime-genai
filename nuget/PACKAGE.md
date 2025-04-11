@@ -124,6 +124,6 @@ ONNX Runtime is an open source project. See:
 
 ## Documentation
 
-See [ONNX Runtime GenAI Documentation](https://onxxruntime.ai/docs/genai)
+See [ONNX Runtime GenAI Documentation](https://onnxruntime.ai/docs/genai)
 
 

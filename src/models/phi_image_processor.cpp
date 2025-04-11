@@ -13,9 +13,11 @@ namespace {
 std::unique_ptr<OrtValue> ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
                                              OrtxTensor* num_img_tokens, Ort::Allocator& allocator) {
   const int64_t *num_img_tokens_data{}, *num_img_tokens_shape{};
-  size_t num_img_tokens_num_dims;
-  CheckResult(OrtxGetTensorData(num_img_tokens, reinterpret_cast<const void**>(&num_img_tokens_data),
-                                &num_img_tokens_shape, &num_img_tokens_num_dims));
+  size_t num_img_tokens_num_dims{};
+  if (num_img_tokens) {
+    CheckResult(OrtxGetTensorData(num_img_tokens, reinterpret_cast<const void**>(&num_img_tokens_data),
+                                  &num_img_tokens_shape, &num_img_tokens_num_dims));
+  }
   const int64_t num_images = num_img_tokens_data
                                  ? std::accumulate(num_img_tokens_shape,
                                                    num_img_tokens_shape + num_img_tokens_num_dims,

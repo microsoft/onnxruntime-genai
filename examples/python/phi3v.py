@@ -63,7 +63,7 @@ def run(args: argparse.Namespace):
             else:
                 image_paths = [str(_find_dir_contains_sub_dir(Path(__file__).parent, "test") / "test_models" / "images" / "australia.jpg")]
 
-        image_paths = [image_path for image_path in image_paths]
+        image_paths = [image_path for image_path in image_paths if image_path]
 
         images = None
         prompt = "<|user|>\n"
