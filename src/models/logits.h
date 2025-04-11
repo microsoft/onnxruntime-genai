@@ -38,6 +38,9 @@ struct Logits {
   DeviceSpan<float> logits_;
 
   DeviceSpan<int32_t> cuda_eos_token_ids_;  // eos_token_ids from params, but in cuda accessible memory
+
+  // Set to true when prefill will generate the already 'trimmed' logits required for sampling.
+  bool trimmed_prefill_logits_ = false;
 };
 
 }  // namespace Generators

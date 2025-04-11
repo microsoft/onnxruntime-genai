@@ -376,6 +376,26 @@ std::string ComposeKeyValueName(const std::string& template_string, int index) {
   return std::string(key_value_name);
 }
 
+ModelManagedKeyValueCache::ModelManagedKeyValueCache(State& state)
+    : state_{state} {}
+
+void ModelManagedKeyValueCache::Add() {
+  // NOOP
+}
+
+void ModelManagedKeyValueCache::AddEncoder() {
+  // NOOP
+}
+
+void ModelManagedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
+  // NO-OP for now.
+  // Eventually we need to set 'beam_idx' tensor here somehow.
+}
+
+void ModelManagedKeyValueCache::RewindTo(size_t index) {
+  // TODO: Figure out how to trigger a 'Rewind' operation for the KVCache state within the session.
+}
+
 namespace {
 
 bool IsCacheNeeded(const Model& model) {
@@ -392,9 +412,26 @@ std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
   if (state.model_.config_->model.decoder.sliding_window &&
       state.model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
     return std::make_unique<WindowedKeyValueCache>(state);
-  } else {
-    return std::make_unique<DefaultKeyValueCache>(state);
+  } else if (state.model_.p_device_->GetType() == DeviceType::OpenVINO) {
+    const auto& provider_options = state.model_.config_->model.decoder.session_options.provider_options;
+    for (auto& po : provider_options) {
+      if (po.name == "OpenVINO") {
+        const auto& openvino_options = po.options;
+        for (auto& option : openvino_options) {
+          // For OpenVINO, if session option 'enable_causallm' is set, the session will encapsulate
+          // a stateful model, so KVCache will be managed internally.
+          if (option.first == "enable_causallm" && option.second == "True") {
+            if (g_log.enabled)
+              Log("info", "CreateKeyValueCache: Creating ModelManagedKeyValueCache");
+
+            return std::make_unique<ModelManagedKeyValueCache>(state);
+          }
+        }
+      }
+    }
   }
+
+  return std::make_unique<DefaultKeyValueCache>(state);
 }
 
 }  // namespace Generators
