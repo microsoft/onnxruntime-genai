@@ -39,6 +39,21 @@ jobs:
         with:
           gradle-version: '8.6'
 
+      - name: Install Rust with rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          source "$HOME/.cargo/env"
+          rustup install 1.82.0
+          rustup override set 1.82.0
+          rustup component add rust-src
+          rustup show active-toolchain
+
+      - name: Check rustc
+        run: |
+          which rustc
+          rustc --version
+
       - name: Get the Latest OnnxRuntime Nightly Version
         shell: pwsh
         run: |
@@ -74,8 +89,8 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release
-          cmake --build --preset linux_gcc_cpu_release
+          cmake --preset linux_gcc_cpu_release -DUSE_GUIDANCE=ON -DRust_COMPILER=$HOME/.cargo/bin/rustc
+          cmake --build --preset linux_gcc_cpu_release -DUSE_GUIDANCE=ON
 
       - name: Install the python wheel and test dependencies
         run: |

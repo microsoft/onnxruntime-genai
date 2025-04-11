@@ -53,6 +53,13 @@ jobs:
       with:
         gradle-version: '8.6'
 
+    - name: Install Rust Toolchain
+      run: |
+        $exePath = "$env:TEMP\rustup-init.exe"
+        (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+        & $exePath -y --default-toolchain=1.82.0
+        Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
+
     - name: Download OnnxRuntime Nightly
       shell: pwsh
       run: |
@@ -78,11 +85,11 @@ jobs:
 
     - name: Configure CMake
       run: |
-        cmake --preset windows_x64_cpu_release
+        cmake --preset windows_x64_cpu_release -DUSE_GUIDANCE=ON
 
     - name: Build with CMake
       run: |
-        cmake --build --preset windows_x64_cpu_release --parallel
+        cmake --build --preset windows_x64_cpu_release --parallel -DUSE_GUIDANCE=ON
 
     - name: Install the python wheel and test dependencies
       run: |

@@ -329,6 +329,24 @@ struct OgaTokenizerStream : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyTokenizerStream(reinterpret_cast<OgaTokenizerStream*>(p)); }
 };
 
+struct OgaGeneratorLogitsProcessor : OgaAbstract {
+  static std::unique_ptr<OgaGeneratorLogitsProcessor> Create(const OgaState& state) {
+    OgaGeneratorLogitsProcessor* p;
+    OgaCheckResult(OgaCreateLogitsProcessor(&state, &p));
+    return std::unique_ptr<OgaGeneratorLogitsProcessor>(p);
+  }
+
+  // void SetLogits(OgaTensor& tensor) {
+  //   OgaCheckResult(OgaGeneratorLogitsProcessorSetLogits(this, &tensor));
+  // }
+
+  // void SetRuntimeOption(const char* key, const char* value) {
+  //   OgaCheckResult(OgaGeneratorLogitsProcessorSetRuntimeOption(this, key, value));
+  // }
+
+  static void operator delete(void* p) { OgaDestroyGeneratorLogitsProcessor(reinterpret_cast<OgaGeneratorLogitsProcessor*>(p)); }
+};
+
 struct OgaGeneratorParams : OgaAbstract {
   static std::unique_ptr<OgaGeneratorParams> Create(const OgaModel& model) {
     OgaGeneratorParams* p;
@@ -354,6 +372,10 @@ struct OgaGeneratorParams : OgaAbstract {
 
   void TryGraphCaptureWithMaxBatchSize(int max_batch_size) {
     printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
+  }
+
+  void SetGuidance(const char* type, const char* data) {
+    OgaCheckResult(OgaGeneratorParamsSetGuidance(this, type, data));
   }
 
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }

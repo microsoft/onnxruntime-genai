@@ -7,6 +7,7 @@
 #include "span.h"
 #include "ort_genai_c.h"
 #include "generators.h"
+#include "logits_processor.h"
 #include "models/model.h"
 #include "runtime_settings.h"
 #include "search.h"
@@ -56,6 +57,8 @@ struct OgaStringArray : std::vector<std::string>, OgaAbstract {};
 struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
+struct OgaGeneratorLogitsProcessor : Generators::GuidanceLogitsProcessor, OgaAbstract {};
+struct OgaState : Generators::State, OgaAbstract {};
 
 // Helper function to return a shared pointer as a raw pointer. It won't compile if the types are wrong.
 // Exposed types that are internally owned by shared_ptrs inherit from ExternalRefCounted. Then we
@@ -336,6 +339,14 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorPa
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* oga_params, const char* type, const char* data) {
+  OGA_TRY
+  auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
+  params.SetGuidance(type, data);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaGenerator** out) {
   OGA_TRY
   *out = ReturnUnique<OgaGenerator>(CreateGenerator(*model, *generator_params));
@@ -543,6 +554,13 @@ OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModa
 OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t token, const char** out) {
   OGA_TRY
   *out = p->Decode(token).c_str();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaCreateLogitsProcessor(const OgaState* state, OgaGeneratorLogitsProcessor** out) {
+  OGA_TRY
+  *out = ReturnUnique<OgaGeneratorLogitsProcessor>(Generators::CreateLogitsProcessor(*state));
   return nullptr;
   OGA_CATCH
 }
@@ -783,5 +801,6 @@ void OGA_API_CALL OgaDestroyAudios(OgaAudios* p) { delete p; }
 void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) { delete p; }
 void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete p; }
+void OGA_API_CALL OgaDestroyGeneratorLogitsProcessor(OgaGeneratorLogitsProcessor* p) { delete p; }
 
 }  // extern "C"
