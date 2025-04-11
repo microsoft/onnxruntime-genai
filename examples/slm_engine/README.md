@@ -203,12 +203,10 @@ $ ./slm-server  --help
 SLM Runner Version: 1.0.0
 ORT GenAI Version: 0.7.0-dev
 ORT Version: 1.20.1
--mf: required.
-Usage: slm_server --model_path VAR --model_family VAR [--port_number VAR] [--verbose]
+Usage: slm_server --model_path VAR [--port_number VAR] [--verbose]
 
 Optional arguments:
   -m, --model_path     Path to the model file [required]
-  -mf, --model_family  Model family: <phi|llama|custom> [required]
   -p, --port_number    HTTP Port Number to use (default 8080)
   -v, --verbose        If provided, more debugging information printed on standard output
 ```
@@ -216,7 +214,7 @@ Optional arguments:
 ### Example Launch Command
 
 ```shell
-$ ./slm-server -mf phi  -m <path to the ONNX model> -v
+$ ./slm-server -m <path to the ONNX model> -v
 
 ```
 
@@ -430,11 +428,10 @@ SLM Runner Version: 1.0.0
 ORT GenAI Version: 0.7.0-dev
 ORT Version: 1.20.1
 Unknown argument: --help
-Usage: slm_runner --model_family VAR --model_path VAR --test_data_file VAR --output_file VAR [--verbose]
+Usage: slm_runner --model_path VAR --test_data_file VAR --output_file VAR [--verbose]
 
 Optional arguments:
   -m, --model_path             Path to the model file [required]
-  -mf, --model_family          Model family: <phi|llama|custom> [required]
   -t, --test_data_file         Path to the test data file (JSONL) [required]
   -o, --output_file            Path to the output file (JSONL) [required]
   -w, --wait_between_requests  Wait time between requests in milliseconds
