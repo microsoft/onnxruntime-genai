@@ -6,13 +6,23 @@
 
 namespace Generators {
 
-MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mode, const std::string& name, int64_t num_feature_tokens)
+MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mode, const std::string& name,
+                                       int64_t batch_size, int64_t num_feature_tokens)
     : state_{state},
       type_{mode == MultiModalFeatures::Mode::Input
                 ? model_.session_info_->GetInputDataType(name)
                 : model_.session_info_->GetOutputDataType(name)},
       mode_{mode},
       name_{name} {
+  const auto dims = mode_ == MultiModalFeatures::Mode::Input
+                        ? model_.session_info_->GetInputSymbolicShape(name).size()
+                        : model_.session_info_->GetOutputSymbolicShape(name).size();
+
+  // If the model expects 3 dimensions, add a batch dimension
+  if (dims == 3) {
+    shape_.push_back(batch_size);
+  }
+
   shape_.push_back(num_feature_tokens);
   shape_.push_back(model_.config_->model.decoder.hidden_size);
 
@@ -50,8 +60,8 @@ void MultiModalFeatures::Add() {
 void MultiModalFeatures::Update(bool is_prompt) {
   // Initialize empty features tensor for after-prompt input scenarios
   // num_feature_tokens will be 0 when no image is provided
-  if (!is_prompt && shape_[0] > 0) {  // if num_image_tokens > 0
-    shape_[0] = 0;
+  if (!is_prompt && shape_[shape_.size() - 2] > 0) {  // if num_image_tokens > 0
+    shape_[shape_.size() - 2] = 0;
     features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
     state_.inputs_[index_] = features_.get();
   }
