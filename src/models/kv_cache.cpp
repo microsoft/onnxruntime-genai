@@ -377,7 +377,12 @@ std::string ComposeKeyValueName(const std::string& template_string, int index) {
 }
 
 ModelManagedKeyValueCache::ModelManagedKeyValueCache(State& state)
-    : state_{state} {}
+    : state_{state} {
+  // This fixes with _qa sample where a new instance of ModelManagedKeyValueCache is
+  // created for each new prompt from user. In this case, we need to trigger a KVCache
+  // reset on the session before the first Session::Run.
+  RewindTo(0);
+}
 
 void ModelManagedKeyValueCache::Add() {
   // NOOP
