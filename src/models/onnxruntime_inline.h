@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 
 // Do not include this file directly. Please include "onnxruntime_cxx_api.h" instead.
 // If interested in trying out features of the new experimental C++ API, include "experimental_onnxruntime_cxx_api.h" instead.
@@ -675,24 +676,8 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_CANN(const 
   return *this;
 }
 
-inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider(
-    const std::string& provider_name,
-    const std::unordered_map<std::string, std::string>& provider_options) {
-  auto num_entries = provider_options.size();
-  std::vector<const char*> keys, values;
-  if (num_entries > 0) {
-    keys.reserve(num_entries);
-    values.reserve(num_entries);
-
-    for (const auto& entry : provider_options) {
-      keys.push_back(entry.first.c_str());
-      values.push_back(entry.second.c_str());
-    }
-  }
-
-  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider(this, provider_name.c_str(),
-                                                                    keys.data(), values.data(), num_entries));
-
+inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider(const std::string& provider_name, const char* const* keys, const char* const* values, size_t num_keys) {
+  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider(this, provider_name.c_str(), keys, values, num_keys));
   return *this;
 }
 
@@ -713,6 +698,11 @@ inline OrtSessionOptions& OrtSessionOptions::SetCustomJoinThreadFn(OrtCustomJoin
 
 inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_OpenVINO(const OrtOpenVINOProviderOptions& provider_options) {
   Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_OpenVINO(this, &provider_options));
+  return *this;
+}
+
+inline OrtSessionOptions& OrtSessionOptions::RegisterCustomOpsLibrary(const ORTCHAR_T* library_file_prefix) {
+  Ort::ThrowOnError(Ort::api->RegisterCustomOpsLibrary_V2(this, library_file_prefix));
   return *this;
 }
 

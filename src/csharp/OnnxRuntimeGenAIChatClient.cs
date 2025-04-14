@@ -222,7 +222,6 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
                 })],
                 CreatedAt = DateTimeOffset.UtcNow,
                 FinishReason = options is not null && options.MaxOutputTokens <= outputTokens ? ChatFinishReason.Length : ChatFinishReason.Stop,
-                ModelId = _metadata.ModelId,
                 ResponseId = responseId,
                 Role = ChatRole.Assistant,
             };
