@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="GennyMaui.Pages.AppMainPage"
+             xmlns:views="clr-namespace:GennyMaui.Pages.Views"
+             Title="OnnxRuntime GenAI">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"></ColumnDefinition>
+            <ColumnDefinition Width="2*"></ColumnDefinition>
+        </Grid.ColumnDefinitions>
+        <views:ModelConfigView Grid.Column="0"></views:ModelConfigView>
+        <Grid Grid.Column="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="2*" />
+            </Grid.RowDefinitions>
+            <views:TokenizeLandscapeView Grid.Row="0" />
+            <views:ChatView Grid.Row="1" />
+        </Grid>
+    </Grid>
+</ContentPage>
