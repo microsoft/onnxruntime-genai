@@ -205,6 +205,8 @@ inline void InitApi() {
     Generators::SetLogBool("ort_lib", true);
   }
 
+  OrtApiBaseFn ort_api_base_fn{};
+
 #if defined(__linux__) || defined(MACOS_USE_DLOPEN)
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
@@ -256,7 +258,7 @@ inline void InitApi() {
     throw std::runtime_error(std::string("Failed to load onnxruntime. Set ORTGENAI_LOG_ORT_LIB envvar to enable detailed logging."));
   }
 
-  OrtApiBaseFn ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
+  ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
   if (ort_api_base_fn == nullptr) {
     char* err = dlerror();
     throw std::runtime_error(std::string("Failed to load symbol OrtGetApiBase: ") + (err != nullptr ? err : "Unknown"));
@@ -264,10 +266,15 @@ inline void InitApi() {
 
   InitApiWithDynamicFn(ort_api_base_fn);
 #else   // defined(__linux__) || defined(MACOS_USE_DLOPEN)
-  api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+  ort_api_base_fn = &OrtGetApiBase;
+  api = ort_api_base_fn()->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
 #endif  // defined(__linux__) || defined(MACOS_USE_DLOPEN)
+
+  LOG_INFO("ORT Version: %s. %s\n", ort_api_base_fn()->GetVersionString(), api->GetBuildInfoString());
+  std::cerr << "ORT version: " << ort_api_base_fn()->GetVersionString() << ". "
+            << api->GetBuildInfoString() << "\n";
 }
 
 /** \brief All C++ methods that can fail will throw an exception of this type
