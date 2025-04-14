@@ -206,7 +206,7 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
 
 std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, bool add_generation_prompt) const {
   const char* output;
-  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, output, add_generation_prompt, false)); // bool tokenize = false
+  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, output, add_generation_prompt, false));  // bool tokenize = false
   return output;
 }
 
