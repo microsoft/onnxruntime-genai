@@ -41,8 +41,6 @@ include(cmake/check_cuda.cmake)
 include(cmake/check_rocm.cmake)
 # Checking if DML is supported
 include(cmake/check_dml.cmake)
-# Checking if OpenVINO is supported
-include(cmake/check_openvino.cmake)
 
 include(cmake/cxx_standard.cmake)
 
