@@ -499,12 +499,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcess
  * tokenizer, and outputs the resulting string. Optionally, it can include a
  * generation prompt in the output.
  *
- * @param tokenizer OgaTokenizer used for template processing.
- * @param template_str Null-terminated string representing the chat template
- * @param messages Null-terminated string containing the input messages to be processed.
- * @param add_generation_prompt Indicates whether to add a generation prompt to the output.
- * @param out_string Pointer to where the output will be stored.
- * @return OgaResult* Returns a pointer to the result.
+ * \param[in] tokenizer OgaTokenizer used for template processing.
+ * \param[in] template_str Null-terminated string representing the chat template
+ * \param[in] messages Null-terminated string containing the input messages to be processed.
+ * \param[in] add_generation_prompt Indicates whether to add a generation prompt to the output.
+ * \param[out] out_string Pointer to where the output will be stored.
+ * \return OgaResult* containing the error message if the function fails
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer*, const char* template_str, const char* messages, bool add_generation_prompt, const char** out_string);
 
