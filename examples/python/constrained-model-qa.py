@@ -25,7 +25,7 @@ def main(args):
 
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
     search_options['batch_size'] = 1
-    file_path = '/test_genai/test/test_models/grammars/weather_schema.json'
+    file_path = '/test_genai/test/test_models/grammars/weather_population.json'
     json_schema_data = ''
     with open(file_path, 'r', encoding='utf-8') as file:
         json_schema_data = file.read()

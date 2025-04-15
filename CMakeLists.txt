@@ -146,7 +146,7 @@ endif()
 if(USE_GUIDANCE)
   target_include_directories(onnxruntime-genai PUBLIC ${llguidance_SOURCE_DIR}/parser/)
   # target_include_directories(onnxruntime-genai-static PUBLIC ${llguidance_SOURCE_DIR}/parser/)
-  target_link_libraries(onnxruntime-genai PRIVATE llguidance_parser)
+  target_link_libraries(onnxruntime-genai PRIVATE llguidance)
   # target_link_libraries(onnxruntime-genai-static PUBLIC llguidance_parser)
   if (WIN32)
     # bcrypt is needed for the rust std lib
