@@ -540,6 +540,25 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("unload", &OgaAdapters::UnloadAdapter)
       .def("load", &OgaAdapters::LoadAdapter);
 
+  pybind11::class_<OgaRequest>(m, "Request")
+      .def(pybind11::init(
+          [](pybind11::array_t<int32_t> tokens, PyGeneratorParams& params) {
+            auto sequences = OgaSequences::Create();
+            auto tokens_span = ToSpan(tokens);
+            sequences->Append(tokens_span.data(), tokens_span.size());
+            return OgaRequest::Create(*sequences, *params.params_);
+          }))
+      .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
+      .def("is_done", &OgaRequest::IsDone)
+      .def("get_unseen_token", &OgaRequest::GetUnseenToken);
+
+  pybind11::class_<OgaEngine>(m, "Engine")
+      .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
+      .def("add_request", &OgaEngine::Add)
+      .def("step", &OgaEngine::ProcessRequests)
+      .def("remove_request", &OgaEngine::Remove)
+      .def("has_pending_requests", &OgaEngine::HasPendingRequests);
+
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);
 
