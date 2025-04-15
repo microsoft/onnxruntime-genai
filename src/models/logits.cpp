@@ -27,7 +27,7 @@ Logits::Logits(State& state)
       if (po.name == "OpenVINO") {
         const auto& openvino_options = po.options;
         for (auto& option : openvino_options) {
-          // When 'enable_causallm' option is set, models are patched in a way so that only return the 
+          // When 'enable_causallm' option is set, models are patched in a way so that only return the
           // sliced logits needed for sampling. For example, given 43 prompt tokens, instead of returning
           // logits of the shape:  [1,43,<vocab_size>]
           // they will have shape: [1, 1,<vocab_size>].
