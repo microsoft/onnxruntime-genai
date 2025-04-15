@@ -77,6 +77,8 @@ typedef struct OgaMultiModalProcessor OgaMultiModalProcessor;
 typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
+typedef struct OgaEngine OgaEngine;
+typedef struct OgaRequest OgqRequest;
 
 //! @}
 
@@ -706,6 +708,44 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUnloadAdapter(OgaAdapters* adapters, const
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters,
                                                        const char* adapter_name);
+
+/**
+ * \brief Creates an OgaEngine object from the given model.
+ * \param[in] model The model to use for the engine.
+ * \param[out] out The created engine.
+ * \return OgaResult containing the error message if the engine creation failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** out);
+
+/**
+ * \brief Destroys the given engine.
+ * \param[in] engine The engine to be destroyed.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
+
+/**
+ * \brief Run one step of the OgaEngine
+ * \param[in] engine The engine to run.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineStep(OgaEngine* engine);
+
+/**
+ * \brief Return if the engine has pending requests
+ * \param[in] engine The engine to check.
+ * \param[out] out True if the engine has pending requests, false otherwise.
+ * \return OgaResult containing the error message if the operation failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine, bool* out);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineAddRequest(OgaEngine* engine, OgaRequest* request);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRemoveRequest(OgaEngine* engine, OgaRequest* request);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRequest(OgaSequences* tokens, OgaGeneratorParams* params, OgaRequest** out);
+OGA_EXPORT void OGA_API_CALL OgaDestroyRequest(OgaRequest* request);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestHasUnseenTokens(const OgaRequest* request, bool* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetUnseenToken(OgaRequest* request, int32_t* out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsDone(const OgaRequest* request, bool* out);
+
 #ifdef __cplusplus
 }
 #endif
