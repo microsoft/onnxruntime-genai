@@ -96,13 +96,12 @@ TEST(CAPITests, TokenizerCAPI) {
 
 TEST(CAPITests, ChatTemplate) {
 #if TEST_PHI2
-  auto config = OgaConfig::Create(PHI2_PATH);  // just to create tokenizer (phi-2 does not have a chat template)
-  auto model = OgaModel::Create(*config);
-  auto tokenizer = OgaTokenizer::Create(*model);
+  // just to create tokenizer (phi-2 does not have a chat template)
+  auto tokenizer = OgaTokenizer::Create(*OgaModel::Create(PHI2_PATH));
 
   // Testing phi-4 chat template
   {
-    std::string messages_json = R"(
+    const char* messages_json = R"(
       [
         {
           "role": "system",
@@ -124,8 +123,8 @@ TEST(CAPITests, ChatTemplate) {
     std::string expected_output = "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>"
       "How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
     
-    auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages_json.c_str(), true);
-    ASSERT_STREQ(expected_output, out_string);
+    auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages_json, true);
+    ASSERT_EQ(expected_output, out_string);
   }
 
 #endif
