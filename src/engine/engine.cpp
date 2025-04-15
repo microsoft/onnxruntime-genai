@@ -7,8 +7,9 @@ namespace Generators {
 
 Engine::Engine(std::shared_ptr<Model> model)
     : model_{model},
-      scheduler_{std::make_unique<Scheduler>(model)},
-      model_executor_{std::make_unique<ModelExecutor>(model)} {}
+      cache_manager_{std::make_shared<CacheManager>(model)},
+      scheduler_{std::make_unique<Scheduler>(model, cache_manager_)},
+      model_executor_{std::make_unique<ModelExecutor>(model, cache_manager_)} {}
 
 void Engine::AddRequest(std::shared_ptr<Request> request) {
   request->Assign(shared_from_this());

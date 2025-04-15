@@ -5,11 +5,12 @@
 
 #include "request.h"
 #include "scheduled_requests.h"
+#include "cache_manager.h"
 
 namespace Generators {
 
 struct Scheduler {
-  Scheduler(std::shared_ptr<Model> model);
+  Scheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
 
   void AddRequest(std::shared_ptr<Request> request);
 
@@ -20,8 +21,9 @@ struct Scheduler {
   bool HasPendingRequests() const;
 
  private:
-  std::unordered_set<std::shared_ptr<Request>> requests_pool_;
+  std::vector<std::shared_ptr<Request>> requests_pool_;
   std::shared_ptr<Model> model_;
+  std::shared_ptr<CacheManager> cache_manager_;
 };
 
 }  // namespace Generators

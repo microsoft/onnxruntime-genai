@@ -35,6 +35,8 @@ struct Request : std::enable_shared_from_this<Request>,
 
   void Remove();
 
+  bool IsPrefill() const;
+
   RequestStatus status_{RequestStatus::Unassigned};
   std::chrono::system_clock::time_point assigned_time_;
 
@@ -43,6 +45,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<Search> search_;
   std::weak_ptr<Engine> engine_;
+  bool is_prefill_{true};
 };
 
 }  // namespace Generators

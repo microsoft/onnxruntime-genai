@@ -26,6 +26,7 @@ struct Engine : std::enable_shared_from_this<Engine>,
   std::shared_ptr<Model> model_;
   std::unique_ptr<Scheduler> scheduler_;
   std::unique_ptr<ModelExecutor> model_executor_;
+  std::shared_ptr<CacheManager> cache_manager_;
 };
 
 }  // namespace Generators

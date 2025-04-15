@@ -4,27 +4,14 @@
 #pragma once
 
 #include "../models/decoder_only.h"
+#include "decoders/decoder.h"
 #include "scheduled_requests.h"
+#include "cache_manager.h"
 
 namespace Generators {
 
-struct Decoder {
-  Decoder() = default;
-
-  virtual void Decode(ScheduledRequests& scheduled_requests) = 0;
-};
-
-struct SimpleDecoder : public Decoder {
-  SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model);
-
-  void Decode(ScheduledRequests& scheduled_requests) override;
-
- private:
-  std::shared_ptr<DecoderOnly_Model> model_;
-};
-
 struct ModelExecutor {
-  ModelExecutor(std::shared_ptr<Model> model);
+  ModelExecutor(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager);
 
   void Encode(ScheduledRequests& scheduled_requests);
 
