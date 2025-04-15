@@ -102,17 +102,29 @@ TEST(CAPITests, ChatTemplate) {
 
   // Testing phi-4 chat template
   {
-    const char* messages = R"([
-      {"role": "system", "content": "You are a helpful assistant.", "tools": "Calculator"},
-      {"role": "user", "content": "How do I add two numbers?"},
-      {"role": "assistant", "content": "You can add numbers by using the '+' operator."}
-    ])";
+    std::string messages_json = R"(
+      [
+        {
+          "role": "system",
+          "content": "You are a helpful assistant.",
+          "tools": "Calculator"
+        },
+        {
+          "role": "user",
+          "content": "How do I add two numbers?"
+        },
+        {
+          "role": "assistant",
+          "content": "You can add numbers by using the '+' operator."
+        }
+      ])";
     const char* chat_template = R"({% for message in messages %}{% if (message['role'] == 'system') %}{{'<|im_start|>system<|im_sep|>' + message['content'] + '<|im_end|>'}}{% elif (message['role'] == 'user') %}{{'<|im_start|>user<|im_sep|>' + message['content'] + '<|im_end|>'}}{% elif (message['role'] == 'assistant') %}{{'<|im_start|>assistant<|im_sep|>' + message['content'] + '<|im_end|>'}}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant<|im_sep|>' }}{% endif %})";
     
     // From HuggingFace Python output for 'microsoft/Phi-4-multimodal-instruct'
-    std::string expected_output = "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
-
-    auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages, true);
+    std::string expected_output = "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>"
+      "How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
+    
+    auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages_json.c_str(), true);
     ASSERT_STREQ(expected_output, out_string);
   }
 

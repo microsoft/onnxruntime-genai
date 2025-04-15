@@ -492,7 +492,19 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaM
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor*, const int32_t* tokens, size_t token_count, const char** out_string);
 
-/** Applies chat template to messages.
+/**
+ * @brief Applies a chat template to the given input.
+ *
+ * This function processes the specified template with the provided input using the
+ * tokenizer, and outputs the resulting string. Optionally, it can include a
+ * generation prompt in the output.
+ *
+ * @param tokenizer OgaTokenizer used for template processing.
+ * @param template_str Null-terminated string representing the chat template
+ * @param messages Null-terminated string containing the input messages to be processed.
+ * @param add_generation_prompt Indicates whether to add a generation prompt to the output.
+ * @param out_string Pointer to where the output will be stored.
+ * @return OgaResult* Returns a pointer to the result.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer*, const char* template_str, const char* messages, bool add_generation_prompt, const char** out_string);
 
