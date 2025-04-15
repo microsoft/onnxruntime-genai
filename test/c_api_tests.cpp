@@ -96,36 +96,34 @@ TEST(CAPITests, TokenizerCAPI) {
 
 TEST(CAPITests, ChatTemplate) {
 #if TEST_PHI2
-  // just to create tokenizer (phi-2 does not have a chat template)
+  // We load the phi-2 model just to get a tokenizer (phi-2 does not have a chat template)
   auto tokenizer = OgaTokenizer::Create(*OgaModel::Create(PHI2_PATH));
 
   // Testing phi-4 chat template
-  {
-    const char* messages_json = R"(
-      [
-        {
-          "role": "system",
-          "content": "You are a helpful assistant.",
-          "tools": "Calculator"
-        },
-        {
-          "role": "user",
-          "content": "How do I add two numbers?"
-        },
-        {
-          "role": "assistant",
-          "content": "You can add numbers by using the '+' operator."
-        }
-      ])";
-    const char* chat_template = R"({% for message in messages %}{% if message['role'] == 'system' and 'tools' in message and message['tools'] is not none %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|tool|>' + message['tools'] + '<|/tool|>' + '<|end|>' }}{% else %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|end|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>' }}{% else %}{{ eos_token }}{% endif %})";
-    
-    // From HuggingFace Python output for 'microsoft/Phi-4-multimodal-instruct'
-    std::string expected_output = "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>"
-      "How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
-    
-    auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages_json, true);
-    ASSERT_EQ(expected_output, std::string(out_string));
-  }
+  const char* messages_json = R"(
+    [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant.",
+        "tools": "Calculator"
+      },
+      {
+        "role": "user",
+        "content": "How do I add two numbers?"
+      },
+      {
+        "role": "assistant",
+        "content": "You can add numbers by using the '+' operator."
+      }
+    ])";
+  const char* chat_template = R"({% for message in messages %}{% if message['role'] == 'system' and 'tools' in message and message['tools'] is not none %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|tool|>' + message['tools'] + '<|/tool|>' + '<|end|>' }}{% else %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|end|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>' }}{% else %}{{ eos_token }}{% endif %})";
+  
+  // From HuggingFace Python output for 'microsoft/Phi-4-multimodal-instruct'
+  const char* expected_output = "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>"
+    "How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
+  
+  auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages_json, true);
+  ASSERT_STREQ(expected_output, out_string);
 
 #endif
 }
