@@ -210,10 +210,10 @@ std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* m
 
   ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
   CheckResult(OrtxTensorResultGetAt(templated_text.get(), 0, tensor.ToBeAssigned()));
-  
+
   const char* text_ptr = nullptr;
   CheckResult(OrtxGetTensorData(tensor.get(), reinterpret_cast<const void**>(&text_ptr), nullptr, nullptr));
-  
+
   return text_ptr;
 }
 
