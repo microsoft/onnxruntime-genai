@@ -124,7 +124,7 @@ TEST(CAPITests, ChatTemplate) {
       "How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
     
     auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages_json, true);
-    ASSERT_EQ(expected_output, out_string);
+    ASSERT_EQ(expected_output, std::string(out_string));
   }
 
 #endif
