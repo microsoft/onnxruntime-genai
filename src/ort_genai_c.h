@@ -500,7 +500,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcess
  * generation prompt in the output.
  *
  * \param[in] tokenizer OgaTokenizer used for template processing.
- * \param[in] template_str Null-terminated string representing the chat template
+ * \param[in] template_str Null-terminated string representing the chat template. Use nullptr to fall back to the default chat template from the tokenizer config.
  * \param[in] messages Null-terminated string containing the input messages to be processed.
  * \param[in] add_generation_prompt Indicates whether to add a generation prompt to the output.
  * \param[out] out_string Pointer to where the output will be stored.
