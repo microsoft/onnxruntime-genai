@@ -493,7 +493,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor*, const int32_t* tokens, size_t token_count, const char** out_string);
 
 /**
- * @brief Applies a chat template to the given input. out_string must be freed with OgaDestroyString
+ * @brief Applies a chat template to input messages
  *
  * This function processes the specified template with the provided input using the
  * tokenizer, and outputs the resulting string. Optionally, it can include a
