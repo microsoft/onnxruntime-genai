@@ -535,6 +535,16 @@ struct OrtCUDAProviderOptionsV2 {
   Ort::Abstract make_abstract;
 };
 
+struct OrtNvProviderOptions {
+  static std::unique_ptr<OrtNvProviderOptions> Create();
+
+  void Update(const char* const* keys, const char* const* values, size_t count);
+  void UpdateValue(const char* key, void* value);
+
+  static void operator delete(void* p) { Ort::api->ReleaseNvProviderOptions(reinterpret_cast<OrtNvProviderOptions*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
 /** \brief Options object used when creating a new Session object
  *
  * Wraps ::OrtSessionOptions object and methods
@@ -592,6 +602,8 @@ struct OrtSessionOptions {
   OrtSessionOptions& AppendExecutionProvider_OpenVINO(const OrtOpenVINOProviderOptions& provider_options);       ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_OpenVINO
   OrtSessionOptions& AppendExecutionProvider_TensorRT(const OrtTensorRTProviderOptions& provider_options);       ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_TensorRT
   OrtSessionOptions& AppendExecutionProvider_TensorRT_V2(const OrtTensorRTProviderOptionsV2& provider_options);  ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_TensorRT
+  OrtSessionOptions& AppendExecutionProvider_Nv(const OrtNvProviderOptions& provider_options);                   ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_Nv
+
   OrtSessionOptions& AppendExecutionProvider_MIGraphX(const OrtMIGraphXProviderOptions& provider_options);       ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_MIGraphX
   ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_CANN
   OrtSessionOptions& AppendExecutionProvider_CANN(const OrtCANNProviderOptions& provider_options);

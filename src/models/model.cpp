@@ -263,7 +263,7 @@ void EnsureDeviceOrtInit(OrtSession& session, DeviceType type) {
   if (device)
     return;
 
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "Nv", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   auto name = device_type_names[static_cast<int>(type)];
@@ -480,6 +480,23 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
 
       session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
+    } else if (provider_options.name == "nv") {
+      std::vector<const char*> keys, values;
+      for (auto& option : provider_options.options) {
+        keys.emplace_back(option.first.c_str());
+        values.emplace_back(option.second.c_str());
+      }
+
+      auto ort_provider_options = OrtNvProviderOptions::Create();
+      // TODO: missing handling in ORT-> NV-EP, need to verify and enable.
+      //ort_provider_options->Update(keys.data(), values.data(), keys.size());
+      session_options.AppendExecutionProvider_Nv(*ort_provider_options);
+
+      // Enable CUDA EP for contrib ops
+      auto ort_provider_options_cuda = OrtCUDAProviderOptionsV2::Create();
+      ort_provider_options_cuda->Update(keys.data(), values.data(), keys.size());
+
+      session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options_cuda);
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 

@@ -485,6 +485,20 @@ inline void OrtCUDAProviderOptionsV2::UpdateValue(const char* key, void* value) 
   Ort::ThrowOnError(Ort::api->UpdateCUDAProviderOptionsWithValue(this, key, value));
 }
 
+inline std::unique_ptr<OrtNvProviderOptions> OrtNvProviderOptions::Create() {
+  OrtNvProviderOptions* p;
+  Ort::ThrowOnError(Ort::api->CreateNvProviderOptions(&p));
+  return std::unique_ptr<OrtNvProviderOptions>{p};
+}
+
+inline void OrtNvProviderOptions::Update(const char* const* keys, const char* const* values, size_t count) {
+  Ort::ThrowOnError(Ort::api->UpdateNvProviderOptions(this, keys, values, count));
+}
+
+inline void OrtNvProviderOptions::UpdateValue(const char* key, void* value) {
+  Ort::ThrowOnError(Ort::api->UpdateNvProviderOptionsWithValue(this, key, value));
+}
+
 inline std::unique_ptr<OrtSessionOptions> OrtSessionOptions::Create() {
   OrtSessionOptions* p;
   Ort::ThrowOnError(Ort::api->CreateSessionOptions(&p));
@@ -648,6 +662,11 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_CUDA(const 
 
 inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_CUDA_V2(const OrtCUDAProviderOptionsV2& provider_options) {
   Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_CUDA_V2(this, &provider_options));
+  return *this;
+}
+
+inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_Nv(const OrtNvProviderOptions& provider_options) {
+  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_Nv(this, &provider_options));
   return *this;
 }
 

@@ -60,6 +60,7 @@ class Model:
             "cuda": {
                 "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",        # "1" if the model is able to enable cuda graph, "0" otherwise
             },
+            "nv": {},
             "rocm": {
                 "tunable_op_enable": "1",
                 "tunable_op_tuning_enable": "1",
@@ -296,6 +297,7 @@ class Model:
         valid_gqa_configurations = [
             ("cpu", TensorProto.FLOAT),
             ("cuda", TensorProto.FLOAT16),
+            ("nv", TensorProto.FLOAT16),
             ("rocm", TensorProto.FLOAT16),
             ("dml", TensorProto.FLOAT16),
             ("webgpu", TensorProto.FLOAT16),
@@ -691,6 +693,23 @@ class Model:
         self.make_node("ReduceMax", inputs=inputs, outputs=[output], name=name, keepdims=False)
         self.make_value_info(output, dtype, shape=shape)
 
+    def make_reduce_mean(self, name, inputs, dtype, shape, axes=[-1], keepdims=False):
+        output = f"{name}/output_0"
+        if self.quant_attrs["use_qdq"]:
+            # Opset 18 uses axes as input[1]
+            inputs.append(f"/model/constants/TensorProto.INT64/1D/{','.join(map(str, axes))}")
+            self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
+            self.make_value_info(output, dtype, shape=shape)
+        else:
+            # Opset 17 uses axes as attribute
+            self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, axes=axes, keepdims=keepdims)
+            self.make_value_info(output, dtype, shape=shape)
+
+    def make_sqrt(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Sqrt", inputs=inputs, outputs=[output], name=name)
+        self.make_value_info(output, dtype, shape=shape)
+
     def make_cast(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Cast", inputs=[root_input], outputs=[output], name=name, to=dtype)
@@ -1045,8 +1064,22 @@ class Model:
             output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
 
-        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
-        self.make_value_info(output_0, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        # NV EP doesn't support Skip/SimplifiedLayerNormalization, so we fallback to primitive ops
+        if self.ep == "nv":
+            layer_norn_basename = f"/model/layers.{layer_id}/{location}_layernorm"
+            if op_type == "SimplifiedLayerNormalization":
+                output_0 = f"{layer_norn_basename}/simplified_layer_norm/Mul_1/output_0"
+                outputs = [output_0]
+                self.make_simplified_layer_norm(layer_norn_basename, root_input, weight, shape=['batch_size', 'sequence_length', self.hidden_size])
+            elif op_type == "SkipSimplifiedLayerNormalization":
+                output_0 = f"{layer_norn_basename}/skip_simplified_layer_norm/simplified_layer_norm/Mul_1/output_0"
+                output_3 = f"{layer_norn_basename}/skip_simplified_layer_norm/Add/output_0"
+                outputs = [output_0, "", "", output_3]
+                self.make_skip_simplified_layer_norm(layer_norn_basename, root_input, skip_input, weight, shape=['batch_size', 'sequence_length', self.hidden_size])
+        else:
+            self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
+            self.make_value_info(output_0, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            
         if skip and not self.layernorm_attrs["last_layernorm"]:
             self.make_value_info(output_3, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
@@ -1235,6 +1268,83 @@ class Model:
         )
         self.make_value_info(if_cos_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value_info(if_sin_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+
+    def make_skip_simplified_layer_norm(self, basename, root_input, skip_input, weight_name, shape, **kwargs):
+        #                          root_input         skip_input
+        #                              |                  |
+        #                              +------------------+
+        #                              |
+        #                             Add-------------> output (1)
+        #                              |
+        #                      SimplifiedLayerNorm----> output (0)
+        make_add_name = f"{basename}/skip_simplified_layer_norm/Add"
+        make_add_inputs = [root_input, skip_input]
+        self.make_add(make_add_name, make_add_inputs, dtype=self.io_dtype, shape=shape)
+
+        make_simplified_layer_norm_name = f"{basename}/skip_simplified_layer_norm"
+        self.make_simplified_layer_norm(make_simplified_layer_norm_name,  f"{make_add_name}/output_0", weight_name, shape=shape, **kwargs)
+
+    def make_simplified_layer_norm(self, basename, root_input, weight_name, shape, **kwargs):
+        
+        
+        #                            Cast (float32) 
+        #                              |
+        #                      +-------+-------+
+        #                      |               |
+        #                     Pow              |
+        #                      |               |
+        #                  ReduceMean          |
+        #                      |               |
+        #                     Add              |
+        #                      |               |
+        #                    Sqrt              |
+        #                      |               |
+        #                     Div              |
+        #                      |               |
+        #                      +-------+-------+
+        #                              |  
+        #                             Mul
+        #                              |
+        #                            Cast_1 (float16)
+        #                              |
+        #                            Mul_1
+        
+        make_cast_name = f"{basename}/simplified_layer_norm/Cast"
+        self.make_cast(make_cast_name, root_input, TensorProto.FLOAT, shape=shape)
+
+        make_pow_name = f"{basename}/simplified_layer_norm/Pow"
+        make_pow_inputs = [f"{make_cast_name}/output_0", f"/model/constants/TensorProto.FLOAT/0D/2"]
+
+        self.make_node("Pow", inputs=make_pow_inputs, outputs=[f"{make_pow_name}/output_0"], name=make_pow_name, domain="")
+        self.make_value_info(f"{make_pow_name}/output_0", TensorProto.FLOAT, shape=shape)
+
+        make_reducemean_name = f"{basename}/simplified_layer_norm/ReduceMean"
+        make_reducemean_inputs = [f"{make_pow_name}/output_0"]
+        self.make_reduce_mean(make_reducemean_name, make_reducemean_inputs, TensorProto.FLOAT, keepdims=True, axes=[-1], shape=shape)
+
+        make_add_name = f"{basename}/simplified_layer_norm/Add"
+        make_add_inputs = [f"{make_reducemean_name}/output_0", f"/model/constants/TensorProto.FLOAT/0D/{self.layernorm_attrs['epsilon']}"]
+        self.make_add(make_add_name, make_add_inputs, TensorProto.FLOAT, shape=shape)
+
+        make_sqrt_name = f"{basename}/simplified_layer_norm/Sqrt"
+        make_sqrt_inputs = [f"{make_add_name}/output_0"]
+        self.make_sqrt(make_sqrt_name, make_sqrt_inputs, TensorProto.FLOAT, shape=shape)
+
+        make_div_name = f"{basename}/simplified_layer_norm/Div"
+        make_div_inputs = [f"/model/constants/TensorProto.FLOAT/0D/1", f"{make_sqrt_name}/output_0"]
+        self.make_div(make_div_name, make_div_inputs, TensorProto.FLOAT, shape=shape)
+        
+        make_mul_name = f"{basename}/simplified_layer_norm/Mul"
+        make_mul_inputs = [f"{make_div_name}/output_0", f"{make_cast_name}/output_0"]
+        self.make_mul(make_mul_name, make_mul_inputs, TensorProto.FLOAT, shape=shape)
+
+        make_cast_1_name = f"{basename}/simplified_layer_norm/Cast_1"
+        self.make_cast(make_cast_1_name, f"{make_mul_name}/output_0", dtype=self.io_dtype, shape=shape)
+
+        make_mul_1_name = f"{basename}/simplified_layer_norm/Mul_1"
+        make_mul_1_inputs = [f"{make_cast_1_name}/output_0", weight_name]
+        self.make_mul(make_mul_1_name, make_mul_1_inputs, dtype=self.io_dtype, shape=shape)
+
 
     def make_qk_norm(self, layer_id, attention):
         # Make subgraph to compute SimplifiedLayerNorm after Q and K MatMuls in attention:
