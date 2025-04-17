@@ -5,6 +5,7 @@
 #include "model.h"
 #include "kv_cache.h"
 #include "windowed_kv_cache.h"
+#include "../openvino/interface.h"
 
 namespace Generators {
 
@@ -411,22 +412,10 @@ std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
   // For OpenVINO Stateful models, they do not contain exposed past/present KV tensors.
   // In this case, 'IsCacheNeeded' below will return false. But in this case we need to create a
   // special 'ModelManagedKeyValueCache' object, and so we check this condition first.
-  if (state.model_.p_device_->GetType() == DeviceType::OpenVINO) {
-    const auto& provider_options = state.model_.config_->model.decoder.session_options.provider_options;
-    for (auto& po : provider_options) {
-      if (po.name == "OpenVINO") {
-        const auto& openvino_options = po.options;
-        for (auto& option : openvino_options) {
-          // For OpenVINO, if session option 'enable_causallm' is set, the session will encapsulate
-          // a stateful model, so KVCache will be managed internally.
-          if (option.first == "enable_causallm" && option.second == "True") {
-            if (g_log.enabled)
-              Log("info", "CreateKeyValueCache: Creating ModelManagedKeyValueCache");
-            return std::make_unique<ModelManagedKeyValueCache>(state);
-          }
-        }
-      }
-    }
+  if (IsOpenVINOStatefulModel(state.model_)) {
+    if (g_log.enabled)
+      Log("info", "CreateKeyValueCache: Creating ModelManagedKeyValueCache");
+    return std::make_unique<ModelManagedKeyValueCache>(state);
   }
 
   if (!IsCacheNeeded(state.model_)) {

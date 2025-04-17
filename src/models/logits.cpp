@@ -3,6 +3,7 @@
 #include "../generators.h"
 #include "model.h"
 #include "logits.h"
+#include "../openvino/interface.h"
 
 namespace Generators {
 
@@ -21,25 +22,15 @@ Logits::Logits(State& state)
 
   input_sequence_lengths.resize(state_.params_->search.batch_size);
 
-  if (state.model_.p_device_->GetType() == DeviceType::OpenVINO) {
-    const auto& provider_options = state.model_.config_->model.decoder.session_options.provider_options;
-    for (auto& po : provider_options) {
-      if (po.name == "OpenVINO") {
-        const auto& openvino_options = po.options;
-        for (auto& option : openvino_options) {
-          // When 'enable_causallm' option is set, models are patched in a way so that only return the
-          // sliced logits needed for sampling. For example, given 43 prompt tokens, instead of returning
-          // logits of the shape:  [1,43,<vocab_size>]
-          // they will have shape: [1, 1,<vocab_size>].
-          if (option.first == "enable_causallm" && option.second == "True") {
-            if (g_log.enabled)
-              Log("info", "Logits: Using Trimmed Prefill Logits");
+  if (IsOpenVINOStatefulModel(state.model_)) {
+    // In the case of OpenVINO stateful models, they are patched in a way so that they only return the
+    // sliced logits needed for sampling. For example, given 43 prompt tokens, instead of returning
+    // logits of the shape:  [1,43,<vocab_size>]
+    // they will have shape: [1, 1,<vocab_size>].
+    if (g_log.enabled)
+      Log("info", "Logits: Using Trimmed Prefill Logits");
 
-            trimmed_prefill_logits_ = true;
-          }
-        }
-      }
-    }
+    trimmed_prefill_logits_ = true;
   }
 }
 
