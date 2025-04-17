@@ -136,7 +136,6 @@ struct ModelManagedKeyValueCache : KeyValueCache {
  private:
   State& state_;
   const Model& model_{state_.model_};
-  Ort::Allocator& Allocator() { return model_.p_device_kvcache_->GetAllocator(); }
 };
 
 std::string ComposeKeyValueName(const std::string& template_string, int index);
