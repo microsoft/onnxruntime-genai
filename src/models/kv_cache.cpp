@@ -396,7 +396,7 @@ void ModelManagedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int tot
 void ModelManagedKeyValueCache::RewindTo(size_t index) {
   // Add 'kvcache_rewind' EP dynamic option to get applied before the next Session::Run.
   // This will trim the internal KVCache states to the desired position.
-  state_._ep_dynamic_options_next_run.push_back({"kvcache_rewind", std::to_string(index)});
+  state_.ep_dynamic_options_next_run_.push_back({"kvcache_rewind", std::to_string(index)});
 }
 
 namespace {
