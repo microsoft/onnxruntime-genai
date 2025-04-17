@@ -14,13 +14,24 @@ struct ScheduledRequests {
 
   std::shared_ptr<GeneratorParams> Params() const;
 
-  std::vector<std::shared_ptr<Request>> Requests();
+  auto begin() const {
+    return requests_.begin();
+  }
 
-  size_t NumRequests() const;
+  auto end() const {
+    return requests_.end();
+  }
 
-  void GenerateNextTokens(std::vector<DeviceSpan<float>>& logits);
+  size_t size() const {
+    return requests_.size();
+  }
 
   explicit operator bool() const;
+
+  auto operator[](size_t idx) const {
+    assert(idx < requests_.size());
+    return requests_[idx];
+  }
 
  private:
   std::vector<std::shared_ptr<Request>> requests_;
