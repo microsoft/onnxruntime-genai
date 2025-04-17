@@ -11,6 +11,7 @@ Run this script to create the desired ONNX model.
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
 from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer, QuantFormat
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+
 import numpy as np
 import torch
 
@@ -3297,6 +3298,59 @@ class Gemma3Model(Gemma2Model):
         sin_cache_name = kwargs.get("sin_cache_name", self.sin_cache_global_name if self.window_size == -1 else self.sin_cache_local_name)
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)
 
+class BitNetModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+    def make_mlp_proj(self, layer_id, mlp, root_input):
+        # Make nodes for the MLP subgraph
+        #
+        #          root_input
+        #              |
+        #         UpProjMatMul
+        #              |
+        #           ActFunc
+        #              |
+        #         DownProjMatMul
+
+        up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
+        up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
+
+        act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")
+
+        # Make output MatMul node
+        down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
+        down_name = self.make_matmul(mlp.down_proj, down_basename, f"{act_fn_name}/output_0")
+
+        # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        super().make_attention(layer_id, attention, root_input, **kwargs)
+
+        # Make attention node (e.g. MultiHeadAttention, GroupQueryAttention, etc.)
+        attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
+        # self.make_attention_op(
+        #     attn_name, q_path=self.attention_attrs["q_path"], k_path=self.attention_attrs["k_path"], v_path=self.attention_attrs["v_path"],
+        #     past_k=past_k, past_v=past_v, present_k=present_k, present_v=present_v,
+        #     cos_cache=cos_cache_name, sin_cache=sin_cache_name, **kwargs,
+        # )
+
+        # Make MatMul node (output projection weight node)
+        o_proj = 'o_proj' if hasattr(attention, 'o_proj') else 'dense'
+        o_matmul_basename = f"/model/layers.{layer_id}/attn/o_proj/MatMul"
+        o_weight = eval(f"attention.{o_proj}")
+        o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, f"{attn_name}/output_0")
+
+        # Make Add node (output projection bias node if bias exists)
+        o_bias_exists = eval(f"attention.{o_proj}.bias") is not None
+        if o_bias_exists:
+            o_add_name = f"/model/layers.{layer_id}/attn/o_proj/Add"
+            o_bias = eval(f"attention.{o_proj}.bias.detach().numpy()")
+            self.make_add_bias(o_bias, o_add_name, root_input=f"{o_matmul_name}/output_0")
+
+        # Assign output 0 of previous output node as skip input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{o_matmul_name if not o_bias_exists else o_add_name}/output_0"
 
 def check_extra_options(kv_pairs):
     """
@@ -3392,7 +3446,9 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     if "config_only" not in extra_options:
         # List architecture options in alphabetical order
-        if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
+        if config.architectures[0] == "BitNetForCausalLM":
+            onnx_model = BitNetModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
             # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
             config.hidden_act = "swiglu"
             onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)

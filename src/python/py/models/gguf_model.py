@@ -282,7 +282,9 @@ class GGUFModel:
         Also performs any pre-processing and post-processing to the GGUF models to ensure the
         weights are the same as the PyTorch models.
         """
-        if model_type == "ChatGLMModel":
+        if model_type == "BitNetForCausalLM":
+            model = GGUFModel(input_path, head_size, hidden_size, intermediate_size, num_attn_heads, num_kv_heads, vocab_size)
+        elif model_type == "ChatGLMModel":
             model = GGUFModel(input_path, head_size, hidden_size, intermediate_size, num_attn_heads, num_kv_heads, vocab_size)
         elif model_type == "GemmaForCausalLM":
             model = GGUFModel(input_path, head_size, hidden_size, intermediate_size, num_attn_heads, num_kv_heads, vocab_size)
