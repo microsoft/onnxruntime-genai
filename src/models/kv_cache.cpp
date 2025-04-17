@@ -378,22 +378,18 @@ std::string ComposeKeyValueName(const std::string& template_string, int index) {
 
 ModelManagedKeyValueCache::ModelManagedKeyValueCache(State& state)
     : state_{state} {
-  // This fixes with _qa sample where a new instance of ModelManagedKeyValueCache is
-  // created for each new prompt from user. In this case, we need to trigger a KVCache
-  // reset on the session before the first Session::Run.
+  // A new instance of ModelManagedKeyValueCache is created for each Generator.
+  // In this case, we need to trigger a KVCache reset on the session before the first Session::Run.
+  // This implies that the key-value cache state is coupled with the ONNX Runtime Session and
+  // that only 1 Generator can be active for the Model at any given time.
   RewindTo(0);
 }
 
-void ModelManagedKeyValueCache::Add() {
-  // NOOP
-}
+void ModelManagedKeyValueCache::Add() {}
 
-void ModelManagedKeyValueCache::AddEncoder() {
-  // NOOP
-}
+void ModelManagedKeyValueCache::AddEncoder() {}
 
 void ModelManagedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
-  // NO-OP for now.
   // Eventually we need to set 'beam_idx' tensor here somehow.
 }
 
