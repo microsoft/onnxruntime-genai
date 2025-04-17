@@ -27,7 +27,9 @@ struct Request : std::enable_shared_from_this<Request>,
 
   void AddTokens(std::span<const int32_t> tokens);
 
-  void GetNewTokens(std::span<int32_t> tokens);
+  DeviceSpan<int32_t> NewTokens();
+
+  DeviceSpan<int32_t> UnprocessedTokens();
 
   void GenerateNextTokens(DeviceSpan<float> logits);
 
@@ -36,6 +38,8 @@ struct Request : std::enable_shared_from_this<Request>,
   void Remove();
 
   bool IsPrefill() const;
+
+  int64_t CurrentSequenceLength() const;
 
   RequestStatus status_{RequestStatus::Unassigned};
   std::chrono::system_clock::time_point assigned_time_;

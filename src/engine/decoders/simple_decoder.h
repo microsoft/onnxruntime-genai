@@ -9,10 +9,29 @@
 
 namespace Generators {
 
-struct SimpleDecoderIO : State {
-  SimpleDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
+struct StaticBatchDecoderIO : ModelIO {
+  StaticBatchDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
+                       ScheduledRequests& scheduled_requests,
+                       std::shared_ptr<CacheManager> cache_manager);
+
+ private:
+  void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareAttentionMask(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PreparePositionIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+
+  std::vector<std::unique_ptr<Tensor>> owned_inputs_;
+  std::vector<std::unique_ptr<Tensor>> owned_outputs_;
+};
+
+struct VarlenDecoderIO : ModelIO {
+  VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                   ScheduledRequests& scheduled_requests,
                   std::shared_ptr<CacheManager> cache_manager);
+
+ private:
+  void PrepareInputIds();
+  void PreparePositionIds();
 };
 
 struct SimpleDecoder : public Decoder {

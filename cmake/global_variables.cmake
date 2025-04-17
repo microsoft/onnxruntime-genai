@@ -82,6 +82,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${MODELS_ROOT}/*.cpp"
   "${ENGINE_ROOT}/*.h"
   "${ENGINE_ROOT}/*.cpp"
+  "${ENGINE_ROOT}/decoders/*.h"
+  "${ENGINE_ROOT}/decoders/*.cpp"
 )
 
 set(ortgenai_embed_libs "") # shared libs that will be embedded inside the onnxruntime-genai package

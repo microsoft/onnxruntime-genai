@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "request.h"
+
 namespace Generators {
 
 struct ScheduledRequests {
@@ -10,29 +12,13 @@ struct ScheduledRequests {
 
   std::unique_ptr<OrtRunOptions> RunOptions();
 
-  OrtValue* InputIds();
+  std::shared_ptr<GeneratorParams> Params() const;
 
-  OrtValue* PositionIds();
+  std::vector<std::shared_ptr<Request>> Requests();
 
-  std::vector<OrtValue*> KeyCaches();
+  size_t NumRequests() const;
 
-  std::vector<OrtValue*> ValueCaches();
-
-  OrtValue* CumulativeSequenceLengths();
-
-  OrtValue* SequenceLengths();
-
-  OrtValue* MaxQueryLength();
-
-  OrtValue* MaxSequenceLength();
-
-  OrtValue* BlockTable();
-
-  OrtValue* SlotMapping();
-
-  OrtValue* Logits();
-
-  void GenerateNextTokens();
+  void GenerateNextTokens(std::vector<DeviceSpan<float>>& logits);
 
   explicit operator bool() const;
 
