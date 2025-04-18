@@ -76,8 +76,15 @@ jobs:
         with:
           submodules: true
 
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@1.82.0
+      - name: Install Rust with rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          source "$HOME/.cargo/env"
+          rustup install 1.82.0
+          rustup override set 1.82.0
+          rustup component add rust-src
+          rustup show active-toolchain
 
       - name: Install Rust Android Toolchain
         run: |
