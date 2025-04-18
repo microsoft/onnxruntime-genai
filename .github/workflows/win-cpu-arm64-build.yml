@@ -64,15 +64,22 @@ jobs:
         move ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
         move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-arm64/native/* ort/lib/
 
+    - name: Install Rust Toolchain
+      run: |
+        $exePath = "$env:TEMP\rustup-init.exe"
+        (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+        & $exePath -y --default-toolchain=1.82.0
+        Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
+
     - name: Configure CMake
       run: |
         python -m pip install wheel requests
 
-        cmake --preset windows_arm64_cpu_release
+        cmake --preset windows_arm64_cpu_release -DUSE_GUIDANCE=ON
 
     - name: Build with CMake
       run: |
-        cmake --build --preset windows_arm64_cpu_release --parallel
+        cmake --build --preset windows_arm64_cpu_release --parallel -DUSE_GUIDANCE=ON
 
     - name: Install the Python Wheel and Test Dependencies
       run: |

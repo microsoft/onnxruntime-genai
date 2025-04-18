@@ -205,6 +205,10 @@ struct PyGeneratorParams {
     std::cerr << "TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release" << std::endl;
   }
 
+  void SetGuidance(const std::string& type, const std::string& data) {
+    params_->SetGuidance(type.c_str(), data.c_str());
+  }
+
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
 
@@ -303,7 +307,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("set_inputs", &PyGeneratorParams::SetInputs)
       .def("set_model_input", &PyGeneratorParams::SetModelInput)
       .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
-      .def("set_search_options", &PyGeneratorParams::SetSearchOptions);  // See config.h 'struct Search' for the options
+      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
+      .def("set_guidance", &PyGeneratorParams::SetGuidance);
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });

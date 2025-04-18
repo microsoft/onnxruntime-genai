@@ -45,6 +45,13 @@ include(cmake/check_dml.cmake)
 include(cmake/cxx_standard.cmake)
 
 add_compile_definitions(BUILDING_ORT_GENAI_C)
+
+if(USE_GUIDANCE)
+  add_compile_definitions(USE_GUIDANCE=1)
+else()
+  add_compile_definitions(USE_GUIDANCE=0)
+endif()
+
 if(MSVC)
   # set updated value for __cplusplus macro instead of 199711L
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
@@ -132,6 +139,19 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-DEF:${GENERATORS_ROOT}/cuda/symbols.def")
   else()
     message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
+  endif()
+endif()
+
+
+if(USE_GUIDANCE)
+  target_include_directories(onnxruntime-genai PUBLIC ${llguidance_SOURCE_DIR}/parser/)
+  # target_include_directories(onnxruntime-genai-static PUBLIC ${llguidance_SOURCE_DIR}/parser/)
+  target_link_libraries(onnxruntime-genai PRIVATE llguidance)
+  # target_link_libraries(onnxruntime-genai-static PUBLIC llguidance_parser)
+  if (WIN32)
+    # bcrypt is needed for the rust std lib
+    target_link_libraries(onnxruntime-genai PRIVATE bcrypt)
+    # target_link_libraries(onnxruntime-genai-static PRIVATE bcrypt)
   endif()
 endif()
 
