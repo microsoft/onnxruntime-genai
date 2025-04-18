@@ -13,10 +13,10 @@
 #include "llguidance.h"
 #endif
 
-#if USE_CUDA
-#include "cuda/cuda_common.h"
-#include "models/kernels.h"
-#endif
+// #if USE_CUDA
+// #include "cuda/cuda_common.h"
+// #include "models/kernels.h"
+// #endif
 
 #include "logits_processor.h"
 
@@ -28,6 +28,7 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
       eos_token_(state.params_->config.model.eos_token_id),
       batch_size_(state.params_->search.batch_size),
       device_type_(state.params_->p_device->GetType()),
+      params_(state.params_),
       guidance_type_(state.params_->guidance_type),
       guidance_data_(state.params_->guidance_data) {
   if (guidance_type_.empty() || guidance_data_.empty()) {
@@ -103,11 +104,9 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     return ComputeMask();
   });
 
-  // Device Allocate: try removing ifdef
-  // if (state.params_->device_type == DeviceType::CUDA) {
+  // if (device_type_ == DeviceType::CUDA) {
   //   cuda_logits_mask_ptr_ = state.params_->p_device->Allocate<uint32_t>(batch_size_ * vocab_size_ / 32);
   // }
-  // cuda_stream_ = state.params_->cuda_stream;
 }
 
 std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
@@ -163,14 +162,28 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
   auto masks = GetMask();
 
 // #if USE_CUDA
-//   if (device_type_ == DeviceType::CUDA) {
-//     for (int i = 0; i < static_cast<int>(masks.size()); i++) {
-//       cudaMemcpyAsync(cuda_logits_mask_ptr_.Span().data() + (i * vocab_size_ / 32), masks.at(i).data(),
-//                       static_cast<int>(masks.at(i).size() * sizeof(uint32_t)), ::cudaMemcpyHostToDevice, cuda_stream_);
-//     }
-//     cuda::LaunchAddLogitsMask(logits.Span().data(), batch_size_, vocab_size_, cuda_logits_mask_ptr_.Span().data(), cuda_stream_);
-//     return;
-//   }
+  if (device_type_ == DeviceType::CUDA) {
+    const size_t words_per_row = vocab_size_ / 32;
+    std::vector<uint32_t> flat_masks;
+    flat_masks.reserve(masks.size() * words_per_row);
+    for (const auto& row : masks)              // row.size() == words_per_row
+        flat_masks.insert(flat_masks.end(), row.begin(), row.end());
+
+    const size_t total_words = flat_masks.size();
+    auto cuda_logits_mask_ptr_ = params_->p_device->Allocate<uint32_t>(total_words);
+    copy(std::span<const uint32_t>{flat_masks}, cuda_logits_mask_ptr_.CpuSpan());
+    cuda_logits_mask_ptr_.CopyCpuToDevice();
+    params_->p_device->LaunchAddLogitsMask(logits.Span().data(), batch_size_, vocab_size_, cuda_logits_mask_ptr_.Span().data());
+    return;
+
+    // copy(masks, cuda_logits_mask_ptr_.Span());
+    // for (int i = 0; i < static_cast<int>(masks.size()); i++) {
+    //   cudaMemcpyAsync(cuda_logits_mask_ptr_.Span().data() + (i * vocab_size_ / 32), masks.at(i).data(),
+    //                   static_cast<int>(masks.at(i).size() * sizeof(uint32_t)), ::cudaMemcpyHostToDevice, cuda_stream_);
+    // }
+    // LaunchAddLogitsMask(logits.Span().data(), batch_size_, vocab_size_, cuda_logits_mask_ptr_.Span().data(), cuda_stream_);
+    // return;
+  }
 // #endif
   size_t vocab_index = 0;
 

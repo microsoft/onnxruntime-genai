@@ -70,14 +70,15 @@ struct GuidanceLogitsProcessor : public LogitsProcessor {
   std::vector<std::unique_ptr<LlgConstraint, LlgConstraintDeleter>> llg_constraints_;
   std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter> llg_tokenizer_;
   std::shared_ptr<Tokenizer> tokenizer_;
+  std::shared_ptr<const GeneratorParams> params_;
 
   std::future<std::vector<std::vector<uint32_t>>> mask_future_;
   std::vector<std::vector<uint32_t>> logits_masks_;
 
-#if USE_CUDA
-  DeviceSpan<uint32_t> cuda_logits_mask_ptr_;
-  cudaStream_t cuda_stream_;
-#endif
+// #if USE_CUDA
+//   DeviceSpan<uint32_t> cuda_logits_mask_ptr_;
+//   cudaStream_t cuda_stream_;
+// #endif
 
   struct TokenizeData {
     Tokenizer* tokenizer;
