@@ -13,6 +13,7 @@
 #include "dml/interface.h"
 #include "qnn/interface.h"
 #include "webgpu/interface.h"
+#include "openvino/interface.h"
 
 #if defined(_WIN32)
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
@@ -210,6 +211,8 @@ std::string to_string(DeviceType device_type) {
       return "WebGpu";
     case DeviceType::QNN:
       return "QnnWithSharedMemory";
+    case DeviceType::OpenVINO:
+      return "OpenVINO";
     default:
       throw std::runtime_error("Unknown device type");
   }
@@ -230,6 +233,8 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
       return GetWebGPUInterface();
     case DeviceType::QNN:
       return GetQNNInterface();
+    case DeviceType::OpenVINO:
+      return GetOpenVINOInterface();
   }
 }
 

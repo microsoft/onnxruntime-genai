@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
+// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #include <algorithm>
 #include <climits>
 #include <random>
@@ -204,6 +204,19 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   return string;
 }
 
+std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, bool add_generation_prompt) const {
+  ort_extensions::OrtxObjectPtr<OrtxTensorResult> templated_text;
+  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, templated_text.ToBeAssigned(), add_generation_prompt, false /*tokenize*/));
+
+  ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
+  CheckResult(OrtxTensorResultGetAt(templated_text.get(), 0, tensor.ToBeAssigned()));
+
+  const char* text_ptr{};
+  CheckResult(OrtxGetTensorData(tensor.get(), reinterpret_cast<const void**>(&text_ptr), nullptr, nullptr));
+
+  return text_ptr;
+}
+
 std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
   std::vector<std::vector<int32_t>> sequences;
   std::vector<std::span<const int32_t>> span_sequences;
@@ -255,14 +268,15 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
 // arena already being destroyed.
 void EnsureDeviceOrtInit(OrtSession& session, DeviceType type) {
   // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
-  if (type == DeviceType::CPU)
+  // OpenVINO delegates to the CPU device allocator
+  if (type == DeviceType::CPU || type == DeviceType::OpenVINO)
     return;
 
   auto& device = GetOrtGlobals()->allocator_device_[static_cast<int>(type)];
   if (device)
     return;
 
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   auto name = device_type_names[static_cast<int>(type)];
@@ -279,20 +293,21 @@ SessionInfo::SessionInfo(OrtSession& session) {
 
 void SessionInfo::Add(OrtSession& session) {
   auto input_names = session.GetInputNames();
-  std::vector<ONNXTensorElementDataType> input_types(input_names.size());
-  for (size_t i = 0; i < input_types.size(); i++) {
-    auto input_type = session.GetInputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
+  for (size_t i = 0; i < input_names.size(); i++) {
+    auto type_info = session.GetInputTypeInfo(i);
+    auto input_type = type_info->GetTensorTypeAndShapeInfo().GetElementType();
     auto found_input = inputs_.find(input_names[i]);
-    if (found_input != inputs_.end() && found_input->second != input_type)
-      throw std::runtime_error("Model input type mismatch: " + input_names[i] + " expected " + std::to_string(found_input->second) + " got " + std::to_string(input_type));
-    inputs_.emplace(std::make_pair(std::move(input_names[i]), input_type));
+    if (found_input != inputs_.end() && found_input->second->GetTensorTypeAndShapeInfo().GetElementType() != input_type)
+      throw std::runtime_error("Model input type mismatch: " + input_names[i] + " expected " +
+                               std::to_string(found_input->second->GetTensorTypeAndShapeInfo().GetElementType()) +
+                               " got " + std::to_string(input_type));
+    inputs_.emplace(std::make_pair(std::move(input_names[i]), std::move(type_info)));
   }
 
   auto output_names = session.GetOutputNames();
-  std::vector<ONNXTensorElementDataType> output_types(output_names.size());
-  for (size_t i = 0; i < output_types.size(); i++) {
-    auto output_type = session.GetOutputTypeInfo(i)->GetTensorTypeAndShapeInfo().GetElementType();
-    outputs_.emplace(std::make_pair(std::move(output_names[i]), output_type));
+  for (size_t i = 0; i < output_names.size(); i++) {
+    auto type_info = session.GetOutputTypeInfo(i);
+    outputs_.emplace(std::make_pair(std::move(output_names[i]), std::move(type_info)));
   }
 }
 
@@ -308,14 +323,14 @@ ONNXTensorElementDataType SessionInfo::GetInputDataType(const std::string& name)
   auto result = inputs_.find(name);
   if (result == inputs_.end())
     throw std::runtime_error("Model input was not found: " + name);
-  return result->second;
+  return result->second->GetTensorTypeAndShapeInfo().GetElementType();
 }
 
 ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name) const {
   auto result = outputs_.find(name);
   if (result == outputs_.end())
     throw std::runtime_error("Model output was not found: " + name);
-  return result->second;
+  return result->second->GetTensorTypeAndShapeInfo().GetElementType();
 }
 
 std::vector<std::string> SessionInfo::GetInputNames() const {
@@ -324,6 +339,20 @@ std::vector<std::string> SessionInfo::GetInputNames() const {
   for (const auto& input : inputs_)
     names.push_back(input.first);
   return names;
+}
+
+std::vector<const char*> SessionInfo::GetInputSymbolicShape(const std::string& name) const {
+  auto type_info = inputs_.find(name);
+  if (type_info == inputs_.end())
+    throw std::runtime_error("Model input was not found: " + name);
+  return type_info->second->GetTensorTypeAndShapeInfo().GetSymbolicDimensions();
+}
+
+std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& name) const {
+  auto type_info = outputs_.find(name);
+  if (type_info == outputs_.end())
+    throw std::runtime_error("Model output was not found: " + name);
+  return type_info->second->GetTensorTypeAndShapeInfo().GetSymbolicDimensions();
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
@@ -431,6 +460,15 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.AddConfigEntry("session.use_env_allocators", "1");
   }
 
+  for (auto& config_entry : config_session_options.config_entries) {
+    session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
+  }
+
+  if (config_session_options.custom_ops_library.has_value()) {
+    fs::path custom_library_file_prefix{config_session_options.custom_ops_library.value()};
+    session_options.RegisterCustomOpsLibrary(custom_library_file_prefix.c_str());
+  }
+
   if (config_session_options.graph_optimization_level.has_value()) {
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
@@ -455,7 +493,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
 
       session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
-
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 
@@ -495,31 +532,39 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       if (is_primary_session_options)
         p_device_ = GetDeviceInterface(DeviceType::DML);  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
 #endif
-    } else if (provider_options.name == "qnn") {
-      session_options.AddConfigEntry("ep.share_ep_contexts", "1");
-      std::unordered_map<std::string, std::string> opts;
-      for (auto& option : provider_options.options) {
-        opts.emplace(option.first, option.second);
+    } else {
+      // For providers that go through the extensible AppendExecutionProvider API:
+
+      if (provider_options.name == "QNN") {
+        session_options.AddConfigEntry("ep.share_ep_contexts", "1");
+        // TODO set device_type_ in a less hacky way.
+        // now, all QNN EP enable_htp_shared_memory_allocator option values had better be consistent...
+        // on the other hand, not sure if is_primary_session_options is the right thing to check here.
+        if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
+                                             [](const auto& pair) { return pair.first == "enable_htp_shared_memory_allocator"; });
+            opt_it != provider_options.options.end() && opt_it->second == "1") {
+          p_device_ = GetDeviceInterface(DeviceType::QNN);
+        }
       }
 
-      // TODO set device_type_ in a less hacky way.
-      // now, all QNN EP enable_htp_shared_memory_allocator option values had better be consistent...
-      // on the other hand, not sure if is_primary_session_options is the right thing to check here.
-      if (const auto opt_it = opts.find("enable_htp_shared_memory_allocator");
-          opt_it != opts.end() && opt_it->second == "1") {
-        p_device_ = GetDeviceInterface(DeviceType::QNN);
+      else if (provider_options.name == "WebGPU")
+        p_device_ = GetDeviceInterface(DeviceType::WEBGPU);
+
+      else if (provider_options.name == "OpenVINO")
+        p_device_ = GetDeviceInterface(DeviceType::OpenVINO);
+
+      else if (provider_options.name == "VitisAI") {
+        session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
+        session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
       }
 
-      session_options.AppendExecutionProvider("QNN", opts);
-    } else if (provider_options.name == "webgpu") {
-      p_device_ = GetDeviceInterface(DeviceType::WEBGPU);
-      std::unordered_map<std::string, std::string> opts;
+      std::vector<const char*> keys, values;
       for (auto& option : provider_options.options) {
-        opts.emplace(option.first, option.second);
+        keys.emplace_back(option.first.c_str());
+        values.emplace_back(option.second.c_str());
       }
-      session_options.AppendExecutionProvider("WebGPU", opts);
-    } else
-      throw std::runtime_error("Unknown provider type: " + provider_options.name);
+      session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
+    }
   }
 
   // Fallback to CPU if no provider specific interface was set
@@ -568,7 +613,9 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
-  std::set<std::string> llm_types = {"chatglm", "decoder", "gemma", "gemma2", "gemma3_text", "granite", "llama", "mistral", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2"};
+  std::set<std::string> llm_types = {"chatglm", "decoder", "gemma", "gemma2", "gemma3_text",
+                                     "granite", "llama", "mistral", "nemotron", "olmo",
+                                     "phi", "phimoe", "phi3", "phi3small", "qwen2"};
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (llm_types.find(config->model.type) != llm_types.end())
@@ -581,6 +628,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
   if (config->model.type == "phi4mm")
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
+  if (config->model.type == "gemma3")
+    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }
@@ -651,15 +700,17 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
 }
 
 MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& session_info)
-    : tokenizer_{std::make_shared<Tokenizer>(config)} {
-  if (config.model.type == "phi3v") {
-    processor_ = std::make_shared<PhiImageProcessor>(config, session_info);
-  } else if (config.model.type == "whisper") {
-    processor_ = std::make_shared<WhisperProcessor>(config, session_info);
-  } else if (config.model.type == "phi4mm") {
-    processor_ = std::make_shared<PhiMultiModalProcessor>(config, session_info);
+    : tokenizer_{std::make_shared<Tokenizer>(config)},
+      processor_factory_{
+          {"phi3v", Processor::Create<PhiImageProcessor>},
+          {"whisper", Processor::Create<WhisperProcessor>},
+          {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
+          {"gemma3", Processor::Create<GemmaImageProcessor>}} {
+  auto processor = processor_factory_.find(config.model.type);
+  if (processor != processor_factory_.end()) {
+    processor_ = processor->second(config, session_info);
   } else {
-    throw std::runtime_error("MultiModalProcessor cannot be created. Expected a multimodal model. Actual: " + config.model.type);
+    throw std::runtime_error("MultiModalProcessor cannot be created. " + config.model.type + " is not a registered multi-modal model type.");
   }
 }
 
