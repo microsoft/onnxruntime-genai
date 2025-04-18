@@ -8,11 +8,12 @@
 namespace Generators {
 
 struct ScheduledRequests {
-  ScheduledRequests(std::vector<std::shared_ptr<Request>> requests);
+  ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
+                    std::shared_ptr<Model> model);
 
   std::unique_ptr<OrtRunOptions> RunOptions();
 
-  std::shared_ptr<GeneratorParams> Params() const;
+  std::shared_ptr<GeneratorParams> Params();
 
   auto begin() const {
     return requests_.begin();
@@ -26,7 +27,7 @@ struct ScheduledRequests {
     return requests_.size();
   }
 
-  explicit operator bool() const;
+  explicit operator bool() const { return !requests_.empty(); };
 
   auto operator[](size_t idx) const {
     assert(idx < requests_.size());
@@ -35,6 +36,7 @@ struct ScheduledRequests {
 
  private:
   std::vector<std::shared_ptr<Request>> requests_;
+  std::shared_ptr<Model> model_;
 };
 
 }  // namespace Generators

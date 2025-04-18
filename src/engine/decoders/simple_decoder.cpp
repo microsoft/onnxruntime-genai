@@ -10,7 +10,7 @@ namespace Generators {
 StaticBatchDecoderIO::StaticBatchDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                                            ScheduledRequests& scheduled_requests,
                                            std::shared_ptr<CacheManager> cache_manager)
-    : ModelIO(*scheduled_requests.Params(), *model) {
+    : DecoderIO(model, scheduled_requests, cache_manager) {
   PrepareInputIds(model, scheduled_requests);
   PrepareAttentionMask(model, scheduled_requests);
   PreparePositionIds(model, scheduled_requests);
@@ -108,10 +108,27 @@ void StaticBatchDecoderIO::PreparePositionIds(std::shared_ptr<DecoderOnly_Model>
   owned_inputs_.push_back(std::move(position_ids_tensor));
 }
 
+void StaticBatchDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
+  auto request_with_max_sequence_length =
+      std::max_element(
+          scheduled_requests.begin(), scheduled_requests.end(),
+          [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
+            return a->UnprocessedTokens().size() < b->UnprocessedTokens().size();
+          });
+
+  const int64_t max_sequence_length = (*request_with_max_sequence_length)->UnprocessedTokens().size();
+  const int64_t batch_size = scheduled_requests.size();
+  const std::vector<int64_t> logits_shape = {batch_size, max_sequence_length, model->config_->model.vocab_size};
+  auto logits_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int32_t>);
+
+  input_names_.push_back(model->config_->model.decoder.outputs.logits.c_str());
+  inputs_.push_back(logits_->GetOrtTensor());
+}
+
 VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
                                  ScheduledRequests& scheduled_requests,
                                  std::shared_ptr<CacheManager> cache_manager)
-    : ModelIO(*scheduled_requests.Params(), *model) {
+    : DecoderIO(model, scheduled_requests, cache_manager) {
 }
 
 SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
@@ -120,12 +137,19 @@ SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
 
 void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests) {
   cache_manager_->Step();
-  std::unique_ptr<State> decoder_state =
+  std::unique_ptr<ModelIO> decoder_state =
       cache_manager_->SupportsContinuousBatching()
-          ? static_cast<std::unique_ptr<State>>(std::make_unique<VarlenDecoderIO>(model_, scheduled_requests, cache_manager_))
-          : static_cast<std::unique_ptr<State>>(std::make_unique<StaticBatchDecoderIO>(model_, scheduled_requests, cache_manager_));
+          ? static_cast<std::unique_ptr<ModelIO>>(std::make_unique<VarlenDecoderIO>(model_, scheduled_requests, cache_manager_))
+          : static_cast<std::unique_ptr<ModelIO>>(std::make_unique<StaticBatchDecoderIO>(model_, scheduled_requests, cache_manager_));
 
-  decoder_state->Run(*model_->session_decoder_);
+  auto run_options = scheduled_requests.RunOptions();
+  model_->session_decoder_->Run(run_options.get(),
+                                decoder_state->input_names_.data(),
+                                decoder_state->inputs_.data(),
+                                decoder_state->input_names_.size(),
+                                decoder_state->output_names_.data(),
+                                decoder_state->outputs_.data(),
+                                decoder_state->output_names_.size());
 }
 
 }  // namespace Generators

@@ -50,6 +50,7 @@ struct Request : std::enable_shared_from_this<Request>,
   std::unique_ptr<Search> search_;
   std::weak_ptr<Engine> engine_;
   bool is_prefill_{true};
+  size_t processed_tokens_{};
 };
 
 }  // namespace Generators

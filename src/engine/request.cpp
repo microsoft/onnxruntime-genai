@@ -34,6 +34,7 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
 
   auto device_tokens = AllocateOnDevice(*params_, unprocessed_input_ids_);
   search_->AppendTokens(device_tokens);
+  unprocessed_input_ids_.clear();
 }
 
 void Request::Schedule() {
@@ -41,7 +42,7 @@ void Request::Schedule() {
     throw std::runtime_error("Request cannot be scheduled unless it has been previously added to the engine.");
   }
 
-  if (unprocessed_input_ids_.empty()) {
+  if (!search_ || search_->GetSequenceLength() == 0) {
     throw std::runtime_error("Cannot schedule a request with no tokens.");
   }
 
@@ -65,6 +66,15 @@ void Request::AddTokens(std::span<const int32_t> tokens) {
     auto device_tokens = AllocateOnDevice(*params_, tokens);
     search_->AppendTokens(device_tokens);
   }
+}
+
+int64_t Request::CurrentSequenceLength() const {
+  return search_->GetSequenceLength();
+}
+
+DeviceSpan<int32_t> Request::UnprocessedTokens() {
+  auto sequence = search_->GetSequence(0);
+  return sequence.subspan(processed_tokens_, sequence.size() - processed_tokens_);
 }
 
 }  // namespace Generators

@@ -14,22 +14,22 @@ struct KeyValueCacheState : State {
 };
 
 struct CacheManager {
-  CacheManager(std::shared_ptr<Model> model);
+  CacheManager(std::shared_ptr<Model> model) : model_{model} {}
 
-  bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const;
+  bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const { return true; };
 
-  void Allocate(const std::vector<std::shared_ptr<Request>>& requests);
+  void Allocate(const std::vector<std::shared_ptr<Request>>& requests){};
 
-  void Step();
+  void Step(){};
 
-  KeyValueCacheState* Cache();
+  KeyValueCacheState* Cache() { return nullptr; };
 
-  bool SupportsContinuousBatching() const;
+  bool SupportsContinuousBatching() const { return false; };
 
  private:
   std::shared_ptr<Model> model_;
   std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
-  std::unique_ptr<KeyValueCacheState> key_value_state_;
+  std::unique_ptr<KeyValueCacheState> key_value_cache_state_;
   std::unique_ptr<KeyValueCache> key_value_cache_;
 };
 

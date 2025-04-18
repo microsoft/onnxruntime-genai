@@ -52,7 +52,7 @@ ScheduledRequests Scheduler::Schedule() {
       }
     }
   }
-  return ScheduledRequests(scheduled_requests);
+  return ScheduledRequests(scheduled_requests, model_);
 }
 
 bool Scheduler::HasPendingRequests() const {
