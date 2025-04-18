@@ -57,7 +57,6 @@ struct OgaStringArray : std::vector<std::string>, OgaAbstract {};
 struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
-struct OgaGeneratorLogitsProcessor : Generators::GuidanceLogitsProcessor, OgaAbstract {};
 struct OgaState : Generators::State, OgaAbstract {};
 
 // Helper function to return a shared pointer as a raw pointer. It won't compile if the types are wrong.
@@ -565,13 +564,6 @@ OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t 
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaCreateLogitsProcessor(const OgaState* state, OgaGeneratorLogitsProcessor** out) {
-  OGA_TRY
-  *out = ReturnUnique<OgaGeneratorLogitsProcessor>(Generators::CreateLogitsProcessor(*state));
-  return nullptr;
-  OGA_CATCH
-}
-
 OgaResult* OGA_API_CALL OgaCreateTensorFromBuffer(void* data, const int64_t* shape_dims, size_t shape_dims_count, OgaElementType element_type, OgaTensor** out) {
   OGA_TRY
   auto p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
@@ -808,6 +800,5 @@ void OGA_API_CALL OgaDestroyAudios(OgaAudios* p) { delete p; }
 void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) { delete p; }
 void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete p; }
-void OGA_API_CALL OgaDestroyGeneratorLogitsProcessor(OgaGeneratorLogitsProcessor* p) { delete p; }
 
 }  // extern "C"
