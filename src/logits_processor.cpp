@@ -166,7 +166,6 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
       std::memcpy(dst, row.data(), words_per_row * sizeof(uint32_t));
       dst += words_per_row;
     }
-    const size_t total_words = flat_masks.size();
     auto cuda_logits_mask_ptr_ = params_->p_device->Allocate<uint32_t>(total_words);
     copy(std::span<const uint32_t>{flat_masks}, cuda_logits_mask_ptr_.CpuSpan());
     cuda_logits_mask_ptr_.CopyCpuToDevice();
