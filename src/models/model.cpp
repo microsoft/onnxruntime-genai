@@ -62,7 +62,6 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
     DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
   }
 
-  params_->p_device->Synchronize();
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
 
