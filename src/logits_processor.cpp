@@ -159,7 +159,7 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
 
   if (device_type_ == DeviceType::CUDA) {
     const size_t words_per_row = vocab_size_ / 32;
-    const size_t total_words   = masks.size() * words_per_row;
+    const size_t total_words = masks.size() * words_per_row;
     std::vector<uint32_t> flat_masks(total_words);
     uint32_t* dst = flat_masks.data();
     for (const auto& row : masks) {

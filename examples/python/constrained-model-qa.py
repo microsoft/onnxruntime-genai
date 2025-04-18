@@ -78,7 +78,6 @@ def main(args):
             system_prompt = args.system_prompt
 
     system_tokens = tokenizer.encode(system_prompt)
-    system_prompt_length = len(system_tokens)
 
     # Keep asking for input prompts in a loop
     while True:
