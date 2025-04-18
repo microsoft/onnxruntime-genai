@@ -159,11 +159,13 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
 
   if (device_type_ == DeviceType::CUDA) {
     const size_t words_per_row = vocab_size_ / 32;
-    std::vector<uint32_t> flat_masks;
-    flat_masks.reserve(masks.size() * words_per_row);
-    for (const auto& row : masks)              // row.size() == words_per_row
-        flat_masks.insert(flat_masks.end(), row.begin(), row.end());
-
+    const size_t total_words   = masks.size() * words_per_row;
+    std::vector<uint32_t> flat_masks(total_words);
+    uint32_t* dst = flat_masks.data();
+    for (const auto& row : masks) {
+      std::memcpy(dst, row.data(), words_per_row * sizeof(uint32_t));
+      dst += words_per_row;
+    }
     const size_t total_words = flat_masks.size();
     auto cuda_logits_mask_ptr_ = params_->p_device->Allocate<uint32_t>(total_words);
     copy(std::span<const uint32_t>{flat_masks}, cuda_logits_mask_ptr_.CpuSpan());
