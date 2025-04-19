@@ -228,6 +228,19 @@ std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* m
   return text_ptr;
 }
 
+std::vector<int32_t> Tokenizer::ApplyChatTemplateTokenize(const char* template_str, const char* messages, bool add_generation_prompt) const {
+  ort_extensions::OrtxObjectPtr<OrtxTensorResult> out_ids;
+  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, out_ids.ToBeAssigned(), add_generation_prompt, true /*tokenize*/));
+
+  ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
+  CheckResult(OrtxTensorResultGetAt(out_ids.get(), 0, tensor.ToBeAssigned()));
+
+  const extTokenId_t* token_ids{};
+  CheckResult(OrtxGetTensorData(tensor.get(), reinterpret_cast<const void**>(&token_ids), nullptr, nullptr));
+
+  return token_ids;
+}
+
 std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
   std::vector<std::vector<int32_t>> sequences;
   std::vector<std::span<const int32_t>> span_sequences;
