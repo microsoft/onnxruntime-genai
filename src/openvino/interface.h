@@ -5,4 +5,7 @@ namespace Generators {
 
 DeviceInterface* GetOpenVINOInterface();
 
+struct Model;
+bool IsOpenVINOStatefulModel(const Model& model);
+
 }  // namespace Generators

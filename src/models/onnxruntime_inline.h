@@ -851,6 +851,10 @@ inline void OrtSession::Run(const OrtRunOptions* run_options, const OrtIoBinding
   Ort::ThrowOnError(Ort::api->RunWithBinding(this, run_options, &io_binding));
 }
 
+inline void OrtSession::SetEpDynamicOptions(const char* const* keys, const char* const* values, size_t kv_len) {
+  Ort::ThrowOnError(Ort::api->SetEpDynamicOptions(this, keys, values, kv_len));
+}
+
 inline std::string OrtModelMetadata::GetProducerName() const {
   Ort::StringAllocator string_allocator;
   Ort::ThrowOnError(Ort::api->ModelMetadataGetProducerName(this, &string_allocator, &string_allocator.out));
