@@ -353,9 +353,14 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
           p_device = GetDeviceInterface(DeviceType::QNN);
         }
       }
-
       else if (provider_options.name == "WebGPU")
         p_device = GetDeviceInterface(DeviceType::WEBGPU);
+      else if (provider_options.name == "OpenVINO")
+        p_device = GetDeviceInterface(DeviceType::OpenVINO);
+      else if (provider_options.name == "VitisAI") {
+        session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
+        session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
+      }
 
       std::vector<const char*> keys, values;
       for (auto& option : provider_options.options) {
