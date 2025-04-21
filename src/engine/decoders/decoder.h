@@ -25,13 +25,16 @@ struct DecoderIO : ModelIO {
   DecoderIO(std::shared_ptr<Model> model,
             ScheduledRequests& scheduled_requests,
             std::shared_ptr<CacheManager> cache_manager)
-      : ModelIO(*scheduled_requests.Params(), *model) {}
+      : ModelIO(*scheduled_requests.Params(), *model),
+        scheduled_requests_{scheduled_requests},
+        cache_manager_{cache_manager} {}
 
-  virtual void ProcessLogits() = 0;
+  virtual std::vector<DeviceSpan<float>> ProcessLogits() = 0;
 
  protected:
-  ScheduledRequests& scheduled_requests{scheduled_requests};
-  std::shared_ptr<CacheManager> cache_manager{cache_manager};
+  ScheduledRequests& scheduled_requests_;
+  std::shared_ptr<CacheManager> cache_manager_;
+  std::unique_ptr<Tensor> logits_;
 };
 
 struct Decoder {

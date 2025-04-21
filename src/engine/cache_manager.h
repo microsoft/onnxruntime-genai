@@ -16,21 +16,55 @@ struct KeyValueCacheState : State {
 struct CacheManager {
   CacheManager(std::shared_ptr<Model> model) : model_{model} {}
 
-  bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const { return true; };
+  virtual bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const = 0;
 
-  void Allocate(const std::vector<std::shared_ptr<Request>>& requests){};
+  virtual void Allocate(const std::vector<std::shared_ptr<Request>>& requests) = 0;
 
-  void Step(){};
+  virtual void Step() = 0;
 
-  KeyValueCacheState* Cache() { return nullptr; };
+  KeyValueCacheState* Cache() { return key_value_cache_state_.get(); };
 
-  bool SupportsContinuousBatching() const { return false; };
+  virtual void Deallocate(std::vector<std::shared_ptr<Request>>& requests) = 0;
+
+  virtual bool SupportsDynamicBatching() const = 0;
+
+ protected:
+  std::shared_ptr<Model> model_;
+  std::unique_ptr<KeyValueCacheState> key_value_cache_state_;
+};
+
+std::unique_ptr<CacheManager> CreateCacheManager(std::shared_ptr<Model> model);
+
+struct StaticCacheManager : CacheManager {
+  StaticCacheManager(std::shared_ptr<Model> model) : CacheManager(model) {}
+
+  bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const override;
+
+  void Allocate(const std::vector<std::shared_ptr<Request>>& requests) override;
+
+  void Step() override;
+
+  void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
+
+  bool SupportsDynamicBatching() const override;
 
  private:
-  std::shared_ptr<Model> model_;
-  std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
-  std::unique_ptr<KeyValueCacheState> key_value_cache_state_;
   std::unique_ptr<KeyValueCache> key_value_cache_;
+  std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
+};
+
+struct PagedCacheManager : CacheManager {
+  PagedCacheManager(std::shared_ptr<Model> model) : CacheManager(model) {}
+
+  bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const override;
+
+  void Allocate(const std::vector<std::shared_ptr<Request>>& requests) override;
+
+  void Step() override;
+
+  void Deallocate(std::vector<std::shared_ptr<Request>>& requests) override;
+
+  bool SupportsDynamicBatching() const override;
 };
 
 }  // namespace Generators

@@ -77,4 +77,35 @@ DeviceSpan<int32_t> Request::UnprocessedTokens() {
   return sequence.subspan(processed_tokens_, sequence.size() - processed_tokens_);
 }
 
+void Request::GenerateNextTokens(DeviceSpan<float> logits) {
+  search_->SetLogits(logits);
+  auto& search_params = search_->params_->search;
+  search_->ApplyMinLength(search_params.min_length);
+  search_->ApplyRepetitionPenalty(search_params.repetition_penalty);
+
+  if (!search_params.do_sample || search_params.top_k == 1 || search_params.temperature == 0) {
+    search_->SelectTop();
+    return;
+  }
+
+  // The user explicitly called TopKTopP on a beam search
+  if (search_params.num_beams != 1)
+    throw std::runtime_error("TopK and TopP cannot be used with a beam search");
+
+  // Sanity checks
+  if (search_params.top_p < 0.0f || search_params.top_p > 1.0f)
+    throw std::runtime_error("top_p must be between 0.0 and 1.0");
+  if (search_params.top_k < 0)
+    throw std::runtime_error("top_k must be 0 or greater");
+
+  if (search_params.top_p > 0.0f && search_params.top_p < 1.0f && search_params.top_k > 1) {
+    search_->SampleTopKTopP(search_params.top_k, search_params.top_p, search_params.temperature);
+  } else if (search_params.top_k > 1) {
+    search_->SampleTopK(search_params.top_k, search_params.temperature);
+  } else {
+    assert(search_params.top_k == 0);
+    search_->SampleTopP(search_params.top_p, search_params.temperature);
+  }
+}
+
 }  // namespace Generators

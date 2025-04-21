@@ -137,10 +137,10 @@ SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
 
 void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests) {
   cache_manager_->Step();
-  std::unique_ptr<ModelIO> decoder_state =
-      cache_manager_->SupportsContinuousBatching()
-          ? static_cast<std::unique_ptr<ModelIO>>(std::make_unique<VarlenDecoderIO>(model_, scheduled_requests, cache_manager_))
-          : static_cast<std::unique_ptr<ModelIO>>(std::make_unique<StaticBatchDecoderIO>(model_, scheduled_requests, cache_manager_));
+  std::unique_ptr<DecoderIO> decoder_state =
+      cache_manager_->SupportsDynamicBatching()
+          ? static_cast<std::unique_ptr<DecoderIO>>(std::make_unique<VarlenDecoderIO>(model_, scheduled_requests, cache_manager_))
+          : static_cast<std::unique_ptr<DecoderIO>>(std::make_unique<StaticBatchDecoderIO>(model_, scheduled_requests, cache_manager_));
 
   auto run_options = scheduled_requests.RunOptions();
   model_->session_decoder_->Run(run_options.get(),
@@ -150,6 +150,8 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests) {
                                 decoder_state->output_names_.data(),
                                 decoder_state->outputs_.data(),
                                 decoder_state->output_names_.size());
+
+  scheduled_requests.AddDecoderState(std::move(decoder_state));
 }
 
 }  // namespace Generators

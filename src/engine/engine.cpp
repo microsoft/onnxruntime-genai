@@ -7,7 +7,7 @@ namespace Generators {
 
 Engine::Engine(std::shared_ptr<Model> model)
     : model_{model},
-      cache_manager_{std::make_shared<CacheManager>(model)},
+      cache_manager_{std::shared_ptr<CacheManager>(CreateCacheManager(model))},
       scheduler_{std::make_unique<Scheduler>(model, cache_manager_)},
       model_executor_{std::make_unique<ModelExecutor>(model, cache_manager_)} {}
 

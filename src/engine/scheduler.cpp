@@ -27,7 +27,7 @@ ScheduledRequests Scheduler::Schedule() {
     }
   }
 
-  if (cache_manager_->SupportsContinuousBatching()) {
+  if (cache_manager_->SupportsDynamicBatching()) {
     for (auto& request : requests_to_schedule) {
       if (cache_manager_->CanAllocate({request})) {
         cache_manager_->Allocate({request});

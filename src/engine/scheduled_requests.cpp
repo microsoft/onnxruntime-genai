@@ -18,7 +18,29 @@ std::unique_ptr<OrtRunOptions> ScheduledRequests::RunOptions() {
 }
 
 std::shared_ptr<GeneratorParams> ScheduledRequests::Params() {
-  return std::make_shared<GeneratorParams>(*model_);
+  if (!params_) {
+    params_ = std::make_shared<GeneratorParams>(*model_);
+  }
+  return params_;
+}
+
+void ScheduledRequests::AddDecoderState(std::unique_ptr<DecoderIO> decoder_state) {
+  decoder_state_ = std::move(decoder_state);
+}
+
+void ScheduledRequests::GenerateNextTokens() {
+  if (!decoder_state_) {
+    throw std::runtime_error("Cannot generate next tokens without the decoder state.");
+  }
+
+  std::vector<DeviceSpan<float>> logits = decoder_state_->ProcessLogits();
+  if (logits.size() != requests_.size()) {
+    throw std::runtime_error("Logits size does not match the number of requests.");
+  }
+
+  for (size_t request_idx = 0; request_idx < requests_.size(); ++request_idx) {
+    requests_[request_idx]->GenerateNextTokens(logits[request_idx]);
+  }
 }
 
 }  // namespace Generators

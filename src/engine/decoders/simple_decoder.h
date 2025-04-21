@@ -14,7 +14,7 @@ struct StaticBatchDecoderIO : DecoderIO {
                        ScheduledRequests& scheduled_requests,
                        std::shared_ptr<CacheManager> cache_manager);
 
-  void ProcessLogits() override{};
+  std::vector<DeviceSpan<float>> ProcessLogits() override { return {}; };
 
  private:
   void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
@@ -31,7 +31,7 @@ struct VarlenDecoderIO : DecoderIO {
                   ScheduledRequests& scheduled_requests,
                   std::shared_ptr<CacheManager> cache_manager);
 
-  void ProcessLogits() override{};
+  std::vector<DeviceSpan<float>> ProcessLogits() override { return {}; };
 
  private:
 };

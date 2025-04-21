@@ -7,6 +7,8 @@
 
 namespace Generators {
 
+struct DecoderIO;
+
 struct ScheduledRequests {
   ScheduledRequests(std::vector<std::shared_ptr<Request>> requests,
                     std::shared_ptr<Model> model);
@@ -34,9 +36,15 @@ struct ScheduledRequests {
     return requests_[idx];
   }
 
+  void AddDecoderState(std::unique_ptr<DecoderIO> decoder_state);
+
+  void GenerateNextTokens();
+
  private:
   std::vector<std::shared_ptr<Request>> requests_;
   std::shared_ptr<Model> model_;
+  std::unique_ptr<DecoderIO> decoder_state_;
+  std::shared_ptr<GeneratorParams> params_;
 };
 
 }  // namespace Generators
