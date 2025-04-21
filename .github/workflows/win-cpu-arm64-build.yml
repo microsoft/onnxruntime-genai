@@ -66,13 +66,13 @@ jobs:
 
     - name: Install Rust Toolchain
       run: |
-        $exePath = "$env:TEMP\rustup-init.exe"
+        $rustupInstaller = "$env:TEMP\rustup-init.exe"
         Invoke-WebRequest -Uri https://win.rustup.rs/x86_64 -OutFile $rustupInstaller
         Start-Process -FilePath $rustupInstaller -ArgumentList "-y" -Wait
         $env:PATH += ";$env:USERPROFILE\.cargo\bin"
-        rustup install 1.82.0-x86_64-pc-windows-msvc
-        rustup default 1.82.0-x86_64-pc-windows-msvc
-        rustup override set 1.82.0
+        rustup install 1.86.0-x86_64-pc-windows-msvc
+        rustup default 1.86.0-x86_64-pc-windows-msvc
+        rustup override set 1.86.0
 
     - name: Configure CMake
       run: |
