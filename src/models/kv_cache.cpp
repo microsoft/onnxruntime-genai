@@ -5,6 +5,7 @@
 #include "model.h"
 #include "kv_cache.h"
 #include "windowed_kv_cache.h"
+#include "../openvino/interface.h"
 
 namespace Generators {
 
@@ -376,6 +377,29 @@ std::string ComposeKeyValueName(const std::string& template_string, int index) {
   return std::string(key_value_name);
 }
 
+ModelManagedKeyValueCache::ModelManagedKeyValueCache(State& state)
+    : state_{state} {
+  // A new instance of ModelManagedKeyValueCache is created for each Generator.
+  // In this case, we need to trigger a KVCache reset on the session before the first Session::Run.
+  // This implies that the key-value cache state is coupled with the ONNX Runtime Session and
+  // that only 1 Generator can be active for the Model at any given time.
+  RewindTo(0);
+}
+
+void ModelManagedKeyValueCache::Add() {}
+
+void ModelManagedKeyValueCache::AddEncoder() {}
+
+void ModelManagedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
+  // Eventually we need to set 'beam_idx' tensor here somehow.
+}
+
+void ModelManagedKeyValueCache::RewindTo(size_t index) {
+  // Add 'kvcache_rewind' EP dynamic option to get applied before the next Session::Run.
+  // This will trim the internal KVCache states to the desired position.
+  state_.ep_dynamic_options_next_run_.push_back({"kvcache_rewind", std::to_string(index)});
+}
+
 namespace {
 
 bool IsCacheNeeded(const Model& model) {
@@ -385,6 +409,15 @@ bool IsCacheNeeded(const Model& model) {
 }  // namespace
 
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
+  // For OpenVINO Stateful models, they do not contain exposed past/present KV tensors.
+  // In this case, 'IsCacheNeeded' below will return false. But in this case we need to create a
+  // special 'ModelManagedKeyValueCache' object, and so we check this condition first.
+  if (IsOpenVINOStatefulModel(state.model_)) {
+    if (g_log.enabled)
+      Log("info", "CreateKeyValueCache: Creating ModelManagedKeyValueCache");
+    return std::make_unique<ModelManagedKeyValueCache>(state);
+  }
+
   if (!IsCacheNeeded(state.model_)) {
     return nullptr;
   }
@@ -392,9 +425,9 @@ std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
   if (state.model_.config_->model.decoder.sliding_window &&
       state.model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
     return std::make_unique<WindowedKeyValueCache>(state);
-  } else {
-    return std::make_unique<DefaultKeyValueCache>(state);
   }
+
+  return std::make_unique<DefaultKeyValueCache>(state);
 }
 
 }  // namespace Generators

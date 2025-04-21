@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
+// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #include <algorithm>
 #include <climits>
 #include <random>
@@ -60,6 +60,17 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
     auto& stream = Log("model_output_shapes");
     stream << std::endl;
     DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
+  }
+
+  if (!ep_dynamic_options_next_run_.empty()) {
+    std::vector<const char*> keys;
+    std::vector<const char*> values;
+    for (auto& kv_pair : ep_dynamic_options_next_run_) {
+      keys.push_back(kv_pair.first.c_str());
+      values.push_back(kv_pair.second.c_str());
+    }
+    session.SetEpDynamicOptions(keys.data(), values.data(), ep_dynamic_options_next_run_.size());
+    ep_dynamic_options_next_run_.clear();
   }
 
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
@@ -202,6 +213,19 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   const char* string;
   CheckResult(OrtxStringArrayGetItem(ortx_string_array, 0, &string));
   return string;
+}
+
+std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, bool add_generation_prompt) const {
+  ort_extensions::OrtxObjectPtr<OrtxTensorResult> templated_text;
+  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, templated_text.ToBeAssigned(), add_generation_prompt, false /*tokenize*/));
+
+  ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
+  CheckResult(OrtxTensorResultGetAt(templated_text.get(), 0, tensor.ToBeAssigned()));
+
+  const char* text_ptr{};
+  CheckResult(OrtxGetTensorData(tensor.get(), reinterpret_cast<const void**>(&text_ptr), nullptr, nullptr));
+
+  return text_ptr;
 }
 
 std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
@@ -361,8 +385,9 @@ static const uint8_t g_trivial_model[] = {
 // arena already being destroyed.
 void EnsureDeviceOrtInit(DeviceInterface& device) {
   // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
+  // OpenVINO delegates to the CPU device allocator
   auto type = device.GetType();
-  if (type == DeviceType::CPU)
+  if (type == DeviceType::CPU || type == DeviceType::OpenVINO)
     return;
 
   auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(type)];
@@ -375,7 +400,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "dml", "webgpu", "qnn"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "dml", "webgpu", "qnn", "OpenVINO (Not used, see above)"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
@@ -388,7 +413,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device) {
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
 
   // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared"};
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
@@ -568,6 +593,11 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
   for (auto& config_entry : config_session_options.config_entries) {
     session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
+  }
+
+  if (config_session_options.custom_ops_library.has_value()) {
+    fs::path custom_library_file_prefix{config_session_options.custom_ops_library.value()};
+    session_options.RegisterCustomOpsLibrary(custom_library_file_prefix.c_str());
   }
 
   if (config_session_options.graph_optimization_level.has_value()) {

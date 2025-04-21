@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+// Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 
 // Do not include this file directly. Please include "onnxruntime_cxx_api.h" instead.
 // If interested in trying out features of the new experimental C++ API, include "experimental_onnxruntime_cxx_api.h" instead.
@@ -700,6 +701,11 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_OpenVINO(co
   return *this;
 }
 
+inline OrtSessionOptions& OrtSessionOptions::RegisterCustomOpsLibrary(const ORTCHAR_T* library_file_prefix) {
+  Ort::ThrowOnError(Ort::api->RegisterCustomOpsLibrary_V2(this, library_file_prefix));
+  return *this;
+}
+
 /// Session
 inline std::unique_ptr<OrtSession> OrtSession::Create(OrtEnv& env, const ORTCHAR_T* model_path, const OrtSessionOptions* options) {
   OrtSession* p;
@@ -843,6 +849,10 @@ inline void OrtSession::Run(const OrtRunOptions* run_options, const char* const*
 
 inline void OrtSession::Run(const OrtRunOptions* run_options, const OrtIoBinding& io_binding) {
   Ort::ThrowOnError(Ort::api->RunWithBinding(this, run_options, &io_binding));
+}
+
+inline void OrtSession::SetEpDynamicOptions(const char* const* keys, const char* const* values, size_t kv_len) {
+  Ort::ThrowOnError(Ort::api->SetEpDynamicOptions(this, keys, values, kv_len));
 }
 
 inline std::string OrtModelMetadata::GetProducerName() const {
