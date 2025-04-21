@@ -64,13 +64,13 @@ struct GuidanceLogitsProcessor : public LogitsProcessor {
   uint32_t eos_token_;
   int batch_size_;
   DeviceType device_type_;
+  std::shared_ptr<const GeneratorParams> params_;
   std::string_view guidance_type_;
   std::string_view guidance_data_;
   std::vector<std::vector<uint32_t>> masks_;
   std::vector<std::unique_ptr<LlgConstraint, LlgConstraintDeleter>> llg_constraints_;
   std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter> llg_tokenizer_;
   std::shared_ptr<Tokenizer> tokenizer_;
-  std::shared_ptr<const GeneratorParams> params_;
 
   std::future<std::vector<std::vector<uint32_t>>> mask_future_;
   std::vector<std::vector<uint32_t>> logits_masks_;
