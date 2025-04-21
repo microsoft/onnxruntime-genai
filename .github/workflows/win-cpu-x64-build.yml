@@ -62,6 +62,7 @@ jobs:
         rustup install 1.86.0-x86_64-pc-windows-msvc
         rustup default 1.86.0-x86_64-pc-windows-msvc
         rustup override set 1.86.0
+        rustc --version
 
     - name: Download OnnxRuntime Nightly
       shell: pwsh
