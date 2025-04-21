@@ -196,6 +196,20 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                out IntPtr /* const char** */ outStr);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerApplyChatTemplate(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                                   byte[] /* const char* */ template_string,
+                                                                                   byte[] /* const char* */ message,
+                                                                                   bool /* bool */ add_gen_prompt,
+                                                                                   out IntPtr /* const char** */ outStr);
+        
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerApplyChatTemplateTokenize(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                                           byte[] /* const char* */ template_string,
+                                                                                           byte[] /* const char* */ message,
+                                                                                           bool /* bool */ add_gen_prompt,
+                                                                                           IntPtr /* OgaSequences* */ sequences);
+        
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyString(IntPtr /* const char* */ str);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
