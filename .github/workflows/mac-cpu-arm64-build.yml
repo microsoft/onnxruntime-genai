@@ -53,7 +53,7 @@ jobs:
           mv ${{ env.ORT_PACKAGE_NAME }}/runtimes/osx-arm64/native/* ort/lib/
 
       - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@1.82.0
+        uses: dtolnay/rust-toolchain@1.86.0
 
       - name: Configure CMake
         run: |

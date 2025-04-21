@@ -27,8 +27,8 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           source "$HOME/.cargo/env"
-          rustup install 1.82.0
-          rustup override set 1.82.0
+          rustup install 1.86.0
+          rustup override set 1.86.0
           rustup component add rust-src
           rustup show active-toolchain
 
