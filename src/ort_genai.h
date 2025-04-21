@@ -291,10 +291,6 @@ struct OgaTokenizer : OgaAbstract {
     return p;
   }
 
-  void ApplyChatTemplateTokenize(const char* template_str, const char* messages, bool add_generation_prompt, OgaSequences& sequences) const {
-    OgaCheckResult(OgaTokenizerApplyChatTemplateTokenize(this, template_str, messages, add_generation_prompt, &sequences));
-  }
-
 #if OGA_USE_SPAN
   OgaString Decode(std::span<const int32_t> tokens) const {
     const char* p;

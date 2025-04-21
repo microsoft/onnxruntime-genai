@@ -515,13 +515,6 @@ OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer* tokeni
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplateTokenize(const OgaTokenizer* tokenizer, const char* template_str, const char* messages, bool add_generation_prompt, OgaSequences* sequences) {
-  OGA_TRY
-  sequences->emplace_back(tokenizer->ApplyChatTemplateTokenize(template_str, messages, add_generation_prompt));
-  return nullptr;
-  OGA_CATCH
-}
-
 OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer* tokenizer, const OgaTensor* tensor, OgaStringArray** out) {
   OGA_TRY
   auto shape = tensor->GetShape();
