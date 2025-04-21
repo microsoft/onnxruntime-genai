@@ -522,7 +522,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokeni
  * \param[out] out_ids Pointer to where the output will be stored. The returned pointer must be freed with OgaDestroyString
  * \return OgaResult* containing the error message if the function fails
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplateTokenize(const OgaTokenizer*, const char* template_str, const char* messages, bool add_generation_prompt, const char** out_ids);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplateTokenize(const OgaTokenizer*, const char* template_str, const char* messages, bool add_generation_prompt, OgaSequences* sequences);
 
 /** OgaTokenizerStream is to decoded token strings incrementally, one token at a time.
  */

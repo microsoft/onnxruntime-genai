@@ -235,10 +235,10 @@ std::vector<int32_t> Tokenizer::ApplyChatTemplateTokenize(const char* template_s
   ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
   CheckResult(OrtxTensorResultGetAt(out_ids.get(), 0, tensor.ToBeAssigned()));
 
-  const extTokenId_t* token_ids{};
+  std::vector<int32_t> token_ids{};
   CheckResult(OrtxGetTensorData(tensor.get(), reinterpret_cast<const void**>(&token_ids), nullptr, nullptr));
 
-  return {token_ids};
+  return token_ids;
 }
 
 std::vector<int32_t> Tokenizer::EncodeBatch(std::span<const std::string> strings) const {
