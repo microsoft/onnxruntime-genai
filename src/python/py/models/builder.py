@@ -523,7 +523,7 @@ class Model:
         order = list(order)
         repeated_proto.sort(key=lambda x: order.index(getattr(x, key_name)))
 
-    def make_external_tensor(self, tensor, name, **kwargs):
+    def make_tensor_proto_from_tensor(self, tensor, name):
         raw_data = bytes(
             (ctypes.c_ubyte * tensor.element_size() * tensor.numel()).from_address(
                 tensor.data_ptr()
@@ -536,6 +536,10 @@ class Model:
             vals=raw_data,
             raw=True,
         )
+        return tensor_proto
+
+    def make_external_tensor(self, tensor, name, **kwargs):
+        tensor_proto = self.make_tensor_proto_from_tensor(tensor, name)
 
         filename = f"{name}.bin"
         external_data_helper.set_external_data(tensor_proto, location=filename)
@@ -544,7 +548,6 @@ class Model:
         tensor_proto.ClearField("raw_data")
         tensor_proto.data_location = TensorProto.EXTERNAL
 
-        # TODO: is this still needed for DML?
         if kwargs.get("unpack_int4", False) and self.onnx_dtype == 'int4':
             tensor_proto.data_type = TensorProto.UINT4
             tensor_proto.dims[-1] *= 2
@@ -626,18 +629,7 @@ class Model:
 
         torch_dtype = self.to_torch_dtype[onnx_dtype]
         tensor = torch.tensor(num if dims == "0D" else list(num) if type(num) == tuple else [num], dtype=torch_dtype).contiguous()
-        raw_data = bytes(
-            (ctypes.c_ubyte * tensor.element_size() * tensor.numel()).from_address(
-                tensor.data_ptr()
-            )
-        )
-        value = helper.make_tensor(
-            name=name.replace("constants", "torch_helper"),
-            data_type=torch.onnx._type_utils.JitScalarType.from_dtype(tensor.dtype).onnx_type(),
-            dims=tensor.shape,
-            vals=raw_data,
-            raw=True,
-        )
+        value = self.make_tensor_proto_from_tensor(tensor, name.replace("constants", "torch_helper"))
 
         node_name = name.replace("constants", "constant_nodes")
         self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=value)
@@ -846,7 +838,6 @@ class Model:
 
         return name
 
-    # TODO: are the booleans in make_external_tensor still needed?
     def make_dequantize_linear(self, dequantize_name, quantized_op):
         # Input weights are quantized, save quantized MatMul weights for onnx model
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
@@ -1195,34 +1186,50 @@ class Model:
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * num_heads])
 
-    def make_rotary_embedding_multi_cache(self):
-        if_cos_cache_output, if_sin_cache_output = "cos_cache", "sin_cache"
+    def make_rotary_embedding_multi_cache(self, **kwargs):
+        cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
+        sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
 
-        # Create caches for when sequence_length > self.original_context_length
+        # Set cache attributes for when sequence_length > self.original_context_length
         self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["long_factor"]
         self.rotemb_attrs["cache_length"] = self.context_length
         self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["long_mscale"]
 
-        # DML doesn't support dynamic selection of the cos/sin cache, so we always use the biggest one
-        if self.ep == "dml":
-            self.make_rotary_embedding_caches()
-            self.make_value_info(if_cos_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
-            self.make_value_info(if_sin_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
-            return
-
-        self.rotemb_attrs["save_caches"] = False
-
+        # Create caches for when sequence_length > self.original_context_length
         cos_cache_large_name, sin_cache_large_name = "cos_cache_large", "sin_cache_large"
-        cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_large_name, sin_cache_name=sin_cache_large_name)
+        if self.ep == "dml":
+            self.rotemb_attrs["save_caches"] = False
+            cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_large_name, sin_cache_name=sin_cache_large_name)
+        else:
+            self.make_rotary_embedding_caches(cos_cache_name=cos_cache_large_name, sin_cache_name=sin_cache_large_name)
+            cos_cache_large = list(filter(lambda i: i.name == cos_cache_large_name, self.initializers))[0]
+            sin_cache_large = list(filter(lambda i: i.name == sin_cache_large_name, self.initializers))[0]
 
-        # Create caches for when sequence_length <= self.original_context_length
+        # Set cache attributes for when sequence_length <= self.original_context_length
         self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
         self.rotemb_attrs["cache_length"] = self.original_context_length
         self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["short_mscale"]
-        cos_cache_small_name, sin_cache_small_name = "cos_cache_small", "sin_cache_small"
-        cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
+        self.rotemb_attrs["create_caches"] = True
 
-        self.rotemb_attrs["create_caches"] = False
+        # Create caches for when sequence_length <= self.original_context_length
+        cos_cache_small_name, sin_cache_small_name = "cos_cache_small", "sin_cache_small"
+        if self.ep == "dml":
+            self.rotemb_attrs["save_caches"] = False
+            cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
+        else:
+            self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
+            cos_cache_small = list(filter(lambda i: i.name == cos_cache_small_name, self.initializers))[0]
+            sin_cache_small = list(filter(lambda i: i.name == sin_cache_small_name, self.initializers))[0]
+
+        if self.ep == "dml":
+            # Concat small and large cos/sin caches for DML EP only
+            cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
+            sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
+            # Save cos/sin caches to disk
+            self.make_external_tensor(cos_cache.contiguous(), cos_cache_name)
+            self.make_external_tensor(sin_cache.contiguous(), sin_cache_name)
+            # Do NOT make the subgraph with the If node for DML EP.
+            return
 
         # Make the following subgraph to decide which cos/sin caches to use in the rotary embeddings
         #
@@ -1242,40 +1249,38 @@ class Model:
         self.make_greater(greater_name, greater_inputs, shape=[])
         if_name = f"{basename}/If"
         self.make_node(
-            "If", inputs=[f"{greater_name}/output_0"], outputs=[if_cos_cache_output, if_sin_cache_output], name=if_name,
+            "If", inputs=[f"{greater_name}/output_0"], outputs=[cos_cache_name, sin_cache_name], name=if_name,
             then_branch=self.make_graph(
                 name="large_rotemb_caches_graph",
                 inputs=[],
                 outputs=[
-                    helper.make_tensor_value_info(cos_cache_large_name, self.io_dtype, shape=cos_cache_large.shape),
-                    helper.make_tensor_value_info(sin_cache_large_name, self.io_dtype, shape=sin_cache_large.shape),
+                    helper.make_tensor_value_info(cos_cache_large_name, self.io_dtype, shape=cos_cache_large.dims),
+                    helper.make_tensor_value_info(sin_cache_large_name, self.io_dtype, shape=sin_cache_large.dims),
                 ],
                 initializer=[],
                 value_info=[],
                 nodes=[
-                    # TODO: fix constant node values since caches can be bf16
-                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_large_name], name="/large/cos_cache/Constant", value=numpy_helper.from_array(cos_cache_large)),
-                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_large_name], name="/large/sin_cache/Constant", value=numpy_helper.from_array(sin_cache_large)),
+                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_large_name], name="/large/cos_cache/Constant", value=cos_cache_large),
+                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_large_name], name="/large/sin_cache/Constant", value=sin_cache_large),
                 ],
             ),
             else_branch=self.make_graph(
                 name="small_rotemb_caches_graph",
                 inputs=[],
                 outputs=[
-                    helper.make_tensor_value_info(cos_cache_small_name, self.io_dtype, shape=cos_cache_small.shape),
-                    helper.make_tensor_value_info(sin_cache_small_name, self.io_dtype, shape=sin_cache_small.shape),
+                    helper.make_tensor_value_info(cos_cache_small_name, self.io_dtype, shape=cos_cache_small.dims),
+                    helper.make_tensor_value_info(sin_cache_small_name, self.io_dtype, shape=sin_cache_small.dims),
                 ],
                 initializer=[],
                 value_info=[],
                 nodes=[
-                    # TODO: fix constant node values since caches can be bf16
-                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_small_name], name="/small/cos_cache/Constant", value=numpy_helper.from_array(cos_cache_small)),
-                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_small_name], name="/small/sin_cache/Constant", value=numpy_helper.from_array(sin_cache_small)),
+                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_small_name], name="/small/cos_cache/Constant", value=cos_cache_small),
+                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_small_name], name="/small/sin_cache/Constant", value=sin_cache_small),
                 ],
             ),
         )
-        self.make_value_info(if_cos_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
-        self.make_value_info(if_sin_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+        self.make_value_info(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+        self.make_value_info(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
     def make_qk_norm(self, layer_id, attention):
         # Make subgraph to compute SimplifiedLayerNorm after Q and K MatMuls in attention:
@@ -2445,10 +2450,9 @@ class Model:
         concat_2_name = f"{basename}/Concat_2"
         concat_inputs = [f"{unsqueeze_4_name}/output_0", f"{unsqueeze_5_name}/output_0"]
         self.make_concat(concat_2_name, concat_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
-        # TODO: use to_torch_dtype for constant node
         constant_shape_name = f"{basename}/ConstantOfShape_2"
-        constant_shape_numpy_dtype = self.to_numpy_dtype[self.io_dtype]
-        constant_shape_value = numpy_helper.from_array(np.array([np.finfo(constant_shape_numpy_dtype).min], dtype=constant_shape_numpy_dtype))
+        constant_shape_torch_dtype = self.to_torch_dtype[self.io_dtype]
+        constant_shape_value = self.make_tensor_proto_from_tensor(torch.tensor([torch.finfo(constant_shape_torch_dtype).min], dtype=constant_shape_torch_dtype))
         self.make_constant_of_shape(constant_shape_name, f"{concat_2_name}/output_0", value=constant_shape_value, dtype=self.io_dtype, shape=['unk', 'unk'])
 
         # Top path
@@ -2865,50 +2869,6 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         self.make_add(add_1_name, add_1_inputs, dtype=proto_dtype, shape=["batch_size", "sequence_length"])
 
         return add_1_name
-        
-    def make_rotary_embedding_caches(self, **kwargs):
-        if self.ep != "dml":
-            cos_cache_name, sin_cache_name = super().make_rotary_embedding_caches(**kwargs)
-            return cos_cache_name, sin_cache_name
-
-        cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
-        sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
-
-        if self.rotemb_attrs["create_caches"]:
-            # Create 4K and 128K cos/sin caches
-            cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches_from_scratch()
-            self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
-            self.rotemb_attrs["cache_length"] = self.original_context_length
-            self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["short_mscale"]
-            cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches_from_scratch()
-
-            # Concat 4K and 128K cos/sin caches for DML EP only
-            cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
-            sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
-
-            # Slice cos/sin caches from (M, H) to (M, H/2)
-            hidden_dim = cos_cache.shape[-1]
-            cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach()
-            cos_cache = cos_cache.to(self.to_torch_dtype[self.io_dtype])
-            sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach()
-            sin_cache = sin_cache.to(self.to_torch_dtype[self.io_dtype])
-
-            # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
-            if self.rotemb_attrs["partial_rotary_factor"] != 1.0:
-                cos_cache = cos_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
-                sin_cache = sin_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
-
-            if self.rotemb_attrs["save_caches"]:
-                # Save cos/sin caches to disk
-                self.make_external_tensor(cos_cache.contiguous(), cos_cache_name)
-                self.make_external_tensor(sin_cache.contiguous(), sin_cache_name)
-            else:
-                # Return cos/sin caches since they will be custom-saved
-                return cos_cache, sin_cache
-
-            self.rotemb_attrs["create_caches"] = False
-
-        return cos_cache_name, sin_cache_name
 
 
 class Phi3SmallModel(Model):
