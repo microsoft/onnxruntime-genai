@@ -11,6 +11,11 @@ namespace Generators {
 struct KeyValueCacheState : State {
   KeyValueCacheState(const GeneratorParams& params, const Model& model)
       : State(params, model) {}
+
+  DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices) override {
+    return {};
+  }
 };
 
 struct CacheManager {
@@ -36,7 +41,7 @@ struct CacheManager {
 std::unique_ptr<CacheManager> CreateCacheManager(std::shared_ptr<Model> model);
 
 struct StaticCacheManager : CacheManager {
-  StaticCacheManager(std::shared_ptr<Model> model) : CacheManager(model) {}
+  StaticCacheManager(std::shared_ptr<Model> model);
 
   bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const override;
 
@@ -51,6 +56,7 @@ struct StaticCacheManager : CacheManager {
  private:
   std::unique_ptr<KeyValueCache> key_value_cache_;
   std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
+  std::shared_ptr<GeneratorParams> params_;
 };
 
 struct PagedCacheManager : CacheManager {

@@ -9,6 +9,9 @@ std::unique_ptr<CacheManager> CreateCacheManager(std::shared_ptr<Model> model) {
   return std::make_unique<StaticCacheManager>(model);
 }
 
+StaticCacheManager::StaticCacheManager(std::shared_ptr<Model> model)
+    : CacheManager(model), params_{std::make_shared<GeneratorParams>(*model)} {}
+
 bool StaticCacheManager::CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const {
   if (cache_allocated_requests_.empty()) {
     return true;
@@ -23,8 +26,8 @@ void StaticCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& r
   }
 
   if (!key_value_cache_) {
-    key_value_cache_state_ = std::make_unique<KeyValueCacheState>(model_->Params(), *model_);
-    key_value_cache_ = std::make_unique<DefaultKeyValueCache>(model_);
+    key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
+    key_value_cache_ = std::make_unique<DefaultKeyValueCache>(*key_value_cache_state_);
   }
 }
 
@@ -41,6 +44,16 @@ void StaticCacheManager::Step() {
   const int64_t max_sequence_length = (*request_with_max_sequence_length)->CurrentSequenceLength();
 
   key_value_cache_->Update({}, max_sequence_length);
+}
+
+void StaticCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& requests) {
+  if (std::set<std::shared_ptr<Request>>{requests.begin(), requests.end()} !=
+      std::set<std::shared_ptr<Request>>{cache_allocated_requests_.begin(), cache_allocated_requests_.end()}) {
+    throw std::runtime_error("Cannot deallocate requests that are not allocated.");
+  }
+
+  key_value_cache_state_.reset();
+  key_value_cache_.reset();
 }
 
 }  // namespace Generators
