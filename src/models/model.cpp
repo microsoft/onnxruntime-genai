@@ -352,8 +352,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
             opt_it != provider_options.options.end() && opt_it->second == "1") {
           p_device = GetDeviceInterface(DeviceType::QNN);
         }
-      }
-      else if (provider_options.name == "WebGPU")
+      } else if (provider_options.name == "WebGPU")
         p_device = GetDeviceInterface(DeviceType::WEBGPU);
       else if (provider_options.name == "OpenVINO")
         p_device = GetDeviceInterface(DeviceType::OpenVINO);
