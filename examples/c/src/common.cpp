@@ -87,6 +87,23 @@ std::string trim(const std::string& str) {
   return str.substr(first, (last - first + 1));
 }
 
-void print_usage(int /*argc*/, char** argv) {
+static void print_usage(int /*argc*/, char** argv) {
   std::cerr << "usage: " << argv[0] << " <model_path> <execution_provider>" << std::endl;
+  std::cerr << "  model_path: [required] Path to the folder containing onnx models, genai_config.json, etc." << std::endl;
+  std::cerr << "  execution_provider: [optional] Force use of a particular execution provider (e.g. \"cpu\")" << std::endl;
+  std::cerr << "                      If not specified, EP / provider options specified in genai_config.json will be used." << std::endl;
+}
+
+bool parse_args(int argc, char** argv, std::string& model_path, std::string& ep) {
+  if (argc < 2) {
+    print_usage(argc, argv);
+    return false;
+  }
+  model_path = argv[1];
+  if (argc > 2) {
+    ep = argv[2];
+  } else {
+    ep = "follow_config";
+  }
+  return true;
 }

@@ -5,21 +5,8 @@
 #include <string>
 #include <fstream>
 #include <memory>
-
+#include "common.h"
 #include "ort_genai.h"
-
-bool FileExists(const char* path) {
-  return static_cast<bool>(std::ifstream(path));
-}
-
-std::string trim(const std::string& str) {
-  const size_t first = str.find_first_not_of(' ');
-  if (std::string::npos == first) {
-    return str;
-  }
-  const size_t last = str.find_last_not_of(' ');
-  return str.substr(first, (last - first + 1));
-}
 
 // C++ API Example
 
@@ -132,27 +119,16 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   }
 }
 
-static void print_usage(int /*argc*/, char** argv) {
-  std::cerr << "usage: " << argv[0] << std::endl;
-  std::cerr << "model_path = " << argv[1] << std::endl;
-  std::cerr << "execution_provider = " << argv[2] << std::endl;
-}
-
 int main(int argc, char** argv) {
-  std::string ep = "follow_config";
-  if (argc < 2) {
-    print_usage(argc, argv);
+  std::string model_path, ep;
+  if (!parse_args(argc, argv, model_path, ep)) {
     return -1;
-  }
-
-  if (argc > 2) {
-    ep = argv[2];
   }
 
   std::cout << "--------------------" << std::endl;
   std::cout << "Hello, Phi-4-Multimodal!" << std::endl;
   std::cout << "--------------------" << std::endl;
-  CXX_API(argv[1], ep.c_str());
+  CXX_API(model_path.c_str(), ep.c_str());
 
   return 0;
 }

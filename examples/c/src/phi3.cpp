@@ -114,14 +114,9 @@ void CXX_API(const char* model_path, const char* execution_provider) {
 }
 
 int main(int argc, char** argv) {
-  std::string ep = "follow_config";
-  if (argc < 2) {
-    print_usage(argc, argv);
+  std::string model_path, ep;
+  if (!parse_args(argc, argv, model_path, ep)) {
     return -1;
-  }
-
-  if (argc > 2) {
-    ep = argv[2];
   }
 
   // Responsible for cleaning up the library during shutdown
@@ -132,7 +127,7 @@ int main(int argc, char** argv) {
   std::cout << "-------------" << std::endl;
 
   std::cout << "C++ API" << std::endl;
-  CXX_API(argv[1], ep.c_str());
+  CXX_API(model_path.c_str(), ep.c_str());
 
   return 0;
 }
