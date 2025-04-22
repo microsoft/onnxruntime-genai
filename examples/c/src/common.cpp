@@ -107,3 +107,15 @@ bool parse_args(int argc, char** argv, std::string& model_path, std::string& ep)
   }
   return true;
 }
+
+void append_provider(OgaConfig& config, const std::string &provider) {
+  if (provider.compare("follow_config") != 0) {
+    config.ClearProviders();
+    if (provider.compare("cpu") != 0) {
+      config.AppendProvider(provider.c_str());
+      if (provider.compare("cuda") == 0) {
+        config.SetProviderOption(provider.c_str(), "enable_cuda_graph", "0");
+      }
+    }
+  }
+}

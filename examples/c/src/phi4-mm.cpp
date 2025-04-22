@@ -15,15 +15,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   auto config = OgaConfig::Create(model_path);
 
   std::string provider(execution_provider);
-  if (provider.compare("follow_config") != 0) {
-    config->ClearProviders();
-    if (provider.compare("cpu") != 0) {
-      config->AppendProvider(execution_provider);
-      if (provider.compare("cuda") == 0) {
-        config->SetProviderOption(execution_provider, "enable_cuda_graph", "0");
-      }
-    }
-  }
+  append_provider(*config, provider);
 
   std::cout << "Creating model..." << std::endl;
   auto model = OgaModel::Create(*config);
