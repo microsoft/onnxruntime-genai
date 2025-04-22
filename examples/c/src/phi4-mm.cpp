@@ -27,12 +27,14 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   std::cout << "Creating config..." << std::endl;
   auto config = OgaConfig::Create(model_path);
 
-  config->ClearProviders();
   std::string provider(execution_provider);
-  if (provider.compare("cpu") != 0) {
-    config->AppendProvider(execution_provider);
-    if (provider.compare("cuda") == 0) {
-      config->SetProviderOption(execution_provider, "enable_cuda_graph", "0");
+  if (provider.compare("follow_config") != 0) {
+    config->ClearProviders();
+    if (provider.compare("cpu") != 0) {
+      config->AppendProvider(execution_provider);
+      if (provider.compare("cuda") == 0) {
+        config->SetProviderOption(execution_provider, "enable_cuda_graph", "0");
+      }
     }
   }
 
@@ -137,15 +139,20 @@ static void print_usage(int /*argc*/, char** argv) {
 }
 
 int main(int argc, char** argv) {
-  if (argc != 3) {
+  std::string ep = "follow_config";
+  if (argc < 2) {
     print_usage(argc, argv);
     return -1;
+  }
+
+  if (argc > 2) {
+    ep = argv[2];
   }
 
   std::cout << "--------------------" << std::endl;
   std::cout << "Hello, Phi-4-Multimodal!" << std::endl;
   std::cout << "--------------------" << std::endl;
-  CXX_API(argv[1], argv[2]);
+  CXX_API(argv[1], ep.c_str());
 
   return 0;
 }
