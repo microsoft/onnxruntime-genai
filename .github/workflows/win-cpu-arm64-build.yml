@@ -67,7 +67,7 @@ jobs:
     - name: Install Rust Toolchain
       run: |
         $exePath = "$env:TEMP\rustup-init.exe"
-        (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+        (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe', $exePath)
         & $exePath -y --default-toolchain=1.86.0
         Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
 
