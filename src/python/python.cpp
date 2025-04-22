@@ -357,7 +357,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           "apply_chat_template", [](const OgaTokenizer& t, const char* template_str, const char* messages, bool add_generation_prompt) -> std::string {
             return t.ApplyChatTemplate(template_str, messages, static_cast<bool>(add_generation_prompt)).p_;
           },
-          pybind11::arg("template_str") = nullptr)
+          pybind11::arg("template_str") = nullptr, pybind11::arg("messages"), pybind11::arg("add_generation_prompt"))
       .def("encode_batch", [](const OgaTokenizer& t, std::vector<std::string> strings) {
         std::vector<const char*> c_strings;
         for (const auto& s : strings)
