@@ -100,10 +100,6 @@ int main(int argc, char** argv) {
     return -1;
   }
 
-  if (argc > 2) {
-    ep = argv[2];
-  }
-
   // Responsible for cleaning up the library during shutdown
   OgaHandle handle;
 
