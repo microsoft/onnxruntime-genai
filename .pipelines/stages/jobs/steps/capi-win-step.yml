@@ -50,7 +50,8 @@ steps:
     $exePath = "$env:TEMP\rustup-init.exe"
     (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
     & $exePath -y --default-toolchain=1.86.0
-    $env:PATH += ";$env:USERPROFILE\.cargo\bin"
+    $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
   displayName: 'Install Rust Toolchain'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
