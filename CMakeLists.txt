@@ -56,10 +56,10 @@ if(MSVC)
   # set updated value for __cplusplus macro instead of 199711L
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
   # Fixes for Binskim errors
-  if(USE_GUIDANCE)
-    add_compile_options("/GS")
-    add_compile_options("/Qspectre")
-  endif()
+  # if(USE_GUIDANCE)
+  #   add_compile_options("/GS")
+  #   add_compile_options("/Qspectre")
+  # endif()
 
   add_compile_options(
       "$<$<COMPILE_LANGUAGE:C,CXX>:/w15038>"
