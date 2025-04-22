@@ -76,7 +76,7 @@ if(PHI3V)
 endif()
 
 if(PHI4-MM)
-  add_executable(phi4-mm ${CMAKE_SOURCE_DIR}/src/phi4-mm.cpp)
+  add_executable(phi4-mm ${CMAKE_SOURCE_DIR}/src/phi4-mm.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
   prepare_executable(phi4-mm)
 endif()
 
