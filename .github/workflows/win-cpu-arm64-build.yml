@@ -70,6 +70,10 @@ jobs:
         (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe', $exePath)
         & $exePath -y --default-toolchain=1.86.0
         Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
+        rustc --version
+        cargo --version
+        winget install LLVM.LLVM
+        clang --version
 
     - name: Configure CMake
       run: |
