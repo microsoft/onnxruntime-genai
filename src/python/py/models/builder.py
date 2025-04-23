@@ -118,6 +118,15 @@ class Model:
         # Store names of nodes already created
         self.node_names: set[str] = set()
 
+        # Map TensorProto dtypes to string dtypes
+        self.to_str_dtype = {
+            ir.DataType.INT8: "TensorProto.INT8",
+            ir.DataType.INT32: "TensorProto.INT32",
+            ir.DataType.INT64: "TensorProto.INT64",
+            ir.DataType.FLOAT16: "TensorProto.FLOAT16",
+            ir.DataType.FLOAT: "TensorProto.FLOAT",
+        }
+
         # Mask-specific variables
         # TODO: Reconcile differences between `seqlens_k` and `key_total_seq_lens` in the GroupQueryAttention and SparseAttention implementations. Ideally the same subgraph can be shared for both.
         self.mask_attrs = {
@@ -461,7 +470,7 @@ class Model:
         quant.process()
         return ir.from_proto(quant.model.model)
 
-    def make_external_tensor(self, tensor: ir.ArrayCompatible, name: str, unpack_int4: bool = False, **kwargs):
+    def make_external_tensor(self, tensor: ir.ArrayCompatible | np.ndarray, name: str, unpack_int4: bool = False, **kwargs):
         ir_tensor = ir.tensor(tensor, name=name)
         initializer = self._get_value(name)
         initializer.const_value = ir_tensor
@@ -720,7 +729,7 @@ class Model:
 
         # Input weights are quantized, save quantized MatMul numpy weights for onnx model
         weight = name[1:].replace("/", ".") + ".qweight"
-        self.make_external_tensor(matmul.qweight.numpy(force=True), weight)
+        self.make_external_tensor(matmul.qweight, weight)
         scales = name[1:].replace("/", ".") + ".scales"
         self.make_external_tensor(matmul.scales.numpy(force=True).astype(self.io_dtype.numpy()), scales)
 
@@ -728,7 +737,7 @@ class Model:
 
         if hasattr(matmul, "qzeros") and matmul.qzeros is not None:
             zeros = name[1:].replace("/", ".") + ".qzeros"
-            self.make_external_tensor(matmul.qzeros.numpy(force=True), zeros)
+            self.make_external_tensor(matmul.qzeros, zeros)
             inputs.append(zeros)
 
         if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
@@ -887,7 +896,7 @@ class Model:
 
         # Input weights are quantized, save quantized MatMul numpy weights for onnx model
         weight = name[1:].replace("/", ".") + ".qweight"
-        self.make_external_tensor(matmul.qweight.numpy(force=True), weight)
+        self.make_external_tensor(matmul.qweight, weight)
         scales = name[1:].replace("/", ".") + ".scales"
         self.make_external_tensor(matmul.scales.numpy(force=True).astype(self.io_dtype.numpy()), scales)
 
@@ -895,7 +904,7 @@ class Model:
 
         if hasattr(matmul, "qzeros") and matmul.qzeros is not None:
             zeros = name[1:].replace("/", ".") + ".qzeros"
-            self.make_external_tensor(matmul.qzeros.numpy(force=True), zeros)
+            self.make_external_tensor(matmul.qzeros, zeros)
             inputs.append(zeros)
 
         if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
@@ -983,7 +992,7 @@ class Model:
             output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
 
-        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
+        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else ""), **kwargs)
         self.make_value_info(output_0, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         if skip and not self.layernorm_attrs["last_layernorm"]:
             self.make_value_info(output_3, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
@@ -2070,7 +2079,7 @@ class Model:
         if mask_exists:
             # Save logits mask as initializer
             logits_mask_name = "logits_mask"
-            self.make_external_tensor(self.lm_head_attrs["mask"].numpy(force=True), logits_mask_name)
+            self.make_external_tensor(self.lm_head_attrs["mask"], logits_mask_name)
 
             where_name = "/lm_head/Where"
             where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.io_dtype.numpy()).min}", f"{lm_name}/output_0"]
