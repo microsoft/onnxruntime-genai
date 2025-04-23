@@ -8,20 +8,20 @@
 Run this script to create the desired ONNX model.
 """
 from __future__ import annotations
-from typing import Sequence
-import ast
-
-from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer, QuantFormat
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
-import numpy as np
-import torch
-from onnxscript import ir
 
 import argparse
+import ast
 import gc
 import json
 import os
 import textwrap
+from typing import Sequence
+
+import numpy as np
+import torch
+from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer, QuantFormat
+from onnxscript import ir
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 # NOTE: Avoid importing from onnx helper and numpy_helper. Instead, leverage
 # ONNX IR methods like ir.tensor, ir.DataType.numpy() and other methods for constructing
