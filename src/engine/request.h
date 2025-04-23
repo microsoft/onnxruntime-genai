@@ -4,7 +4,6 @@
 #pragma once
 
 #include "../generators.h"
-#include <chrono>
 
 namespace Generators {
 
@@ -27,9 +26,11 @@ struct Request : std::enable_shared_from_this<Request>,
 
   void AddTokens(std::span<const int32_t> tokens);
 
-  DeviceSpan<int32_t> NewTokens();
+  int32_t UnseenToken();
 
   DeviceSpan<int32_t> UnprocessedTokens();
+
+  bool HasUnseenTokens() const;
 
   void GenerateNextTokens(DeviceSpan<float> logits);
 
@@ -42,15 +43,15 @@ struct Request : std::enable_shared_from_this<Request>,
   int64_t CurrentSequenceLength() const;
 
   RequestStatus status_{RequestStatus::Unassigned};
-  std::chrono::system_clock::time_point assigned_time_;
 
  private:
-  std::vector<int32_t> unprocessed_input_ids_;
+  std::vector<int32_t> prefill_input_ids_;
+  int64_t seen_sequence_length_{};
+  int64_t processed_sequence_length_{};
   std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<Search> search_;
   std::weak_ptr<Engine> engine_;
   bool is_prefill_{true};
-  size_t processed_tokens_{};
 };
 
 }  // namespace Generators

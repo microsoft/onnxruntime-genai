@@ -29,12 +29,12 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
     throw std::runtime_error("Cannot add the request to the engine since it is already assigned.");
   }
   engine_ = engine;
-  assigned_time_ = std::chrono::system_clock::now();
   status_ = RequestStatus::Assigned;
 
-  auto device_tokens = AllocateOnDevice(*params_, unprocessed_input_ids_);
+  auto device_tokens = AllocateOnDevice(*params_, prefill_input_ids_);
+  processed_sequence_length_ = search_->GetSequenceLength();
   search_->AppendTokens(device_tokens);
-  unprocessed_input_ids_.clear();
+  prefill_input_ids_.clear();
 }
 
 void Request::Schedule() {
@@ -59,7 +59,7 @@ void Request::Remove() {
 
 void Request::AddTokens(std::span<const int32_t> tokens) {
   if (status_ == RequestStatus::Unassigned) {
-    unprocessed_input_ids_ = std::vector<int32_t>(tokens.begin(), tokens.end());
+    std::copy(tokens.begin(), tokens.end(), std::back_inserter(prefill_input_ids_));
   } else if (status_ == RequestStatus::InProgress) {
     throw std::runtime_error("Cannot add tokens to a request that is in progress.");
   } else if (status_ == RequestStatus::Completed) {
@@ -72,9 +72,29 @@ int64_t Request::CurrentSequenceLength() const {
   return search_->GetSequenceLength();
 }
 
+int32_t Request::UnseenToken() {
+  auto sequence = search_->GetSequence(0).CopyDeviceToCpu();
+  if (seen_sequence_length_ >= sequence.size())
+    throw std::runtime_error("All tokens have been seen.");
+
+  auto unseen_token = sequence[seen_sequence_length_];
+  seen_sequence_length_++;
+  return unseen_token;
+}
+
+bool Request::HasUnseenTokens() const {
+  return seen_sequence_length_ < search_->GetSequenceLength();
+}
+
 DeviceSpan<int32_t> Request::UnprocessedTokens() {
   auto sequence = search_->GetSequence(0);
-  return sequence.subspan(processed_tokens_, sequence.size() - processed_tokens_);
+  auto unprocessed_tokens = sequence.subspan(processed_sequence_length_, sequence.size() - processed_sequence_length_);
+  processed_sequence_length_ = sequence.size();
+  return unprocessed_tokens;
+}
+
+bool Request::IsDone() const {
+  return status_ == RequestStatus::Completed;
 }
 
 void Request::GenerateNextTokens(DeviceSpan<float> logits) {
@@ -105,6 +125,10 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
   } else {
     assert(search_params.top_k == 0);
     search_->SampleTopP(search_params.top_p, search_params.temperature);
+  }
+
+  if (search_->IsDone()) {
+    status_ = RequestStatus::Completed;
   }
 }
 

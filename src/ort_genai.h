@@ -658,6 +658,62 @@ struct OgaAdapters : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyAdapters(reinterpret_cast<OgaAdapters*>(p)); }
 };
 
+struct OgaRequest : OgaAbstract {
+  static std::unique_ptr<OgaRequest> Create(OgaSequences& tokens, OgaGeneratorParams& params) {
+    OgaRequest* p;
+    OgaCheckResult(OgaCreateRequest(&tokens, &params, &p));
+    return std::unique_ptr<OgaRequest>(p);
+  }
+
+  bool IsDone() const {
+    bool f;
+    OgaCheckResult(OgaRequestIsDone(this, &f));
+    return f;
+  }
+
+  bool HasUnseenTokens() const {
+    bool f;
+    OgaCheckResult(OgaRequestHasUnseenTokens(this, &f));
+    return f;
+  }
+
+  int32_t GetUnseenToken() {
+    int32_t token;
+    OgaCheckResult(OgaRequestGetUnseenToken(this, &token));
+    return token;
+  }
+
+  static void operator delete(void* p) { OgaDestroyRequest(reinterpret_cast<OgaRequest*>(p)); }
+};
+
+struct OgaEngine : OgaAbstract {
+  static std::unique_ptr<OgaEngine> Create(OgaModel& model) {
+    OgaEngine* p;
+    OgaCheckResult(OgaCreateEngine(&model, &p));
+    return std::unique_ptr<OgaEngine>(p);
+  }
+
+  bool HasPendingRequests() {
+    bool f;
+    OgaCheckResult(OgaEngineHasPendingRequests(this, &f));
+    return f;
+  }
+
+  void Add(OgaRequest& request) {
+    OgaCheckResult(OgaEngineAddRequest(this, &request));
+  }
+
+  void Remove(OgaRequest& request) {
+    OgaCheckResult(OgaEngineRemoveRequest(this, &request));
+  }
+
+  void Step() {
+    OgaCheckResult(OgaEngineStep(this));
+  }
+
+  static void operator delete(void* p) { OgaDestroyEngine(reinterpret_cast<OgaEngine*>(p)); }
+};
+
 struct OgaHandle {
   OgaHandle() = default;
   ~OgaHandle() noexcept {
