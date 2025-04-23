@@ -362,14 +362,14 @@ class Model:
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
 
     def make_attention_init(self):
-        valid_gqa_configurations = [
+        valid_gqa_configurations = {
             ("cpu", ir.DataType.FLOAT),
             ("cuda", ir.DataType.FLOAT16),
             ("rocm", ir.DataType.FLOAT16),
             ("dml", ir.DataType.FLOAT16),
             ("webgpu", ir.DataType.FLOAT16),
             ("webgpu", ir.DataType.FLOAT),
-        ]
+        }
         if (self.ep, self.io_dtype) in valid_gqa_configurations:
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
