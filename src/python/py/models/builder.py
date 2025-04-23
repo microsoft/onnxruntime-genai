@@ -576,6 +576,7 @@ class Model:
 
     def to_int4(self, model: ir.Model) -> ir.Model:
         # TODO(justinchuby): This function doesn't use self and should not be a method. Lift out
+        ir.external_data.load_to_model(model)
         quant = MatMul4BitsQuantizer(
             model=ir.to_proto(model),
             block_size=self.quant_attrs["int4"]["block_size"],
