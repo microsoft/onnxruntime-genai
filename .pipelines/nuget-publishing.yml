@@ -177,7 +177,7 @@ extends:
           cuda_version: ${{ parameters.cuda_version }}
           SpecificArtifact: false
 
-    - ${{ if and(and(ne(parameters.custom_ort_package_versioned_name, ''), eq(parameters.enable_win_arm64, true)), eq(parameters.enable_win_cuda, true)) }}:
+    - ${{ if and(and(and(ne(parameters.custom_ort_package_versioned_name, ''), eq(parameters.enable_win_arm64, true)), eq(parameters.enable_win_cuda, true)), eq(parameters.enable_macos_cpu, true)) }}:
       - template: stages/custom-nuget-packaging-stage.yml
         parameters:
           custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
