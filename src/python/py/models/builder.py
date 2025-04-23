@@ -14,6 +14,7 @@ import ast
 import gc
 import json
 import os
+import tempfile
 import textwrap
 from typing import Literal, Sequence
 
@@ -526,10 +527,6 @@ class Model:
         print(f"Saving ONNX model in {out_dir}")
         gc.collect()
 
-        # Delete temporary cache dir if empty
-        if len(os.listdir(self.cache_dir)) == 0:
-            os.rmdir(self.cache_dir)
-
         model = self.as_ir_model()
         # Make sure all nodes are topologically sorted
         model.graph.sort()
@@ -561,6 +558,10 @@ class Model:
 
     def make_external_tensor(self, tensor: ir.ArrayCompatible | np.ndarray | ir.TensorProtocol, name: str):
         ir_tensor = ir.tensor(tensor, name=name)
+        filename = f"{name}.bin"
+        (ir_tensor,) = ir.external_data.convert_tensors_to_external(
+            [ir_tensor], self.cache_dir, filename
+        )
         initializer = self._get_or_create_value(name)
         initializer.const_value = ir_tensor
         initializer.dtype = ir.DataType(ir_tensor.dtype)
@@ -3380,7 +3381,6 @@ def parse_hf_token(hf_token):
 def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(cache_dir, exist_ok=True)
 
     # Load model config
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
@@ -3594,4 +3594,5 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
     extra_options = parse_extra_options(args.extra_options)
-    create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
+    with tempfile.TemporaryDirectory(dir=args.cache_dir) as temp_dir:
+        create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, temp_dir, **extra_options)
