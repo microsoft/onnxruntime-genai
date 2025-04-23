@@ -1442,7 +1442,7 @@ class Model:
         shape_2_name = f"{basename}/Shape_2"
         self.make_shape(shape_2_name, f"{reshape_2_name}/output_0", shape=[1])
         constant_shape_name = f"{basename}/ConstantOfShape"
-        constant_shape_value = ir.tensor([1], dtype=ir.DataType.INT64))
+        constant_shape_value = ir.tensor([1], dtype=ir.DataType.INT64)
         self.make_constant_of_shape(constant_shape_name, f"{shape_2_name}/output_0", value=constant_shape_value, dtype=ir.DataType.INT64, shape=[5])
         mul_2_name = f"{basename}/Mul"
         mul_2_inputs = [f"{constant_shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/-1"]
