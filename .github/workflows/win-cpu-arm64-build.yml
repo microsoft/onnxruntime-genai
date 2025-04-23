@@ -94,9 +94,10 @@ jobs:
 
     - name: Install the Python Wheel and Test Dependencies
       run: |
+        choco uninstall llvm --yes
         python -m pip install coloredlogs flatbuffers packaging protobuf sympy pytest
         # python -m pip install "numpy<2" --prefer-binary
-        python -m pip install "numpy<2" -Csetup-args=--vsenv
+        python -m pip install "numpy<2"
         python -m pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ ort-nightly-qnn
         python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
