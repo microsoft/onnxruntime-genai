@@ -618,8 +618,10 @@ class Model:
     def make_value_info(self, name, dtype: int, shape: Sequence[int | str]) -> None:
         if name not in self._values:
             raise KeyError(f"Value {name} not found in model values. You must create the node before creating the value info.")
-        self._values[name].dtype = ir.DataType(dtype)
-        self._values[name].shape = ir.Shape(shape)
+        if dtype is not None:
+            self._values[name].dtype = ir.DataType(dtype)
+        if shape is not None:
+            self._values[name].shape = ir.Shape(shape)
 
     def make_inputs_and_outputs(self):
         inputs = self._model.graph.inputs
