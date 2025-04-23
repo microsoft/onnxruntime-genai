@@ -510,8 +510,19 @@ class Model:
             print(f"Failed to get prompt templates. Error: {e}")
             return None
 
-    def _get_or_create_value(self, name: str) -> ir.Value:
-        """Obtain an IR value by value name. If the value does not exist a new one is created."""
+    def _get_or_create_value(self, name: str, output: bool = False) -> ir.Value | None:
+        """Obtain an IR value by value name. If the value does not exist a new one is created.
+
+        Args:
+            name: The name of the value.
+            output: Whether the value is an output value.
+        """
+        if name == "":
+            if not output:
+                return None
+            else:
+                return ir.Value(name="")
+
         return self._values.setdefault(name, ir.Value(name=name))
 
     def as_ir_model(self) -> ir.Model:
@@ -589,7 +600,11 @@ class Model:
         initializer.shape = ir_tensor.shape
         self._model.graph.register_initializer(initializer)
 
-    def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name, domain="", **kwargs):
+    def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name: str, domain="", **kwargs):
+        assert name, "Node name must be provided"
+        if name in self.node_names:
+            return
+
         # Save any constants as nodes
         for input_name in inputs:
             if input_name.startswith("/model/constants") and input_name not in self.node_names:
@@ -597,13 +612,10 @@ class Model:
 
         # Resolve values from names
         input_values = [self._get_or_create_value(name) for name in inputs]
-        output_values = [self._get_or_create_value(name) for name in outputs]
-
-        # Make node only if it does not already exist
-        if name not in self.node_names:
-            node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
-            self._model.graph.append(node)
-            self.node_names.add(name)
+        output_values = [self._get_or_create_value(name, output=True) for name in outputs]
+        node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
+        self._model.graph.append(node)
+        self.node_names.add(name)
 
         # Note:
         #
