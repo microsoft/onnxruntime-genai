@@ -510,7 +510,14 @@ class Model:
             print(f"Failed to get prompt templates. Error: {e}")
             return None
 
-    def _get_or_create_value(self, name: str, output: bool = False) -> ir.Value | None:
+    def _get_or_create_value(
+        self,
+        name: str,
+        *,
+        output: bool = False,
+        dtype: ir.DataType | None = None,
+        shape: Sequence[int | str] | ir.Shape | None = None,
+    ) -> ir.Value | None:
         """Obtain an IR value by value name. If the value does not exist a new one is created.
 
         Args:
@@ -522,8 +529,13 @@ class Model:
                 return None
             else:
                 return ir.Value(name="")
+        value = ir.Value(name=name)
+        if shape is not None:
+            value.shape = ir.Shape(shape)
+        if dtype is not None:
+            value.dtype = ir.DataType(dtype)
 
-        return self._values.setdefault(name, ir.Value(name=name))
+        return self._values.setdefault(name, value)
 
     def as_ir_model(self) -> ir.Model:
         """Return the IR model."""
@@ -595,10 +607,8 @@ class Model:
         (ir_tensor,) = ir.external_data.convert_tensors_to_external(
             [ir_tensor], self.cache_dir, filename
         )
-        initializer = self._get_or_create_value(name)
+        initializer = self._get_or_create_value(name, dtype=ir_tensor.dtype, shape=ir_tensor.shape)
         initializer.const_value = ir_tensor
-        initializer.dtype = ir.DataType(ir_tensor.dtype)
-        initializer.shape = ir_tensor.shape
         self._model.graph.register_initializer(initializer)
 
     def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name: str, domain="", **kwargs):
@@ -637,28 +647,37 @@ class Model:
             self._values[name].shape = ir.Shape(shape)
 
     def make_inputs_and_outputs(self):
-        inputs = self._model.graph.inputs
-        outputs = self._model.graph.outputs
+
 
         # Add model-specific inputs to list of model inputs
-        inputs.extend([self._get_or_create_value(name) for name in self.input_names])
+        inputs = self._model.graph.inputs
+        for name in self.input_names:
+            value = self._get_or_create_value(
+                name, dtype=self.input_types[name], shape=self.input_shapes[name]
+            )
+            inputs.append(value)
 
         # Add model-specific outputs to list of model outputs
-        outputs.extend([self._get_or_create_value(name) for name in self.output_names])
+        outputs = self._model.graph.outputs
+        for name in self.output_names:
+            value = self._get_or_create_value(
+                name, dtype=self.output_types[name], shape=self.output_shapes[name]
+            )
+            outputs.append(value)
 
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(self._get_or_create_value(key_name))
+            inputs.append(self._get_or_create_value(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
             value_name = f"past_key_values.{i}.value"
-            inputs.append(self._get_or_create_value(value_name))
+            inputs.append(self._get_or_create_value(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(self._get_or_create_value(key_name))
+            outputs.append(self._get_or_create_value(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"]))
             value_name = f"present.{i}.value"
-            outputs.append(self._get_or_create_value(value_name))
+            outputs.append(self._get_or_create_value(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"]))
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
