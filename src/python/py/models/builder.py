@@ -7,12 +7,15 @@
 """
 Run this script to create the desired ONNX model.
 """
+from __future__ import annotations
+from typing import Sequence
 
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
 from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer, QuantFormat
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
 import torch
+from onnxscript import ir
 
 import argparse
 import gc
@@ -22,7 +25,7 @@ import textwrap
 
 
 class Model:
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options): 
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
         self.original_context_length = config.original_max_position_embeddings if hasattr(config, "original_max_position_embeddings") else config.rope_scaling["original_max_position_embeddings"] if hasattr(config, "rope_scaling") and hasattr(config.rope_scaling, "original_max_position_embeddings") else self.context_length
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
@@ -47,11 +50,12 @@ class Model:
         self.hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
         self.extra_options = extra_options
 
-        self.inputs = []
-        self.outputs = []
-        self.initializers = []
-        self.value_infos = []
-        self.nodes = []
+        # States for building the model
+        graph = ir.Graph([], [], nodes=[], name="main_graph")
+        # A tracer for recording the nodes added
+        # TODO(justinchuby): Bump IR version to 10
+        self._model = ir.Model(graph, ir_version=7, producer_name="onnxruntime-genai")
+        self._values: dict[str, ir.Value] = {}
 
         # EP-specific variables
         self.ep = ep
@@ -112,25 +116,7 @@ class Model:
             self.output_names = ["hidden_states"] + self.output_names
 
         # Store names of nodes already created
-        self.node_names = set()
-
-        # Map TensorProto dtypes to NumPy dtypes
-        self.to_numpy_dtype = {
-            TensorProto.INT8: np.uint8,
-            TensorProto.INT32: np.int32,
-            TensorProto.INT64: np.int64,
-            TensorProto.FLOAT16: np.float16,
-            TensorProto.FLOAT: np.float32,
-        }
-
-        # Map TensorProto dtypes to string dtypes
-        self.to_str_dtype = {
-            TensorProto.INT8: "TensorProto.INT8",
-            TensorProto.INT32: "TensorProto.INT32",
-            TensorProto.INT64: "TensorProto.INT64",
-            TensorProto.FLOAT16: "TensorProto.FLOAT16",
-            TensorProto.FLOAT: "TensorProto.FLOAT",
-        }
+        self.node_names: set[str] = set()
 
         # Mask-specific variables
         # TODO: Reconcile differences between `seqlens_k` and `key_total_seq_lens` in the GroupQueryAttention and SparseAttention implementations. Ideally the same subgraph can be shared for both.
@@ -425,38 +411,14 @@ class Model:
                 "assistant": assistant_template,
                 "prompt": prompt_template
             }
-            return templates 
+            return templates
         except Exception as e:
             print(f"Failed to get prompt templates. Error: {e}")
             return None
-        
+
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
         gc.collect()
-
-        # Create ONNX model
-        model = helper.make_model(
-            opset_imports=[self.clear_field(helper.make_operatorsetid('', 21 if self.quant_attrs["use_qdq"] else 14), 'domain'), helper.make_operatorsetid('com.microsoft', 1)],
-            ir_version=7,
-            producer_name="onnxruntime-genai",
-            producer_version="0.0.0",
-            graph=self.make_graph(
-                name="main_graph",
-                inputs=self.inputs,
-                outputs=self.outputs,
-                initializer=self.initializers,
-                value_info=self.value_infos,
-                nodes=self.nodes,
-            )
-        )
-
-        # Load external data into ONNX model
-        external_data_helper.load_external_data_for_model(model, self.cache_dir)
-
-        # Delete external data files on disk before re-saving
-        for path in os.listdir(self.cache_dir):
-            if path.endswith(".bin"):
-                os.remove(os.path.join(self.cache_dir, path))
 
         # Delete temporary cache dir if empty
         if len(os.listdir(self.cache_dir)) == 0:
@@ -466,31 +428,25 @@ class Model:
         # TODO: Replace by quantizing the MatMuls as they are created
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
         if self.onnx_dtype == "int4" and not already_quantized_in_qdq_format:
-            model = self.to_int4(model)
+            model = self.to_int4(self._model)
+        else:
+            model = self._model
 
         # Save ONNX model with only one external data file and delete any existing duplicate copies
         out_path = os.path.join(out_dir, self.filename)
         data_path = os.path.join(out_dir, os.path.basename(out_path) + ".data")
-        if os.path.exists(out_path):
-            print(f"Overwriting {out_path}")
-            os.remove(out_path)
-        if os.path.exists(data_path):
-            print(f"Overwriting {data_path}")
-            os.remove(data_path)
 
-        save_model(
+        ir.save(
             model,
             out_path,
-            save_as_external_data=True,
-            all_tensors_to_one_file=True,
-            location=os.path.basename(data_path),
-            size_threshold=0,
-            convert_attribute=False,
+            external_data=os.path.basename(data_path),
+            size_threshold_bytes=0,
         )
 
-    def to_int4(self, model):
+    def to_int4(self, model: ir.Model) -> ir.Model:
+        # TODO(justinchuby): This function doesn't use self and should not be a method. Lift out
         quant = MatMul4BitsQuantizer(
-            model=model,
+            model=ir.to_proto(model),
             block_size=self.quant_attrs["int4"]["block_size"],
             is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
@@ -499,46 +455,38 @@ class Model:
             op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
         )
         quant.process()
-        return quant.model.model
+        return ir.from_proto(quant.model.model)
 
-    def clear_field(self, proto, field):
-        proto.ClearField(field)
-        return proto
-
-    def order_repeated_field(self, repeated_proto, key_name, order):
-        order = list(order)
-        repeated_proto.sort(key=lambda x: order.index(getattr(x, key_name)))
-
-    def make_external_tensor(self, np_data, name, unpack_int4=False, **kwargs):
-        tensor = numpy_helper.from_array(np_data)
-        tensor.name = name
-
-        filename = f"{name}.bin"
-        external_data_helper.set_external_data(tensor, location=filename)
-        with open(os.path.join(self.cache_dir, filename), "wb") as f:
-            f.write(tensor.raw_data)
-        tensor.ClearField("raw_data")
-        tensor.data_location = TensorProto.EXTERNAL
-
-        if unpack_int4 and self.onnx_dtype == 'int4':
-            tensor.data_type = TensorProto.UINT4
-            tensor.dims[-1] *= 2
-
-        self.initializers.append(tensor)
-
-    def make_node(self, op_type, inputs, outputs, name=None, doc_string=None, domain=None, **kwargs):
+    def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name, domain="", **kwargs):
         # Save any constants as nodes
         for input_name in inputs:
             if input_name.startswith("/model/constants") and input_name not in self.node_names:
                 self.make_constant(input_name)
 
+        # Resolve values from names
+        # TODO(justinchuby): Lift this out to a separate function
+        input_values = []
+        for input_name in inputs:
+            if input_name in self._values:
+                input_values.append(self._values[input_name])
+            else:
+                value = ir.Value(name=input_name)
+                self._values[input_name] = value
+                # Record the newly created value
+                input_values.append(value)
+        output_values = []
+        for output_name in outputs:
+            if output_name in self._values:
+                output_values.append(self._values[output_name])
+            else:
+                value = ir.Value(name=output_name)
+                self._values[output_name] = value
+                output_values.append(value)
+
         # Make node only if it does not already exist
         if name not in self.node_names:
-            node = helper.make_node(op_type, inputs, outputs, name, doc_string, domain, **kwargs)
-            if doc_string == '':
-                node.doc_string = ''
-            self.order_repeated_field(node.attribute, 'name', kwargs.keys())
-            self.nodes.append(node)
+            node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
+            self._model.graph.append(node)
             self.node_names.add(name)
 
         # Note:
@@ -551,15 +499,9 @@ class Model:
         # status in the graph. The above checks can then decide whether the proposed node actually
         # needs to be added into the graph or not.
 
-    def make_value_info(self, name, dtype, shape):
-        value_info = helper.make_tensor_value_info(name, dtype, shape=shape)
-        self.value_infos.append(value_info)
-
-    def make_graph(self, *args, doc_string=None, **kwargs):
-        graph = helper.make_graph(*args, doc_string=doc_string, **kwargs)
-        if doc_string == '':
-            graph.doc_string = ''
-        return graph
+    def make_value_info(self, name, dtype: int, shape: Sequence[int]):
+        self._values[name].dtype = ir.DataType(dtype)
+        self._values[name].shape = ir.Shape(shape)
 
     def make_inputs_and_outputs(self):
         # Add model-specific inputs to list of model inputs
@@ -655,7 +597,7 @@ class Model:
         output = f"{name}/output_0"
         self.make_node("Greater", inputs=inputs, outputs=[output], name=name)
         self.make_value_info(output, TensorProto.BOOL, shape=shape)
-    
+
     def make_greater_or_equal(self, name, inputs, shape):
         output = f"{name}/output_0"
         self.make_node("GreaterOrEqual", inputs=inputs, outputs=[output], name=name)
@@ -748,7 +690,7 @@ class Model:
         else:
             # For regular `MatMul`
             return self.make_matmul_op(matmul, basename, root_input, **kwargs)
-    
+
     def make_matmul_op(self, matmul, basename, root_input, **kwargs):
         if self.onnx_dtype in {"fp16", "fp32"}:
             return self.make_matmul_fp16_or_fp32(matmul, basename, root_input, **kwargs)
@@ -2236,7 +2178,7 @@ class Model:
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
                 print("Reading final norm")
                 self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
-            
+
             elif (isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size) or (hasattr(model, "lm_head") and module == model.lm_head):
                 # Checks (Hugging Face logic) or (GGUF logic)
                 if not self.exclude_lm_head:
@@ -2803,7 +2745,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
-   
+
     def make_position_ids_reformatting(self):
         if self.ep != "dml":
             position_ids_input_to_rotemb = super().make_position_ids_reformatting()
@@ -2829,7 +2771,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         self.make_add(add_1_name, add_1_inputs, dtype=proto_dtype, shape=["batch_size", "sequence_length"])
 
         return add_1_name
-        
+
     def make_rotary_embedding_caches(self, **kwargs):
         if self.ep != "dml":
             cos_cache_name, sin_cache_name = super().make_rotary_embedding_caches(**kwargs)
@@ -3275,7 +3217,7 @@ def check_extra_options(kv_pairs):
                 kv_pairs[key] = True
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
-    
+
     if "int4_op_types_to_quantize" in kv_pairs:
         op_types_to_quantize = ()
         for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
