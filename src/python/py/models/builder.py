@@ -499,7 +499,9 @@ class Model:
         # status in the graph. The above checks can then decide whether the proposed node actually
         # needs to be added into the graph or not.
 
-    def make_value_info(self, name, dtype: int, shape: Sequence[int]):
+    def make_value_info(self, name, dtype: int, shape: Sequence[int | str]) -> None:
+        if name not in self._values:
+            raise KeyError(f"Value {name} not found in model values. You must create the node before creating the value info.")
         self._values[name].dtype = ir.DataType(dtype)
         self._values[name].shape = ir.Shape(shape)
 
@@ -538,6 +540,7 @@ class Model:
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
         # Format of name is "/model/constants/{dtype}/{shape}/{num}"
+        # TODO(justinchuby): I am here
         path = name.split("/")
         onnx_dtype, dims, num = eval(path[-3]), path[-2], eval(path[-1])
         np_dtype = self.to_numpy_dtype[onnx_dtype]
