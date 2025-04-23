@@ -3594,5 +3594,5 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
     extra_options = parse_extra_options(args.extra_options)
-    with tempfile.TemporaryDirectory(dir=args.cache_dir) as temp_dir:
+    with tempfile.TemporaryDirectory(dir=args.cache_dir, ignore_cleanup_errors=True) as temp_dir:
         create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, temp_dir, **extra_options)
