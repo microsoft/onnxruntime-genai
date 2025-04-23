@@ -102,8 +102,8 @@ class Model:
     def __init__(
         self,
         config,
-        io_dtype: Literal[ir.DataType.FLOAT, ir.DataType.FLOAT16],
-        onnx_dtype: Literal[ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.UINT4],
+        io_dtype: Literal[ir.DataType.FLOAT, ir.DataType.FLOAT16] | int,
+        onnx_dtype: Literal[ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.UINT4] | int,
         ep: str,
         cache_dir,
         extra_options,
@@ -122,8 +122,8 @@ class Model:
 
         self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]
-        self.io_dtype: ir.DataType = ir.DataType(io_dtype)  # {"fp16", "fp32"}
-        self.onnx_dtype: ir.DataType = ir.DataType(onnx_dtype)  # {"int4", "fp16", "fp32"}
+        self.io_dtype: ir.DataType = ir.DataType(io_dtype)
+        self.onnx_dtype: ir.DataType = ir.DataType(onnx_dtype)
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
         self.adapter_path = extra_options.get("adapter_path", None)
 
