@@ -14,7 +14,7 @@ import ast
 import gc
 import json
 import os
-import tempfile
+import logging
 import textwrap
 from typing import Literal, Sequence
 
@@ -29,6 +29,8 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, Genera
 # ONNX IR methods like ir.tensor, ir.DataType.numpy() and other methods for constructing
 # the ONNX graph efficiently.
 
+
+logger = logging.getLogger(__name__)
 
 _TENSOR_PROTO_STRING_TO_DTYPE = {
     "TensorProto.UNDEFINED": ir.DataType.UNDEFINED,
@@ -534,13 +536,32 @@ class Model:
         # Save ONNX model with only one external data file and delete any existing duplicate copies
         out_path = os.path.join(out_dir, self.filename)
         data_path = os.path.join(out_dir, os.path.basename(out_path) + ".data")
-
+        if os.path.exists(out_path):
+            print(f"Overwriting {out_path}")
+            os.remove(out_path)
+        if os.path.exists(data_path):
+            print(f"Overwriting {data_path}")
+            os.remove(data_path)
         ir.save(
             model,
             out_path,
             external_data=os.path.basename(data_path),
             size_threshold_bytes=0,
         )
+
+        # TODO(justinchuby): This makes the model not savable again when the weight
+        # files are deleted.
+        # Delete external data files on disk before re-saving
+        for path in os.listdir(self.cache_dir):
+            if path.endswith(".bin"):
+                try:
+                    os.remove(os.path.join(self.cache_dir, path))
+                except OSError:
+                    logger.debug("Error deleting file", stack_info=True)
+
+        # Delete temporary cache dir if empty
+        if not os.listdir(self.cache_dir):
+            os.rmdir(self.cache_dir)
 
     def to_int4(self, model: ir.Model) -> ir.Model:
         # TODO(justinchuby): This function doesn't use self and should not be a method. Lift out
@@ -3594,6 +3615,4 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
     extra_options = parse_extra_options(args.extra_options)
-    # Use tempfile.TemporaryDirectory to automatically clean up the cache directory
-    with tempfile.TemporaryDirectory(dir=args.cache_dir, ignore_cleanup_errors=True) as temp_dir:
-        create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, temp_dir, **extra_options)
+    create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
