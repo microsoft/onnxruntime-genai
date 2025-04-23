@@ -565,7 +565,7 @@ class Model:
         initializer.const_value = ir_tensor
         initializer.dtype = ir.DataType(ir_tensor.dtype)
         initializer.shape = ir_tensor.shape
-        self._model.graph.initializers[name] = initializer
+        self._model.graph.register_initializer(initializer)
 
     def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name, domain="", **kwargs):
         # Save any constants as nodes
