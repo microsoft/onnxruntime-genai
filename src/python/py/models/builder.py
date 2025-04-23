@@ -15,7 +15,7 @@ import gc
 import json
 import os
 import textwrap
-from typing import Sequence
+from typing import Literal, Sequence
 
 import ml_dtypes
 import numpy as np
@@ -99,7 +99,15 @@ def _unpack_uint4(
 
 
 class Model:
-    def __init__(self, config, io_dtype: int, onnx_dtype: int, ep: str, cache_dir, extra_options):
+    def __init__(
+        self,
+        config,
+        io_dtype: Literal[ir.DataType.FLOAT, ir.DataType.FLOAT16],
+        onnx_dtype: Literal[ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.UINT4],
+        ep: str,
+        cache_dir,
+        extra_options,
+    ):
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
         self.original_context_length = config.original_max_position_embeddings if hasattr(config, "original_max_position_embeddings") else config.rope_scaling["original_max_position_embeddings"] if hasattr(config, "rope_scaling") and hasattr(config.rope_scaling, "original_max_position_embeddings") else self.context_length
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
@@ -508,7 +516,7 @@ class Model:
         # Quantize ONNX model to desired precision
         # TODO: Replace by quantizing the MatMuls as they are created
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
-        if self.onnx_dtype == "int4" and not already_quantized_in_qdq_format:
+        if self.onnx_dtype == ir.DataType.INT4 and not already_quantized_in_qdq_format:
             model = self.to_int4(self._model)
         else:
             model = self._model
@@ -778,9 +786,9 @@ class Model:
             return self.make_matmul_op(matmul, basename, root_input, **kwargs)
 
     def make_matmul_op(self, matmul, basename, root_input, **kwargs):
-        if self.onnx_dtype in {"fp16", "fp32"}:
+        if self.onnx_dtype in {ir.DataType.FLOAT16, ir.DataType.FLOAT}:
             return self.make_matmul_fp16_or_fp32(matmul, basename, root_input, **kwargs)
-        elif self.onnx_dtype == "int4":
+        elif self.onnx_dtype == ir.DataType.UINT4:
             if self.quant_attrs["use_qdq"]:
                 return self.make_matmul_int4_qdq(matmul, basename, root_input, **kwargs)
             else:
@@ -930,9 +938,9 @@ class Model:
         return add_name
 
     def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
-        if self.onnx_dtype in {"fp16", "fp32"}:
+        if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16}:
             return self.make_packed_matmul_fp16_or_fp32(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
-        elif self.onnx_dtype == "int4":
+        elif self.onnx_dtype == ir.DataType.UINT4:
             return self.make_packed_matmul_int4(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
@@ -2766,7 +2774,7 @@ class QwenModel(MistralModel):
 
 
 class PhiModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+    def __init__(self, config, io_dtype: int, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
         self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = False, True
@@ -3388,19 +3396,24 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     # Set input/output precision of ONNX model
     use_webgpu_fp32 = extra_options.get("use_webgpu_fp32", "0") == "1"
     io_dtype = ir.DataType.FLOAT if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") or use_webgpu_fp32 else ir.DataType.FLOAT16
+    onnx_dtype = {
+        "fp32": ir.DataType.FLOAT,
+        "fp16": ir.DataType.FLOAT16,
+        "int4": ir.DataType.UINT4,
+    }[precision]
 
     if "config_only" not in extra_options:
         # List architecture options in alphabetical order
         if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
             # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
             config.hidden_act = "swiglu"
-            onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GemmaForCausalLM":
-            onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
-            onnx_model = Gemma2Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = Gemma2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma3ForCausalLM":
-            onnx_model = Gemma3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
             onnx_model.model_type = "gemma3_text"
         elif config.architectures[0] == "Gemma3ForConditionalGeneration":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
@@ -3409,43 +3422,43 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
                 if not hasattr(config, key):
                     setattr(config, key, getattr(text_config, key))
             extra_options["exclude_embeds"] = True
-            onnx_model = Gemma3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GraniteForCausalLM":
-            onnx_model = GraniteModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "LlamaForCausalLM":
-            onnx_model = LlamaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "MistralForCausalLM":
-            onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = MistralModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "NemotronForCausalLM":
-            onnx_model = NemotronModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "OlmoForCausalLM":
-            onnx_model = OLMoModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiForCausalLM":
-            onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = PhiModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
-            onnx_model = Phi3MiniModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3MiniModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
-            onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
             print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
             print("WARNING: This model currently only supports quantized version. Setting `--precision int4` by default.")
             execution_provider = "cuda"
-            precision = "int4"
-            onnx_model = Phi3MoELongRoPEModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_dtype = ir.DataType.UINT4
+            onnx_model = Phi3MoELongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
-            onnx_model = Phi3SmallModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3SmallModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
-            onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3VForCausalLM":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             extra_options["exclude_embeds"] = True
-            onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3VModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi4MMForCausalLM":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             extra_options["exclude_embeds"] = True
-            onnx_model = Phi4MMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen2ForCausalLM":
-            onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
@@ -3455,7 +3468,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         # Save ONNX model
         onnx_model.save_model(output_dir)
     else:
-        onnx_model = Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
 
     # Make GenAI config
     onnx_model.make_genai_config(hf_name, extra_kwargs, output_dir)
