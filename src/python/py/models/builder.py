@@ -481,6 +481,8 @@ class Model:
             os.rmdir(self.cache_dir)
 
         model = self.as_ir_model()
+        # Make sure all nodes are topologically sorted
+        model.graph.sort()
 
         # Save ONNX model with only one external data file and delete any existing duplicate copies
         out_path = os.path.join(out_dir, self.filename)
