@@ -429,6 +429,17 @@ class Model:
         """Obtain an IR value by value name. If the value does not exist a new one is created."""
         return self._values.setdefault(name, ir.Value(name=name))
 
+    def as_ir_model(self) -> ir.Model:
+        """Return the IR model."""
+        # Quantize ONNX model to desired precision
+        # TODO: Replace by quantizing the MatMuls as they are created
+        already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
+        if self.onnx_dtype == "int4" and not already_quantized_in_qdq_format:
+            model = self.to_int4(self._model)
+        else:
+            model = self._model
+        return model
+
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
         gc.collect()
@@ -437,13 +448,7 @@ class Model:
         if len(os.listdir(self.cache_dir)) == 0:
             os.rmdir(self.cache_dir)
 
-        # Quantize ONNX model to desired precision
-        # TODO: Replace by quantizing the MatMuls as they are created
-        already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
-        if self.onnx_dtype == "int4" and not already_quantized_in_qdq_format:
-            model = self.to_int4(self._model)
-        else:
-            model = self._model
+        model = self.as_ir_model()
 
         # Save ONNX model with only one external data file and delete any existing duplicate copies
         out_path = os.path.join(out_dir, self.filename)
@@ -1149,35 +1154,53 @@ class Model:
         greater_inputs = [f"{gather_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.original_context_length}"]
         self.make_greater(greater_name, greater_inputs, shape=[])
         if_name = f"{basename}/If"
+
+        cos_cache_large_node = ir.node(
+            "Constant", [], outputs=[
+                ir.Value(name=cos_cache_large_name, type=ir.TensorType(self.io_dtype), shape=cos_cache_large.shape)
+            ],
+            name="/large/cos_cache/Constant", attributes=dict(value=ir.tensor(cos_cache_large)))
+        sin_cache_large_node = ir.node(
+            "Constant", [], outputs=[
+                ir.Value(name=sin_cache_large_name, type=ir.TensorType(self.io_dtype), shape=sin_cache_large.shape)
+            ],
+            name="/large/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_large)))
+        cos_cache_small_node = ir.node(
+            "Constant", [], outputs=[
+                ir.Value(name=cos_cache_small_name, type=ir.TensorType(self.io_dtype), shape=cos_cache_small.shape)
+            ],
+            name="/small/cos_cache/Constant", attributes=dict(value=ir.tensor(cos_cache_small)))
+        sin_cache_small_node = ir.node(
+            "Constant", [], outputs=[
+                ir.Value(name=sin_cache_small_name, type=ir.TensorType(self.io_dtype), shape=sin_cache_small.shape)
+            ],
+            name="/small/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_small)))
         self.make_node(
             "If", inputs=[f"{greater_name}/output_0"], outputs=[if_cos_cache_output, if_sin_cache_output], name=if_name,
-            then_branch=self.make_graph(
+            then_branch=ir.Graph(
+                inputs=[],
+                outputs=[
+                    cos_cache_large_node.outputs[0],
+                    sin_cache_large_node.outputs[0],
+                ],
+                nodes=[
+                    cos_cache_large_node,
+                    sin_cache_large_node,
+                ],
                 name="large_rotemb_caches_graph",
-                inputs=[],
-                outputs=[
-                    helper.make_tensor_value_info(cos_cache_large_name, self.io_dtype, shape=cos_cache_large.shape),
-                    helper.make_tensor_value_info(sin_cache_large_name, self.io_dtype, shape=sin_cache_large.shape),
-                ],
-                initializer=[],
-                value_info=[],
-                nodes=[
-                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_large_name], name="/large/cos_cache/Constant", value=numpy_helper.from_array(cos_cache_large)),
-                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_large_name], name="/large/sin_cache/Constant", value=numpy_helper.from_array(sin_cache_large)),
-                ],
             ),
-            else_branch=self.make_graph(
-                name="small_rotemb_caches_graph",
+            else_branch=ir.Graph(
+
                 inputs=[],
                 outputs=[
-                    helper.make_tensor_value_info(cos_cache_small_name, self.io_dtype, shape=cos_cache_small.shape),
-                    helper.make_tensor_value_info(sin_cache_small_name, self.io_dtype, shape=sin_cache_small.shape),
+                    cos_cache_small_node.outputs[0],
+                    sin_cache_small_node.outputs[0],
                 ],
-                initializer=[],
-                value_info=[],
                 nodes=[
-                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_small_name], name="/small/cos_cache/Constant", value=numpy_helper.from_array(cos_cache_small)),
-                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_small_name], name="/small/sin_cache/Constant", value=numpy_helper.from_array(sin_cache_small)),
+                    cos_cache_small_node,
+                    sin_cache_small_node,
                 ],
+                name="small_rotemb_caches_graph",
             ),
         )
         self.make_value_info(if_cos_cache_output, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
