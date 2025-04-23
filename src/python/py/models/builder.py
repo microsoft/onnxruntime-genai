@@ -17,6 +17,7 @@ import os
 import textwrap
 from typing import Sequence
 
+import ml_dtypes
 import numpy as np
 import torch
 from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer, QuantFormat
@@ -54,6 +55,47 @@ _TENSOR_PROTO_STRING_TO_DTYPE = {
     "TensorProto.INT4": ir.DataType.INT4,
     "TensorProto.FLOAT4E2M1": ir.DataType.FLOAT4E2M1,
 }
+
+
+def _unpack_uint4_as_uint8(
+    data: np.ndarray, dims: Sequence[int]
+) -> np.ndarray:
+    """Convert a packed uint4 array to unpacked uint4 array represented as uint8.
+
+    Args:
+        data: A numpy array.
+        dims: The dimensions are used to reshape the unpacked buffer.
+
+    Returns:
+        A numpy array of int8/uint8 reshaped to dims.
+    """
+    result = np.empty([data.size * 2], dtype=data.dtype)
+    array_low = data & np.uint8(0x0F)
+    array_high = data & np.uint8(0xF0)
+    array_high >>= np.uint8(4)
+    result[0::2] = array_low
+    result[1::2] = array_high
+    if result.size == np.prod(dims) + 1:
+        # handle single-element padding due to odd number of elements
+        result = result[:-1]
+    result.resize(dims, refcheck=False)
+    return result
+
+
+def _unpack_uint4(
+    data: np.ndarray, dims: Sequence[int]
+) -> np.ndarray:
+    """Convert a packed uint4 array to unpacked uint4 array represented as uint8.
+
+    Args:
+        data: A numpy array.
+        dims: The dimensions are used to reshape the unpacked buffer.
+
+    Returns:
+        A numpy array of int8/uint8 reshaped to dims.
+    """
+    data = data.flatten()
+    return _unpack_uint4_as_uint8(data, dims).view(ml_dtypes.uint4)
 
 
 class Model:
@@ -457,7 +499,7 @@ class Model:
             print(f"Failed to get prompt templates. Error: {e}")
             return None
 
-    def _get_value(self, name: str) -> ir.Value:
+    def _get_or_create_value(self, name: str) -> ir.Value:
         """Obtain an IR value by value name. If the value does not exist a new one is created."""
         return self._values.setdefault(name, ir.Value(name=name))
 
@@ -509,18 +551,12 @@ class Model:
         quant.process()
         return ir.from_proto(quant.model.model)
 
-    def make_external_tensor(self, tensor: ir.ArrayCompatible | np.ndarray, name: str, unpack_int4: bool = False, **kwargs):
+    def make_external_tensor(self, tensor: ir.ArrayCompatible | np.ndarray | ir.TensorProtocol, name: str):
         ir_tensor = ir.tensor(tensor, name=name)
-        initializer = self._get_value(name)
+        initializer = self._get_or_create_value(name)
         initializer.const_value = ir_tensor
         initializer.dtype = ir.DataType(ir_tensor.dtype)
         initializer.shape = ir_tensor.shape
-
-        # FIXME(justinchuby): Handle int4
-        if unpack_int4 and self.onnx_dtype == 'int4':
-            tensor.data_type = ir.DataType.UINT4
-            tensor.dims[-1] *= 2
-
         self._model.graph.initializers[name] = initializer
 
     def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name, domain="", **kwargs):
@@ -530,8 +566,8 @@ class Model:
                 self.make_constant(input_name)
 
         # Resolve values from names
-        input_values = [self._get_value(name) for name in inputs]
-        output_values = [self._get_value(name) for name in outputs]
+        input_values = [self._get_or_create_value(name) for name in inputs]
+        output_values = [self._get_or_create_value(name) for name in outputs]
 
         # Make node only if it does not already exist
         if name not in self.node_names:
@@ -560,24 +596,24 @@ class Model:
         outputs = self._model.graph.outputs
 
         # Add model-specific inputs to list of model inputs
-        inputs.extend([self._get_value(name) for name in self.input_names])
+        inputs.extend([self._get_or_create_value(name) for name in self.input_names])
 
         # Add model-specific outputs to list of model outputs
-        outputs.extend([self._get_value(name) for name in self.output_names])
+        outputs.extend([self._get_or_create_value(name) for name in self.output_names])
 
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(self._get_value(key_name))
+            inputs.append(self._get_or_create_value(key_name))
             value_name = f"past_key_values.{i}.value"
-            inputs.append(self._get_value(value_name))
+            inputs.append(self._get_or_create_value(value_name))
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(self._get_value(key_name))
+            outputs.append(self._get_or_create_value(key_name))
             value_name = f"present.{i}.value"
-            outputs.append(self._get_value(value_name))
+            outputs.append(self._get_or_create_value(value_name))
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
@@ -805,7 +841,8 @@ class Model:
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
         qweight_npy = quantized_op.qweight.numpy(force=True)
         qweight_npy = qweight_npy.reshape(*qweight_npy.shape[:-2], qweight_npy.shape[-2] * qweight_npy.shape[-1])
-        self.make_external_tensor(qweight_npy, qweight, True)
+        qweight_npy = _unpack_uint4(qweight_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2])
+        self.make_external_tensor(qweight_npy, qweight)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
         scales_npy = quantized_op.scales.numpy(force=True).astype(self.io_dtype.numpy())
@@ -818,7 +855,8 @@ class Model:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
             zeros_npy = quantized_op.qzeros.numpy(force=True)
             zeros_npy = zeros_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] // quantized_op.group_size)
-            self.make_external_tensor(zeros_npy, zeros, True)
+            zeros_npy = _unpack_uint4(zeros_npy, dims=[*zeros_npy.shape[:-1], zeros_npy.shape[-1] * 2])
+            self.make_external_tensor(zeros_npy, zeros)
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
