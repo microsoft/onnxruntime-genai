@@ -615,7 +615,7 @@ class Model:
         # status in the graph. The above checks can then decide whether the proposed node actually
         # needs to be added into the graph or not.
 
-    def make_value_info(self, name, dtype: int, shape: Sequence[int | str]) -> None:
+    def make_value_info(self, name, dtype: ir.DataType | int| None, shape: Sequence[int | str] | None) -> None:
         if name not in self._values:
             raise KeyError(f"Value {name} not found in model values. You must create the node before creating the value info.")
         if dtype is not None:
