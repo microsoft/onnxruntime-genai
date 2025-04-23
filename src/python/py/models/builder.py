@@ -652,18 +652,16 @@ class Model:
         # Add model-specific inputs to list of model inputs
         inputs = self._model.graph.inputs
         for name in self.input_names:
-            value = self._get_or_create_value(
-                name, dtype=self.input_types[name], shape=self.input_shapes[name]
-            )
-            inputs.append(value)
+            dtype = self.input_types[name]
+            shape = self.input_shapes[name]
+            inputs.append(self._get_or_create_value(name, dtype=dtype, shape=shape))
 
         # Add model-specific outputs to list of model outputs
         outputs = self._model.graph.outputs
         for name in self.output_names:
-            value = self._get_or_create_value(
-                name, dtype=self.output_types[name], shape=self.output_shapes[name]
-            )
-            outputs.append(value)
+            dtype = self.output_types[name]
+            shape = self.output_shapes[name]
+            outputs.append(self._get_or_create_value(name, dtype=dtype, shape=shape))
 
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
