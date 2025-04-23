@@ -75,7 +75,7 @@ jobs:
       run: |
         rustc --version
         cargo --version
-        winget install LLVM.LLVM
+        choco install llvm --yes
         clang --version
 
     - name: Configure CMake
