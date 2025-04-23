@@ -436,8 +436,8 @@ class Model:
 
         # Create ONNX model
         model = helper.make_model(
-            opset_imports=[self.clear_field(helper.make_operatorsetid('', 21 if self.quant_attrs["use_qdq"] else 14), 'domain'), helper.make_operatorsetid('com.microsoft', 1)],
-            ir_version=7,
+            opset_imports=[self.clear_field(helper.make_operatorsetid('', 21, 'domain'), helper.make_operatorsetid('com.microsoft', 1)],
+            ir_version=10,
             producer_name="onnxruntime-genai",
             producer_version="0.0.0",
             graph=self.make_graph(
