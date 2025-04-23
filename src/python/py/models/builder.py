@@ -25,7 +25,7 @@ import textwrap
 
 
 class Model:
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+    def __init__(self, config, io_dtype: int, onnx_dtype: int, ep: str, cache_dir, extra_options):
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
         self.original_context_length = config.original_max_position_embeddings if hasattr(config, "original_max_position_embeddings") else config.rope_scaling["original_max_position_embeddings"] if hasattr(config, "rope_scaling") and hasattr(config.rope_scaling, "original_max_position_embeddings") else self.context_length
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
@@ -40,10 +40,8 @@ class Model:
 
         self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]
-        self.io_dtype = io_dtype
-        assert self.io_dtype in {"fp16", "fp32"}
-        self.onnx_dtype = onnx_dtype
-        assert self.onnx_dtype in {"int4", "fp16", "fp32"}
+        self.io_dtype: ir.DataType = ir.DataType(io_dtype)  # {"fp16", "fp32"}
+        self.onnx_dtype: ir.DataType = ir.DataType(onnx_dtype)  # {"int4", "fp16", "fp32"}
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
         self.adapter_path = extra_options.get("adapter_path", None)
 
@@ -702,7 +700,7 @@ class Model:
 
     def make_matmul_fp16_or_fp32(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
-        self.make_external_tensor(matmul.weight.numpy(force=True).transpose().astype(self.to_numpy_dtype[self.io_dtype]), weight)
+        self.make_external_tensor(matmul.weight.numpy(force=True).transpose().astype(self.io_dtype.numpy()), weight)
 
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
@@ -724,7 +722,7 @@ class Model:
         weight = name[1:].replace("/", ".") + ".qweight"
         self.make_external_tensor(matmul.qweight.numpy(force=True), weight)
         scales = name[1:].replace("/", ".") + ".scales"
-        self.make_external_tensor(matmul.scales.numpy(force=True).astype(self.to_numpy_dtype[self.io_dtype]), scales)
+        self.make_external_tensor(matmul.scales.numpy(force=True).astype(self.io_dtype.numpy()), scales)
 
         inputs = [root_input, weight, scales]
 
@@ -756,7 +754,7 @@ class Model:
         self.make_external_tensor(qweight_npy, qweight, True)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
-        scales_npy = quantized_op.scales.numpy(force=True).astype(self.to_numpy_dtype[self.io_dtype])
+        scales_npy = quantized_op.scales.numpy(force=True).astype(self.io_dtype.numpy())
         scales_npy = scales_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size)
         self.make_external_tensor(scales_npy, scales)
 
@@ -891,7 +889,7 @@ class Model:
         weight = name[1:].replace("/", ".") + ".qweight"
         self.make_external_tensor(matmul.qweight.numpy(force=True), weight)
         scales = name[1:].replace("/", ".") + ".scales"
-        self.make_external_tensor(matmul.scales.numpy(force=True).astype(self.to_numpy_dtype[self.io_dtype]), scales)
+        self.make_external_tensor(matmul.scales.numpy(force=True).astype(self.io_dtype.numpy()), scales)
 
         inputs = [root_input, weight, scales]
 
@@ -917,7 +915,7 @@ class Model:
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
-        self.make_external_tensor(add.astype(self.to_numpy_dtype[self.io_dtype]), bias)
+        self.make_external_tensor(add.astype(self.io_dtype.numpy()), bias)
 
         add_bias_inputs = [root_input, bias]
         shape = ['batch_size', 'sequence_length', add.shape[0]]
@@ -936,7 +934,7 @@ class Model:
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
-        self.make_external_tensor(embedding.astype(self.to_numpy_dtype[self.io_dtype]), weight)
+        self.make_external_tensor(embedding.astype(self.io_dtype.numpy()), weight)
 
         basename = "/model/embed_tokens"
         gather_name = f"{basename}/Gather"
@@ -964,10 +962,10 @@ class Model:
         skip_input = self.layernorm_attrs["skip_input"]
 
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor(layernorm.weight.numpy(force=True).astype(self.to_numpy_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"], weight)
+        self.make_external_tensor(layernorm.weight.numpy(force=True).astype(self.io_dtype.numpy()) + self.layernorm_attrs["add_offset"], weight)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
-            self.make_external_tensor(layernorm.bias.numpy(force=True).astype(self.to_numpy_dtype[self.io_dtype]), bias)
+            self.make_external_tensor(layernorm.bias.numpy(force=True).astype(self.io_dtype.numpy()), bias)
 
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
@@ -1062,9 +1060,9 @@ class Model:
             # Slice cos/sin caches from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
             cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].numpy(force=True)
-            cos_cache = cos_cache.astype(self.to_numpy_dtype[self.io_dtype])
+            cos_cache = cos_cache.astype(self.io_dtype.numpy())
             sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].numpy(force=True)
-            sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
+            sin_cache = sin_cache.astype(self.io_dtype.numpy())
 
             # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
             if self.rotemb_attrs["partial_rotary_factor"] != 1.0:
@@ -1200,7 +1198,7 @@ class Model:
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
         q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
         q_layernorm_output = f"{q_layernorm_name}/output_0"
-        self.make_external_tensor(attention.q_norm.weight.numpy(force=True).astype(self.to_numpy_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"], q_weight_name)
+        self.make_external_tensor(attention.q_norm.weight.numpy(force=True).astype(self.io_dtype.numpy()) + self.layernorm_attrs["add_offset"], q_weight_name)
         self.make_node("SimplifiedLayerNormalization", inputs=[q_reshape_1_output, q_weight_name], outputs=[q_layernorm_output], name=q_layernorm_name, **layernorm_kwargs)
         self.make_value_info(q_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
 
@@ -1219,7 +1217,7 @@ class Model:
         k_layernorm_name = f"/model/layers.{layer_id}/attn/k_norm/SimplifiedLayerNormalization"
         k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
         k_layernorm_output = f"{k_layernorm_name}/output_0"
-        self.make_external_tensor(attention.k_norm.weight.numpy(force=True).astype(self.to_numpy_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"], k_weight_name)
+        self.make_external_tensor(attention.k_norm.weight.numpy(force=True).astype(self.io_dtype.numpy()) + self.layernorm_attrs["add_offset"], k_weight_name)
         self.make_node("SimplifiedLayerNormalization", inputs=[k_reshape_1_output, k_weight_name], outputs=[k_layernorm_output], name=k_layernorm_name, **layernorm_kwargs)
         self.make_value_info(k_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
@@ -1958,9 +1956,9 @@ class Model:
         make_moe_external_tensor(w3_list, moe_expert_weight_3_name, np.uint8)
 
         # Currently we don't expect QMoE to be used with distributed inference
-        make_moe_external_tensor(w1_scale_list, moe_expert_scales_1_name, self.to_numpy_dtype[self.io_dtype])
-        make_moe_external_tensor(w2_scale_list, moe_expert_scales_2_name, self.to_numpy_dtype[self.io_dtype])
-        make_moe_external_tensor(w3_scale_list, moe_expert_scales_3_name, self.to_numpy_dtype[self.io_dtype])
+        make_moe_external_tensor(w1_scale_list, moe_expert_scales_1_name, self.io_dtype.numpy())
+        make_moe_external_tensor(w2_scale_list, moe_expert_scales_2_name, self.io_dtype.numpy())
+        make_moe_external_tensor(w3_scale_list, moe_expert_scales_3_name, self.io_dtype.numpy())
 
         bias_ph = "" # Placeholder for bias
         inputs = [root_input, f"{gate_reshape_name}/output_0", \
@@ -2075,7 +2073,7 @@ class Model:
             self.make_external_tensor(self.lm_head_attrs["mask"].numpy(force=True), logits_mask_name)
 
             where_name = "/lm_head/Where"
-            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{lm_name}/output_0"]
+            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.io_dtype.numpy()).min}", f"{lm_name}/output_0"]
             where_output = "logits" if not softcap_exists else f"{where_name}/output_0"
             self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
             self.make_value_info(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
@@ -2351,7 +2349,7 @@ class Model:
         concat_inputs = [f"{unsqueeze_4_name}/output_0", f"{unsqueeze_5_name}/output_0"]
         self.make_concat(concat_2_name, concat_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
         constant_shape_name = f"{basename}/ConstantOfShape_2"
-        constant_shape_numpy_dtype = self.to_numpy_dtype[self.io_dtype]
+        constant_shape_numpy_dtype = self.io_dtype.numpy()
         constant_shape_value = numpy_helper.from_array(np.array([np.finfo(constant_shape_numpy_dtype).min], dtype=constant_shape_numpy_dtype))
         self.make_constant_of_shape(constant_shape_name, f"{concat_2_name}/output_0", value=constant_shape_value, dtype=self.io_dtype, shape=['unk', 'unk'])
 
@@ -2436,7 +2434,7 @@ class Model:
         cast_2_name = f"{basename}/Cast_2"
         self.make_cast(cast_2_name, f"{sub_name}/output_0", dtype=TensorProto.BOOL, shape=["unk", "unk", "unk", "unk"])
         where_2_name = f"{basename}/Where_2"
-        where_2_inputs = [f"{cast_2_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.to_numpy_dtype[self.io_dtype]).min}", f"{sub_name}/output_0"]
+        where_2_inputs = [f"{cast_2_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{np.finfo(self.io_dtype.numpy()).min}", f"{sub_name}/output_0"]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
 
         return where_2_name
@@ -2793,9 +2791,9 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
             # Slice cos/sin caches from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
             cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].numpy(force=True)
-            cos_cache = cos_cache.astype(self.to_numpy_dtype[self.io_dtype])
+            cos_cache = cos_cache.astype(self.io_dtype.numpy())
             sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].numpy(force=True)
-            sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
+            sin_cache = sin_cache.astype(self.io_dtype.numpy())
 
             # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
             if self.rotemb_attrs["partial_rotary_factor"] != 1.0:
