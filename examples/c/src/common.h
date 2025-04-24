@@ -35,7 +35,6 @@ class Timing {
   TimePoint end_timestamp_;
 };
 
-
 class TerminateSession {
  public:
   std::condition_variable cv;
