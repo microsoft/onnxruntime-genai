@@ -2754,7 +2754,6 @@ class Gemma2Model(GemmaModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
-        self.lm_head_attrs["scale"] = config.final_logit_softcapping if config.final_logit_softcapping is not None else 1.0
         self.is_local = lambda layer_id: layer_id % 2 == 1
 
     def make_layer(self, layer_id, layer):
