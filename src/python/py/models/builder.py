@@ -529,22 +529,26 @@ class Model:
     ) -> ir.Value | None:
         """Obtain an IR value by value name. If the value does not exist a new one is created.
 
+        If dtype and shape are provided, they will be set on the value.
+
         Args:
             name: The name of the value.
             output: Whether the value is an output value.
+            dtype: The data type of the value.
+            shape: The shape of the value.
         """
         if name == "":
             if not output:
                 return None
             else:
                 return ir.Value(name="")
-        value = ir.Value(name=name)
+
+        value = self._values.setdefault(name, ir.Value(name=name))
         if shape is not None:
             value.shape = ir.Shape(shape)
         if dtype is not None:
             value.dtype = ir.DataType(dtype)
-
-        return self._values.setdefault(name, value)
+        return value
 
     def as_ir_model(self) -> ir.Model:
         """Return the IR model."""
@@ -656,8 +660,6 @@ class Model:
             self._values[name].shape = ir.Shape(shape)
 
     def make_inputs_and_outputs(self):
-
-
         # Add model-specific inputs to list of model inputs
         inputs = self._model.graph.inputs
         for name in self.input_names:
