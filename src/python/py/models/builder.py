@@ -9,7 +9,7 @@ Run this script to create the desired ONNX model.
 """
 
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
-from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer, QuantFormat
+from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer, QuantFormat
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
 import torch
@@ -489,7 +489,7 @@ class Model:
         )
 
     def to_int4(self, model):
-        quant = MatMul4BitsQuantizer(
+        quant = MatMulNBitsQuantizer(
             model=model,
             block_size=self.quant_attrs["int4"]["block_size"],
             is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
