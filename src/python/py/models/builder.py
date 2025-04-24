@@ -13,15 +13,20 @@ import argparse
 import ast
 import gc
 import json
-import os
 import logging
+import os
 import textwrap
 from typing import Literal, Sequence
 
 import numpy as np
 import torch
 from onnxscript import ir
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    GenerationConfig,
+)
 
 try:
     # For users who runs this script from source
