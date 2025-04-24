@@ -9,7 +9,7 @@ Run this script to create the desired ONNX model.
 """
 
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
-from onnxruntime.quantization.matmul_4bits_quantizer import MatMulNBitsQuantizer, QuantFormat
+from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer, QuantFormat
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
 import torch
