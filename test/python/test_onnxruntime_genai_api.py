@@ -16,6 +16,8 @@ import pytest
 
 if not sysconfig.get_platform().endswith("arm64"):
     # Skip importing onnx if running on ARM64
+    # TODO(justinchuby): ONNX 1.18 supports arm64. Remove the condition when
+    # there is a version bump
     import onnx
 
 devices = ["cpu"]
@@ -142,7 +144,7 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
-    
+
     assert generator.get_sequence(0) is not None
 
     # Batch size > 1 case
@@ -155,10 +157,10 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731], [64, 65, 66, 67]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
-    
+
     for i in range(batch_size):
         assert generator.get_sequence(i) is not None
-    
+
     generator.rewind_to(0)
 
     generator.append_tokens(np.array([[52, 204, 204, 204], [731, 731, 114, 114], [67, 68, 69, 70]], dtype=np.int32))
@@ -184,7 +186,7 @@ def test_rewind(test_data_path, relative_model_path):
         [0, 0, 195, 731, 731, 114, 114, 114, 114, 114],
         dtype=np.int32,
     )
-    
+
     input_ids_shape = [1, 4]
     batch_size = input_ids_shape[0]
     search_params = og.GeneratorParams(model)
@@ -202,9 +204,9 @@ def test_rewind(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
-    
+
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
-    
+
 
 # TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
 # requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
@@ -444,6 +446,9 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
         """Extract a subgraph from the input model and save it to the output path"""
 
         model = onnx.load(input_path)
+        # Add all value info out the model output to value_info list for the
+        # extractor to find the value properly
+        model.graph.value_info.extend(model.graph.output)
 
         e = onnx.utils.Extractor(model)
         extracted = e.extract_model(input_names, output_names)
@@ -689,7 +694,7 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
             adapter_paths.append(adapter_file_name)
 
         return adapter_model_path, adapter_paths
-    
+
     if device == "dml":
         pytest.skip("EP DML does not support adapters")
 
@@ -712,7 +717,7 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
     generator = og.Generator(model, params)
     for i in range(len(adapter_paths)):
         generator.set_active_adapter(adapters, f"adapter_{i}")
-        
+
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
