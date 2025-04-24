@@ -379,7 +379,7 @@ class Model:
 
         genai_config = {
             "model": {
-                "bos_token_id": config.bos_token_id if hasattr(config, "bos_token_id") and config.bos_token_id != None else 1,  # config.bos_token_id not present in ChatGLM model configs.
+                "bos_token_id": config.bos_token_id if hasattr(config, "bos_token_id") and config.bos_token_id is not None else 1,  # config.bos_token_id not present in ChatGLM model configs.
                 "context_length": self.context_length,
                 "decoder": {
                     "session_options" : {
