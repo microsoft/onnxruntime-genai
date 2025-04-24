@@ -81,8 +81,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
         const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
         std::cout << tokenizer_stream->Decode(new_token) << std::flush;
       }
-    }
-    catch (const std::exception& e) {
+    } catch (const std::exception& e) {
       std::cout << "Session Terminated: " << e.what() << std::endl;
     }
 

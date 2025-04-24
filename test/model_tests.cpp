@@ -34,7 +34,7 @@ static const std::pair<const char*, const char*> c_tiny_gpt2_model_paths[] = {
 
 #if USE_DML
 TEST(ModelTests, DMLAdapterSelection) {
-#if 0 // TEST_PHI2 TODO: Remove this? Can't access the device directly anymore.
+#if 0  // TEST_PHI2 TODO: Remove this? Can't access the device directly anymore.
   auto model = Generators::CreateModel(Generators::GetOrtEnv(), PHI2_PATH);
   auto d3d12Device = model->GetD3D12Device();
 
@@ -179,7 +179,7 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
   }
-  
+
   // Verify outputs match expected outputs
   auto sequence = generator->GetSequence(0);
   auto* expected_output_start = &expected_output_continuous[0];
