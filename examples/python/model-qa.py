@@ -57,6 +57,9 @@ def main(args):
             args.chat_template = '{system_prompt}<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
         elif model_type == "gemma3_text":
             args.chat_template = '<start_of_turn>user\n{system_prompt}{input}<end_of_turn>\n<start_of_turn>model\n'
+        elif model_type.startswith("bitnet"):
+            # args.chat_template = '{system_prompt}{"role": "user", "content": "{input}"}'
+            args.chat_template = '{{system_prompt}}, {{"role": "user", "content": "{input}"}}'
         else:
             raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
 
@@ -72,6 +75,8 @@ def main(args):
         elif model_type.startswith("llama"):
             system_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{args.system_prompt}<|eot_id|>"
             print("Using System Prompt for LLAMA 3, if you are using LLAMA  2 please pass the argument --system_prompt '<s>[INST] <<SYS>>\\n{args.system_prompt}\\n<</SYS>>')")
+        elif model_type.startswith("bitnet"):
+            system_prompt = f'{{"role": "system", "content": "{args.system_prompt}"}}'
         elif model_type.startswith("qwen2"):
             system_prompt = f"<|im_start|>system\n{args.system_prompt}<|im_end|>\n"
         elif model_type == "gemma3_text":

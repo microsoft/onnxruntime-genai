@@ -32,7 +32,8 @@ class Model:
         self.hidden_size = config.hidden_size
         self.num_kv_heads = config.num_key_value_heads if hasattr(config, "num_key_value_heads") else config.multi_query_group_num if hasattr(config, "multi_query_group_num") else config.num_attention_heads
         self.num_attn_heads = config.num_attention_heads
-        self.head_size = config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
+        # with mistral, config.head_dim is null so I have the extra check before assigning it
+        self.head_size = config.head_dim if hasattr(config, "head_dim") and config.head_dim else config.hidden_size // config.num_attention_heads
         self.num_layers = int(extra_options["num_hidden_layers"]) if "num_hidden_layers" in extra_options else config.num_hidden_layers if hasattr(config, "num_hidden_layers") else config.num_layers
         self.vocab_size = config.vocab_size
         self.activation = config.hidden_activation if hasattr(config, "hidden_activation") and config.hidden_activation is not None else config.hidden_act
@@ -3301,6 +3302,7 @@ class Gemma3Model(Gemma2Model):
 class BitNetModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.rms_norm_eps = config.rms_norm_eps
 
     def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
@@ -3311,6 +3313,8 @@ class BitNetModel(MistralModel):
         #              |
         #           ActFunc
         #              |
+        #        SimpleLayerNorm
+        #              |
         #         DownProjMatMul
 
         up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
@@ -3318,15 +3322,148 @@ class BitNetModel(MistralModel):
 
         act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")
 
+        # add an extra SimplifiedLayerNorm after the MLP activation before the down projection MatMul
+        ffn_sub_norm_kwargs = {"epsilon": self.rms_norm_eps, "axis": -1, "stash_type": 1}   # BitNetRMSNorm on axes -1
+        ffn_sub_norm_name = f"/model/layers.{layer_id}/mlp/ffn_sub_norm/SimplifiedLayerNormalization"
+        ffn_sub_norm_weight_name = f"/model/layers.{layer_id}/mlp/ffn_sub_norm.weight"
+        ffn_sub_norm_weight_name = ffn_sub_norm_weight_name[1:].replace("/", ".")
+        ffn_sub_norm_output = f"{ffn_sub_norm_weight_name}/output_0"
+        self.make_external_tensor((mlp.ffn_sub_norm.weight.detach().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), ffn_sub_norm_weight_name)
+        self.make_node("SimplifiedLayerNormalization", inputs=[f"{act_fn_name}/output_0", ffn_sub_norm_weight_name], outputs=[ffn_sub_norm_output], name=ffn_sub_norm_name, **ffn_sub_norm_kwargs)
+
         # Make output MatMul node
         down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
-        down_name = self.make_matmul(mlp.down_proj, down_basename, f"{act_fn_name}/output_0")
+        down_name = self.make_matmul(mlp.down_proj, down_basename, ffn_sub_norm_output)
 
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{down_name}/output_0"
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
-        super().make_attention(layer_id, attention, root_input, **kwargs)
+        # Make nodes for the Attention subgraph
+        #
+        # MultiHeadAttention example:
+        #
+        #               root_input
+        #              /     |     \
+        #       Q_MatMul  K_MatMul  V_MatMul  4D causal mask  past_key  past_value
+        #           |        |         |            |            |           |
+        #         Q_Add    K_Add     V_Add          +------------+-----------+
+        #           |        |         |                         |
+        #       Q_Rotary  K_Rotary     |                         |
+        #           \        |        /                          |
+        #            MultiHeadAttention--------------------------+
+        #                    |
+        #              SimpleLayerNorm
+        #                    |
+        #                O_MatMul
+        #                    |
+        #                  O_Add
+        #
+
+        # Unpack attention weights if needed
+        self.make_attention_unpacked(layer_id, attention, root_input, **kwargs)
+
+        # Make MatMul nodes
+        if self.attention_attrs["use_packed_matmul"]:
+            # Combine 3 MatMuls into 1 packed MatMul
+            qkv_matmul_basename = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
+            qkv_matmul_name = self.make_packed_matmul(attention.q_proj, attention.k_proj, attention.v_proj, qkv_matmul_basename, root_input)
+            self.attention_attrs["q_path"] = f"{qkv_matmul_name}/output_0"
+        else:
+            q_matmul_basename = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
+            q_matmul_name = self.make_matmul(attention.q_proj, q_matmul_basename, root_input)
+            self.attention_attrs["q_path"] = f"{q_matmul_name}/output_0"
+            k_matmul_basename = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
+            k_matmul_name = self.make_matmul(attention.k_proj, k_matmul_basename, root_input)
+            self.attention_attrs["k_path"] = f"{k_matmul_name}/output_0"
+            v_matmul_basename = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
+            v_matmul_name = self.make_matmul(attention.v_proj, v_matmul_basename, root_input)
+            self.attention_attrs["v_path"] = f"{v_matmul_name}/output_0"
+
+        # Make Add nodes (if bias exists)
+        q_bias_exists = attention.q_proj.bias is not None and torch.count_nonzero(attention.q_proj.bias) > 0
+        k_bias_exists = attention.k_proj.bias is not None and torch.count_nonzero(attention.k_proj.bias) > 0
+        v_bias_exists = attention.v_proj.bias is not None and torch.count_nonzero(attention.v_proj.bias) > 0
+        all_bias_exists = q_bias_exists and k_bias_exists and v_bias_exists
+
+        if all_bias_exists and self.attention_attrs["use_packed_matmul"]:
+            # Combine 3 Adds into 1 packed Add
+            qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
+            self.make_packed_add(attention.q_proj.bias.detach(), attention.k_proj.bias.detach(), attention.v_proj.bias.detach(), qkv_add_name, root_input=self.attention_attrs["q_path"])
+            self.attention_attrs["q_path"] = f"{qkv_add_name}/output_0"
+        else:
+            if q_bias_exists:
+                q_add_name = f"/model/layers.{layer_id}/attn/q_proj/Add"
+                self.make_add_bias(attention.q_proj.bias.detach(), q_add_name, root_input=self.attention_attrs["q_path"])
+                self.attention_attrs["q_path"] = f"{q_add_name}/output_0"
+            if k_bias_exists:
+                k_add_name = f"/model/layers.{layer_id}/attn/k_proj/Add"
+                self.make_add_bias(attention.k_proj.bias.detach(), k_add_name, root_input=self.attention_attrs["k_path"])
+                self.attention_attrs["k_path"] = f"{k_add_name}/output_0"
+            if v_bias_exists:
+                v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
+                self.make_add_bias(attention.v_proj.bias.detach(), v_add_name, root_input=self.attention_attrs["v_path"])
+                self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
+
+        # Make Q/K SimplifiedLayerNorm nodes
+        if self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"]:
+            self.make_qk_norm(layer_id, attention)
+
+        # Make RotaryEmbedding nodes
+        cos_cache_name, sin_cache_name = "", ""
+        if self.attention_attrs["use_rope_in_attn"]:
+            cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
+        else:
+            q_rotary_name = f"/model/layers.{layer_id}/attn/q_rotary/RotaryEmbedding"
+            self.make_rotary_embedding(q_rotary_name, root_input=self.attention_attrs["q_path"], position_ids=kwargs.get("position_ids", "position_ids"))
+            self.attention_attrs["q_path"] = f"{q_rotary_name}/output_0"
+            k_rotary_name = f"/model/layers.{layer_id}/attn/k_rotary/RotaryEmbedding"
+            self.make_rotary_embedding(k_rotary_name, root_input=self.attention_attrs["k_path"], position_ids=kwargs.get("position_ids", "position_ids"))
+            self.attention_attrs["k_path"] = f"{k_rotary_name}/output_0"
+
+        # Make repeat KV nodes (Note: `repeat_kv` needs to be kept since GroupQueryAttention isn't supported for FP32 CUDA)
+        past_k = f"past_key_values.{layer_id}.key"
+        past_v = f"past_key_values.{layer_id}.value"
+        present_k = f"present.{layer_id}.key"
+        present_v = f"present.{layer_id}.value"
+        if self.num_attn_heads != self.num_kv_heads and self.attention_attrs["op_type"] == "MultiHeadAttention":
+            self.attention_attrs["k_path"] = self.make_repeat_kv(layer_id, root_input=self.attention_attrs["k_path"], past_kv=past_k, present_kv=present_k)
+            self.attention_attrs["v_path"] = self.make_repeat_kv(layer_id, root_input=self.attention_attrs["v_path"], past_kv=past_v, present_kv=present_v)
+            past_k, past_v, present_k, present_v = "", "", "", ""
+
+        # Make attention node (e.g. MultiHeadAttention, GroupQueryAttention, etc.)
+        attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
+        self.make_attention_op(
+            attn_name, q_path=self.attention_attrs["q_path"], k_path=self.attention_attrs["k_path"], v_path=self.attention_attrs["v_path"],
+            past_k=past_k, past_v=past_v, present_k=present_k, present_v=present_v,
+            cos_cache=cos_cache_name, sin_cache=sin_cache_name, **kwargs,
+        )
+
+        # add an extra SimplifiedLayerNorm before the output projection for attention
+        attn_sub_norm_kwargs = {"epsilon": self.rms_norm_eps, "axis": -1, "stash_type": 1}   # BitNetRMSNorm on axes -1
+        attn_sub_norm_name = f"/model/layers.{layer_id}/attn/attn_sub_norm/SimplifiedLayerNormalization"
+        attn_sub_norm_weight_name = f"/model/layers.{layer_id}/attn/attn_sub_norm.weight"
+        attn_sub_norm_weight_name = attn_sub_norm_weight_name[1:].replace("/", ".")
+        attn_sub_norm_output = f"{attn_sub_norm_weight_name}/output_0"
+        self.make_external_tensor((attention.attn_sub_norm.weight.detach().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), attn_sub_norm_weight_name)
+        self.make_node("SimplifiedLayerNormalization", inputs=[f"{attn_name}/output_0", attn_sub_norm_weight_name], outputs=[attn_sub_norm_output], name=attn_sub_norm_name, **attn_sub_norm_kwargs)
+
+        # Make MatMul node (output projection weight node)
+        o_proj = 'o_proj' if hasattr(attention, 'o_proj') else 'dense'
+        o_matmul_basename = f"/model/layers.{layer_id}/attn/o_proj/MatMul"
+        o_weight = eval(f"attention.{o_proj}")
+        o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, attn_sub_norm_output)
+
+        # Make Add node (output projection bias node if bias exists)
+        o_bias_exists = eval(f"attention.{o_proj}.bias") is not None
+        if o_bias_exists:
+            o_add_name = f"/model/layers.{layer_id}/attn/o_proj/Add"
+            o_bias = eval(f"attention.{o_proj}.bias.detach()")
+            self.make_add_bias(o_bias, o_add_name, root_input=f"{o_matmul_name}/output_0")
+
+        # Assign output 0 of previous output node as skip input to next SkipLayerNorm
+        self.layernorm_attrs["skip_input"] = f"{o_matmul_name if not o_bias_exists else o_add_name}/output_0"
+
 
         # Make attention node (e.g. MultiHeadAttention, GroupQueryAttention, etc.)
         attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
