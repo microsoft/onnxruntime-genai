@@ -263,7 +263,7 @@ void EnsureDeviceOrtInit(OrtSession& session, DeviceType type) {
   if (device)
     return;
 
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)", "NvTensorRtRtx"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   auto name = device_type_names[static_cast<int>(type)];
@@ -545,8 +545,10 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
       }
 
-      else if (provider_options.name == "NvTensorRtRtx")
-        p_device_ = GetDeviceInterface(DeviceType::NvTensorRtRtx);
+      else if (provider_options.name == "NvTensorRtRtx") {
+        session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_cuda_graph_enable", "1");
+        p_device_ = GetDeviceInterface(DeviceType::CUDA);
+      }
 
       std::vector<const char*> keys, values;
       for (auto& option : provider_options.options) {
@@ -554,14 +556,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         values.emplace_back(option.second.c_str());
       }
       session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
-
-      if (provider_options.name == "NvTensorRtRtx") {
-        // Enable CUDA EP for contrib ops
-        auto ort_provider_options_cuda = OrtCUDAProviderOptionsV2::Create();
-        ort_provider_options_cuda->Update(keys.data(), values.data(), keys.size());
-
-        session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options_cuda);
-      }
     }
   }
 

@@ -593,7 +593,7 @@ struct OrtSessionOptions {
   OrtSessionOptions& AppendExecutionProvider_TensorRT(const OrtTensorRTProviderOptions& provider_options);       ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_TensorRT
   OrtSessionOptions& AppendExecutionProvider_TensorRT_V2(const OrtTensorRTProviderOptionsV2& provider_options);  ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_TensorRT
 
-  OrtSessionOptions& AppendExecutionProvider_MIGraphX(const OrtMIGraphXProviderOptions& provider_options);       ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_MIGraphX
+  OrtSessionOptions& AppendExecutionProvider_MIGraphX(const OrtMIGraphXProviderOptions& provider_options);  ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_MIGraphX
   ///< Wraps OrtApi::SessionOptionsAppendExecutionProvider_CANN
   OrtSessionOptions& AppendExecutionProvider_CANN(const OrtCANNProviderOptions& provider_options);
   /// Wraps OrtApi::SessionOptionsAppendExecutionProvider. Currently supports SNPE, XNNPACK and VitisAI.

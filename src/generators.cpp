@@ -212,8 +212,6 @@ std::string to_string(DeviceType device_type) {
       return "QnnWithSharedMemory";
     case DeviceType::OpenVINO:
       return "OpenVINO";
-    case DeviceType::NvTensorRtRtx:
-      return "NvTensorRtRtx";
     default:
       throw std::runtime_error("Unknown device type");
   }
@@ -224,7 +222,6 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
     default:
     case DeviceType::CPU:
       return GetCpuInterface();
-    case DeviceType::NvTensorRtRtx: // Fallback to CUDA interface.
     case DeviceType::CUDA:
       return GetCudaInterface();
 #if USE_DML
