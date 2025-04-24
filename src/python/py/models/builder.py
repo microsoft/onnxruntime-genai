@@ -519,36 +519,23 @@ class Model:
             print(f"Failed to get prompt templates. Error: {e}")
             return None
 
-    def _get_or_create_value(
-        self,
-        name: str,
-        *,
-        output: bool = False,
-        dtype: ir.DataType | None = None,
-        shape: Sequence[int | str] | ir.Shape | None = None,
-    ) -> ir.Value | None:
+    def make_value(self, name: str, *, output: bool = False) -> ir.Value | None:
         """Obtain an IR value by value name. If the value does not exist a new one is created.
-
-        If dtype and shape are provided, they will be set on the value.
 
         Args:
             name: The name of the value.
             output: Whether the value is an output value.
-            dtype: The data type of the value.
-            shape: The shape of the value.
         """
         if name == "":
             if not output:
+                # ONNX IR uses None to represent an empty input
                 return None
             else:
+                # Use empty string to represent an empty output because all outputs
+                # need to be of type ir.Value
                 return ir.Value(name="")
 
-        value = self._values.setdefault(name, ir.Value(name=name))
-        if shape is not None:
-            value.shape = ir.Shape(shape)
-        if dtype is not None:
-            value.dtype = ir.DataType(dtype)
-        return value
+        return self._values.setdefault(name, ir.Value(name=name))
 
     def as_ir_model(self) -> ir.Model:
         """Return the IR model."""
@@ -620,8 +607,9 @@ class Model:
         (ir_tensor,) = ir.external_data.convert_tensors_to_external(
             [ir_tensor], self.cache_dir, filename
         )
-        initializer = self._get_or_create_value(name, dtype=ir_tensor.dtype, shape=ir_tensor.shape)
+        initializer = self.make_value(name)
         initializer.const_value = ir_tensor
+        self.make_value_info(name, ir_tensor.dtype, ir_tensor.shape)
         self._model.graph.register_initializer(initializer)
 
     def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name: str, domain="", **kwargs):
@@ -635,8 +623,8 @@ class Model:
                 self.make_constant(input_name)
 
         # Resolve values from names
-        input_values = [self._get_or_create_value(name) for name in inputs]
-        output_values = [self._get_or_create_value(name, output=True) for name in outputs]
+        input_values = [self.make_value(name) for name in inputs]
+        output_values = [self.make_value(name, output=True) for name in outputs]
         node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
         self._model.graph.append(node)
         self.node_names.add(name)
@@ -651,7 +639,7 @@ class Model:
         # status in the graph. The above checks can then decide whether the proposed node actually
         # needs to be added into the graph or not.
 
-    def make_value_info(self, name, dtype: ir.DataType | int| None, shape: Sequence[int | str] | None) -> None:
+    def make_value_info(self, name, dtype: ir.DataType | int| None, shape: Sequence[int | str] | ir.Shape | None) -> None:
         if name not in self._values:
             raise KeyError(f"Value {name} not found in model values. You must create the node before creating the value info.")
         if dtype is not None:
@@ -665,28 +653,34 @@ class Model:
         for name in self.input_names:
             dtype = self.input_types[name]
             shape = self.input_shapes[name]
-            inputs.append(self._get_or_create_value(name, dtype=dtype, shape=shape))
+            inputs.append(self.make_value(name))
+            self.make_value_info(name, dtype=dtype, shape=shape)
 
         # Add model-specific outputs to list of model outputs
         outputs = self._model.graph.outputs
         for name in self.output_names:
             dtype = self.output_types[name]
             shape = self.output_shapes[name]
-            outputs.append(self._get_or_create_value(name, dtype=dtype, shape=shape))
+            outputs.append(self.make_value(name))
+            self.make_value_info(name, dtype=dtype, shape=shape)
 
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(self._get_or_create_value(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
+            inputs.append(self.make_value(key_name))
+            self.make_value_info(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"])
             value_name = f"past_key_values.{i}.value"
-            inputs.append(self._get_or_create_value(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
+            inputs.append(self.make_value(value_name))
+            self.make_value_info(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"])
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(self._get_or_create_value(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"]))
+            outputs.append(self.make_value(key_name))
+            self.make_value_info(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"])
             value_name = f"present.{i}.value"
-            outputs.append(self._get_or_create_value(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"]))
+            outputs.append(self.make_value(value_name))
+            self.make_value_info(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"])
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
