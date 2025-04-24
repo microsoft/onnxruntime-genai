@@ -50,15 +50,6 @@ jobs:
           add-cmake-to-path: 'true'
           disable-terrapin: 'true'
 
-      - name: Install Rust with rustup
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          source "$HOME/.cargo/env"
-          rustup install 1.86.0
-          rustup override set 1.86.0
-          rustup component add rust-src
-          rustup show active-toolchain
       - uses: microsoft/onnxruntime-github-actions/setup-build-tools@v0.0.6
         with:
           vcpkg-version: '2025.03.19'
@@ -68,6 +59,16 @@ jobs:
           add-cmake-to-path: 'true'
           disable-terrapin: 'true'
 
+      - name: Install Rust with rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          source "$HOME/.cargo/env"
+          rustup install 1.86.0
+          rustup override set 1.86.0
+          rustup component add rust-src
+          rustup show active-toolchain
+      
       - name: Get the Latest OnnxRuntime Nightly Version
         shell: pwsh
         run: |

@@ -55,11 +55,6 @@ endif()
 if(MSVC)
   # set updated value for __cplusplus macro instead of 199711L
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
-  # Fixes for Binskim errors
-  # if(USE_GUIDANCE)
-  #   add_compile_options("/GS")
-  #   add_compile_options("/Qspectre")
-  # endif()
 
   add_compile_options(
       "$<$<COMPILE_LANGUAGE:C,CXX>:/w15038>"
@@ -150,13 +145,10 @@ endif()
 
 if(USE_GUIDANCE)
   target_include_directories(onnxruntime-genai PUBLIC ${llguidance_SOURCE_DIR}/parser/)
-  # target_include_directories(onnxruntime-genai-static PUBLIC ${llguidance_SOURCE_DIR}/parser/)
   target_link_libraries(onnxruntime-genai PRIVATE llguidance)
-  # target_link_libraries(onnxruntime-genai-static PUBLIC llguidance_parser)
   if (WIN32)
     # bcrypt is needed for the rust std lib
     target_link_libraries(onnxruntime-genai PRIVATE bcrypt)
-    # target_link_libraries(onnxruntime-genai-static PRIVATE bcrypt)
   endif()
 endif()
 

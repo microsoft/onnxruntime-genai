@@ -79,12 +79,6 @@ steps:
       DisplayName: 'ESRP - Sign C++ dlls'
       Pattern: '*genai.dll'
 
-  # - task: BinSkim@4
-  #   displayName: 'Run BinSkim'
-  #   inputs:
-  #     AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*genai.dll'
-  #   continueOnError: true
-
   - powershell: |
       python -m pip install wheel
     displayName: 'Install wheel'

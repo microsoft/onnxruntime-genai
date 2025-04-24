@@ -71,16 +71,10 @@ jobs:
         & $exePath -y --default-toolchain=1.86.0
         Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
 
-    - name: Check Rust version and Install clang
+    - name: Install LLVM
       run: |
-        rustc --version
-        cargo --version
         choco install llvm --yes
         Add-Content $env:GITHUB_PATH "C:\Program Files\LLVM\bin"
-
-    - name: Check Clang version
-      run: |
-        clang --version
 
     - name: Configure CMake
       run: |
