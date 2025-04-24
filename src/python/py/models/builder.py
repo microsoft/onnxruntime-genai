@@ -1693,14 +1693,14 @@ class Model:
         # Make MatMul node (output projection weight node)
         o_proj = 'o_proj' if hasattr(attention, 'o_proj') else 'dense'
         o_matmul_basename = f"/model/layers.{layer_id}/attn/o_proj/MatMul"
-        o_weight = eval(f"attention.{o_proj}")
+        o_weight = getattr(attention, o_proj)
         o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, f"{attn_name}/output_0")
 
         # Make Add node (output projection bias node if bias exists)
-        o_bias_exists = eval(f"attention.{o_proj}.bias") is not None
+        o_bias_exists = getattr(attention, o_proj).bias is not None
         if o_bias_exists:
             o_add_name = f"/model/layers.{layer_id}/attn/o_proj/Add"
-            o_bias = eval(f"attention.{o_proj}.bias.numpy(force=True)")
+            o_bias = getattr(attention, o_proj).bias.numpy(force=True)
             self.make_add_bias(o_bias, o_add_name, root_input=f"{o_matmul_name}/output_0")
 
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
