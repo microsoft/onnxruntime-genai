@@ -2251,9 +2251,10 @@ class Model:
        hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
        hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
        hf_transformer_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
+       hf_multimodal_final_layernorm = hasattr(model, "language_model") and hasattr(model.language_model, "model") and hasattr(model.language_model.model, "norm") and module == model.language_model.model.norm
        # GGUF names
        gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
-       return hf_norm or hf_final_layernorm or hf_transformer_final_layernorm or gguf_final_norm
+       return hf_norm or hf_final_layernorm or hf_transformer_final_layernorm or hf_multimodal_final_layernorm or gguf_final_norm
 
     def make_preprocessing_nodes(self):
         self.make_attention_mask_reformatting()
