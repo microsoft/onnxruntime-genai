@@ -475,7 +475,14 @@ class Model:
         # TODO: Replace by quantizing the MatMuls as they are created
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
         if self.onnx_dtype == ir.DataType.UINT4 and not already_quantized_in_qdq_format:
-            model = builder_utils.to_int4(self._model)
+            model = builder_utils.to_int4(
+                self._model,
+                block_size=self.quant_attrs["int4"]["block_size"],
+                is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
+                accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
+                use_qdq=self.quant_attrs["use_qdq"],
+                op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
+            )
         else:
             model = self._model
         return model
