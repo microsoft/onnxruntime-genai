@@ -87,11 +87,11 @@ struct DeviceSpan {
 enum struct DeviceType {
   CPU,
   CUDA,
-  NV,
   DML,
   WEBGPU,
   QNN,
   OpenVINO,
+  NvTensorRtRtx,
   MAX
 };
 
