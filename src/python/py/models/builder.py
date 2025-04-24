@@ -23,7 +23,11 @@ import torch
 from onnxscript import ir
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
-import builder_utils
+try:
+    # For users who runs this script from source
+    import builder_utils
+except ImportError:
+    from onnxruntime_genai.models import builder_utils
 
 # NOTE: Avoid importing from onnx helper and numpy_helper. Instead, leverage
 # ONNX IR methods like ir.tensor, ir.DataType.numpy() and other methods for constructing
