@@ -57,7 +57,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset macos_arm64_cpu_release
+          cmake --preset macos_arm64_cpu_release -DUSE_GUIDANCE=ON
 
       - name: Build with CMake
         run: |
