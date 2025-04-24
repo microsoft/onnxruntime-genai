@@ -18,12 +18,12 @@ import logging
 import textwrap
 from typing import Literal, Sequence
 
-import ml_dtypes
 import numpy as np
 import torch
-from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer, QuantFormat
 from onnxscript import ir
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+
+import builder_utils
 
 # NOTE: Avoid importing from onnx helper and numpy_helper. Instead, leverage
 # ONNX IR methods like ir.tensor, ir.DataType.numpy() and other methods for constructing
@@ -31,74 +31,6 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, Genera
 
 
 logger = logging.getLogger(__name__)
-
-_TENSOR_PROTO_STRING_TO_DTYPE = {
-    "TensorProto.UNDEFINED": ir.DataType.UNDEFINED,
-    "TensorProto.FLOAT": ir.DataType.FLOAT,
-    "TensorProto.UINT8": ir.DataType.UINT8,
-    "TensorProto.INT8": ir.DataType.INT8,
-    "TensorProto.UINT16": ir.DataType.UINT16,
-    "TensorProto.INT16": ir.DataType.INT16,
-    "TensorProto.INT32": ir.DataType.INT32,
-    "TensorProto.INT64": ir.DataType.INT64,
-    "TensorProto.STRING": ir.DataType.STRING,
-    "TensorProto.BOOL": ir.DataType.BOOL,
-    "TensorProto.FLOAT16": ir.DataType.FLOAT16,
-    "TensorProto.DOUBLE": ir.DataType.DOUBLE,
-    "TensorProto.UINT32": ir.DataType.UINT32,
-    "TensorProto.UINT64": ir.DataType.UINT64,
-    "TensorProto.COMPLEX64": ir.DataType.COMPLEX64,
-    "TensorProto.COMPLEX128": ir.DataType.COMPLEX128,
-    "TensorProto.BFLOAT16": ir.DataType.BFLOAT16,
-    "TensorProto.FLOAT8E4M3FN": ir.DataType.FLOAT8E4M3FN,
-    "TensorProto.FLOAT8E4M3FNUZ": ir.DataType.FLOAT8E4M3FNUZ,
-    "TensorProto.FLOAT8E5M2": ir.DataType.FLOAT8E5M2,
-    "TensorProto.FLOAT8E5M2FNUZ": ir.DataType.FLOAT8E5M2FNUZ,
-    "TensorProto.UINT4": ir.DataType.UINT4,
-    "TensorProto.INT4": ir.DataType.INT4,
-    "TensorProto.FLOAT4E2M1": ir.DataType.FLOAT4E2M1,
-}
-
-
-def _unpack_uint4_as_uint8(
-    data: np.ndarray, dims: Sequence[int]
-) -> np.ndarray:
-    """Convert a packed uint4 array to unpacked uint4 array represented as uint8.
-
-    Args:
-        data: A numpy array.
-        dims: The dimensions are used to reshape the unpacked buffer.
-
-    Returns:
-        A numpy array of int8/uint8 reshaped to dims.
-    """
-    result = np.empty([data.size * 2], dtype=data.dtype)
-    array_low = data & np.uint8(0x0F)
-    array_high = data & np.uint8(0xF0)
-    array_high >>= np.uint8(4)
-    result[0::2] = array_low
-    result[1::2] = array_high
-    if result.size == np.prod(dims) + 1:
-        # handle single-element padding due to odd number of elements
-        result = result[:-1]
-    result.resize(dims, refcheck=False)
-    return result
-
-
-def _unpack_uint4(
-    data: np.ndarray, dims: Sequence[int]
-) -> np.ndarray:
-    """Convert a packed uint4 array to unpacked uint4 array represented as uint8.
-
-    Args:
-        data: A numpy array.
-        dims: The dimensions are used to reshape the unpacked buffer.
-
-    Returns:
-        A numpy array of int8/uint8 reshaped to dims.
-    """
-    data = data.flatten()
-    return _unpack_uint4_as_uint8(data, dims).view(ml_dtypes.uint4)
 
 
 class Model:
@@ -543,7 +475,7 @@ class Model:
         # TODO: Replace by quantizing the MatMuls as they are created
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
         if self.onnx_dtype == ir.DataType.UINT4 and not already_quantized_in_qdq_format:
-            model = self.to_int4(self._model)
+            model = builder_utils.to_int4(self._model)
         else:
             model = self._model
         return model
@@ -585,21 +517,6 @@ class Model:
         # Delete temporary cache dir if empty
         if not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
-
-    def to_int4(self, model: ir.Model) -> ir.Model:
-        # TODO(justinchuby): This function doesn't use self and should not be a method. Lift out
-        ir.external_data.load_to_model(model)
-        quant = MatMul4BitsQuantizer(
-            model=ir.to_proto(model),
-            block_size=self.quant_attrs["int4"]["block_size"],
-            is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
-            accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
-            nodes_to_exclude=[],
-            quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
-            op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
-        )
-        quant.process()
-        return ir.from_proto(quant.model.model)
 
     def make_external_tensor(self, tensor: ir.ArrayCompatible | np.ndarray | ir.TensorProtocol, name: str):
         ir_tensor = ir.tensor(tensor, name=name)
@@ -687,7 +604,7 @@ class Model:
         # Format of name is "/model/constants/{dtype}/{shape}/{num}"
 
         path = name.split("/")
-        onnx_dtype = _TENSOR_PROTO_STRING_TO_DTYPE[path[-3]]
+        onnx_dtype = builder_utils.tensor_proto_string_to_dtype(path[-3])
         dims = path[-2]
         # NOTE: Use ast.literal_eval instead of eval as eval allows arbitrary code execution
         num = ast.literal_eval(path[-1])
@@ -908,7 +825,7 @@ class Model:
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
         qweight_npy = quantized_op.qweight.numpy(force=True)
         qweight_npy = qweight_npy.reshape(*qweight_npy.shape[:-2], qweight_npy.shape[-2] * qweight_npy.shape[-1])
-        qweight_npy = _unpack_uint4(qweight_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2])
+        qweight_npy = builder_utils.unpack_uint4(qweight_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2])
         self.make_external_tensor(qweight_npy, qweight)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
@@ -922,7 +839,7 @@ class Model:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
             zeros_npy = quantized_op.qzeros.numpy(force=True)
             zeros_npy = zeros_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] // quantized_op.group_size)
-            zeros_npy = _unpack_uint4(zeros_npy, dims=[*zeros_npy.shape[:-1], zeros_npy.shape[-1] * 2])
+            zeros_npy = builder_utils.unpack_uint4(zeros_npy, dims=[*zeros_npy.shape[:-1], zeros_npy.shape[-1] * 2])
             self.make_external_tensor(zeros_npy, zeros)
             dequantize_inputs.append(zeros)
 
