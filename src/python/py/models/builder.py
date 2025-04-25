@@ -2247,7 +2247,7 @@ class Model:
         for module in model.modules():
             if isinstance(module, torch.nn.Embedding) or (hasattr(model, "embedding") and module == model.embedding):
                 # Checks (Hugging Face logic) or (GGUF logic)
-                if not self.exclude_embeds:
+                if not self.exclude_embeds and module == model.language_model.model.embed_tokens:
                     # Embedding layer
                     print("Reading embedding layer")
                     self.make_embedding(module.weight.detach())
@@ -3359,8 +3359,9 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             for key in text_config:
                 if not hasattr(config, key):
                     setattr(config, key, getattr(text_config, key))
-            extra_options["exclude_embeds"] = True
+            # extra_options["exclude_embeds"] = True
             onnx_model = Gemma3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+            onnx_model.model_type = "gemma3_text"
         elif config.architectures[0] == "GraniteForCausalLM":
             onnx_model = GraniteModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "LlamaForCausalLM":
