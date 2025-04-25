@@ -5,11 +5,12 @@ import time
 def main(args):
     if args.verbose: print("Loading model...")
     config = og.Config(args.model_path)
-    config.clear_providers()
-    if args.execution_provider != "cpu":
-        if args.verbose:
-            print(f"Setting model to {args.execution_provider}...")
-        config.append_provider(args.execution_provider)
+    if args.execution_provider != "follow_config":
+        config.clear_providers()
+        if args.execution_provider != "cpu":
+            if args.verbose:
+                print(f"Setting model to {args.execution_provider}...")
+            config.append_provider(args.execution_provider)
     model = og.Model(config)
 
     if args.verbose: print("Model loaded")
@@ -74,7 +75,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end token generation loop example for gen-ai")
     parser.add_argument('-m', '--model_path', type=str, required=True, help='Onnx model folder path (must contain genai_config.json and model.onnx)')
-    parser.add_argument("-e", "--execution_provider", type=str, required=True, choices=["cpu", "cuda", "dml"], help="Provider to run model")
+    parser.add_argument('-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
     parser.add_argument('-pr', '--prompts', nargs='*', required=False, help='Input prompts to generate tokens from. Provide this parameter multiple times to batch multiple prompts')
     parser.add_argument('-i', '--min_length', type=int, default=25, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, default=50, help='Max number of tokens to generate including the prompt')
