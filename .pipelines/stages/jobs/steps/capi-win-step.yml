@@ -56,6 +56,13 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
+    choco install llvm --yes
+    $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+  displayName: 'Install LLVM'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
     cmake --preset windows_$(arch)_$(ep)_$(build_config) -DUSE_GUIDANCE=ON -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
   displayName: 'Configure CMake C API with CUDA'
   condition: eq(variables['ep'], 'cuda')
@@ -68,7 +75,9 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
+    cmake --build --preset windows_$(arch)_$(ep)_$(build_config) -DUSE_GUIDANCE=ON --parallel --target ${{ parameters.target }}
+    # Uninstalling LLVM/Clang as it is no longer required and causes issues with numpy installation
+    choco uninstall llvm --yes
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
