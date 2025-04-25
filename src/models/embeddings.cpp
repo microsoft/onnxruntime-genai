@@ -12,8 +12,8 @@ Embeddings::Embeddings(State& state, Embeddings::Mode mode, const std::string& n
       shape_{static_cast<int64_t>(state_.params_->search.batch_size) * state_.params_->search.num_beams,
              0, model_.config_->model.decoder.hidden_size},
       type_{mode == Embeddings::Mode::Input
-                ? model_.session_info_->GetInputDataType(name)
-                : model_.session_info_->GetOutputDataType(name)},
+                ? model_.session_info_.GetInputDataType(name)
+                : model_.session_info_.GetOutputDataType(name)},
       mode_{mode},
       name_{name} {
   // Embeddings are only transient inputs and outputs.
