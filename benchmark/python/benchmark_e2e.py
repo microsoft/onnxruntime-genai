@@ -212,11 +212,12 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     # Get tokenizer, and model
     if args.verbose: print("Getting config")
     config = og.Config(f'{args.input_folder}')
-    config.clear_providers()
+    if args.execution_provider != "follow_config":
+        config.clear_providers()
+        if args.execution_provider != "cpu":
+            if args.verbose: print(f"Setting model to {args.execution_provider}")
+            config.append_provider(args.execution_provider)
     if args.verbose: print("Loading model... ")
-    if args.execution_provider != "cpu":
-        if args.verbose: print(f"Setting model to {args.execution_provider}")
-        config.append_provider(args.execution_provider)
     model = og.Model(config)
     if args.verbose: print("Model loaded")
     tokenizer = og.Tokenizer(model)
@@ -446,7 +447,7 @@ if __name__ == "__main__":
     parser.add_argument('--use_random_tokens', action='store_true', help='Use random tokens instead of generating a prompt')
     parser.add_argument('--use_prompt_set', action='store_true', help='Use pre-generated prompt set instead of generating a prompt')
     parser.add_argument('--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}')
-    parser.add_argument('-e', '--execution_provider', type=str, required=True, choices=["cpu", "cuda", "dml"], help='Execution provider to run ONNX model with')
+    parser.add_argument('-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
     args = parser.parse_args()
 
     # check max_lengths
