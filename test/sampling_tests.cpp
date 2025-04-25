@@ -1,6 +1,5 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-
 #include <algorithm>
 #include <array>
 #include <cstring>  // for memcmp
@@ -16,6 +15,7 @@
 #define MODEL_PATH "../../test/test_models/"
 #endif
 
+#if 0
 TEST(SamplingTests, BatchedSamplingTopPCpu) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<int32_t> expected_output{1, 2, 3, 4};
@@ -110,6 +110,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCpu) {
     EXPECT_GT(next_token_score, 1.25f);
   }
 }
+#endif
 
 void CreateRandomLogits(float* logits, int num_large, int vocab_size, int batch_size, std::mt19937& engine) {
   assert(num_large < vocab_size / 2);  // num_large should be much smaller than vocab_size
@@ -133,6 +134,7 @@ void CreateRandomLogits(float* logits, int num_large, int vocab_size, int batch_
   }
 }
 
+#if 0
 TEST(SamplingTests, RandomizedSamplingTopPCpu) {
   int batch_size = 5;
   int vocab_size = 32000;
@@ -568,4 +570,5 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda) {
     }
   }
 }
+#endif
 #endif

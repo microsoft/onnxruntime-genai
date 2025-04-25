@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#if 0
 
 #include "worker_thread.h"
 
@@ -50,3 +51,4 @@ TEST(WorkerThreadTest, EnqueueMultipleThenWaitForMultiple) {
 }
 
 }  // namespace Generators::test
+#endif

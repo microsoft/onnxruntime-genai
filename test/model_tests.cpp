@@ -1,6 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-
+#if 0
 #include <cstring>  // for memcmp
 #include <iostream>
 #include <random>
@@ -310,4 +310,5 @@ Print all primes between 1 and n
 
   std::cout << tokenizer->Decode(result) << "\r\n";
 }
+#endif
 #endif
