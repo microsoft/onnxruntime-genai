@@ -156,7 +156,7 @@ if __name__ == "__main__":
         "-m", "--model_path", type=str, required=True, help="Path to the folder containing the model"
     )
     parser.add_argument(
-        "-e", "--execution_provider", type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run model"
+        "-e", "--execution_provider", type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead."
     )
     parser.add_argument(
         "--image_paths", nargs='*', type=str, required=False, help="Path to the images, mainly for CI usage"
