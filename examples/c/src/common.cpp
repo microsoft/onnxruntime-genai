@@ -108,7 +108,7 @@ bool parse_args(int argc, char** argv, std::string& model_path, std::string& ep)
   return true;
 }
 
-void append_provider(OgaConfig& config, const std::string &provider) {
+void append_provider(OgaConfig& config, const std::string& provider) {
   if (provider.compare("follow_config") != 0) {
     config.ClearProviders();
     if (provider.compare("cpu") != 0) {

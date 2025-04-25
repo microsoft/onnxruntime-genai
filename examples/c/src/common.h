@@ -58,4 +58,4 @@ bool parse_args(int /*argc*/, char** argv, std::string& model_path, std::string&
 
 // Append provider / options to config.
 // This is a no-op if provider=="follow_config"
-void append_provider(OgaConfig& config, const std::string &provider);
+void append_provider(OgaConfig& config, const std::string& provider);
