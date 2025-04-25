@@ -546,6 +546,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
 
       else if (provider_options.name == "NvTensorRtRtx") {
+        // After setting the NvTensorRtRtx provider in Onnxruntime, GenAI will then treat it as the cuda device.
         session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_cuda_graph_enable", "1");
         p_device_ = GetDeviceInterface(DeviceType::CUDA);
       }
