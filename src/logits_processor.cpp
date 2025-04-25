@@ -35,8 +35,8 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     throw std::runtime_error("Guidance type and data must be provided together");
   }
 
-  if (guidance_type_ != "json_schema" && guidance_type_ != "regex") {
-    throw std::runtime_error("Unsupported guidance type: " + std::string(guidance_type_) + " (only json_schema and regex are supported)");
+  if (guidance_type_ != "json_schema" && guidance_type_ != "regex" && guidance_type_ != "lark_grammar") {
+    throw std::runtime_error("Unsupported guidance type: " + std::string(guidance_type_) + " (only json_schema, regex and lark_grammar are supported)");
   }
 
   auto tokenize_fn = (LlgTokenizeFn) + [](const void* user_data, const uint8_t* bytes,
@@ -88,8 +88,10 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
       constraint_ptr = llg_new_constraint_json(&constraint_init, guidance_data_.data());
     } else if (guidance_type_ == "regex") {
       constraint_ptr = llg_new_constraint_regex(&constraint_init, guidance_data_.data());
+    } else if (guidance_type_ == "lark_grammar") {
+      constraint_ptr = llg_new_constraint_lark(&constraint_init, guidance_data_.data());
     } else {
-      throw std::runtime_error("Unsupported guidance type: " + std::string(guidance_type_) + " (only json_schema and regex are supported)");
+      throw std::runtime_error("Unsupported guidance type: " + std::string(guidance_type_) + " (only json_schema, regex and lark_grammar are supported)");
     }
     if (llg_get_error(constraint_ptr) != nullptr) {
       std::string error_message = llg_get_error(constraint_ptr);
@@ -199,8 +201,10 @@ void GuidanceLogitsProcessor::Reset() {
       constraint_ptr = llg_new_constraint_json(&constraint_init, guidance_data_.data());
     } else if (guidance_type_ == "regex") {
       constraint_ptr = llg_new_constraint_regex(&constraint_init, guidance_data_.data());
+    } else if (guidance_type_ == "lark_grammar") {
+      constraint_ptr = llg_new_constraint_lark(&constraint_init, guidance_data_.data());
     } else {
-      throw std::runtime_error("Unsupported guidance type: " + std::string(guidance_type_) + " (only json_schema and regex are supported)");
+      throw std::runtime_error("Unsupported guidance type: " + std::string(guidance_type_) + " (only json_schema, regex and lark_grammar are supported)");
     }
     if (llg_get_error(constraint_ptr) != nullptr) {
       std::string error_message = llg_get_error(constraint_ptr);
