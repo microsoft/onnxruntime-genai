@@ -502,6 +502,22 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaM
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor*, const int32_t* tokens, size_t token_count, const char** out_string);
 
+/**
+ * @brief Applies a chat template to input messages
+ *
+ * This function processes the specified template with the provided input using the
+ * tokenizer, and outputs the resulting string. Optionally, it can include a
+ * generation prompt in the output.
+ *
+ * \param[in] tokenizer OgaTokenizer used for template processing.
+ * \param[in] template_str Null-terminated string representing the chat template. Use nullptr to fall back to the default chat template from the tokenizer config.
+ * \param[in] messages Null-terminated string containing the input messages to be processed.
+ * \param[in] add_generation_prompt Indicates whether to add a generation prompt to the output.
+ * \param[out] out_string Pointer to where the output will be stored. The returned pointer must be freed with OgaDestroyString
+ * \return OgaResult* containing the error message if the function fails
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer*, const char* template_str, const char* messages, bool add_generation_prompt, const char** out_string);
+
 /** OgaTokenizerStream is to decoded token strings incrementally, one token at a time.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateTokenizerStream(const OgaTokenizer*, OgaTokenizerStream** out);
@@ -557,7 +573,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateNamedTensors(OgaNamedTensors** out);
  * \param[out] out The tensor with the given name
  * \return OgaResult containing the error message if the tensor with the given name could not be found.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsGet(const OgaNamedTensors* named_tensors, const char* name, OgaTensor** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaNamedTensorsGet(OgaNamedTensors* named_tensors, const char* name, OgaTensor** out);
 
 /** \brief Set a tensor in a NamedTensor set by name
  * \param[in] named_tensors The named tensors to set the tensor

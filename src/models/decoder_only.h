@@ -29,7 +29,7 @@ struct DecoderOnly_State : State {
 
   DefaultInputIDs input_ids_{*this};
   Logits logits_{*this};
-  DefaultKeyValueCache kv_cache_{*this};
+  std::unique_ptr<KeyValueCache> kv_cache_;
   DefaultPositionInputs position_inputs_;
   ExtraInputs extra_inputs_{*this};
 };

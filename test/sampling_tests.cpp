@@ -72,7 +72,7 @@ TEST(SamplingTests, BatchedSamplingTopKCpu) {
   auto next_tokens = generator->GetNextTokens();
   for (int b = 0; b < batch_size; b++) {
     auto next_token = next_tokens[b];
-    auto next_token_score = logits_cpu[next_token + 5 /*vocab_size*/* b];
+    auto next_token_score = logits_cpu[next_token + 5 /*vocab_size*/ * b];
     EXPECT_GT(next_token_score, 1.25f);
   }
 }
@@ -205,7 +205,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCpu) {
   std::vector<float> logits_cpu(vocab_size * batch_size);
   const int num_iter = 100;
   std::map<float, int> logit_to_count;
-  
+
   // Run test
   for (int i = 0; i < num_iter; i++) {
     logits_cpu = std::vector<float>(vocab_size * batch_size, 0.0f);

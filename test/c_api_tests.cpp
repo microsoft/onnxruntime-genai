@@ -94,6 +94,41 @@ TEST(CAPITests, TokenizerCAPI) {
 #endif
 }
 
+TEST(CAPITests, ChatTemplate) {
+#if TEST_PHI2
+  // We load the phi-2 model just to get a tokenizer (phi-2 does not have a chat template)
+  auto tokenizer = OgaTokenizer::Create(*OgaModel::Create(PHI2_PATH));
+
+  // Testing phi-4 chat template
+  const char* messages_json = R"(
+    [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant.",
+        "tools": "Calculator"
+      },
+      {
+        "role": "user",
+        "content": "How do I add two numbers?"
+      },
+      {
+        "role": "assistant",
+        "content": "You can add numbers by using the '+' operator."
+      }
+    ])";
+  const char* chat_template = R"({% for message in messages %}{% if message['role'] == 'system' and 'tools' in message and message['tools'] is not none %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|tool|>' + message['tools'] + '<|/tool|>' + '<|end|>' }}{% else %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|end|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>' }}{% else %}{{ eos_token }}{% endif %})";
+
+  // From HuggingFace Python output for 'microsoft/Phi-4-multimodal-instruct'
+  const char* expected_output =
+      "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>"
+      "How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
+
+  auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages_json, true);
+  ASSERT_STREQ(expected_output, out_string);
+
+#endif
+}
+
 TEST(CAPITests, AppendTokensToSequence) {
 #if TEST_PHI2
   auto model = OgaModel::Create(PHI2_PATH);
@@ -208,7 +243,7 @@ TEST(CAPITests, EndToEndPhiBatch) {
       1212, 318, 257, 1332, 13, 50256, 50256, 50256, 50256, 50256, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278, 6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417, 6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974,
       49, 1381, 389, 7427, 17252, 0, 50256, 50256, 50256, 50256, 198, 50284, 37811, 628, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256,
       464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13, 198, 50284, 37811, 628, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256};
-  
+
   for (size_t i = 0; i < 3; i++) {
     const auto sequence_length = generator->GetSequenceCount(i);
     const auto* sequence_data = generator->GetSequenceData(i);
@@ -246,8 +281,8 @@ TEST(CAPITests, EndToEndPhi) {
 
   // Verify outputs match expected outputs
   std::vector<int32_t> expected_output{
-      1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278, 
-      6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417, 
+      1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278,
+      6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417,
       6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974, 82, 1039, 889, 263, 3684};
 
   const auto sequence_length = generator->GetSequenceCount(0);
@@ -474,8 +509,7 @@ TEST(CAPITests, SetTerminate) {
     EXPECT_THROW({
       while (!generator->IsDone()) {
         generator->GenerateNextToken();
-      }
-    }, std::runtime_error);
+      } }, std::runtime_error);
   };
 
   auto model = OgaModel::Create(PHI2_PATH);

@@ -75,6 +75,8 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/qnn/*.cpp"
   "${GENERATORS_ROOT}/webgpu/*.h"
   "${GENERATORS_ROOT}/webgpu/*.cpp"
+  "${GENERATORS_ROOT}/openvino/*.h"
+  "${GENERATORS_ROOT}/openvino/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
 )

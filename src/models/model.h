@@ -7,6 +7,7 @@
 #include "phi_image_processor.h"
 #include "whisper_processor.h"
 #include "phi_multimodal_processor.h"
+#include "gemma_image_processor.h"
 #include "adapters.h"
 #include "extra_outputs.h"
 
@@ -44,6 +45,8 @@ struct State {
   std::vector<std::string> adapter_names_;
   std::vector<OrtValue*> inputs_, outputs_;
 
+  std::vector<std::pair<std::string, std::string>> ep_dynamic_options_next_run_;
+
  protected:
   void Run(OrtSession& session, bool graph_capture_this_run = false);  // Uses the inputs below to run
   bool first_run_{true};
@@ -78,6 +81,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
 
   std::vector<int32_t> Encode(const char* text) const;
   std::string Decode(std::span<const int32_t> tokens) const;
+  std::string ApplyChatTemplate(const char* template_str, const char* messages, bool add_generation_prompt) const;
 
   std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
   std::shared_ptr<Tensor> EncodeBatch(std::span<const char*> strings) const;
@@ -98,10 +102,13 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, 
 
   std::shared_ptr<Tokenizer> tokenizer_;
   std::shared_ptr<Processor> processor_;
+
+ private:
+  std::unordered_map<std::string, std::function<std::shared_ptr<Processor>(Config&, const SessionInfo&)>> processor_factory_;
 };
 
 struct SessionInfo {
-  SessionInfo(OrtSession& session);
+  SessionInfo() = default;
 
   void Add(OrtSession& session);
 
@@ -113,8 +120,11 @@ struct SessionInfo {
 
   std::vector<std::string> GetInputNames() const;
 
+  std::vector<const char*> GetInputSymbolicShape(const std::string& name) const;
+  std::vector<const char*> GetOutputSymbolicShape(const std::string& name) const;
+
  private:
-  std::unordered_map<std::string, ONNXTensorElementDataType> inputs_, outputs_;
+  std::unordered_map<std::string, std::unique_ptr<OrtTypeInfo>> inputs_, outputs_;
 };
 
 struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, ExternalRefCounted<Model> {
@@ -140,10 +150,9 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   Ort::Allocator& allocator_cpu_{GetDeviceInterface(DeviceType::CPU)->GetAllocator()};
 
-  std::unique_ptr<SessionInfo> session_info_;
+  SessionInfo session_info_;
 
  protected:
-  void InitDeviceAllocator(OrtSession& session);
   void CreateSessionOptions();
 
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,

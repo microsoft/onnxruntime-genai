@@ -3,13 +3,14 @@
 #include "../generators.h"
 #include "model.h"
 #include "logits.h"
+#include "../openvino/interface.h"
 
 namespace Generators {
 
 Logits::Logits(State& state)
     : state_{state},
       shape_{static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.vocab_size},
-      type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
+      type_{model_.session_info_.GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
 
   if (model_.p_device_inputs_->GetType() == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
@@ -20,6 +21,17 @@ Logits::Logits(State& state)
   }
 
   input_sequence_lengths.resize(state_.params_->search.batch_size);
+
+  if (IsOpenVINOStatefulModel(state.model_)) {
+    // In the case of OpenVINO stateful models, they are patched in a way so that they only return the
+    // sliced logits needed for sampling. For example, given 43 prompt tokens, instead of returning
+    // logits of the shape:  [1,43,<vocab_size>]
+    // they will have shape: [1, 1,<vocab_size>].
+    if (g_log.enabled)
+      Log("info", "Logits: Using Trimmed Prefill Logits");
+
+    trimmed_prefill_logits_ = true;
+  }
 }
 
 DeviceSpan<float> Logits::Get() {
@@ -91,6 +103,10 @@ DeviceSpan<float> Logits::Get() {
 }
 
 void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length) {
+  if (trimmed_prefill_logits_) {
+    new_kv_length = 1;
+  }
+
   if (output_raw_->ort_tensor_ && static_cast<size_t>(output_raw_->GetShape()[1]) == new_kv_length && new_kv_length == 1) {
     return;
   }

@@ -10,8 +10,8 @@ WhisperModel::WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
   session_encoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.encoder.filename)).c_str(), session_options_.get());
   session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
 
-  InitDeviceAllocator(*session_decoder_);
-  session_info_->Add(*session_encoder_);
+  session_info_.Add(*session_decoder_);
+  session_info_.Add(*session_encoder_);
 }
 
 std::unique_ptr<State> WhisperModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {

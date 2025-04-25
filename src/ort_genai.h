@@ -285,6 +285,12 @@ struct OgaTokenizer : OgaAbstract {
     return p;
   }
 
+  OgaString ApplyChatTemplate(const char* template_str, const char* messages, bool add_generation_prompt) const {
+    const char* p{};
+    OgaCheckResult(OgaTokenizerApplyChatTemplate(this, template_str, messages, add_generation_prompt, &p));
+    return p;
+  }
+
 #if OGA_USE_SPAN
   OgaString Decode(std::span<const int32_t> tokens) const {
     const char* p;
@@ -564,7 +570,7 @@ struct OgaNamedTensors : OgaAbstract {
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
-  std::unique_ptr<OgaTensor> Get(const char* name) const {
+  std::unique_ptr<OgaTensor> Get(const char* name) {
     OgaTensor* p;
     OgaCheckResult(OgaNamedTensorsGet(this, name, &p));
     return std::unique_ptr<OgaTensor>(p);
