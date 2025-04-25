@@ -792,12 +792,24 @@ class Model:
 
     def make_matmul_float(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
-        self.make_external_tensor(matmul.weight.detach().T.to(self.to_torch_dtype[self.io_dtype]).contiguous(), weight)
+        self.make_external_tensor(matmul.weight.detach().T.to(torch.bfloat16).contiguous(), weight)
 
         last_dim = matmul.weight.shape[0]
+        first_dim = matmul.weight.shape[1]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
-        self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
+
+        cast_input = f"{root_input}/Cast"
+        cast_output = f"{output}/Cast"
+
+        if kwargs.get("first_cast", True):
+            self.make_node("Cast", inputs=[root_input], outputs=[cast_input], name=f"{name}/Cast_Input", to=TensorProto.BFLOAT16)
+            self.make_value_info(cast_input, TensorProto.BFLOAT16, shape=["batch_size", "sequence_length", first_dim])
+
+        self.make_node("MatMul", inputs=[cast_input, weight], outputs=[cast_output], name=name)
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', last_dim])
+
+        self.make_node("Cast", inputs=[cast_output], outputs=[output], name=f"{name}/Cast_Output", to=self.io_dtype)
+        self.make_value_info(cast_output, TensorProto.BFLOAT16, shape=["batch_size", "sequence_length", last_dim])
 
         return name
 
@@ -1613,10 +1625,10 @@ class Model:
             q_matmul_name = self.make_matmul(attention.q_proj, q_matmul_basename, root_input)
             self.attention_attrs["q_path"] = f"{q_matmul_name}/output_0"
             k_matmul_basename = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
-            k_matmul_name = self.make_matmul(attention.k_proj, k_matmul_basename, root_input)
+            k_matmul_name = self.make_matmul(attention.k_proj, k_matmul_basename, root_input, first_cast=False)
             self.attention_attrs["k_path"] = f"{k_matmul_name}/output_0"
             v_matmul_basename = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
-            v_matmul_name = self.make_matmul(attention.v_proj, v_matmul_basename, root_input)
+            v_matmul_name = self.make_matmul(attention.v_proj, v_matmul_basename, root_input, first_cast=False)
             self.attention_attrs["v_path"] = f"{v_matmul_name}/output_0"
 
         # Make Add nodes (if bias exists)
@@ -1882,7 +1894,7 @@ class Model:
 
         # Make Up proj nodes
         up_matmul_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
-        up_matmul_name = self.make_matmul(mlp.up_proj, up_matmul_basename, root_input)
+        up_matmul_name = self.make_matmul(mlp.up_proj, up_matmul_basename, root_input, first_cast=False)
         up_name = up_matmul_name
         if up_bias_exists:
             up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
