@@ -1,0 +1,34 @@
+{
+    "unk_token": {
+        "content": "<|endoftext|>",
+        "single_word": false,
+        "lstrip": false,
+        "rstrip": false,
+        "normalized": true,
+        "__type": "AddedToken"
+    },
+    "bos_token": {
+        "content": "<|startoftext|>",
+        "single_word": false,
+        "lstrip": false,
+        "rstrip": false,
+        "normalized": true,
+        "__type": "AddedToken"
+    },
+    "eos_token": {
+        "content": "<|endoftext|>",
+        "single_word": false,
+        "lstrip": false,
+        "rstrip": false,
+        "normalized": true,
+        "__type": "AddedToken"
+    },
+    "pad_token": "<|endoftext|>",
+    "add_prefix_space": false,
+    "errors": "replace",
+    "do_lower_case": true,
+    "name_or_path": "openai/clip-vit-base-patch32",
+    "model_max_length": 77,
+    "special_tokens_map_file": "/home/suraj/.cache/huggingface/transformers/18a566598f286c9139f88160c99f84eec492a26bd22738fa9cb44d5b7e0a5c76.cce1206abbad28826f000510f22f354e53e66a97f7c23745a7dfe27609cc07f5",
+    "tokenizer_class": "CLIPTokenizer"
+}

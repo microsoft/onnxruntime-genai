@@ -16,6 +16,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "multi_modal.h"
+#include "sd.h"
 #include "decoder_only_pipeline.h"
 #include "../dml/interface.h"
 
@@ -665,6 +666,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (config->model.type == "whisper")
     return std::make_shared<Whisper_Model>(std::move(config), ort_env);
+  if (config->model.type == "sd")
+    return std::make_shared<StableDiffusion_Model>(std::move(config), ort_env);
   if (config->model.type == "phi3v")
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (config->model.type == "decoder-pipeline")
