@@ -56,6 +56,8 @@ def main(args):
             print("Using Chat Template for LLAMA 3, if you are using LLAMA  2 please pass the argument --chat_template '{input} [/INST]')")
         elif model_type.startswith("qwen2"):
             args.chat_template = '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
+        elif model_type == "gemma3_text":
+            args.chat_template = '<start_of_turn>user\n{system_prompt}{input}<end_of_turn>\n<start_of_turn>model\n'
         else:
             raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
 
@@ -82,6 +84,8 @@ def main(args):
             print("Using System Prompt for LLAMA 3, if you are using LLAMA  2 please pass the argument --system_prompt '<s>[INST] <<SYS>>\\n{args.system_prompt}\\n<</SYS>>')")
         elif model_type.startswith("qwen2"):
             system_prompt = f"<|im_start|>system\n{args.system_prompt}<|im_end|>\n"
+        elif model_type == "gemma3_text":
+            system_prompt = f"{args.system_prompt}"
         else:
             system_prompt = args.system_prompt
 
@@ -101,7 +105,7 @@ def main(args):
 
         if args.timings: started_timestamp = time.time()
 
-        prompt = f'{args.chat_template.format(input=text)}'
+        prompt = f'{args.chat_template.format(system_prompt=system_prompt, input=text)}'
         input_tokens = tokenizer.encode(prompt)
         
         generator.append_tokens(input_tokens)
