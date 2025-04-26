@@ -149,8 +149,8 @@ void BeamSearch_Cuda::SelectTop() {
 void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
   std::span<float> scores = next_token_scores_.Span();
   assert(scores.size() == params_->search.batch_size * params_->config.model.vocab_size);
-  cuda::GetSample(samplingdata_.get(), GetStream(), next_tokens_.data(), scores.data(), int(scores.size() / params_->search.batch_size),
-                  params_->search.batch_size, k, p, temperature);
+//  cuda::GetSample(samplingdata_.get(), GetStream(), next_tokens_.data(), scores.data(), int(scores.size() / params_->search.batch_size),
+//                  params_->search.batch_size, k, p, temperature);
 
   // Check for EOS
   assert(next_tokens_.size() == eos_meet_.size());

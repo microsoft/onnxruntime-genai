@@ -46,12 +46,13 @@ struct GpuMemory final : DeviceBuffer {
   void CopyDeviceToCpu() override {
     AllocateCpu();
     ::cudaMemcpyAsync(p_cpu_, p_device_, size_in_bytes_, ::cudaMemcpyDeviceToHost, GetStream());
-    ::cudaStreamSynchronize(GetStream());
+    ::cudaStreamSynchronize(GetStream());  // Since we expect the result to be used immediately, we wait for the copy to finish
   }
 
   void CopyCpuToDevice() override {
     assert(p_cpu_);
     ::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream());
+    ::cudaStreamSynchronize(GetStream());  // In case the source data goes away, we wait for the copy to finish
   }
 
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {

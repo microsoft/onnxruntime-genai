@@ -149,6 +149,3 @@ auto benchmark_values = ::testing::Values(
 
 INSTANTIATE_TEST_SUITE_P(Benchmarks, SamplingBenchmarkTest, benchmark_values,
                          [](const ::testing::TestParamInfo<BenchmarkParams>& info) { return info.param.Name(); });
-
-INSTANTIATE_TEST_SUITE_P(Benchmarks2, SamplingBenchmarkTest, benchmark_values,
-                         [](const ::testing::TestParamInfo<BenchmarkParams>& info) { return info.param.Name(); });
