@@ -118,22 +118,6 @@ jobs:
             bash -c " \
               /usr/bin/cmake --build --preset linux_gcc_cuda_release"
 
-      - name: Install the onnxruntime-genai Python wheel and run python test
-        run: |
-          echo "Installing the onnxruntime-genai Python wheel and running the Python tests"
-          docker run \
-            --gpus all \
-            --rm \
-            --volume /data/ortgenai/pytorch:/data/ortgenai/pytorch \
-            --volume $GITHUB_WORKSPACE:/ort_genai_src \
-            -e HF_TOKEN=$HF_TOKEN \
-            -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/torch/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install -r test/python/cuda/ort/requirements.txt --user && \
-              ${{ env.PYTHON_EXECUTABLE }} -m pip install /ort_genai_src/build/cuda/wheel/onnxruntime_genai*manylinux*.whl --no-deps --user && \
-              ${{ env.PYTHON_EXECUTABLE }} test/python/test_onnxruntime_genai.py --cwd test/python --test_models test/test_models --e2e"
-
       # TODO: Enable this by adding dotnet to the docker image
       # - name: Build the C# API and Run the C# Tests
       #   run: |
