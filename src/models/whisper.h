@@ -25,7 +25,7 @@ struct AudioEncoderState : State {
 
   void AddCrossCache(std::unique_ptr<CrossCache>& cross_cache) { cross_cache->AddOutputs(*this); }
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
-  int GetNumFrames() { return audio_features_.GetShape()[2]; }
+  int GetNumFrames() { return static_cast<int>(audio_features_.GetShape()[2]); }
 
  private:
   friend struct WhisperState;

@@ -11,8 +11,8 @@ AudioFeatures::AudioFeatures(State& state, const std::string& name)
       model_{state.model_},
       name_{name} {
   // Get audio features
-  for (const auto& [name, value] : state_.params_->extra_inputs) {
-    if (name == "audio_features") {
+  for (const auto& [input_name, value] : state_.params_->extra_inputs) {
+    if (input_name == "audio_features") {
       audio_features_ = model_.ExpandInputs(value->ort_tensor_, state_.params_->search.num_beams);
     }
   }
