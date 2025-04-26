@@ -42,6 +42,11 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def transpose_shape(shape: Sequence[int]) -> Sequence[int]:
+    return [*shape[:-2], shape[-1], shape[-2]]
+
+
+
 class Model:
     def __init__(
         self,
@@ -534,8 +539,21 @@ class Model:
         if not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
 
-    def make_external_tensor(self, func: Callable[[], ir.TensorProtocol], dtype, shape, name: str):
-        ir_tensor = ir.LazyTensor(func, dtype=dtype, shape=shape, name=name)
+    def make_external_tensor(
+        self,
+        func_or_tensor: Callable[[], np.ndarray] | ir.ArrayCompatible | np.ndarray | ir.TensorProtocol,
+        name: str,
+        dtype: ir.DataType | None = None,
+        shape: Sequence[int | str] | ir.Shape | None = None,
+    ):
+        if callable(func_or_tensor):
+            assert shape is not None
+            assert dtype is not None
+            def tensor_func():
+                return ir.tensor(func_or_tensor())
+            ir_tensor = ir.LazyTensor(tensor_func, dtype=dtype, shape=ir.Shape(shape), name=name)
+        else:
+            ir_tensor = ir.tensor(func_or_tensor)
         initializer = self.make_value(name)
         initializer.const_value = ir_tensor
         self.make_value_info(name, ir_tensor.dtype, ir_tensor.shape)
@@ -786,7 +804,14 @@ class Model:
 
     def make_matmul_fp16_or_fp32(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
-        self.make_external_tensor(lambda: matmul.weight.numpy(force=True).transpose().astype(self.io_dtype.numpy()), matmul.weight.shape, weight)
+        self.make_external_tensor(
+            lambda: matmul.weight.numpy(force=True)
+            .transpose()
+            .astype(self.io_dtype.numpy()),
+            weight,
+            dtype=self.io_dtype,
+            shape=transpose_shape(matmul.weight.shape),
+        )
 
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
@@ -808,7 +833,10 @@ class Model:
         weight = name[1:].replace("/", ".") + ".qweight"
         self.make_external_tensor(matmul.qweight, weight)
         scales = name[1:].replace("/", ".") + ".scales"
-        self.make_external_tensor(matmul.scales.numpy(force=True).astype(self.io_dtype.numpy()), scales)
+        self.make_external_tensor(
+            lambda: matmul.scales.numpy(force=True).astype(self.io_dtype.numpy()), scales,
+            dtype=self.io_dtype, shape=matmul.scales.shape
+        )
 
         inputs = [root_input, weight, scales]
 
@@ -819,7 +847,10 @@ class Model:
 
         if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
             g_idx = name[1:].replace("/", ".") + ".g_idx"
-            self.make_external_tensor(matmul.g_idx.numpy(force=True).astype(np.int32), g_idx)
+            self.make_external_tensor(
+                lambda: matmul.g_idx.numpy(force=True).astype(np.int32), g_idx
+                dtype=ir.DataType.INT32, shape=matmul.g_idx.shape
+            )
             inputs.append(g_idx)
 
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
@@ -977,7 +1008,10 @@ class Model:
         weight = name[1:].replace("/", ".") + ".qweight"
         self.make_external_tensor(matmul.qweight, weight)
         scales = name[1:].replace("/", ".") + ".scales"
-        self.make_external_tensor(matmul.scales.numpy(force=True).astype(self.io_dtype.numpy()), scales)
+        self.make_external_tensor(
+            lambda: matmul.scales.numpy(force=True).astype(self.io_dtype.numpy()), scales,
+            dtype=self.io_dtype, shape=matmul.scales.shape
+        )
 
         inputs = [root_input, weight, scales]
 
@@ -988,7 +1022,10 @@ class Model:
 
         if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
             g_idx = name[1:].replace("/", ".") + ".g_idx"
-            self.make_external_tensor(matmul.g_idx.numpy(force=True).astype(np.int32), g_idx)
+            self.make_external_tensor(
+                lambda: matmul.g_idx.numpy(force=True).astype(np.int32), g_idx,
+                dtype=ir.DataType.INT32, shape=matmul.g_idx.shape
+            )
             inputs.append(g_idx)
 
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
@@ -1003,7 +1040,11 @@ class Model:
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
-        self.make_external_tensor(add.astype(self.io_dtype.numpy()), bias)
+        self.make_external_tensor(
+            lambda: add.astype(self.io_dtype.numpy()), bias,
+            dtype=self.io_dtype,
+            shape=add.shape,
+        )
 
         add_bias_inputs = [root_input, bias]
         shape = ['batch_size', 'sequence_length', add.shape[0]]
@@ -1022,7 +1063,10 @@ class Model:
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
-        self.make_external_tensor(embedding.astype(self.io_dtype.numpy()), weight)
+        self.make_external_tensor(
+            lambda: embedding.astype(self.io_dtype.numpy()), weight,
+            dtype=self.io_dtype, shape=embedding.shape
+        )
 
         basename = "/model/embed_tokens"
         gather_name = f"{basename}/Gather"
@@ -1050,10 +1094,16 @@ class Model:
         skip_input = self.layernorm_attrs["skip_input"]
 
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor(layernorm.weight.numpy(force=True).astype(self.io_dtype.numpy()) + self.layernorm_attrs["add_offset"], weight)
+        self.make_external_tensor(
+            lambda: layernorm.weight.numpy(force=True).astype(self.io_dtype.numpy()) + self.layernorm_attrs["add_offset"], weight,
+            dtype=self.io_dtype, shape=layernorm.weight.shape
+        )
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
-            self.make_external_tensor(layernorm.bias.numpy(force=True).astype(self.io_dtype.numpy()), bias)
+            self.make_external_tensor(
+                lambda: layernorm.bias.numpy(force=True).astype(self.io_dtype.numpy()), bias,
+                dtype=self.io_dtype, shape=layernorm.bias.shape
+            )
 
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
@@ -1304,7 +1354,10 @@ class Model:
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
         q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
         q_layernorm_output = f"{q_layernorm_name}/output_0"
-        self.make_external_tensor(attention.q_norm.weight.numpy(force=True).astype(self.io_dtype.numpy()) + self.layernorm_attrs["add_offset"], q_weight_name)
+        self.make_external_tensor(
+            lambda: attention.q_norm.weight.numpy(force=True).astype(self.io_dtype.numpy()) + self.layernorm_attrs["add_offset"], q_weight_name,
+            dtype=self.io_dtype, shape=attention.q_norm.weight.shape
+        )
         self.make_node("SimplifiedLayerNormalization", inputs=[q_reshape_1_output, q_weight_name], outputs=[q_layernorm_output], name=q_layernorm_name, **layernorm_kwargs)
         self.make_value_info(q_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
 
@@ -1323,7 +1376,10 @@ class Model:
         k_layernorm_name = f"/model/layers.{layer_id}/attn/k_norm/SimplifiedLayerNormalization"
         k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
         k_layernorm_output = f"{k_layernorm_name}/output_0"
-        self.make_external_tensor(attention.k_norm.weight.numpy(force=True).astype(self.io_dtype.numpy()) + self.layernorm_attrs["add_offset"], k_weight_name)
+        self.make_external_tensor(
+            lambda: attention.k_norm.weight.numpy(force=True).astype(self.io_dtype.numpy()) + self.layernorm_attrs["add_offset"], k_weight_name,
+            dtype=self.io_dtype, shape=attention.k_norm.weight.shape
+        )
         self.make_node("SimplifiedLayerNormalization", inputs=[k_reshape_1_output, k_weight_name], outputs=[k_layernorm_output], name=k_layernorm_name, **layernorm_kwargs)
         self.make_value_info(k_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
@@ -2055,7 +2111,10 @@ class Model:
 
         def make_moe_external_tensor(w_list, moe_expert_name, numpy_type):
             moe_experts_weight = torch.stack(w_list, dim=0).numpy(force=True)
-            self.make_external_tensor(moe_experts_weight.astype(numpy_type), moe_expert_name)
+            self.make_external_tensor(
+                lambda: moe_experts_weight.astype(numpy_type), moe_expert_name,
+                dtype=ir.DataType.from_numpy(numpy_type), shape=moe_experts_weight.shape
+            )
 
         make_moe_external_tensor(w1_list, moe_expert_weight_1_name, np.uint8)
         make_moe_external_tensor(w2_list, moe_expert_weight_2_name, np.uint8)
@@ -2988,11 +3047,17 @@ class Phi3SmallModel(Model):
 
         # Create tensors for row indices and col indices
         crows_name = "block_row_indices"
-        self.make_external_tensor(crows.numpy(force=True).astype(np.int32), crows_name)
+        self.make_external_tensor(
+            lambda: crows.numpy(force=True).astype(np.int32), crows_name,
+            dtype=ir.DataType.INT32, shape=crows.shape,
+        )
         self.mask_attrs["block_row_indices"] = crows_name
 
         cols_name = "block_col_indices"
-        self.make_external_tensor(cols.numpy(force=True).astype(np.int32), cols_name)
+        self.make_external_tensor(
+            lambda: cols.numpy(force=True).astype(np.int32), cols_name,
+            dtype=ir.DataType.INT32, shape=cols.shape,
+        )
         self.mask_attrs["block_col_indices"] = cols_name
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
