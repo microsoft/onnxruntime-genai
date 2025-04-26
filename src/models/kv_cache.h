@@ -127,7 +127,6 @@ struct ModelManagedKeyValueCache : KeyValueCache {
   ModelManagedKeyValueCache(State& state);
 
   virtual void Add() override;
-  virtual void AddEncoder() override;
   virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   virtual void RewindTo(size_t index) override;
 

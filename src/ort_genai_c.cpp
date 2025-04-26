@@ -323,16 +323,12 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* params, 
 
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* params, const char* name, OgaTensor* tensor) {
   OGA_TRY
-  params->extra_inputs.push_back({std::string{name}, tensor->shared_from_this()});
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetAudioFeatures(OgaGeneratorParams* oga_params, OgaTensor* tensor) {
-  OGA_TRY
-  auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
-  Generators::GeneratorParams::Whisper& whisper = params.inputs.emplace<Generators::GeneratorParams::Whisper>();
-  whisper.audio_features = reinterpret_cast<Generators::Tensor*>(tensor)->shared_from_this();
+  const char* input_ids = "input_ids";
+  if (strcmp(name, input_ids) == 0) {
+    params->SetInputIds(tensor);
+  } else {
+    params->extra_inputs.push_back({std::string{name}, tensor->shared_from_this()});
+  }
   return nullptr;
   OGA_CATCH
 }
@@ -425,14 +421,6 @@ OgaResult* OGA_API_CALL OgaGenerator_GetInputOutput(const OgaGenerator* oga_gene
   *out = ReturnShared<OgaTensor>(tensor);
   return nullptr;
   OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaGenerator_GetInput(const OgaGenerator* generator, const char* name, OgaTensor** out) {
-  return OgaGenerator_GetInputOutput(generator, name, true, out);
-}
-
-OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* generator, const char* name, OgaTensor** out) {
-  return OgaGenerator_GetInputOutput(generator, name, false, out);
 }
 
 OgaResult* OGA_API_CALL OgaGenerator_GetInput(const OgaGenerator* generator, const char* name, OgaTensor** out) {

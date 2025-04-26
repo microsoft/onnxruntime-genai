@@ -72,14 +72,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   cpu_span<int32_t> aux_input_ids{};  // Intermediate solution to be used with SetInputs function for multimodal and whisper models
 
-  // TODO: delete
-  struct Whisper {
-    std::shared_ptr<Tensor> audio_features;   // float16/float32 [batch_size, number_of_mels, number_of_frames]
-    std::shared_ptr<Tensor> alignment_heads;  // int32 [num_alignment_heads, 2]
-  };
-
-  std::variant<Whisper> inputs;
-
   struct Input {
     std::string name;
     std::shared_ptr<Tensor> tensor;
@@ -88,6 +80,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   // A list of extra model inputs that will be matched at runtime based on name
   std::vector<Input> extra_inputs;
 
+  void SetInputIds(const Tensor* tensor);
   void SetInputs(const NamedTensors& inputs);
 };
 

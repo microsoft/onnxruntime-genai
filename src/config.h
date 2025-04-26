@@ -46,6 +46,7 @@ struct Config {
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
     static constexpr std::string_view CacheIndirectionName = "cache_indirection";
+    static constexpr std::string_view AlignmentHeadsName = "alignment_heads";
     static constexpr std::string_view TokenTypeIdsName = "token_type_ids";
 
     static constexpr std::string_view PromptTemplateName = "{Content}";
@@ -237,17 +238,17 @@ struct Config {
   } model;
 
   struct Search {
-    bool do_sample{};  // True to do randomized sampling through top_k and top_p, if false, the top logit score is chosen
+    bool do_sample{};                  // True to do randomized sampling through top_k and top_p, if false, the top logit score is chosen
     int min_length{};
-    int max_length{};  // If omitted or 0 in json file, will be set to model.context_length on load
+    int max_length{};                  // If omitted or 0 in json file, will be set to model.context_length on load
     int batch_size{1};
-    int num_beams{1};  // 1 means no beam search.
+    int num_beams{1};                  // 1 means no beam search.
     int num_return_sequences{1};
-    float repetition_penalty{1.0f};  // 1.0 means no penalty.
-    int top_k{};                     // Number of highest probability vocabulary tokens to keep for top-k-filtering that will be used by default in the generate method of the model.
-    float top_p{};                   // If set to float >0 and <1, only the most probable tokens with probabilities that add up to top_p or higher are kept for generation.
+    float repetition_penalty{1.0f};    // 1.0 means no penalty.
+    int top_k{};                       // Number of highest probability vocabulary tokens to keep for top-k-filtering that will be used by default in the generate method of the model.
+    float top_p{};                     // If set to float >0 and <1, only the most probable tokens with probabilities that add up to top_p or higher are kept for generation.
     float temperature{1.0f};
-    bool early_stopping{true};  //  Whether to stop the beam search when at least num_beams sentences are finished per batch or not.
+    bool early_stopping{true};         //  Whether to stop the beam search when at least num_beams sentences are finished per batch or not.
     int no_repeat_ngram_size{};
     float diversity_penalty{};
     float length_penalty{1.0f};        // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.

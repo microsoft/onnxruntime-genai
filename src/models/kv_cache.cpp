@@ -336,7 +336,7 @@ CrossCache::CrossCache(State& state, int sequence_length) {
   }
 
   // Derive the cross attention KV cache's data type
-  type_ = model.session_info_->GetOutputDataType(output_name_strings_[0]);
+  type_ = model.session_info_.GetOutputDataType(output_name_strings_[0]);
 
   for (int i = 0; i < layer_count_; ++i) {
     values_.push_back(OrtValue::CreateTensor(allocator, shape_, type_));
@@ -379,8 +379,6 @@ ModelManagedKeyValueCache::ModelManagedKeyValueCache(State& state)
 }
 
 void ModelManagedKeyValueCache::Add() {}
-
-void ModelManagedKeyValueCache::AddEncoder() {}
 
 void ModelManagedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
   // Eventually we need to set 'beam_idx' tensor here somehow.

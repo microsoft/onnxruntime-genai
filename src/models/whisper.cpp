@@ -45,8 +45,8 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
   kv_cache_.Add();
 
   // Add past sequence length
-  if (model_.session_info_->HasInput(model_.config_->model.decoder.inputs.past_sequence_length)) {
-    auto past_sequence_length_type = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length);
+  if (model_.session_info_.HasInput(model_.config_->model.decoder.inputs.past_sequence_length)) {
+    auto past_sequence_length_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length);
     auto past_sequence_length_shape = std::array<int64_t, 1>{1};
     past_sequence_length_ = OrtValue::CreateTensor(GetDeviceInterface(DeviceType::CPU)->GetAllocator(), past_sequence_length_shape, past_sequence_length_type);
     auto data = past_sequence_length_->GetTensorMutableData<int32_t>();
@@ -57,8 +57,8 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
   }
 
   // Add cache indirection
-  if (model_.session_info_->HasInput(model_.config_->model.decoder.inputs.cache_indirection)) {
-    auto cache_indirection_type = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.cache_indirection);
+  if (model_.session_info_.HasInput(model_.config_->model.decoder.inputs.cache_indirection)) {
+    auto cache_indirection_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.cache_indirection);
     auto cache_indirection_shape = std::array<int64_t, 3>{params_->search.batch_size, params_->search.num_beams, params_->search.max_length};
     auto cache_indirection_size = cache_indirection_shape[0] * cache_indirection_shape[1] * cache_indirection_shape[2];
     cache_indirection_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cache_indirection_shape, cache_indirection_type);
@@ -75,8 +75,8 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
 
 DeviceSpan<float> WhisperDecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   // Add output QK on first run
-  if (first_run_ && model_.session_info_->HasOutput(output_cross_qk_name_)) {
-    output_cross_qk_type_ = model_.session_info_->GetOutputDataType(output_cross_qk_name_);
+  if (first_run_ && model_.session_info_.HasOutput(output_cross_qk_name_)) {
+    output_cross_qk_type_ = model_.session_info_.GetOutputDataType(output_cross_qk_name_);
     output_cross_qk_shape_ = std::array<int64_t, 4>{params_->BatchBeamSize(), model_.config_->model.decoder.num_attention_heads, current_length, num_frames_ / 2};
     output_cross_qk_index_ = outputs_.size();
 
@@ -113,7 +113,7 @@ void WhisperDecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, 
       beam_indices.CopyCpuToDevice();
     }
     std::unique_ptr<OrtValue> new_cache_indirection;
-    auto cache_indirection_type = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.cache_indirection);
+    auto cache_indirection_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.cache_indirection);
     auto cache_indirection_shape = std::array<int64_t, 3>{params_->search.batch_size, params_->search.num_beams, params_->search.max_length};
     new_cache_indirection = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cache_indirection_shape, cache_indirection_type);
 
@@ -152,18 +152,26 @@ WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& par
 
   transpose_k_cache_buffer_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cross_cache_->GetShape(), cross_cache_->GetType());
 
-  auto& inputs = const_cast<GeneratorParams::Whisper&>(std::get<GeneratorParams::Whisper>(params.inputs));
-  if (decoder_state_->output_cross_qk_.size() && inputs.alignment_heads) {
+  // Check if alignment heads input exists
+  void* alignment_heads_input = nullptr;
+  for (const auto& [name, value] : params.extra_inputs) {
+    if (name == Generators::Config::Defaults::AlignmentHeadsName) {
+      alignment_heads_input = value.get();
+    }
+  }
+  // Add alignment heads
+  if (decoder_state_->output_cross_qk_.size() && alignment_heads_input != nullptr) {
+    auto alignment_heads = std::move(reinterpret_cast<Tensor*>(alignment_heads_input)->ort_tensor_);
     if (model_.p_device_inputs_->GetType() == DeviceType::CPU) {
-      alignment_heads_ = std::move(inputs.alignment_heads->ort_tensor_);
+      alignment_heads_ = std::move(alignment_heads);
     } else {
-      auto alignment_heads_type_and_shape_info = inputs.alignment_heads->ort_tensor_->GetTensorTypeAndShapeInfo();
+      auto alignment_heads_type_and_shape_info = alignment_heads->GetTensorTypeAndShapeInfo();
       auto alignment_heads_type = alignment_heads_type_and_shape_info->GetElementType();  // ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32
       auto alignment_heads_shape = alignment_heads_type_and_shape_info->GetShape();
       alignment_heads_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), alignment_heads_shape, alignment_heads_type);
 
       // Since alignment_heads is a user input, we need to copy from CPU to GPU
-      auto alignment_heads_src = ByteWrapTensor(*model_.p_device_inputs_, *(inputs.alignment_heads->ort_tensor_));
+      auto alignment_heads_src = ByteWrapTensor(*model_.p_device_inputs_, *alignment_heads);
       auto alignment_heads_dest = ByteWrapTensor(*model_.p_device_inputs_, *alignment_heads_);
       alignment_heads_dest.CopyFrom(alignment_heads_src);
 
@@ -280,7 +288,7 @@ DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t>& nex
     // Run decoder-init
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
 
-    if (first_run_ && decoder_state_->model_.session_info_->HasOutput(decoder_state_->output_cross_qk_name_)) {
+    if (first_run_ && decoder_state_->model_.session_info_.HasOutput(decoder_state_->output_cross_qk_name_)) {
       prompt_length_ = decoder_state_->output_cross_qk_shape_[2];
     }
 
