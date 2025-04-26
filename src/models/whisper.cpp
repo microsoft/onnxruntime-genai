@@ -60,7 +60,6 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
   if (model_.session_info_.HasInput(model_.config_->model.decoder.inputs.cache_indirection)) {
     auto cache_indirection_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.cache_indirection);
     auto cache_indirection_shape = std::array<int64_t, 3>{params_->search.batch_size, params_->search.num_beams, params_->search.max_length};
-    auto cache_indirection_size = cache_indirection_shape[0] * cache_indirection_shape[1] * cache_indirection_shape[2];
     cache_indirection_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cache_indirection_shape, cache_indirection_type);
     cache_indirection_index_ = inputs_.size();
 
@@ -289,7 +288,7 @@ DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t>& nex
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
 
     if (first_run_ && decoder_state_->model_.session_info_.HasOutput(decoder_state_->output_cross_qk_name_)) {
-      prompt_length_ = decoder_state_->output_cross_qk_shape_[2];
+      prompt_length_ = static_cast<int>(decoder_state_->output_cross_qk_shape_[2]);
     }
 
     if (decoder_state_->output_cross_qk_type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
