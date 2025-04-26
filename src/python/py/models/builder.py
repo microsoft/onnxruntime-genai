@@ -848,7 +848,7 @@ class Model:
         if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
             g_idx = name[1:].replace("/", ".") + ".g_idx"
             self.make_external_tensor(
-                lambda: matmul.g_idx.numpy(force=True).astype(np.int32), g_idx
+                lambda: matmul.g_idx.numpy(force=True).astype(np.int32), g_idx,
                 dtype=ir.DataType.INT32, shape=matmul.g_idx.shape
             )
             inputs.append(g_idx)
