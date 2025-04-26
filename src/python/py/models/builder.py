@@ -16,7 +16,7 @@ import json
 import logging
 import os
 import textwrap
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence
 
 import numpy as np
 import torch
@@ -534,12 +534,8 @@ class Model:
         if not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
 
-    def make_external_tensor(self, tensor: ir.ArrayCompatible | np.ndarray | ir.TensorProtocol, name: str):
-        ir_tensor = ir.tensor(tensor, name=name)
-        filename = f"{name}.bin"
-        (ir_tensor,) = ir.external_data.convert_tensors_to_external(
-            [ir_tensor], self.cache_dir, filename
-        )
+    def make_external_tensor(self, func: Callable[[], ir.TensorProtocol], dtype, shape, name: str):
+        ir_tensor = ir.LazyTensor(func, dtype=dtype, shape=shape, name=name)
         initializer = self.make_value(name)
         initializer.const_value = ir_tensor
         self.make_value_info(name, ir_tensor.dtype, ir_tensor.shape)
@@ -790,7 +786,7 @@ class Model:
 
     def make_matmul_fp16_or_fp32(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
-        self.make_external_tensor(matmul.weight.numpy(force=True).transpose().astype(self.io_dtype.numpy()), weight)
+        self.make_external_tensor(lambda: matmul.weight.numpy(force=True).transpose().astype(self.io_dtype.numpy()), matmul.weight.shape, weight)
 
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
