@@ -2315,7 +2315,7 @@ class Model:
                 cache_dir=self.cache_dir,
                 token=self.hf_token,
                 trust_remote_code=True,
-                torch_dtype=torch.bfloat16,
+                torch_dtype="auto",
                 **extra_kwargs,
             )
 
