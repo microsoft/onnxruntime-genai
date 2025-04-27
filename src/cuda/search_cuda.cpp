@@ -147,6 +147,8 @@ void BeamSearch_Cuda::SelectTop() {
 }
 
 void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
+  cudaStreamSynchronize(GetStream());
+#if 0
   std::span<float> scores = next_token_scores_.Span();
   assert(scores.size() == params_->search.batch_size * params_->config.model.vocab_size);
   cuda::GetSample(samplingdata_.get(), GetStream(), next_tokens_.data(), scores.data(), int(scores.size() / params_->search.batch_size),
@@ -155,11 +157,10 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
   // Check for EOS
   assert(next_tokens_.size() == eos_meet_.size());
   // Don't replace EOS with pad for batch_size == 1 for continuous decoding mode
-//  cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_meet_.data(), params_->config.model.eos_token_id, params_->search.batch_size > 1 ? params_->config.model.pad_token_id : params_->config.model.eos_token_id, done_cpu_.get(), GetStream());
+  cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_meet_.data(), params_->config.model.eos_token_id, params_->search.batch_size > 1 ? params_->config.model.pad_token_id : params_->config.model.eos_token_id, done_cpu_.get(), GetStream());
 
   // Append tokens
-  cudaStreamSynchronize(GetStream());
-  //  cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
+  cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
   sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
@@ -167,6 +168,7 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
   }
+#endif
 }
 
 bool BeamSearch_Cuda::IsDone() const {
@@ -178,7 +180,7 @@ bool BeamSearch_Cuda::IsDone() const {
       Log("hit_max_length", "beam cuda hit");
     return true;
   }
-  return false;
+  return false; 
 }
 
 void BeamSearch_Cuda::Finalize(size_t num_return_sequences) {

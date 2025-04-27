@@ -138,12 +138,12 @@ auto benchmark_values = ::testing::Values(
 //    BenchmarkParams{"cpu", 1, BenchmarkFunction::TopKTopP}
 #if USE_CUDA
     ,
-//    BenchmarkParams{"cuda", 1, BenchmarkFunction::TopP},
+    BenchmarkParams{"cuda", 1, BenchmarkFunction::TopP},
     BenchmarkParams{"cuda", 1, BenchmarkFunction::TopK}
-//    BenchmarkParams{"cuda", 1, BenchmarkFunction::TopKTopP},
-//    BenchmarkParams{"cuda", 1, BenchmarkFunction::SelectTop},
-//    BenchmarkParams{"cuda", 6, BenchmarkFunction::SelectTop},
-//    BenchmarkParams{"cuda", 12, BenchmarkFunction::SelectTop}
+    BenchmarkParams{"cuda", 1, BenchmarkFunction::TopKTopP},
+    BenchmarkParams{"cuda", 1, BenchmarkFunction::SelectTop},
+    BenchmarkParams{"cuda", 6, BenchmarkFunction::SelectTop},
+    BenchmarkParams{"cuda", 12, BenchmarkFunction::SelectTop}
 #endif
 );
 
