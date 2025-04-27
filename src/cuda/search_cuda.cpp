@@ -147,12 +147,11 @@ void BeamSearch_Cuda::SelectTop() {
 }
 
 void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
-  cudaStreamSynchronize(GetStream());
-#if 0
   std::span<float> scores = next_token_scores_.Span();
   assert(scores.size() == params_->search.batch_size * params_->config.model.vocab_size);
-  cuda::GetSample(samplingdata_.get(), GetStream(), next_tokens_.data(), scores.data(), int(scores.size() / params_->search.batch_size),
-                  params_->search.batch_size, k, p, temperature);
+//  cuda::GetSample(samplingdata_.get(), GetStream(), next_tokens_.data(), scores.data(), int(scores.size() / params_->search.batch_size),
+//                  params_->search.batch_size, k, p, temperature);
+  cudaStreamSynchronize(GetStream());
 
   // Check for EOS
   assert(next_tokens_.size() == eos_meet_.size());
@@ -168,7 +167,6 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
       Log("hit_max_length", "greedy cuda hit");
     *done_cpu_ = true;
   }
-#endif
 }
 
 bool BeamSearch_Cuda::IsDone() const {
@@ -180,7 +178,7 @@ bool BeamSearch_Cuda::IsDone() const {
       Log("hit_max_length", "beam cuda hit");
     return true;
   }
-  return false; 
+  return false;
 }
 
 void BeamSearch_Cuda::Finalize(size_t num_return_sequences) {
