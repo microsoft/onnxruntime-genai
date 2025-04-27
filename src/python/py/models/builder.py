@@ -538,16 +538,6 @@ class Model:
             size_threshold_bytes=0,
         )
 
-        # TODO(justinchuby): This makes the model not savable again when the weight
-        # files are deleted.
-        # Delete external data files on disk before re-saving
-        for path in os.listdir(self.cache_dir):
-            if path.endswith(".bin"):
-                try:
-                    os.remove(os.path.join(self.cache_dir, path))
-                except OSError:
-                    logger.debug("Error deleting file", stack_info=True)
-
         # Delete temporary cache dir if empty
         if not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
@@ -2325,7 +2315,7 @@ class Model:
                 cache_dir=self.cache_dir,
                 token=self.hf_token,
                 trust_remote_code=True,
-                torch_dtype="auto",
+                torch_dtype=torch.bfloat16,
                 **extra_kwargs,
             )
 
