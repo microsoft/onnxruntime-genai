@@ -46,6 +46,18 @@ def transpose_shape(shape: Sequence[int]) -> Sequence[int]:
     return [*shape[:-2], shape[-1], shape[-2]]
 
 
+def onnx_dtype_to_torch_dtype(onnx_dtype: ir.DataType) -> torch.dtype:
+    """Convert ONNX data type to PyTorch data type."""
+    if onnx_dtype == ir.DataType.FLOAT:
+        return torch.float32
+    elif onnx_dtype == ir.DataType.FLOAT16:
+        return torch.float16
+    elif onnx_dtype == ir.DataType.BFLOAT16:
+        return torch.bfloat16
+    elif onnx_dtype == ir.DataType.UINT4:
+        return torch.uint8
+    else:
+        raise NotImplementedError(f"Unsupported ONNX data type in builder: {onnx_dtype}")
 
 class Model:
     def __init__(
@@ -73,6 +85,7 @@ class Model:
         self.model_type = config.architectures[0]
         self.io_dtype: ir.DataType = ir.DataType(io_dtype)
         self.onnx_dtype: ir.DataType = ir.DataType(onnx_dtype)
+        self.io_torch_dtype: torch.dtype = onnx_dtype_to_torch_dtype(self.onnx_dtype)
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
         self.adapter_path = extra_options.get("adapter_path", None)
 
@@ -541,7 +554,7 @@ class Model:
 
     def make_external_tensor(
         self,
-        func_or_tensor: Callable[[], np.ndarray] | ir.ArrayCompatible | np.ndarray | ir.TensorProtocol,
+        func_or_tensor: Callable[[], torch.Tensor] | ir.ArrayCompatible | np.ndarray | ir.TensorProtocol,
         name: str,
         dtype: ir.DataType | None = None,
         shape: Sequence[int | str] | ir.Shape | None = None,
@@ -805,9 +818,7 @@ class Model:
     def make_matmul_fp16_or_fp32(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
         self.make_external_tensor(
-            lambda: matmul.weight.numpy(force=True)
-            .transpose()
-            .astype(self.io_dtype.numpy()),
+            lambda: matmul.weight.transpose().to(dtype=self.io_torch_dtype),
             weight,
             dtype=self.io_dtype,
             shape=transpose_shape(matmul.weight.shape),
@@ -834,7 +845,7 @@ class Model:
         self.make_external_tensor(matmul.qweight, weight)
         scales = name[1:].replace("/", ".") + ".scales"
         self.make_external_tensor(
-            lambda: matmul.scales.numpy(force=True).astype(self.io_dtype.numpy()), scales,
+            lambda: matmul.scales.to(dtype=self.io_torch_dtype), scales,
             dtype=self.io_dtype, shape=matmul.scales.shape
         )
 
@@ -848,7 +859,7 @@ class Model:
         if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
             g_idx = name[1:].replace("/", ".") + ".g_idx"
             self.make_external_tensor(
-                lambda: matmul.g_idx.numpy(force=True).astype(np.int32), g_idx,
+                lambda: matmul.g_idx.to(dtype=torch.int32), g_idx,
                 dtype=ir.DataType.INT32, shape=matmul.g_idx.shape
             )
             inputs.append(g_idx)
@@ -872,7 +883,7 @@ class Model:
         self.make_external_tensor(qweight_npy, qweight)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
-        scales_npy = quantized_op.scales.numpy(force=True).astype(self.io_dtype.numpy())
+        scales_npy = quantized_op.scales.to(dtype=self.io_torch_dtype)
         scales_npy = scales_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size)
         self.make_external_tensor(scales_npy, scales)
 
@@ -905,7 +916,7 @@ class Model:
         # compute quantized matmul when the weights are transposed. In most implementations, the transpose should usually be converted to a "transposeB"
         # attribute on the MatMul itself. A more natural way to represent this would have been to use Gemm since it already supports a transB attribute,
         # but unfortunately Gemm doesn't support batches.
-        qweight_shape = matmul.qweight.numpy(force=True).shape
+        qweight_shape = matmul.qweight.shape
         transposed_shape = [qweight_shape[1] * qweight_shape[2] * 2, qweight_shape[0]]
         transpose_name = f"{matmul_name}/Transpose"
         self.make_transpose(transpose_name, dequantize_output, self.io_dtype, transposed_shape, [1, 0])
@@ -1009,7 +1020,7 @@ class Model:
         self.make_external_tensor(matmul.qweight, weight)
         scales = name[1:].replace("/", ".") + ".scales"
         self.make_external_tensor(
-            lambda: matmul.scales.numpy(force=True).astype(self.io_dtype.numpy()), scales,
+            lambda: matmul.scales.to(dtype=self.io_torch_dtype), scales,
             dtype=self.io_dtype, shape=matmul.scales.shape
         )
 
@@ -1023,7 +1034,7 @@ class Model:
         if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
             g_idx = name[1:].replace("/", ".") + ".g_idx"
             self.make_external_tensor(
-                lambda: matmul.g_idx.numpy(force=True).astype(np.int32), g_idx,
+                lambda: matmul.g_idx.to(dtype=torch.int32), g_idx,
                 dtype=ir.DataType.INT32, shape=matmul.g_idx.shape
             )
             inputs.append(g_idx)
@@ -1038,10 +1049,10 @@ class Model:
 
         return name
 
-    def make_add_bias(self, add, name, root_input, **kwargs):
+    def make_add_bias(self, add: torch.Tensor, name: str, root_input: str, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
         self.make_external_tensor(
-            lambda: add.astype(self.io_dtype.numpy()), bias,
+            lambda: add.to(dtype=self.io_torch_dtype), bias,
             dtype=self.io_dtype,
             shape=add.shape,
         )
@@ -1058,13 +1069,13 @@ class Model:
 
     def make_packed_add(self, q_add, k_add, v_add, name, root_input, **kwargs):
         # Combine 3 Adds of shape N_q, N_kv, and N_kv into 1 packed Add of shape N_q + N_kv + N_kv
-        add = np.concatenate([q_add, k_add, v_add], axis=0).flatten()
+        add = torch.cat([q_add, k_add, v_add], dim=0).flatten()
         self.make_add_bias(add, name, root_input, **kwargs)
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
         self.make_external_tensor(
-            lambda: embedding.astype(self.io_dtype.numpy()), weight,
+            lambda: embedding.to(dtype=self.io_torch_dtype), weight,
             dtype=self.io_dtype, shape=embedding.shape
         )
 
@@ -1095,13 +1106,13 @@ class Model:
 
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
         self.make_external_tensor(
-            lambda: layernorm.weight.numpy(force=True).astype(self.io_dtype.numpy()) + self.layernorm_attrs["add_offset"], weight,
+            lambda: layernorm.weight.to(dtype=self.io_torch_dtype) + self.layernorm_attrs["add_offset"], weight,
             dtype=self.io_dtype, shape=layernorm.weight.shape
         )
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
             self.make_external_tensor(
-                lambda: layernorm.bias.numpy(force=True).astype(self.io_dtype.numpy()), bias,
+                lambda: layernorm.bias.to(dtype=self.io_torch_dtype), bias,
                 dtype=self.io_dtype, shape=layernorm.bias.shape
             )
 
@@ -1197,10 +1208,10 @@ class Model:
 
             # Slice cos/sin caches from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
-            cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].numpy(force=True)
-            cos_cache = cos_cache.astype(self.io_dtype.numpy())
-            sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].numpy(force=True)
-            sin_cache = sin_cache.astype(self.io_dtype.numpy())
+            cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)]
+            cos_cache = cos_cache.to(dtype=self.io_torch_dtype)
+            sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)]
+            sin_cache = sin_cache.to(dtype=self.io_torch_dtype)
 
             # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
             if self.rotemb_attrs["partial_rotary_factor"] != 1.0:
@@ -1355,7 +1366,7 @@ class Model:
         q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
         q_layernorm_output = f"{q_layernorm_name}/output_0"
         self.make_external_tensor(
-            lambda: attention.q_norm.weight.numpy(force=True).astype(self.io_dtype.numpy()) + self.layernorm_attrs["add_offset"], q_weight_name,
+            lambda: attention.q_norm.weight.to(dtype=self.io_torch_dtype) + self.layernorm_attrs["add_offset"], q_weight_name,
             dtype=self.io_dtype, shape=attention.q_norm.weight.shape
         )
         self.make_node("SimplifiedLayerNormalization", inputs=[q_reshape_1_output, q_weight_name], outputs=[q_layernorm_output], name=q_layernorm_name, **layernorm_kwargs)
@@ -1377,7 +1388,7 @@ class Model:
         k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
         k_layernorm_output = f"{k_layernorm_name}/output_0"
         self.make_external_tensor(
-            lambda: attention.k_norm.weight.numpy(force=True).astype(self.io_dtype.numpy()) + self.layernorm_attrs["add_offset"], k_weight_name,
+            lambda: attention.k_norm.weight.to(dtype=self.io_torch_dtype) + self.layernorm_attrs["add_offset"], k_weight_name,
             dtype=self.io_dtype, shape=attention.k_norm.weight.shape
         )
         self.make_node("SimplifiedLayerNormalization", inputs=[k_reshape_1_output, k_weight_name], outputs=[k_layernorm_output], name=k_layernorm_name, **layernorm_kwargs)
@@ -1692,20 +1703,20 @@ class Model:
         if all_bias_exists and self.attention_attrs["use_packed_matmul"]:
             # Combine 3 Adds into 1 packed Add
             qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
-            self.make_packed_add(attention.q_proj.bias.numpy(force=True), attention.k_proj.bias.numpy(force=True), attention.v_proj.bias.numpy(force=True), qkv_add_name, root_input=self.attention_attrs["q_path"])
+            self.make_packed_add(attention.q_proj.bias, attention.k_proj.bias, attention.v_proj.bias, qkv_add_name, root_input=self.attention_attrs["q_path"])
             self.attention_attrs["q_path"] = f"{qkv_add_name}/output_0"
         else:
             if q_bias_exists:
                 q_add_name = f"/model/layers.{layer_id}/attn/q_proj/Add"
-                self.make_add_bias(attention.q_proj.bias.numpy(force=True), q_add_name, root_input=self.attention_attrs["q_path"])
+                self.make_add_bias(attention.q_proj.bias, q_add_name, root_input=self.attention_attrs["q_path"])
                 self.attention_attrs["q_path"] = f"{q_add_name}/output_0"
             if k_bias_exists:
                 k_add_name = f"/model/layers.{layer_id}/attn/k_proj/Add"
-                self.make_add_bias(attention.k_proj.bias.numpy(force=True), k_add_name, root_input=self.attention_attrs["k_path"])
+                self.make_add_bias(attention.k_proj.bias, k_add_name, root_input=self.attention_attrs["k_path"])
                 self.attention_attrs["k_path"] = f"{k_add_name}/output_0"
             if v_bias_exists:
                 v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
-                self.make_add_bias(attention.v_proj.bias.numpy(force=True), v_add_name, root_input=self.attention_attrs["v_path"])
+                self.make_add_bias(attention.v_proj.bias, v_add_name, root_input=self.attention_attrs["v_path"])
                 self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
 
         # Make Q/K SimplifiedLayerNorm nodes
@@ -1752,7 +1763,7 @@ class Model:
         o_bias_exists = getattr(attention, o_proj).bias is not None
         if o_bias_exists:
             o_add_name = f"/model/layers.{layer_id}/attn/o_proj/Add"
-            o_bias = getattr(attention, o_proj).bias.numpy(force=True)
+            o_bias = getattr(attention, o_proj).bias
             self.make_add_bias(o_bias, o_add_name, root_input=f"{o_matmul_name}/output_0")
 
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
@@ -1941,7 +1952,7 @@ class Model:
         gate_name = gate_matmul_name
         if gate_bias_exists:
             gate_add_name = f"/model/layers.{layer_id}/mlp/gate_proj/Add"
-            self.make_add_bias(mlp.gate_proj.bias.numpy(force=True), gate_add_name, root_input=f"{gate_name}/output_0")
+            self.make_add_bias(mlp.gate_proj.bias, gate_add_name, root_input=f"{gate_name}/output_0")
             gate_name = gate_add_name
 
         # Make Up proj nodes
@@ -1950,7 +1961,7 @@ class Model:
         up_name = up_matmul_name
         if up_bias_exists:
             up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
-            self.make_add_bias(mlp.up_proj.bias.numpy(force=True), up_add_name, root_input=f"{up_name}/output_0")
+            self.make_add_bias(mlp.up_proj.bias, up_add_name, root_input=f"{up_name}/output_0")
             up_name = up_add_name
 
         # Make activation node(s)
@@ -1967,7 +1978,7 @@ class Model:
         down_name = down_matmul_name
         if down_bias_exists:
             down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
-            self.make_add_bias(mlp.down_proj.bias.numpy(force=True), down_add_name, root_input=f"{down_name}/output_0")
+            self.make_add_bias(mlp.down_proj.bias, down_add_name, root_input=f"{down_name}/output_0")
             down_name = down_add_name
 
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
@@ -1998,7 +2009,7 @@ class Model:
         fc1_name = fc1_matmul_name
         if fc1_bias_exists:
             fc1_add_name = f"/model/layers.{layer_id}/mlp/fc1/Add"
-            self.make_add_bias(mlp.fc1.bias.numpy(force=True), fc1_add_name, root_input=f"{fc1_name}/output_0")
+            self.make_add_bias(mlp.fc1.bias, fc1_add_name, root_input=f"{fc1_name}/output_0")
             fc1_name = fc1_add_name
 
         # Make activation function
@@ -2010,7 +2021,7 @@ class Model:
         fc2_name = fc2_matmul_name
         if fc2_bias_exists:
             fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
-            self.make_add_bias(mlp.fc2.bias.numpy(force=True), fc2_add_name, root_input=f"{fc2_name}/output_0")
+            self.make_add_bias(mlp.fc2.bias, fc2_add_name, root_input=f"{fc2_name}/output_0")
             fc2_name = fc2_add_name
 
         # Assign output 0 of MLP layer as output of last layer
@@ -2109,21 +2120,21 @@ class Model:
         moe_expert_scales_2_name = f"model.layers.{layer_id}.moe.scales_2"
         moe_expert_scales_3_name = f"model.layers.{layer_id}.moe.scales_3"
 
-        def make_moe_external_tensor(w_list, moe_expert_name, numpy_type):
-            moe_experts_weight = torch.stack(w_list, dim=0).numpy(force=True)
+        def make_moe_external_tensor(w_list, moe_expert_name, dtype: ir.DataType):
+            moe_experts_weight = torch.stack(w_list, dim=0)
             self.make_external_tensor(
-                lambda: moe_experts_weight.astype(numpy_type), moe_expert_name,
-                dtype=ir.DataType.from_numpy(numpy_type), shape=moe_experts_weight.shape
+                lambda: moe_experts_weight.to(dtype=onnx_dtype_to_torch_dtype(dtype)), moe_expert_name,
+                dtype=dtype, shape=moe_experts_weight.shape
             )
 
-        make_moe_external_tensor(w1_list, moe_expert_weight_1_name, np.uint8)
-        make_moe_external_tensor(w2_list, moe_expert_weight_2_name, np.uint8)
-        make_moe_external_tensor(w3_list, moe_expert_weight_3_name, np.uint8)
+        make_moe_external_tensor(w1_list, moe_expert_weight_1_name, ir.DataType.UINT8)
+        make_moe_external_tensor(w2_list, moe_expert_weight_2_name, ir.DataType.UINT8)
+        make_moe_external_tensor(w3_list, moe_expert_weight_3_name, ir.DataType.UINT8)
 
         # Currently we don't expect QMoE to be used with distributed inference
-        make_moe_external_tensor(w1_scale_list, moe_expert_scales_1_name, self.io_dtype.numpy())
-        make_moe_external_tensor(w2_scale_list, moe_expert_scales_2_name, self.io_dtype.numpy())
-        make_moe_external_tensor(w3_scale_list, moe_expert_scales_3_name, self.io_dtype.numpy())
+        make_moe_external_tensor(w1_scale_list, moe_expert_scales_1_name, self.io_dtype)
+        make_moe_external_tensor(w2_scale_list, moe_expert_scales_2_name, self.io_dtype)
+        make_moe_external_tensor(w3_scale_list, moe_expert_scales_3_name, self.io_dtype)
 
         bias_ph = "" # Placeholder for bias
         inputs = [root_input, f"{gate_reshape_name}/output_0", \
@@ -2221,7 +2232,7 @@ class Model:
 
         if bias_exists:
             add_name = "/lm_head/Add"
-            self.make_add_bias(lm_head.bias.numpy(force=True), add_name, root_input=f"{lm_name}/output_0", logits=not(scale_exists or mask_exists or softcap_exists))
+            self.make_add_bias(lm_head.bias, add_name, root_input=f"{lm_name}/output_0", logits=not(scale_exists or mask_exists or softcap_exists))
             lm_name = add_name
 
         if scale_exists:
@@ -2309,7 +2320,14 @@ class Model:
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
-            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+            model = AutoModelForCausalLM.from_pretrained(
+                self.model_name_or_path,
+                cache_dir=self.cache_dir,
+                token=self.hf_token,
+                trust_remote_code=True,
+                torch_dtype="auto",
+                **extra_kwargs,
+            )
 
         if "adapter_path" in self.extra_options:
             from peft import PeftModel
@@ -2323,7 +2341,7 @@ class Model:
                 if not self.exclude_embeds:
                     # Embedding layer
                     print("Reading embedding layer")
-                    self.make_embedding(module.weight.numpy(force=True))
+                    self.make_embedding(module.weight)
                 else:
                     # Exclude embedding layer from model
                     self.layernorm_attrs["root_input"] = "inputs_embeds"
@@ -2954,10 +2972,10 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
 
             # Slice cos/sin caches from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
-            cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].numpy(force=True)
-            cos_cache = cos_cache.astype(self.io_dtype.numpy())
-            sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].numpy(force=True)
-            sin_cache = sin_cache.astype(self.io_dtype.numpy())
+            cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)]
+            cos_cache = cos_cache.to(dtype=self.io_torch_dtype)
+            sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)]
+            sin_cache = sin_cache.to(dtype=self.io_torch_dtype)
 
             # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
             if self.rotemb_attrs["partial_rotary_factor"] != 1.0:
@@ -3048,14 +3066,14 @@ class Phi3SmallModel(Model):
         # Create tensors for row indices and col indices
         crows_name = "block_row_indices"
         self.make_external_tensor(
-            lambda: crows.numpy(force=True).astype(np.int32), crows_name,
+            lambda: crows.to(dtype=torch.int32), crows_name,
             dtype=ir.DataType.INT32, shape=crows.shape,
         )
         self.mask_attrs["block_row_indices"] = crows_name
 
         cols_name = "block_col_indices"
         self.make_external_tensor(
-            lambda: cols.numpy(force=True).astype(np.int32), cols_name,
+            lambda: cols.to(dtype=torch.int32), cols_name,
             dtype=ir.DataType.INT32, shape=cols.shape,
         )
         self.mask_attrs["block_col_indices"] = cols_name
@@ -3072,8 +3090,8 @@ class Phi3SmallModel(Model):
         q_size = self.num_attn_heads * self.head_size
         kv_size = self.num_kv_heads * self.head_size
 
-        qkv_weight = attention.query_key_value.weight.T.view(self.hidden_size, self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
-        qkv_bias = attention.query_key_value.bias.view(self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
+        qkv_weight = attention.query_key_value.weight.T.to(dtype=self.hidden_size, self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
+        qkv_bias = attention.query_key_value.bias.to(dtype=self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
 
         attention.q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
         attention.q_proj.weight = torch.nn.Parameter(qkv_weight[:, :, :-2].reshape(q_size, q_size).T, requires_grad=False)
@@ -3130,7 +3148,7 @@ class Phi3SmallModel(Model):
         up_matmul_name = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
         self.make_matmul(mlp.up_proj, up_matmul_name, root_input)
         up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
-        self.make_add_bias(mlp.up_proj.bias.numpy(force=True), up_add_name, f"{up_matmul_name}/output_0")
+        self.make_add_bias(mlp.up_proj.bias, up_add_name, f"{up_matmul_name}/output_0")
 
         # Left path
         slice_1_name = f"/model/layers.{layer_id}/mlp/gelu/Slice"
@@ -3176,7 +3194,7 @@ class Phi3SmallModel(Model):
         down_matmul_name = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
         self.make_matmul(mlp.down_proj, down_matmul_name, f"{mul_name}/output_0")
         down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
-        self.make_add_bias(mlp.down_proj.bias.numpy(force=True), down_add_name, f"{down_matmul_name}/output_0")
+        self.make_add_bias(mlp.down_proj.bias, down_add_name, f"{down_matmul_name}/output_0")
 
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{down_add_name}/output_0"
