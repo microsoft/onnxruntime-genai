@@ -818,7 +818,7 @@ class Model:
     def make_matmul_fp16_or_fp32(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
         self.make_external_tensor(
-            lambda: matmul.weight.transpose().to(dtype=self.io_torch_dtype),
+            lambda: matmul.weight.t().to(dtype=self.io_torch_dtype),
             weight,
             dtype=self.io_dtype,
             shape=transpose_shape(matmul.weight.shape),
@@ -3090,8 +3090,8 @@ class Phi3SmallModel(Model):
         q_size = self.num_attn_heads * self.head_size
         kv_size = self.num_kv_heads * self.head_size
 
-        qkv_weight = attention.query_key_value.weight.T.to(dtype=self.hidden_size, self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
-        qkv_bias = attention.query_key_value.bias.to(dtype=self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
+        qkv_weight = attention.query_key_value.weight.T.view(self.hidden_size, self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
+        qkv_bias = attention.query_key_value.bias.view(self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
 
         attention.q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
         attention.q_proj.weight = torch.nn.Parameter(qkv_weight[:, :, :-2].reshape(q_size, q_size).T, requires_grad=False)
