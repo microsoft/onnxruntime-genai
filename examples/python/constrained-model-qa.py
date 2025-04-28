@@ -25,7 +25,7 @@ def main(args):
 
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
     search_options['batch_size'] = 1
-    file_path = '/test_genai/test/test_models/grammars/weather_population.json'
+    file_path = '/workspace/onnxruntime-genai/test/test_models/grammars/weather_grammar.txt'
     json_schema_data = ''
     with open(file_path, 'r', encoding='utf-8') as file:
         json_schema_data = file.read()
@@ -77,6 +77,10 @@ def main(args):
         else:
             system_prompt = args.system_prompt
 
+    # system_prompt = "You are a helpful AI agent. You can provide normal text as an output or sometime a tool function which you have been provided. If and only if the output is a tool function, only give function name and arguments starting with curly braces and nothing else. Do not create any function names which you have not been provided here. <|tool|>[ {'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}]<|/tool|>"
+    # system_prompt = "You are a helpful AI agent. You can provide normal text as an output or tool function details. There is only 1 available tool function to you, which is called get_weather and it has only 1 parameter which is the city for which I want the weather."
+    system_prompt = "You are a helpful AI agent. You can provide normal text as an output or sometime a tool function which you have been providied. There is only 1 available tool to you, which is called get_weather and it is used to get weather of a particular city. The tool has only 1 parameter which is the city for which I want the weather. <|tool|>[ {'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}]<|/tool|>"
+
     system_tokens = tokenizer.encode(system_prompt)
 
     # Keep asking for input prompts in a loop
@@ -99,8 +103,9 @@ def main(args):
 
         params = og.GeneratorParams(model)
         params.set_search_options(**search_options)
-        params.set_guidance('json_schema', json_schema_data)
+        # params.set_guidance('json_schema', json_schema_data)
         # params.set_guidance('regex', "answer: .*")
+        params.set_guidance('lark_grammar', json_schema_data)
         generator = og.Generator(model, params)
         if args.verbose: print("Generator created")
 
