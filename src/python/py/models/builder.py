@@ -3403,7 +3403,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             extra_options["exclude_embeds"] = True
             onnx_model = Phi4MMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Qwen2ForCausalLM":
+        elif config.architectures[0] in ("Qwen2ForCausalLM", "Qwen3ForCausalLM"):
             onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
