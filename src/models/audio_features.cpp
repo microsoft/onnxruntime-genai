@@ -12,12 +12,12 @@ AudioFeatures::AudioFeatures(State& state, const std::string& name)
       name_{name} {
   // Get audio features
   for (const auto& [input_name, value] : state_.params_->extra_inputs) {
-    if (input_name == "audio_features") {
+    if (input_name == Config::Defaults::AudioFeaturesName) {
       audio_features_ = model_.ExpandInputs(value->ort_tensor_, state_.params_->search.num_beams);
     }
   }
   if (audio_features_ == nullptr) {
-    throw std::runtime_error("audio_features must be provided in the extra inputs");
+    throw std::runtime_error("audio_features must be provided via SetInputs or SetModelInput");
   }
 
   auto audio_features_info = audio_features_->GetTensorTypeAndShapeInfo();
