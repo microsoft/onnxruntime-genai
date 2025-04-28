@@ -54,6 +54,8 @@ struct GpuMemory final : DeviceBuffer {
   }
 
   void CopyCpuToDevice() override {
+    if (!p_cpu_)
+      throw std::runtime_error("CopyCpuToDevice called without allocating CPU memory");
     assert(p_cpu_);
     ::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream());
   }

@@ -10,7 +10,7 @@ std::unique_ptr<CacheManager> CreateCacheManager(std::shared_ptr<Model> model) {
 }
 
 StaticCacheManager::StaticCacheManager(std::shared_ptr<Model> model)
-    : CacheManager(model), params_{std::make_shared<GeneratorParams>(*model)} {}
+    : CacheManager(model) {}
 
 bool StaticCacheManager::CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const {
   if (cache_allocated_requests_.empty()) {
@@ -26,8 +26,21 @@ void StaticCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& r
   }
 
   if (!key_value_cache_) {
+    auto request_with_max_total_sequence_length =
+        std::max_element(
+            requests.begin(), requests.end(),
+            [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
+              return a->Params()->search.max_length < b->Params()->search.max_length;
+            });
+
+    params_ = std::make_shared<GeneratorParams>(*model_);
+    params_->search.max_length = (*request_with_max_total_sequence_length)->Params()->search.max_length;
+    params_->search.batch_size = cache_allocated_requests_.size();
+
     key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
     key_value_cache_ = std::make_unique<DefaultKeyValueCache>(*key_value_cache_state_);
+
+    key_value_cache_->Add();
   }
 }
 
@@ -44,6 +57,7 @@ void StaticCacheManager::Step() {
   const int64_t max_sequence_length = (*request_with_max_sequence_length)->CurrentSequenceLength();
 
   key_value_cache_->Update({}, max_sequence_length);
+  std::cout << "KeyValueCache updated with max_sequence_length: " << max_sequence_length << std::endl;
 }
 
 void StaticCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& requests) {
@@ -52,8 +66,9 @@ void StaticCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reque
     throw std::runtime_error("Cannot deallocate requests that are not allocated.");
   }
 
-  key_value_cache_state_.reset();
   key_value_cache_.reset();
+  key_value_cache_state_.reset();
+  params_.reset();
 }
 
 }  // namespace Generators

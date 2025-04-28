@@ -67,9 +67,9 @@ struct Engine : std::enable_shared_from_this<Engine>,
 
  private:
   std::shared_ptr<Model> model_;                   ///< The model used by the Engine.
+  std::shared_ptr<CacheManager> cache_manager_;    ///< The cache manager for handling cached data.
   std::unique_ptr<Scheduler> scheduler_;           ///< The scheduler responsible for managing execution order.
   std::unique_ptr<ModelExecutor> model_executor_;  ///< The executor responsible for running the model.
-  std::shared_ptr<CacheManager> cache_manager_;    ///< The cache manager for handling cached data.
 };
 
 }  // namespace Generators

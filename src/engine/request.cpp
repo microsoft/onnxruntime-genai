@@ -35,6 +35,8 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
   processed_sequence_length_ = search_->GetSequenceLength();
   search_->AppendTokens(device_tokens);
   prefill_input_ids_.clear();
+
+  std::cout << "Request assigned to engine." << std::endl;
 }
 
 void Request::Schedule() {
@@ -130,6 +132,10 @@ void Request::GenerateNextTokens(DeviceSpan<float> logits) {
   if (search_->IsDone()) {
     status_ = RequestStatus::Completed;
   }
+}
+
+std::shared_ptr<GeneratorParams> Request::Params() {
+  return params_;
 }
 
 }  // namespace Generators

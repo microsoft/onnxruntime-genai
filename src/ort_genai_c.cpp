@@ -871,6 +871,6 @@ void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) { delete p; }
 void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete p; }
 void OGA_API_CALL OgaDestroyEngine(OgaEngine* p) { p->ExternalRelease(); }
-void OGA_API_CALL OgaDestroyRequest(OgaRequest* p) { delete p; }
+void OGA_API_CALL OgaDestroyRequest(OgaRequest* p) { p->ExternalRelease(); }
 
 }  // extern "C"

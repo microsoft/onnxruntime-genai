@@ -33,6 +33,8 @@ struct CacheManager {
 
   virtual bool SupportsDynamicBatching() const = 0;
 
+  virtual ~CacheManager() = default;
+
  protected:
   std::shared_ptr<Model> model_;
   std::unique_ptr<KeyValueCacheState> key_value_cache_state_;
@@ -54,9 +56,9 @@ struct StaticCacheManager : CacheManager {
   bool SupportsDynamicBatching() const override;
 
  private:
+  std::shared_ptr<GeneratorParams> params_;
   std::unique_ptr<KeyValueCache> key_value_cache_;
   std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
-  std::shared_ptr<GeneratorParams> params_;
 };
 
 struct PagedCacheManager : CacheManager {

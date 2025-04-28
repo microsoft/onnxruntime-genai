@@ -11,10 +11,15 @@ StaticBatchDecoderIO::StaticBatchDecoderIO(std::shared_ptr<DecoderOnly_Model> mo
                                            ScheduledRequests& scheduled_requests,
                                            std::shared_ptr<CacheManager> cache_manager)
     : DecoderIO(model, scheduled_requests, cache_manager) {
+  std::cout << "StaticBatchDecoderIO created." << std::endl;
   PrepareInputIds(model, scheduled_requests);
+  std::cout << "Input IDs prepared." << std::endl;
   PrepareAttentionMask(model, scheduled_requests);
+  std::cout << "Attention mask prepared." << std::endl;
   PreparePositionIds(model, scheduled_requests);
+  std::cout << "Position IDs prepared." << std::endl;
   PrepareLogits(model, scheduled_requests);
+  std::cout << "Logits prepared." << std::endl;
 }
 
 void StaticBatchDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
@@ -29,6 +34,7 @@ void StaticBatchDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> mo
   const int64_t batch_size = scheduled_requests.size();
   const std::vector<int64_t> input_ids_shape = {batch_size, max_sequence_length};
   auto input_ids_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int32_t>);
+  input_ids_tensor->CreateTensor(input_ids_shape);
   auto device_span = input_ids_tensor->GetDeviceSpan<int32_t>();
   auto cpu_span = device_span.CpuSpan();
 
@@ -39,6 +45,8 @@ void StaticBatchDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> mo
       cpu_span[i * max_sequence_length + j] = (j < input_ids.size()) ? input_ids[j] : model->config_->model.pad_token_id;
     }
   }
+
+  device_span.CopyCpuToDevice();
 
   input_names_.push_back(model->config_->model.decoder.inputs.input_ids.c_str());
   inputs_.push_back(input_ids_tensor->GetOrtTensor());
@@ -57,6 +65,7 @@ void StaticBatchDecoderIO::PrepareAttentionMask(std::shared_ptr<DecoderOnly_Mode
   const int64_t batch_size = scheduled_requests.size();
   const std::vector<int64_t> attention_mask_shape = {batch_size, max_sequence_length};
   auto attention_mask_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int32_t>);
+  attention_mask_tensor->CreateTensor(attention_mask_shape);
   auto device_span = attention_mask_tensor->GetDeviceSpan<int32_t>();
   auto cpu_span = device_span.CpuSpan();
 
@@ -69,7 +78,9 @@ void StaticBatchDecoderIO::PrepareAttentionMask(std::shared_ptr<DecoderOnly_Mode
     }
   }
 
+  std::cout << "Attention mask prepared." << std::endl;
   device_span.CopyCpuToDevice();
+  std::cout << "Attention mask copied to device." << std::endl;
 
   input_names_.push_back(model->config_->model.decoder.inputs.attention_mask.c_str());
   inputs_.push_back(attention_mask_tensor->GetOrtTensor());
@@ -88,6 +99,7 @@ void StaticBatchDecoderIO::PreparePositionIds(std::shared_ptr<DecoderOnly_Model>
   const int64_t batch_size = scheduled_requests.size();
   const std::vector<int64_t> position_ids_shape = {batch_size, max_sequence_length};
   auto position_ids_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int32_t>);
+  position_ids_tensor->CreateTensor(position_ids_shape);
   auto device_span = position_ids_tensor->GetDeviceSpan<int32_t>();
   auto cpu_span = device_span.CpuSpan();
 
@@ -120,6 +132,7 @@ void StaticBatchDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> mode
   const int64_t batch_size = scheduled_requests.size();
   const std::vector<int64_t> logits_shape = {batch_size, max_sequence_length, model->config_->model.vocab_size};
   auto logits_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int32_t>);
+  logits_->CreateTensor(logits_shape);
 
   input_names_.push_back(model->config_->model.decoder.outputs.logits.c_str());
   inputs_.push_back(logits_->GetOrtTensor());
@@ -136,11 +149,15 @@ SimpleDecoder::SimpleDecoder(std::shared_ptr<DecoderOnly_Model> model,
     : model_{model}, cache_manager_{cache_manager} {}
 
 void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests) {
+  std::cout << "SimpleDecoder::Decode" << std::endl;
   cache_manager_->Step();
+  std::cout << "Cache manager step completed" << std::endl;
   std::unique_ptr<DecoderIO> decoder_state =
       cache_manager_->SupportsDynamicBatching()
           ? static_cast<std::unique_ptr<DecoderIO>>(std::make_unique<VarlenDecoderIO>(model_, scheduled_requests, cache_manager_))
           : static_cast<std::unique_ptr<DecoderIO>>(std::make_unique<StaticBatchDecoderIO>(model_, scheduled_requests, cache_manager_));
+
+  std::cout << "Decoder state created" << std::endl;
 
   auto run_options = scheduled_requests.RunOptions();
   model_->session_decoder_->Run(run_options.get(),

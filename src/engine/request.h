@@ -44,6 +44,8 @@ struct Request : std::enable_shared_from_this<Request>,
 
   RequestStatus status_{RequestStatus::Unassigned};
 
+  std::shared_ptr<GeneratorParams> Params();
+
  private:
   std::vector<int32_t> prefill_input_ids_;
   int64_t seen_sequence_length_{};

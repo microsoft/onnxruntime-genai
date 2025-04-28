@@ -41,6 +41,8 @@ struct Decoder {
   Decoder() = default;
 
   virtual void Decode(ScheduledRequests& scheduled_requests) = 0;
+
+  virtual ~Decoder() = default;
 };
 
 }  // namespace Generators

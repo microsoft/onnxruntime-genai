@@ -21,9 +21,9 @@ struct Scheduler {
   bool HasPendingRequests() const;
 
  private:
-  std::vector<std::shared_ptr<Request>> requests_pool_;
   std::shared_ptr<Model> model_;
   std::shared_ptr<CacheManager> cache_manager_;
+  std::vector<std::shared_ptr<Request>> requests_pool_;
 };
 
 }  // namespace Generators
