@@ -47,7 +47,7 @@ struct SamplingBenchmark {
     switch (benchmark_function_) {
       case BenchmarkFunction::TopP:
         params->SetSearchOption("top_p", 0.95f);
-        break;  
+        break;
       case BenchmarkFunction::TopK:
         params->SetSearchOption("top_k", 5);
         break;
@@ -68,7 +68,7 @@ struct SamplingBenchmark {
     double total_time = 0.0;
     int num_iter = 1000;
 
-    auto logits = OgaTensor::Create<float>(nullptr, std::array<int64_t, 1>{vocab_size*batch_size_});
+    auto logits = OgaTensor::Create<float>(nullptr, std::array<int64_t, 1>{vocab_size * batch_size_});
     auto test_start = std::chrono::high_resolution_clock::now();
 
     for (int i = 0; i < num_iter; i++) {
@@ -78,7 +78,7 @@ struct SamplingBenchmark {
       generator->SetLogits(*logits);
       auto start = std::chrono::high_resolution_clock::now();
       generator->GenerateNextToken();
-      auto result=generator->GetNextTokens();
+      auto result = generator->GetNextTokens();
       auto stop = std::chrono::high_resolution_clock::now();
       auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
       total_time += duration.count();

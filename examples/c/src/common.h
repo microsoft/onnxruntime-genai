@@ -35,7 +35,6 @@ class Timing {
   TimePoint end_timestamp_;
 };
 
-
 class TerminateSession {
  public:
   std::condition_variable cv;
@@ -51,4 +50,11 @@ bool FileExists(const char* path);
 
 std::string trim(const std::string& str);
 
-void print_usage(int /*argc*/, char** argv);
+// Returns true if model_path & ep were able to be set from user cmd-line args.
+// Returns false if insufficient cmd-line arguments were passed.
+// Note: ep will be set to "follow_config" if user only gives model_path
+bool parse_args(int /*argc*/, char** argv, std::string& model_path, std::string& ep);
+
+// Append provider / options to config.
+// This is a no-op if provider=="follow_config"
+void append_provider(OgaConfig& config, const std::string& provider);
