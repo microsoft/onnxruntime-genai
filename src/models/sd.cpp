@@ -10,6 +10,8 @@ namespace Generators {
 StableDiffusion_Model::StableDiffusion_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model(std::move(config)) {
   // Initialize encoder and decoder sessions
+
+  auto text_model_path = config_->config_path / "text_encoder" / "model.onnx";
   //session_encoder_ = CreateSession("encoder_decoder_init.onnx");
   //session_decoder_ = CreateSession("decoder.onnx");
 }
@@ -30,7 +32,7 @@ StableDiffusion_State::StableDiffusion_State(const StableDiffusion_Model& model,
 DeviceSpan<float> StableDiffusion_State::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   UpdateInputsOutputs(next_tokens, next_indices, current_length, /*search_buffers=*/true);
   // Execute decoder session
-  model_.session_decoder_->Run(/*inputs=*/{}, /*outputs=*/{});
+  //model_.session_decoder_->Run(/*inputs=*/{}, /*outputs=*/{});
   return {};  // Return the output span (to be implemented)
 }
 
