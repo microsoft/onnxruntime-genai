@@ -57,7 +57,6 @@ struct OgaStringArray : std::vector<std::string>, OgaAbstract {};
 struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
-struct OgaState : Generators::State, OgaAbstract {};
 
 // Helper function to return a shared pointer as a raw pointer. It won't compile if the types are wrong.
 // Exposed types that are internally owned by shared_ptrs inherit from ExternalRefCounted. Then we
@@ -340,8 +339,7 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorPa
 
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* oga_params, const char* type, const char* data) {
   OGA_TRY
-  auto& params = *reinterpret_cast<Generators::GeneratorParams*>(oga_params);
-  params.SetGuidance(type, data);
+  oga_params->SetGuidance(type, data);
   return nullptr;
   OGA_CATCH
 }

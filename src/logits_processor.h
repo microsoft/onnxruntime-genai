@@ -28,18 +28,6 @@ struct LogitsProcessor {
 };
 
 #if USE_GUIDANCE
-struct LlgConstraintDeleter {
-  void operator()(LlgConstraint* lc) const {
-    llg_free_constraint(lc);
-  }
-};
-
-struct LlgTokenizerDeleter {
-  void operator()(LlgTokenizer* lt) const {
-    llg_free_tokenizer(lt);
-  }
-};
-
 struct GuidanceLogitsProcessor : public LogitsProcessor {
   // llguidance need to use tokenizer.json to add special tokens
   static constexpr const char* kDefaultVocabFile = "tokenizer.json";
@@ -59,14 +47,19 @@ struct GuidanceLogitsProcessor : public LogitsProcessor {
 
  private:
   std::vector<std::vector<uint32_t>> ComputeMask();
+  struct LlgConstraintDeleter {
+    void operator()(LlgConstraint* lc) const {
+      llg_free_constraint(lc);
+    }
+  };
 
-  int vocab_size_;
-  uint32_t eos_token_;
-  int batch_size_;
-  DeviceType device_type_;
+  struct LlgTokenizerDeleter {
+    void operator()(LlgTokenizer* lt) const {
+      llg_free_tokenizer(lt);
+    }
+  };
+
   std::shared_ptr<const GeneratorParams> params_;
-  std::string_view guidance_type_;
-  std::string_view guidance_data_;
   std::vector<std::vector<uint32_t>> masks_;
   std::vector<std::unique_ptr<LlgConstraint, LlgConstraintDeleter>> llg_constraints_;
   std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter> llg_tokenizer_;
