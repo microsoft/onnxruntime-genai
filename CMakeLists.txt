@@ -46,11 +46,7 @@ include(cmake/cxx_standard.cmake)
 
 add_compile_definitions(BUILDING_ORT_GENAI_C)
 
-if(USE_GUIDANCE)
-  add_compile_definitions(USE_GUIDANCE=1)
-else()
-  add_compile_definitions(USE_GUIDANCE=0)
-endif()
+add_compile_definitions(USE_GUIDANCE=$<BOOL:${USE_GUIDANCE}>)
 
 if(MSVC)
   # set updated value for __cplusplus macro instead of 199711L

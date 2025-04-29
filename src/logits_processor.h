@@ -60,6 +60,7 @@ struct GuidanceLogitsProcessor : public LogitsProcessor {
   };
 
   std::shared_ptr<const GeneratorParams> params_;
+  uint32_t eos_token_;
   std::vector<std::vector<uint32_t>> masks_;
   std::vector<std::unique_ptr<LlgConstraint, LlgConstraintDeleter>> llg_constraints_;
   std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter> llg_tokenizer_;

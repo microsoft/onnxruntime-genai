@@ -19,7 +19,8 @@ namespace Generators {
 
 #if USE_GUIDANCE
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
-    : params_(state.params_) {
+    : params_(state.params_),
+      eos_token_(state.params_->config.model.eos_token_id) {
   if (params_->guidance_type.empty() || params_->guidance_type.empty()) {
     throw std::runtime_error("Guidance type and data must be provided together");
   }
@@ -52,14 +53,14 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
   tokenize_data_ = {tokenizer_.get(), prefix_len};
   LlgTokenizerInit tokenizer_init = {
       static_cast<uint32_t>(params_->config.model.vocab_size),  // vocab_size
-      params_->config.model.eos_token_id,  // eos_token
-      nullptr,                             // token_lens
-      nullptr,                             // token_bytes
-      json_data.c_str(),                   // tokenizer_json config data
-      false,                               // tokenize_assumes_string
-      tokenize_fn,                         // tokenize_fn
-      false,                               // use_approximate_greedy_tokenize_fn
-      &tokenize_data_,                     // user_data
+      eos_token_,                                               // eos_token
+      nullptr,                                                  // token_lens
+      nullptr,                                                  // token_bytes
+      json_data.c_str(),                                        // tokenizer_json config data
+      false,                                                    // tokenize_assumes_string
+      tokenize_fn,                                              // tokenize_fn
+      false,                                                    // use_approximate_greedy_tokenize_fn
+      &tokenize_data_,                                          // user_data
   };
 
   char error_buf[128];
@@ -98,7 +99,7 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
 
 std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
   std::vector<std::vector<uint32_t>> masks;
-  for (int batch_idx = 0; batch_idx < params_->search.batch_size; batch_idx++) {  // renamed 'i' to 'batch_idx'
+  for (int batch_idx = 0; batch_idx < params_->search.batch_size; batch_idx++) {
     LlgMaskResult mask_result;
     auto error = llg_compute_mask(llg_constraints_[batch_idx].get(), &mask_result);
     if (error != 0) {
@@ -110,8 +111,8 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
     if (mask_result.is_stop) {
       // when logits processor decides to stop, we mask all tokens except the EOS token
       mask = std::vector<uint32_t>((params_->config.model.vocab_size - 1) / 32 + 1, 0);
-      uint32_t eos_mask32 = 1 << (params_->config.model.eos_token_id % 32);
-      mask[params_->config.model.eos_token_id / 32] = eos_mask32;
+      uint32_t eos_mask32 = 1 << (eos_token_ % 32);
+      mask[eos_token_ / 32] = eos_mask32;
     } else {
       mask.reserve((params_->config.model.vocab_size - 1) / 32 + 1);
       for (int i = 0; i < (params_->config.model.vocab_size - 1) / 32 + 1; i++) {
