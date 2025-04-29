@@ -9,7 +9,14 @@ Run this script to create the desired ONNX model.
 """
 
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
-from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer, QuantFormat
+from onnxruntime import __version__ as ort_version
+from packaging import version
+
+if version.parse(ort_version) > version.parse("1.21.1"):
+    from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer, QuantFormat
+else:
+    from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer as MatMulNBitsQuantizer, QuantFormat
+
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
 import torch
@@ -367,7 +374,7 @@ class Model:
                 },
                 "eos_token_id": config.eos_token_id,
                 "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id[0] if isinstance(config.eos_token_id, list) else config.eos_token_id,
-                "type": self.model_type[ : self.model_type.find("For")].lower(),
+                "type": self.model_type[ : self.model_type.find("For") if "For" in self.model_type else len(self.model_type)].lower(),
                 "vocab_size": self.vocab_size,
             },
             "search": {
@@ -489,7 +496,7 @@ class Model:
         )
 
     def to_int4(self, model):
-        quant = MatMul4BitsQuantizer(
+        quant = MatMulNBitsQuantizer(
             model=model,
             block_size=self.quant_attrs["int4"]["block_size"],
             is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
@@ -2143,14 +2150,14 @@ class Model:
 
         if softcap_exists:
             # Add final logit softcapping (Div --> Tanh --> Mul)
-            div_name = "/lm_head/Div"
+            div_name = "/lm_head/softcap/Div"
             div_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['softcap']}"]
             self.make_div(div_name, div_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
-            tanh_name = "/lm_head/Tanh"
+            tanh_name = "/lm_head/softcap/Tanh"
             self.make_tanh(tanh_name, f"{div_name}/output_0", dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
-            mul_name = "/lm_head/Mul"
+            mul_name = "/lm_head/softcap/Mul"
             mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['softcap']}"]
             mul_output = "logits"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
@@ -2251,9 +2258,10 @@ class Model:
        hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
        hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
        hf_transformer_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
+       hf_multimodal_final_layernorm = hasattr(model, "language_model") and hasattr(model.language_model, "model") and hasattr(model.language_model.model, "norm") and module == model.language_model.model.norm
        # GGUF names
        gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
-       return hf_norm or hf_final_layernorm or hf_transformer_final_layernorm or gguf_final_norm
+       return hf_norm or hf_final_layernorm or hf_transformer_final_layernorm or hf_multimodal_final_layernorm or gguf_final_norm
 
     def make_preprocessing_nodes(self):
         self.make_attention_mask_reformatting()
@@ -2754,7 +2762,6 @@ class Gemma2Model(GemmaModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
-        self.lm_head_attrs["scale"] = config.final_logit_softcapping if config.final_logit_softcapping is not None else 1.0
         self.is_local = lambda layer_id: layer_id % 2 == 1
 
     def make_layer(self, layer_id, layer):

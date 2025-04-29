@@ -12,14 +12,8 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   std::cout << "Creating config..." << std::endl;
   auto config = OgaConfig::Create(model_path);
 
-  config->ClearProviders();
   std::string provider(execution_provider);
-  if (provider.compare("cpu") != 0) {
-    config->AppendProvider(execution_provider);
-    if (provider.compare("cuda") == 0) {
-      config->SetProviderOption(execution_provider, "enable_cuda_graph", "0");
-    }
-  }
+  append_provider(*config, provider);
 
   std::cout << "Creating model..." << std::endl;
   auto model = OgaModel::Create(*config);
@@ -87,8 +81,8 @@ void CXX_API(const char* model_path, const char* execution_provider) {
 }
 
 int main(int argc, char** argv) {
-  if (argc != 3) {
-    print_usage(argc, argv);
+  std::string model_path, ep;
+  if (!parse_args(argc, argv, model_path, ep)) {
     return -1;
   }
 
@@ -97,7 +91,7 @@ int main(int argc, char** argv) {
   std::cout << "--------------------" << std::endl;
 
   std::cout << "C++ API" << std::endl;
-  CXX_API(argv[1], argv[2]);
+  CXX_API(model_path.c_str(), ep.c_str());
 
   return 0;
 }

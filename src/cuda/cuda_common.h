@@ -42,8 +42,14 @@ struct cuda_stream_holder {
       (void)cudaStreamDestroy(v_);
   }
 
-  operator cudaStream_t() const { return v_; }
-  cudaStream_t get() const { return v_; }
+  operator cudaStream_t() const {
+    assert(v_);
+    return v_;
+  }
+  cudaStream_t get() const {
+    assert(v_);
+    return v_;
+  }
 
  private:
   cudaStream_t v_{};

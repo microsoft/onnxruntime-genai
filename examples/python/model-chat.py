@@ -12,10 +12,11 @@ def main(args):
         first_token_timestamp = 0
 
     config = og.Config(args.model_path)
-    config.clear_providers()
-    if args.execution_provider != "cpu":
-        if args.verbose: print(f"Setting model to {args.execution_provider}")
-        config.append_provider(args.execution_provider)
+    if args.execution_provider != "follow_config":
+        config.clear_providers()
+        if args.execution_provider != "cpu":
+            if args.verbose: print(f"Setting model to {args.execution_provider}")
+            config.append_provider(args.execution_provider)
     model = og.Model(config)
 
     if args.verbose: print("Model loaded")
@@ -55,6 +56,8 @@ def main(args):
             print("Using Chat Template for LLAMA 3, if you are using LLAMA  2 please pass the argument --chat_template '{input} [/INST]')")
         elif model_type.startswith("qwen2"):
             args.chat_template = '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
+        elif model_type == "gemma3_text":
+            args.chat_template = '<start_of_turn>user\n{system_prompt}{input}<end_of_turn>\n<start_of_turn>model\n'
         else:
             raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
 
@@ -81,6 +84,8 @@ def main(args):
             print("Using System Prompt for LLAMA 3, if you are using LLAMA  2 please pass the argument --system_prompt '<s>[INST] <<SYS>>\\n{args.system_prompt}\\n<</SYS>>')")
         elif model_type.startswith("qwen2"):
             system_prompt = f"<|im_start|>system\n{args.system_prompt}<|im_end|>\n"
+        elif model_type == "gemma3_text":
+            system_prompt = f"{args.system_prompt}"
         else:
             system_prompt = args.system_prompt
 
@@ -100,7 +105,7 @@ def main(args):
 
         if args.timings: started_timestamp = time.time()
 
-        prompt = f'{args.chat_template.format(input=text)}'
+        prompt = f'{args.chat_template.format(system_prompt=system_prompt, input=text)}'
         input_tokens = tokenizer.encode(prompt)
         
         generator.append_tokens(input_tokens)
@@ -141,7 +146,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")
     parser.add_argument('-m', '--model_path', type=str, required=True, help='Onnx model folder path (must contain genai_config.json and model.onnx)')
-    parser.add_argument('-e', '--execution_provider', type=str, required=True, choices=["cpu", "cuda", "dml"], help="Execution provider to run ONNX model with")
+    parser.add_argument('-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
     parser.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, help='Max number of tokens to generate including the prompt')
     parser.add_argument('-ds', '--do_sample', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
