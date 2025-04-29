@@ -10,7 +10,7 @@ namespace Generators {
 Logits::Logits(State& state)
     : state_{state},
       shape_{static_cast<int64_t>(state_.params_->BatchBeamSize()), 0, model_.config_->model.vocab_size},
-      type_{model_.session_info_->GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
+      type_{model_.session_info_.GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
 
   if (model_.p_device_inputs_->GetType() == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {

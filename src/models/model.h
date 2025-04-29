@@ -109,7 +109,7 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, 
 };
 
 struct SessionInfo {
-  SessionInfo(OrtSession& session);
+  SessionInfo() = default;
 
   void Add(OrtSession& session);
 
@@ -151,10 +151,9 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   Ort::Allocator& allocator_cpu_{GetDeviceInterface(DeviceType::CPU)->GetAllocator()};
 
-  std::unique_ptr<SessionInfo> session_info_;
+  SessionInfo session_info_;
 
  protected:
-  void InitDeviceAllocator(OrtSession& session);
   void CreateSessionOptions();
 
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,

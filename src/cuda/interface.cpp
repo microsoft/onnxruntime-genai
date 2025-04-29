@@ -70,6 +70,7 @@ struct GpuMemory final : DeviceBuffer {
 
 struct CudaInterfaceImpl final : DeviceInterface {
   CudaInterfaceImpl() {
+    g_stream.Create();
   }
 
   ~CudaInterfaceImpl() {
