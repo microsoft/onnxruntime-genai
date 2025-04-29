@@ -1531,7 +1531,7 @@ class Model:
         if op_type == "MultiHeadAttention":
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
-            self.make_group_query_attention(name, seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
+            self.make_group_query_attention_with_bf16(name, seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
         elif op_type == "SparseAttention":
             self.make_sparse_attention(name, block_row_indices=self.mask_attrs['block_row_indices'], block_col_indices=self.mask_attrs['block_col_indices'], key_total_seq_lens=f"{self.mask_attrs['key_total_seq_lens']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
         else:
@@ -1566,6 +1566,84 @@ class Model:
             softcap=self.attention_attrs["softcap"], do_rotary=self.attention_attrs["use_rope_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
+
+    def make_group_query_attention_with_bf16(self, name, **kwargs):
+        raw_inputs = [
+            kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
+            kwargs.get("past_k", ""), kwargs.get("past_v", ""),
+            kwargs.get("cos_cache", ""), kwargs.get("sin_cache", ""),
+        ]
+
+        int64_inputs = [kwargs.get("seqlens_k", ""), kwargs.get("total_seq_len", "")]
+
+        bf16_inputs = []
+        for inp in raw_inputs:
+            if inp == "": 
+                bf16_inputs.append("") 
+                continue
+            bf16_inp = f"{inp}_bf16"
+            self.make_node(
+                "Cast",
+                inputs=[inp],
+                outputs=[bf16_inp],
+                name=f"{name}/cast_{inp}_to_bf16",
+                to=TensorProto.BFLOAT16
+            )
+            bf16_inputs.append(bf16_inp)
+
+        bf16_inputs[5:5] = int64_inputs
+
+        out_bf16 = f"{name}/output_0_bf16"
+        pk_bf16  = f"{kwargs['present_k']}_bf16" if kwargs.get("present_k") else ""
+        pv_bf16  = f"{kwargs['present_v']}_bf16" if kwargs.get("present_v") else ""
+        bf16_outputs = [out_bf16, pk_bf16, pv_bf16]
+
+        self.make_node(
+            "GroupQueryAttention",
+            inputs=bf16_inputs,
+            outputs=bf16_outputs,
+            name=name,
+            domain="com.microsoft",
+            num_heads=self.num_attn_heads,
+            kv_num_heads=self.num_kv_heads,
+            scale=self.attention_attrs["scale"],
+            local_window_size=self.window_size,
+            softcap=self.attention_attrs["softcap"],
+            do_rotary=self.attention_attrs["use_rope_in_attn"],
+            rotary_interleaved=self.rotemb_attrs["interleaved"],
+        )
+
+        self.make_node(
+            "Cast",
+            inputs=[out_bf16],
+            outputs=[f"{name}/output_0"],
+            name=f"{name}/Cast_output_to_fp32",
+            to=TensorProto.FLOAT,
+        )
+
+        if pk_bf16:
+            self.make_node(
+                "Cast",
+                inputs=[pk_bf16],
+                outputs=[kwargs["present_k"]],
+                name=f"{name}/Cast_present_k_to_fp32",
+                to=TensorProto.FLOAT,
+            )
+
+        if pv_bf16:
+            self.make_node(
+                "Cast",
+                inputs=[pv_bf16],
+                outputs=[kwargs["present_v"]],
+                name=f"{name}/Cast_present_v_to_fp32",
+                to=TensorProto.FLOAT,
+            )
+
+        self.make_value_info(
+            f"{name}/output_0",
+            TensorProto.FLOAT,
+            shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads]
+        )
 
     def make_sparse_attention(self, name, **kwargs):
         inputs = [
