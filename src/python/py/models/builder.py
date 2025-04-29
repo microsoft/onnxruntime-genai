@@ -2207,6 +2207,24 @@ class Model:
 
         return gelu_name
 
+    def make_gelu_bf16(self, layer_id, root_input, activation):
+        gelu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
+        cast_to_bf16 = f"{gelu_name}/cast_to_bf16"
+        gelu_in = f"{cast_to_bf16}/output"
+        gelu_out_bf16 = f"{gelu_name}/gelu_bf16"
+        cast_to_fp32 = f"{gelu_name}/cast_to_fp32"
+        final_output =  f"{gelu_name}/output_0"
+
+        self.make_node("Cast", inputs=[root_input], outputs=[gelu_in], name=cast_to_bf16, to=TensorProto.BFLOAT16)
+        self.make_node(activation, inputs=[gelu_in], outputs=[gelu_out_bf16], name=gelu_name, domain="com.microsoft")
+        
+        self.make_value_info(gelu_out_bf16, TensorProto.BFLOAT16, shape=['batch_size', 'sequence_length', self.intermediate_size])
+
+        self.make_node("Cast",inputs=[gelu_out_bf16], outputs=[final_output], name=cast_to_fp32, to=TensorProto.FLOAT)
+        self.make_value_info(final_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
+
+        return gelu_name
+
     def make_relu(self, layer_id, root_input, activation):
         relu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         output = f"{relu_name}/output_0"
@@ -2227,7 +2245,7 @@ class Model:
         if self.activation in {"silu", "swish", "swiglu"}:
             output_name = self.make_activation_with_mul(layer_id, root_input, activation="Sigmoid", domain=None)
         elif self.activation in {"gelu_new", "gelu_fast", "gelu_pytorch_tanh"}:
-            output_name = self.make_gelu(layer_id, root_input, activation="FastGelu")
+            output_name = self.make_gelu_bf16(layer_id, root_input, activation="FastGelu")
         elif self.activation in {"gelu"}:
             output_name = self.make_gelu(layer_id, root_input, activation="Gelu")
         elif self.activation in {"gegelu", "geglu"}:
