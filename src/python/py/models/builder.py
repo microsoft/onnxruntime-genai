@@ -1171,9 +1171,9 @@ class Model:
             # Slice cos/sin caches from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
             cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach()
-            cos_cache = cos_cache.to(self.to_torch_dtype[self.io_dtype])
+            cos_cache = cos_cache.to(self.to_torch_dtype[TensorProto.BFLOAT16])
             sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach()
-            sin_cache = sin_cache.to(self.to_torch_dtype[self.io_dtype])
+            sin_cache = sin_cache.to(self.to_torch_dtype[TensorProto.BFLOAT16])
 
             # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
             if self.rotemb_attrs["partial_rotary_factor"] != 1.0:
@@ -1196,14 +1196,23 @@ class Model:
         cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
         num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
 
-        inputs = [root_input, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
+        casted_root = f"{name}/root_input_bf16"
+        self.make_node(
+            "Cast",
+            inputs=[root_input],
+            outputs=[casted_root],
+            name=f"{name}/Cast_to_bf16",
+            to=TensorProto.BFLOAT16,
+        )
+
+        inputs = [casted_root, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
         output = f"{name}/output_0"
         self.make_node(
             "RotaryEmbedding", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
             interleaved=self.rotemb_attrs["interleaved"], num_heads=(0 if self.rotemb_attrs["partial_rotary_factor"] == 1.0 else num_heads),  # default is 0 in RotaryEmbedding kernel
             rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"],
         )
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * num_heads])
+        self.make_value_info(output, TensorProto.BFLOAT16, shape=['batch_size', 'sequence_length', self.head_size * num_heads])
 
     def make_rotary_embedding_multi_cache(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
@@ -1569,14 +1578,14 @@ class Model:
 
     def make_group_query_attention_with_bf16(self, name, **kwargs):
         raw_inputs = [
-            kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
+            kwargs["v_path"],
             kwargs.get("past_k", ""), kwargs.get("past_v", ""),
             kwargs.get("cos_cache", ""), kwargs.get("sin_cache", ""),
         ]
 
         int64_inputs = [kwargs.get("seqlens_k", ""), kwargs.get("total_seq_len", "")]
 
-        bf16_inputs = []
+        bf16_inputs = [kwargs["q_path"], kwargs["k_path"]]
         for inp in raw_inputs:
             if inp == "": 
                 bf16_inputs.append("") 
