@@ -291,6 +291,7 @@ class Model:
                 "block_size": int(extra_options.get("int4_block_size", 32)),
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
+                "exclude_nodes": extra_options.get("int4_exclude_nodes", []),  # List of nodes to exclude from quantization
             },
             "use_qdq": extra_options.get("use_qdq", False),           # Use QDQ format
         }
@@ -501,7 +502,7 @@ class Model:
             block_size=self.quant_attrs["int4"]["block_size"],
             is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
-            nodes_to_exclude=[],
+            nodes_to_exclude=self.quant_attrs["int4"]["exclude_nodes"],
             quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
             op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
         )
@@ -3298,6 +3299,12 @@ def check_extra_options(kv_pairs):
         for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
             op_types_to_quantize += (op_type, )
         kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
+    
+    if "int4_exclude_nodes" in kv_pairs:
+        nodes_to_exclude = []
+        for node in kv_pairs["int4_exclude_nodes"].split(","):
+            nodes_to_exclude.append(node)
+        kv_pairs["int4_exclude_nodes"] = nodes_to_exclude
 
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -3509,6 +3516,7 @@ def get_args():
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
                     Use this option when you want to quantize specific ops.
                     Separate the op types with a '/' when passing them here (e.g. int4_op_types_to_quantize=MatMul/Gather)
+                int4_exclude_nodes = Specify nodes to exclude from int4 quantization. 
                 num_hidden_layers = Manually specify the number of layers in your ONNX model (for unit testing purposes).
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
