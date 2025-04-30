@@ -23,9 +23,8 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
 
 void Engine::Step() {
   if (auto scheduled_requests = scheduler_->Schedule()) {
-    std::cout << "Scheduled requests: " << scheduled_requests.size() << std::endl;
     model_executor_->Decode(scheduled_requests);
-    std::cout << "Model execution completed." << std::endl;
+    scheduled_requests->GenerateNextTokens();
   }
 }
 

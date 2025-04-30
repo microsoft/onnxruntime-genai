@@ -38,6 +38,9 @@ struct State {
 
   void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
 
+  void DumpInputs();
+  void DumpOutputs();
+
   const Model& model_;
 
   std::shared_ptr<const GeneratorParams> params_;

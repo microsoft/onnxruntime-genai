@@ -5,6 +5,7 @@
 #include <atomic>
 #include <memory>
 #include "span.h"
+#include <iostream>
 
 namespace Ort {
 struct Allocator;
@@ -53,6 +54,7 @@ struct DeviceSpan {
 
   // Return the CPU accessible memory, allocating if necessary (note, to get the current device memory on CPU, use 'CopyDeviceToCpu' instead)
   std::span<T> CpuSpan() {
+    std::cout << "Len for cpu buffer: " << length_ << std::endl;
     p_device_memory_->AllocateCpu();
     return std::span<T>{reinterpret_cast<T*>(p_device_memory_->p_cpu_) + begin_, length_};
   }

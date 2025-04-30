@@ -3,6 +3,8 @@ import argparse
 import time
 import json
 
+og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
+
 def main(args):
     if args.verbose: print("Loading model...")
     if args.timings:
@@ -28,7 +30,7 @@ def main(args):
     # Set the max length to something sensible by default, unless it is specified by the user,
     # since otherwise it will be set to the entire context length
     if 'max_length' not in search_options:
-        search_options['max_length'] = 2048
+        search_options['max_length'] = 256
 
     # Keep asking for input prompts in a loop
     while True:
@@ -67,6 +69,8 @@ def main(args):
                     if first:
                         first_token_timestamp = time.time()
                         first = False
+
+                exit()
 
                 new_token = generator.get_next_tokens()[0]
                 print(tokenizer_stream.decode(new_token), end='', flush=True)

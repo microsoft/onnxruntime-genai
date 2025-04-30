@@ -8,6 +8,7 @@
 #include "search_cuda.h"
 #include "kernels.h"
 #include <cstdarg>
+#include <iostream>
 
 #if defined(_WIN32) || defined(_WIN64)
 #define strcasecmp _stricmp
@@ -43,6 +44,7 @@ struct GpuMemory final : DeviceBuffer {
   const char* GetType() const override { return device_label; }
 
   void AllocateCpu() override {
+    std::cout << "Allocating CPU memory of size: " << size_in_bytes_ << std::endl;
     if (!p_cpu_)
       ::cudaHostAlloc(&p_cpu_, size_in_bytes_, 0);
   }

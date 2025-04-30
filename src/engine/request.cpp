@@ -91,7 +91,6 @@ bool Request::HasUnseenTokens() const {
 DeviceSpan<int32_t> Request::UnprocessedTokens() {
   auto sequence = search_->GetSequence(0);
   auto unprocessed_tokens = sequence.subspan(processed_sequence_length_, sequence.size() - processed_sequence_length_);
-  processed_sequence_length_ = sequence.size();
   return unprocessed_tokens;
 }
 
@@ -99,7 +98,14 @@ bool Request::IsDone() const {
   return status_ == RequestStatus::Completed;
 }
 
+bool Request::IsPrefill() const {
+  return is_prefill_;
+}
+
 void Request::GenerateNextTokens(DeviceSpan<float> logits) {
+  processed_sequence_length_ = search_->GetSequence(0).size();
+  is_prefill_ = false;
+
   search_->SetLogits(logits);
   auto& search_params = search_->params_->search;
   search_->ApplyMinLength(search_params.min_length);

@@ -16,10 +16,27 @@ StaticBatchDecoderIO::StaticBatchDecoderIO(std::shared_ptr<DecoderOnly_Model> mo
   std::cout << "Input IDs prepared." << std::endl;
   PrepareAttentionMask(model, scheduled_requests);
   std::cout << "Attention mask prepared." << std::endl;
-  PreparePositionIds(model, scheduled_requests);
-  std::cout << "Position IDs prepared." << std::endl;
+  // PreparePositionIds(model, scheduled_requests);
+  // std::cout << "Position IDs prepared." << std::endl;
   PrepareLogits(model, scheduled_requests);
   std::cout << "Logits prepared." << std::endl;
+
+  auto cache = cache_manager->Cache();
+  for (size_t i = 0; i < cache->input_names_.size(); ++i) {
+    input_names_.push_back(cache->input_names_[i]);
+    inputs_.push_back(cache->inputs_[i]);
+  }
+
+  for (size_t i = 0; i < cache->output_names_.size(); ++i) {
+    output_names_.push_back(cache->output_names_[i]);
+    outputs_.push_back(cache->outputs_[i]);
+  }
+
+  std::cout << "inputs_ size: " << inputs_.size() << std::endl;
+  std::cout << "input_names_ size: " << input_names_.size() << std::endl;
+  std::cout << "owned_inputs_ size: " << owned_inputs_.size() << std::endl;
+  std::cout << "outputs_ size: " << outputs_.size() << std::endl;
+  std::cout << "output_names_ size: " << output_names_.size() << std::endl;
 }
 
 void StaticBatchDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
@@ -33,9 +50,9 @@ void StaticBatchDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> mo
   const int64_t max_sequence_length = (*request_with_max_sequence_length)->UnprocessedTokens().size();
   const int64_t batch_size = scheduled_requests.size();
   const std::vector<int64_t> input_ids_shape = {batch_size, max_sequence_length};
-  auto input_ids_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int32_t>);
+  auto input_ids_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
   input_ids_tensor->CreateTensor(input_ids_shape);
-  auto device_span = input_ids_tensor->GetDeviceSpan<int32_t>();
+  auto device_span = input_ids_tensor->GetDeviceSpan<int64_t>();
   auto cpu_span = device_span.CpuSpan();
 
   for (size_t i = 0; i < batch_size; ++i) {
@@ -63,10 +80,12 @@ void StaticBatchDecoderIO::PrepareAttentionMask(std::shared_ptr<DecoderOnly_Mode
 
   const int64_t max_sequence_length = (*request_with_max_sequence_length)->UnprocessedTokens().size();
   const int64_t batch_size = scheduled_requests.size();
+  std::cout << "Batch size: " << batch_size << std::endl;
+  std::cout << "Max sequence length: " << max_sequence_length << std::endl;
   const std::vector<int64_t> attention_mask_shape = {batch_size, max_sequence_length};
-  auto attention_mask_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int32_t>);
+  auto attention_mask_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
   attention_mask_tensor->CreateTensor(attention_mask_shape);
-  auto device_span = attention_mask_tensor->GetDeviceSpan<int32_t>();
+  auto device_span = attention_mask_tensor->GetDeviceSpan<int64_t>();
   auto cpu_span = device_span.CpuSpan();
 
   for (size_t i = 0; i < batch_size; ++i) {
@@ -131,11 +150,44 @@ void StaticBatchDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> mode
   const int64_t max_sequence_length = (*request_with_max_sequence_length)->UnprocessedTokens().size();
   const int64_t batch_size = scheduled_requests.size();
   const std::vector<int64_t> logits_shape = {batch_size, max_sequence_length, model->config_->model.vocab_size};
-  auto logits_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int32_t>);
+  logits_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<Ort::Float16_t>);
   logits_->CreateTensor(logits_shape);
 
-  input_names_.push_back(model->config_->model.decoder.outputs.logits.c_str());
-  inputs_.push_back(logits_->GetOrtTensor());
+  output_names_.push_back(model->config_->model.decoder.outputs.logits.c_str());
+  outputs_.push_back(logits_->GetOrtTensor());
+}
+
+std::vector<DeviceSpan<float>> StaticBatchDecoderIO::ProcessLogits() {
+  const std::vector<int64_t> logits_shape{scheduled_requests_.size(), model->config_->model.vocab_size};
+  std::vector<int64_t> valid_token_indices;
+  for (auto& request : scheduled_requests_) {
+    if (request->IsPrefill()) {
+      valid_token_indices.push_back(request->CurrentSequenceLength() - 1);
+    } else {
+      valid_token_indices.push_back(0);
+    }
+  }
+
+  // [batch_size, max_sequence_length, vocab_size]
+  const auto logits_shape = logits_->GetShape();
+  const int64_t batch_size = logits_shape[0],
+                max_sequence_length = logits_shape[1],
+                vocab_size = logits_shape[2];
+  const int64_t element_size = static_cast<int64_t>(SizeOf(logits_->GetType()));
+
+  auto logits_bytes = logits_->GetByteSpan();
+  std::vector<decltype<logits_bytes>> logits_bytes_vector;
+  for (size_t i = 0; i < valid_token_indices.size(); ++i) {
+    auto logits_of_last_token = logits_bytes.subspan((i * max_sequence_length * vocab_size + valid_token_indices[i] * vocab_size) * element_size,
+                                                     vocab_size);
+    logits_bytes_vector.push_back(logits_of_last_token);
+  }
+
+  // Create an std::vector<DeviceSpan<T>> to hold all the raw logits
+  std::vector<DeviceSpan<float>> logits_vector;
+
+  // Then copy over the logits to fp32 if T is not fp32
+  logits_fp32_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<float>);
 }
 
 VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
@@ -160,6 +212,7 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests) {
   std::cout << "Decoder state created" << std::endl;
 
   auto run_options = scheduled_requests.RunOptions();
+  decoder_state->DumpInputs();
   model_->session_decoder_->Run(run_options.get(),
                                 decoder_state->input_names_.data(),
                                 decoder_state->inputs_.data(),
@@ -167,6 +220,7 @@ void SimpleDecoder::Decode(ScheduledRequests& scheduled_requests) {
                                 decoder_state->output_names_.data(),
                                 decoder_state->outputs_.data(),
                                 decoder_state->output_names_.size());
+  decoder_state->DumpOutputs();
 
   scheduled_requests.AddDecoderState(std::move(decoder_state));
 }

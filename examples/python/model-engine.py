@@ -6,6 +6,8 @@ import argparse
 import onnxruntime_genai as og
 
 
+# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True, model_output_shapes=True)
+
 class ClientRequest:
     def __init__(self, prompt: str, model: og.Model, tokenizer: og.Tokenizer):
         self.prompt = prompt
@@ -71,9 +73,12 @@ class Engine:
         self.engine = og.Engine(self.model)
 
     def run(self):
+        i = 0
         while self.engine.has_pending_requests():
             self.engine.step()
-            exit()
+            # i += 1
+            # if i == 2:
+            #     exit()
 
 
 def run(args: argparse.Namespace):
