@@ -66,7 +66,6 @@ steps:
   - template: compliant/mac-esrp-archive-step.yml
     parameters:
       FolderPath: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package'
-      DisplayName: 'ESRP - Sign MacOS C/C++ Package'
       Pattern: '*.zip'
 
   - bash: |
