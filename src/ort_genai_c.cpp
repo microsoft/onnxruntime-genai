@@ -11,6 +11,7 @@
 #include "runtime_settings.h"
 #include "search.h"
 #include "smartptrs.h"
+#include "models/sd.h"
 
 namespace Generators {
 
@@ -769,6 +770,70 @@ OgaResult* OgaUnloadAdapter(OgaAdapters* adapters, const char* adapter_name) {
 OgaResult* OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters, const char* adapter_name) {
   OGA_TRY
   generator->state_->SetActiveAdapter(adapters, adapter_name);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaSelenaTest(OgaTensor** result, const int32_t *sequences_data, size_t sequences_size, const char* model_path) {
+  OGA_TRY
+  //  Generators::StableDiffusion_....
+
+  // create the OrtSession
+  Ort::InitApi();
+  std::unique_ptr<OrtEnv> p_env = OrtEnv::Create(ORT_LOGGING_LEVEL_WARNING, "test");
+
+  std::unique_ptr<OrtSessionOptions> session_options = OrtSessionOptions::Create();
+
+  std::unique_ptr<OrtSession> p_session_ = OrtSession::Create(
+      *p_env,
+      model_path,
+      session_options.get());
+
+  std::unique_ptr<OrtMemoryInfo> p_memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
+  auto allocator = Ort::Allocator::Create(*p_session_, *p_memory_info);
+
+  // enable_cuda_graph is false in first version
+  // create input_ids tensor
+  int32_t batch_size = 1;
+  int32_t max_sequence_length = 77;
+  std::vector<int64_t> input_ids_shape{batch_size, max_sequence_length};
+
+  std::unique_ptr<OrtValue> p_input_tensor = OrtValue::CreateTensor<int32_t>(*allocator, std::span{input_ids_shape});
+  int32_t* input_ids_data = p_input_tensor->GetTensorMutableData<int32_t>();
+
+
+  // if the length of input_ids is larger than max_sequence_length, we need to truncate it
+  if (sequences_size > max_sequence_length) {
+    std::copy(sequences_data, sequences_data + max_sequence_length, input_ids_data);
+  }
+
+  std::copy(sequences_data, sequences_data + sequences_size, input_ids_data);
+
+  // if the length of input_ids is smaller than max_sequence_length, we need to pad it
+  if (sequences_size < max_sequence_length) {
+    std::fill(input_ids_data + sequences_size, input_ids_data + max_sequence_length, 0);
+  }
+  // Bind input tensors and run inference
+  auto io_binding = OrtIoBinding::Create(*p_session_);
+  io_binding->BindInput("input_ids", *p_input_tensor);
+
+  // Bind output text_embeddings tensor
+  int32_t hidden_size = 1024;
+  std::vector<int64_t> output_embeddings_shape{batch_size, max_sequence_length, hidden_size};
+  std::unique_ptr<OrtValue> p_output_tensor = OrtValue::CreateTensor<float>(*allocator, std::span{output_embeddings_shape});
+  io_binding->BindOutput("text_embeddings", *p_output_tensor);
+
+  std::unique_ptr<OrtRunOptions> run_options = OrtRunOptions::Create();
+
+  io_binding->SynchronizeInputs();
+  p_session_->Run(run_options.get(), *io_binding);
+  io_binding->SynchronizeOutputs();
+
+  // Get output tensor
+  auto output_tensor = io_binding->GetOutputValues();
+
+  auto output_tensor_data = output_tensor[0]->GetTensorMutableData<float>();
+
   return nullptr;
   OGA_CATCH
 }
