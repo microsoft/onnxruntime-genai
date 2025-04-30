@@ -341,7 +341,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 #endif
     } else {
       // For providers that go through the extensible AppendExecutionProvider API:
-
       if (provider_options.name == "QNN") {
         session_options.AddConfigEntry("ep.share_ep_contexts", "1");
         // TODO set device_type_ in a less hacky way.
@@ -408,7 +407,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "dml", "webgpu", "qnn", "OpenVINO (Not used, see above)"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "dml", "WebGPU", "qnn", "OpenVINO (Not used, see above)"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
