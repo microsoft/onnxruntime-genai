@@ -54,7 +54,7 @@ steps:
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
       tar -xvzf $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package/onnxruntime-genai-*.tar.gz -C $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
-      zip -r $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package/onnxruntime-genai-$(ep)-$(arch)-$(build_config).zip $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package/onnxruntime-genai-*
+      find $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec zip -r {}.zip {} \;
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
       rm -rf $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package/onnxruntime-genai-*.tar.gz
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
@@ -72,7 +72,7 @@ steps:
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
       unzip $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package/onnxruntime-genai-*.zip -d $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
-      tar -czvf $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package/onnxruntime-genai-$(ep)-$(arch)-$(build_config).tar.gz $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package onnxruntime-genai-*
+      find $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec tar -czvf {}.tar.gz {} \;
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
       rm -rf $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package/onnxruntime-genai-*.zip
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
