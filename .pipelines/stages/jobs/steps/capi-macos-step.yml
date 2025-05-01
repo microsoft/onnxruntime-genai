@@ -70,7 +70,7 @@ steps:
 
   - bash: |
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
-      unzip $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package/onnxruntime-genai-*.zip -d $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+      find . '*.zip' -exec unzip {} \;
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
       find $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec tar -czvf {}.tar.gz {} \;
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
@@ -79,7 +79,7 @@ steps:
       find $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec rm -rf {} +
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
     displayName: 'Convert from .zip to .tar.gz'
-    workingDirectory: '$(Build.Repository.LocalPath)'
+    workingDirectory: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
