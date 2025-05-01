@@ -770,7 +770,7 @@ bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
           throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
         }
       }
-    } else if (provider_options.name == "dml") {
+    } else if (provider_options.name == "DML") {
       return true;
     } else if (provider_options.name == "NvTensorRtRtx") {
       return true;
