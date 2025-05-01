@@ -3304,7 +3304,7 @@ def check_extra_options(kv_pairs):
         nodes_to_exclude = []
         for node in kv_pairs["int4_nodes_to_exclude"].split(","):
             nodes_to_exclude.append(node)
-        kv_pairs["int4_exclude_nodes"] = nodes_to_exclude
+        kv_pairs["int4_nodes_to_exclude"] = nodes_to_exclude
 
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
