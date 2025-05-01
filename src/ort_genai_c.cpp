@@ -776,6 +776,18 @@ OgaResult* OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters, c
 
 OgaResult* OgaSelenaTest(OgaTensor** result, const int32_t *sequences_data, size_t sequences_size, const char* model_path) {
   OGA_TRY
+
+  // The following are params (currently hardcoded) for the model
+  int32_t batch_size = 1;
+  int32_t max_sequence_length = 77;
+  int32_t hidden_size = 1024;
+  int32_t unet_channels = 4; 
+  int32_t unet_height = 512;
+  int32_t unet_width = 512;
+
+  float init_noise_sigma = 1.0;
+
+
   //  Generators::StableDiffusion_....
 
   // create the OrtSession
@@ -794,8 +806,6 @@ OgaResult* OgaSelenaTest(OgaTensor** result, const int32_t *sequences_data, size
 
   // enable_cuda_graph is false in first version
   // create input_ids tensor
-  int32_t batch_size = 1;
-  int32_t max_sequence_length = 77;
   std::vector<int64_t> input_ids_shape{batch_size, max_sequence_length};
 
   std::unique_ptr<OrtValue> p_input_tensor = OrtValue::CreateTensor<int32_t>(*allocator, std::span{input_ids_shape});
@@ -818,7 +828,7 @@ OgaResult* OgaSelenaTest(OgaTensor** result, const int32_t *sequences_data, size
   io_binding->BindInput("input_ids", *p_input_tensor);
 
   // Bind output text_embeddings tensor
-  int32_t hidden_size = 1024;
+
   std::vector<int64_t> output_embeddings_shape{batch_size, max_sequence_length, hidden_size};
   std::unique_ptr<OrtValue> p_output_tensor = OrtValue::CreateTensor<float>(*allocator, std::span{output_embeddings_shape});
   io_binding->BindOutput("text_embeddings", *p_output_tensor);
@@ -829,10 +839,33 @@ OgaResult* OgaSelenaTest(OgaTensor** result, const int32_t *sequences_data, size
   p_session_->Run(run_options.get(), *io_binding);
   io_binding->SynchronizeOutputs();
 
-  // Get output tensor
-  auto output_tensor = io_binding->GetOutputValues();
+  // Get output text_embeddings tensor
+  auto text_embeddings_tensor = io_binding->GetOutputValues();
 
-  auto output_tensor_data = output_tensor[0]->GetTensorMutableData<float>();
+  auto text_embeddings_tensor_data = text_embeddings_tensor[0]->GetTensorMutableData<float>();
+
+  // Create a new OrtValue for the latents tensor
+  int64_t latent_height = unet_height / 8;  
+  int64_t latent_width = unet_width / 8;
+  std::vector<int64_t> latents_shape{batch_size, unet_channels, latent_height, latent_width};
+  //latents = torch.randn(latents_shape, device=self.device, dtype=latents_dtype, generator=self.generator)
+  // Create the tensor of latentss
+
+  std::unique_ptr<OrtValue> latents_tensor = OrtValue::CreateTensor<float>(*allocator, std::span{latents_shape});
+  float* latents_data = latents_tensor->GetTensorMutableData<float>();
+
+  // Create a random number generator and normal distribution
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::normal_distribution<float> dist(0.0, 1.0);
+
+  // Fill the latents_tensor_data with random values
+
+  for (int i = 0; i < batch_size * unet_channels * latent_height * latent_width; i++) {
+    // Scale the initial noise by the standard deviation required by the scheduler
+    latents_data[i] = dist(gen) * init_noise_sigma;
+  }
+  
 
   return nullptr;
   OGA_CATCH
