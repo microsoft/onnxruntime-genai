@@ -311,8 +311,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
       Ort::ThrowOnError(Ort::api->UpdateROCMProviderOptions(&ort_provider_options, keys.data(), values.data(), keys.size()));
       session_options.AppendExecutionProvider_ROCM(ort_provider_options);
+    } else if (provider_options.name == "DML") {
 #if USE_DML
-    } else if (provider_options.name == "dml") {
       if (!GetDmlInterface()) {
         LUID device_luid{};
         LUID* p_device_luid{};
@@ -338,6 +338,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
       if (is_primary_session_options)
         p_device = GetDeviceInterface(DeviceType::DML);  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
+#else
+      throw std::runtime_error("DML provider requested, but the installed GenAI has not been built with DML support");
 #endif
     } else {
       // For providers that go through the extensible AppendExecutionProvider API:

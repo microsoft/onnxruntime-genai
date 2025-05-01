@@ -65,6 +65,8 @@ struct ProviderOptionsArray_Element : JSON::Element {
         v.name = "QNN";
       } else if (v.name == "webgpu") {
         v.name = "WebGPU";
+      } else if (v.name == "dml") {
+        v.name = "DML";
       }
     }
   }
