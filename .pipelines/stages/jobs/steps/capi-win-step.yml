@@ -59,8 +59,9 @@ steps:
     # choco install llvm --yes
     # $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
     # Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
-    $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/LLVM-17.0.6-win64.exe"
-    $installerPath = "$(Agent.TempDirectory)\LLVM-17.0.6-win64.exe"
+    # $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/LLVM-17.0.6-win64.exe"
+    $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-woa64.exe"
+    $installerPath = "$(Agent.TempDirectory)\LLVM-18.1.8-woa64.exe"
     Write-Host "Downloading LLVM..."
     Invoke-WebRequest -Uri $llvmUrl -OutFile $installerPath
     Write-Host "Installing LLVM silently..."
