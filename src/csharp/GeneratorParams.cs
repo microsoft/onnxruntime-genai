@@ -46,7 +46,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public void SetGuidance(string type, string data)
         {
-            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetInputs(_generatorParamsHandle, StringUtils.ToUtf8(type), StringUtils.ToUtf8(data)));
+            Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetGuidance(_generatorParamsHandle, StringUtils.ToUtf8(type), StringUtils.ToUtf8(data)));
         }
 
         ~GeneratorParams()
