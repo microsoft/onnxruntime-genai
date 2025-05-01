@@ -3302,7 +3302,7 @@ def check_extra_options(kv_pairs):
     
     if "int4_nodes_to_exclude" in kv_pairs:
         nodes_to_exclude = []
-        for node in kv_pairs["int4_exclude_nodes"].split(","):
+        for node in kv_pairs["int4_nodes_to_exclude"].split(","):
             nodes_to_exclude.append(node)
         kv_pairs["int4_exclude_nodes"] = nodes_to_exclude
 
