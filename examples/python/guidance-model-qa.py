@@ -1,7 +1,6 @@
 ﻿import onnxruntime_genai as og
 import argparse
 import time
-import numpy as np
 import json
 
 def get_tools_list(input_tools):
@@ -37,8 +36,7 @@ def get_lark_grammar(input_tools):
     tools_list = get_tools_list(input_tools)
     prompt_tool_input = create_prompt_tool_input(tools_list)
     if len(tools_list) == 1:
-        # output = "start: TEXT | fun_call\\nTEXT: /[^{](.|\\n)*/\\nfun_call: <|tool_call|> %json " + json.dumps(tools_list[0]) 
-        # output2 = ("start: TEXT | fun_call\n" "TEXT: /[^{](.|\\n)*/\n" " fun_call: <|tool_call|> %json " + json.dumps(tools_list[0]))
+        # output = ("start: TEXT | fun_call\n" "TEXT: /[^{](.|\\n)*/\n" " fun_call: <|tool_call|> %json " + json.dumps(tools_list[0]))
         output = ("start: TEXT | fun_call\n" "TEXT: /[^{](.|\\n)*/\n" " fun_call: <|tool_call|> %json " + json.dumps(convert_tool_to_grammar_input(tools_list[0])))
         return prompt_tool_input, output
     else:
@@ -98,21 +96,9 @@ def main(args):
 
     if args.verbose: print(search_options)
 
-    # Get model type
-    model_type = None
-    if hasattr(model, "type"):
-        model_type = model.type
-    else:
-        import json, os
-
-        with open(os.path.join(args.model_path, "genai_config.json"), "r") as f:
-            genai_config = json.load(f)
-            model_type = genai_config["model"]["type"]
-    
     system_prompt = args.system_prompt
     prompt_tool_input = ""
     guidance_input = ""
-    guidance_input2 = ""
     if args.guidance_type:
         if not args.guidance_info:
             raise ValueError("Guidance information is required if guidance type is provided")
@@ -127,20 +113,8 @@ def main(args):
         else:
             raise ValueError("Guidance Type can only be [json_schema, regex, or lark_grammar]")
 
-
-
-
-    # system_prompt = "You are a helpful AI agent. You can provide normal text as an output or sometime a tool function which you have been provided. If and only if the output is a tool function, only give function name and arguments starting with curly braces and nothing else. Do not create any function names which you have not been provided here. <|tool|>[ {'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}]<|/tool|>"
-    # system_prompt = "You are a helpful AI agent. You can provide normal text as an output or tool function details. There is only 1 available tool function to you, which is called get_weather and it has only 1 parameter which is the city for which I want the weather."
-    # system_prompt = "You are a helpful AI agent. You can provide normal text as an output or sometime a tool function which you have been providied. There is only 1 available tool to you, which is called get_weather and it is used to get weather of a particular city. The tool has only 1 parameter which is the city for which I want the weather. <|tool|>[ {'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}]<|/tool|>"
-    # system_prompt = "You are a helpful AI agent. You can provide normal text as an output or sometime a tool function which you have been providied. There is only 1 available tool to you, which is called get_weather and it is used to get weather of a particular city. The tool has only 1 parameter which is the city for which I want the weather."
-    # tool_function_info = "{'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}"
-
-    # system_tokens = tokenizer.encode(system_prompt)
-
     # Keep asking for input prompts in a loop
     while True:
-        # print(args.guidance_type, guidance_input)
         if args.input_prompt:
             text = args.input_prompt
         else:
