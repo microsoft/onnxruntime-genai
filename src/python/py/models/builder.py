@@ -291,7 +291,7 @@ class Model:
                 "block_size": int(extra_options.get("int4_block_size", 32)),
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
-                "exclude_nodes": extra_options.get("int4_exclude_nodes", []),  # List of nodes to exclude from quantization
+                "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),  # List of nodes to exclude from quantization
             },
             "use_qdq": extra_options.get("use_qdq", False),           # Use QDQ format
         }
