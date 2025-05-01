@@ -502,7 +502,7 @@ class Model:
             block_size=self.quant_attrs["int4"]["block_size"],
             is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
-            nodes_to_exclude=self.quant_attrs["int4"]["exclude_nodes"],
+            nodes_to_exclude=self.quant_attrs["int4"]["nodes_to_exclude"],
             quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
             op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
         )
