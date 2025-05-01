@@ -208,9 +208,8 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
   // For numerical stability, we use 0.9999999f not 1.0f to avoid zero probabilities.
   std::uniform_real_distribution<float> dis(0, 0.999999f);
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
-    if (PadIfAlreadyEOS(batch_id)) {
+    if (PadIfAlreadyEOS(batch_id))
       continue;
-    }
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     // Find the top K scores
     std::vector<int> indices(scores.size());
