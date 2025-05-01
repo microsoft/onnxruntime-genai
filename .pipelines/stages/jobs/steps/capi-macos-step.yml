@@ -51,6 +51,7 @@ steps:
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   - bash: |
+      set -e -x
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
       tar -xvzf onnxruntime-genai-*.tar.gz -C .
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
@@ -69,6 +70,7 @@ steps:
       Pattern: '*.zip'
 
   - bash: |
+      set -e -x
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
       find . '*.zip' -exec unzip {} \;
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
