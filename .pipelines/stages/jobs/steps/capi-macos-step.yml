@@ -78,8 +78,8 @@ steps:
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
       find $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec rm -rf {} +
       ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
-    displayName: 'List all files in the package for debugging'
-    workingDirectory: 'Convert from .zip to .tar.gz'
+    displayName: 'Convert from .zip to .tar.gz'
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
