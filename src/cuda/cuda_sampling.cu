@@ -526,7 +526,7 @@ void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out,
     GetTopKSubset(data, stream, scores_in, data->scores_sorted.get(), data->indices_sorted.get(), vocab_size, batch_size, k, temperature);
   } else {
     DispatchBlockwiseSoftmaxForward<false>(stream, data->scores_buffer.get(), const_cast<const float*>(scores_in), vocab_size, vocab_size, vocab_size, batch_size, temperature);
-    LaunchSort(data, stream, scores_in, data->scores_sorted.get(), data->indices_sorted.get(), vocab_size, batch_size);
+    LaunchSort(data, stream, data->scores_buffer.get(), data->scores_sorted.get(), data->indices_sorted.get(), vocab_size, batch_size);
   }
   // Sample kernel
   int sample_range = k > 0 ? k : vocab_size;
