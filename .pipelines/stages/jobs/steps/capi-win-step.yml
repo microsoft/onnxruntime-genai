@@ -76,6 +76,7 @@ steps:
     Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
     # Confirm clang installed
     clang --version
+    python -m pip install wheel
   displayName: 'Install LLVM'
   condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
