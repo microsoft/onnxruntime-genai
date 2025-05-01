@@ -57,9 +57,26 @@ steps:
 
 - powershell: |
     # choco install llvm --yes
-    $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+    # $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
+    # Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+    $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/LLVM-17.0.6-win64.exe"
+    $installerPath = "$(Agent.TempDirectory)\LLVM-17.0.6-win64.exe"
+    Write-Host "Downloading LLVM..."
+    Invoke-WebRequest -Uri $llvmUrl -OutFile $installerPath
+    Write-Host "Installing LLVM silently..."
+    Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
+    # Add LLVM to PATH
+    $llvmBin = "C:\Program Files\LLVM\bin"
+    if (!(Test-Path $llvmBin)) {
+      Write-Error "LLVM install failed or path not found: $llvmBin"
+      exit 1
+    }
+    $env:PATH = "$llvmBin;$env:PATH"
     Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+    # Confirm clang installed
+    clang --version
   displayName: 'Install LLVM'
+  condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
