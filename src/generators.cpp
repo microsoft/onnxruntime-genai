@@ -208,7 +208,7 @@ std::string to_string(DeviceType device_type) {
     case DeviceType::DML:
       return "DirectML";
     case DeviceType::WEBGPU:
-      return "WebGpu";
+      return "WebGPU";
     case DeviceType::QNN:
       return "QnnWithSharedMemory";
     case DeviceType::OpenVINO:
