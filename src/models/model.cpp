@@ -198,17 +198,7 @@ std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
 
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   OrtxPtr<OrtxTokenId2DArray> ids;
-  CheckResult(OrtxTokenize(tokenizer_, &text, 1, ids.Address()));
-
-  const extTokenId_t* tokens;
-  size_t count;
-  CheckResult(OrtxTokenId2DArrayGetItem(ids, 0, &tokens, &count));
-  return {tokens, tokens + count};
-}
-
-std::vector<int32_t> Tokenizer::EncodeWithOptions(const char* text, bool add_special_tokens) const {
-  OrtxPtr<OrtxTokenId2DArray> ids;
-  CheckResult(OrtxTokenizeWithOptions(tokenizer_, &text, 1, ids.Address(), add_special_tokens));
+  CheckResult(OrtxTokenizeWithOptions(tokenizer_, &text, 1, ids.Address(), false));
 
   const extTokenId_t* tokens;
   size_t count;

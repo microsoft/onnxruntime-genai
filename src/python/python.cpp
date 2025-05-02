@@ -351,11 +351,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         t.Encode(s.c_str(), *sequences);
         return ToPython(sequences->Get(0));
       })
-      .def("encode_with_options", [](const OgaTokenizer& t, std::string s, bool add_special_tokens) -> pybind11::array_t<int32_t> {
-        auto sequences = OgaSequences::Create();
-        t.EncodeWithOptions(s.c_str(), *sequences, add_special_tokens);
-        return ToPython(sequences->Get(0));
-      })
       .def("to_token_id", &OgaTokenizer::ToTokenId)
       .def("decode", [](const OgaTokenizer& t, pybind11::array_t<int32_t> tokens) -> std::string { return t.Decode(ToSpan(tokens)).p_; })
       .def("apply_chat_template", [](const OgaTokenizer& t, const char* template_str, const char* messages, bool add_generation_prompt) -> std::string { return t.ApplyChatTemplate(template_str, messages, add_generation_prompt).p_; }, pybind11::arg("template_str") = nullptr, pybind11::arg("messages"), pybind11::arg("add_generation_prompt"))
