@@ -65,6 +65,8 @@ struct ProviderOptionsArray_Element : JSON::Element {
         v.name = "QNN";
       } else if (v.name == "webgpu") {
         v.name = "WebGPU";
+      } else if (v.name == "dml") {
+        v.name = "DML";
       }
     }
   }
@@ -768,7 +770,7 @@ bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
           throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
         }
       }
-    } else if (provider_options.name == "dml") {
+    } else if (provider_options.name == "DML") {
       return true;
     } else if (provider_options.name == "NvTensorRtRtx") {
       return true;
