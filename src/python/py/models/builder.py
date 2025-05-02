@@ -797,28 +797,6 @@ class Model:
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
-    def make_matmul_float2(self, matmul, name, root_input, **kwargs):
-        weight = name[1:].replace("/", ".") + ".weight"
-
-        last_dim = matmul.weight.shape[0]
-        first_dim = matmul.weight.shape[1]
-        output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
-
-        cast_input = f"{root_input}/Cast"
-        cast_output = f"{output}/Cast"
-
-        if kwargs.get("first_cast", True):
-            self.make_node("Cast", inputs=[root_input], outputs=[cast_input], name=f"{name}/Cast_Input", to=TensorProto.BFLOAT16)
-            self.make_value_info(cast_input, TensorProto.BFLOAT16, shape=["batch_size", "sequence_length", first_dim])
-
-        self.make_node("MatMul", inputs=[cast_input, weight], outputs=[cast_output], name=name)
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', last_dim])
-
-        self.make_node("Cast", inputs=[cast_output], outputs=[output], name=f"{name}/Cast_Output", to=self.io_dtype)
-        self.make_value_info(cast_output, TensorProto.BFLOAT16, shape=["batch_size", "sequence_length", last_dim])
-
-        return name
-
     def make_matmul_float(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
         self.make_external_tensor(matmul.weight.detach().T.to( self.to_torch_dtype[self.io_dtype]).contiguous(), weight)
@@ -1097,44 +1075,63 @@ class Model:
         self.layernorm_attrs["root_input"] = layernorm_attrs_value
         self.layernorm_attrs["skip_input"] = layernorm_attrs_value
 
-    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
+    def make_layernorm_default(self, layer_id, layernorm, skip, simple, location):
+        root_input = self.layernorm_attrs["root_input"]
+        skip_input = self.layernorm_attrs["skip_input"]
+
+        weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
+        self.make_external_tensor(layernorm.weight.detach().to(self.to_torch_dtype[self.io_dtype]).contiguous() + self.layernorm_attrs["add_offset"], weight)
+        bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
+        if not simple:
+            self.make_external_tensor(layernorm.bias.detach().to(self.to_torch_dtype[self.io_dtype]).contiguous(), bias)
+
+        inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
+        if not simple:
+            inputs.append(bias)
+
+        name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
+        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
+        kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
+        if not skip:
+            kwargs.update({"axis": -1, "stash_type": 1})
+
+        output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
+        output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
+        if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
+            output_0 = "hidden_states"
+        outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
+
+        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
+        self.make_value_info(output_0, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        if skip and not self.layernorm_attrs["last_layernorm"]:
+            self.make_value_info(output_3, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+
+        # Update LayerNorm attributes
+        self.layernorm_attrs["output_0"] = output_0
+        if skip and not self.layernorm_attrs["last_layernorm"]:
+            self.layernorm_attrs["output_3"] = output_3
+
+            # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
+            self.layernorm_attrs["root_input"] = output_3
+
+    def make_layernorm_gemma_3(self, layer_id, layernorm, skip, simple, location):
         root_input = self.layernorm_attrs["root_input"]
         skip_input = self.layernorm_attrs["skip_input"]
 
         skip_path = "skip" if skip else "noskip"
 
-        casted_root = f"{root_input}.{layer_id}.{skip_path}/Cast"
-        self.make_node(
-            "Cast",
-            inputs=[root_input],
-            outputs=[casted_root],
-            name=f"/model/layers.{layer_id}/{location}_layernorm/CastRoot",
-            to=TensorProto.FLOAT
-        )
+        casted_root = f"{root_input}.{layer_id}.{skip_path}root/Cast"
+        self.make_node("Cast", inputs=[root_input], outputs=[casted_root], name=f"/model/layers.{layer_id}/{location}_layernorm/CastInput0", to=TensorProto.FLOAT)
         root_input = casted_root
 
-        self.make_value_info(
-            casted_root,
-            TensorProto.FLOAT,
-        shape=["batch_size", "sequence_length", self.hidden_size],
-        )
+        self.make_value_info(casted_root, TensorProto.FLOAT, shape=["batch_size", "sequence_length", self.hidden_size],)
 
         if skip:
-            casted_skip = f"{skip_input}.{layer_id}.{skip_path}/Cast"
-            self.make_node(
-                "Cast",
-                inputs=[skip_input],
-                outputs=[casted_skip],
-                name=f"/model/layers.{layer_id}/{location}_layernorm/CastRoot2",
-                to=TensorProto.FLOAT
-            )
+            casted_skip = f"{skip_input}.{layer_id}.{skip_path}skip/Cast"
+            self.make_node("Cast", inputs=[skip_input], outputs=[casted_skip], name=f"/model/layers.{layer_id}/{location}_layernorm/CastInput3", to=TensorProto.FLOAT)
             skip_input = casted_skip
 
-            self.make_value_info(
-                casted_skip,
-                TensorProto.FLOAT,
-            shape=["batch_size", "sequence_length", self.hidden_size],
-            )
+            self.make_value_info(casted_skip, TensorProto.FLOAT, shape=["batch_size", "sequence_length", self.hidden_size],)
 
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
         self.make_external_tensor(layernorm.weight.detach().to(self.to_torch_dtype[TensorProto.FLOAT]).contiguous() + self.layernorm_attrs["add_offset"], weight)
@@ -1154,54 +1151,36 @@ class Model:
 
         output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
         output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
+        raw_out0 = f"{output_0}/Cast"
+        raw_out3 = f"{output_3}/Cast"
         if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
-            output_0 = "hidden_states"
-        outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
+            raw_out0 = "hidden_states"
+        outputs = [raw_out0, "", "", raw_out3] if skip and not self.layernorm_attrs["last_layernorm"] else [raw_out0]
 
         self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
 
-        self.make_value_info(output_0, TensorProto.FLOAT, shape=['batch_size', 'sequence_length', self.hidden_size])
+        self.make_value_info(raw_out0, TensorProto.FLOAT, shape=['batch_size', 'sequence_length', self.hidden_size])
         if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.make_value_info(output_3, TensorProto.FLOAT, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self.make_value_info(raw_out3, TensorProto.FLOAT, shape=['batch_size', 'sequence_length', self.hidden_size])
 
-        raw_out0 = output_0
-        if skip and not self.layernorm_attrs["last_layernorm"]:
-            raw_out3 = output_3
-        else:
+        if not(skip and not self.layernorm_attrs["last_layernorm"]):
             raw_out3 = None
 
-        # 2) cast output_0 back to bf16
-        cast_out0 = f"{raw_out0}/Cast"
-        self.make_node(
-            "Cast",
-            inputs=[raw_out0],
-            outputs=[cast_out0],
-            name=f"{name}/CastOutput0",
-            to=self.io_dtype,  # e.g. TensorProto.BFLOAT16
-        )
-        self.make_value_info(
-            cast_out0,
-            self.io_dtype,
-            shape=["batch_size", "sequence_length", self.hidden_size],
-        )
-        self.layernorm_attrs["output_0"] = cast_out0
+        self.make_node("Cast", inputs=[raw_out0], outputs=[output_0], name=f"{name}/CastOutput0", to=self.io_dtype,)
+        self.make_value_info(output_0, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size],)
+        self.layernorm_attrs["output_0"] = output_0
 
         if raw_out3 is not None:
-            cast_out3 = f"{raw_out3}/Cast"
-            self.make_node(
-                "Cast",
-                inputs=[raw_out3],
-                outputs=[cast_out3],
-                name=f"{name}/CastOutput3",
-                to=self.io_dtype,
-            )
-            self.make_value_info(
-                cast_out3,
-                self.io_dtype,
-                shape=["batch_size", "sequence_length", self.hidden_size],
-            )
-            self.layernorm_attrs["output_3"] = cast_out3
-            self.layernorm_attrs["root_input"] = cast_out3
+            self.make_node("Cast", inputs=[raw_out3], outputs=[output_3], name=f"{name}/CastOutput3", to=self.io_dtype,)
+            self.make_value_info(output_3, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size],)
+            self.layernorm_attrs["output_3"] = output_3
+            self.layernorm_attrs["root_input"] = output_3
+
+    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
+        if "gemma-3" in self.model_name_or_path:
+            self.make_layernorm_gemma_3(layer_id, layernorm, skip, simple, location)
+        else:
+            self.make_layernorm_default(layer_id, layernorm, skip, simple, location)
 
     def make_mscale_su(self, mscale):
         if mscale <= 1.0:
@@ -1676,84 +1655,6 @@ class Model:
             softcap=self.attention_attrs["softcap"], do_rotary=self.attention_attrs["use_rope_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
         )
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
-
-    def make_group_query_attention_with_bf16(self, name, **kwargs):
-        raw_inputs = [
-            kwargs["v_path"],
-            kwargs.get("past_k", ""), kwargs.get("past_v", ""),
-            kwargs.get("cos_cache", ""), kwargs.get("sin_cache", ""),
-        ]
-
-        int64_inputs = [kwargs.get("seqlens_k", ""), kwargs.get("total_seq_len", "")]
-
-        bf16_inputs = [kwargs["q_path"], kwargs["k_path"]]
-        for inp in raw_inputs:
-            if inp == "": 
-                bf16_inputs.append("") 
-                continue
-            bf16_inp = f"{inp}_bf16"
-            self.make_node(
-                "Cast",
-                inputs=[inp],
-                outputs=[bf16_inp],
-                name=f"{name}/cast_{inp}_to_bf16",
-                to=TensorProto.BFLOAT16
-            )
-            bf16_inputs.append(bf16_inp)
-
-        bf16_inputs[5:5] = int64_inputs
-
-        out_bf16 = f"{name}/output_0_bf16"
-        pk_bf16  = f"{kwargs['present_k']}_bf16" if kwargs.get("present_k") else ""
-        pv_bf16  = f"{kwargs['present_v']}_bf16" if kwargs.get("present_v") else ""
-        bf16_outputs = [out_bf16, pk_bf16, pv_bf16]
-
-        self.make_node(
-            "GroupQueryAttention",
-            inputs=bf16_inputs,
-            outputs=bf16_outputs,
-            name=name,
-            domain="com.microsoft",
-            num_heads=self.num_attn_heads,
-            kv_num_heads=self.num_kv_heads,
-            scale=self.attention_attrs["scale"],
-            local_window_size=self.window_size,
-            softcap=self.attention_attrs["softcap"],
-            do_rotary=self.attention_attrs["use_rope_in_attn"],
-            rotary_interleaved=self.rotemb_attrs["interleaved"],
-        )
-
-        self.make_node(
-            "Cast",
-            inputs=[out_bf16],
-            outputs=[f"{name}/output_0"],
-            name=f"{name}/Cast_output_to_fp32",
-            to=TensorProto.FLOAT,
-        )
-
-        if pk_bf16:
-            self.make_node(
-                "Cast",
-                inputs=[pk_bf16],
-                outputs=[kwargs["present_k"]],
-                name=f"{name}/Cast_present_k_to_fp32",
-                to=TensorProto.FLOAT,
-            )
-
-        if pv_bf16:
-            self.make_node(
-                "Cast",
-                inputs=[pv_bf16],
-                outputs=[kwargs["present_v"]],
-                name=f"{name}/Cast_present_v_to_fp32",
-                to=TensorProto.FLOAT,
-            )
-
-        self.make_value_info(
-            f"{name}/output_0",
-            TensorProto.FLOAT,
-            shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads]
-        )
 
     def make_sparse_attention(self, name, **kwargs):
         inputs = [
