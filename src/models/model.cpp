@@ -739,9 +739,15 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   auto expanded = OrtValue::CreateTensor(p_device_inputs_->GetAllocator(), input_shape, element_type);
   auto expanded_span = ByteWrapTensor(*p_device_inputs_, *expanded);
 
-  for (int i = 0; i < batch_size; i++) {
-    for (int j = 0; j < num_beams; j++) {
-      expanded_span.subspan((i * num_beams + j) * data_size_bytes, data_size_bytes).CopyFrom(input_span.subspan(i * data_size_bytes, data_size_bytes));
+  // Detect fast & simple copy case
+  if (num_beams==1) {
+    expanded_span.CopyFrom(input_span);
+  } else {
+    // TODO (RyanHill): To avoid cuda uninitialized memory warnings, we should copy input_span to device memory first
+    for (int i = 0; i < batch_size; i++) {
+      for (int j = 0; j < num_beams; j++) {
+        expanded_span.subspan((i * num_beams + j) * data_size_bytes, data_size_bytes).CopyFrom(input_span.subspan(i * data_size_bytes, data_size_bytes));
+      }
     }
   }
   return expanded;
