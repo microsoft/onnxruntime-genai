@@ -100,9 +100,12 @@ class Model:
 
         # Map output names to their types and shapes
         self.output_names = ["logits"]
+
+        logits_type = TensorProto.FLOAT if "gemma-3" in self.model_name_or_path else self.io_dtype
+
         self.output_types = {
             "hidden_states": self.io_dtype,                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
-            "logits": TensorProto.FLOAT,                                                                             # For standard models
+            "logits": logits_type,                                                                               # For standard models
             "present.key": self.io_dtype,                                                                        # For standard models (note that `present.key` is written this way to match Hugging Face format)
             "present.value": self.io_dtype,                                                                      # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
@@ -1114,7 +1117,7 @@ class Model:
             # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
 
-    def make_layernorm_gemma_3(self, layer_id, layernorm, skip, simple, location):
+    def make_layernorm_with_casting_to_fp32(self, layer_id, layernorm, skip, simple, location):
         root_input = self.layernorm_attrs["root_input"]
         skip_input = self.layernorm_attrs["skip_input"]
 
@@ -1177,8 +1180,8 @@ class Model:
             self.layernorm_attrs["root_input"] = output_3
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
-        if "gemma-3" in self.model_name_or_path:
-            self.make_layernorm_gemma_3(layer_id, layernorm, skip, simple, location)
+        if "gemma-3" in self.model_name_or_path and self.io_dtype == TensorProto.BFLOAT16:
+            self.make_layernorm_with_casting_to_fp32(layer_id, layernorm, skip, simple, location)
         else:
             self.make_layernorm_default(layer_id, layernorm, skip, simple, location)
 
@@ -1391,16 +1394,20 @@ class Model:
         q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
         q_layernorm_output = f"{q_layernorm_name}/output_0"
 
-        q_layernorm_cast_in = f"{q_layernorm_name}/Cast"
-        self.make_node("Cast", inputs=[q_reshape_1_output], outputs=[q_layernorm_cast_in], name=f"{q_layernorm_name}/CastIn", to=TensorProto.FLOAT)
+        if "gemma-3" in self.model_name_or_path and self.io_dtype == TensorProto.BFLOAT16:
+            q_layernorm_cast_in = f"{q_layernorm_name}/Cast"
+            self.make_node("Cast", inputs=[q_reshape_1_output], outputs=[q_layernorm_cast_in], name=f"{q_layernorm_name}/CastIn", to=TensorProto.FLOAT)
 
-        q_layernorm_weight_fp32 = (attention.q_norm.weight.detach().to(self.to_torch_dtype[TensorProto.FLOAT]) + self.layernorm_attrs["add_offset"]).contiguous()
-        self.make_external_tensor(q_layernorm_weight_fp32, q_weight_name)
+            q_layernorm_weight_fp32 = (attention.q_norm.weight.detach().to(self.to_torch_dtype[TensorProto.FLOAT]) + self.layernorm_attrs["add_offset"]).contiguous()
+            self.make_external_tensor(q_layernorm_weight_fp32, q_weight_name)
 
-        self.make_node("SimplifiedLayerNormalization", inputs=[q_layernorm_cast_in, q_weight_name], outputs=[f"{q_layernorm_name}/output/Cast"], name=q_layernorm_name, **layernorm_kwargs)
-        self.make_node("Cast", inputs=[f"{q_layernorm_name}/output/Cast"], outputs=[q_layernorm_output], name=f"{q_layernorm_name}/CastOut", to=self.io_dtype)
+            self.make_node("SimplifiedLayerNormalization", inputs=[q_layernorm_cast_in, q_weight_name], outputs=[f"{q_layernorm_name}/output/Cast"], name=q_layernorm_name, **layernorm_kwargs)
+            self.make_node("Cast", inputs=[f"{q_layernorm_name}/output/Cast"], outputs=[q_layernorm_output], name=f"{q_layernorm_name}/CastOut", to=self.io_dtype)
+        else:
+            self.make_external_tensor((attention.q_norm.weight.detach().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), q_weight_name)
+            self.make_node("SimplifiedLayerNormalization", inputs=[q_reshape_1_output, q_weight_name], outputs=[q_layernorm_output], name=q_layernorm_name, **layernorm_kwargs)
+       
         self.make_value_info(q_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
-
 
         # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD
         q_reshape_2_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
@@ -1417,14 +1424,19 @@ class Model:
         k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
         k_layernorm_output = f"{k_layernorm_name}/output_0"
 
-        k_layernorm_cast_in = f"{k_layernorm_name}/Cast"
-        self.make_node("Cast", inputs=[k_reshape_1_output], outputs=[k_layernorm_cast_in], name=f"{k_layernorm_name}/CastIn", to=TensorProto.FLOAT)
+        if "gemma-3" in self.model_name_or_path and self.io_dtype == TensorProto.BFLOAT16:
+            k_layernorm_cast_in = f"{k_layernorm_name}/Cast"
+            self.make_node("Cast", inputs=[k_reshape_1_output], outputs=[k_layernorm_cast_in], name=f"{k_layernorm_name}/CastIn", to=TensorProto.FLOAT)
 
-        k_layernorm_weight_fp32 = (attention.k_norm.weight.detach().to(self.to_torch_dtype[TensorProto.FLOAT]) + self.layernorm_attrs["add_offset"]).contiguous()
-        self.make_external_tensor(k_layernorm_weight_fp32, k_weight_name)
+            k_layernorm_weight_fp32 = (attention.k_norm.weight.detach().to(self.to_torch_dtype[TensorProto.FLOAT]) + self.layernorm_attrs["add_offset"]).contiguous()
+            self.make_external_tensor(k_layernorm_weight_fp32, k_weight_name)
 
-        self.make_node("SimplifiedLayerNormalization", inputs=[k_layernorm_cast_in, k_weight_name], outputs=[f"{k_layernorm_name}/output/Cast"], name=k_layernorm_name, **layernorm_kwargs)
-        self.make_node("Cast", inputs=[f"{k_layernorm_name}/output/Cast"], outputs=[k_layernorm_output], name=f"{k_layernorm_name}/CastOut", to=self.io_dtype)
+            self.make_node("SimplifiedLayerNormalization", inputs=[k_layernorm_cast_in, k_weight_name], outputs=[f"{k_layernorm_name}/output/Cast"], name=k_layernorm_name, **layernorm_kwargs)
+            self.make_node("Cast", inputs=[f"{k_layernorm_name}/output/Cast"], outputs=[k_layernorm_output], name=f"{k_layernorm_name}/CastOut", to=self.io_dtype)
+        else:
+            self.make_external_tensor((attention.k_norm.weight.detach().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), k_weight_name)
+            self.make_node("SimplifiedLayerNormalization", inputs=[k_reshape_1_output, k_weight_name], outputs=[k_layernorm_output], name=k_layernorm_name, **layernorm_kwargs)                
+            
         self.make_value_info(k_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
         # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD
