@@ -807,26 +807,15 @@ class Model:
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
 
-        if output != "logits":
+        if output != "logits" or "gemma-3" not in self.model_name_or_path:
             self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
             self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', last_dim])
         else:
-            cast_name = name + "_cast_fp32"
-            cast_name_input = name + "_cast_fp32_input"
+            cast_name = name + "/Cast"
+            cast_name_input = name + "/Cast"
             self.make_node("MatMul", inputs=[root_input, weight], outputs=[cast_name_input], name=name)
-            self.make_node(
-                "Cast",
-                inputs=[cast_name_input],
-                outputs=[output],
-                name=cast_name,
-                to=TensorProto.FLOAT
-            )
-            self.make_value_info(
-                output,
-                TensorProto.FLOAT,
-                shape=['batch_size', 'sequence_length', last_dim]
-            )
-
+            self.make_node("Cast", inputs=[cast_name_input], outputs=[output], name=cast_name, to=TensorProto.FLOAT)
+            self.make_value_info(output, TensorProto.FLOAT, shape=['batch_size', 'sequence_length', last_dim])
 
         return name
 
