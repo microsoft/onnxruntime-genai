@@ -102,7 +102,7 @@ class Model:
         self.output_names = ["logits"]
         self.output_types = {
             "hidden_states": self.io_dtype,                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
-            "logits": self.io_dtype,                                                                             # For standard models
+            "logits": TensorProto.FLOAT,                                                                             # For standard models
             "present.key": self.io_dtype,                                                                        # For standard models (note that `present.key` is written this way to match Hugging Face format)
             "present.value": self.io_dtype,                                                                      # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
@@ -797,9 +797,8 @@ class Model:
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
-    def make_matmul_float(self, matmul, name, root_input, **kwargs):
+    def make_matmul_float2(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
-        self.make_external_tensor(matmul.weight.detach().T.to(torch.bfloat16).contiguous(), weight)
 
         last_dim = matmul.weight.shape[0]
         first_dim = matmul.weight.shape[1]
@@ -817,6 +816,36 @@ class Model:
 
         self.make_node("Cast", inputs=[cast_output], outputs=[output], name=f"{name}/Cast_Output", to=self.io_dtype)
         self.make_value_info(cast_output, TensorProto.BFLOAT16, shape=["batch_size", "sequence_length", last_dim])
+
+        return name
+
+    def make_matmul_float(self, matmul, name, root_input, **kwargs):
+        weight = name[1:].replace("/", ".") + ".weight"
+        self.make_external_tensor(matmul.weight.detach().T.to( self.to_torch_dtype[self.io_dtype]).contiguous(), weight)
+
+        last_dim = matmul.weight.shape[0]
+        output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
+
+        if output != "logits":
+            self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
+            self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', last_dim])
+        else:
+            cast_name = name + "_cast_fp32"
+            cast_name_input = name + "_cast_fp32_input"
+            self.make_node("MatMul", inputs=[root_input, weight], outputs=[cast_name_input], name=name)
+            self.make_node(
+                "Cast",
+                inputs=[cast_name_input],
+                outputs=[output],
+                name=cast_name,
+                to=TensorProto.FLOAT
+            )
+            self.make_value_info(
+                output,
+                TensorProto.FLOAT,
+                shape=['batch_size', 'sequence_length', last_dim]
+            )
+
 
         return name
 
@@ -1072,11 +1101,46 @@ class Model:
         root_input = self.layernorm_attrs["root_input"]
         skip_input = self.layernorm_attrs["skip_input"]
 
+        skip_path = "skip" if skip else "noskip"
+
+        casted_root = f"{root_input}.{layer_id}.{skip_path}/Cast"
+        self.make_node(
+            "Cast",
+            inputs=[root_input],
+            outputs=[casted_root],
+            name=f"/model/layers.{layer_id}/{location}_layernorm/CastRoot",
+            to=TensorProto.FLOAT
+        )
+        root_input = casted_root
+
+        self.make_value_info(
+            casted_root,
+            TensorProto.FLOAT,
+        shape=["batch_size", "sequence_length", self.hidden_size],
+        )
+
+        if skip:
+            casted_skip = f"{skip_input}.{layer_id}.{skip_path}/Cast"
+            self.make_node(
+                "Cast",
+                inputs=[skip_input],
+                outputs=[casted_skip],
+                name=f"/model/layers.{layer_id}/{location}_layernorm/CastRoot2",
+                to=TensorProto.FLOAT
+            )
+            skip_input = casted_skip
+
+            self.make_value_info(
+                casted_skip,
+                TensorProto.FLOAT,
+            shape=["batch_size", "sequence_length", self.hidden_size],
+            )
+
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor(layernorm.weight.detach().to(self.to_torch_dtype[self.io_dtype]).contiguous() + self.layernorm_attrs["add_offset"], weight)
+        self.make_external_tensor(layernorm.weight.detach().to(self.to_torch_dtype[TensorProto.FLOAT]).contiguous() + self.layernorm_attrs["add_offset"], weight)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
-            self.make_external_tensor(layernorm.bias.detach().to(self.to_torch_dtype[self.io_dtype]).contiguous(), bias)
+            self.make_external_tensor(layernorm.bias.detach().to(self.to_torch_dtype[TensorProto.FLOAT]).contiguous(), bias)
 
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
@@ -1095,17 +1159,49 @@ class Model:
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
 
         self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
-        self.make_value_info(output_0, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
-        if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.make_value_info(output_3, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
-        # Update LayerNorm attributes
-        self.layernorm_attrs["output_0"] = output_0
+        self.make_value_info(output_0, TensorProto.FLOAT, shape=['batch_size', 'sequence_length', self.hidden_size])
         if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.layernorm_attrs["output_3"] = output_3
+            self.make_value_info(output_3, TensorProto.FLOAT, shape=['batch_size', 'sequence_length', self.hidden_size])
 
-            # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
-            self.layernorm_attrs["root_input"] = output_3
+        raw_out0 = output_0
+        if skip and not self.layernorm_attrs["last_layernorm"]:
+            raw_out3 = output_3
+        else:
+            raw_out3 = None
+
+        # 2) cast output_0 back to bf16
+        cast_out0 = f"{raw_out0}/Cast"
+        self.make_node(
+            "Cast",
+            inputs=[raw_out0],
+            outputs=[cast_out0],
+            name=f"{name}/CastOutput0",
+            to=self.io_dtype,  # e.g. TensorProto.BFLOAT16
+        )
+        self.make_value_info(
+            cast_out0,
+            self.io_dtype,
+            shape=["batch_size", "sequence_length", self.hidden_size],
+        )
+        self.layernorm_attrs["output_0"] = cast_out0
+
+        if raw_out3 is not None:
+            cast_out3 = f"{raw_out3}/Cast"
+            self.make_node(
+                "Cast",
+                inputs=[raw_out3],
+                outputs=[cast_out3],
+                name=f"{name}/CastOutput3",
+                to=self.io_dtype,
+            )
+            self.make_value_info(
+                cast_out3,
+                self.io_dtype,
+                shape=["batch_size", "sequence_length", self.hidden_size],
+            )
+            self.layernorm_attrs["output_3"] = cast_out3
+            self.layernorm_attrs["root_input"] = cast_out3
 
     def make_mscale_su(self, mscale):
         if mscale <= 1.0:
@@ -1171,9 +1267,9 @@ class Model:
             # Slice cos/sin caches from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
             cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach()
-            cos_cache = cos_cache.to(self.to_torch_dtype[TensorProto.BFLOAT16])
+            cos_cache = cos_cache.to(self.to_torch_dtype[self.io_dtype])
             sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach()
-            sin_cache = sin_cache.to(self.to_torch_dtype[TensorProto.BFLOAT16])
+            sin_cache = sin_cache.to(self.to_torch_dtype[self.io_dtype])
 
             # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
             if self.rotemb_attrs["partial_rotary_factor"] != 1.0:
@@ -1196,23 +1292,15 @@ class Model:
         cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
         num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
 
-        casted_root = f"{name}/root_input_bf16"
-        self.make_node(
-            "Cast",
-            inputs=[root_input],
-            outputs=[casted_root],
-            name=f"{name}/Cast_to_bf16",
-            to=TensorProto.BFLOAT16,
-        )
+        inputs = [root_input, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
 
-        inputs = [casted_root, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
         output = f"{name}/output_0"
         self.make_node(
             "RotaryEmbedding", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
             interleaved=self.rotemb_attrs["interleaved"], num_heads=(0 if self.rotemb_attrs["partial_rotary_factor"] == 1.0 else num_heads),  # default is 0 in RotaryEmbedding kernel
             rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"],
         )
-        self.make_value_info(output, TensorProto.BFLOAT16, shape=['batch_size', 'sequence_length', self.head_size * num_heads])
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * num_heads])
 
     def make_rotary_embedding_multi_cache(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
@@ -1320,13 +1408,20 @@ class Model:
         q_reshape_1_output = f"{q_reshape_1_name}/output_0"
         self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
 
-        # Make Q LayerNorm
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
         q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
         q_layernorm_output = f"{q_layernorm_name}/output_0"
-        self.make_external_tensor((attention.q_norm.weight.detach().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), q_weight_name)
-        self.make_node("SimplifiedLayerNormalization", inputs=[q_reshape_1_output, q_weight_name], outputs=[q_layernorm_output], name=q_layernorm_name, **layernorm_kwargs)
+
+        q_layernorm_cast_in = f"{q_layernorm_name}/Cast"
+        self.make_node("Cast", inputs=[q_reshape_1_output], outputs=[q_layernorm_cast_in], name=f"{q_layernorm_name}/CastIn", to=TensorProto.FLOAT)
+
+        q_layernorm_weight_fp32 = (attention.q_norm.weight.detach().to(self.to_torch_dtype[TensorProto.FLOAT]) + self.layernorm_attrs["add_offset"]).contiguous()
+        self.make_external_tensor(q_layernorm_weight_fp32, q_weight_name)
+
+        self.make_node("SimplifiedLayerNormalization", inputs=[q_layernorm_cast_in, q_weight_name], outputs=[f"{q_layernorm_name}/output/Cast"], name=q_layernorm_name, **layernorm_kwargs)
+        self.make_node("Cast", inputs=[f"{q_layernorm_name}/output/Cast"], outputs=[q_layernorm_output], name=f"{q_layernorm_name}/CastOut", to=self.io_dtype)
         self.make_value_info(q_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
+
 
         # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD
         q_reshape_2_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
@@ -1339,12 +1434,18 @@ class Model:
         k_reshape_1_output = f"{k_reshape_1_name}/output_0"
         self.make_reshape(k_reshape_1_name, k_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
-        # Make K LayerNorm
         k_layernorm_name = f"/model/layers.{layer_id}/attn/k_norm/SimplifiedLayerNormalization"
         k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
         k_layernorm_output = f"{k_layernorm_name}/output_0"
-        self.make_external_tensor((attention.k_norm.weight.detach().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), k_weight_name)
-        self.make_node("SimplifiedLayerNormalization", inputs=[k_reshape_1_output, k_weight_name], outputs=[k_layernorm_output], name=k_layernorm_name, **layernorm_kwargs)
+
+        k_layernorm_cast_in = f"{k_layernorm_name}/Cast"
+        self.make_node("Cast", inputs=[k_reshape_1_output], outputs=[k_layernorm_cast_in], name=f"{k_layernorm_name}/CastIn", to=TensorProto.FLOAT)
+
+        k_layernorm_weight_fp32 = (attention.k_norm.weight.detach().to(self.to_torch_dtype[TensorProto.FLOAT]) + self.layernorm_attrs["add_offset"]).contiguous()
+        self.make_external_tensor(k_layernorm_weight_fp32, k_weight_name)
+
+        self.make_node("SimplifiedLayerNormalization", inputs=[k_layernorm_cast_in, k_weight_name], outputs=[f"{k_layernorm_name}/output/Cast"], name=k_layernorm_name, **layernorm_kwargs)
+        self.make_node("Cast", inputs=[f"{k_layernorm_name}/output/Cast"], outputs=[k_layernorm_output], name=f"{k_layernorm_name}/CastOut", to=self.io_dtype)
         self.make_value_info(k_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
         # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD
@@ -1540,7 +1641,7 @@ class Model:
         if op_type == "MultiHeadAttention":
             self.make_multi_head_attention(name, add_qk=f"{self.mask_attrs['mask_name']}/output_0", **kwargs)
         elif op_type == "GroupQueryAttention":
-            self.make_group_query_attention_with_bf16(name, seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
+            self.make_group_query_attention(name, seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
         elif op_type == "SparseAttention":
             self.make_sparse_attention(name, block_row_indices=self.mask_attrs['block_row_indices'], block_col_indices=self.mask_attrs['block_col_indices'], key_total_seq_lens=f"{self.mask_attrs['key_total_seq_lens']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
         else:
@@ -2207,24 +2308,6 @@ class Model:
 
         return gelu_name
 
-    def make_gelu_bf16(self, layer_id, root_input, activation):
-        gelu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
-        cast_to_bf16 = f"{gelu_name}/cast_to_bf16"
-        gelu_in = f"{cast_to_bf16}/output"
-        gelu_out_bf16 = f"{gelu_name}/gelu_bf16"
-        cast_to_fp32 = f"{gelu_name}/cast_to_fp32"
-        final_output =  f"{gelu_name}/output_0"
-
-        self.make_node("Cast", inputs=[root_input], outputs=[gelu_in], name=cast_to_bf16, to=TensorProto.BFLOAT16)
-        self.make_node(activation, inputs=[gelu_in], outputs=[gelu_out_bf16], name=gelu_name, domain="com.microsoft")
-        
-        self.make_value_info(gelu_out_bf16, TensorProto.BFLOAT16, shape=['batch_size', 'sequence_length', self.intermediate_size])
-
-        self.make_node("Cast",inputs=[gelu_out_bf16], outputs=[final_output], name=cast_to_fp32, to=TensorProto.FLOAT)
-        self.make_value_info(final_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
-
-        return gelu_name
-
     def make_relu(self, layer_id, root_input, activation):
         relu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         output = f"{relu_name}/output_0"
@@ -2245,7 +2328,7 @@ class Model:
         if self.activation in {"silu", "swish", "swiglu"}:
             output_name = self.make_activation_with_mul(layer_id, root_input, activation="Sigmoid", domain=None)
         elif self.activation in {"gelu_new", "gelu_fast", "gelu_pytorch_tanh"}:
-            output_name = self.make_gelu_bf16(layer_id, root_input, activation="FastGelu")
+            output_name = self.make_gelu(layer_id, root_input, activation="FastGelu")
         elif self.activation in {"gelu"}:
             output_name = self.make_gelu(layer_id, root_input, activation="Gelu")
         elif self.activation in {"gegelu", "geglu"}:
