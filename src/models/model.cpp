@@ -740,7 +740,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   auto expanded_span = ByteWrapTensor(*p_device_inputs_, *expanded);
 
   // Detect fast & simple copy case
-  if (num_beams==1) {
+  if (num_beams == 1) {
     expanded_span.CopyFrom(input_span);
   } else {
     // TODO (RyanHill): To avoid cuda uninitialized memory warnings, we should copy input_span to device memory first
