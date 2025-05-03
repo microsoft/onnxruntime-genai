@@ -12,7 +12,7 @@
   <PropertyGroup>
     <TargetFrameworks>$(BaseTargets);$(MobileTargets)</TargetFrameworks>
     <Platforms>AnyCPU</Platforms>
-    <LangVersion>default</LangVersion>
+    <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <SignAssembly>true</SignAssembly>
     <AssemblyOriginatorKeyFile>onnxruntime-genai.snk</AssemblyOriginatorKeyFile>
