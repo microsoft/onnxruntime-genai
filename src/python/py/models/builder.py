@@ -2219,17 +2219,25 @@ class Model:
 
         del model
 
-    def has_final_norm(self, module, model):
-       # Hugging Face names
-       hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
-       hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
-       hf_transformer_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
-       hf_multimodal_final_layernorm = hasattr(model, "language_model") and hasattr(model.language_model, "model") and hasattr(model.language_model.model, "norm") and module == model.language_model.model.norm
-       # PEFT names
-       peft_norm = hasattr(model, "base_model") and hasattr(model.base_model, "model") and hasattr(model.base_model.model, "model") and hasattr(model.base_model.model.model, "norm") and module == model.base_model.model.model.norm
-       # GGUF names
-       gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
-       return hf_norm or hf_final_layernorm or hf_transformer_final_layernorm or hf_multimodal_final_layernorm or peft_norm or gguf_final_norm
+    def has_final_norm(self, module, orig_model):
+        if hasattr(orig_model, "base_model") and hasattr(orig_model.base_model, "model"):
+            # Model is from PEFT
+            model = orig_model.base_model.model
+        else:
+            model = orig_model
+
+        # Hugging Face names
+        hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
+        hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
+        hf_transformer_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
+        hf_multimodal_final_layernorm = hasattr(model, "language_model") and hasattr(model.language_model, "model") and hasattr(model.language_model.model, "norm") and module == model.language_model.model.norm
+
+        # GGUF names
+        gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
+
+        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm, hf_multimodal_final_layernorm]
+        gguf_names = [gguf_final_norm]
+        return any(hf_names + gguf_names)
 
     def make_preprocessing_nodes(self):
         self.make_attention_mask_reformatting()
