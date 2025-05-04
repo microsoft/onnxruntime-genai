@@ -302,12 +302,18 @@ class Model:
             self.lm_head_attrs["mask"] = dummy_tokens_mask
 
         # Quantization-specific variables (INT4, INT8, etc.)
+        int4_algo_config = self.make_int4_algo_config(extra_options.get("int4_algo_config", "default"))
         self.quant_attrs = {
             "int4": {
                 "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep == "cpu" else 0)),
                 "block_size": int(extra_options.get("int4_block_size", 32)),
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
+<<<<<<< HEAD
+=======
+                "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
+                "algo_config": int4_algo_config,
+>>>>>>> 89a28898 (Support k_quant in model builder (#1444))
             },
             "use_qdq": extra_options.get("use_qdq", False),
         }
@@ -494,6 +500,34 @@ class Model:
             convert_attribute=False,
         )
 
+    def make_int4_algo_config(self, quant_method):
+        int4_algo_config = None
+        if quant_method == "rtn":
+            from onnxruntime.quantization.matmul_nbits_quantizer import RTNWeightOnlyQuantConfig
+            int4_algo_config = RTNWeightOnlyQuantConfig()
+        elif quant_method in ["k_quant_mixed", "k_quant_last"]:
+            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
+            if quant_method == "k_quant_mixed":
+                # k_quant_mixed is from llama.cpp.
+                # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
+                # We also consider some MatMuls are more senstive to quantization than other MatMuls.
+                layers_to_exclude = [
+                    i
+                    for i in range(self.num_layers)
+                    if i < self.num_layers / 8 or i >= 7 * self.num_layers / 8 or (i - (round)(self.num_layers / 8)) % 3 == 2
+                ]
+                customized_weight_config = {}
+                for i in layers_to_exclude:
+                    customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
+                    customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
+                    # Gemma model
+                    customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
+                customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
+            elif quant_method == "k_quant_last":
+                customized_weight_config = {"/lm_head/MatMul": {"bits": 8}}
+            int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+        return int4_algo_config
+
     def to_int4(self, model):
         quant = MatMulNBitsQuantizer(
             model=model,
@@ -503,6 +537,7 @@ class Model:
             nodes_to_exclude=[],
             quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
             op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
+            algo_config=self.quant_attrs["int4"]["algo_config"],
         )
         quant.process()
         return quant.model.model
@@ -3622,6 +3657,13 @@ def get_args():
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
                     Use this option when you want to quantize specific ops.
                     Separate the op types with a '/' when passing them here (e.g. int4_op_types_to_quantize=MatMul/Gather)
+                int4_nodes_to_exclude = Specify nodes to exclude from int4 quantization. 
+                    Use this option when you want to exclude certain nodes from being quantized.
+                    Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
+                int4_algo_config = Method for int4 quantization. Default is 'default'.
+                    Currently supported options are: 'default', 'rtn', 'k_quant_mixed', 'k_quant_last'.
+                    k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
+                    k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model (for unit testing purposes).
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
