@@ -10,5 +10,13 @@ export CMAKE_ARGS="-DONNX_GEN_PB_TYPE_STUBS=OFF -DONNX_WERROR=OFF"
 for PYTHON_EXE in "${PYTHON_EXES[@]}"
 do
   ${PYTHON_EXE} -m pip install -r requirements.txt
+  if command -v nvcc &> /dev/null; then
+    cuda_version=$(nvcc --version | grep release | sed 's/.*release //' | cut -d',' -f1)
+    if [[ "$cuda_version" == 11* ]]; then
+      ${PYTHON_EXE} -m pip install cupy-cuda11x
+    elif [[ "$cuda_version" == 12* ]]; then
+      ${PYTHON_EXE} -m pip install cupy-cuda12x
+    fi
+  fi
 done
 
