@@ -25,7 +25,6 @@ struct Config {
     static constexpr std::string_view InputsEmbedsName = "inputs_embeds";
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
-    static constexpr std::string_view promptTemplate = "{Content}";
     static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
     static constexpr std::string_view TokenTypeIdsName = "token_type_ids";
 
@@ -206,13 +205,6 @@ struct Config {
 
     } decoder;
 
-    struct PromptTemplates {
-      std::string assistant{Defaults::promptTemplate};
-      std::string prompt{Defaults::promptTemplate};
-      std::string system{Defaults::promptTemplate};
-      std::string user{Defaults::promptTemplate};
-    };
-    std::optional<PromptTemplates> prompt_templates;
   } model;
 
   struct Search {
