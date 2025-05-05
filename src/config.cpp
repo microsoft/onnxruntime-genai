@@ -589,38 +589,6 @@ struct Embedding_Element : JSON::Element {
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
 
-struct PromptTemplates_Element : JSON::Element {
-  explicit PromptTemplates_Element(std::optional<Config::Model::PromptTemplates>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    // if one of templates is given in json, then any non-specified template will be default "{Content}"
-    if (name == "assistant") {
-      EnsureAvailable();
-      v_->assistant = JSON::Get<std::string_view>(value);
-    } else if (name == "prompt") {
-      EnsureAvailable();
-      v_->prompt = JSON::Get<std::string_view>(value);
-    } else if (name == "system") {
-      EnsureAvailable();
-      v_->system = JSON::Get<std::string_view>(value);
-    } else if (name == "user") {
-      EnsureAvailable();
-      v_->user = JSON::Get<std::string_view>(value);
-    } else {
-      throw JSON::unknown_value_error{};
-    }
-  }
-
- private:
-  std::optional<Config::Model::PromptTemplates>& v_;
-
-  void EnsureAvailable() {
-    if (!v_.has_value()) {
-      v_.emplace();
-    }
-  }
-};
-
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v) : v_{v} {}
 
