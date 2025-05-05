@@ -6,7 +6,7 @@ import argparse
 import onnxruntime_genai as og
 
 
-# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True, model_output_shapes=True)
+og.set_log_options(enabled=True, model_input_values=True, model_output_values=True, model_output_shapes=True)
 
 class ClientRequest:
     def __init__(self, prompt: str, model: og.Model, tokenizer: og.Tokenizer):
@@ -51,12 +51,14 @@ class RequestPool:
         requests_to_remove = []
         for request in self.requests:
             while request.request.has_unseen_tokens():
-                request.token_stream += request.streaming_tokenizer.decode(request.request.get_unseen_token())
+                token = request.request.get_unseen_token()
+                print("unseen token", token)
+                request.token_stream += request.streaming_tokenizer.decode(token)
 
             if request.request.is_done():
                 requests_to_remove.append(request)
 
-        for request in requests_to_remove:
+        for request in self.requests:
             print(f"🫵: {request.prompt}")
             print(f"🤖: {request.token_stream}")
             self.requests.remove(request)
@@ -76,8 +78,9 @@ class Engine:
         i = 0
         while self.engine.has_pending_requests():
             self.engine.step()
-            # i += 1
-            # if i == 2:
+            i += 1
+            if i == 2:
+                break
             #     exit()
 
 

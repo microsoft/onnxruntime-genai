@@ -62,18 +62,22 @@ def main(args):
         print()
         print("Output: ", end='', flush=True)
 
+        i = 0
         try:
             while not generator.is_done():
                 generator.generate_next_token()
+                i += 1
                 if args.timings:
                     if first:
                         first_token_timestamp = time.time()
                         first = False
 
-                exit()
 
                 new_token = generator.get_next_tokens()[0]
+                print("New token", new_token)
                 print(tokenizer_stream.decode(new_token), end='', flush=True)
+                if i == 2:
+                    exit()
                 if args.timings: new_tokens.append(new_token)
         except KeyboardInterrupt:
             print("  --control+c pressed, aborting generation--")

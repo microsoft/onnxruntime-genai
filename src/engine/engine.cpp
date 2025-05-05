@@ -14,7 +14,6 @@ Engine::Engine(std::shared_ptr<Model> model)
 void Engine::AddRequest(std::shared_ptr<Request> request) {
   request->Assign(shared_from_this());
   scheduler_->AddRequest(request);
-  std::cout << "Request added to engine." << std::endl;
 }
 
 void Engine::RemoveRequest(std::shared_ptr<Request> request) {
@@ -24,7 +23,7 @@ void Engine::RemoveRequest(std::shared_ptr<Request> request) {
 void Engine::Step() {
   if (auto scheduled_requests = scheduler_->Schedule()) {
     model_executor_->Decode(scheduled_requests);
-    scheduled_requests->GenerateNextTokens();
+    scheduled_requests.GenerateNextTokens();
   }
 }
 

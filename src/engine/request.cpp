@@ -35,8 +35,6 @@ void Request::Assign(std::shared_ptr<Engine> engine) {
   processed_sequence_length_ = search_->GetSequenceLength();
   search_->AppendTokens(device_tokens);
   prefill_input_ids_.clear();
-
-  std::cout << "Request assigned to engine." << std::endl;
 }
 
 void Request::Schedule() {
@@ -90,7 +88,10 @@ bool Request::HasUnseenTokens() const {
 
 DeviceSpan<int32_t> Request::UnprocessedTokens() {
   auto sequence = search_->GetSequence(0);
-  auto unprocessed_tokens = sequence.subspan(processed_sequence_length_, sequence.size() - processed_sequence_length_);
+  std::cout << "Request::UnprocessedTokens: sequence.size() = " << sequence.size() << std::endl;
+  std::cout << "Request::UnprocessedTokens: processed_sequence_length_ = " << processed_sequence_length_ << std::endl;
+  std::cout << "Request::UnprocessedTokens: search_->GetSequenceLength() = " << search_->GetSequenceLength() << std::endl;
+  auto unprocessed_tokens = sequence.subspan(processed_sequence_length_, search_->GetSequenceLength() - processed_sequence_length_);
   return unprocessed_tokens;
 }
 
@@ -104,6 +105,7 @@ bool Request::IsPrefill() const {
 
 void Request::GenerateNextTokens(DeviceSpan<float> logits) {
   processed_sequence_length_ = search_->GetSequence(0).size();
+  std::cout << "Request::GenerateNextTokens: processed_sequence_length_ = " << processed_sequence_length_ << std::endl;
   is_prefill_ = false;
 
   search_->SetLogits(logits);

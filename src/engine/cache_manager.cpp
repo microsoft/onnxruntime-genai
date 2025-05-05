@@ -57,7 +57,6 @@ void StaticCacheManager::Step() {
   const int64_t max_sequence_length = (*request_with_max_sequence_length)->CurrentSequenceLength();
 
   key_value_cache_->Update({}, max_sequence_length);
-  std::cout << "KeyValueCache updated with max_sequence_length: " << max_sequence_length << std::endl;
 }
 
 void StaticCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& requests) {
