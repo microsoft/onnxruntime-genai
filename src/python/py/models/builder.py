@@ -527,8 +527,12 @@ class Model:
         repeated_proto.sort(key=lambda x: order.index(getattr(x, key_name)))
 
     def make_tensor_proto_from_tensor(self, tensor, name):
-        assert tensor.is_contiguous, "Tensor must be contiguous"
-        assert tensor.get_device == -1, "Tensor must be on CPU"
+        if not tensor.is_contiguous:
+            # Make tensor contiguous
+            tensor = tensor.contiguous()
+        if tensor.get_device != -1:
+            # Tensor must be on CPU (device id = -1)
+            tensor = tensor.cpu()
 
         raw_data = bytes(
             (ctypes.c_ubyte * tensor.element_size() * tensor.numel()).from_address(
