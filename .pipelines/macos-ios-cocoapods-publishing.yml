@@ -28,6 +28,15 @@ extends:
   # For productions pipelines, use "Official".
   template: v1/1ES.Official.PipelineTemplate.yml@1esPipelines
   parameters:
+    sdl:
+      tsa:
+        enabled: true
+      codeSignValidation:
+        enabled: true
+        break: true
+      policheck:
+        enabled: true
+        exclusionsFile: '$(Build.SourcesDirectory)\.pipelines\policheck_exclusions.xml'
     # Update the pool with your team's 1ES hosted pool.
     pool:
       name: 'onnxruntime-Win-CPU-2022'  # Name of your hosted pool
