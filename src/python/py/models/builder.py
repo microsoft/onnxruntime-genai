@@ -9,7 +9,7 @@ Run this script to create the desired ONNX model.
 """
 
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
-from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer, QuantFormat
+from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer, QuantFormat
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 import numpy as np
@@ -505,7 +505,7 @@ class Model:
         )
 
     def to_int4(self, model):
-        quant = MatMul4BitsQuantizer(
+        quant = MatMulNBitsQuantizer(
             model=model,
             block_size=self.quant_attrs["int4"]["block_size"],
             is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
@@ -2215,7 +2215,7 @@ class Model:
         self.make_preprocessing_nodes()
 
         # Load weights of original model
-        if input_path.endswith(".gguf"):
+        if input_path.endswith("gguf"):
             # Load GGUF model
             try:
                 from gguf_model import GGUFModel
@@ -2223,7 +2223,7 @@ class Model:
                 from onnxruntime_genai.models.gguf_model import GGUFModel
             model = GGUFModel.from_pretrained(self.model_type, input_path, self.head_size, self.hidden_size, self.intermediate_size, self.num_attn_heads, self.num_kv_heads, self.vocab_size)
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
-        elif self.quant_type is not None:
+        elif self.quant_type is not None and self.quant_type != 'bitnet': # not know how to work with bitnet yet
             # Load quantized PyTorch model
             try:
                 from quantized_model import QuantModel
@@ -3305,22 +3305,34 @@ class BitNetModel(MistralModel):
         self.rms_norm_eps = config.rms_norm_eps
 
     def make_mlp_proj(self, layer_id, mlp, root_input):
+        # BitNetMLP: self.down_proj(self.ffn_sub_norm(self.act_fn(self.gate_proj(x)) * self.up_proj(x)))
         # Make nodes for the MLP subgraph
         #
-        #          root_input
-        #              |
-        #         UpProjMatMul
-        #              |
-        #           ActFunc
-        #              |
-        #        SimpleLayerNorm
-        #              |
-        #         DownProjMatMul
+        #                   root_input
+        #               ________|___________
+        #              |                    |
+        #         GateProjMatMul        UpProjMatMul
+        #              |                    |
+        #           ActFunc                 |
+        #              |____________________|
+        #                        |
+        #                       Mul
+        #                        |
+        #                   SimpleLayerNorm
+        #                        |
+        #                   DownProjMatMul
 
         up_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
         up_name = self.make_matmul(mlp.up_proj, up_basename, root_input)
 
-        act_fn_name = self.make_activation(layer_id, root_input=f"{up_name}/output_0")
+        gate_basename = f"/model/layers.{layer_id}/mlp/gate_proj/MatMul"
+        gate_name = self.make_matmul(mlp.gate_proj, gate_basename, root_input)
+
+        act_fn_name = self.make_activation(layer_id, root_input=f"{gate_name}/output_0")
+
+        mul_name = f"/model/layers.{layer_id}/mlp/Mul"
+        mul_inputs = [f"{act_fn_name}/output_0", f"{up_name}/output_0"]
+        self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         # add an extra SimplifiedLayerNorm after the MLP activation before the down projection MatMul
         ffn_sub_norm_kwargs = {"epsilon": self.rms_norm_eps, "axis": -1, "stash_type": 1}   # BitNetRMSNorm on axes -1
@@ -3329,7 +3341,7 @@ class BitNetModel(MistralModel):
         ffn_sub_norm_weight_name = ffn_sub_norm_weight_name[1:].replace("/", ".")
         ffn_sub_norm_output = f"{ffn_sub_norm_weight_name}/output_0"
         self.make_external_tensor((mlp.ffn_sub_norm.weight.detach().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), ffn_sub_norm_weight_name)
-        self.make_node("SimplifiedLayerNormalization", inputs=[f"{act_fn_name}/output_0", ffn_sub_norm_weight_name], outputs=[ffn_sub_norm_output], name=ffn_sub_norm_name, **ffn_sub_norm_kwargs)
+        self.make_node("SimplifiedLayerNormalization", inputs=[f"{mul_name}/output_0", ffn_sub_norm_weight_name], outputs=[ffn_sub_norm_output], name=ffn_sub_norm_name, **ffn_sub_norm_kwargs)
 
         # Make output MatMul node
         down_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
@@ -3577,6 +3589,11 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         from peft import PeftConfig
         peft_config = PeftConfig.from_pretrained(extra_options["adapter_path"], token=hf_token, trust_remote_code=True, **extra_kwargs)
         config.update(peft_config.__dict__)
+
+    if "BitNet" in hf_name or "bitnet" in hf_name and not config.architectures:
+        config.architectures = ["BitNetForCausalLM"]
+    if "Mistral" in hf_name and not config.architectures:
+        config.architectures = ["MistralForCausalLM"]
 
     # Set input/output precision of ONNX model
     io_dtype = set_io_dtype(precision, execution_provider, extra_options)
