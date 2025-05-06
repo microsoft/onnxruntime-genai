@@ -1169,7 +1169,7 @@ class Model:
             self.layernorm_attrs["root_input"] = output_3
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
-        if "gemma-3" in self.model_name_or_path and self.io_dtype == TensorProto.BFLOAT16:
+        if self.layernorm_attrs["use_fp32_layernorms"]:
             self.make_layernorm_with_casting_to_fp32(layer_id, layernorm, skip, simple, location)
         else:
             self.make_layernorm_default(layer_id, layernorm, skip, simple, location)
@@ -2325,6 +2325,7 @@ class Model:
                 from onnxruntime_genai.models.gguf_model import GGUFModel
             model = GGUFModel.from_pretrained(self.model_type, input_path, self.head_size, self.hidden_size, self.intermediate_size, self.num_attn_heads, self.num_kv_heads, self.vocab_size)
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
+            self.layernorm_attrs["use_fp32_layernorms"] = 0
         elif self.quant_type is not None:
             # Load quantized PyTorch model
             try:
@@ -3334,6 +3335,7 @@ class Gemma3Model(Gemma2Model):
         self.is_local = lambda layer_id: bool((layer_id + 1) % config.sliding_window_pattern)
         self.rope_local_theta = config.rope_local_base_freq
         self.make_rotary_embedding_multi_cache()
+        self.layernorm_attrs["use_fp32_layernorms"] = 1 if self.io_dtype == TensorProto.BFLOAT16 else 0        
 
     def make_attention_init(self):
         self.attention_attrs["q_norm"] = True
