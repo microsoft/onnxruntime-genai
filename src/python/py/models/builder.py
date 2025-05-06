@@ -73,6 +73,7 @@ class Model:
             },
             "dml": {},
             "webgpu": {},
+            "NvTensorRtRtx": {},
         }
 
         # Map input names to their types and shapes
@@ -295,7 +296,7 @@ class Model:
                 "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
                 "algo_config": int4_algo_config,
             },
-            "use_qdq": extra_options.get("use_qdq", False),           # Use QDQ format
+            "use_qdq": True if self.ep == "NvTensorRtRtx" else extra_options.get("use_qdq", False), # Use QDQ format
         }
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
@@ -310,6 +311,7 @@ class Model:
             ("dml", TensorProto.FLOAT16),
             ("webgpu", TensorProto.FLOAT16),
             ("webgpu", TensorProto.FLOAT),
+            ("NvTensorRtRtx", TensorProto.FLOAT16),
         ]
         if (self.ep, self.io_dtype) in valid_gqa_configurations:
             # Change model settings for GroupQueryAttention
@@ -2076,7 +2078,15 @@ class Model:
         #        GeluAct
         gelu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         output = f"{gelu_name}/output_0"
-        self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
+
+        # NvTensorRtRtx (Opset 21) uses standard "Gelu" replacing "Gelu" & "FastGelu" contrib ops, otherwise fallback to contrib ops
+        if activation == "Gelu" and self.ep == "NvTensorRtRtx":
+            self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="none") 
+        elif activation == "FastGelu" and self.ep == "NvTensorRtRtx":
+            self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="tanh")
+        else:
+            self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
+
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
 
         return gelu_name
@@ -3486,7 +3496,7 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "rocm", "dml", "webgpu"],
+        choices=["cpu", "cuda", "rocm", "dml", "webgpu", "NvTensorRtRtx"],
         help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WEBGPU)",
     )
 
