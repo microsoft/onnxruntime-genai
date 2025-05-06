@@ -132,7 +132,7 @@ extends:
         break: true
       policheck:
         enabled: true
-        exclusionsFile: '$(Build.SourcesDirectory)\.pipelines\policheck_exclusions.xml'
+        # exclusionsFile: '$(Build.SourcesDirectory)\.pipelines\policheck_exclusions.xml'
     stages:
     - template: stages/capi-packaging-stage.yml
       parameters:
