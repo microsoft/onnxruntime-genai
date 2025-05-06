@@ -31,7 +31,7 @@ __global__ void InitCurandStates(unsigned long long seed, curandState* states, i
 SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int vocab_size, cudaStream_t stream) {
   indices_sorted = CudaMallocArray<int>(vocab_size * batch_size);
   scores_sorted = CudaMallocArray<float>(vocab_size * batch_size);
-  scores_softmaxed = CudaMallocArray<float>(vocab_size * batch_size);
+  scores_buffer = CudaMallocArray<float>(vocab_size * batch_size);
   prefix_sums = CudaMallocArray<float>(vocab_size * batch_size);
   thresholds = CudaMallocArray<float>(batch_size);
   indices_in = CudaMallocArray<int>(vocab_size * batch_size);
@@ -384,8 +384,6 @@ void GetTempStorageSize(const T* d_keys_in,
   }
 }
 
-// Sampling Kernels and Launchers
-
 template <int kBlockSize>
 __global__ void PrefixSumKernel(float* scores, float* prefix_sums, int sample_range, int batch_size) {
   int batch = blockIdx.x;
@@ -403,7 +401,7 @@ __global__ void PrefixSumKernel(float* scores, float* prefix_sums, int sample_ra
     prefix_sum += sum;
     __syncthreads();
     if (local_index < sample_range) {
-      prefix_sums[local_index + batch * sample_range] = prefix_sum;
+      prefix_sums[global_index] = prefix_sum;
     }
   }
 }
@@ -442,18 +440,7 @@ void LaunchGetTopKSubset(cudaStream_t stream, float* scores_in, float* scores_ou
 }
 
 // Sets up random thresholds for top p or top k sampling
-__global__ void RandomThresholdKernelTopPAndK(curandState* curand_states, float* thresholds, float* prefix_sums, int batch_size, float p, int k) {
-  int index = threadIdx.x + blockIdx.x * blockDim.x;
-
-  float k_prob = prefix_sums[k - 1];
-  if (index < batch_size) {
-    float min_p = fminf(p, k_prob);
-    thresholds[index] = min_p * curand_uniform(&curand_states[index]);
-  }
-}
-
-// Sets up random thresholds for top p or top k sampling
-__global__ void RandomThresholdKernelTopP(curandState* curand_states, float* thresholds, float* prefix_sums, int batch_size, float p) {
+__global__ void RandomThresholdKernel(curandState* curand_states, float* thresholds, int batch_size, float p=1.0) {
   int index = threadIdx.x + blockIdx.x * blockDim.x;
 
   if (index < batch_size) {
@@ -461,17 +448,8 @@ __global__ void RandomThresholdKernelTopP(curandState* curand_states, float* thr
   }
 }
 
-// Sets up random thresholds for top p or top k sampling
-__global__ void RandomThresholdKernelTopK(curandState* curand_states, float* thresholds, float* prefix_sums, int batch_size, int k) {
-  int index = threadIdx.x + blockIdx.x * blockDim.x;
-
-  if (index < batch_size) {
-    thresholds[index] = prefix_sums[k - 1] * curand_uniform(&curand_states[index]);
-  }
-}
-
 template <int kBlockSize>
-__global__ void SampleKernel(float* prefix_sums, int* indices, int* index_out, int sample_range, float* thresholds) {
+__global__ void SampleKernel(float* prefix_sums, int* indices, int* index_out, int sample_range, int indices_stride, float* thresholds) {
   int batch = blockIdx.x;
   int index = threadIdx.x;
 
@@ -481,85 +459,48 @@ __global__ void SampleKernel(float* prefix_sums, int* indices, int* index_out, i
   }
   __syncthreads();
 
-  for (; index < sample_range; index += blockDim.x) {
-    if (index + batch * sample_range < blockDim.x * sample_range) {
-      float sum = prefix_sums[index + batch * sample_range];
-      // TOP P or K
-      if (sum >= thresholds[batch] || index == sample_range - 1) {
-        atomicMin(&first_index, index);
-        break;
-      }
+  for (; index < sample_range - 1; index += blockDim.x) {
+    float sum = prefix_sums[batch * sample_range + index];
+    // TOP P or K
+    if (sum >= thresholds[batch]) {
+      atomicMin(&first_index, index);
+      break;
     }
   }
   __syncthreads();
 
   if (threadIdx.x == 0) {
-    index_out[batch] = indices[first_index + batch * sample_range];
+    index_out[batch] = indices[batch * indices_stride + first_index];
   }
 }
 
-void LaunchSampleKernel(SamplingData* data, cudaStream_t stream, float* scores, int* indices, int* index_out, int sample_range, int batch_size, float p = 0.0, int k = -1) {
+void LaunchSampleKernel(SamplingData* data, cudaStream_t stream, float* scores, int* indices, int* index_out, int sample_range, int batch_size, int indices_stride, float p = 0.0, int k = -1) {
   dim3 grid(batch_size, 1, 1);
   dim3 block(256, 1, 1);
   // Prefix Sums
-  std::span<float> prefix_sums{data->prefix_sums.get(), static_cast<size_t>(sample_range * batch_size)};
-  PrefixSumKernel<256><<<grid, block, 0, stream>>>(scores, prefix_sums.data(), sample_range, batch_size);
+  PrefixSumKernel<256><<<grid, block, 0, stream>>>(scores, data->prefix_sums.get(), sample_range, batch_size);
   // Random Thresholds for Top P or Top K Sampling
-  std::span<float> thresholds{data->thresholds.get(), static_cast<size_t>(batch_size)};
-  if (p > 0.0 && k > 1) {
-    RandomThresholdKernelTopPAndK<<<int(batch_size / 128) + 1, 128, 0, stream>>>(data->curand_states.get(), thresholds.data(), prefix_sums.data(), batch_size, p, k);
-  } else if (p > 0.0) {
-    RandomThresholdKernelTopP<<<int(batch_size / 128) + 1, 128, 0, stream>>>(data->curand_states.get(), thresholds.data(), prefix_sums.data(), batch_size, p);
-  } else if (k > 1) {
-    RandomThresholdKernelTopK<<<int(batch_size / 128) + 1, 128, 0, stream>>>(data->curand_states.get(), thresholds.data(), prefix_sums.data(), batch_size, k);
-  }
-  SampleKernel<256><<<grid, block, 0, stream>>>(prefix_sums.data(), indices, index_out, sample_range, thresholds.data());
+  RandomThresholdKernel<<<int(batch_size / 128) + 1, 128, 0, stream>>>(data->curand_states.get(), data->thresholds.get(), batch_size, p > 0.0 ? p : 1.0);
+  SampleKernel<256><<<grid, block, 0, stream>>>(data->prefix_sums.get(), indices, index_out, sample_range, indices_stride, data->thresholds.get());
 }
 
-// Top P+K Kernel Launchers
-
-// Outputs sorted scores and corresponding indices... scores_out and indices_out should already be allocated
-void SoftmaxAndSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, float temperature) {
-  // Softmax scores
-  std::span<float> scores{data->scores_softmaxed.get(), static_cast<size_t>(vocab_size * batch_size)};
-  DispatchBlockwiseSoftmaxForward<false>(stream, scores.data(), const_cast<const float*>(scores_in), vocab_size, vocab_size, vocab_size, batch_size, temperature);
-  // Sort indices by scores
-  std::span<int> offsets_gpu{data->offsets.get(), static_cast<size_t>(batch_size + 1)};
-  LaunchPopulateOffsets(offsets_gpu.data(), vocab_size, batch_size, stream);
-  std::span<int32_t> indices_in{data->indices_in.get(), static_cast<size_t>(vocab_size * batch_size)};
-  LaunchPopulateIndices(indices_in.data(), vocab_size, batch_size, stream);
-  std::span<float> temp_span{data->temp_buffer.get(), data->temp_storage_bytes / sizeof(float)};
-  LaunchSortPairs<float>(temp_span.data(), data->temp_storage_bytes, scores.data(), scores_out,
-                         indices_in.data(), indices_out, vocab_size * batch_size, batch_size, offsets_gpu.data(),
-                         stream, /*is_descending*/ true);
-}
-
-void LaunchGetTopKSubsetFullSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k) {
+void LaunchSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size) {
   // Sort indices and scores
-  std::span<float> scores_sorted{data->scores_sorted.get(), static_cast<size_t>(vocab_size * batch_size)};
-  std::span<int> indices_sorted{data->indices_sorted.get(), static_cast<size_t>(vocab_size * batch_size)};
-  std::span<int> offsets_gpu{data->offsets.get(), static_cast<size_t>(batch_size + 1)};
-  LaunchPopulateOffsets(offsets_gpu.data(), vocab_size, batch_size, stream);
-  std::span<int32_t> indices_in{data->indices_in.get(), static_cast<size_t>(vocab_size * batch_size)};
-  LaunchPopulateIndices(indices_in.data(), vocab_size, batch_size, stream);
-  std::span<float> temp_span{data->temp_buffer.get(), data->temp_storage_bytes / sizeof(float)};
-  LaunchSortPairs<float>(temp_span.data(), data->temp_storage_bytes, scores_in, scores_sorted.data(),
-                         indices_in.data(), indices_sorted.data(), vocab_size * batch_size, batch_size, offsets_gpu.data(),
+  LaunchPopulateOffsets(data->offsets.get(), vocab_size, batch_size, stream);
+  LaunchPopulateIndices(data->indices_in.get(), vocab_size, batch_size, stream);
+  LaunchSortPairs<float>(data->temp_buffer.get(), data->temp_storage_bytes, scores_in, scores_out,
+                         data->indices_in.get(), indices_out, vocab_size * batch_size, batch_size, data->offsets.get(),
                          stream, /*is_descending*/ true);
 }
 
 void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
-  // Softmax scores
-  std::span<float> scores_softmaxed{data->scores_softmaxed.get(), static_cast<size_t>(vocab_size * batch_size)};
-  DispatchBlockwiseSoftmaxForward<false>(stream, scores_softmaxed.data(), const_cast<const float*>(scores_in), vocab_size, vocab_size, vocab_size, batch_size, temperature);
-// Get top k subset
-#define GetTopK(max_k)                                \
-  LaunchGetTopKSubset<max_k>(stream,                  \
-                             scores_softmaxed.data(), \
-                             scores_out,              \
-                             indices_out,             \
-                             vocab_size,              \
-                             batch_size,              \
+#define GetTopK(max_k)                                   \
+  LaunchGetTopKSubset<max_k>(stream,                     \
+                             scores_in,                  \
+                             data->scores_buffer.get(),  \
+                             indices_out,                \
+                             vocab_size,                 \
+                             batch_size,                 \
                              k)
 
   if (k <= 4) {
@@ -573,22 +514,24 @@ void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, fl
   } else if (k <= 64) {
     GetTopK(64);
   } else {
-    LaunchGetTopKSubsetFullSort(data, stream, scores_softmaxed.data(), scores_out, indices_out, vocab_size, batch_size, k);
+    // In this case, we need vocab_size as stride for indices_out.
+    LaunchSort(data, stream, scores_in, data->scores_buffer.get(), indices_out, vocab_size, batch_size);
   }
+  DispatchBlockwiseSoftmaxForward<false>(stream, scores_out, const_cast<const float*>(data->scores_buffer.get()), k, k <= 64 ? k : vocab_size, k, batch_size, temperature);
 }
 
-// Kernel launcher for combined (or seperate) top k and top p sampling; where k is the max number of tokens to sample and p is the probability threshold
+// Kernel launcher for combined (or separate) top k and top p sampling; where k is the max number of tokens to sample and p is the probability threshold
 void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out, float* scores_in, int vocab_size, int batch_size, int k, float p, float temperature) {
-  int sample_range = (k > 0 && k <= 64) ? k : vocab_size;
-  std::span<float> scores_sorted(data->scores_sorted.get(), static_cast<size_t>(sample_range * batch_size));
-  std::span<int> indices_sorted(data->indices_sorted.get(), static_cast<size_t>(sample_range * batch_size));
   if (k > 0 && k < vocab_size) {
-    GetTopKSubset(data, stream, scores_in, scores_sorted.data(), indices_sorted.data(), vocab_size, batch_size, k, temperature);
+    GetTopKSubset(data, stream, scores_in, data->scores_sorted.get(), data->indices_sorted.get(), vocab_size, batch_size, k, temperature);
   } else {
-    SoftmaxAndSort(data, stream, scores_in, scores_sorted.data(), indices_sorted.data(), vocab_size, batch_size, temperature);
+    DispatchBlockwiseSoftmaxForward<false>(stream, data->scores_buffer.get(), const_cast<const float*>(scores_in), vocab_size, vocab_size, vocab_size, batch_size, temperature);
+    LaunchSort(data, stream, data->scores_buffer.get(), data->scores_sorted.get(), data->indices_sorted.get(), vocab_size, batch_size);
   }
   // Sample kernel
-  LaunchSampleKernel(data, stream, scores_sorted.data(), indices_sorted.data(), next_token_out, sample_range, batch_size, p, k);
+  int sample_range = k > 0 ? k : vocab_size;
+  int indices_stride = (k > 0 && k <= 64) ? k : vocab_size;
+  LaunchSampleKernel(data, stream, data->scores_sorted.get(), data->indices_sorted.get(), next_token_out, sample_range, batch_size, indices_stride, p, k);
 }
 
 }  // namespace cuda

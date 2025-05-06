@@ -65,6 +65,8 @@ struct ProviderOptionsArray_Element : JSON::Element {
         v.name = "QNN";
       } else if (v.name == "webgpu") {
         v.name = "WebGPU";
+      } else if (v.name == "dml") {
+        v.name = "DML";
       }
     }
   }
@@ -587,38 +589,6 @@ struct Embedding_Element : JSON::Element {
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
 
-struct PromptTemplates_Element : JSON::Element {
-  explicit PromptTemplates_Element(std::optional<Config::Model::PromptTemplates>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    // if one of templates is given in json, then any non-specified template will be default "{Content}"
-    if (name == "assistant") {
-      EnsureAvailable();
-      v_->assistant = JSON::Get<std::string_view>(value);
-    } else if (name == "prompt") {
-      EnsureAvailable();
-      v_->prompt = JSON::Get<std::string_view>(value);
-    } else if (name == "system") {
-      EnsureAvailable();
-      v_->system = JSON::Get<std::string_view>(value);
-    } else if (name == "user") {
-      EnsureAvailable();
-      v_->user = JSON::Get<std::string_view>(value);
-    } else {
-      throw JSON::unknown_value_error{};
-    }
-  }
-
- private:
-  std::optional<Config::Model::PromptTemplates>& v_;
-
-  void EnsureAvailable() {
-    if (!v_.has_value()) {
-      v_.emplace();
-    }
-  }
-};
-
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v) : v_{v} {}
 
@@ -662,9 +632,6 @@ struct Model_Element : JSON::Element {
     if (name == "embedding") {
       return embedding_;
     }
-    if (name == "prompt_templates") {
-      return prompt_templates_;
-    }
     if (name == "speech") {
       return speech_;
     }
@@ -678,7 +645,6 @@ struct Model_Element : JSON::Element {
   Eos_Array_Element eos_token_ids_{v_};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
-  PromptTemplates_Element prompt_templates_{v_.prompt_templates};
   Speech_Element speech_{v_.speech};
 };
 
@@ -768,7 +734,7 @@ bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
           throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
         }
       }
-    } else if (provider_options.name == "dml") {
+    } else if (provider_options.name == "DML") {
       return true;
     } else if (provider_options.name == "NvTensorRtRtx") {
       return true;
