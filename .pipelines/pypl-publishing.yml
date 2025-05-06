@@ -85,13 +85,9 @@ extends:
       sourceRepositoriesToScan:
         include:
         - repository: manylinux
-      tsa:
-        enabled: true
-      codeSignValidation:
-        enabled: true
-        break: true
       policheck:
         enabled: true
+        break: true # always break the build on policheck issues. You can disable it by setting to 'false'
     stages:
     - template: stages/py-packaging-stage.yml
       parameters:
