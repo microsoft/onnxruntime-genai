@@ -10,7 +10,7 @@ parameters:
   default: 'x64'
 - name: build_config
   type: string
-  default: 'release'
+  default: 'Release'
 
 steps:
 - bash: |
