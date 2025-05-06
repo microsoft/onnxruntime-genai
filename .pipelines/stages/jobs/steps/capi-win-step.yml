@@ -47,20 +47,20 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
-  displayName: 'Configure CMake C API with CUDA'
+    python build.py --config $(build_config) --update --use_cuda --cuda_home $(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)
+  displayName: 'Configure with CUDA using build.py'
   condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config)
-  displayName: 'Configure CMake C API without CUDA'
+    python build.py --config $(build_config) --update
+  displayName: 'Configure without CUDA using build.py'
   condition: ne(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
-  displayName: 'Build C API'
+    python build.py --config $(build_config) --build --parallel
+  displayName: 'Build C API using build.py'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
@@ -81,8 +81,8 @@ steps:
     displayName: 'Install wheel'
 
   - powershell: |
-      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --target package
-    displayName: 'Package C/C++ API'
+      python build.py --config $(build_config) --build --cmake_extra_defines BUILD_TARGET=package
+    displayName: 'Package C/C++ API using build.py'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: 1ES.PublishPipelineArtifact@1
@@ -110,8 +110,8 @@ steps:
     displayName: 'Install wheel'
 
   - powershell: |
-      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --PyPackageBuild
-    displayName: 'Build Python Wheel'
+      python build.py --config $(build_config) --build --parallel
+    displayName: 'Build Python Wheel using build.py'
 
   - powershell: |
       Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
