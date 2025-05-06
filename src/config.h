@@ -74,7 +74,7 @@ struct Config {
     std::vector<NamedString> config_entries;  // Entries go into OrtSessionOptions::AddConfigEntry
 
     std::vector<ProviderOptions> provider_options;
-    std::vector<ProviderOptions> provider_options_backup;
+    std::vector<std::string> providers;
     std::optional<GraphOptimizationLevel> graph_optimization_level;
   };
 

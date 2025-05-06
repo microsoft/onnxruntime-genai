@@ -54,9 +54,8 @@ struct ProviderOptionsObject_Element : JSON::Element {
 };
 
 struct ProviderOptionsArray_Element : JSON::Element {
-  explicit ProviderOptionsArray_Element(std::vector<Config::ProviderOptions>& v,
-                                        std::vector<Config::ProviderOptions>* v_backup = nullptr)
-      : v_{v}, v_backup_{v_backup} {}
+  explicit ProviderOptionsArray_Element(std::vector<Config::ProviderOptions>& v, std::vector<std::string>& providers)
+      : v_{v}, providers_{providers} {}
 
   JSON::Element& OnObject(std::string_view name) override { return object_; }
 
@@ -70,19 +69,18 @@ struct ProviderOptionsArray_Element : JSON::Element {
       } else if (v.name == "dml") {
         v.name = "DML";
       }
-    }
 
-    // Copy the provider options to the backup vector.
-    // The backup is used to restore the original provider options when
-    // AppendProvider is called with the same provider name.
-    if (v_backup_) {
-      *v_backup_ = v_;
+      if (std::find(providers_.begin(), providers_.end(), v.name) == providers_.end()) {
+        // The providers array determines the which execution provider is picked for the session..
+        // It also determines the order of the providers.
+        providers_.push_back(v.name);
+      }
     }
   }
 
  private:
   std::vector<Config::ProviderOptions>& v_;
-  std::vector<Config::ProviderOptions>* v_backup_;
+  std::vector<std::string>& providers_;
   ProviderOptionsObject_Element object_{v_};
 };
 
@@ -153,7 +151,7 @@ struct SessionOptions_Element : JSON::Element {
 
  private:
   Config::SessionOptions& v_;
-  ProviderOptionsArray_Element provider_options_{v_.provider_options, &v_.provider_options_backup};
+  ProviderOptionsArray_Element provider_options_{v_.provider_options, v_.providers};
   NamedStrings_Element config_entries_{v_.config_entries};
 };
 
@@ -721,31 +719,17 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
 }
 
 void ClearProviders(Config& config) {
-  config.model.decoder.session_options.provider_options.clear();
+  config.model.decoder.session_options.providers.clear();
 }
 
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
-  for (auto& provider_options : config.model.decoder.session_options.provider_options_backup) {
-    // If config.model.decoder.session_options.provider_options already has the provider name, add the requested option to it.
-    // Otherwise, if the provider name is found in the backup, query the provider options from the backup and add them to the current provider options.
-    // Otherwise, create a new provider options object and add it to the current provider options.
-    // This ensures that any __required__ options specified in the genai_config.json are not lost when ClearProviders -> AppendProvider is called.
-    // This is important for providers like Cuda, which require certain options to be set for some models.
-    if (provider_options.name == provider_name &&
-        std::none_of(config.model.decoder.session_options.provider_options.begin(),
-                     config.model.decoder.session_options.provider_options.end(),
-                     [&provider_name](const Config::ProviderOptions& po) { return po.name == provider_name; })) {
-      config.model.decoder.session_options.provider_options.emplace_back(provider_options);
-      return;
-    }
-  }
   std::ostringstream json;
   json << R"({")" << provider_name << R"(":{)";
   if (!option_name.empty()) {
     json << R"(")" << option_name << R"(":")" << option_value << R"(")";
   }
   json << R"(}})";
-  ProviderOptionsArray_Element element{config.model.decoder.session_options.provider_options};
+  ProviderOptionsArray_Element element{config.model.decoder.session_options.provider_options, config.model.decoder.session_options.providers};
   JSON::Parse(element, json.str());
 }
 
