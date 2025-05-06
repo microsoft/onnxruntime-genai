@@ -45,6 +45,9 @@ steps:
   displayName: 'Download CUDA $(cuda_version)'
   condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
+- powershell: |
+    pip install -r tools\python\requirements.txt
+  workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
     python build.py --config $(build_config) --update --use_cuda --cuda_home $(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)
