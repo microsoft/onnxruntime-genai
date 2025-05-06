@@ -6,6 +6,57 @@ import time
 import numpy as np
 import onnxruntime_genai as og
 
+
+def json_schema():
+    file_path = '/home/kvaishnavi/onnxruntime-genai/test/test_models/grammars/file_schema.json'
+    json_schema_data = ''
+    with open(file_path, 'r', encoding='utf-8') as file:
+        json_schema_data = file.read()
+
+    tool_function_info = ""
+    file_path = '/home/kvaishnavi/onnxruntime-genai/test/test_models/grammars/file_grammar.json'
+    with open(file_path, 'r', encoding='utf-8') as file:
+        # tool_function_data = file.read()
+        tool_function_data = json.load(file)
+        tool_function_info = json.dumps(tool_function_data).replace("\"", "'")
+        tool_function_info = tool_function_info[1:-1]
+    # tool_function_info = "\"" + ",".join(tool_function_info) + "\""
+    print(tool_function_info)
+
+    return json_schema_data, tool_function_info
+
+
+def lark_grammar():
+    file_path = '/home/kvaishnavi/onnxruntime-genai/test/test_models/grammars/file_grammar.txt'
+    json_schema_data = ''
+    with open(file_path, 'r', encoding='utf-8') as file:
+        json_schema_data = file.read()
+
+    # Version 1: cherry pick fields from file_grammar.json
+    # tool_function_info = []
+    # file_path = '/home/kvaishnavi/onnxruntime-genai/test/test_models/grammars/file_grammar.json'
+    # with open(file_path, 'r', encoding='utf-8') as file:
+    #     tool_function_data = json.load(file)
+    #     for tool in tool_function_data:
+    #         tool_function = {'name': tool["properties"]["name"]["const"], 'description': tool["description"], 'parameters': tool["properties"]["parameters"]["properties"]}
+    #         tool_function_str = json.dumps(tool_function).replace("\"", "'")
+    #         tool_function_info.append(tool_function_str)
+    # tool_function_info = ", ".join(tool_function_info)
+    # print(tool_function_info)
+
+    # Version 2: use all fields from file_grammar.json
+    tool_function_info = ""
+    file_path = '/home/kvaishnavi/onnxruntime-genai/test/test_models/grammars/file_grammar.json'
+    with open(file_path, 'r', encoding='utf-8') as file:
+        # tool_function_data = file.read()
+        tool_function_data = json.load(file)
+        tool_function_info = json.dumps(tool_function_data).replace("\"", "'")
+        tool_function_info = tool_function_info[1:-1]
+    # tool_function_info = "\"" + ",".join(tool_function_info) + "\""
+    print(tool_function_info)
+
+    return json_schema_data, tool_function_info
+
 def main(args):
     if args.verbose: print("Loading model...")
     if args.timings:
@@ -30,10 +81,6 @@ def main(args):
     search_options['batch_size'] = 1
     # file_path = '/workspace/code/test/test_models/grammars/weather_grammar.txt'
     # file_path = '/workspace/code/test/test_models/grammars/grammar_multiple_functions.txt'
-    file_path = '/home/kvaishnavi/onnxruntime-genai/test/test_models/grammars/file_grammar.txt'
-    json_schema_data = ''
-    with open(file_path, 'r', encoding='utf-8') as file:
-        json_schema_data = file.read()
 
     if args.verbose: print(search_options)
 
@@ -85,26 +132,13 @@ def main(args):
     # system_prompt = "You are a helpful AI agent. You can provide normal text as an output or sometime a tool function which you have been providied. There is only 1 available tool to you, which is called get_weather and it is used to get weather of a particular city. The tool has only 1 parameter which is the city for which I want the weather. <|tool|>[ {'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}]<|/tool|>"
     # system_prompt_wo_tool_info = "You are a helpful AI agent. You can provide normal text as an output or sometime a tool function which you have been providied. There is only 1 available tool to you, which is called get_weather and it is used to get weather of a particular city. The tool has only 1 parameter which is the city for which I want the weather."
     # tool_function_info = "{'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}"
-    # system_prompt = "You are a helpful AI assistant."
+
+    system_prompt = "You are an AI agent operating on a user's filesystem. Based on the provided information, you need to decide what is the next command to run."
     # tool_function_info = "{'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}, {'name': 'get_population', 'description': 'Get population of a city.', 'parameters': {'city': {'description': 'The city for which population information is requested', 'type': 'str', 'default': 'Dallas'}}}"
     # tool_function_info = "{'name': 'move_file', 'description': 'Move or rename files and directories. Can move files between directories and rename them in a single operation. If the destination exists, the operation will fail. Works across different directories and can be used for simple renaming within the same directory. Both source and destination must be within allowed directories.', 'parameters': {'source': {'type': 'string'}, 'destination': {'type': 'string'}}}"
     # tool_function_info = "{'name': 'search_files', 'description': 'Recursively search for files and directories matching a pattern. Searches through all subdirectories from the starting path. The search is case-insensitive and matches partial names. Returns full paths to all matching items. Great for finding files when you don't know their exact location. Only searches within allowed directories.', 'parameters': {'path':{'type':'string'},'pattern':{'type':'string'},'excludePatterns':{'type':'array','items':{'type':'string'},'default':[]}}}"
 
-    tool_function_info = []
-    file_path = '/home/kvaishnavi/onnxruntime-genai/test/test_models/grammars/file_grammar.json'
-    with open(file_path, 'r', encoding='utf-8') as file:
-        # tool_function_data = file.read()
-        tool_function_data = json.load(file)
-        # tool_function_info = json.dumps(tool_function_info).replace("\"", "'")
-        for tool in tool_function_data:
-            tool_function = {'name': tool["properties"]["name"]["const"], 'description': tool["description"], 'parameters': tool["properties"]["parameters"]["properties"]}
-            tool_function_str = json.dumps(tool_function).replace("\"", "'")
-            tool_function_info.append(tool_function_str)
-    tool_function_info = ", ".join(tool_function_info)
-    # tool_function_info = "\"" + ",".join(tool_function_info) + "\""
-    print(tool_function_info)
-
-    # system_tokens = tokenizer.encode(system_prompt)
+    system_tokens = tokenizer.encode(system_prompt)
 
     # Keep asking for input prompts in a loop
     while True:
@@ -126,9 +160,15 @@ def main(args):
 
         params = og.GeneratorParams(model)
         params.set_search_options(**search_options)
-        # params.set_guidance('json_schema', json_schema_data)
+
+        json_schema_data, tool_function_info = json_schema()
+        params.set_guidance('json_schema', json_schema_data)
+        
         # params.set_guidance('regex', "answer: .*")
-        params.set_guidance('lark_grammar', json_schema_data)
+        
+        # json_schema_data, tool_function_info = lark_grammar()
+        # params.set_guidance('lark_grammar', json_schema_data)
+        
         generator = og.Generator(model, params)
         if args.verbose: print("Generator created")
 
@@ -139,6 +179,7 @@ def main(args):
         messages = f"""[{{"role": "system", "content": "{system_prompt}", "tools": "{tool_function_info}"}}, {{"role": "user", "content": "{text}"}}]"""
         final_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
         final_input = tokenizer.encode(final_prompt)
+        print(len(final_input))
         generator.append_tokens(final_input)
 
         if args.verbose: print("Running generation loop ...")
@@ -147,7 +188,7 @@ def main(args):
             new_tokens = []
 
         print()
-        print("Output: ", end='', flush=True)
+        print("Output: ", flush=True)
 
         try:
             while not generator.is_done():
