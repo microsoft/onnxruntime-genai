@@ -25,7 +25,9 @@ def main(args):
 
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
     search_options['batch_size'] = 1
-    file_path = '/workspace/onnxruntime-genai/test/test_models/grammars/weather_grammar.txt'
+    file_path = '/workspace/code/test/test_models/grammars/weather_grammar.txt'
+    file_path = '/workspace/code/test/test_models/grammars/grammar_multiple_functions.txt'
+    file_path = '/workspace/code/test/test_models/grammars/grammar_read_files.txt'
     json_schema_data = ''
     with open(file_path, 'r', encoding='utf-8') as file:
         json_schema_data = file.read()
@@ -79,11 +81,15 @@ def main(args):
 
     # system_prompt = "You are a helpful AI agent. You can provide normal text as an output or sometime a tool function which you have been provided. If and only if the output is a tool function, only give function name and arguments starting with curly braces and nothing else. Do not create any function names which you have not been provided here. <|tool|>[ {'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}]<|/tool|>"
     # system_prompt = "You are a helpful AI agent. You can provide normal text as an output or tool function details. There is only 1 available tool function to you, which is called get_weather and it has only 1 parameter which is the city for which I want the weather."
-    system_prompt = "You are a helpful AI agent. You can provide normal text as an output or sometime a tool function which you have been providied. There is only 1 available tool to you, which is called get_weather and it is used to get weather of a particular city. The tool has only 1 parameter which is the city for which I want the weather. <|tool|>[ {'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}]<|/tool|>"
-    system_prompt_wo_tool_info = "You are a helpful AI agent. You can provide normal text as an output or sometime a tool function which you have been providied. There is only 1 available tool to you, which is called get_weather and it is used to get weather of a particular city. The tool has only 1 parameter which is the city for which I want the weather."
-    tool_function_info = "{'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}"
+    # system_prompt = "You are a helpful AI agent. You can provide normal text as an output or sometime a tool function which you have been providied. There is only 1 available tool to you, which is called get_weather and it is used to get weather of a particular city. The tool has only 1 parameter which is the city for which I want the weather. <|tool|>[ {'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}]<|/tool|>"
+    # system_prompt_wo_tool_info = "You are a helpful AI agent. You can provide normal text as an output or sometime a tool function which you have been providied. There is only 1 available tool to you, which is called get_weather and it is used to get weather of a particular city. The tool has only 1 parameter which is the city for which I want the weather."
+    # tool_function_info = "{'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}"
+    system_prompt = "You are a helpful AI assistant."
+    tool_function_info = "{'name': 'get_weather', 'description': 'Get weather of a city.', 'parameters': {'city': {'description': 'The city for which weather information is requested', 'type': 'str', 'default': 'Dallas'}}}, {'name': 'get_population', 'description': 'Get population of a city.', 'parameters': {'city': {'description': 'The city for which population information is requested', 'type': 'str', 'default': 'Dallas'}}}"
+    # tool_function_info = "{'name': 'move_file', 'description': 'Move or rename files and directories. Can move files between directories and rename them in a single operation. If the destination exists, the operation will fail. Works across different directories and can be used for simple renaming within the same directory. Both source and destination must be within allowed directories.', 'parameters': {'source': {'type': 'string'}, 'destination': {'type': 'string'}}}"
+    tool_function_info = "{'name': 'search_files', 'description': 'Recursively search for files and directories matching a pattern. Searches through all subdirectories from the starting path. The search is case-insensitive and matches partial names. Returns full paths to all matching items. Great for finding files when you don't know their exact location. Only searches within allowed directories.', 'parameters': {'path':{'type':'string'},'pattern':{'type':'string'},'excludePatterns':{'type':'array','items':{'type':'string'},'default':[]}}}"
 
-    system_tokens = tokenizer.encode(system_prompt)
+    # system_tokens = tokenizer.encode(system_prompt)
 
     # Keep asking for input prompts in a loop
     while True:
@@ -113,7 +119,9 @@ def main(args):
 
         # Append system and input tokens to the generator
         # generator.append_tokens(np.concatenate([system_tokens, input_tokens]))
-        messages = f"""[{{"role": "system", "content": "{system_prompt_wo_tool_info}", "tools": "{tool_function_info}"}}, {{"role": "user", "content": "{text}"}}]"""
+        # import pdb
+        # pdb.set_trace()
+        messages = f"""[{{"role": "system", "content": "{system_prompt}", "tools": "{tool_function_info}"}}, {{"role": "user", "content": "{text}"}}]"""
         final_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
         final_input = tokenizer.encode(final_prompt)
         generator.append_tokens(final_input)
