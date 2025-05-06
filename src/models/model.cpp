@@ -198,7 +198,7 @@ std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
 
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   OrtxPtr<OrtxTokenId2DArray> ids;
-  CheckResult(OrtxTokenize(tokenizer_, &text, 1, ids.Address()));
+  CheckResult(OrtxTokenizeWithOptions(tokenizer_, &text, 1, ids.Address(), false /* add_special_tokens */));
 
   const extTokenId_t* tokens;
   size_t count;
@@ -311,8 +311,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
       Ort::ThrowOnError(Ort::api->UpdateROCMProviderOptions(&ort_provider_options, keys.data(), values.data(), keys.size()));
       session_options.AppendExecutionProvider_ROCM(ort_provider_options);
+    } else if (provider_options.name == "DML") {
 #if USE_DML
-    } else if (provider_options.name == "dml") {
       if (!GetDmlInterface()) {
         LUID device_luid{};
         LUID* p_device_luid{};
@@ -338,10 +338,11 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
       if (is_primary_session_options)
         p_device = GetDeviceInterface(DeviceType::DML);  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
+#else
+      throw std::runtime_error("DML provider requested, but the installed GenAI has not been built with DML support");
 #endif
     } else {
       // For providers that go through the extensible AppendExecutionProvider API:
-
       if (provider_options.name == "QNN") {
         session_options.AddConfigEntry("ep.share_ep_contexts", "1");
         // TODO set device_type_ in a less hacky way.
@@ -408,7 +409,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "dml", "webgpu", "qnn", "OpenVINO (Not used, see above)"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
@@ -738,9 +739,15 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   auto expanded = OrtValue::CreateTensor(p_device_inputs_->GetAllocator(), input_shape, element_type);
   auto expanded_span = ByteWrapTensor(*p_device_inputs_, *expanded);
 
-  for (int i = 0; i < batch_size; i++) {
-    for (int j = 0; j < num_beams; j++) {
-      expanded_span.subspan((i * num_beams + j) * data_size_bytes, data_size_bytes).CopyFrom(input_span.subspan(i * data_size_bytes, data_size_bytes));
+  // Detect fast & simple copy case
+  if (num_beams == 1) {
+    expanded_span.CopyFrom(input_span);
+  } else {
+    // TODO (RyanHill): To avoid cuda uninitialized memory warnings, we should copy input_span to device memory first
+    for (int i = 0; i < batch_size; i++) {
+      for (int j = 0; j < num_beams; j++) {
+        expanded_span.subspan((i * num_beams + j) * data_size_bytes, data_size_bytes).CopyFrom(input_span.subspan(i * data_size_bytes, data_size_bytes));
+      }
     }
   }
   return expanded;
