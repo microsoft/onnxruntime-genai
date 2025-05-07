@@ -260,7 +260,7 @@ def test_qwen_chat_template(device, qwen_for):
     message_json = json.dumps(messages)
     hf_enc = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct", use_fast=True)
     inputs = hf_enc.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    ortx_inputs = tokenizer.apply_chat_template(message_json, add_generation_prompt=True)
+    ortx_inputs = tokenizer.apply_chat_template(template_str = None, messages = message_json, add_generation_prompt=True)
     np.testing.assert_array_equal(ortx_inputs, inputs)
 
 # Test Chat Template Unsupported Model with Template String Override
@@ -282,9 +282,9 @@ def test_phi2_chat_template(device, phi2_for):
     message_json = json.dumps(messages)
 
     # Note: this should work, although the results cannot be compared with HF as phi-2 has no official chat template
-    template_str = """{% for message in messages %}{% if message['role'] == 'system' %}{{'<|system|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'user' %}{{'<|user|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'assistant' %}{{'<|assistant|>\n' + message['content'] + '<|end|>\n'}}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\n' }}{% else %}{{ eos_token }}{% endif %}"""
+    template_string = """{% for message in messages %}{% if message['role'] == 'system' %}{{'<|system|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'user' %}{{'<|user|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'assistant' %}{{'<|assistant|>\n' + message['content'] + '<|end|>\n'}}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\n' }}{% else %}{{ eos_token }}{% endif %}"""
     try:
-        tokenizer.apply_chat_template(template_str, message_json)
+        tokenizer.apply_chat_template(template_str = template_string, messages = message_json)
     except Exception as e:
         assert False, f"Error while trying to override chat template: {e}"
 
