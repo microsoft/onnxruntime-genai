@@ -281,9 +281,12 @@ def test_phi2_chat_template(device, phi2_for):
     ]
     message_json = json.dumps(messages)
 
-    # Note: this should pass, although the results cannot be compared with HF as phi-2 has no official chat template
+    # Note: this should work, although the results cannot be compared with HF as phi-2 has no official chat template
     template_str = """{% for message in messages %}{% if message['role'] == 'system' %}{{'<|system|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'user' %}{{'<|user|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'assistant' %}{{'<|assistant|>\n' + message['content'] + '<|end|>\n'}}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\n' }}{% else %}{{ eos_token }}{% endif %}"""
-    ortx_inputs = tokenizer.apply_chat_template(template_str, message_json)
+    try:
+        tokenizer.apply_chat_template(template_str, message_json)
+    except Exception as e:
+        assert False, f"Error while trying to override chat template: {e}"
 
 @pytest.mark.skipif(
     sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
