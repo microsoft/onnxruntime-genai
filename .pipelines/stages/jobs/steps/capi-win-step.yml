@@ -56,10 +56,6 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    # choco install llvm --yes
-    # $env:PATH = "C:\Program Files\LLVM\bin;$env:PATH"
-    # Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
-    # $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-17.0.6/LLVM-17.0.6-win64.exe"
     $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-woa64.exe"
     $installerPath = "$(Agent.TempDirectory)\LLVM-18.1.8-woa64.exe"
     Write-Host "Downloading LLVM..."
@@ -95,8 +91,6 @@ steps:
 
 - powershell: |
     cmake --build --preset windows_$(arch)_$(ep)_$(build_config) -DUSE_GUIDANCE=ON --parallel --target ${{ parameters.target }}
-    # Uninstalling LLVM/Clang as it is no longer required and causes issues with numpy installation
-    # choco uninstall llvm --yes
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
