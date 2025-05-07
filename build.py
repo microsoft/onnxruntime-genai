@@ -653,12 +653,15 @@ if __name__ == "__main__":
     environment = _create_env(arguments)
 
     if arguments.update:
+        print(f"Updating build files in {arguments.build_dir}")
         update(arguments, environment)
 
     if arguments.clean:
+        print(f"Cleaning build files in {arguments.build_dir}")
         clean(arguments, environment)
 
     if arguments.build:
+        print(f"Building targets in {arguments.build_dir}")
         build(arguments, environment)
 
     if arguments.test and not arguments.skip_tests:

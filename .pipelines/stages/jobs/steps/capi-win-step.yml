@@ -46,22 +46,46 @@ steps:
   condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
+# Must we specity arch?
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
-  displayName: 'Configure CMake C API with CUDA'
-  condition: eq(variables['ep'], 'cuda')
-  workingDirectory: '$(Build.Repository.LocalPath)'
-
-- powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config)
-  displayName: 'Configure CMake C API without CUDA'
-  condition: ne(variables['ep'], 'cuda')
-  workingDirectory: '$(Build.Repository.LocalPath)'
-
-- powershell: |
-    cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
+    python build.py --parallel --config=$${{parameters.build_config}} --cuda_path='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' --build_dir='$(Build.Repository.LocalPath)\${buildDir}'
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
+  condition: eq(variables['ep'], 'cuda')
+  # env:
+  #   CUDA_PATH: '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
+
+- powershell: |
+    python build.py --parallel --config=$${{parameters.build_config}} 
+  displayName: 'Build C API'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+  condition: ne(variables['ep'], 'cuda')
+
+
+
+
+
+# - powershell: |
+#     cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
+#   displayName: 'Configure CMake C API with CUDA'
+#   condition: eq(variables['ep'], 'cuda')
+#   workingDirectory: '$(Build.Repository.LocalPath)'
+
+# - powershell: |
+#     cmake --preset windows_$(arch)_$(ep)_$(build_config)
+#   displayName: 'Configure CMake C API without CUDA'
+#   condition: ne(variables['ep'], 'cuda')
+#   workingDirectory: '$(Build.Repository.LocalPath)'
+
+# - powershell: |
+#     cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
+#   displayName: 'Build C API'
+#   workingDirectory: '$(Build.Repository.LocalPath)'
+
+
+
+
+
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - template: compliant/win-esrp-dll-step.yml
