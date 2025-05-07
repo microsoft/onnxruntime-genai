@@ -247,8 +247,8 @@ def test_tokenizer_encode_decode(device, phi2_for, batch):
     reason="Python 3.8 is required for downloading models.",
 )
 @pytest.mark.parametrize("device", devices)
-def test_phi3_chat_template(device, phi3_for):
-    model_path = phi3_for(device)
+def test_qwen_chat_template(device, qwen_for):
+    model_path = qwen_for(device)
 
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
@@ -258,9 +258,9 @@ def test_phi3_chat_template(device, phi3_for):
         {"role": "user", "content": "How should I explain the Internet?"},
     ]
     message_json = json.dumps(messages)
-    hf_enc = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-128k-instruct", use_fast=True)
+    hf_enc = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct", use_fast=True)
     inputs = hf_enc.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    ortx_inputs = tokenizer.apply_chat_template(message_json)
+    ortx_inputs = tokenizer.apply_chat_template(message_json, add_generation_prompt=True)
     np.testing.assert_array_equal(ortx_inputs, inputs)
 
 # Test Chat Template Unsupported Model with Template String Override
