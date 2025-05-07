@@ -4,6 +4,7 @@
 import onnxruntime_genai as og
 import argparse
 import time
+import json
 
 def main(args):
     if args.verbose: print("Loading model...")
@@ -36,7 +37,7 @@ def main(args):
     if hasattr(model, "type"):
         model_type = model.type
     else:
-        import json, os
+        import os
 
         with open(os.path.join(args.model_path, "genai_config.json"), "r") as f:
             genai_config = json.load(f)
@@ -51,7 +52,6 @@ def main(args):
     if args.verbose: print("Generator created")
 
     # Set system prompt
-    system_prompt = args.system_prompt
     messages = []
     messages.append({"role": "system", "content": args.system_prompt})
     sys_prompt = tokenizer.apply_chat_template(json.dumps(messages))
