@@ -14,6 +14,9 @@ import numpy as np
 import onnxruntime_genai as og
 import pytest
 
+import json
+from transformers import AutoTokenizer
+
 if not sysconfig.get_platform().endswith("arm64"):
     # Skip importing onnx if running on ARM64
     import onnx
@@ -206,6 +209,8 @@ def test_rewind(test_data_path, relative_model_path):
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
     
 
+# Test Model Loading with No Chat Template
+
 # TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
 # requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
 @pytest.mark.skipif(
@@ -236,6 +241,49 @@ def test_tokenizer_encode_decode(device, phi2_for, batch):
             decoded_string = tokenizer.decode(sequence)
             assert prompt == decoded_string
 
+# Test Chat Template Supported Model
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
+)
+@pytest.mark.parametrize("device", devices)
+def test_phi3_chat_template(device, phi3_for):
+    model_path = phi3_for(device)
+
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+
+    messages = [
+        {"role": "system", "content": "You are a medieval knight and must provide explanations to modern people."},
+        {"role": "user", "content": "How should I explain the Internet?"},
+    ]
+    message_json = json.dumps(messages)
+    hf_enc = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-128k-instruct", use_fast=True)
+    inputs = hf_enc.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    ortx_inputs = tokenizer.apply_chat_template(message_json)
+    np.testing.assert_array_equal(ortx_inputs, inputs)
+
+# Test Chat Template Unsupported Model with Template String Override
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
+)
+@pytest.mark.parametrize("device", devices)
+def test_phi2_chat_template(device, phi2_for):
+    model_path = phi2_for(device)
+
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+
+    messages = [
+        {"role": "system", "content": "You are a medieval knight and must provide explanations to modern people."},
+        {"role": "user", "content": "How should I explain the Internet?"},
+    ]
+    message_json = json.dumps(messages)
+
+    # Note: this should pass, although the results cannot be compared with HF as phi-2 has no official chat template
+    template_str = """{% for message in messages %}{% if message['role'] == 'system' %}{{'<|system|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'user' %}{{'<|user|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'assistant' %}{{'<|assistant|>\n' + message['content'] + '<|end|>\n'}}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\n' }}{% else %}{{ eos_token }}{% endif %}"""
+    ortx_inputs = tokenizer.apply_chat_template(template_str, message_json)
 
 @pytest.mark.skipif(
     sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,

@@ -82,7 +82,7 @@ def get_model_paths():
         "phi-2": os.path.join(ci_data_path, "phi2"),
         # "gemma-2b": os.path.join(ci_data_path, "gemma-1.1-2b-it"),
         # "gemma-7b": os.path.join(ci_data_path, "gemma-7b-it-awq"),
-        # "phi-3-mini": os.path.join(ci_data_path, "phi3-mini-128k-instruct"),
+        "phi-3-mini": os.path.join(ci_data_path, "phi3-mini-128k-instruct"),
         # "gemma-2-2b": os.path.join(ci_data_path, "gemma-2-2b-it"),
         # "llama-3.2": os.path.join(ci_data_path, "llama-3.2b-1b-instruct"),
         "qwen-2.5": os.path.join(ci_data_path, "qwen2.5-0.5b-instruct"),
