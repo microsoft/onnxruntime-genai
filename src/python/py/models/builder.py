@@ -144,6 +144,9 @@ class Model:
             TensorProto.FLOAT: torch.float32,
         }
 
+        # Map PyTorch dtypes to TensorProto dtypes
+        self.to_onnx_dtype = {v: k for k, v in self.to_torch_dtype.items()}
+
         # Map TensorProto dtypes to string dtypes
         self.to_str_dtype = {
             TensorProto.INT8: "TensorProto.INT8",
@@ -300,12 +303,15 @@ class Model:
             self.lm_head_attrs["mask"] = dummy_tokens_mask
 
         # Quantization-specific variables (INT4, INT8, etc.)
+        int4_algo_config = self.make_int4_algo_config(extra_options.get("int4_algo_config", "default"))
         self.quant_attrs = {
             "int4": {
                 "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep == "cpu" else 0)),
                 "block_size": int(extra_options.get("int4_block_size", 32)),
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
+                "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
+                "algo_config": int4_algo_config,
             },
             "use_qdq": extra_options.get("use_qdq", False),
         }
@@ -416,11 +422,6 @@ class Model:
             ep_options = { self.ep : self.ep_attrs[self.ep] }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
-        if self.extra_options.get("include_prompt_templates", False):
-            prompt_templates = self._get_prompt_templates(model_name_or_path, extra_kwargs)
-            if prompt_templates is not None:
-                genai_config["model"]["prompt_templates"] = prompt_templates
-
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
@@ -429,30 +430,6 @@ class Model:
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
-
-    def _get_prompt_templates(self, hf_name, extra_kwargs):
-        try:
-            # disable end of sentence padding with eos_token=None
-            tokenizer = AutoTokenizer.from_pretrained(hf_name, token=self.hf_token, trust_remote_code=True, eos_token=None, **extra_kwargs)
-            system_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}], tokenize=False)
-            system_user_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}], tokenize=False)
-            system_user_assistant_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}, {'role': 'assistant', 'content': '{Content}'}], tokenize=False)
-            assert system_user_template.startswith(system_template), "Chat templates may contain padding tokens, leading to incorrect prompt templates"
-            assert system_user_assistant_template.startswith(system_user_template), "Chat templates may contain padding tokens, leading to incorrect prompt templates"
-            user_template = system_user_template[len(system_template):]
-            assistant_template = system_user_assistant_template[len(system_user_template):]
-            prompt_template = system_user_assistant_template[len(system_template):]
-            prompt_template = prompt_template[:prompt_template.rfind('{Content}')]
-            templates = {
-                "system": system_template,
-                "user": user_template,
-                "assistant": assistant_template,
-                "prompt": prompt_template
-            }
-            return templates 
-        except Exception as e:
-            print(f"Failed to get prompt templates. Error: {e}")
-            return None
         
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
@@ -512,15 +489,44 @@ class Model:
             convert_attribute=False,
         )
 
+    def make_int4_algo_config(self, quant_method):
+        int4_algo_config = None
+        if quant_method == "rtn":
+            from onnxruntime.quantization.matmul_nbits_quantizer import RTNWeightOnlyQuantConfig
+            int4_algo_config = RTNWeightOnlyQuantConfig()
+        elif quant_method in ["k_quant_mixed", "k_quant_last"]:
+            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
+            if quant_method == "k_quant_mixed":
+                # k_quant_mixed is from llama.cpp.
+                # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
+                # We also consider some MatMuls are more senstive to quantization than other MatMuls.
+                layers_to_exclude = [
+                    i
+                    for i in range(self.num_layers)
+                    if i < self.num_layers / 8 or i >= 7 * self.num_layers / 8 or (i - (round)(self.num_layers / 8)) % 3 == 2
+                ]
+                customized_weight_config = {}
+                for i in layers_to_exclude:
+                    customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
+                    customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
+                    # Gemma model
+                    customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
+                customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
+            elif quant_method == "k_quant_last":
+                customized_weight_config = {"/lm_head/MatMul": {"bits": 8}}
+            int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+        return int4_algo_config
+
     def to_int4(self, model):
         quant = MatMulNBitsQuantizer(
             model=model,
             block_size=self.quant_attrs["int4"]["block_size"],
             is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
-            nodes_to_exclude=[],
+            nodes_to_exclude=self.quant_attrs["int4"]["nodes_to_exclude"],
             quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
             op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
+            algo_config=self.quant_attrs["int4"]["algo_config"],
         )
         quant.process()
         return quant.model.model
@@ -534,6 +540,13 @@ class Model:
         repeated_proto.sort(key=lambda x: order.index(getattr(x, key_name)))
 
     def make_tensor_proto_from_tensor(self, tensor, name):
+        if not tensor.is_contiguous:
+            # Make tensor contiguous
+            tensor = tensor.contiguous()
+        if tensor.get_device != -1:
+            # Tensor must be on CPU (device id = -1)
+            tensor = tensor.cpu()
+
         raw_data = bytes(
             (ctypes.c_ubyte * tensor.element_size() * tensor.numel()).from_address(
                 tensor.data_ptr()
@@ -541,7 +554,7 @@ class Model:
         )
         tensor_proto = helper.make_tensor(
             name=name,
-            data_type=torch.onnx._type_utils.JitScalarType.from_dtype(tensor.dtype).onnx_type(),
+            data_type=self.to_onnx_dtype[tensor.dtype],
             dims=tensor.shape,
             vals=raw_data,
             raw=True,
@@ -802,7 +815,7 @@ class Model:
 
     def make_matmul_float(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
-        self.make_external_tensor(matmul.weight.detach().T.to( self.to_torch_dtype[self.io_dtype]).contiguous(), weight)
+        self.make_external_tensor(matmul.weight.detach().cpu().T.to(self.to_torch_dtype[self.io_dtype]).contiguous(), weight)
 
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
@@ -830,20 +843,20 @@ class Model:
 
         # Input weights are quantized, save quantized MatMul weights for onnx model
         weight = name[1:].replace("/", ".") + ".qweight"
-        self.make_external_tensor(matmul.qweight.detach().contiguous(), weight)
+        self.make_external_tensor(matmul.qweight.detach().cpu().contiguous(), weight)
         scales = name[1:].replace("/", ".") + ".scales"
-        self.make_external_tensor(matmul.scales.detach().to(self.to_torch_dtype[self.io_dtype]).contiguous(), scales)
+        self.make_external_tensor(matmul.scales.detach().cpu().to(self.to_torch_dtype[self.io_dtype]).contiguous(), scales)
 
         inputs = [root_input, weight, scales]
 
         if hasattr(matmul, "qzeros") and matmul.qzeros is not None:
             zeros = name[1:].replace("/", ".") + ".qzeros"
-            self.make_external_tensor(matmul.qzeros.detach().contiguous(), zeros)
+            self.make_external_tensor(matmul.qzeros.detach().cpu().contiguous(), zeros)
             inputs.append(zeros)
 
         if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
             g_idx = name[1:].replace("/", ".") + ".g_idx"
-            self.make_external_tensor(matmul.g_idx.detach().to(torch.int32).contiguous(), g_idx)
+            self.make_external_tensor(matmul.g_idx.detach().cpu().to(torch.int32).contiguous(), g_idx)
             inputs.append(g_idx)
 
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
@@ -859,12 +872,12 @@ class Model:
     def make_dequantize_linear(self, dequantize_name, quantized_op):
         # Input weights are quantized, save quantized MatMul weights for onnx model
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
-        qweight_npy = quantized_op.qweight.detach()
+        qweight_npy = quantized_op.qweight.detach().cpu()
         qweight_npy = qweight_npy.reshape(*qweight_npy.shape[:-2], qweight_npy.shape[-2] * qweight_npy.shape[-1])
         self.make_external_tensor(qweight_npy.contiguous(), qweight, True)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
-        scales_npy = quantized_op.scales.detach().to(self.to_torch_dtype[self.io_dtype])
+        scales_npy = quantized_op.scales.detach().cpu().to(self.to_torch_dtype[self.io_dtype])
         scales_npy = scales_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size)
         self.make_external_tensor(scales_npy.contiguous(), scales)
 
@@ -872,7 +885,7 @@ class Model:
 
         if hasattr(quantized_op, "qzeros") and quantized_op.qzeros is not None:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
-            zeros_npy = quantized_op.qzeros.detach()
+            zeros_npy = quantized_op.qzeros.detach().cpu()
             zeros_npy = zeros_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] // quantized_op.group_size)
             self.make_external_tensor(zeros_npy.contiguous(), zeros, True)
             dequantize_inputs.append(zeros)
@@ -896,7 +909,7 @@ class Model:
         # compute quantized matmul when the weights are transposed. In most implementations, the transpose should usually be converted to a "transposeB"
         # attribute on the MatMul itself. A more natural way to represent this would have been to use Gemm since it already supports a transB attribute,
         # but unfortunately Gemm doesn't support batches.
-        qweight_shape = matmul.qweight.detach().shape
+        qweight_shape = matmul.qweight.detach().cpu().shape
         transposed_shape = [qweight_shape[1] * qweight_shape[2] * 2, qweight_shape[0]]
         transpose_name = f"{matmul_name}/Transpose"
         self.make_transpose(transpose_name, dequantize_output, self.io_dtype, transposed_shape, [1, 0])
@@ -955,7 +968,7 @@ class Model:
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
 
-    def make_packed_matmul_float(self, q_matmul, k_matmul, v_matmul, name, root_input, **kwargs):
+    def make_packed_matmul_float(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
         # N_q = num_attention_heads * head_size, N_kv = num_key_value_heads * head_size, H = hidden_size
         # Combine 3 MatMuls of shape N_q x H, N_kv x H, N_kv x H into 1 packed MatMul of shape (N_q+N_kv+N_kv)xH
         # Note: Packed MatMul is of shape (N_q+N_kv+N_kv)xH instead of Hx(N_q+N_kv+N_kv) because `make_matmul` will
@@ -968,7 +981,7 @@ class Model:
             def __init__(self):
                 self.weight = torch.cat([q_matmul.weight.detach().cpu(), k_matmul.weight.detach().cpu(), v_matmul.weight.detach().cpu()], dim=0).reshape(N_q + N_kv + N_kv, H)
         matmul = PackedMatMul()
-        new_name = self.make_matmul(matmul, name, root_input, **kwargs)
+        new_name = self.make_matmul(matmul, basename, root_input, **kwargs)
 
         return new_name
 
@@ -978,8 +991,6 @@ class Model:
             # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
             # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
             return self.make_packed_matmul_float(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
-
-        name = f"{basename}NBits"
 
         # Create dummy PackedMatMul class
         class PackedMatMul:
@@ -994,34 +1005,9 @@ class Model:
                 self.bits = q_matmul.bits
                 self.group_size = q_matmul.group_size
         matmul = PackedMatMul()
+        new_name = self.make_matmul_int4(matmul, basename, root_input, **kwargs)
 
-        # Input weights are quantized, save quantized MatMul weights for onnx model
-        weight = name[1:].replace("/", ".") + ".qweight"
-        self.make_external_tensor(matmul.qweight.detach().contiguous(), weight)
-        scales = name[1:].replace("/", ".") + ".scales"
-        self.make_external_tensor(matmul.scales.detach().to(self.to_torch_dtype[self.io_dtype]).contiguous(), scales)
-
-        inputs = [root_input, weight, scales]
-
-        if hasattr(matmul, "qzeros") and matmul.qzeros is not None:
-            zeros = name[1:].replace("/", ".") + ".qzeros"
-            self.make_external_tensor(matmul.qzeros.detach().contiguous(), zeros)
-            inputs.append(zeros)
-
-        if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
-            g_idx = name[1:].replace("/", ".") + ".g_idx"
-            self.make_external_tensor(matmul.g_idx.detach().to(torch.int32).contiguous(), g_idx)
-            inputs.append(g_idx)
-
-        output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
-        self.make_node(
-            "MatMulNBits", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
-            accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
-            bits=matmul.bits, block_size=matmul.group_size, K=matmul.in_features, N=matmul.out_features,
-        )
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
-
-        return name
+        return new_name
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
@@ -1030,7 +1016,7 @@ class Model:
         add_bias_inputs = [root_input, bias]
         shape = ['batch_size', 'sequence_length', add.shape[0]]
 
-        if "logits" in kwargs:
+        if kwargs.get("logits", False):
             output = "logits"
             self.make_node("Add", inputs=add_bias_inputs, outputs=[output], name=name)
             self.make_value_info(output, dtype=self.io_dtype, shape=shape)
@@ -1072,10 +1058,10 @@ class Model:
         skip_input = self.layernorm_attrs["skip_input"]
 
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor(layernorm.weight.detach().to(self.to_torch_dtype[self.io_dtype]).contiguous() + self.layernorm_attrs["add_offset"], weight)
+        self.make_external_tensor(layernorm.weight.detach().cpu().to(self.to_torch_dtype[self.io_dtype]).contiguous() + self.layernorm_attrs["add_offset"], weight)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
-            self.make_external_tensor(layernorm.bias.detach().to(self.to_torch_dtype[self.io_dtype]).contiguous(), bias)
+            self.make_external_tensor(layernorm.bias.detach().cpu().to(self.to_torch_dtype[self.io_dtype]).contiguous(), bias)
 
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
@@ -1237,9 +1223,9 @@ class Model:
 
             # Slice cos/sin caches from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
-            cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach()
+            cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach().cpu()
             cos_cache = cos_cache.to(self.to_torch_dtype[self.io_dtype])
-            sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach()
+            sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().cpu()
             sin_cache = sin_cache.to(self.to_torch_dtype[self.io_dtype])
 
             # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
@@ -1387,13 +1373,13 @@ class Model:
             q_layernorm_cast_in = f"{q_layernorm_name}/Cast"
             self.make_node("Cast", inputs=[q_reshape_1_output], outputs=[q_layernorm_cast_in], name=f"{q_layernorm_name}/CastIn", to=TensorProto.FLOAT)
 
-            q_layernorm_weight_fp32 = (attention.q_norm.weight.detach().to(self.to_torch_dtype[TensorProto.FLOAT]) + self.layernorm_attrs["add_offset"]).contiguous()
+            q_layernorm_weight_fp32 = (attention.q_norm.weight.detach().cpu().to(self.to_torch_dtype[TensorProto.FLOAT]) + self.layernorm_attrs["add_offset"]).contiguous()
             self.make_external_tensor(q_layernorm_weight_fp32, q_weight_name)
 
             self.make_node("SimplifiedLayerNormalization", inputs=[q_layernorm_cast_in, q_weight_name], outputs=[f"{q_layernorm_name}/output/Cast"], name=q_layernorm_name, **layernorm_kwargs)
             self.make_node("Cast", inputs=[f"{q_layernorm_name}/output/Cast"], outputs=[q_layernorm_output], name=f"{q_layernorm_name}/CastOut", to=self.io_dtype)
         else:
-            self.make_external_tensor((attention.q_norm.weight.detach().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), q_weight_name)
+            self.make_external_tensor((attention.q_norm.weight.detach().cpu().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), q_weight_name)
             self.make_node("SimplifiedLayerNormalization", inputs=[q_reshape_1_output, q_weight_name], outputs=[q_layernorm_output], name=q_layernorm_name, **layernorm_kwargs)
        
         self.make_value_info(q_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
@@ -1417,13 +1403,13 @@ class Model:
             k_layernorm_cast_in = f"{k_layernorm_name}/Cast"
             self.make_node("Cast", inputs=[k_reshape_1_output], outputs=[k_layernorm_cast_in], name=f"{k_layernorm_name}/CastIn", to=TensorProto.FLOAT)
 
-            k_layernorm_weight_fp32 = (attention.k_norm.weight.detach().to(self.to_torch_dtype[TensorProto.FLOAT]) + self.layernorm_attrs["add_offset"]).contiguous()
+            k_layernorm_weight_fp32 = (attention.k_norm.weight.detach().cpu().to(self.to_torch_dtype[TensorProto.FLOAT]) + self.layernorm_attrs["add_offset"]).contiguous()
             self.make_external_tensor(k_layernorm_weight_fp32, k_weight_name)
 
             self.make_node("SimplifiedLayerNormalization", inputs=[k_layernorm_cast_in, k_weight_name], outputs=[f"{k_layernorm_name}/output/Cast"], name=k_layernorm_name, **layernorm_kwargs)
             self.make_node("Cast", inputs=[f"{k_layernorm_name}/output/Cast"], outputs=[k_layernorm_output], name=f"{k_layernorm_name}/CastOut", to=self.io_dtype)
         else:
-            self.make_external_tensor((attention.k_norm.weight.detach().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), k_weight_name)
+            self.make_external_tensor((attention.k_norm.weight.detach().cpu().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), k_weight_name)
             self.make_node("SimplifiedLayerNormalization", inputs=[k_reshape_1_output, k_weight_name], outputs=[k_layernorm_output], name=k_layernorm_name, **layernorm_kwargs)                
             
         self.make_value_info(k_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
@@ -1737,20 +1723,20 @@ class Model:
         if all_bias_exists and self.attention_attrs["use_packed_matmul"]:
             # Combine 3 Adds into 1 packed Add
             qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
-            self.make_packed_add(attention.q_proj.bias.detach(), attention.k_proj.bias.detach(), attention.v_proj.bias.detach(), qkv_add_name, root_input=self.attention_attrs["q_path"])
+            self.make_packed_add(attention.q_proj.bias.detach().cpu(), attention.k_proj.bias.detach().cpu(), attention.v_proj.bias.detach().cpu(), qkv_add_name, root_input=self.attention_attrs["q_path"])
             self.attention_attrs["q_path"] = f"{qkv_add_name}/output_0"
         else:
             if q_bias_exists:
                 q_add_name = f"/model/layers.{layer_id}/attn/q_proj/Add"
-                self.make_add_bias(attention.q_proj.bias.detach(), q_add_name, root_input=self.attention_attrs["q_path"])
+                self.make_add_bias(attention.q_proj.bias.detach().cpu(), q_add_name, root_input=self.attention_attrs["q_path"])
                 self.attention_attrs["q_path"] = f"{q_add_name}/output_0"
             if k_bias_exists:
                 k_add_name = f"/model/layers.{layer_id}/attn/k_proj/Add"
-                self.make_add_bias(attention.k_proj.bias.detach(), k_add_name, root_input=self.attention_attrs["k_path"])
+                self.make_add_bias(attention.k_proj.bias.detach().cpu(), k_add_name, root_input=self.attention_attrs["k_path"])
                 self.attention_attrs["k_path"] = f"{k_add_name}/output_0"
             if v_bias_exists:
                 v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
-                self.make_add_bias(attention.v_proj.bias.detach(), v_add_name, root_input=self.attention_attrs["v_path"])
+                self.make_add_bias(attention.v_proj.bias.detach().cpu(), v_add_name, root_input=self.attention_attrs["v_path"])
                 self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
 
         # Make Q/K SimplifiedLayerNorm nodes
@@ -1797,7 +1783,7 @@ class Model:
         o_bias_exists = eval(f"attention.{o_proj}.bias") is not None
         if o_bias_exists:
             o_add_name = f"/model/layers.{layer_id}/attn/o_proj/Add"
-            o_bias = eval(f"attention.{o_proj}.bias.detach()")
+            o_bias = eval(f"attention.{o_proj}.bias.detach().cpu()")
             self.make_add_bias(o_bias, o_add_name, root_input=f"{o_matmul_name}/output_0")
 
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
@@ -1986,7 +1972,7 @@ class Model:
         gate_name = gate_matmul_name
         if gate_bias_exists:
             gate_add_name = f"/model/layers.{layer_id}/mlp/gate_proj/Add"
-            self.make_add_bias(mlp.gate_proj.bias.detach(), gate_add_name, root_input=f"{gate_name}/output_0")
+            self.make_add_bias(mlp.gate_proj.bias.detach().cpu(), gate_add_name, root_input=f"{gate_name}/output_0")
             gate_name = gate_add_name
 
         # Make Up proj nodes
@@ -1995,7 +1981,7 @@ class Model:
         up_name = up_matmul_name
         if up_bias_exists:
             up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
-            self.make_add_bias(mlp.up_proj.bias.detach(), up_add_name, root_input=f"{up_name}/output_0")
+            self.make_add_bias(mlp.up_proj.bias.detach().cpu(), up_add_name, root_input=f"{up_name}/output_0")
             up_name = up_add_name
 
         # Make activation node(s)
@@ -2012,7 +1998,7 @@ class Model:
         down_name = down_matmul_name
         if down_bias_exists:
             down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
-            self.make_add_bias(mlp.down_proj.bias.detach(), down_add_name, root_input=f"{down_name}/output_0")
+            self.make_add_bias(mlp.down_proj.bias.detach().cpu(), down_add_name, root_input=f"{down_name}/output_0")
             down_name = down_add_name
 
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
@@ -2043,7 +2029,7 @@ class Model:
         fc1_name = fc1_matmul_name
         if fc1_bias_exists:
             fc1_add_name = f"/model/layers.{layer_id}/mlp/fc1/Add"
-            self.make_add_bias(mlp.fc1.bias.detach(), fc1_add_name, root_input=f"{fc1_name}/output_0")
+            self.make_add_bias(mlp.fc1.bias.detach().cpu(), fc1_add_name, root_input=f"{fc1_name}/output_0")
             fc1_name = fc1_add_name
 
         # Make activation function
@@ -2055,7 +2041,7 @@ class Model:
         fc2_name = fc2_matmul_name
         if fc2_bias_exists:
             fc2_add_name = f"/model/layers.{layer_id}/mlp/fc2/Add"
-            self.make_add_bias(mlp.fc2.bias.detach(), fc2_add_name, root_input=f"{fc2_name}/output_0")
+            self.make_add_bias(mlp.fc2.bias.detach().cpu(), fc2_add_name, root_input=f"{fc2_name}/output_0")
             fc2_name = fc2_add_name
 
         # Assign output 0 of MLP layer as output of last layer
@@ -2150,7 +2136,7 @@ class Model:
         moe_expert_scales_3_name = f"model.layers.{layer_id}.moe.scales_3"
 
         def make_moe_external_tensor(w_list, moe_expert_name, dtype):
-            moe_experts_weight = torch.stack(w_list, dim=0).detach()
+            moe_experts_weight = torch.stack(w_list, dim=0).detach().cpu()
             self.make_external_tensor(moe_experts_weight.to(dtype).contiguous(), moe_expert_name)
 
         make_moe_external_tensor(w1_list, moe_expert_weight_1_name, torch.uint8)
@@ -2257,7 +2243,7 @@ class Model:
 
         if bias_exists:
             add_name = "/lm_head/Add"
-            self.make_add_bias(lm_head.bias.detach(), add_name, root_input=f"{lm_name}/output_0", logits=not(scale_exists or mask_exists or softcap_exists))
+            self.make_add_bias(lm_head.bias.detach().cpu(), add_name, root_input=f"{lm_name}/output_0", logits=not(scale_exists or mask_exists or softcap_exists))
             lm_name = add_name
 
         if scale_exists:
@@ -2271,7 +2257,7 @@ class Model:
         if mask_exists:
             # Save logits mask as initializer
             logits_mask_name = "logits_mask"
-            self.make_external_tensor(self.lm_head_attrs["mask"].detach().contiguous(), logits_mask_name)
+            self.make_external_tensor(self.lm_head_attrs["mask"].detach().cpu().contiguous(), logits_mask_name)
 
             where_name = "/lm_head/Where"
             where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{torch.finfo(self.to_torch_dtype[self.io_dtype]).min}", f"{lm_name}/output_0"]
@@ -2334,15 +2320,7 @@ class Model:
                 from onnxruntime_genai.models.quantized_model import QuantModel
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
-            model = QuantModel.from_pretrained(
-                self.quant_type,
-                input_path = input_path,
-                quant_attrs = self.quant_attrs,
-                q_size = q_size,
-                kv_size = kv_size,
-                intermediate_size = self.intermediate_size,
-                num_layers = self.num_layers,
-            )
+            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs, q_size, kv_size, self.intermediate_size, self.num_layers)
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
@@ -2360,7 +2338,7 @@ class Model:
                 if not self.exclude_embeds and module == model.language_model.model.embed_tokens:
                     # Embedding layer
                     print("Reading embedding layer")
-                    self.make_embedding(module.weight.detach())
+                    self.make_embedding(module.weight.detach().cpu())
                 else:
                     # Exclude embedding layer from model
                     self.layernorm_attrs["root_input"] = "inputs_embeds"
@@ -2386,15 +2364,25 @@ class Model:
 
         del model
 
-    def has_final_norm(self, module, model):
-       # Hugging Face names
-       hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
-       hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
-       hf_transformer_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
-       hf_multimodal_final_layernorm = hasattr(model, "language_model") and hasattr(model.language_model, "model") and hasattr(model.language_model.model, "norm") and module == model.language_model.model.norm
-       # GGUF names
-       gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
-       return hf_norm or hf_final_layernorm or hf_transformer_final_layernorm or hf_multimodal_final_layernorm or gguf_final_norm
+    def has_final_norm(self, module, orig_model):
+        if hasattr(orig_model, "base_model") and hasattr(orig_model.base_model, "model"):
+            # Model is from PEFT
+            model = orig_model.base_model.model
+        else:
+            model = orig_model
+
+        # Hugging Face names
+        hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
+        hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
+        hf_transformer_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
+        hf_multimodal_final_layernorm = hasattr(model, "language_model") and hasattr(model.language_model, "model") and hasattr(model.language_model.model, "norm") and module == model.language_model.model.norm
+
+        # GGUF names
+        gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
+
+        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm, hf_multimodal_final_layernorm]
+        gguf_names = [gguf_final_norm]
+        return any(hf_names + gguf_names)
 
     def make_preprocessing_nodes(self):
         self.make_attention_mask_reformatting()
@@ -2553,7 +2541,7 @@ class Model:
         self.make_concat(concat_2_name, concat_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
         constant_shape_name = f"{basename}/ConstantOfShape_2"
         constant_shape_torch_dtype = self.to_torch_dtype[self.io_dtype]
-        constant_shape_value = self.make_tensor_proto_from_tensor(torch.tensor([torch.finfo(constant_shape_torch_dtype).min], dtype=constant_shape_torch_dtype), "constant_shape_torch_helper")
+        constant_shape_value = self.make_tensor_proto_from_tensor(torch.tensor([torch.finfo(constant_shape_torch_dtype).min], dtype=constant_shape_torch_dtype))
         self.make_constant_of_shape(constant_shape_name, f"{concat_2_name}/output_0", value=constant_shape_value, dtype=self.io_dtype, shape=['unk', 'unk'])
 
         # Top path
@@ -2858,6 +2846,16 @@ class QwenModel(MistralModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
 
+class Qwen3Model(QwenModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+    def make_attention_init(self):
+        self.attention_attrs["q_norm"] = True
+        self.attention_attrs["k_norm"] = True
+        super().make_attention_init()
+
+
 class PhiModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
@@ -3041,11 +3039,11 @@ class Phi3SmallModel(Model):
 
         # Create tensors for row indices and col indices
         crows_name = "block_row_indices"
-        self.make_external_tensor(crows.detach().to(torch.int32).contiguous(), crows_name)
+        self.make_external_tensor(crows.detach().cpu().to(torch.int32).contiguous(), crows_name)
         self.mask_attrs["block_row_indices"] = crows_name
 
         cols_name = "block_col_indices"
-        self.make_external_tensor(cols.detach().to(torch.int32).contiguous(), cols_name)
+        self.make_external_tensor(cols.detach().cpu().to(torch.int32).contiguous(), cols_name)
         self.mask_attrs["block_col_indices"] = cols_name
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
@@ -3118,7 +3116,7 @@ class Phi3SmallModel(Model):
         up_matmul_name = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
         self.make_matmul(mlp.up_proj, up_matmul_name, root_input)
         up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
-        self.make_add_bias(mlp.up_proj.bias.detach(), up_add_name, f"{up_matmul_name}/output_0")
+        self.make_add_bias(mlp.up_proj.bias.detach().cpu(), up_add_name, f"{up_matmul_name}/output_0")
 
         # Left path
         slice_1_name = f"/model/layers.{layer_id}/mlp/gelu/Slice"
@@ -3164,7 +3162,7 @@ class Phi3SmallModel(Model):
         down_matmul_name = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
         self.make_matmul(mlp.down_proj, down_matmul_name, f"{mul_name}/output_0")
         down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
-        self.make_add_bias(mlp.down_proj.bias.detach(), down_add_name, f"{down_matmul_name}/output_0")
+        self.make_add_bias(mlp.down_proj.bias.detach().cpu(), down_add_name, f"{down_matmul_name}/output_0")
 
         # Assign output 0 of previous MatMul as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{down_add_name}/output_0"
@@ -3363,7 +3361,7 @@ def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
     """
-    bools = ["int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "use_8bits_moe", "use_qdq", "include_prompt_templates"]
+    bools = ["int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "use_8bits_moe", "use_qdq", "use_webgpu_fp32"]
     for key in bools:
         if key in kv_pairs:
             if kv_pairs[key] in {"false", "False", "0"}:
@@ -3378,6 +3376,12 @@ def check_extra_options(kv_pairs):
         for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
             op_types_to_quantize += (op_type, )
         kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
+    
+    if "int4_nodes_to_exclude" in kv_pairs:
+        nodes_to_exclude = []
+        for node in kv_pairs["int4_nodes_to_exclude"].split(","):
+            nodes_to_exclude.append(node)
+        kv_pairs["int4_nodes_to_exclude"] = nodes_to_exclude
 
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
@@ -3419,8 +3423,7 @@ def parse_hf_token(hf_token):
 
 
 def set_io_dtype(precision, execution_provider, extra_options):
-    use_webgpu_fp32 = extra_options.get("use_webgpu_fp32", "0") == "1"
-    if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") or use_webgpu_fp32:
+    if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") or extra_options.get("use_webgpu_fp32", False):
         # FP32 precision
         return TensorProto.FLOAT
 
@@ -3509,6 +3512,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = Phi4MMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen2ForCausalLM":
             onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Qwen3ForCausalLM":
+            onnx_model = Qwen3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
@@ -3601,6 +3606,13 @@ def get_args():
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
                     Use this option when you want to quantize specific ops.
                     Separate the op types with a '/' when passing them here (e.g. int4_op_types_to_quantize=MatMul/Gather)
+                int4_nodes_to_exclude = Specify nodes to exclude from int4 quantization. 
+                    Use this option when you want to exclude certain nodes from being quantized.
+                    Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
+                int4_algo_config = Method for int4 quantization. Default is 'default'.
+                    Currently supported options are: 'default', 'rtn', 'k_quant_mixed', 'k_quant_last'.
+                    k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
+                    k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model (for unit testing purposes).
                 filename = Filename for ONNX model (default is 'model.onnx').
                     For models with multiple components, each component is exported to its own ONNX model.
@@ -3632,8 +3644,6 @@ def get_args():
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
-                include_prompt_templates = Include prompt templates in the GenAI config file. Default is false.
-                    Use this option to include per-role prompt templates in the `genai_config.json` file.
             """),
     )
 

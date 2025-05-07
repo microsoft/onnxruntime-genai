@@ -198,7 +198,7 @@ std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
 
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   OrtxPtr<OrtxTokenId2DArray> ids;
-  CheckResult(OrtxTokenize(tokenizer_, &text, 1, ids.Address()));
+  CheckResult(OrtxTokenizeWithOptions(tokenizer_, &text, 1, ids.Address(), false /* add_special_tokens */));
 
   const extTokenId_t* tokens;
   size_t count;
@@ -274,12 +274,21 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
 }
 
 DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
+                                           const std::vector<std::string>& providers,
                                            const std::vector<Config::ProviderOptions>& provider_options_list,
                                            bool is_primary_session_options,
                                            bool disable_graph_capture) {
   DeviceInterface* p_device{};
 
-  for (auto& provider_options : provider_options_list) {
+  for (auto& provider : providers) {
+    auto provider_options_it = std::find_if(provider_options_list.begin(), provider_options_list.end(),
+                                            [&provider](const Config::ProviderOptions& po) { return po.name == provider; });
+
+    if (provider_options_it == provider_options_list.end()) {
+      throw std::runtime_error("Provider options not found for provider: " + provider);
+    }
+    const auto& provider_options = *provider_options_it;
+
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
       std::vector<const char*> keys, values;
@@ -299,7 +308,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       }
 
       session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
-
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 
@@ -311,8 +319,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
       Ort::ThrowOnError(Ort::api->UpdateROCMProviderOptions(&ort_provider_options, keys.data(), values.data(), keys.size()));
       session_options.AppendExecutionProvider_ROCM(ort_provider_options);
+    } else if (provider_options.name == "DML") {
 #if USE_DML
-    } else if (provider_options.name == "dml") {
       if (!GetDmlInterface()) {
         LUID device_luid{};
         LUID* p_device_luid{};
@@ -338,10 +346,11 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
       if (is_primary_session_options)
         p_device = GetDeviceInterface(DeviceType::DML);  // We use a DML allocator for input/output caches, but other tensors will use CPU tensors
+#else
+      throw std::runtime_error("DML provider requested, but the installed GenAI has not been built with DML support");
 #endif
     } else {
       // For providers that go through the extensible AppendExecutionProvider API:
-
       if (provider_options.name == "QNN") {
         session_options.AddConfigEntry("ep.share_ep_contexts", "1");
         // TODO set device_type_ in a less hacky way.
@@ -408,14 +417,15 @@ void EnsureDeviceOrtInit(DeviceInterface& device) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "dml", "webgpu", "qnn", "OpenVINO (Not used, see above)"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
   auto session_options = OrtSessionOptions::Create();
   std::vector<Config::ProviderOptions> provider_options_list;
   provider_options_list.emplace_back(Config::ProviderOptions{device_type_names[static_cast<int>(type)], {}});
-  SetProviderSessionOptions(*session_options, provider_options_list, true, false);
+  const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
+  SetProviderSessionOptions(*session_options, providers, provider_options_list, true, false);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
@@ -612,7 +622,9 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
 
-  p_device_ = SetProviderSessionOptions(session_options, config_session_options.provider_options, is_primary_session_options, disable_graph_capture);
+  p_device_ = SetProviderSessionOptions(session_options, config_session_options.providers,
+                                        config_session_options.provider_options, is_primary_session_options,
+                                        disable_graph_capture);
 
   // Fallback to CPU if no provider specific interface was set
   if (!p_device_)
@@ -738,9 +750,15 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   auto expanded = OrtValue::CreateTensor(p_device_inputs_->GetAllocator(), input_shape, element_type);
   auto expanded_span = ByteWrapTensor(*p_device_inputs_, *expanded);
 
-  for (int i = 0; i < batch_size; i++) {
-    for (int j = 0; j < num_beams; j++) {
-      expanded_span.subspan((i * num_beams + j) * data_size_bytes, data_size_bytes).CopyFrom(input_span.subspan(i * data_size_bytes, data_size_bytes));
+  // Detect fast & simple copy case
+  if (num_beams == 1) {
+    expanded_span.CopyFrom(input_span);
+  } else {
+    // TODO (RyanHill): To avoid cuda uninitialized memory warnings, we should copy input_span to device memory first
+    for (int i = 0; i < batch_size; i++) {
+      for (int j = 0; j < num_beams; j++) {
+        expanded_span.subspan((i * num_beams + j) * data_size_bytes, data_size_bytes).CopyFrom(input_span.subspan(i * data_size_bytes, data_size_bytes));
+      }
     }
   }
   return expanded;

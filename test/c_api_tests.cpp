@@ -37,6 +37,7 @@ TEST(CAPITests, Config) {
   config->SetProviderOption("brainium", "custom_field2", "hello2");
   config->ClearProviders();
   config->AppendProvider("cuda");
+  config->AppendProvider("dml");
 #endif
 }
 
