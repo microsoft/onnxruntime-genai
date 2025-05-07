@@ -68,6 +68,8 @@ class Model:
             "webgpu": {},
         }
 
+        self.use_paged_attention = extra_options.get("use_paged_attention", False)
+
         # Map input names to their types and shapes
         self.input_names = ["input_ids", "attention_mask", "position_ids"]
         self.input_types = {
@@ -89,6 +91,15 @@ class Model:
         self.exclude_embeds = extra_options.get("exclude_embeds", False)
         if self.exclude_embeds:
             self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
+        
+        if self.use_paged_attention:
+            self.attention_attrs["op_type"] = "PagedAttention"
+            self.input_shapes["input_ids"] = ["token_count"]
+            self.input_names.remove("attention_mask")
+            self.input_shapes["past_key_values.key"] = ["num_blocks", "num_heads", "head_size_x", "block_size", "x"]
+            self.input_shapes["past_key_values.value"] = ["num_blocks", "num_heads", "head_size", "block_size"]
+            # self.input_shapes["position_ids"] = ["token_count"] # TODO: If we do this, we need support rotary embeddings with packed input
+
 
         # Map output names to their types and shapes
         self.output_names = ["logits"]
@@ -135,12 +146,15 @@ class Model:
         # Mask-specific variables
         # TODO: Reconcile differences between `seqlens_k` and `key_total_seq_lens` in the GroupQueryAttention and SparseAttention implementations. Ideally the same subgraph can be shared for both.
         self.mask_attrs = {
-            "mask_name": "",            # Name of node that outputs 4D causal attention mask (used as add_qk in MultiHeadAttention)
-            "seqlens_k": "",            # Sum of each row in attention mask - 1 (used as input to GroupQueryAttention)
-            "total_seq_len": "",        # Size of total sequence length in attention mask (used as input to GroupQueryAttention and SparseAttention)
-            "block_row_indices": "",    # Row indices of CSR format of block mask (used as input to SparseAttention)
-            "block_col_indices": "",    # Col indices of CSR format of block mask (used as input to SparseAttention)
-            "key_total_seq_lens": "",   # Sum of each row in attention mask (used as input to SparseAttention)
+            "mask_name": "",                    # Name of node that outputs 4D causal attention mask (used as add_qk in MultiHeadAttention)
+            "seqlens_k": "",                    # Sum of each row in attention mask - 1 (used as input to GroupQueryAttention)
+            "total_seq_len": "",                # Size of total sequence length in attention mask (used as input to GroupQueryAttention and SparseAttention)
+            "block_row_indices": "",            # Row indices of CSR format of block mask (used as input to SparseAttention)
+            "block_col_indices": "",            # Col indices of CSR format of block mask (used as input to SparseAttention)
+            "key_total_seq_lens": "",           # Sum of each row in attention mask (used as input to SparseAttention)
+            "cumulative_sequence_length": "",   # Cumulative sequence length of each row in attention mask (used as input to SparseAttention)
+            "past_seqlens": "",                 # Past sequence lengths (used as input to PagedAttention)
+            "block_table": "",                  # Block table for paged KV-cache (used as input to PagedAttention)
         }
 
         # Embedding-specific variables
@@ -1405,6 +1419,8 @@ class Model:
             self.make_group_query_attention(name, seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
         elif op_type == "SparseAttention":
             self.make_sparse_attention(name, block_row_indices=self.mask_attrs['block_row_indices'], block_col_indices=self.mask_attrs['block_col_indices'], key_total_seq_lens=f"{self.mask_attrs['key_total_seq_lens']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
+        elif op_type == "PagedAttention":
+            self.make_paged_attention(name, past_seqlens=self.mask_attrs["past_seqlens"], **kwargs) 
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
 
@@ -1454,6 +1470,25 @@ class Model:
             do_rotary=self.attention_attrs["use_rotemb_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
         )
 
+    def make_paged_attention(self, name, **kwargs):
+        inputs = [
+            kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
+            kwargs["past_k"], kwargs["past_v"],
+            kwargs["cumulative_sequence_length"], kwargs["seqlens"],
+            kwargs["max_query_len"], kwargs["max_seq_len"],
+            kwargs["block_table"], kwargs["slot_mappings"],
+            kwargs.get("cos_cache", ""), kwargs.get("sin_cache", ""),
+        ]
+        output = f"{name}/output_0"
+        outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
+        self.make_node(
+            "PagedAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
+            num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], # local_window_size=self.window_size,  # Disable sliding window attribute temporarily
+            softcap=self.attention_attrs["softcap"], do_rotary=self.attention_attrs["use_rotemb_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
+        )
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
+
+
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         # Make nodes for the Attention subgraph
         #
@@ -1484,6 +1519,22 @@ class Model:
         #       Q_Rotary  K_Rotary     |                       |
         #           \        |        /                        |
         #            GroupQueryAttention-----------------------+
+        #                    |
+        #                O_MatMul
+        #                    |
+        #                  O_Add
+        #
+        # PagedAttention example:
+        #
+        #               root_input
+        #              /     |     \
+        #       Q_MatMul  K_MatMul  V_MatMul  cumulative_sequence_length  seqlens  key_cache  value_cache  max_query_len  max_seq_len  block_table  slot_mappings
+        #           |        |         |                   |                 |         |           |             |             |            |             |
+        #         Q_Add    K_Add     V_Add                 +-----------------+---------+-----------+-------------+-------------+------------+-------------+
+        #           |        |         |                                     |
+        #       Q_Rotary  K_Rotary     |                                     |
+        #           \        |        /                                      |
+        #            GroupQueryAttention-------------------------------------+
         #                    |
         #                O_MatMul
         #                    |
