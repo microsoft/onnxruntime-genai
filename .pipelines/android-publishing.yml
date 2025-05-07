@@ -32,6 +32,7 @@ extends:
       policheck:
         enabled: true
         break: true # always break the build on policheck issues. You can disable it by setting to 'false'
+        exclusionsFile: '$(Build.SourcesDirectory)\.pipelines\policheck_exclusions.xml'
     # Update the pool with your team's 1ES hosted pool.
     pool:
       name: 'onnxruntime-Win-CPU-2022'  # Name of your hosted pool
