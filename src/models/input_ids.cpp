@@ -8,24 +8,24 @@ DefaultInputIDs::DefaultInputIDs(State& state)
     : state_{state} {
   name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
   shape_ = {state_.params_->BatchBeamSize(), 0};
-  type_ = model_.session_info_->GetInputDataType(name_);
+  type_ = model_.session_info_.GetInputDataType(name_);
 
-  if (model_.session_info_->HasInput(model_.config_->model.decoder.inputs.current_sequence_length) &&
-      model_.session_info_->HasInput(model_.config_->model.decoder.inputs.past_sequence_length)) {
+  if (model_.session_info_.HasInput(model_.config_->model.decoder.inputs.current_sequence_length) &&
+      model_.session_info_.HasInput(model_.config_->model.decoder.inputs.past_sequence_length)) {
     if (state_.params_->BatchBeamSize() != 1) {
       throw std::runtime_error("Batch size must be 1 for current_sequence_length and past_sequence_length inputs");
     }
     const std::array<int64_t, 1> current_sequence_length_shape{1};
     const std::array<int64_t, 2> past_sequence_length_shape{1, 1};
 
-    if (model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.current_sequence_length) != Ort::TypeToTensorType<int32_t> ||
-        model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length) != Ort::TypeToTensorType<int32_t>)
+    if (model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.current_sequence_length) != Ort::TypeToTensorType<int32_t> ||
+        model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length) != Ort::TypeToTensorType<int32_t>)
       throw std::runtime_error("current_sequence_length and past_sequence_length must be int32");
 
-    current_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, current_sequence_length_shape, model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.current_sequence_length));
+    current_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, current_sequence_length_shape, model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.current_sequence_length));
     *current_sequence_length_->GetTensorMutableData<int32_t>() = 0;
 
-    past_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, past_sequence_length_shape, model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length));
+    past_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, past_sequence_length_shape, model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length));
     *past_sequence_length_->GetTensorMutableData<int32_t>() = -1;
   }
 
@@ -116,27 +116,27 @@ WindowedInputIDs::WindowedInputIDs(State& state) : state_{state} {
 
   window_size_ = model_.config_->model.decoder.sliding_window->window_size;
   shape_ = {1, model_.config_->model.decoder.sliding_window->window_size};
-  type_ = model_.session_info_->GetInputDataType(name_);
+  type_ = model_.session_info_.GetInputDataType(name_);
 
   if (type_ != Ort::TypeToTensorType<int32_t> && type_ != Ort::TypeToTensorType<int64_t>) {
     throw std::runtime_error("WindowedInputIDs only supports int32_t and int64_t input_ids.");
   }
 
-  if (model_.session_info_->HasInput(model_.config_->model.decoder.inputs.total_sequence_length) &&
-      model_.session_info_->HasInput(model_.config_->model.decoder.inputs.past_sequence_length)) {
+  if (model_.session_info_.HasInput(model_.config_->model.decoder.inputs.total_sequence_length) &&
+      model_.session_info_.HasInput(model_.config_->model.decoder.inputs.past_sequence_length)) {
     const std::array<int64_t, 1> total_sequence_length_shape{1};
     const std::array<int64_t, 2> past_sequence_length_shape{1, 1};
 
-    if (model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.total_sequence_length) != Ort::TypeToTensorType<int32_t> ||
-        model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length) != Ort::TypeToTensorType<int32_t>)
+    if (model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.total_sequence_length) != Ort::TypeToTensorType<int32_t> ||
+        model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length) != Ort::TypeToTensorType<int32_t>)
       throw std::runtime_error("total_sequence_length and past_sequence_length must be int32");
 
     total_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, total_sequence_length_shape,
-                                                    model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.total_sequence_length));
+                                                    model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.total_sequence_length));
     *total_sequence_length_->GetTensorMutableData<int32_t>() = state_.params_->search.max_length;
 
     past_sequence_length_ = OrtValue::CreateTensor(model_.allocator_cpu_, past_sequence_length_shape,
-                                                   model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length));
+                                                   model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length));
     *past_sequence_length_->GetTensorMutableData<int32_t>() = -1;
   }
 }

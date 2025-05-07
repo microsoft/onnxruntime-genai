@@ -508,6 +508,13 @@ OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* tokenizer, const 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer* tokenizer, const char* template_str, const char* messages, bool add_generation_prompt, const char** out_string) {
+  OGA_TRY
+  *out_string = AllocOgaString(tokenizer->ApplyChatTemplate(template_str, messages, add_generation_prompt));
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer* tokenizer, const OgaTensor* tensor, OgaStringArray** out) {
   OGA_TRY
   auto shape = tensor->GetShape();

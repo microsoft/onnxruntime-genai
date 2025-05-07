@@ -54,7 +54,8 @@ struct ProviderOptionsObject_Element : JSON::Element {
 };
 
 struct ProviderOptionsArray_Element : JSON::Element {
-  explicit ProviderOptionsArray_Element(std::vector<Config::ProviderOptions>& v) : v_{v} {}
+  explicit ProviderOptionsArray_Element(std::vector<Config::ProviderOptions>& v, std::vector<std::string>& providers)
+      : v_{v}, providers_{providers} {}
 
   JSON::Element& OnObject(std::string_view name) override { return object_; }
 
@@ -65,12 +66,21 @@ struct ProviderOptionsArray_Element : JSON::Element {
         v.name = "QNN";
       } else if (v.name == "webgpu") {
         v.name = "WebGPU";
+      } else if (v.name == "dml") {
+        v.name = "DML";
+      }
+
+      if (std::find(providers_.begin(), providers_.end(), v.name) == providers_.end()) {
+        // The providers array determines the which execution provider is picked for the session..
+        // It also determines the order of the providers.
+        providers_.push_back(v.name);
       }
     }
   }
 
  private:
   std::vector<Config::ProviderOptions>& v_;
+  std::vector<std::string>& providers_;
   ProviderOptionsObject_Element object_{v_};
 };
 
@@ -141,7 +151,7 @@ struct SessionOptions_Element : JSON::Element {
 
  private:
   Config::SessionOptions& v_;
-  ProviderOptionsArray_Element provider_options_{v_.provider_options};
+  ProviderOptionsArray_Element provider_options_{v_.provider_options, v_.providers};
   NamedStrings_Element config_entries_{v_.config_entries};
 };
 
@@ -587,38 +597,6 @@ struct Embedding_Element : JSON::Element {
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
 
-struct PromptTemplates_Element : JSON::Element {
-  explicit PromptTemplates_Element(std::optional<Config::Model::PromptTemplates>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    // if one of templates is given in json, then any non-specified template will be default "{Content}"
-    if (name == "assistant") {
-      EnsureAvailable();
-      v_->assistant = JSON::Get<std::string_view>(value);
-    } else if (name == "prompt") {
-      EnsureAvailable();
-      v_->prompt = JSON::Get<std::string_view>(value);
-    } else if (name == "system") {
-      EnsureAvailable();
-      v_->system = JSON::Get<std::string_view>(value);
-    } else if (name == "user") {
-      EnsureAvailable();
-      v_->user = JSON::Get<std::string_view>(value);
-    } else {
-      throw JSON::unknown_value_error{};
-    }
-  }
-
- private:
-  std::optional<Config::Model::PromptTemplates>& v_;
-
-  void EnsureAvailable() {
-    if (!v_.has_value()) {
-      v_.emplace();
-    }
-  }
-};
-
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v) : v_{v} {}
 
@@ -662,9 +640,6 @@ struct Model_Element : JSON::Element {
     if (name == "embedding") {
       return embedding_;
     }
-    if (name == "prompt_templates") {
-      return prompt_templates_;
-    }
     if (name == "speech") {
       return speech_;
     }
@@ -678,7 +653,6 @@ struct Model_Element : JSON::Element {
   Eos_Array_Element eos_token_ids_{v_};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
-  PromptTemplates_Element prompt_templates_{v_.prompt_templates};
   Speech_Element speech_{v_.speech};
 };
 
@@ -745,7 +719,7 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
 }
 
 void ClearProviders(Config& config) {
-  config.model.decoder.session_options.provider_options.clear();
+  config.model.decoder.session_options.providers.clear();
 }
 
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
@@ -755,7 +729,7 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
     json << R"(")" << option_name << R"(":")" << option_value << R"(")";
   }
   json << R"(}})";
-  ProviderOptionsArray_Element element{config.model.decoder.session_options.provider_options};
+  ProviderOptionsArray_Element element{config.model.decoder.session_options.provider_options, config.model.decoder.session_options.providers};
   JSON::Parse(element, json.str());
 }
 
@@ -768,7 +742,9 @@ bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
           throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
         }
       }
-    } else if (provider_options.name == "dml") {
+    } else if (provider_options.name == "DML") {
+      return true;
+    } else if (provider_options.name == "NvTensorRtRtx") {
       return true;
     }
   }

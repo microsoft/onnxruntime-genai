@@ -123,7 +123,12 @@ struct OrtGlobals {
   OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
-  std::unique_ptr<Ort::Allocator> allocator_device_[static_cast<int>(DeviceType::MAX)];
+
+  struct Allocator {
+    std::unique_ptr<Ort::Allocator> allocator_;
+    std::unique_ptr<OrtSession> session_;
+  };
+  Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
 
  private:
   OrtGlobals(const OrtGlobals&) = delete;
