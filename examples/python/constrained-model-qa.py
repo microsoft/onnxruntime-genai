@@ -21,7 +21,6 @@ def json_schema():
         tool_function_info = json.dumps(tool_function_data).replace("\"", "'")
         tool_function_info = tool_function_info[1:-1]
     # tool_function_info = "\"" + ",".join(tool_function_info) + "\""
-    print(tool_function_info)
 
     return json_schema_data, tool_function_info
 
@@ -53,7 +52,6 @@ def lark_grammar():
         tool_function_info = json.dumps(tool_function_data).replace("\"", "'")
         tool_function_info = tool_function_info[1:-1]
     # tool_function_info = "\"" + ",".join(tool_function_info) + "\""
-    print(tool_function_info)
 
     return json_schema_data, tool_function_info
 
@@ -162,6 +160,7 @@ def main(args):
         params.set_search_options(**search_options)
 
         json_schema_data, tool_function_info = json_schema()
+        print(json_schema_data)
         params.set_guidance('json_schema', json_schema_data)
         
         # params.set_guidance('regex', "answer: .*")
