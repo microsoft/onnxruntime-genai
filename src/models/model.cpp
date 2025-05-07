@@ -287,7 +287,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
     if (provider_options_it == provider_options_list.end()) {
       throw std::runtime_error("Provider options not found for provider: " + provider);
     }
-    auto provider_options = *provider_options_it;
+    const auto& provider_options = *provider_options_it;
 
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
@@ -308,7 +308,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       }
 
       session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
-
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 
