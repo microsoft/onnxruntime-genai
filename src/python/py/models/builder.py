@@ -2365,7 +2365,15 @@ class Model:
         del model
 
     def has_final_norm(self, module, orig_model):
-        if hasattr(orig_model, "base_model") and hasattr(orig_model.base_model, "model"):
+        # Find where the language model is stored to check attributes. Some classes
+        # store the language model in a different attribute than `model.model`.
+        if hasattr(orig_model, "language_model"):
+            # Model is multimodal
+            # Note: This case is checked first because the `language_model` attribute and the `base_model` attribute
+            # exist for both multimodal models and PEFT models. However they represent different classes and their attributes
+            # differ.
+            model = orig_model.language_model
+        elif hasattr(orig_model, "base_model") and hasattr(orig_model.base_model, "model"):
             # Model is from PEFT
             model = orig_model.base_model.model
         else:
@@ -2375,12 +2383,11 @@ class Model:
         hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
         hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
         hf_transformer_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
-        hf_multimodal_final_layernorm = hasattr(model, "language_model") and hasattr(model.language_model, "model") and hasattr(model.language_model.model, "norm") and module == model.language_model.model.norm
 
         # GGUF names
         gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
 
-        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm, hf_multimodal_final_layernorm]
+        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm]
         gguf_names = [gguf_final_norm]
         return any(hf_names + gguf_names)
 
