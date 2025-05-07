@@ -101,20 +101,9 @@ class Model:
         # Map output names to their types and shapes
         self.output_names = ["logits"]
 
-        logits_type = TensorProto.FLOAT if "gemma-3" in self.model_name_or_path else self.io_dtype
+        self.outputs_attrs = {"logits_type": self.io_dtype}
 
-        self.output_types = {
-            "hidden_states": self.io_dtype,                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
-            "logits": logits_type,                                                                               # For standard models
-            "present.key": self.io_dtype,                                                                        # For standard models (note that `present.key` is written this way to match Hugging Face format)
-            "present.value": self.io_dtype,                                                                      # For standard models (note that `present.value` is written this way to match Hugging Face format)
-        }
-        self.output_shapes = {
-            "hidden_states": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
-            "logits": ["batch_size", "sequence_length", self.vocab_size],                                        # For standard models
-            "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
-            "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
-        }
+        self.make_outputs_init()
         self.exclude_lm_head = extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = extra_options.get("include_hidden_states", False)
         if self.exclude_lm_head:
@@ -319,6 +308,21 @@ class Model:
             # Create quantized attributes from quantization config
             self.quant_attrs["config"] = config.quantization_config
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
+
+
+    def make_outputs_init(self):
+        self.output_types = {
+            "hidden_states": self.io_dtype,                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
+            "logits": self.outputs_attrs["logits_type"],                                                                               # For standard models
+            "present.key": self.io_dtype,                                                                        # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": self.io_dtype,                                                                      # For standard models (note that `present.value` is written this way to match Hugging Face format)
+        }
+        self.output_shapes = {
+            "hidden_states": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
+            "logits": ["batch_size", "sequence_length", self.vocab_size],                                        # For standard models
+            "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
+        }
 
     def make_attention_init(self):
         valid_gqa_configurations = [
@@ -820,17 +824,13 @@ class Model:
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
 
-        if output != "logits" or "gemma-3" not in self.model_name_or_path:
-            self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
-            self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', last_dim])
-        else:
-            cast_name = name + "/Cast"
-            cast_name_input = name + "/Cast"
-            self.make_node("MatMul", inputs=[root_input, weight], outputs=[cast_name_input], name=name)
-            self.make_node("Cast", inputs=[cast_name_input], outputs=[output], name=cast_name, to=TensorProto.FLOAT)
-            self.make_value_info(output, TensorProto.FLOAT, shape=['batch_size', 'sequence_length', last_dim])
+        self.make_matmul_float_node_and_value_info(name, [root_input, weight], output, last_dim)
 
         return name
+
+    def make_matmul_float_node_and_value_info(self, name, inputs, output, last_dim):
+        self.make_node("MatMul", inputs=inputs, outputs=[output], name=name)
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', last_dim])
 
     def make_matmul_int4(self, matmul, basename, root_input, **kwargs):
         if not hasattr(matmul, "qweight"):
@@ -3346,6 +3346,20 @@ class Gemma3Model(Gemma2Model):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
         super().make_attention_init()
+
+    def make_outputs_init(self):
+        self.outputs_attrs["logits_type"] = TensorProto.FLOAT
+        super().make_outputs_init()
+
+    def make_matmul_float_node_and_value_info(self, name, inputs, output, last_dim):
+        if output == "logits":
+            cast_name = name + "/Cast"
+            cast_name_input = name + "/Cast"
+            self.make_node("MatMul", inputs=inputs, outputs=[cast_name_input], name=name)
+            self.make_node("Cast", inputs=[cast_name_input], outputs=[output], name=cast_name, to=TensorProto.FLOAT)
+            self.make_value_info(output, TensorProto.FLOAT, shape=['batch_size', 'sequence_length', last_dim])
+        else:
+            super().make_matmul_float_node_and_value_info(name, inputs, output, last_dim)
 
     def make_rotary_embedding_multi_cache(self):
         self.cos_cache_global_name, self.sin_cache_global_name = "cos_cache_global", "sin_cache_global"
