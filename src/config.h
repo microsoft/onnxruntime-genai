@@ -48,8 +48,6 @@ struct Config {
     static constexpr std::string_view CacheIndirectionName = "cache_indirection";
     static constexpr std::string_view AlignmentHeadsName = "alignment_heads";
     static constexpr std::string_view TokenTypeIdsName = "token_type_ids";
-
-    static constexpr std::string_view PromptTemplateName = "{Content}";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -81,6 +79,7 @@ struct Config {
     std::vector<NamedString> config_entries;  // Entries go into OrtSessionOptions::AddConfigEntry
 
     std::vector<ProviderOptions> provider_options;
+    std::vector<std::string> providers;  // List of providers to use at runtime, not persisted in the json currently
     std::optional<GraphOptimizationLevel> graph_optimization_level;
   };
 
@@ -228,13 +227,6 @@ struct Config {
 
     } decoder;
 
-    struct PromptTemplates {
-      std::string assistant{Defaults::PromptTemplateName};
-      std::string prompt{Defaults::PromptTemplateName};
-      std::string system{Defaults::PromptTemplateName};
-      std::string user{Defaults::PromptTemplateName};
-    };
-    std::optional<PromptTemplates> prompt_templates;
   } model;
 
   struct Search {
