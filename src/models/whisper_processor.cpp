@@ -7,11 +7,11 @@
 namespace Generators {
 
 WhisperProcessor::WhisperProcessor(Config& config, const SessionInfo& session_info)
-    : input_features_type_{session_info.GetInputDataType(config.model.encoder_decoder_init.inputs.input_features)} {
+    : audio_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.audio_features)} {
   auto processor_config = (config.config_path / fs::path(config.model.speech.config_filename)).string();
   processor_ = ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor>(OrtxCreateSpeechFeatureExtractor, processor_config.c_str());
 
-  config.AddMapping(std::string(Config::Defaults::InputFeaturesName), config.model.encoder_decoder_init.inputs.input_features);
+  config.AddMapping(std::string(Config::Defaults::AudioFeaturesName), config.model.encoder.inputs.audio_features);
 }
 
 std::unique_ptr<NamedTensors> WhisperProcessor::Process([[maybe_unused]] const Tokenizer& tokenizer, const Payload& payload) const {
@@ -29,11 +29,11 @@ std::unique_ptr<NamedTensors> WhisperProcessor::Process([[maybe_unused]] const T
   ort_extensions::OrtxObjectPtr<OrtxTensor> mel;
   CheckResult(OrtxTensorResultGetAt(result.get(), 0, mel.ToBeAssigned()));
 
-  if (input_features_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    named_tensors->emplace(std::string(Config::Defaults::InputFeaturesName),
+  if (audio_features_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    named_tensors->emplace(std::string(Config::Defaults::AudioFeaturesName),
                            std::make_shared<Tensor>(ProcessTensor<float>(mel.get(), allocator)));
   } else {
-    named_tensors->emplace(std::string(Config::Defaults::InputFeaturesName),
+    named_tensors->emplace(std::string(Config::Defaults::AudioFeaturesName),
                            std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(mel.get(), allocator)));
   }
 

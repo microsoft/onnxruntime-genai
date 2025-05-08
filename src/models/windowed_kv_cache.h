@@ -11,9 +11,6 @@ struct WindowedKeyValueCache : KeyValueCache {
   WindowedKeyValueCache(State& state);
 
   void Add() override;
-  void AddEncoder() override {
-    throw std::runtime_error("WindowedKeyValueCache does not support AddEncoder.");
-  };
 
   void Update(DeviceSpan<int32_t> beam_indices, int current_length) override;
 
