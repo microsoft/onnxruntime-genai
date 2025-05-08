@@ -1246,7 +1246,6 @@ class Model:
         num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
 
         inputs = [root_input, kwargs.pop("position_ids"), cos_cache_name, sin_cache_name]
-
         output = f"{name}/output_0"
         self.make_node(
             "RotaryEmbedding", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
@@ -2339,9 +2338,9 @@ class Model:
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
         for module in model.modules():
-            if isinstance(module, torch.nn.Embedding) or (hasattr(model, "embedding") and module == model.embedding):
+            if (isinstance(module, torch.nn.Embedding) and module.weight.shape[0] == self.vocab_size) or (hasattr(model, "embedding") and module == model.embedding):
                 # Checks (Hugging Face logic) or (GGUF logic)
-                if not self.exclude_embeds and module == model.language_model.model.embed_tokens:
+                if not self.exclude_embeds:
                     # Embedding layer
                     print("Reading embedding layer")
                     self.make_embedding(module.weight.detach().cpu())
