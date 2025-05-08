@@ -100,9 +100,7 @@ class Model:
 
         # Map output names to their types and shapes
         self.output_names = ["logits"]
-
         self.outputs_attrs = {"logits_type": self.io_dtype}
-
         self.make_outputs_init()
         self.exclude_lm_head = extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = extra_options.get("include_hidden_states", False)
@@ -1058,17 +1056,11 @@ class Model:
         skip_input = self.layernorm_attrs["skip_input"]
 
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor(layernorm.weight.detach().cpu().to(self.to_torch_dtype[self.io_dtype]).contiguous() + self.layernorm_attrs["add_offset"], weight)
-        bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
-        if not simple:
-            self.make_external_tensor(layernorm.bias.detach().cpu().to(self.to_torch_dtype[self.io_dtype]).contiguous(), bias)
-
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
             inputs.append(bias)
 
         name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
-        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
         kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
         if not skip:
             kwargs.update({"axis": -1, "stash_type": 1})
@@ -1078,18 +1070,19 @@ class Model:
         if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
             output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
+        
+        bias_name = f"model.layers.{layer_id}.{location}_layernorm.bias"
+        bias = getattr(layernorm, "bias", None)
 
-        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
+        self.make_layernorm_node_and_tensors(layernorm.weight, weight, bias, bias_name, inputs, outputs, name, TensorProto.FLOAT, skip, simple, kwargs)
         self.make_value_info(output_0, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         if skip and not self.layernorm_attrs["last_layernorm"]:
             self.make_value_info(output_3, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
-        # Update LayerNorm attributes
         self.layernorm_attrs["output_0"] = output_0
         if skip and not self.layernorm_attrs["last_layernorm"]:
             self.layernorm_attrs["output_3"] = output_3
 
-            # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
 
     def make_layernorm_with_casting_to_fp32(self, layer_id, layernorm, skip, simple, location):
@@ -1112,17 +1105,12 @@ class Model:
             self.make_value_info(casted_skip, TensorProto.FLOAT, shape=["batch_size", "sequence_length", self.hidden_size],)
 
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor(layernorm.weight.detach().to(self.to_torch_dtype[TensorProto.FLOAT]).contiguous() + self.layernorm_attrs["add_offset"], weight)
-        bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
-        if not simple:
-            self.make_external_tensor(layernorm.bias.detach().to(self.to_torch_dtype[TensorProto.FLOAT]).contiguous(), bias)
-
+       
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
             inputs.append(bias)
 
         name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
-        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
         kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
         if not skip:
             kwargs.update({"axis": -1, "stash_type": 1})
@@ -1135,7 +1123,9 @@ class Model:
             raw_out0 = "hidden_states"
         outputs = [raw_out0, "", "", raw_out3] if skip and not self.layernorm_attrs["last_layernorm"] else [raw_out0]
 
-        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
+        bias_name = f"model.layers.{layer_id}.{location}_layernorm.bias"
+        bias = getattr(layernorm, "bias", None)
+        self.make_layernorm_node_and_tensors(layernorm.weight, weight, bias, bias_name, inputs, outputs, name, TensorProto.FLOAT, skip, simple, kwargs)
 
         self.make_value_info(raw_out0, TensorProto.FLOAT, shape=['batch_size', 'sequence_length', self.hidden_size])
         if skip and not self.layernorm_attrs["last_layernorm"]:
@@ -1345,6 +1335,44 @@ class Model:
         self.make_value_info(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value_info(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
+    def make_layernorm_node_and_tensors(self, weight, weight_name, bias, bias_name, inputs, outputs, name, tensor_type, skip, simple, layernorm_kwargs):
+        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
+        self.make_external_tensor((weight.detach().cpu().to(self.to_torch_dtype[tensor_type]) + self.layernorm_attrs["add_offset"]).contiguous(), weight_name)
+        
+        if not simple:
+            self.make_external_tensor(bias.detach().to(self.to_torch_dtype[TensorProto.FLOAT]).contiguous(), bias_name)
+
+        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **layernorm_kwargs)
+        
+    def make_qk_norm_layernorms(self, reshape_output, norm_weight, weight_name, layernorm_name, output_name, layernorm_kwargs):
+        if self.layernorm_attrs["use_fp32_layernorms"]:
+            cast_in = f"{layernorm_name}/Cast"
+            self.make_node("Cast", inputs=[reshape_output], outputs=[cast_in], name=f"{layernorm_name}/CastIn", to=TensorProto.FLOAT)
+            self.make_layernorm_node_and_tensors(
+                norm_weight,
+                weight_name,
+                None, None,
+                [cast_in, weight_name],
+                [f"{layernorm_name}/output/Cast"],
+                layernorm_name,
+                TensorProto.FLOAT,
+                False, True,
+                layernorm_kwargs
+            )
+            self.make_node("Cast", inputs=[f"{layernorm_name}/output/Cast"], outputs=[output_name], name=f"{layernorm_name}/CastOut", to=self.io_dtype)
+        else:
+            self.make_layernorm_node_and_tensors(
+                norm_weight,
+                weight_name,
+                None, None,
+                [reshape_output, weight_name],
+                [output_name],
+                layernorm_name,
+                self.io_dtype,
+                False, True,
+                layernorm_kwargs
+            )
+
     def make_qk_norm(self, layer_id, attention):
         # Make subgraph to compute SimplifiedLayerNorm after Q and K MatMuls in attention:
         #
@@ -1369,19 +1397,7 @@ class Model:
         q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
         q_layernorm_output = f"{q_layernorm_name}/output_0"
 
-        if "gemma-3" in self.model_name_or_path and self.io_dtype == TensorProto.BFLOAT16:
-            q_layernorm_cast_in = f"{q_layernorm_name}/Cast"
-            self.make_node("Cast", inputs=[q_reshape_1_output], outputs=[q_layernorm_cast_in], name=f"{q_layernorm_name}/CastIn", to=TensorProto.FLOAT)
-
-            q_layernorm_weight_fp32 = (attention.q_norm.weight.detach().cpu().to(self.to_torch_dtype[TensorProto.FLOAT]) + self.layernorm_attrs["add_offset"]).contiguous()
-            self.make_external_tensor(q_layernorm_weight_fp32, q_weight_name)
-
-            self.make_node("SimplifiedLayerNormalization", inputs=[q_layernorm_cast_in, q_weight_name], outputs=[f"{q_layernorm_name}/output/Cast"], name=q_layernorm_name, **layernorm_kwargs)
-            self.make_node("Cast", inputs=[f"{q_layernorm_name}/output/Cast"], outputs=[q_layernorm_output], name=f"{q_layernorm_name}/CastOut", to=self.io_dtype)
-        else:
-            self.make_external_tensor((attention.q_norm.weight.detach().cpu().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), q_weight_name)
-            self.make_node("SimplifiedLayerNormalization", inputs=[q_reshape_1_output, q_weight_name], outputs=[q_layernorm_output], name=q_layernorm_name, **layernorm_kwargs)
-       
+        self.make_qk_norm_layernorms(reshape_output=q_reshape_1_output, norm_weight=attention.q_norm.weight, weight_name=q_weight_name, layernorm_name=q_layernorm_name, output_name=q_layernorm_output, layernorm_kwargs=layernorm_kwargs)
         self.make_value_info(q_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
 
         # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD
@@ -1399,19 +1415,7 @@ class Model:
         k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
         k_layernorm_output = f"{k_layernorm_name}/output_0"
 
-        if "gemma-3" in self.model_name_or_path and self.io_dtype == TensorProto.BFLOAT16:
-            k_layernorm_cast_in = f"{k_layernorm_name}/Cast"
-            self.make_node("Cast", inputs=[k_reshape_1_output], outputs=[k_layernorm_cast_in], name=f"{k_layernorm_name}/CastIn", to=TensorProto.FLOAT)
-
-            k_layernorm_weight_fp32 = (attention.k_norm.weight.detach().cpu().to(self.to_torch_dtype[TensorProto.FLOAT]) + self.layernorm_attrs["add_offset"]).contiguous()
-            self.make_external_tensor(k_layernorm_weight_fp32, k_weight_name)
-
-            self.make_node("SimplifiedLayerNormalization", inputs=[k_layernorm_cast_in, k_weight_name], outputs=[f"{k_layernorm_name}/output/Cast"], name=k_layernorm_name, **layernorm_kwargs)
-            self.make_node("Cast", inputs=[f"{k_layernorm_name}/output/Cast"], outputs=[k_layernorm_output], name=f"{k_layernorm_name}/CastOut", to=self.io_dtype)
-        else:
-            self.make_external_tensor((attention.k_norm.weight.detach().cpu().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), k_weight_name)
-            self.make_node("SimplifiedLayerNormalization", inputs=[k_reshape_1_output, k_weight_name], outputs=[k_layernorm_output], name=k_layernorm_name, **layernorm_kwargs)                
-            
+        self.make_qk_norm_layernorms(reshape_output=k_reshape_1_output, norm_weight=attention.k_norm.weight, weight_name=k_weight_name, layernorm_name=k_layernorm_name, output_name=k_layernorm_output, layernorm_kwargs=layernorm_kwargs)
         self.make_value_info(k_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
         # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD
