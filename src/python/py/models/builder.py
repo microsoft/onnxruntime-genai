@@ -13,7 +13,7 @@ from onnxruntime import __version__ as ort_version
 from packaging import version
 
 if version.parse(ort_version) > version.parse("1.21.1"):
-    from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer, QuantFormat
+    from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig, MatMulNBitsQuantizer, QuantFormat, RTNWeightOnlyQuantConfig
 else:
     from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer as MatMulNBitsQuantizer, QuantFormat
 
@@ -100,14 +100,19 @@ class Model:
 
         # Map output names to their types and shapes
         self.output_names = ["logits"]
-        self.outputs_attrs = {"logits_type": self.io_dtype}
+        self.output_types = {
+            "hidden_states": self.io_dtype,                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
+            "logits": self.io_dtype,                                                                             # For standard models
+            "present.key": self.io_dtype,                                                                        # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": self.io_dtype,                                                                      # For standard models (note that `present.value` is written this way to match Hugging Face format)
+        }
+        self.output_shapes = {
+            "hidden_states": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
+            "logits": ["batch_size", "sequence_length", self.vocab_size],                                        # For standard models
+            "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
+        }
         self.make_outputs_init()
-        self.exclude_lm_head = extra_options.get("exclude_lm_head", False)
-        self.include_hidden_states = extra_options.get("include_hidden_states", False)
-        if self.exclude_lm_head:
-            self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
-        elif self.include_hidden_states:
-            self.output_names = ["hidden_states"] + self.output_names
 
         # Store names of nodes already created
         self.node_names = set()
@@ -172,6 +177,7 @@ class Model:
             "output_3": "",             # Output 3 for SkipLayerNorm
             "add_offset": 0,            # Offset value for LayerNorm weight
             "epsilon": epsilon,         # Epsilon value to avoid `sqrt(0)` in LayerNorm
+            "use_fp32": False,          # Use float32 precision to compute LayerNorm
         }
 
         # MatMul-specific variables
@@ -309,18 +315,13 @@ class Model:
 
 
     def make_outputs_init(self):
-        self.output_types = {
-            "hidden_states": self.io_dtype,                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
-            "logits": self.outputs_attrs["logits_type"],                                                                               # For standard models
-            "present.key": self.io_dtype,                                                                        # For standard models (note that `present.key` is written this way to match Hugging Face format)
-            "present.value": self.io_dtype,                                                                      # For standard models (note that `present.value` is written this way to match Hugging Face format)
-        }
-        self.output_shapes = {
-            "hidden_states": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
-            "logits": ["batch_size", "sequence_length", self.vocab_size],                                        # For standard models
-            "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
-            "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
-        }
+        self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
+        self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
+
+        if self.exclude_lm_head:
+            self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
+        elif self.include_hidden_states:
+            self.output_names = ["hidden_states"] + self.output_names
 
     def make_attention_init(self):
         valid_gqa_configurations = [
@@ -494,10 +495,8 @@ class Model:
     def make_int4_algo_config(self, quant_method):
         int4_algo_config = None
         if quant_method == "rtn":
-            from onnxruntime.quantization.matmul_nbits_quantizer import RTNWeightOnlyQuantConfig
             int4_algo_config = RTNWeightOnlyQuantConfig()
         elif quant_method in ["k_quant_mixed", "k_quant_last"]:
-            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
             if quant_method == "k_quant_mixed":
                 # k_quant_mixed is from llama.cpp.
                 # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
@@ -821,14 +820,10 @@ class Model:
 
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
-
-        self.make_matmul_float_node_and_value_info(name, [root_input, weight], output, last_dim)
+        self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', last_dim])
 
         return name
-
-    def make_matmul_float_node_and_value_info(self, name, inputs, output, last_dim):
-        self.make_node("MatMul", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', last_dim])
 
     def make_matmul_int4(self, matmul, basename, root_input, **kwargs):
         if not hasattr(matmul, "qweight"):
@@ -1051,103 +1046,115 @@ class Model:
         self.layernorm_attrs["root_input"] = layernorm_attrs_value
         self.layernorm_attrs["skip_input"] = layernorm_attrs_value
 
-    def make_layernorm_default(self, layer_id, layernorm, skip, simple, location):
+    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         root_input = self.layernorm_attrs["root_input"]
         skip_input = self.layernorm_attrs["skip_input"]
 
-        bias_name = f"model.layers.{layer_id}.{location}_layernorm.bias"
+        # Get precision types to use
+        old_torch_dtype = self.to_torch_dtype[self.io_dtype]
+        old_io_dtype = self.io_dtype
+        new_torch_dtype = torch.float32 if self.layernorm_attrs["use_fp32"] else self.to_torch_dtype[self.io_dtype]
+        new_io_dtype = self.to_onnx_dtype[new_torch_dtype]
+        cast = (old_torch_dtype != new_torch_dtype)
+
+        # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
+        self.make_external_tensor(layernorm.weight.detach().cpu().to(new_torch_dtype).contiguous() + self.layernorm_attrs["add_offset"], weight)
+        bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
+        if not simple:
+            self.make_external_tensor(layernorm.bias.detach().cpu().to(new_torch_dtype).contiguous(), bias)
+
+        # Create input names for op
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
-            inputs.append(bias_name)
+            inputs.append(bias)
 
         name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
+        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
         kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
         if not skip:
             kwargs.update({"axis": -1, "stash_type": 1})
 
+        # Create output names for op
         output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
         output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
         if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
             output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
-        
-        bias = getattr(layernorm, "bias", None)
 
-        self.make_layernorm_node_and_tensors(layernorm.weight, weight, bias, bias_name, inputs, outputs, name, TensorProto.FLOAT, skip, simple, kwargs)
-        self.make_value_info(output_0, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
+        if cast:
+            inputs, outputs = self.make_layernorm_casts(name, inputs, outputs, old_io_dtype, new_io_dtype)
+
+        # Make op and its shape
+        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
+        self.make_value_info(outputs[0], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.make_value_info(output_3, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self.make_value_info(outputs[3], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
+        # Update LayerNorm attributes
         self.layernorm_attrs["output_0"] = output_0
         if skip and not self.layernorm_attrs["last_layernorm"]:
             self.layernorm_attrs["output_3"] = output_3
 
+            # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
 
-    def make_layernorm_with_casting_to_fp32(self, layer_id, layernorm, skip, simple, location):
-        root_input = self.layernorm_attrs["root_input"]
-        skip_input = self.layernorm_attrs["skip_input"]
+    def make_layernorm_casts(self, name, inputs, outputs, old_dtype, new_dtype):
+        # Name = name of original LayerNorm op as if the cast nodes did not exist
+        # Inputs = inputs into the original LayerNorm op as if the cast nodes did not exist
+        # Outputs = outputs from the original LayerNorm op as if the cast nodes did not exist
+        def get_shape_of_value_info(target_name):
+            for value_info in self.value_infos:
+                if value_info.name == target_name:
+                    shape = []
+                    for dim in value_info.type.tensor_type.shape.dim:
+                        if dim.HasField("dim_value"):
+                            shape.append(dim.dim_value)
+                        elif dim.HasField("dim_param"):
+                            shape.append(dim.dim_param)
+                        else:
+                            shape.append(None)
+                    return shape
 
-        skip_path = "skip" if skip else "noskip"
+        # Save original inputs and outputs
+        skip = len(inputs) > 2  # [root_input, skip_input, weight] vs. [root_input, weight]
+        root_input = inputs[0]
+        skip_input = inputs[1] if skip else None
+        output_0 = outputs[0]
+        output_3 = outputs[3] if skip and not self.layernorm_attrs["last_layernorm"] else None
 
-        casted_root = f"{root_input}.{layer_id}.{skip_path}root/Cast"
-        self.make_node("Cast", inputs=[root_input], outputs=[casted_root], name=f"/model/layers.{layer_id}/{location}_layernorm/CastInput0", to=TensorProto.FLOAT)
-        root_input = casted_root
-
-        self.make_value_info(casted_root, TensorProto.FLOAT, shape=["batch_size", "sequence_length", self.hidden_size],)
+        # Cast root_input
+        root_input_cast_name = f"{name}/root_input/Cast"
+        root_input_cast_output = f"{root_input_cast_name}/output_0"
+        self.make_node("Cast", inputs=[root_input], outputs=[root_input_cast_output], name=root_input_cast_name, to=new_dtype)
+        self.make_value_info(root_input_cast_output, new_dtype, shape=get_shape_of_value_info(root_input))
+        inputs[0] = root_input_cast_output
 
         if skip:
-            casted_skip = f"{skip_input}.{layer_id}.{skip_path}skip/Cast"
-            self.make_node("Cast", inputs=[skip_input], outputs=[casted_skip], name=f"/model/layers.{layer_id}/{location}_layernorm/CastInput3", to=TensorProto.FLOAT)
-            skip_input = casted_skip
+            # Cast skip_input
+            skip_input_cast_name = f"{name}/skip_input/Cast"
+            skip_input_cast_output = f"{skip_input_cast_name}/output_0"
+            self.make_node("Cast", inputs=[skip_input], outputs=[skip_input_cast_output], name=skip_input_cast_name, to=new_dtype)
+            self.make_value_info(skip_input_cast_output, new_dtype, shape=get_shape_of_value_info(skip_input))
+            inputs[1] = skip_input_cast_output
 
-            self.make_value_info(casted_skip, TensorProto.FLOAT, shape=["batch_size", "sequence_length", self.hidden_size],)
+        # Cast output_0
+        output_0_cast_name = f"{name}/output_0/Cast"
+        output_0_cast_output = f"{output_0_cast_name}/output_0"
+        self.make_node("Cast", inputs=[output_0_cast_output], outputs=[output_0], name=output_0_cast_name, to=old_dtype)
+        self.make_value_info(output_0, old_dtype, shape=get_shape_of_value_info(root_input))
+        outputs[0] = output_0_cast_output
 
-        weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        bias_name = f"model.layers.{layer_id}.{location}_layernorm.bias"
-        inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
-        if not simple:
-            inputs.append(bias_name)
-
-        name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
-        kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
-        if not skip:
-            kwargs.update({"axis": -1, "stash_type": 1})
-
-        output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
-        output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
-        raw_out0 = f"{output_0}/Cast"
-        raw_out3 = f"{output_3}/Cast"
-        if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
-            raw_out0 = "hidden_states"
-        outputs = [raw_out0, "", "", raw_out3] if skip and not self.layernorm_attrs["last_layernorm"] else [raw_out0]
-
-        bias = getattr(layernorm, "bias", None)
-        self.make_layernorm_node_and_tensors(layernorm.weight, weight, bias, bias_name, inputs, outputs, name, TensorProto.FLOAT, skip, simple, kwargs)
-
-        self.make_value_info(raw_out0, TensorProto.FLOAT, shape=['batch_size', 'sequence_length', self.hidden_size])
         if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.make_value_info(raw_out3, TensorProto.FLOAT, shape=['batch_size', 'sequence_length', self.hidden_size])
+            # Cast output_3
+            output_3_cast_name = f"{name}/output_3/Cast"
+            output_3_cast_output = f"{output_3_cast_name}/output_3"
+            self.make_node("Cast", inputs=[output_3_cast_output], outputs=[output_3], name=output_3_cast_name, to=old_dtype)
+            self.make_value_info(output_3, old_dtype, shape=get_shape_of_value_info(root_input))
+            outputs[3] = output_3_cast_output
 
-        if not(skip and not self.layernorm_attrs["last_layernorm"]):
-            raw_out3 = None
-
-        self.make_node("Cast", inputs=[raw_out0], outputs=[output_0], name=f"{name}/CastOutput0", to=self.io_dtype,)
-        self.make_value_info(output_0, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size],)
-        self.layernorm_attrs["output_0"] = output_0
-
-        if raw_out3 is not None:
-            self.make_node("Cast", inputs=[raw_out3], outputs=[output_3], name=f"{name}/CastOutput3", to=self.io_dtype,)
-            self.make_value_info(output_3, self.io_dtype, shape=["batch_size", "sequence_length", self.hidden_size],)
-            self.layernorm_attrs["output_3"] = output_3
-            self.layernorm_attrs["root_input"] = output_3
-
-    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
-        if self.layernorm_attrs["use_fp32_layernorms"]:
-            self.make_layernorm_with_casting_to_fp32(layer_id, layernorm, skip, simple, location)
-        else:
-            self.make_layernorm_default(layer_id, layernorm, skip, simple, location)
+        return inputs, outputs
 
     def make_mscale_su(self, mscale):
         if mscale <= 1.0:
@@ -1334,44 +1341,6 @@ class Model:
         self.make_value_info(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value_info(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
-    def make_layernorm_node_and_tensors(self, weight, weight_name, bias, bias_name, inputs, outputs, name, tensor_type, skip, simple, layernorm_kwargs):
-        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
-        self.make_external_tensor((weight.detach().cpu().to(self.to_torch_dtype[tensor_type]) + self.layernorm_attrs["add_offset"]).contiguous(), weight_name)
-        
-        if not simple:
-            self.make_external_tensor(bias.detach().to(self.to_torch_dtype[TensorProto.FLOAT]).contiguous(), bias_name)
-
-        self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **layernorm_kwargs)
-        
-    def make_qk_norm_layernorms(self, reshape_output, norm_weight, weight_name, layernorm_name, output_name, layernorm_kwargs):
-        if self.layernorm_attrs["use_fp32_layernorms"]:
-            cast_in = f"{layernorm_name}/Cast"
-            self.make_node("Cast", inputs=[reshape_output], outputs=[cast_in], name=f"{layernorm_name}/CastIn", to=TensorProto.FLOAT)
-            self.make_layernorm_node_and_tensors(
-                norm_weight,
-                weight_name,
-                None, None,
-                [cast_in, weight_name],
-                [f"{layernorm_name}/output/Cast"],
-                layernorm_name,
-                TensorProto.FLOAT,
-                False, True,
-                layernorm_kwargs
-            )
-            self.make_node("Cast", inputs=[f"{layernorm_name}/output/Cast"], outputs=[output_name], name=f"{layernorm_name}/CastOut", to=self.io_dtype)
-        else:
-            self.make_layernorm_node_and_tensors(
-                norm_weight,
-                weight_name,
-                None, None,
-                [reshape_output, weight_name],
-                [output_name],
-                layernorm_name,
-                self.io_dtype,
-                False, True,
-                layernorm_kwargs
-            )
-
     def make_qk_norm(self, layer_id, attention):
         # Make subgraph to compute SimplifiedLayerNorm after Q and K MatMuls in attention:
         #
@@ -1383,8 +1352,13 @@ class Model:
         #          |
         #       Reshape (BxSxD)
 
-        # Save kwargs shared by LayerNorm ops
+        # Save kwargs shared by LayerNorm ops and precision types to use
         layernorm_kwargs = {"epsilon": self.layernorm_attrs["epsilon"], "axis": -1, "stash_type": 1}
+        old_torch_dtype = self.to_torch_dtype[self.io_dtype]
+        old_io_dtype = self.io_dtype
+        new_torch_dtype = torch.float32 if self.layernorm_attrs["use_fp32"] else self.to_torch_dtype[self.io_dtype]
+        new_io_dtype = self.to_onnx_dtype[new_torch_dtype]
+        cast = (old_torch_dtype != new_torch_dtype)
 
         # Reshape Q MatMul from BxSxD to Bx(SxN)xH before LayerNorm
         q_reshape_1_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_1"
@@ -1392,12 +1366,20 @@ class Model:
         q_reshape_1_output = f"{q_reshape_1_name}/output_0"
         self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
 
+        # Make Q LayerNorm
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
         q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
         q_layernorm_output = f"{q_layernorm_name}/output_0"
+        self.make_external_tensor((attention.q_norm.weight.detach().cpu().to(new_torch_dtype) + self.layernorm_attrs["add_offset"]).contiguous(), q_weight_name)
 
-        self.make_qk_norm_layernorms(reshape_output=q_reshape_1_output, norm_weight=attention.q_norm.weight, weight_name=q_weight_name, layernorm_name=q_layernorm_name, output_name=q_layernorm_output, layernorm_kwargs=layernorm_kwargs)
-        self.make_value_info(q_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
+        # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
+        q_layernorm_inputs = [q_reshape_1_output, q_weight_name]
+        q_layernorm_outputs = [q_layernorm_output]
+        if cast:
+            q_layernorm_inputs, q_layernorm_outputs = self.make_layernorm_casts(q_layernorm_name, q_layernorm_inputs, q_layernorm_outputs, old_io_dtype, new_io_dtype)
+
+        self.make_node("SimplifiedLayerNormalization", inputs=q_layernorm_inputs, outputs=q_layernorm_outputs, name=q_layernorm_name, **layernorm_kwargs)
+        self.make_value_info(q_layernorm_outputs[0], dtype=new_io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
 
         # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD
         q_reshape_2_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
@@ -1410,12 +1392,20 @@ class Model:
         k_reshape_1_output = f"{k_reshape_1_name}/output_0"
         self.make_reshape(k_reshape_1_name, k_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
+        # Make K LayerNorm
         k_layernorm_name = f"/model/layers.{layer_id}/attn/k_norm/SimplifiedLayerNormalization"
         k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
         k_layernorm_output = f"{k_layernorm_name}/output_0"
+        self.make_external_tensor((attention.k_norm.weight.detach().cpu().to(new_torch_dtype) + self.layernorm_attrs["add_offset"]).contiguous(), k_weight_name)
 
-        self.make_qk_norm_layernorms(reshape_output=k_reshape_1_output, norm_weight=attention.k_norm.weight, weight_name=k_weight_name, layernorm_name=k_layernorm_name, output_name=k_layernorm_output, layernorm_kwargs=layernorm_kwargs)
-        self.make_value_info(k_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
+        # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
+        k_layernorm_inputs = [k_reshape_1_output, k_weight_name]
+        k_layernorm_outputs = [k_layernorm_output]
+        if cast:
+            k_layernorm_inputs, k_layernorm_outputs = self.make_layernorm_casts(k_layernorm_name, k_layernorm_inputs, k_layernorm_outputs, old_io_dtype, new_io_dtype)
+
+        self.make_node("SimplifiedLayerNormalization", inputs=k_layernorm_inputs, outputs=k_layernorm_outputs, name=k_layernorm_name, **layernorm_kwargs)
+        self.make_value_info(k_layernorm_outputs[0], dtype=new_io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
         # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD
         k_reshape_2_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_2"
@@ -1711,10 +1701,10 @@ class Model:
             q_matmul_name = self.make_matmul(attention.q_proj, q_matmul_basename, root_input)
             self.attention_attrs["q_path"] = f"{q_matmul_name}/output_0"
             k_matmul_basename = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
-            k_matmul_name = self.make_matmul(attention.k_proj, k_matmul_basename, root_input, first_cast=False)
+            k_matmul_name = self.make_matmul(attention.k_proj, k_matmul_basename, root_input)
             self.attention_attrs["k_path"] = f"{k_matmul_name}/output_0"
             v_matmul_basename = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
-            v_matmul_name = self.make_matmul(attention.v_proj, v_matmul_basename, root_input, first_cast=False)
+            v_matmul_name = self.make_matmul(attention.v_proj, v_matmul_basename, root_input)
             self.attention_attrs["v_path"] = f"{v_matmul_name}/output_0"
 
         # Make Add nodes (if bias exists)
@@ -1980,7 +1970,7 @@ class Model:
 
         # Make Up proj nodes
         up_matmul_basename = f"/model/layers.{layer_id}/mlp/up_proj/MatMul"
-        up_matmul_name = self.make_matmul(mlp.up_proj, up_matmul_basename, root_input, first_cast=False)
+        up_matmul_name = self.make_matmul(mlp.up_proj, up_matmul_basename, root_input)
         up_name = up_matmul_name
         if up_bias_exists:
             up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
@@ -2238,21 +2228,26 @@ class Model:
         scale_exists = self.lm_head_attrs["scale"] != 1
         mask_exists = self.lm_head_attrs["mask"] is not None
         softcap_exists = self.lm_head_attrs["softcap"] != 0.0
+        cast_exists = (self.io_dtype != self.output_types["logits"])
+
+        # List order matters here. It should match the order of the below if condition checks.
+        # Add new checks to the end of the list and after the below if condition checks.
+        exists_checks = [bias_exists, scale_exists, mask_exists, softcap_exists, cast_exists]
 
         matmul_basename = "/lm_head/MatMul"
         root_input = self.layernorm_attrs["output_0"]
-        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not(bias_exists or scale_exists or mask_exists or softcap_exists))
+        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not any(exists_checks))
         lm_name = matmul_name
 
         if bias_exists:
             add_name = "/lm_head/Add"
-            self.make_add_bias(lm_head.bias.detach().cpu(), add_name, root_input=f"{lm_name}/output_0", logits=not(scale_exists or mask_exists or softcap_exists))
+            self.make_add_bias(lm_head.bias.detach().cpu(), add_name, root_input=f"{lm_name}/output_0", logits=not any(exists_checks[1:]))
             lm_name = add_name
 
         if scale_exists:
             mul_name = "/lm_head/Mul"
             mul_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
-            mul_output = "logits" if not(mask_exists or softcap_exists) else f"{mul_name}/output_0"
+            mul_output = "logits" if not any(exists_checks[2:]) else f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
             self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
             lm_name = mul_name
@@ -2264,7 +2259,7 @@ class Model:
 
             where_name = "/lm_head/Where"
             where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{torch.finfo(self.to_torch_dtype[self.io_dtype]).min}", f"{lm_name}/output_0"]
-            where_output = "logits" if not softcap_exists else f"{where_name}/output_0"
+            where_output = "logits" if not any(exists_checks[3:]) else f"{where_name}/output_0"
             self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
             self.make_value_info(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
             lm_name = where_name
@@ -2280,10 +2275,17 @@ class Model:
 
             mul_name = "/lm_head/softcap/Mul"
             mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['softcap']}"]
-            mul_output = "logits"
+            mul_output = "logits" if not any(exists_checks[4:]) else f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
             self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
-            lm_head = mul_name
+            lm_name = mul_name
+
+        if cast_exists:
+            # Add final cast from io_dtype to logits_dtype
+            cast_name = "/lm_head/Cast"
+            cast_output = "logits"
+            self.make_node('Cast', inputs=[f"{lm_name}/output_0"], outputs=[cast_output], to=self.output_types['logits'])
+            self.make_value_info(cast_output, self.output_types['logits'], shape=['batch_size', 'sequence_length', self.vocab_size])
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
@@ -2314,7 +2316,7 @@ class Model:
                 from onnxruntime_genai.models.gguf_model import GGUFModel
             model = GGUFModel.from_pretrained(self.model_type, input_path, self.head_size, self.hidden_size, self.intermediate_size, self.num_attn_heads, self.num_kv_heads, self.vocab_size)
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
-            self.layernorm_attrs["use_fp32_layernorms"] = 0
+
         elif self.quant_type is not None:
             # Load quantized PyTorch model
             try:
@@ -2324,6 +2326,7 @@ class Model:
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
             model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs, q_size, kv_size, self.intermediate_size, self.num_layers)
+
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
@@ -2902,8 +2905,14 @@ class GemmaModel(MistralModel):
 class Gemma2Model(GemmaModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.layernorm_attrs["use_fp32"] = True
         self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
         self.is_local = lambda layer_id: layer_id % 2 == 1
+
+    def make_outputs_init(self):
+        # Always use float32 logits to improve accuracy
+        self.output_types["logits"] = TensorProto.FLOAT
+        super().make_outputs_init()
 
     def make_layer(self, layer_id, layer):
         # Gemma2 decoder layer is typically defined as:
@@ -3343,26 +3352,11 @@ class Gemma3Model(Gemma2Model):
         self.is_local = lambda layer_id: bool((layer_id + 1) % config.sliding_window_pattern)
         self.rope_local_theta = config.rope_local_base_freq
         self.make_rotary_embedding_multi_cache()
-        self.layernorm_attrs["use_fp32_layernorms"] = 1 if self.io_dtype == TensorProto.BFLOAT16 else 0        
 
     def make_attention_init(self):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
         super().make_attention_init()
-
-    def make_outputs_init(self):
-        self.outputs_attrs["logits_type"] = TensorProto.FLOAT
-        super().make_outputs_init()
-
-    def make_matmul_float_node_and_value_info(self, name, inputs, output, last_dim):
-        if output == "logits":
-            cast_name = name + "/Cast"
-            cast_name_input = name + "/Cast"
-            self.make_node("MatMul", inputs=inputs, outputs=[cast_name_input], name=name)
-            self.make_node("Cast", inputs=[cast_name_input], outputs=[output], name=cast_name, to=TensorProto.FLOAT)
-            self.make_value_info(output, TensorProto.FLOAT, shape=['batch_size', 'sequence_length', last_dim])
-        else:
-            super().make_matmul_float_node_and_value_info(name, inputs, output, last_dim)
 
     def make_rotary_embedding_multi_cache(self):
         self.cos_cache_global_name, self.sin_cache_global_name = "cos_cache_global", "sin_cache_global"
@@ -3487,8 +3481,14 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         elif config.architectures[0] == "GemmaForCausalLM":
             onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
+            if precision == "fp16":
+                print("WARNING: This model loses accuracy with float16 precision. Setting `--precision bf16` by default.")
+                precision = "bf16"
             onnx_model = Gemma2Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma3ForCausalLM":
+            if precision == "fp16":
+                print("WARNING: This model loses accuracy with float16 precision. Setting `--precision bf16` by default.")
+                precision = "bf16"
             onnx_model = Gemma3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
             onnx_model.model_type = "gemma3_text"
         elif config.architectures[0] == "Gemma3ForConditionalGeneration":
@@ -3497,7 +3497,11 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             for key in text_config:
                 if not hasattr(config, key):
                     setattr(config, key, getattr(text_config, key))
+
             # extra_options["exclude_embeds"] = True
+            if precision == "fp16":
+                print("WARNING: This model loses accuracy with float16 precision. Setting `--precision bf16` by default.")
+                precision = "bf16"
             onnx_model = Gemma3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
             onnx_model.model_type = "gemma3_text"
         elif config.architectures[0] == "GraniteForCausalLM":
@@ -3518,7 +3522,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
             print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
-            print("WARNING: This model currently only supports quantized version. Setting `--precision int4` by default.")
+            print("WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default.")
             execution_provider = "cuda"
             precision = "int4"
             onnx_model = Phi3MoELongRoPEModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
