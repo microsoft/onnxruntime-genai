@@ -141,12 +141,6 @@ struct SessionOptions_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
-  void OnComplete(bool) override {
-    for (const auto& provider_option : v_.provider_options) {
-      v_.providers.push_back(provider_option.name);
-    }
-  }
-
  private:
   Config::SessionOptions& v_;
   ProviderOptionsArray_Element provider_options_{v_.provider_options};
@@ -835,6 +829,10 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
 
   if (search.max_length == 0)
     search.max_length = model.context_length;
+
+  for (const auto& provider_option : model.decoder.session_options.provider_options) {
+    providers.push_back(provider_option.name);
+  }
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {
