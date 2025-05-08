@@ -103,8 +103,14 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
     LlgMaskResult mask_result;
     auto error = llg_compute_mask(llg_constraints_[batch_idx].get(), &mask_result);
     if (error != 0) {
-      std::string error_message = llg_get_error(llg_constraints_[batch_idx].get());
-      throw std::runtime_error("Error computing mask: " + error_message);
+      // If the mask computation fails, we need to reset the constraint
+      // and try again. LLGuidance needs to be reset for every new prompt.
+      ResetWithoutCompute();
+      auto error = llg_compute_mask(llg_constraints_[batch_idx].get(), &mask_result);
+      if (error != 0) {
+        std::string error_message = llg_get_error(llg_constraints_[batch_idx].get());
+        throw std::runtime_error("Error computing mask: " + error_message);
+      }
     }
 
     std::vector<uint32_t> mask;
@@ -179,7 +185,7 @@ void GuidanceLogitsProcessor::ProcessLogits(DeviceSpan<float> logits) {
   }
 }
 
-void GuidanceLogitsProcessor::Reset() {
+void GuidanceLogitsProcessor::ResetWithoutCompute() {
   masks_.clear();
   llg_constraints_.clear();
   llg_constraints_.resize(params_->search.batch_size);
@@ -203,7 +209,10 @@ void GuidanceLogitsProcessor::Reset() {
     }
     llg_constraints_[i] = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
   }
+}
 
+void GuidanceLogitsProcessor::Reset() {
+  ResetWithoutCompute();
   mask_future_ = std::async(std::launch::async, [&]() {
     return ComputeMask();
   });
@@ -223,7 +232,7 @@ std::vector<int32_t> GuidanceLogitsProcessor::tokenize_partial(const Tokenizer* 
 
 #endif
 
-std::unique_ptr<LogitsProcessor> CreateLogitsProcessor(const State& state) {
+std::unique_ptr<LogitsProcessor> CreateGuidanceLogitsProcessor(const State& state) {
   if (!state.params_->guidance_type.empty() && !state.params_->guidance_data.empty()) {
 #if USE_GUIDANCE
     return std::make_unique<GuidanceLogitsProcessor>(state);

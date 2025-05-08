@@ -301,7 +301,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);  // Search sequence lengths set when creating state
 
-  logits_processor_ = CreateLogitsProcessor(*state_);  // Could be nullptr if no logits processor is used
+  guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
   // Temporary solution for multimodal and whisper models
   if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
     AuxAppendTokens(params.aux_input_ids);
@@ -376,9 +376,9 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
-  if (last_action_ == Action::generated && logits_processor_) {
+  if (last_action_ == Action::generated && guidance_logits_processor_) {
     auto next_tokens_span = next_tokens.CopyDeviceToCpu();
-    logits_processor_->CommitTokens(next_tokens_span);
+    guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
@@ -455,9 +455,9 @@ void Generator::GenerateNextToken() {
       search_->AppendTokens(next_tokens);
     ComputeLogits(next_tokens);
   }
-  if (logits_processor_) {
+  if (guidance_logits_processor_) {
     auto logits = GetLogits();
-    logits_processor_->ProcessLogits(logits);
+    guidance_logits_processor_->ProcessLogits(logits);
   }
   computed_logits_ = false;
   auto& search = search_->params_->search;
@@ -512,8 +512,8 @@ void Generator::RewindToLength(size_t new_length) {
     throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
-  if (logits_processor_) {
-    logits_processor_->Reset();
+  if (guidance_logits_processor_) {
+    guidance_logits_processor_->Reset();
   }
   computed_logits_ = false;
   last_action_ = Action::rewound;
