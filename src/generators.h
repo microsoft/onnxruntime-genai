@@ -43,7 +43,7 @@ struct Search;
 struct Tokenizer;
 
 template <typename T, typename V>
-bool contains(const T& t, V v) {
+bool contains(const T& t, V&& v) {
   return std::find(t.begin(), t.end(), v) != t.end();
 }
 

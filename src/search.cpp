@@ -53,6 +53,7 @@ DeviceSpan<float> Search_Cpu::GetLogits() const {
 
 void Search_Cpu::SetLogits(DeviceSpan<float> logits) {
   next_token_scores_ = logits;
+  next_token_scores_.CopyDeviceToCpu();  // To the device->cpu copy once here as all later calls use CpuSpan()
 }
 
 DeviceSpan<int32_t> GreedySearch_Cpu::GetNextTokens() {
