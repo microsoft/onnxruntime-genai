@@ -76,6 +76,7 @@ def _parse_args():
     parser.add_argument("--update", action="store_true", help="Update makefiles.")
     parser.add_argument("--build", action="store_true", help="Build.")
     parser.add_argument("--test", action="store_true", help="Run tests.")
+    parser.add_argument("--package", action="store_true", help="Package the build.") # Does not override other phases.
     parser.add_argument(
         "--clean", action="store_true", help="Run 'cmake --build --target clean' for the selected config."
     )
@@ -602,6 +603,16 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
 
+def package(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Package the build output with CMake targets.
+    """
+    make_command = [str(args.cmake_path), "--build", str(args.build_dir), "--config", args.config, "--target", "package"]
+    if args.parallel:
+        make_command.append("--parallel")
+    util.run(make_command, env=env)
+
+
 def test(args: argparse.Namespace, env: dict[str, str]):
     """
     Run the tests.
@@ -663,6 +674,10 @@ if __name__ == "__main__":
     if arguments.build:
         print(f"Building targets in {arguments.build_dir}")
         build(arguments, environment)
+    
+    if arguments.package:
+        print(f"Packaging targets in {arguments.build_dir}")
+        package(arguments, environment)
 
     if arguments.test and not arguments.skip_tests:
         test(arguments, environment)
