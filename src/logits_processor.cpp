@@ -9,6 +9,7 @@
 #include <sys/types.h>
 
 #include "generators.h"
+#include "models/model.h"
 #if USE_GUIDANCE
 #include "llguidance.h"
 #endif
