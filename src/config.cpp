@@ -31,6 +31,18 @@ struct NamedStrings_Element : JSON::Element {
   std::vector<Config::NamedString>& v_;
 };
 
+struct Int_Array_Element : JSON::Element {
+  explicit Int_Array_Element(std::vector<int>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.emplace_back(static_cast<int>(JSON::Get<double>(value)));
+  }
+
+ private:
+  std::vector<int>& v_;
+};
+
+
 struct ProviderOptionsObject_Element : JSON::Element {
   explicit ProviderOptionsObject_Element(std::vector<Config::ProviderOptions>& v) : v_{v} {}
 
@@ -509,29 +521,6 @@ struct Speech_Element : JSON::Element {
   SpeechOutputs_Element outputs_{v_.outputs};
 };
 
-struct Eos_Array_Element : JSON::Element {
-  explicit Eos_Array_Element(Config::Model& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    v_.eos_token_ids.push_back(static_cast<int>(JSON::Get<double>(value)));
-  }
-
-  void OnComplete(bool empty) override {
-    if (v_.eos_token_ids.empty())
-      return;  // Empty array, nothign to do
-
-    // Copy the first eos_token_id into the eos_token_id value, it will be our primary eos token
-    v_.eos_token_id = v_.eos_token_ids.front();
-
-    // If the array is just one value, clear the array and just act like a single value was set
-    if (v_.eos_token_ids.size() == 1)
-      v_.eos_token_ids.clear();
-  }
-
- private:
-  Config::Model& v_;
-};
-
 struct EmbeddingInputs_Element : JSON::Element {
   explicit EmbeddingInputs_Element(Config::Model::Embedding::Inputs& v) : v_{v} {}
 
@@ -634,7 +623,7 @@ struct Model_Element : JSON::Element {
     } else if (name == "pad_token_id") {
       v_.pad_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "eos_token_id") {
-      v_.eos_token_id = static_cast<int>(JSON::Get<double>(value));
+      v_.eos_token_id.assign(1, static_cast<int>(JSON::Get<double>(value)));
     } else if (name == "bos_token_id") {
       v_.bos_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "decoder_start_token_id") {
@@ -647,7 +636,7 @@ struct Model_Element : JSON::Element {
 
   Element& OnArray(std::string_view name) override {
     if (name == "eos_token_id")
-      return eos_token_ids_;
+      return eos_token_id_;
     throw JSON::unknown_value_error{};
   }
 
@@ -677,7 +666,7 @@ struct Model_Element : JSON::Element {
   Config::Model& v_;
   EncoderDecoderInit_Element encoder_decoder_init_{v_.encoder_decoder_init};
   Decoder_Element decoder_{v_.decoder};
-  Eos_Array_Element eos_token_ids_{v_};
+  Int_Array_Element eos_token_id_{v_.eos_token_id};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   PromptTemplates_Element prompt_templates_{v_.prompt_templates};
@@ -858,6 +847,10 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
 
   if (search.max_length == 0)
     search.max_length = model.context_length;
+
+  // If no eos_token_id was set, set it to the pad token id
+  if (model.eos_token_id.empty())
+    model.eos_token_id.push_back(model.pad_token_id);
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {
