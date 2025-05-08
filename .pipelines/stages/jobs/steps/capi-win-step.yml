@@ -61,6 +61,7 @@ steps:
 #   workingDirectory: '$(Build.Repository.LocalPath)'
 #   condition: ne(variables['ep'], 'cuda')
 
+# TODO(aciddelgado): pass ort version to build.py
 - powershell: |
     $ep = '${{ parameters.ep }}'
     $target = '${{ parameters.target }}'
@@ -81,8 +82,8 @@ steps:
       $build_config = 'Debug'
     }
     python -m pip install requests
-    python build.py --parallel $cuda_path $package_c $skip_wheel --config=$build_config --build_dir='$(Build.Repository.LocalPath)\${buildDir}'
-    Rename-Item -Path '$(Build.Repository.LocalPath)\${buildDir}\Release' -NewName '$(os)-$(arch)' -Force
+    python build.py --parallel $cuda_path $package_c $skip_wheel --config=$build_config --build_dir='$(Build.Repository.LocalPath)\$(buildDir)'
+    Rename-Item -Path '$(Build.Repository.LocalPath)\$(buildDir)\Release' -NewName '$(os)-$(arch)' -Force
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
