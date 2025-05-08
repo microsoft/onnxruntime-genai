@@ -66,7 +66,8 @@ steps:
     $ep = '${{ parameters.ep }}'
     $target = '${{ parameters.target }}'
     $config = '${{ parameters.build_config }}'
-    $cuda_path = if ($ep -eq 'cuda') { '--cuda_path=$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' } else { '' }
+    $cuda_home = if ($ep -eq 'cuda') { '$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' } else { '' }
+    $use_dml = if ($ep -eq 'directml') { '--use_dml' } else { '' }
     $package_c = if ($target -eq 'onnxruntime-genai') { '--package' } else { '' }
     if ($target -ne 'python') {
       $skip_wheel = '--skip_wheel'
@@ -82,7 +83,7 @@ steps:
       $build_config = 'Debug'
     }
     python -m pip install requests
-    python build.py --parallel $cuda_path $package_c $skip_wheel --config=$build_config --build_dir='$(Build.Repository.LocalPath)\$(buildDir)'
+    python build.py --parallel --cuda_home=$cuda_home $use_dml $package_c $skip_wheel --config=$build_config --build_dir='$(Build.Repository.LocalPath)\$(buildDir)'
     Rename-Item -Path '$(Build.Repository.LocalPath)\$(buildDir)\Release' -NewName '$(os)-$(arch)' -Force
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
