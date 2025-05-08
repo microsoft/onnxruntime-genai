@@ -272,9 +272,10 @@ def test_phi2_chat_template(device, phi2_for):
     messages = f"""[{{"role": "system", "content": "This is a test."}}, {{"role": "user", "content": "Hi, how are you?"}}]"""
 
     # Note: this should work, even though phi-2 has no official chat template, as we override it and pass one in
-    template_string = r"{% for message in messages %}{% if message['role'] == 'system' %}{{'<|system|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'user' %}{{'<|user|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'assistant' %}{{'<|assistant|>\n' + message['content'] + '<|end|>\n'}}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\n' }}{% else %}{{ eos_token }}{% endif %}"
+    template = """{% for message in messages %}{% if message['role'] == 'system' %}{{'<|system|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'user' %}{{'<|user|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'assistant' %}{{'<|assistant|>\n' + message['content'] + '<|end|>\n'}}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\n' }}{% else %}{{ eos_token }}{% endif %}"""
+    template_string = f"""{template}"""
     try:
-        tokenizer.apply_chat_template(template_str = template_string, messages = messages)
+        tokenizer.apply_chat_template(template_str = template_string, messages = messages, add_generation_prompt=True)
     except Exception as e:
         assert False, f"Error while trying to override chat template: {e}"
 
