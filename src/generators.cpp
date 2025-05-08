@@ -308,6 +308,8 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   }
 }
 
+Generator::~Generator() = default;
+
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
   size_t padded_input_ids_size = input_ids.size();
   if (model_->config_->model.decoder.sliding_window.has_value()) {
