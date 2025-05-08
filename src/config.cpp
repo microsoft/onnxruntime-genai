@@ -831,7 +831,7 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
     search.max_length = model.context_length;
 
   for (const auto& provider_option : model.decoder.session_options.provider_options) {
-    providers.push_back(provider_option.name);
+    model.decoder.session_options.providers.push_back(provider_option.name);
   }
 }
 
