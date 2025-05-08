@@ -62,16 +62,25 @@ steps:
 #   condition: ne(variables['ep'], 'cuda')
 
 - powershell: |
-    $package_c = if (${{ parameters.target }} -eq 'onnxruntime-genai') { '--package' } else { '' }
-    if (${{ parameters.target }} -ne 'python') {
-      $build_wheel = 'skip_wheel'
+    $ep = '${{ parameters.ep }}'
+    $target = '${{ parameters.target }}'
+    $config = '${{ parameters.build_config }}'
+    $cuda_path = if ($ep -eq 'cuda') { '--cuda_path=$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' } else { '' }
+    $package_c = if ($target -eq 'onnxruntime-genai') { '--package' } else { '' }
+    if ($target -ne 'python') {
+      $skip_wheel = '--skip_wheel'
     } else {
-      $build_wheel = ''
+      $skip_wheel = ''
       python -m pip install wheel
     }
-    $cuda_path = if (${{ parameters.ep }} -eq 'cuda') { '--cuda_path $(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' } else { '' }
-    $config = if (${{parameters.build_config}} -eq 'release') { '--config=Release' } else { '' }
-    python build.py --parallel --package --config=$${{parameters.build_config}} --build_dir='$(Build.Repository.LocalPath)\${buildDir}'
+    if ($config -eq 'release') {
+      $build_config = 'Release'
+    } elif ($config -eq 'relwithdebinfo') {
+      $build_config = 'RelWithDebInfo'
+    } else {
+      $build_config = 'Debug'
+    }
+    python build.py --parallel $cuda_path $package_c $skip_wheel --config=$build_config --build_dir='$(Build.Repository.LocalPath)\${buildDir}'
     Rename-Item -Path '$(Build.Repository.LocalPath)\${buildDir}\Release' -NewName '$(os)-$(arch)' -Force
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
