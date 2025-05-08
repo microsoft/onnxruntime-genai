@@ -577,38 +577,6 @@ struct Embedding_Element : JSON::Element {
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
 
-struct PromptTemplates_Element : JSON::Element {
-  explicit PromptTemplates_Element(std::optional<Config::Model::PromptTemplates>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    // if one of templates is given in json, then any non-specified template will be default "{Content}"
-    if (name == "assistant") {
-      EnsureAvailable();
-      v_->assistant = JSON::Get<std::string_view>(value);
-    } else if (name == "prompt") {
-      EnsureAvailable();
-      v_->prompt = JSON::Get<std::string_view>(value);
-    } else if (name == "system") {
-      EnsureAvailable();
-      v_->system = JSON::Get<std::string_view>(value);
-    } else if (name == "user") {
-      EnsureAvailable();
-      v_->user = JSON::Get<std::string_view>(value);
-    } else {
-      throw JSON::unknown_value_error{};
-    }
-  }
-
- private:
-  std::optional<Config::Model::PromptTemplates>& v_;
-
-  void EnsureAvailable() {
-    if (!v_.has_value()) {
-      v_.emplace();
-    }
-  }
-};
-
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v) : v_{v} {}
 
@@ -652,9 +620,6 @@ struct Model_Element : JSON::Element {
     if (name == "embedding") {
       return embedding_;
     }
-    if (name == "prompt_templates") {
-      return prompt_templates_;
-    }
     if (name == "speech") {
       return speech_;
     }
@@ -668,7 +633,6 @@ struct Model_Element : JSON::Element {
   Int_Array_Element eos_token_id_{v_.eos_token_id};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
-  PromptTemplates_Element prompt_templates_{v_.prompt_templates};
   Speech_Element speech_{v_.speech};
 };
 
@@ -735,16 +699,23 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
 }
 
 void ClearProviders(Config& config) {
-  config.model.decoder.session_options.provider_options.clear();
+  config.model.decoder.session_options.providers.clear();
 }
 
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
+  if (std::find(config.model.decoder.session_options.providers.begin(),
+                config.model.decoder.session_options.providers.end(), provider_name) ==
+      config.model.decoder.session_options.providers.end()) {
+    config.model.decoder.session_options.providers.push_back(std::string(provider_name));
+  }
+
   std::ostringstream json;
   json << R"({")" << provider_name << R"(":{)";
   if (!option_name.empty()) {
     json << R"(")" << option_name << R"(":")" << option_value << R"(")";
   }
   json << R"(}})";
+
   ProviderOptionsArray_Element element{config.model.decoder.session_options.provider_options};
   JSON::Parse(element, json.str());
 }
@@ -850,6 +821,10 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
   // If no eos_token_id was set, set it to the pad token id
   if (model.eos_token_id.empty())
     model.eos_token_id.push_back(model.pad_token_id);
+
+  for (const auto& provider_option : model.decoder.session_options.provider_options) {
+    model.decoder.session_options.providers.push_back(provider_option.name);
+  }
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {
