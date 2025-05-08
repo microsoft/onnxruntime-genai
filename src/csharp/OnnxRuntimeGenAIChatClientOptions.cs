@@ -24,7 +24,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI;
 ///
 ///         foreach (var message in messages)
 ///             foreach (var content in message.Contents.OfType&lt;TextContent&gt;())
-///                 prompt.Append("&lt;|").Append(message.Role.Value).Append("|&gt;\n").Append(tc.Text).Append("&lt;|end|&gt;\n");
+///                 prompt.Append("&lt;|").Append(message.Role.Value).Append("|&gt;\n").Append(content.Text).Append("&lt;|end|&gt;\n");
 ///
 ///         return prompt.Append("&lt;|assistant|&gt;\n").ToString();
 ///     });
@@ -33,8 +33,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI;
 /// </remarks>
 public sealed class OnnxRuntimeGenAIChatClientOptions
 {
-    private IList<string> _stopSequences = [];
-
     /// <summary>Initializes a new instance of the <see cref="OnnxRuntimeGenAIChatClientOptions"/> class.</summary>
     /// <param name="stopSequences">The stop sequences used by the model.</param>
     /// <param name="promptFormatter">The function to use to format a list of messages for input into the model.</param>

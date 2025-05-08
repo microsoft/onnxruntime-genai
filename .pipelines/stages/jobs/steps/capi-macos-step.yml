@@ -50,6 +50,39 @@ steps:
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
+  - bash: |
+      set -e -x
+      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+      tar -xvzf onnxruntime-genai-*.tar.gz -C .
+      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+      find . -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec zip -FSr --symlinks {}.zip {} \;
+      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+      rm -rf $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package/onnxruntime-genai-*.tar.gz
+      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+      find $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec rm -rf {} +
+      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+    displayName: 'Convert from .tar.gz to .zip'
+    workingDirectory: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package'
+
+  - template: compliant/mac-esrp-archive-step.yml
+    parameters:
+      FolderPath: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package'
+      Pattern: '*.zip'
+
+  - bash: |
+      set -e -x
+      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+      find . -name 'onnxruntime-genai-*.zip' -exec unzip {} \;
+      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+      find . -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec tar -czvf {}.tar.gz {} \;
+      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+      rm -rf $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package/onnxruntime-genai-*.zip
+      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+      find $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package -maxdepth 1 -type d -name 'onnxruntime-genai-*' -exec rm -rf {} +
+      ls -al $(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package
+    displayName: 'Convert from .zip to .tar.gz'
+    workingDirectory: '$(Build.Repository.LocalPath)/build/$(ep)/$(os)-$(arch)/package'
+
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:

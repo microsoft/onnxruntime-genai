@@ -143,22 +143,7 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
             throw new ArgumentNullException(nameof(messages));
         }
 
-        // Check to see whether there's a cached generator. If there is, and if its id matches what we got from the client,
-        // we can use it; otherwise, we need to create a new one.
-        CachedGenerator? generator = Interlocked.Exchange(ref _cachedGenerator, null);
-        if (generator is null ||
-            generator.ChatThreadId is null ||
-            generator.ChatThreadId != options?.ChatThreadId)
-        {
-            generator?.Dispose();
-
-            using GeneratorParams p = new(_model); // we can dispose of this after we create the generator
-            UpdateGeneratorParamsFromOptions(p, options);
-            generator = new(new Generator(_model, p));
-        }
-
-        // If caching is enabled, generate a new ID to represent the state of the generator when we finish this response.
-        generator.ChatThreadId = _options?.EnableCaching is true ? Guid.NewGuid().ToString("N") : null;
+        bool enableCaching = _options?.EnableCaching is true;
 
         // Format and tokenize the message.
         string formattedPrompt = _options?.PromptFormatter is { } formatter ?
@@ -166,12 +151,31 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
             FormatPromptDefault(messages, options);
 
         using Sequences tokens = _tokenizer.Encode(formattedPrompt);
+        int inputTokens = tokens[0].Length;
+
+        // Check to see whether there's a cached generator. If there is, and if its id matches what we got from the client,
+        // we can use it; otherwise, we need to create a new one.
+        CachedGenerator? generator = Interlocked.Exchange(ref _cachedGenerator, null);
+        if (generator is null ||
+            generator.ConversationId is null ||
+            generator.ConversationId != options?.ConversationId)
+        {
+            generator?.Dispose();
+
+            using GeneratorParams p = new(_model); // we can dispose of this after we create the generator
+            UpdateGeneratorParamsFromOptions(p, options, enableCaching, inputTokens);
+            generator = new(new Generator(_model, p));
+        }
+
+        // If caching is enabled, generate a new ID to represent the state of the generator when we finish this response.
+        generator.ConversationId = enableCaching ? Guid.NewGuid().ToString("N") : null;
         try
         {
+            string messageId = Guid.NewGuid().ToString("N");
             string responseId = Guid.NewGuid().ToString("N");
 
             generator.Generator.AppendTokenSequences(tokens);
-            int inputTokens = tokens[0].Length, outputTokens = 0;
+            int outputTokens = 0;
 
             // Loop while we still want to produce more tokens.
             using var tokenizerStream = _tokenizer.CreateStream();
@@ -206,6 +210,7 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
                 yield return new(ChatRole.Assistant, next)
                 {
                     CreatedAt = DateTimeOffset.UtcNow,
+                    MessageId = messageId,
                     ResponseId = responseId,
                 };
             }
@@ -213,7 +218,7 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
             // Yield a final update containing metadata.
             yield return new()
             {
-                ChatThreadId = generator.ChatThreadId,
+                ConversationId = generator.ConversationId,
                 Contents = [new UsageContent(new()
                 {
                     InputTokenCount = inputTokens,
@@ -222,6 +227,7 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
                 })],
                 CreatedAt = DateTimeOffset.UtcNow,
                 FinishReason = options is not null && options.MaxOutputTokens <= outputTokens ? ChatFinishReason.Length : ChatFinishReason.Stop,
+                MessageId = messageId,
                 ResponseId = responseId,
                 Role = ChatRole.Assistant,
             };
@@ -229,7 +235,7 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
         finally
         {
             // Cache the generator for subsequent use if it's cachable and there isn't already a generator cached.
-            if (generator.ChatThreadId is null ||
+            if (generator.ConversationId is null ||
                 Interlocked.CompareExchange(ref _cachedGenerator, generator, null) != null)
             {
                 generator.Dispose();
@@ -250,6 +256,7 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
             serviceType == typeof(ChatClientMetadata) ? _metadata :
             serviceType == typeof(Model) ? _model :
             serviceType == typeof(Tokenizer) ? _tokenizer :
+            serviceType == typeof(Config) ? _config :
             serviceType?.IsInstanceOfType(this) is true ? this :
             null;
     }
@@ -266,17 +273,30 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
         foreach (var message in messages)
         {
             sb.Append(message).AppendLine();
-}
+        }
 
         return sb.ToString();
     }
 
     /// <summary>Updates the <paramref name="generatorParams"/> based on the supplied <paramref name="options"/>.</summary>
-    private static void UpdateGeneratorParamsFromOptions(GeneratorParams generatorParams, ChatOptions? options)
+    private static void UpdateGeneratorParamsFromOptions(GeneratorParams generatorParams, ChatOptions? options, bool enableCaching, int inputTokens)
     {
         if (options is null)
         {
             return;
+        }
+
+        if (options.MaxOutputTokens is int maxOutputTokens &&
+            !enableCaching) // don't set this if we're caching, since we want to be able to generate more tokens later
+        {
+            try
+            {
+                generatorParams.SetSearchOption("max_length", inputTokens + maxOutputTokens);
+            }
+            catch (OnnxRuntimeGenAIException)
+            {
+                // Ignore failure to set max_length. It'll default to the context window length.
+            }
         }
 
         if (options.Temperature.HasValue)
@@ -337,7 +357,7 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
     {
         public Generator Generator { get; } = generator;
 
-        public string? ChatThreadId { get; set; }
+        public string? ConversationId { get; set; }
 
         public void Dispose() => Generator?.Dispose();
     }

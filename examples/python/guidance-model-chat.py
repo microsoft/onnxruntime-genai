@@ -1,4 +1,4 @@
-﻿# Copyright (c) Microsoft Corporation. All rights reserved.
+# Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
 import onnxruntime_genai as og
@@ -7,13 +7,12 @@ import time
 import json
 
 def get_tools_list(input_tools):
-    # input_tools format: '[{"name": "fn1", "description": "fn details", "parameters": {"p1": {"description": "details", "type": "string"}}},
-    # {"fn2": 2},{"fn3": 3}]'
+    # Expected format: '[{"fn1": 1},{"fn2": 2},{"fn3": 3}]'
     tools_list = []
     try:
         tools_list = json.loads(input_tools)
     except json.JSONDecodeError:
-        raise ValueError("Invalid JSON format for tools list, expected format: '[{\"name\": \"fn1\"},{\"name\": \"fn2\"}]'")
+        raise ValueError("Invalid JSON format for tools list, expected format: '[{\"fn1\": \"fn1_details\"},{\"fn2\": \"fn2_details\"}]'")
     if len(tools_list) == 0:
         raise ValueError("Tools list cannot be empty")
     return tools_list
@@ -101,31 +100,43 @@ def main(args):
     if args.verbose: print(search_options)
 
     system_prompt = args.system_prompt
-    guidance_type = ""
-    if args.guidance_type != "none":
-        guidance_type = args.guidance_type
     prompt_tool_input = ""
     guidance_input = ""
-    if guidance_type:
+    if args.guidance_type:
         if not args.guidance_info:
             raise ValueError("Guidance information is required if guidance type is provided")
-        if guidance_type == "json_schema" or guidance_type == "lark_grammar":
+        if args.guidance_type == "json_schema" or args.guidance_type == "lark_grammar":
             tools_list = args.guidance_info
-            if guidance_type == "json_schema":
+            if args.guidance_type == "json_schema":
                 prompt_tool_input, guidance_input = get_json_grammar(tools_list)
-            elif guidance_type == "lark_grammar":
+            elif args.guidance_type == "lark_grammar":
                 prompt_tool_input, guidance_input = get_lark_grammar(tools_list)
-        elif guidance_type == "regex":
+        elif args.guidance_type == "regex":
             guidance_input = args.guidance_info
         else:
             raise ValueError("Guidance Type can only be [json_schema, regex, or lark_grammar]")
+    
+    params = og.GeneratorParams(model)
+    params.set_search_options(**search_options)
+    if args.guidance_type:
+      params.set_guidance(args.guidance_type, guidance_input)
+        
+    generator = og.Generator(model, params)
+    if args.verbose: print("Generator created")
+    if args.guidance_type == "json_schema" or args.guidance_type == "lark_grammar":
+        messages = f"""[{{"role": "system", "content": "{system_prompt}", "tools": "{prompt_tool_input}"}}]"""
+    else:
+        messages = f"""[{{"role": "system", "content": "{system_prompt}"}}]"""
+    # Apply Chat Template
+    final_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=False)
+    final_input = tokenizer.encode(final_prompt)
+    # Ignoring the last end of text token as it is messes up the generation when grammar is enabled
+    final_input = final_input[:-1]
+    generator.append_tokens(final_input)
 
     # Keep asking for input prompts in a loop
     while True:
-        if args.input_prompt:
-            text = args.input_prompt
-        else:
-            text = input("Prompt (Use quit() to exit): ")
+        text = input("Prompt (Use quit() to exit): ")
         if not text:
             print("Error, input cannot be empty")
             continue
@@ -135,17 +146,7 @@ def main(args):
 
         if args.timings: started_timestamp = time.time()
 
-        params = og.GeneratorParams(model)
-        params.set_search_options(**search_options)
-        
-        if guidance_type:
-            params.set_guidance(guidance_type, guidance_input)
-        generator = og.Generator(model, params)
-        if args.verbose: print("Generator created")
-        if guidance_type == "json_schema" or guidance_type == "lark_grammar":
-            messages = f"""[{{"role": "system", "content": "{system_prompt}", "tools": "{prompt_tool_input}"}}, {{"role": "user", "content": "{text}"}}]"""
-        else:
-            messages = f"""[{{"role": "system", "content": "{system_prompt}"}}, {{"role": "user", "content": "{text}"}}]"""
+        messages = f"""[{{"role": "user", "content": "{text}"}}]"""
         # Apply Chat Template
         final_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
         final_input = tokenizer.encode(final_prompt)
@@ -175,17 +176,10 @@ def main(args):
         print()
         print()
 
-        # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
-
-        del generator
-
         if args.timings:
             prompt_time = first_token_timestamp - started_timestamp
             run_time = time.time() - first_token_timestamp
             print(f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens)/prompt_time:.2f} tps, New tokens per second: {len(new_tokens)/run_time:.2f} tps")
-        # If Input prompt is provided it will just run the model for the input prompt and exit
-        if args.input_prompt:
-            break
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")
@@ -200,9 +194,8 @@ if __name__ == "__main__":
     parser.add_argument('-re', '--repetition_penalty', type=float, help='Repetition penalty to sample with')
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
-    parser.add_argument('-gtype', '--guidance_type', type=str, default="none", choices=["none", "json_schema", "regex", "lark_grammar"], help='Provide guidance type for the model, options are json_schema, regex, or lark_grammar.')
+    parser.add_argument('-gtype', '--guidance_type', type=str, default='', help='Provide guidance type for the model, options are json_schema, regex, or lark_grammar.')
     parser.add_argument('-ginfo', '--guidance_info', type=str, default='', help='Provide information of the guidance type used, it could be either tools or regex string. It is required if guidance_type is provided')
     parser.add_argument('-s', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the prompt.')
-    parser.add_argument('-inp', '--input_prompt', type=str, default='', help='Input Prompt, if provided it will just run the prompt and exit')
     args = parser.parse_args()
     main(args)

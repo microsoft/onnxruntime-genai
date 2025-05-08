@@ -26,6 +26,8 @@ struct LogitsProcessor {
   virtual void ProcessLogits(DeviceSpan<float> logits) = 0;
   // Reset is used to reset the logits processor after rewinding
   virtual void Reset() = 0;
+  // ResetWithoutCompute is used to reset the logits processor without computing the mask for chat
+  virtual void ResetWithoutCompute() = 0;
 };
 
 #if USE_GUIDANCE
@@ -39,6 +41,7 @@ struct GuidanceLogitsProcessor : public LogitsProcessor {
   void ProcessLogits(DeviceSpan<float> logits) override;
   void CommitTokens(std::span<int32_t> tokens) override;
   void Reset() override;
+  void ResetWithoutCompute() override;
   // GetMask is used to get the logits mask
   std::vector<std::vector<uint32_t>> GetMask();
   // tokenize_partial is used to tokenize the input tokens with special prefix, this will get stable
@@ -78,6 +81,6 @@ struct GuidanceLogitsProcessor : public LogitsProcessor {
 };
 #endif
 
-std::unique_ptr<LogitsProcessor> CreateLogitsProcessor(const State& state);
+std::unique_ptr<LogitsProcessor> CreateGuidanceLogitsProcessor(const State& state);
 
 }  // namespace Generators

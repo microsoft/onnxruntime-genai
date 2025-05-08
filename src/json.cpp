@@ -50,6 +50,7 @@ void TranslateException(std::string_view name) {
 JSON::JSON(Element& element, std::string_view document) : begin_{document.data()}, end_{document.data() + document.size()} {
   try {
     Parse_Value(element, {});
+    element.OnComplete(false);
   } catch (const std::exception& message) {
     // Figure out line number of error by counting carriage returns seen from start to error location
     int line = 1;
