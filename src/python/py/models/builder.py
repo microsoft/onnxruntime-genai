@@ -13,7 +13,7 @@ from onnxruntime import __version__ as ort_version
 from packaging import version
 
 if version.parse(ort_version) > version.parse("1.21.1"):
-    from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig, MatMulNBitsQuantizer, QuantFormat, RTNWeightOnlyQuantConfig
+    from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer, QuantFormat
 else:
     from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer as MatMulNBitsQuantizer, QuantFormat
 
@@ -495,8 +495,10 @@ class Model:
     def make_int4_algo_config(self, quant_method):
         int4_algo_config = None
         if quant_method == "rtn":
+            from onnxruntime.quantization.matmul_nbits_quantizer import RTNWeightOnlyQuantConfig
             int4_algo_config = RTNWeightOnlyQuantConfig()
         elif quant_method in ["k_quant_mixed", "k_quant_last"]:
+            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
             if quant_method == "k_quant_mixed":
                 # k_quant_mixed is from llama.cpp.
                 # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
