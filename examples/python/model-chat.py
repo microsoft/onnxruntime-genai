@@ -52,8 +52,7 @@ def main(args):
     if args.verbose: print("Generator created")
 
     # Set system prompt
-    messages = []
-    messages.append({"role": "system", "content": args.system_prompt})
+    messages = [{"role": "system", "content": args.system_prompt }]
     sys_prompt = tokenizer.apply_chat_template(json.dumps(messages))
     system_tokens = tokenizer.encode(sys_prompt)
     generator.append_tokens(system_tokens)
@@ -72,7 +71,7 @@ def main(args):
         if args.timings: started_timestamp = time.time()
 
         input_message = [{"role": "user", "content": text }]
-        input_prompt = tokenizer.apply_chat_template(json.dumps(input_message))
+        input_prompt = tokenizer.apply_chat_template(json.dumps(input_message), add_generation_prompt=True)
         input_tokens = tokenizer.encode(input_prompt)
         
         generator.append_tokens(input_tokens)

@@ -41,7 +41,7 @@ def main(args):
 
         # If there is a chat template, use it
         input_message = [{"role": "user", "content": text }]
-        input_prompt = tokenizer.apply_chat_template(json.dumps(input_message))
+        input_prompt = tokenizer.apply_chat_template(json.dumps(input_message), add_generation_prompt=True)
 
         input_tokens = tokenizer.encode(input_prompt)
 
