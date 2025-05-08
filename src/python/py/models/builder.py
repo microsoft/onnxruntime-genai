@@ -1055,10 +1055,11 @@ class Model:
         root_input = self.layernorm_attrs["root_input"]
         skip_input = self.layernorm_attrs["skip_input"]
 
+        bias_name = f"model.layers.{layer_id}.{location}_layernorm.bias"
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
-            inputs.append(bias)
+            inputs.append(bias_name)
 
         name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
         kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
@@ -1071,7 +1072,6 @@ class Model:
             output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
         
-        bias_name = f"model.layers.{layer_id}.{location}_layernorm.bias"
         bias = getattr(layernorm, "bias", None)
 
         self.make_layernorm_node_and_tensors(layernorm.weight, weight, bias, bias_name, inputs, outputs, name, TensorProto.FLOAT, skip, simple, kwargs)
@@ -1105,10 +1105,10 @@ class Model:
             self.make_value_info(casted_skip, TensorProto.FLOAT, shape=["batch_size", "sequence_length", self.hidden_size],)
 
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-       
+        bias_name = f"model.layers.{layer_id}.{location}_layernorm.bias"
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
-            inputs.append(bias)
+            inputs.append(bias_name)
 
         name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
         kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
@@ -1123,7 +1123,6 @@ class Model:
             raw_out0 = "hidden_states"
         outputs = [raw_out0, "", "", raw_out3] if skip and not self.layernorm_attrs["last_layernorm"] else [raw_out0]
 
-        bias_name = f"model.layers.{layer_id}.{location}_layernorm.bias"
         bias = getattr(layernorm, "bias", None)
         self.make_layernorm_node_and_tensors(layernorm.weight, weight, bias, bias_name, inputs, outputs, name, TensorProto.FLOAT, skip, simple, kwargs)
 
