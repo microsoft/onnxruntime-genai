@@ -106,8 +106,8 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
       // If the mask computation fails, we need to reset the constraint
       // and try again. LLGuidance needs to be reset for every new prompt.
       ResetWithoutCompute();
-      auto error = llg_compute_mask(llg_constraints_[batch_idx].get(), &mask_result);
-      if (error != 0) {
+      auto retry_error = llg_compute_mask(llg_constraints_[batch_idx].get(), &mask_result);
+      if (retry_error != 0) {
         std::string error_message = llg_get_error(llg_constraints_[batch_idx].get());
         throw std::runtime_error("Error computing mask: " + error_message);
       }
