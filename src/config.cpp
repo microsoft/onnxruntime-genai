@@ -54,8 +54,7 @@ struct ProviderOptionsObject_Element : JSON::Element {
 };
 
 struct ProviderOptionsArray_Element : JSON::Element {
-  explicit ProviderOptionsArray_Element(std::vector<Config::ProviderOptions>& v, std::vector<std::string>& providers)
-      : v_{v}, providers_{providers} {}
+  explicit ProviderOptionsArray_Element(std::vector<Config::ProviderOptions>& v) : v_{v} {}
 
   JSON::Element& OnObject(std::string_view name) override { return object_; }
 
@@ -69,18 +68,11 @@ struct ProviderOptionsArray_Element : JSON::Element {
       } else if (v.name == "dml") {
         v.name = "DML";
       }
-
-      if (std::find(providers_.begin(), providers_.end(), v.name) == providers_.end()) {
-        // The providers array determines the which execution provider is picked for the session..
-        // It also determines the order of the providers.
-        providers_.push_back(v.name);
-      }
     }
   }
 
  private:
   std::vector<Config::ProviderOptions>& v_;
-  std::vector<std::string>& providers_;
   ProviderOptionsObject_Element object_{v_};
 };
 
@@ -151,7 +143,7 @@ struct SessionOptions_Element : JSON::Element {
 
  private:
   Config::SessionOptions& v_;
-  ProviderOptionsArray_Element provider_options_{v_.provider_options, v_.providers};
+  ProviderOptionsArray_Element provider_options_{v_.provider_options};
   NamedStrings_Element config_entries_{v_.config_entries};
 };
 
@@ -723,13 +715,20 @@ void ClearProviders(Config& config) {
 }
 
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
+  if (std::find(config.model.decoder.session_options.providers.begin(),
+                config.model.decoder.session_options.providers.end(), provider_name) ==
+      config.model.decoder.session_options.providers.end()) {
+    config.model.decoder.session_options.providers.push_back(std::string(provider_name));
+  }
+
   std::ostringstream json;
   json << R"({")" << provider_name << R"(":{)";
   if (!option_name.empty()) {
     json << R"(")" << option_name << R"(":")" << option_value << R"(")";
   }
   json << R"(}})";
-  ProviderOptionsArray_Element element{config.model.decoder.session_options.provider_options, config.model.decoder.session_options.providers};
+
+  ProviderOptionsArray_Element element{config.model.decoder.session_options.provider_options};
   JSON::Parse(element, json.str());
 }
 
@@ -830,6 +829,10 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
 
   if (search.max_length == 0)
     search.max_length = model.context_length;
+
+  for (const auto& provider_option : model.decoder.session_options.provider_options) {
+    model.decoder.session_options.providers.push_back(provider_option.name);
+  }
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {
