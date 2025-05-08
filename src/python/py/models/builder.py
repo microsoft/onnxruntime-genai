@@ -2283,7 +2283,7 @@ class Model:
             # Add final cast from io_dtype to logits_dtype
             cast_name = "/lm_head/Cast"
             cast_output = "logits"
-            self.make_node('Cast', inputs=[f"{lm_name}/output_0"], outputs=[cast_output], to=self.output_types['logits'])
+            self.make_node('Cast', inputs=[f"{lm_name}/output_0"], outputs=[cast_output], name=cast_name, to=self.output_types['logits'])
             self.make_value_info(cast_output, self.output_types['logits'], shape=['batch_size', 'sequence_length', self.vocab_size])
 
     def make_layer(self, layer_id, layer):
