@@ -42,7 +42,6 @@ struct Int_Array_Element : JSON::Element {
   std::vector<int>& v_;
 };
 
-
 struct ProviderOptionsObject_Element : JSON::Element {
   explicit ProviderOptionsObject_Element(std::vector<Config::ProviderOptions>& v) : v_{v} {}
 

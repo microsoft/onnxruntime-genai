@@ -81,11 +81,11 @@ struct Config {
   struct Model {
     std::string type;
 
-    int pad_token_id{};              // The id of the padding token.
-    std::vector<int> eos_token_id;   // The end-of-stream tokens (when set as a single value it is converted to a vector with one value).
-    int bos_token_id{};              // The id of the beginning-of-stream token.
-    int sep_token_id{};              // The id of the separation token.
-    int decoder_start_token_id{};    // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
+    int pad_token_id{};             // The id of the padding token.
+    std::vector<int> eos_token_id;  // The end-of-stream tokens (when set as a single value it is converted to a vector with one value).
+    int bos_token_id{};             // The id of the beginning-of-stream token.
+    int sep_token_id{};             // The id of the separation token.
+    int decoder_start_token_id{};   // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
     int vocab_size{};
     int context_length{};
 
