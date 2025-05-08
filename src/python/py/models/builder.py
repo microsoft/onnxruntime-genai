@@ -1057,7 +1057,7 @@ class Model:
         old_io_dtype = self.io_dtype
         new_torch_dtype = torch.float32 if self.layernorm_attrs["use_fp32"] else self.to_torch_dtype[self.io_dtype]
         new_io_dtype = self.to_onnx_dtype[new_torch_dtype]
-        cast = (old_torch_dtype != new_torch_dtype)
+        cast = old_torch_dtype != new_torch_dtype
 
         # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
@@ -1359,7 +1359,7 @@ class Model:
         old_io_dtype = self.io_dtype
         new_torch_dtype = torch.float32 if self.layernorm_attrs["use_fp32"] else self.to_torch_dtype[self.io_dtype]
         new_io_dtype = self.to_onnx_dtype[new_torch_dtype]
-        cast = (old_torch_dtype != new_torch_dtype)
+        cast = old_torch_dtype != new_torch_dtype
 
         # Reshape Q MatMul from BxSxD to Bx(SxN)xH before LayerNorm
         q_reshape_1_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_1"
@@ -2229,7 +2229,7 @@ class Model:
         scale_exists = self.lm_head_attrs["scale"] != 1
         mask_exists = self.lm_head_attrs["mask"] is not None
         softcap_exists = self.lm_head_attrs["softcap"] != 0.0
-        cast_exists = (self.io_dtype != self.output_types["logits"])
+        cast_exists = self.io_dtype != self.output_types["logits"]
 
         # List order matters here. It should match the order of the below if condition checks.
         # Add new checks to the end of the list and after the below if condition checks.
