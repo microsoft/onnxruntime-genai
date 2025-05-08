@@ -67,6 +67,7 @@ class Model:
             "cpu": {},
             "cuda": {
                 "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",              # "1" if the model is able to enable cuda graph, "0" otherwise
+                "enable_skip_layer_norm_strict_mode": "1"
             },
             "rocm": {
                 "tunable_op_enable": "1",
