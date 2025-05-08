@@ -27,9 +27,9 @@ def json_schema():
 
 def lark_grammar():
     file_path = '/home/kvaishnavi/onnxruntime-genai/test/test_models/grammars/file_grammar.txt'
-    json_schema_data = ''
+    lark_grammar_data = ''
     with open(file_path, 'r', encoding='utf-8') as file:
-        json_schema_data = file.read()
+        lark_grammar_data = file.read()
 
     # Version 1: cherry pick fields from file_grammar.json
     # tool_function_info = []
@@ -53,7 +53,7 @@ def lark_grammar():
         tool_function_info = tool_function_info[1:-1]
     # tool_function_info = "\"" + ",".join(tool_function_info) + "\""
 
-    return json_schema_data, tool_function_info
+    return lark_grammar_data, tool_function_info
 
 def main(args):
     if args.verbose: print("Loading model...")
@@ -165,8 +165,12 @@ def main(args):
         
         # params.set_guidance('regex', "answer: .*")
         
-        # json_schema_data, tool_function_info = lark_grammar()
-        # params.set_guidance('lark_grammar', json_schema_data)
+        # lark_grammar_data, tool_function_info = lark_grammar()
+        # print(lark_grammar_data)
+        # params.set_guidance('lark_grammar', lark_grammar_data)
+
+        # print("tools:")
+        # print(tool_function_info)
         
         generator = og.Generator(model, params)
         if args.verbose: print("Generator created")
