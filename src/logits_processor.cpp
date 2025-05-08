@@ -63,7 +63,7 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
       &tokenize_data_,                                          // user_data
   };
 
-  char error_buf[128];
+  char error_buf[256];
   llg_tokenizer_ = std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter>(llg_new_tokenizer(&tokenizer_init, error_buf, sizeof(error_buf)));
   if (!llg_tokenizer_) {
     throw std::runtime_error("Error creating llg_tokenizer: " + std::string(error_buf));
