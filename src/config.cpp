@@ -703,11 +703,8 @@ void ClearProviders(Config& config) {
 }
 
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
-  if (std::find(config.model.decoder.session_options.providers.begin(),
-                config.model.decoder.session_options.providers.end(), provider_name) ==
-      config.model.decoder.session_options.providers.end()) {
+  if (!contains(config.model.decoder.session_options.providers, provider_name))
     config.model.decoder.session_options.providers.push_back(std::string(provider_name));
-  }
 
   std::ostringstream json;
   json << R"({")" << provider_name << R"(":{)";
