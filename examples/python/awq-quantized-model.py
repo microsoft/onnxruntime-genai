@@ -5,6 +5,7 @@ from awq import AutoAWQForCausalLM
 from transformers import AutoTokenizer
 from onnxruntime_genai.models.builder import create_model
 import onnxruntime_genai as og
+import json
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -84,14 +85,15 @@ def run_model(args):
         'max_length': 2048,
     }
 
-    # Chat template for Phi-3 (replace with the chat template for your model)
-    chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
     while True:
         text = input("Input: ")
         if not text:
             print("Error, input cannot be empty")
             continue
-        prompt = f'{chat_template.format(input=text)}'
+
+        # Apply chat template
+        input_message = [{"role": "user", "content": text}]
+        prompt = tokenizer.apply_chat_template(json.dumps(input_message), add_generation_prompt=True)
 
         input_tokens = tokenizer.encode(prompt)
 

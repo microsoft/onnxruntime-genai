@@ -4,6 +4,7 @@
 import onnxruntime_genai as og
 import argparse
 import time
+import json
 
 def main(args):
     if args.verbose: print("Loading model...")
@@ -31,54 +32,8 @@ def main(args):
 
     if args.verbose: print(search_options)
 
-    # Get model type
-    model_type = None
-    if hasattr(model, "type"):
-        model_type = model.type
-    else:
-        import json, os
-
-        with open(os.path.join(args.model_path, "genai_config.json"), "r") as f:
-            genai_config = json.load(f)
-            model_type = genai_config["model"]["type"]
-    
-    # Set chat template
-    if args.chat_template:
-        if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
-            raise ValueError("Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
-    else:
-        if model_type.startswith("phi4"):
-            args.chat_template = '{system_prompt}<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>'
-        elif model_type.startswith("phi"): # For Phi2 and Phi3
-            args.chat_template = '{system_prompt}<|user|>\n{input} <|end|>\n<|assistant|>'
-        elif model_type.startswith("llama"):
-            args.chat_template = '{system_prompt}<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
-            print("Using Chat Template for LLAMA 3, if you are using LLAMA  2 please pass the argument --chat_template '{input} [/INST]')")
-        elif model_type.startswith("qwen2"):
-            args.chat_template = '{system_prompt}<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
-        elif model_type == "gemma3_text":
-            args.chat_template = '<start_of_turn>user\n{system_prompt}{input}<end_of_turn>\n<start_of_turn>model\n'
-        else:
-            raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
-
     # Set system prompt
-    if "<|" in args.system_prompt and "|>" in args.system_prompt:
-        # User-provided system template already has tags
-        system_prompt = args.system_prompt
-    else:
-        if model_type.startswith('phi4'):
-            system_prompt = f"<|im_start|>system<|im_sep|>\n{args.system_prompt}<|im_end|>"
-        elif model_type.startswith('phi'): # For Phi2 and Phi3
-            system_prompt = f"<|system|>\n{args.system_prompt}<|end|>"
-        elif model_type.startswith("llama"):
-            system_prompt = f"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{args.system_prompt}<|eot_id|>"
-            print("Using System Prompt for LLAMA 3, if you are using LLAMA  2 please pass the argument --system_prompt '<s>[INST] <<SYS>>\\n{args.system_prompt}\\n<</SYS>>')")
-        elif model_type.startswith("qwen2"):
-            system_prompt = f"<|im_start|>system\n{args.system_prompt}<|im_end|>\n"
-        elif model_type == "gemma3_text":
-            system_prompt = f"{args.system_prompt}"
-        else:
-            system_prompt = args.system_prompt
+    system_prompt = args.system_prompt
 
     # Keep asking for input prompts in a loop
     while True:
@@ -95,7 +50,9 @@ def main(args):
 
         if args.timings: started_timestamp = time.time()
 
-        prompt = f'{args.chat_template.format(system_prompt=system_prompt, input=text)}'
+        # Apply chat template
+        messages = f"""[{{"role": "system", "content": "{system_prompt}"}}, {{"role": "user", "content": "{text}"}}]"""
+        prompt = tokenizer.apply_chat_template(messages=json.dumps(messages), add_generation_prompt=True)
         input_tokens = tokenizer.encode(prompt)
 
         params = og.GeneratorParams(model)
@@ -155,7 +112,6 @@ if __name__ == "__main__":
     parser.add_argument('-re', '--repetition_penalty', type=float, help='Repetition penalty to sample with')
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
-    parser.add_argument('-c', '--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}')
     parser.add_argument('-s', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the prompt.')
     parser.add_argument('-inp', '--input_prompt', type=str, default='', help='Input Prompt, if provided it will just run the prompt and exit')
     args = parser.parse_args()
