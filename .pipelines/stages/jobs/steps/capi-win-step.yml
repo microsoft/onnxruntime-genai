@@ -75,7 +75,7 @@ steps:
     }
     if ($config -eq 'release') {
       $build_config = 'Release'
-    } elif ($config -eq 'relwithdebinfo') {
+    } else if ($config -eq 'relwithdebinfo') {
       $build_config = 'RelWithDebInfo'
     } else {
       $build_config = 'Debug'
