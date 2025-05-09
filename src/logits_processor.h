@@ -15,7 +15,6 @@
 
 namespace Generators {
 
-// LogitsProcessor is essentially an abstract interface when USE_GUIDANCE is not enabled
 struct LogitsProcessor {
   LogitsProcessor() = default;
   virtual ~LogitsProcessor() = default;
