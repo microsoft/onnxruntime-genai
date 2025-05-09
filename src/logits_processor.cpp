@@ -81,8 +81,6 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
       constraint_ptr = llg_new_constraint_regex(&constraint_init, params_->guidance_data.data());
     } else if (params_->guidance_type == "lark_grammar") {
       constraint_ptr = llg_new_constraint_lark(&constraint_init, params_->guidance_data.data());
-    } else {
-      throw std::runtime_error("Unsupported guidance type: " + std::string(params_->guidance_type) + " (only json_schema, regex and lark_grammar are supported)");
     }
     if (llg_get_error(constraint_ptr) != nullptr) {
       std::string error_message = llg_get_error(constraint_ptr);
