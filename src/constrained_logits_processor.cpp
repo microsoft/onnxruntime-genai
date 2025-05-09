@@ -14,7 +14,7 @@
 #include "llguidance.h"
 #endif
 
-#include "logits_processor.h"
+#include "constrained_logits_processor.h"
 
 namespace Generators {
 
@@ -232,12 +232,12 @@ std::vector<int32_t> GuidanceLogitsProcessor::tokenize_partial(const Tokenizer* 
 
 #endif
 
-std::unique_ptr<LogitsProcessor> CreateGuidanceLogitsProcessor(const State& state) {
+std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(const State& state) {
   if (!state.params_->guidance_type.empty() && !state.params_->guidance_data.empty()) {
 #if USE_GUIDANCE
     return std::make_unique<GuidanceLogitsProcessor>(state);
 #endif
-    Log("warning", "No supported LogitsProcessor found. e.g. to use guidance, build with use_guidance=true");
+    Log("warning", "No supported ConstrainedLogitsProcessor found. e.g. to use guidance, build with use_guidance=true");
   }
   return nullptr;
 }

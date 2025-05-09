@@ -15,9 +15,9 @@
 
 namespace Generators {
 
-struct LogitsProcessor {
-  LogitsProcessor() = default;
-  virtual ~LogitsProcessor() = default;
+struct ConstrainedLogitsProcessor {
+  ConstrainedLogitsProcessor() = default;
+  virtual ~ConstrainedLogitsProcessor() = default;
   // Commits the selected tokens to the constrained system and also trigger mask recomputation
   // The input is the current token in the batch and internally verifies that it is valid in the current
   // context and also updates the internal state of the constraint system
@@ -32,7 +32,7 @@ struct LogitsProcessor {
 };
 
 #if USE_GUIDANCE
-struct GuidanceLogitsProcessor : public LogitsProcessor {
+struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   // llguidance need to use tokenizer.json to add special tokens
   static constexpr const char* kDefaultVocabFile = "tokenizer.json";
   // tokenizer need to tokenize token with special prefix
@@ -82,6 +82,6 @@ struct GuidanceLogitsProcessor : public LogitsProcessor {
 };
 #endif
 
-std::unique_ptr<LogitsProcessor> CreateGuidanceLogitsProcessor(const State& state);
+std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(const State& state);
 
 }  // namespace Generators
