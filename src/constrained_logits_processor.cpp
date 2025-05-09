@@ -74,7 +74,7 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
   for (int i = 0; i < params_->search.batch_size; i++) {
     LlgConstraintInit constraint_init;
     llg_constraint_init_set_defaults(&constraint_init, llg_tokenizer_.get());
-    LlgConstraint* constraint_ptr;
+    LlgConstraint* constraint_ptr = nullptr;
     if (params_->guidance_type == "json_schema") {
       constraint_ptr = llg_new_constraint_json(&constraint_init, params_->guidance_data.data());
     } else if (params_->guidance_type == "regex") {
