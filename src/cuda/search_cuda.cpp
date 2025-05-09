@@ -24,8 +24,12 @@ Search_Cuda::Search_Cuda(const GeneratorParams& params)
   auto batch_beam_size = params.BatchBeamSize();
   sequence_lengths_ = params.p_device->Allocate<int32_t>(batch_beam_size);
 
-  eos_meet_buffer_ = CudaMallocArray<bool>(batch_beam_size, &eos_meet_);
-  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), GetStream());
+  eos_seen_buffer_ = CudaMallocArray<bool>(batch_beam_size, &eos_seen_);
+  cudaMemsetAsync(eos_seen_.data(), 0, eos_seen_.size_bytes(), GetStream());
+
+  eos_token_ids_ = params.p_device->Allocate<int32_t>(params.config.model.eos_token_id.size());
+  copy(std::span<const int32_t>{params.config.model.eos_token_id}, eos_token_ids_.CpuSpan());
+  eos_token_ids_.CopyCpuToDevice();
 
   done_cpu_ = CudaMallocHostArray<bool>(1);
   *done_cpu_ = false;
@@ -49,7 +53,7 @@ BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
     : Search_Cuda{params} {
   assert(params_->search.num_beams > 1);  // If 1, use GreedySearch
   auto batch_beam_size = params_->BatchBeamSize();
-  beam_scorer_ = std::make_unique<BeamSearchScorer_Cuda>(*params_);
+  beam_scorer_ = std::make_unique<BeamSearchScorer_Cuda>(*params_, eos_token_ids_.Span());
 
   topk_next_tokens_ = CudaMallocArray<int32_t>(2 * batch_beam_size);
   topk_next_indices_ = CudaMallocArray<int32_t>(2 * batch_beam_size);
@@ -153,9 +157,8 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
                   params_->search.batch_size, k, p, temperature);
 
   // Check for EOS
-  assert(next_tokens_.size() == eos_meet_.size());
-  // Don't replace EOS with pad for batch_size == 1 for continuous decoding mode
-  cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_meet_.data(), params_->config.model.eos_token_id, params_->search.batch_size > 1 ? params_->config.model.pad_token_id : params_->config.model.eos_token_id, done_cpu_.get(), GetStream());
+  assert(next_tokens_.size() == eos_seen_.size());
+  cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_seen_.data(), eos_token_ids_.Span().data(), static_cast<int>(eos_token_ids_.Span().size()), params_->config.model.pad_token_id, done_cpu_.get(), GetStream());
 
   // Append tokens
   cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
@@ -210,7 +213,7 @@ std::span<float> Search_Cuda::GetScores() {
 
 // Set user input tokens (batch_beam_size, sequence_length)
 void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
-  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), GetStream());
+  cudaMemsetAsync(eos_seen_.data(), 0, eos_seen_.size_bytes(), GetStream());
   *done_cpu_ = false;
 
   auto next_tokens_gpu = next_tokens.Span();
@@ -224,7 +227,7 @@ void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
     return;
   }
 
-  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), GetStream());
+  cudaMemsetAsync(eos_seen_.data(), 0, eos_seen_.size_bytes(), GetStream());
   *done_cpu_ = false;
 }
 
@@ -237,7 +240,7 @@ void BeamSearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
 }
 
 void GreedySearch_Cuda::RewindTo(size_t index) {
-  cudaMemsetAsync(eos_meet_.data(), 0, eos_meet_.size_bytes(), GetStream());
+  cudaMemsetAsync(eos_seen_.data(), 0, eos_seen_.size_bytes(), GetStream());
   *done_cpu_ = false;
   if (index > 0)
     cuda::Launch_GetLastTokens(next_tokens_.data(), sequences_.GetSequences().Span().data(), static_cast<int>(params_->BatchBeamSize()), static_cast<int>(index), sequences_.max_length_, GetStream());
@@ -250,7 +253,8 @@ void Search_Cuda::ApplyMinLength(int min_length) {
   if (sequences_.GetSequenceLength() >= min_length)
     return;
 
-  cuda::LaunchSetScoreProcessor(GetScores().data(), params_->BatchBeamSize(), params_->config.model.vocab_size, params_->config.model.eos_token_id, std::numeric_limits<float>::lowest(), GetStream());
+  for (auto eos_token_id : params_->config.model.eos_token_id)
+    cuda::LaunchSetScoreProcessor(GetScores().data(), params_->BatchBeamSize(), params_->config.model.vocab_size, eos_token_id, std::numeric_limits<float>::lowest(), GetStream());
 }
 
 void Search_Cuda::ApplyRepetitionPenalty(float penalty) {
