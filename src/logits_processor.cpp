@@ -9,6 +9,7 @@
 #include <sys/types.h>
 
 #include "generators.h"
+#include "models/model.h"
 #if USE_GUIDANCE
 #include "llguidance.h"
 #endif
@@ -63,7 +64,7 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
       &tokenize_data_,                                          // user_data
   };
 
-  char error_buf[128];
+  char error_buf[256];
   llg_tokenizer_ = std::unique_ptr<LlgTokenizer, LlgTokenizerDeleter>(llg_new_tokenizer(&tokenizer_init, error_buf, sizeof(error_buf)));
   if (!llg_tokenizer_) {
     throw std::runtime_error("Error creating llg_tokenizer: " + std::string(error_buf));
@@ -106,8 +107,8 @@ std::vector<std::vector<uint32_t>> GuidanceLogitsProcessor::ComputeMask() {
       // If the mask computation fails, we need to reset the constraint
       // and try again. LLGuidance needs to be reset for every new prompt.
       ResetWithoutCompute();
-      auto error = llg_compute_mask(llg_constraints_[batch_idx].get(), &mask_result);
-      if (error != 0) {
+      auto retry_error = llg_compute_mask(llg_constraints_[batch_idx].get(), &mask_result);
+      if (retry_error != 0) {
         std::string error_message = llg_get_error(llg_constraints_[batch_idx].get());
         throw std::runtime_error("Error computing mask: " + error_message);
       }
@@ -211,6 +212,7 @@ void GuidanceLogitsProcessor::ResetWithoutCompute() {
   }
 }
 
+// Reset the masks and llguidance constraints and then recompute the mask
 void GuidanceLogitsProcessor::Reset() {
   ResetWithoutCompute();
   mask_future_ = std::async(std::launch::async, [&]() {

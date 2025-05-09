@@ -7,12 +7,13 @@ import time
 import json
 
 def get_tools_list(input_tools):
-    # Expected format: '[{"fn1": 1},{"fn2": 2},{"fn3": 3}]'
+    # input_tools format: '[{"name": "fn1", "description": "fn details", "parameters": {"p1": {"description": "details", "type": "string"}}},
+    # {"fn2": 2},{"fn3": 3}]'
     tools_list = []
     try:
         tools_list = json.loads(input_tools)
     except json.JSONDecodeError:
-        raise ValueError("Invalid JSON format for tools list, expected format: '[{\"fn1\": \"fn1_details\"},{\"fn2\": \"fn2_details\"}]'")
+        raise ValueError("Invalid JSON format for tools list, expected format: '[{\"name\": \"fn1\"},{\"name\": \"fn2\"}]'")
     if len(tools_list) == 0:
         raise ValueError("Tools list cannot be empty")
     return tools_list
@@ -100,30 +101,33 @@ def main(args):
     if args.verbose: print(search_options)
 
     system_prompt = args.system_prompt
+    guidance_type = ""
+    if args.guidance_type != "none":
+        guidance_type = args.guidance_type
     prompt_tool_input = ""
     guidance_input = ""
-    if args.guidance_type:
+    if guidance_type:
         if not args.guidance_info:
             raise ValueError("Guidance information is required if guidance type is provided")
-        if args.guidance_type == "json_schema" or args.guidance_type == "lark_grammar":
+        if guidance_type == "json_schema" or guidance_type == "lark_grammar":
             tools_list = args.guidance_info
-            if args.guidance_type == "json_schema":
+            if guidance_type == "json_schema":
                 prompt_tool_input, guidance_input = get_json_grammar(tools_list)
-            elif args.guidance_type == "lark_grammar":
+            elif guidance_type == "lark_grammar":
                 prompt_tool_input, guidance_input = get_lark_grammar(tools_list)
-        elif args.guidance_type == "regex":
+        elif guidance_type == "regex":
             guidance_input = args.guidance_info
         else:
             raise ValueError("Guidance Type can only be [json_schema, regex, or lark_grammar]")
     
     params = og.GeneratorParams(model)
     params.set_search_options(**search_options)
-    if args.guidance_type:
-      params.set_guidance(args.guidance_type, guidance_input)
+    if guidance_type:
+      params.set_guidance(guidance_type, guidance_input)
         
     generator = og.Generator(model, params)
     if args.verbose: print("Generator created")
-    if args.guidance_type == "json_schema" or args.guidance_type == "lark_grammar":
+    if guidance_type == "json_schema" or guidance_type == "lark_grammar":
         messages = f"""[{{"role": "system", "content": "{system_prompt}", "tools": "{prompt_tool_input}"}}]"""
     else:
         messages = f"""[{{"role": "system", "content": "{system_prompt}"}}]"""
@@ -194,7 +198,7 @@ if __name__ == "__main__":
     parser.add_argument('-re', '--repetition_penalty', type=float, help='Repetition penalty to sample with')
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
-    parser.add_argument('-gtype', '--guidance_type', type=str, default='', help='Provide guidance type for the model, options are json_schema, regex, or lark_grammar.')
+    parser.add_argument('-gtype', '--guidance_type', type=str, default="none", choices=["none", "json_schema", "regex", "lark_grammar"], help='Provide guidance type for the model, options are json_schema, regex, or lark_grammar.')
     parser.add_argument('-ginfo', '--guidance_info', type=str, default='', help='Provide information of the guidance type used, it could be either tools or regex string. It is required if guidance_type is provided')
     parser.add_argument('-s', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the prompt.')
     args = parser.parse_args()
