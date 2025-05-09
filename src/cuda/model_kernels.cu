@@ -98,25 +98,6 @@ void LaunchAddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_siz
   AddLogitsMask<<<num_blocks, block_size, 0, stream>>>(batch_logits, batch_beam_size, vocab_size, logits_mask);
 }
 
-__global__ void HandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count) {
-  int index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= batch_beam_size)
-    return;
-
-  float* logits = batch_logits + index * vocab_size;
-  float max = std::numeric_limits<float>::lowest();
-  for (int i = 0; i < eos_token_ids_count; i++) {
-    max = std::max(max, logits[eos_token_ids[i]]);
-    logits[eos_token_ids[i]] = std::numeric_limits<float>::lowest();  // Set all EOS token options to never happen (the first will get the max of all)
-  }
-
-  logits[eos_token_ids[0]] = max;  // Set the score of the primary EOS token to the highest of any of the EOS tokens
-}
-
-void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) {
-  HandleEOSArray<<<(batch_beam_size + 255) / 256, 256, 0, stream>>>(batch_logits, batch_beam_size, vocab_size, eos_token_ids, eos_token_ids_count);
-}
-
 __global__ void ConvertFp16ToFp32(const half* src, float* dst, int count) {
   int idx = threadIdx.x + blockIdx.x * blockDim.x;
   if (idx < count)
