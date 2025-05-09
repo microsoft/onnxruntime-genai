@@ -19,13 +19,16 @@ namespace Generators {
 struct LogitsProcessor {
   LogitsProcessor() = default;
   virtual ~LogitsProcessor() = default;
-  // CommitTokens is used to commit the generated tokens to the logits processor
+  // Commits the selected tokens to the constrained system and also trigger mask recomputation
+  // The input is the current token in the batch and internally verifies that it is valid in the current
+  // context and also updates the internal state of the constraint system
   virtual void CommitTokens(std::span<int32_t> tokens) = 0;
-  // ProcessLogits is used to add logits mask to the logits
+  // ProcessLogits applies token-level masking to the logits
+  // Based on the masks which are derived from constraints, it sets the logits to -inf for invalid tokens
   virtual void ProcessLogits(DeviceSpan<float> logits) = 0;
-  // Reset is used to reset the logits processor after rewinding
+  // Reset is used to reset the masks and the constrains of the logits processor and then recompute the mask, used after rewinding
   virtual void Reset() = 0;
-  // ResetWithoutCompute is used to reset the logits processor without computing the mask for chat
+  // ResetWithoutCompute is used to reset the masks and constraints for logits processor without computing the mask for chat
   virtual void ResetWithoutCompute() = 0;
 };
 

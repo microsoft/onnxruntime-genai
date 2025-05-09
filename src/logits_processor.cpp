@@ -212,6 +212,7 @@ void GuidanceLogitsProcessor::ResetWithoutCompute() {
   }
 }
 
+// Reset the masks and llguidance constraints and then recompute the mask
 void GuidanceLogitsProcessor::Reset() {
   ResetWithoutCompute();
   mask_future_ = std::async(std::launch::async, [&]() {
