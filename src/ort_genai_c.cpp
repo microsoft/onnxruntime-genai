@@ -8,6 +8,7 @@
 #include "ort_genai_c.h"
 #include "generators.h"
 #include "models/model.h"
+#include "constrained_logits_processor.h"
 #include "runtime_settings.h"
 #include "search.h"
 #include "smartptrs.h"
@@ -332,6 +333,13 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorPa
   OGA_TRY
   Generators::GeneratorParams::Whisper& whisper = params->inputs.emplace<Generators::GeneratorParams::Whisper>();
   whisper.input_features = tensor->shared_from_this();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* oga_params, const char* type, const char* data) {
+  OGA_TRY
+  oga_params->SetGuidance(type, data);
   return nullptr;
   OGA_CATCH
 }

@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<PoliCheckExclusions>
+  <Exclusion Type="FileName">THIRDPARTYNOTICES.TXT|BUILDER.PY|PROMPTS.JSON</Exclusion>
+</PoliCheckExclusions>
