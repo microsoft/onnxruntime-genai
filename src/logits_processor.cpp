@@ -21,7 +21,7 @@ namespace Generators {
 #if USE_GUIDANCE
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     : params_(state.params_),
-      eos_token_(state.params_->config.model.eos_token_id) {
+      eos_token_(state.params_->config.model.eos_token_id[0]) {
   if (params_->guidance_type.empty() || params_->guidance_type.empty()) {
     throw std::runtime_error("Guidance type and data must be provided together");
   }
