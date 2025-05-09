@@ -808,7 +808,7 @@ class Model:
     def make_matmul_fp16_or_fp32(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
         self.make_external_tensor(
-            lambda: matmul.weight.t().to(dtype=self.io_torch_dtype),
+            lambda: matmul.weight.detach().t().contiguous().to(dtype=self.io_torch_dtype),
             weight,
             dtype=self.io_dtype,
             shape=transpose_shape(matmul.weight.shape),
@@ -3654,4 +3654,9 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
     extra_options = parse_extra_options(args.extra_options)
+    # import pyinstrument
+    # profiler = pyinstrument.Profiler()
+    # profiler.start()
     create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
+    # profiler.stop()
+    # profiler.print()
