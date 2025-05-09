@@ -432,6 +432,30 @@ def _run_android_tests(args: argparse.Namespace):
             raise exception
 
 
+def _get_windows_build_args(args: argparse.Namespace):
+    win_args = [
+        "-DCMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
+        "-DCMAKE_MODULE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
+        "-DCMAKE_SHARED_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
+    ]
+    cmake_c_flags = "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000"
+    if args.config == "Release":
+        cmake_c_flags += " /O2 /Ob2 /DNDEBUG"
+    elif args.config == "RelWithDebInfo":
+        cmake_c_flags += " /O2 /Ob1 /DNDEBUG"
+    elif args.config == "Debug":
+        cmake_c_flags += " /Ob0 /Od /RTC1"
+    win_args += [
+        "-DCMAKE_C_FLAGS_INIT=" + cmake_c_flags,
+        "-DCMAKE_CXX_FLAGS_INIT=" + cmake_c_flags,
+    ]
+    if args.use_cuda:
+        win_args += [
+            "-DCMAKE_CUDA_FLAGS_INIT=/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=\" /MP /guard:cf /Qspectre \" -allow-unsupported-compiler",
+        ]
+    return win_args
+
+
 def update(args: argparse.Namespace, env: dict[str, str]):
     """
     Update the cmake build files.
@@ -485,26 +509,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}"]
 
     if util.is_windows():
-        command += [
-            "-DCMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
-            "-DCMAKE_MODULE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
-            "-DCMAKE_SHARED_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
-        ]
-        cmake_c_flags = "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000"
-        if args.config == "Release":
-            cmake_c_flags += " /O2 /Ob2 /DNDEBUG"
-        elif args.config == "RelWithDebInfo":
-            cmake_c_flags += " /O2 /Ob1 /DNDEBUG"
-        elif args.config == "Debug":
-            cmake_c_flags += " /Ob0 /Od /RTC1"
-        command += [
-            "-DCMAKE_C_FLAGS_INIT=" + cmake_c_flags,
-            "-DCMAKE_CXX_FLAGS_INIT=" + cmake_c_flags,
-        ]
-        if args.use_cuda:
-            command += [
-                "-DCMAKE_CUDA_FLAGS_INIT=/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=\" /MP /guard:cf /Qspectre \" -allow-unsupported-compiler",
-            ]
+        command += _get_windows_build_args(args)
 
     if args.android:
         command += [
