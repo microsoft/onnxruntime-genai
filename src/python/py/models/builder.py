@@ -1071,44 +1071,31 @@ class Model:
         if not simple:
             self.make_external_tensor(layernorm.bias.detach().cpu().to(self.to_torch_dtype[self.io_dtype]).contiguous(), bias)
 
+        name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
+        # NvTensorRtRtx EP doesn't support Skip/SimplifiedLayerNormalization and SkipLayerNormalization, so we fallback to primitive ops
+        if self.ep == "NvTensorRtRtx" and (skip or simple):
+            self._make_layernormlization(name, skip, simple, root_input, skip_input, weight, bias)
+        else:
+            self.make_layernormlization(name, skip, simple, root_input, skip_input, weight, bias)
+
+    def make_layernormlization(self, basename, skip, simple, root_input, skip_input, weight, bias):
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
             inputs.append(bias)
 
-        name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
-        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
-        kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
-        if not skip:
-            kwargs.update({"axis": -1, "stash_type": 1})
-
-        output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
-        output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
+        output_0 = f"{basename}/output_0"
+        output_3 = f"{basename}/output_3"
         if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
             output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
 
-        # NvTensorRtRtx EP doesn't support Skip/SimplifiedLayerNormalization, so we fallback to primitive ops
-        if self.ep == "NvTensorRtRtx":
-            layer_norn_basename = f"/model/layers.{layer_id}/{location}_layernorm"
-            if op_type == "SimplifiedLayerNormalization":
-                output_0 = f"{layer_norn_basename}/simplified_layer_norm/Mul_1/output_0"
-                outputs = [output_0]
-                self.make_simplified_layer_norm(layer_norn_basename, root_input, weight, shape=['batch_size', 'sequence_length', self.hidden_size])
-            elif op_type == "SkipSimplifiedLayerNormalization":
-                output_0 = f"{layer_norn_basename}/skip_simplified_layer_norm/simplified_layer_norm/Mul_1/output_0"
-                output_3 = f"{layer_norn_basename}/skip_simplified_layer_norm/Add/output_0"
-                self.make_skip_simplified_layer_norm(layer_norn_basename, root_input, skip_input, weight, shape=['batch_size', 'sequence_length', self.hidden_size])
-            elif op_type == "SkipLayerNormalization":
-                output_0 = f"{layer_norn_basename}/skip_layer_norm/LayerNormalization/output_0"
-                output_3 = f"{layer_norn_basename}/skip_layer_norm/Add/output_0"
-                self.make_skip_layer_norm(layer_norn_basename, root_input, skip_input, weight, bias, shape=['batch_size', 'sequence_length', self.hidden_size])
-            else: # LayerNormalization
-                self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, **kwargs)
-                self.make_value_info(output_0, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
-        else:
-            self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
-            self.make_value_info(output_0, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
+        if not skip:
+            kwargs.update({"axis": -1, "stash_type": 1})
 
+        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
+        self.make_node(op_type, inputs=inputs, outputs=outputs, name=basename, domain=("com.microsoft" if skip else None), **kwargs)
+        self.make_value_info(output_0, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         if skip and not self.layernorm_attrs["last_layernorm"]:
             self.make_value_info(output_3, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
@@ -1119,6 +1106,17 @@ class Model:
 
             # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
+
+    def _make_layernormlization(self, basename, skip, simple, root_input, skip_input, weight, bias):
+        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
+        if op_type == "SimplifiedLayerNormalization":
+            self._make_simplified_layer_norm(basename, root_input, weight, shape=['batch_size', 'sequence_length', self.hidden_size])
+        elif op_type == "SkipSimplifiedLayerNormalization":
+            self._make_skip_simplified_layer_norm(basename, root_input, skip_input, weight, shape=['batch_size', 'sequence_length', self.hidden_size])
+        elif op_type == "SkipLayerNormalization":
+            self._make_skip_layer_norm(basename, root_input, skip_input, weight, bias, shape=['batch_size', 'sequence_length', self.hidden_size])
+        else:
+            raise ValueError(f"Invalid op_type: {op_type}")
 
     def make_mscale_su(self, mscale):
         if mscale <= 1.0:
@@ -1318,9 +1316,15 @@ class Model:
         self.make_add(make_add_name, make_add_inputs, dtype=self.io_dtype, shape=shape)
 
         make_simplified_layer_norm_name = f"{basename}/skip_simplified_layer_norm"
-        self.make_simplified_layer_norm(make_simplified_layer_norm_name,  f"{make_add_name}/output_0", weight_name, shape=shape, **kwargs)
+        self._make_simplified_layer_norm(make_simplified_layer_norm_name,  f"{make_add_name}/output_0", weight_name, shape=shape, **kwargs)
 
-    # This expansion contrib-op can be updated / deprecated in future.
+        if not self.layernorm_attrs["last_layernorm"]:
+            self.make_value_info(f"{make_add_name}/output_0", self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self.layernorm_attrs["output_3"] = f"{make_add_name}/output_0"      
+            # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
+            self.layernorm_attrs["root_input"] = f"{make_add_name}/output_0"
+
+    # This expansion contrib-op can be updated / depricated in future.
     def _make_skip_layer_norm(self, basename, root_input, skip_input, weight_name, bias_name, shape, **kwargs):
         #                          root_input         skip_input
         #                              |                  |
@@ -1338,11 +1342,22 @@ class Model:
 
         make_layer_norm_name = f"{basename}/skip_layer_norm/LayerNormalization"
         inputs = [f"{make_add_name}/output_0", weight_name, bias_name]
-        outputs = [f"{make_layer_norm_name}/output_0"]
-        self.make_node("LayerNormalization", inputs=inputs, outputs=outputs, name=make_layer_norm_name, **kwargs)
+        output = f"{make_layer_norm_name}/output_0"
+
+        if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
+            output = ["hidden_states"]
+
+        self.make_node("LayerNormalization", inputs=inputs, outputs=[output], name=make_layer_norm_name, **kwargs)
         self.make_value_info(f"{make_layer_norm_name}/output_0", self.io_dtype, shape=shape)
 
-    # This expansion contrib-op can be updated / deprecated in future.
+        self.layernorm_attrs["output_0"] = output
+        if not self.layernorm_attrs["last_layernorm"]:
+            self.make_value_info(f"{make_add_name}/output_0", self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self.layernorm_attrs["output_3"] = f"{make_add_name}/output_0"        
+            # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
+            self.layernorm_attrs["root_input"] = f"{make_add_name}/output_0"
+
+    # This expansion contrib-op can be updated / depricated in future.
     def _make_simplified_layer_norm(self, basename, root_input, weight_name, shape, **kwargs):
         
         #                            Cast (float32) - most calc happens in higher precision
@@ -1401,7 +1416,17 @@ class Model:
 
         make_mul_1_name = f"{basename}/simplified_layer_norm/Mul_1"
         make_mul_1_inputs = [f"{make_cast_1_name}/output_0", weight_name]
-        self.make_mul(make_mul_1_name, make_mul_1_inputs, dtype=self.io_dtype, shape=shape)
+
+        make_mul_1_output = f"{make_mul_1_name}/output_0"
+        if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
+            make_mul_1_output = "hidden_states"
+
+        self.make_node("Mul", inputs=make_mul_1_inputs, outputs=[make_mul_1_output], name=make_mul_1_name)
+        self.make_value_info(make_mul_1_output, dtype=self.io_dtype, shape=shape)
+
+        # Update LayerNorm attributes
+        self.layernorm_attrs["output_0"] = make_mul_1_output
+
 
     def make_qk_norm(self, layer_id, attention):
         # Make subgraph to compute SimplifiedLayerNorm after Q and K MatMuls in attention:
