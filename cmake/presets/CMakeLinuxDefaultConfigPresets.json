@@ -10,7 +10,8 @@
         "CMAKE_MODULE_LINKER_FLAGS_INIT": "-Wl,-z,now",
         "CMAKE_SHARED_LINKER_FLAGS_INIT": "-Wl,-z,now",
         "USE_CUDA": "OFF",
-        "USE_ROCM": "OFF"
+        "USE_ROCM": "OFF",
+        "USE_GUIDANCE": "ON"
       },
       "environment": {
         "CC": "gcc",

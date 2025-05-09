@@ -331,7 +331,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParam
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* generator_params, const char* name, OgaTensor* tensor);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams*, OgaTensor* tensor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams* generator_params, OgaTensor* tensor);
+
+/**
+ * \brief Sets the guidance type and data for the Generator params
+ * \param[in] generator_params The generator params to set the guidance on
+ * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar
+ * \param[in] data The input string, which is the guidance data. Examples are present in test/test_models/grammars folder
+ * \return OgaResult containing the error message if the setting of the guidance failed
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* generator_params, const char* type, const char* data);
 
 /**
  * \brief Creates a generator from the given model and generator params.

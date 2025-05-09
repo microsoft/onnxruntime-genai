@@ -20,3 +20,9 @@ do
   fi
 done
 
+# Install Rust
+export RUSTUP_HOME=/usr/.rustup 
+export CARGO_HOME=/usr/.cargo 
+curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain=1.86.0
+chmod -R 777 /usr/.rustup
+chmod -R 777 /usr/.cargo

@@ -1,0 +1,19 @@
+start: TEXT | fun_call
+TEXT: /[^{](.|\n)*/
+fun_call: <|tool_call|> %json {
+  "description": "How to get the weather for a city",
+  "type": "object",
+  "required": ["name", "parameters"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "const": "get_weather" },
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "city": { "type": "string" }
+      },
+      "required": ["city"],
+      "additionalProperties": false
+    }
+  }
+}

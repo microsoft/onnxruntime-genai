@@ -1,0 +1,19 @@
+start: TEXT | fun_call
+TEXT: /[^{](.|\n)*/
+fun_call: <|tool_call|> %json {
+  "description": "Move or rename files and directories. Can move files between directories and rename them in a single operation. If the destination exists, the operation will fail. Works across different directories and can be used for simple renaming within the same directory. Both source and destination must be within allowed directories.",
+  "type": "object",
+  "required": ["name", "parameters"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "const": "move_file" },
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "source": { "type": "string", "description": "source of the file"}, "destination": { "type": "string", "description": "destination of the file"}
+      },
+      "required": ["source", "destination"],
+      "additionalProperties": false
+    }
+  }
+}
