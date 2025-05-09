@@ -1342,7 +1342,7 @@ class Model:
         self.make_node("LayerNormalization", inputs=inputs, outputs=outputs, name=make_layer_norm_name, **kwargs)
         self.make_value_info(f"{make_layer_norm_name}/output_0", self.io_dtype, shape=shape)
 
-    # This expansion contrib-op can be updated / depricated in future.
+    # This expansion contrib-op can be updated / deprecated in future.
     def make_simplified_layer_norm(self, basename, root_input, weight_name, shape, **kwargs):
         
         #                            Cast (float32) - most calc happens in higher precision
