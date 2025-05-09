@@ -1320,7 +1320,7 @@ class Model:
         make_simplified_layer_norm_name = f"{basename}/skip_simplified_layer_norm"
         self.make_simplified_layer_norm(make_simplified_layer_norm_name,  f"{make_add_name}/output_0", weight_name, shape=shape, **kwargs)
 
-    # This expansion contrib-op can be updated / depricated in future.
+    # This expansion contrib-op can be updated / deprecated in future.
     def make_skip_layer_norm(self, basename, root_input, skip_input, weight_name, bias_name, shape, **kwargs):
         #                          root_input         skip_input
         #                              |                  |
