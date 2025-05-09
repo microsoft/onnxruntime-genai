@@ -5,6 +5,7 @@ FROM onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cpu_aar
 
 ADD scripts /tmp/scripts
 RUN cd /tmp/scripts && /tmp/scripts/install_centos.sh && /tmp/scripts/install_deps.sh && rm -rf /tmp/scripts
+RUN apt update && apt install -y pkg-config libssl-dev
 
 ENV PATH="/usr/.cargo/bin:$PATH"
 ENV RUSTUP_HOME="/usr/.rustup"
