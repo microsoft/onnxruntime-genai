@@ -38,7 +38,7 @@ jobs:
           rustup override set 1.86.0
           rustup component add rust-src
           rustup show active-toolchain
-          sudo apt update && sudo apt install libssl-dev -y
+          sudo apt update && sudo apt pkg-config install libssl-dev -y
 
       - name: Get the Latest OnnxRuntime Nightly Version
         shell: pwsh
