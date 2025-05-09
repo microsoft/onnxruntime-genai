@@ -30,7 +30,17 @@ jobs:
           cmake-hash: '42395e20b10a8e9ef3e33014f9a4eed08d46ab952e02d2c1bbc8f6133eca0d7719fb75680f9bbff6552f20fcd1b73d86860f7f39388d631f98fb6f622b37cf04'
           add-cmake-to-path: 'true'
           disable-terrapin: 'true'
-
+      
+      - name: Install Rust with rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          source "$HOME/.cargo/env"
+          rustup install 1.86.0
+          rustup override set 1.86.0
+          rustup component add rust-src
+          rustup show active-toolchain
+      
       - name: Git Submodule Update
         run: |
           git submodule update --init --recursive
@@ -39,8 +49,8 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release
-          cmake --build --preset linux_gcc_cpu_release
+          cmake --preset linux_gcc_cpu_release -DUSE_GUIDANCE=ON
+          cmake --build --preset linux_gcc_cpu_release -DUSE_GUIDANCE=ON
 
       - name: Install the python wheel and test dependencies
         run: |
