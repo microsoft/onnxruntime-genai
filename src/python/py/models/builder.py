@@ -333,7 +333,6 @@ class Model:
     def make_attention_init(self):
         valid_gqa_configurations = [
             ("cpu", TensorProto.FLOAT),
-            ("cpu", TensorProto.BFLOAT16),
             ("cuda", TensorProto.FLOAT16),
             ("cuda", TensorProto.BFLOAT16),
             ("rocm", TensorProto.FLOAT16),
@@ -3716,7 +3715,7 @@ def get_args():
     )
 
     args = parser.parse_args()
-    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CPU, BF16 CUDA, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WEBGPU")
+    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WEBGPU")
     return args
 
 if __name__ == '__main__':
