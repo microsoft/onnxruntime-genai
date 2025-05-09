@@ -14,14 +14,14 @@
 #include "llguidance.h"
 #endif
 
-#include "logits_processor.h"
+#include "constrained_logits_processor.h"
 
 namespace Generators {
 
 #if USE_GUIDANCE
 GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
     : params_(state.params_),
-      eos_token_(state.params_->config.model.eos_token_id) {
+      eos_token_(state.params_->config.model.eos_token_id[0]) {
   if (params_->guidance_type.empty() || params_->guidance_type.empty()) {
     throw std::runtime_error("Guidance type and data must be provided together");
   }
@@ -74,15 +74,13 @@ GuidanceLogitsProcessor::GuidanceLogitsProcessor(const State& state)
   for (int i = 0; i < params_->search.batch_size; i++) {
     LlgConstraintInit constraint_init;
     llg_constraint_init_set_defaults(&constraint_init, llg_tokenizer_.get());
-    LlgConstraint* constraint_ptr;
+    LlgConstraint* constraint_ptr = nullptr;
     if (params_->guidance_type == "json_schema") {
       constraint_ptr = llg_new_constraint_json(&constraint_init, params_->guidance_data.data());
     } else if (params_->guidance_type == "regex") {
       constraint_ptr = llg_new_constraint_regex(&constraint_init, params_->guidance_data.data());
     } else if (params_->guidance_type == "lark_grammar") {
       constraint_ptr = llg_new_constraint_lark(&constraint_init, params_->guidance_data.data());
-    } else {
-      throw std::runtime_error("Unsupported guidance type: " + std::string(params_->guidance_type) + " (only json_schema, regex and lark_grammar are supported)");
     }
     if (llg_get_error(constraint_ptr) != nullptr) {
       std::string error_message = llg_get_error(constraint_ptr);
@@ -234,12 +232,12 @@ std::vector<int32_t> GuidanceLogitsProcessor::tokenize_partial(const Tokenizer* 
 
 #endif
 
-std::unique_ptr<LogitsProcessor> CreateGuidanceLogitsProcessor(const State& state) {
+std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(const State& state) {
   if (!state.params_->guidance_type.empty() && !state.params_->guidance_data.empty()) {
 #if USE_GUIDANCE
     return std::make_unique<GuidanceLogitsProcessor>(state);
 #endif
-    Log("warning", "No supported LogitsProcessor found. e.g. to use guidance, build with use_guidance=true");
+    Log("warning", "No supported ConstrainedLogitsProcessor found. e.g. to use guidance, build with use_guidance=true");
   }
   return nullptr;
 }

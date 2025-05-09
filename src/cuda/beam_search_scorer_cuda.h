@@ -4,7 +4,7 @@
 namespace Generators {
 
 struct BeamSearchScorer_Cuda {
-  BeamSearchScorer_Cuda(const GeneratorParams& parameters);
+  BeamSearchScorer_Cuda(const GeneratorParams& parameters, std::span<int32_t> cuda_eos_tokens);
 
   void Process(Sequences& sequences,
                std::span<const float> next_scores,
@@ -26,7 +26,9 @@ struct BeamSearchScorer_Cuda {
   mutable cuda_event_holder event_process_complete_;
   cuda_host_unique_ptr<cuda::BeamScorerState> state_cpu_;
   cuda_unique_ptr<cuda::BeamScorerState> state_gpu_;
+
   cudaStream_t stream_;
+  std::span<int32_t> eos_tokens_;
 
   DeviceSpan<float> next_beam_scores_;
   DeviceSpan<int32_t> next_beam_tokens_;

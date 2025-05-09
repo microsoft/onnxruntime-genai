@@ -112,9 +112,6 @@ class QuantizedModel:
                     local_bits = self.get_layer_bits(name)  # codeql[py/init-calls-subclass]
                     local_group_size = self.get_layer_group_size(name)  # codeql[py/init-calls-subclass]
 
-                    if tensor.dtype == torch.bfloat16:
-                        # Cast bfloat16 to float32 since NumPy does not support bfloat16
-                        tensor = tensor.to(torch.float32)
                     if name == "model.embed_tokens.weight" or name == "transformer.embedding.word_embeddings.weight":
                         self.embedding.weight = tensor
                     elif name == "model.norm.weight" or name == "transformer.encoder.final_layernorm.weight":

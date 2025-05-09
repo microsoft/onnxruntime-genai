@@ -74,21 +74,29 @@ struct ArgMaxDataImpl : ArgMaxData {
   cuda_unique_ptr<cub::KeyValuePair<int, float>> argmaxen_owner_;
 };
 
-__global__ void CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu) {
-  // Look for EOS tokens, if seen set EOS flag and replace with pad token
-  for (size_t batch_id = 0; batch_id < next_tokens_count; ++batch_id) {
-    if (next_tokens[batch_id] == eos_token_id || eos_meet[batch_id] == true) {
-      eos_meet[batch_id] = true;
+__global__ void CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_seen, const int* eos_token_ids, int eos_token_count, int pad_token_id, bool* done_cpu) {
+  for (int batch_id = 0; batch_id < next_tokens_count; ++batch_id) {
+    // If EOS already met, pad
+    if (eos_seen[batch_id]) {
       next_tokens[batch_id] = pad_token_id;
+      continue;
+    }
+
+    // Look for EOS
+    for (int eos_id = 0; eos_id < eos_token_count; ++eos_id) {
+      if (next_tokens[batch_id] == eos_token_ids[eos_id]) {
+        eos_seen[batch_id] = true;
+        break;
+      }
     }
   }
 
   // When all batches are finished, stop earlier to avoid wasting computation.
   // TODO: Merge this with the above so we don't have to double scan. Just keep track of 'batches left'
   {
-    size_t batch_id = 0;
+    int batch_id = 0;
     while (batch_id < next_tokens_count) {
-      if (eos_meet[batch_id] == false) {
+      if (eos_seen[batch_id] == false) {
         break;
       }
       ++batch_id;
@@ -100,8 +108,8 @@ __global__ void CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, b
   }
 }
 
-void Launch_CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu, cudaStream_t stream) {
-  CheckForEOSAndPad<<<1, 1, 0, stream>>>(next_tokens, next_tokens_count, eos_meet, eos_token_id, pad_token_id, done_cpu);
+void Launch_CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_seen, const int *eos_token_ids, int eos_token_count, int pad_token_id, bool* done_cpu, cudaStream_t stream) {
+  CheckForEOSAndPad<<<1, 1, 0, stream>>>(next_tokens, next_tokens_count, eos_seen, eos_token_ids, eos_token_count, pad_token_id, done_cpu);
 }
 
 __global__ void AddProbsKernel(float* log_probs,

@@ -274,12 +274,21 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
 }
 
 DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
+                                           const std::vector<std::string>& providers,
                                            const std::vector<Config::ProviderOptions>& provider_options_list,
                                            bool is_primary_session_options,
                                            bool disable_graph_capture) {
   DeviceInterface* p_device{};
 
-  for (auto& provider_options : provider_options_list) {
+  for (auto& provider : providers) {
+    auto provider_options_it = std::find_if(provider_options_list.begin(), provider_options_list.end(),
+                                            [&provider](const Config::ProviderOptions& po) { return po.name == provider; });
+
+    if (provider_options_it == provider_options_list.end()) {
+      throw std::runtime_error("Provider options not found for provider: " + provider);
+    }
+    const auto& provider_options = *provider_options_it;
+
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
       std::vector<const char*> keys, values;
@@ -299,7 +308,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       }
 
       session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
-
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 
@@ -416,7 +424,8 @@ void EnsureDeviceOrtInit(DeviceInterface& device) {
   auto session_options = OrtSessionOptions::Create();
   std::vector<Config::ProviderOptions> provider_options_list;
   provider_options_list.emplace_back(Config::ProviderOptions{device_type_names[static_cast<int>(type)], {}});
-  SetProviderSessionOptions(*session_options, provider_options_list, true, false);
+  const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
+  SetProviderSessionOptions(*session_options, providers, provider_options_list, true, false);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
@@ -613,7 +622,9 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
 
-  p_device_ = SetProviderSessionOptions(session_options, config_session_options.provider_options, is_primary_session_options, disable_graph_capture);
+  p_device_ = SetProviderSessionOptions(session_options, config_session_options.providers,
+                                        config_session_options.provider_options, is_primary_session_options,
+                                        disable_graph_capture);
 
   // Fallback to CPU if no provider specific interface was set
   if (!p_device_)

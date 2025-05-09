@@ -76,6 +76,8 @@ __device__ bool BeamHypotheses::CanImprove(float best_sum_logprobs, int current_
 
 __global__ void BeamSearchScorer_Process(BeamScorerState& state_cpu,
                                          BeamScorerState& state,
+                                         const int32_t* eos_token_ids,
+                                         const int eos_token_count,
                                          const int32_t* sequences_buffer,
                                          int sequence_length,
                                          BeamHypotheses* beam_hyps_,
@@ -105,7 +107,14 @@ __global__ void BeamSearchScorer_Process(BeamScorerState& state_cpu,
 
       int batch_beam_idx = batch_start + next_index;
       // Add to generated hypotheses if end of sentence.
-      if ((state.eos_token_id_ >= 0) && (next_token == state.eos_token_id_)) {
+      bool is_eos_token = false;
+      for (unsigned eos_index = 0; eos_index < eos_token_count; eos_index++) {
+        if (next_token == eos_token_ids[eos_index]) {
+          is_eos_token = true;
+          break;
+        }
+      }
+      if (is_eos_token) {
         bool is_beam_token_worse_than_top_num_beams = (j >= state.num_beams_);
         if (is_beam_token_worse_than_top_num_beams) {
           continue;
@@ -152,6 +161,7 @@ __global__ void BeamSearchScorer_Process(BeamScorerState& state_cpu,
 
 void LaunchBeamSearchScorer_Process(BeamScorerState& state_cpu,
                                     BeamScorerState& state,
+                                    std::span<const int32_t> eos_token_ids,
                                     std::span<const int32_t> sequences,
                                     int sequence_length,
                                     std::span<BeamHypotheses> beam_hyps,
@@ -165,6 +175,8 @@ void LaunchBeamSearchScorer_Process(BeamScorerState& state_cpu,
                                     cudaStream_t stream) {
   BeamSearchScorer_Process<<<1, state_cpu.batch_size_, 0, stream>>>(state_cpu,
                                                                     state,
+                                                                    eos_token_ids.data(),
+                                                                    static_cast<int>(eos_token_ids.size()),
                                                                     sequences.data(),
                                                                     sequence_length,
                                                                     beam_hyps.data(),

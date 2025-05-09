@@ -6,7 +6,7 @@
 #include "models/env_utils.h"
 #include "models/model.h"
 #include "models/decoder_only.h"
-#include "logits_processor.h"
+#include "constrained_logits_processor.h"
 #include "search.h"
 #include "cpu/interface.h"
 #include "cuda/interface.h"

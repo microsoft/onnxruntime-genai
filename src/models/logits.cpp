@@ -13,13 +13,6 @@ Logits::Logits(State& state)
       type_{model_.session_info_.GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
 
-  if (model_.p_device_inputs_->GetType() == DeviceType::CUDA && !model_.config_->model.eos_token_ids.empty()) {
-    auto& cpu_ids = model_.config_->model.eos_token_ids;
-    cuda_eos_token_ids_ = model_.p_device_->Allocate<int32_t>(cpu_ids.size());
-    copy(std::span<const int32_t>{cpu_ids}, cuda_eos_token_ids_.CpuSpan());
-    cuda_eos_token_ids_.CopyCpuToDevice();
-  }
-
   input_sequence_lengths.resize(state_.params_->search.batch_size);
 
   if (IsOpenVINOStatefulModel(state.model_)) {
@@ -82,23 +75,6 @@ DeviceSpan<float> Logits::Get() {
   if (logits_.empty() || logits_of_last_token->GetTensorMutableRawData() != logits_.Span().data())
     logits_ = WrapTensor<float>(*model_.p_device_inputs_, *logits_of_last_token);
 
-  // TODO: This functionality may have to be moved to DeviceInterface to make the code platform agnostic
-  if (model_.p_device_inputs_->GetType() == DeviceType::CUDA) {
-    if (!cuda_eos_token_ids_.empty())
-      model_.p_device_inputs_->LaunchHandleEOSArray(
-          logits_.Span().data(),
-          static_cast<int>(shape_[0]) /* batch_beam_size*/,
-          static_cast<int>(shape_[2]) /* vocab_size */,
-          cuda_eos_token_ids_.Span().data(),
-          static_cast<int>(cuda_eos_token_ids_.size()));
-    return logits_;
-  } else if (model_.p_device_inputs_->GetType() == DeviceType::DML) {
-    HandleEOSArray(logits_.CopyDeviceToCpu());
-    logits_.CopyCpuToDevice();
-    return logits_;
-  }
-
-  HandleEOSArray(logits_.Span());
   return logits_;
 }
 
@@ -130,26 +106,6 @@ void Logits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length
   shape_[1] = new_kv_length;
   output_raw_->CreateTensor(shape_, state_.params_->use_graph_capture && shape_[1] == 1);
   state_.outputs_[output_index_] = output_raw_->GetOrtTensor();
-}
-
-void Logits::HandleEOSArray(std::span<float> batched_logits) {
-  if (model_.config_->model.eos_token_ids.empty())
-    return;
-
-  const size_t vocab_size = shape_[2];
-  size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
-
-  for (int index = 0; index < shape_[0]; index++) {
-    auto logits = batched_logits.subspan(vocab_index, vocab_size);
-    float max = std::numeric_limits<float>::lowest();
-    for (auto id : model_.config_->model.eos_token_ids) {
-      max = std::max(max, logits[id]);
-      logits[id] = std::numeric_limits<float>::lowest();  // Set all EOS token options to never happen (the first will get the max of all)
-    }
-
-    logits[model_.config_->model.eos_token_id] = max;  // Set the score of the primary EOS token to the highest of any of the EOS tokens
-    vocab_index += vocab_size;
-  }
 }
 
 void Logits::Add() {
