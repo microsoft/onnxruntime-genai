@@ -9,7 +9,8 @@ struct ArgMaxData {
   virtual ~ArgMaxData() = default;
 };
 
-void Launch_CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_meet, int eos_token_id, int pad_token_id, bool* done_cpu, cudaStream_t stream);
+void Launch_CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_seen, const int32_t* eos_token_ids, int eos_token_count, bool* done_cpu, cudaStream_t stream);
+void Launch_CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_seen, const int32_t* eos_token_ids, int eos_token_count, int pad_token_id, bool* done_cpu, cudaStream_t stream);
 void Launch_ExpandInputSequences(const std::span<int32_t> input_sequences, std::span<int32_t> sequences, int batch_size, int beam_size, int max_length, cudaStream_t stream);
 void Launch_AppendNextTokensToSequences(std::span<const int32_t> next_tokens, std::span<int32_t> sequences, int batch_beam_size, int past_length, int max_length, cudaStream_t stream);
 void Launch_GetLastTokens(int32_t* next_tokens, const int32_t* sequences, int batch_beam_size, int sequence_length, int max_length, cudaStream_t stream);
