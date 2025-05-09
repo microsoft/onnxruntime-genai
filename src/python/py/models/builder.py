@@ -620,7 +620,7 @@ class Model:
         # Format of name is "/model/constants/{dtype}/{shape}/{num}"
 
         path = name.split("/")
-        onnx_dtype = builder_utils.tensor_proto_string_to_dtype(path[-3])
+        onnx_dtype = ir.DataType[path[-3].split(".")[-1]]
         dims = path[-2]
         # NOTE: Use ast.literal_eval instead of eval as eval allows arbitrary code execution
         num = ast.literal_eval(path[-1])
