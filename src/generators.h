@@ -42,6 +42,11 @@ struct State;
 struct Search;
 struct Tokenizer;
 
+template <typename T, typename V>
+bool contains(const T& t, V&& v) {
+  return std::find(t.begin(), t.end(), v) != t.end();
+}
+
 template <typename T>
 DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
   auto info = value.GetTensorTypeAndShapeInfo();
