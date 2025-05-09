@@ -1305,7 +1305,7 @@ class Model:
         self.make_value_info(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
     # This expansion of contrib-op can be updated / deprecated in future.
-    def make_skip_simplified_layer_norm(self, basename, root_input, skip_input, weight_name, shape, **kwargs):
+    def _make_skip_simplified_layer_norm(self, basename, root_input, skip_input, weight_name, shape, **kwargs):
         #                          root_input         skip_input
         #                              |                  |
         #                              +------------------+
@@ -1321,7 +1321,7 @@ class Model:
         self.make_simplified_layer_norm(make_simplified_layer_norm_name,  f"{make_add_name}/output_0", weight_name, shape=shape, **kwargs)
 
     # This expansion contrib-op can be updated / deprecated in future.
-    def make_skip_layer_norm(self, basename, root_input, skip_input, weight_name, bias_name, shape, **kwargs):
+    def _make_skip_layer_norm(self, basename, root_input, skip_input, weight_name, bias_name, shape, **kwargs):
         #                          root_input         skip_input
         #                              |                  |
         #                              +------------------+
@@ -1343,7 +1343,7 @@ class Model:
         self.make_value_info(f"{make_layer_norm_name}/output_0", self.io_dtype, shape=shape)
 
     # This expansion contrib-op can be updated / deprecated in future.
-    def make_simplified_layer_norm(self, basename, root_input, weight_name, shape, **kwargs):
+    def _make_simplified_layer_norm(self, basename, root_input, weight_name, shape, **kwargs):
         
         #                            Cast (float32) - most calc happens in higher precision
         #                              |
