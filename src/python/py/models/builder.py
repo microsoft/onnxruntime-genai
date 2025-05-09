@@ -1304,7 +1304,7 @@ class Model:
         self.make_value_info(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value_info(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
-    # This expansion of contrib-op can be updated / depricated in future.
+    # This expansion of contrib-op can be updated / deprecated in future.
     def make_skip_simplified_layer_norm(self, basename, root_input, skip_input, weight_name, shape, **kwargs):
         #                          root_input         skip_input
         #                              |                  |
