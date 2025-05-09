@@ -69,7 +69,7 @@ steps:
     python -m pip install requests
     python build.py --parallel $cuda_home $use_dml $package_c $skip_wheel --config=$build_config --build_dir='$(Build.Repository.LocalPath)\$(buildDir)'
     Rename-Item -Path '$(Build.Repository.LocalPath)\$(buildDir)\Release' -NewName '$(os)-$(arch)' -Force
-  displayName: 'Build C API'
+  displayName: 'Build C API and package / wheel'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:

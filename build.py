@@ -484,7 +484,6 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
         command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}"]
 
-    # TODO(aciddelgado): What about minsize rel and asan presets?
     if util.is_windows():
         command += [
             "-DCMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
@@ -687,19 +686,15 @@ if __name__ == "__main__":
     environment = _create_env(arguments)
 
     if arguments.update:
-        print(f"Updating build files in {arguments.build_dir}")
         update(arguments, environment)
 
     if arguments.clean:
-        print(f"Cleaning build files in {arguments.build_dir}")
         clean(arguments, environment)
 
     if arguments.build:
-        print(f"Building targets in {arguments.build_dir}")
         build(arguments, environment)
     
     if arguments.package:
-        print(f"Packaging targets in {arguments.build_dir}")
         package(arguments, environment)
 
     if arguments.test and not arguments.skip_tests:
