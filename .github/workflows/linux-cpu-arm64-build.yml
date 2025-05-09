@@ -39,6 +39,7 @@ jobs:
           rustup component add rust-src
           rustup show active-toolchain
           sudo apt update && sudo apt install pkg-config libssl-dev -y
+          export OPENSSL_INCLUDE_DIR=/usr/include
 
       - name: Get the Latest OnnxRuntime Nightly Version
         shell: pwsh
