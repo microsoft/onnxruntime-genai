@@ -107,6 +107,13 @@ OgaResult* OGA_API_CALL OgaSetLogString(const char* name, const char* value) {
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaSetLogCallback(void (*callback)(const char* string, size_t length)) {
+  OGA_TRY
+  Generators::SetLogCallback(callback);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateSequences(OgaSequences** out) {
   OGA_TRY
   *out = ReturnUnique<OgaSequences>(std::make_unique<Generators::TokenSequences>());

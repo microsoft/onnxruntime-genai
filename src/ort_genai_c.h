@@ -98,6 +98,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogBool(const char* name, bool value);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogString(const char* name, const char* value);
 
 /**
+ * \param[in] callback function pointer to the logging callback function (use nullptr to disable callback)
+ * \return OgaResult containing the error message when the callback could not be set, else nullptr.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogCallback(void (*callback)(const char* string, size_t length));
+
+/**
  * \param[in] result OgaResult to be destroyed.
  */
 OGA_EXPORT void OGA_API_CALL OgaDestroyResult(OgaResult* result);
