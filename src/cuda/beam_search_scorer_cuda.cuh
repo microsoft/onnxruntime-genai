@@ -32,7 +32,6 @@ struct BeamScorerState {
   int num_beams_;
   int max_length_;
   int pad_token_id_;
-  int eos_token_id_;
   bool early_stopping_;
   int not_done_count_;  // When zero, every batch entry is done (starts at batch_size_)
 
@@ -43,6 +42,7 @@ void LaunchInitializeBeamHypotheses(std::span<BeamHypotheses> beam_hyps, float l
 
 void LaunchBeamSearchScorer_Process(BeamScorerState& state_cpu,
                                     BeamScorerState& state,
+                                    std::span<const int32_t> eos_token_ids,
                                     std::span<const int32_t> sequences,
                                     int sequence_length,
                                     std::span<BeamHypotheses> beam_hyps_,

@@ -6,6 +6,7 @@
 #include "models/env_utils.h"
 #include "models/model.h"
 #include "models/decoder_only.h"
+#include "constrained_logits_processor.h"
 #include "search.h"
 #include "cpu/interface.h"
 #include "cuda/interface.h"
@@ -207,7 +208,7 @@ std::string to_string(DeviceType device_type) {
     case DeviceType::DML:
       return "DirectML";
     case DeviceType::WEBGPU:
-      return "WebGpu";
+      return "WebGPU";
     case DeviceType::QNN:
       return "QnnWithSharedMemory";
     case DeviceType::OpenVINO:
@@ -272,6 +273,11 @@ void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   }
 }
 
+void GeneratorParams::SetGuidance(std::string_view type, std::string_view data) {
+  guidance_type = type;
+  guidance_data = data;
+}
+
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }
@@ -295,6 +301,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);  // Search sequence lengths set when creating state
 
+  guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
   // Temporary solution for multimodal and whisper models
   if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
     AuxAppendTokens(params.aux_input_ids);
@@ -369,7 +376,10 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
-
+  if (last_action_ == Action::generated && guidance_logits_processor_) {
+    auto next_tokens_span = next_tokens.CopyDeviceToCpu();
+    guidance_logits_processor_->CommitTokens(next_tokens_span);
+  }
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
@@ -445,6 +455,10 @@ void Generator::GenerateNextToken() {
       search_->AppendTokens(next_tokens);
     ComputeLogits(next_tokens);
   }
+  if (guidance_logits_processor_) {
+    auto logits = GetLogits();
+    guidance_logits_processor_->ProcessLogits(logits);
+  }
   computed_logits_ = false;
   auto& search = search_->params_->search;
   search_->ApplyMinLength(search.min_length);
@@ -498,6 +512,9 @@ void Generator::RewindToLength(size_t new_length) {
     throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
+  if (guidance_logits_processor_) {
+    guidance_logits_processor_->Reset();
+  }
   computed_logits_ = false;
   last_action_ = Action::rewound;
 }
