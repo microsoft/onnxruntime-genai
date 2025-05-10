@@ -71,17 +71,6 @@ struct Stats {
   }
 };
 
-template <typename... Types>
-const char* TypeToString(ONNXTensorElementDataType type, Ort::TypeList<Types...>) {
-  const char* name = "(please add type to list)";
-  (void)((type == Ort::TypeToTensorType<Types> ? name = typeid(Types).name(), true : false) || ...);
-  return name;
-}
-
-const char* TypeToString(ONNXTensorElementDataType type) {
-  return TypeToString(type, Ort::TensorTypes{});
-}
-
 std::ostream& operator<<(std::ostream& stream, Ort::Float16_t v) {
   stream << Float16ToFloat32(v);
   return stream;
@@ -178,7 +167,7 @@ void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool 
     case OrtMemoryInfoDeviceType_GPU: {
       stream << "GPU\r\n";
       auto type = type_info->GetElementType();
-      auto tensor_span = std::span<uint8_t>{const_cast<OrtValue*>(value)->GetTensorMutableData<uint8_t>(), SizeOf(type) * element_count};
+      auto tensor_span = std::span<uint8_t>{const_cast<OrtValue*>(value)->GetTensorMutableData<uint8_t>(), Ort::SizeOf(type) * element_count};
       auto device_span = model.p_device_->WrapMemory<uint8_t>(tensor_span);
       DumpValues(stream, type, device_span.CopyDeviceToCpu().data(), element_count);
       break;

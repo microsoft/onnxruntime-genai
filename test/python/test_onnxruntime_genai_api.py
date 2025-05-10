@@ -14,6 +14,8 @@ import numpy as np
 import onnxruntime_genai as og
 import pytest
 
+input("Press Enter to continue...")
+
 if not sysconfig.get_platform().endswith("arm64"):
     # Skip importing onnx if running on ARM64
     import onnx
@@ -41,6 +43,27 @@ def test_config(test_data_path):
     config.set_provider_option("cuda", "infinite_clock", "1")
     config.set_provider_option("quantum", "break_universe", "true")
     config.append_provider("slide rule")
+
+def log_callback(log):
+    print("Python log callback: "+log, flush=True)
+
+def test_logging(test_data_path):
+    og.set_log_options(enabled=True, generate_next_token=True)
+    og.set_log_callback(log_callback)
+
+    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    config = og.Config(model_path)
+    model = og.Model(config)
+
+    search_params = og.GeneratorParams(model)
+    input_ids_shape = [1, 4]
+    search_params = og.GeneratorParams(model)
+    generator = og.Generator(model, search_params)
+    generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
+    generator.generate_next_token()
+
+    og.set_log_callback(None)
+    og.set_log_options(enabled=False)
 
 def test_NamedTensors():
     named_tensors = og.NamedTensors()
@@ -317,11 +340,6 @@ def test_e2e(device, phi2_for):
         generator.generate_next_token()
     for i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
-
-
-def test_logging():
-    og.set_log_options(enabled=True, generate_next_token=True)
-
 
 @pytest.mark.parametrize(
     "relative_model_path",
