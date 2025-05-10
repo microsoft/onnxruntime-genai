@@ -9,7 +9,8 @@
 
 namespace Generators {
 
-std::string NormalizeProviderName(std::string_view name) {
+// Fix casing of certain historical names to match current Onnxruntime names
+std::string_view NormalizeProviderName(std::string_view name) {
   if (name == "qnn") {
     return "QNN";
   } else if (name == "webgpu") {
@@ -17,9 +18,8 @@ std::string NormalizeProviderName(std::string_view name) {
   } else if (name == "dml") {
     return "DML";
   }
-  return std::string(name);
+  return name;  // Return name unchanged
 }
-
 ONNXTensorElementDataType TranslateTensorType(std::string_view value) {
   if (value == "float32") {
     return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
