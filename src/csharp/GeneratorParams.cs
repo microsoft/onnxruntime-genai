@@ -46,6 +46,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         public void SetGuidance(string type, string data)
         {
+            Console.WriteLine("Entering C# API...");
+            Console.WriteLine($"Type = {type}");
+            Console.WriteLine($"Data = {data}");
             Result.VerifySuccess(NativeMethods.OgaGeneratorParamsSetGuidance(_generatorParamsHandle, StringUtils.ToUtf8(type), StringUtils.ToUtf8(data)));
         }
 
