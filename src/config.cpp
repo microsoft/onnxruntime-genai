@@ -709,7 +709,7 @@ void ClearProviders(Config& config) {
 
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
   if (auto normalized_provider = NormalizeProviderName(provider_name); !contains(config.model.decoder.session_options.providers, normalized_provider))
-    config.model.decoder.session_options.providers.push_back(normalized_provider);
+    config.model.decoder.session_options.providers.push_back(std::string(normalized_provider));
 
   std::ostringstream json;
   json << R"({")" << provider_name << R"(":{)";
