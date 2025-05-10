@@ -6,6 +6,8 @@ import argparse
 import time
 import json
 
+# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
+
 def get_tools_list(input_tools):
     # input_tools format: '[{"name": "fn1", "description": "fn details", "parameters": {"p1": {"description": "details", "type": "string"}}},
     # {"fn2": 2},{"fn3": 3}]'

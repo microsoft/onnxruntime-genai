@@ -339,9 +339,7 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorPa
 
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* oga_params, const char* type, const char* data) {
   OGA_TRY
-  printf("Entering C API...");
-  // oga_params->SetGuidance(type, data);
-  oga_params->SetGuidance(std::string(type), std::string(data));
+  oga_params->SetGuidance(type, data);
   return nullptr;
   OGA_CATCH
 }

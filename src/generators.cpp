@@ -274,9 +274,6 @@ void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
 }
 
 void GeneratorParams::SetGuidance(std::string_view type, std::string_view data) {
-  std::cout << "Entering C++ API..." << std::endl;
-  std::cout << "Type = " << type << std::endl;
-  std::cout << "Data = " << data << std::endl;
   guidance_type = type;
   guidance_data = data;
 }
