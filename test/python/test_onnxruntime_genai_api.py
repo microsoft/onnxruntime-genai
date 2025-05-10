@@ -14,8 +14,6 @@ import numpy as np
 import onnxruntime_genai as og
 import pytest
 
-input("Press Enter to continue...")
-
 if not sysconfig.get_platform().endswith("arm64"):
     # Skip importing onnx if running on ARM64
     import onnx
@@ -55,8 +53,6 @@ def test_logging(test_data_path):
     config = og.Config(model_path)
     model = og.Model(config)
 
-    search_params = og.GeneratorParams(model)
-    input_ids_shape = [1, 4]
     search_params = og.GeneratorParams(model)
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
@@ -104,8 +100,7 @@ def test_greedy_search(test_data_path, relative_model_path):
     model = og.Model(config)
 
     search_params = og.GeneratorParams(model)
-    input_ids_shape = [2, 4]
-    batch_size = input_ids_shape[0]
+    batch_size = 2
     search_params = og.GeneratorParams(model)
     search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
 
@@ -148,8 +143,7 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     model = og.Model(model_path)
 
     # Batch size 1 (continuous decoding) case
-    input_ids_shape = [1, 4]
-    batch_size = input_ids_shape[0]
+    batch_size = 1
     search_params = og.GeneratorParams(model)
     search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
 
@@ -169,8 +163,7 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     assert generator.get_sequence(0) is not None
 
     # Batch size > 1 case
-    input_ids_shape = [3, 4]
-    batch_size = input_ids_shape[0]
+    batch_size = 3
     search_params = og.GeneratorParams(model)
     search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
 
@@ -208,8 +201,7 @@ def test_rewind(test_data_path, relative_model_path):
         dtype=np.int32,
     )
     
-    input_ids_shape = [1, 4]
-    batch_size = input_ids_shape[0]
+    batch_size = 1
     search_params = og.GeneratorParams(model)
     search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
 
