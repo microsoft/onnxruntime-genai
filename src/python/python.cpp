@@ -275,7 +275,7 @@ void SetLogOptions(const pybind11::kwargs& dict) {
 
 void SetLogCallback(std::optional<const pybind11::function> callback) {
   static std::optional<pybind11::function> log_callback;
-  log_callback=callback;
+  log_callback = callback;
 
   if (log_callback.has_value()) {
     Oga::SetLogCallback([](const char* message, size_t length) {
