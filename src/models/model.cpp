@@ -215,9 +215,9 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   return string;
 }
 
-std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, bool add_generation_prompt) const {
+std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const {
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> templated_text;
-  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, templated_text.ToBeAssigned(), add_generation_prompt, false /*tokenize*/));
+  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, tools, templated_text.ToBeAssigned(), add_generation_prompt, false /*tokenize*/));
 
   ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
   CheckResult(OrtxTensorResultGetAt(templated_text.get(), 0, tensor.ToBeAssigned()));
