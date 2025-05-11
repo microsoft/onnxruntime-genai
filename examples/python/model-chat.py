@@ -6,6 +6,8 @@ import argparse
 import time
 import json
 
+# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
+
 def get_tools_list(input_tools):
     # input_tools format: '[{"name": "fn1", "description": "fn details", "parameters": {"p1": {"description": "details", "type": "string"}}},
     # {"fn2": 2},{"fn3": 3}]'
@@ -135,7 +137,10 @@ def main(args):
     else:
         messages = f"""[{{"role": "system", "content": "{system_prompt}"}}]"""
     # Apply Chat Template
+    # print("Messages are:")
+    # print(messages)
     final_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=False)
+    if args.verbose: print(final_prompt)
     final_input = tokenizer.encode(final_prompt)
     # Ignoring the last end of text token as it is messes up the generation when grammar is enabled
     if guidance_type:
@@ -157,6 +162,7 @@ def main(args):
         messages = f"""[{{"role": "user", "content": "{text}"}}]"""
         # Apply Chat Template
         final_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+        if args.verbose: print(final_prompt)
         final_input = tokenizer.encode(final_prompt)
         generator.append_tokens(final_input)
 

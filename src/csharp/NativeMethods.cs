@@ -92,14 +92,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                  IntPtr /* const OgaNamedTensors* */ namedTensors);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaCreateGenerator(IntPtr /* const OgaModel* */ model,
-                                                                        IntPtr /* const OgaGeneratorParams* */ generatorParams,
-                                                                        out IntPtr /* OgaGenerator** */ generator);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetGuidance(IntPtr /* OgaGeneratorParams* */ generatorParams,
                                                                                    byte[] /* const char* */ type,
                                                                                    byte[] /* const char* */ data);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaCreateGenerator(IntPtr /* const OgaModel* */ model,
+                                                                        IntPtr /* const OgaGeneratorParams* */ generatorParams,
+                                                                        out IntPtr /* OgaGenerator** */ generator);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyGenerator(IntPtr /* OgaGenerator* */ generator);
