@@ -1,4 +1,4 @@
-{ "anyOf": [
+[
   {
     "description": "How to get the statistics for a city",
     "type": "object",
@@ -50,4 +50,4 @@
       }
     }
   }
-] }
+]

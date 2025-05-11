@@ -1,81 +1,73 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-import onnxruntime_genai as og
 import argparse
-import time
 import json
+import os
+import time
+
+import onnxruntime_genai as og
 
 # og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
 
-def get_tools_list(input_tools):
-    # input_tools format: '[{"name": "fn1", "description": "fn details", "parameters": {"p1": {"description": "details", "type": "string"}}},
-    # {"fn2": 2},{"fn3": 3}]'
-    tools_list = []
+def get_json_grammar(input_tools: str):
+    """
+    Example of input_tools format:
+    '[{"name": "fn1", "description": "fn details", "parameters": {"p1": {"description": "details", "type": "string"}}}, {"name": "fn2", ...}, {"name": "fn3", ...}, ...]'
+    """
+    
+    # Get list of tools as string for prompt registration
+    # Must be without brackets and must use single quotes instead of double quotes
+    prompt_tools = input_tools[1:-1].replace("\"", "'")
+
+    # Get grammar for guidance
+    # Spacing here matters
+    grammar = '{ "anyOf": ' + input_tools + ' }'
+
+    return prompt_tools, grammar
+
+def get_lark_grammar(input_tools: str, tool_calling_token: str = "<|tool_call|>"):
+    """
+    Example of input_tools format:
+    '[{"name": "fn1", "description": "fn details", "parameters": {"p1": {"description": "details", "type": "string"}}}, {"name": "fn2", ...}, {"name": "fn3", ...}, ...]'
+    """
+
+    # Get tools for prompt registration and inner grammar for LARK grammar
+    prompt_tools, inner_grammar = get_json_grammar(input_tools)
+
+    # Get grammar for guidance
+    start_row = "start: TEXT | fun_call"
+    text_row = "TEXT: /[^{](.|\\n)*/"
+    func_row = f"fun_call: {tool_calling_token} %json "
+    grammar = start_row + " \n" + text_row + " \n" + func_row + inner_grammar
+
+    return prompt_tools, grammar
+
+def get_guidance_info(guidance_info):
+    """
+    Returns a JSON string with guidance info
+    """
+    # Raise error if guidance info is not provided with guidance type
+    if not guidance_info:
+        raise ValueError("Guidance information is required if guidance type is provided")
+
+    # If guidance info is provided via a JSON file
+    if os.path.exists(guidance_info):
+        with open(guidance_info, 'r') as f:
+            guidance_data = json.load(f)               # Read JSON file into memory
+            guidance_data = json.dumps(guidance_data)  # Uses double quotes and lowercases any booleans
+
+        return guidance_data
+
+    # If guidance info is provided as a JSON string
     try:
-        tools_list = json.loads(input_tools)
+        tools_list = json.loads(guidance_info)
     except json.JSONDecodeError:
-        raise ValueError("Invalid JSON format for tools list, expected format: '[{\"name\": \"fn1\"},{\"name\": \"fn2\"}]'")
+        raise ValueError("Invalid JSON format for tools list. Format must be list of dictionaries stored as a JSON string. Example of expected format: '[{\"name\": \"fn1\"},{\"name\": \"fn2\"}]'")
     if len(tools_list) == 0:
-        raise ValueError("Tools list cannot be empty")
-    return tools_list
+        raise ValueError("Tools list cannot be empty")        
 
-def create_prompt_tool_input(tools_list):
-    tool_input = str(tools_list[0])
-    for tool in tools_list[1:]:
-        tool_input += ',' + str(tool)
-    return tool_input
-
-def get_json_grammar(input_tools):
-    tools_list = get_tools_list(input_tools)
-    prompt_tool_input = create_prompt_tool_input(tools_list)
-    if len(tools_list) == 1:
-        return prompt_tool_input, json.dumps(tools_list[0])
-    else:
-        output = '{ "anyOf": [' + json.dumps(tools_list[0])
-        for tool in tools_list[1:]:
-            output += ',' + json.dumps(tool)
-        output += '] }'
-        return prompt_tool_input, output
-
-def get_lark_grammar(input_tools):
-    tools_list = get_tools_list(input_tools)
-    prompt_tool_input = create_prompt_tool_input(tools_list)
-    if len(tools_list) == 1:
-        # output = ("start: TEXT | fun_call\n" "TEXT: /[^{](.|\\n)*/\n" " fun_call: <|tool_call|> %json " + json.dumps(tools_list[0]))
-        output = ("start: TEXT | fun_call\n" "TEXT: /[^{](.|\\n)*/\n" " fun_call: <|tool_call|> %json " + json.dumps(convert_tool_to_grammar_input(tools_list[0])))
-        return prompt_tool_input, output
-    else:
-        return prompt_tool_input, "start: TEXT | fun_call \n TEXT: /[^{](.|\n)*/ \n fun_call: <|tool_call|> %json {\"anyOf\": [" + ','.join([json.dumps(tool) for tool in tools_list]) + "]}"
-
-def convert_tool_to_grammar_input(tool):
-    param_props = {}
-    required_params = []
-    for param_name, param_info in tool.get("parameters", {}).items():
-        param_props[param_name] = {
-            "type": param_info.get("type", "string"),
-            "description": param_info.get("description", "")
-        }
-        required_params.append(param_name)
-    output_schema = {
-        "description": tool.get('description', ''),
-        "type": "object",
-        "required": ["name", "parameters"],
-        "additionalProperties": False,
-        "properties": {
-            "name": { "const": tool["name"] },
-            "parameters": {
-                "type": "object",
-                "properties": param_props,
-                "required": required_params,
-                "additionalProperties": False
-            }
-        }
-    }
-    if len(param_props) == 0:
-        output_schema["required"] = ["name"]
-    return output_schema
-
+    return guidance_info
 
 def main(args):
     if args.verbose: print("Loading model...")
@@ -104,21 +96,18 @@ def main(args):
     if args.verbose: print(search_options)
 
     system_prompt = args.system_prompt
+    prompt_tools = ""
     guidance_type = ""
-    prompt_tool_input = ""
     guidance_input = ""
     if args.guidance_type != "none":
         guidance_type = args.guidance_type
-        if not args.guidance_info:
-            raise ValueError("Guidance information is required if guidance type is provided")
-        if guidance_type == "json_schema" or guidance_type == "lark_grammar":
-            tools_list = args.guidance_info
-            if guidance_type == "json_schema":
-                prompt_tool_input, guidance_input = get_json_grammar(tools_list)
-            elif guidance_type == "lark_grammar":
-                prompt_tool_input, guidance_input = get_lark_grammar(tools_list)
+        guidance_info = get_guidance_info(args.guidance_info)
+        if guidance_type == "json_schema":
+            prompt_tools, guidance_input = get_json_grammar(guidance_info)
+        elif guidance_type == "lark_grammar":
+            prompt_tools, guidance_input = get_lark_grammar(guidance_info)
         elif guidance_type == "regex":
-            guidance_input = args.guidance_info
+            guidance_input = guidance_info
         else:
             raise ValueError("Guidance Type can only be [json_schema, regex, or lark_grammar]")
 
@@ -133,12 +122,11 @@ def main(args):
     generator = og.Generator(model, params)
     if args.verbose: print("Generator created")
     if guidance_type == "json_schema" or guidance_type == "lark_grammar":
-        messages = f"""[{{"role": "system", "content": "{system_prompt}", "tools": "{prompt_tool_input}"}}]"""
+        messages = f"""[{{"role": "system", "content": "{system_prompt}", "tools": "{prompt_tools}"}}]"""
     else:
         messages = f"""[{{"role": "system", "content": "{system_prompt}"}}]"""
+
     # Apply Chat Template
-    # print("Messages are:")
-    # print(messages)
     final_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=False)
     if args.verbose: print(final_prompt)
     final_input = tokenizer.encode(final_prompt)
@@ -183,6 +171,7 @@ def main(args):
                         first = False
 
                 new_token = generator.get_next_tokens()[0]
+                # print(new_token, end=', ', flush=True)
                 print(tokenizer_stream.decode(new_token), end='', flush=True)
                 if args.timings: new_tokens.append(new_token)
         except KeyboardInterrupt:
@@ -214,7 +203,7 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
     parser.add_argument('-gtype', '--guidance_type', type=str, default="none", choices=["none", "json_schema", "regex", "lark_grammar"], help='Provide guidance type for the model, options are json_schema, regex, or lark_grammar.')
-    parser.add_argument('-ginfo', '--guidance_info', type=str, default='', help='Provide information of the guidance type used, it could be either tools or regex string. It is required if guidance_type is provided')
+    parser.add_argument('-ginfo', '--guidance_info', type=str, default="", help='Provide information of the guidance type used (e.g. list of JSON tools, regex string, etc) or the path to the file containing the information. It is required if guidance_type is provided.')
     parser.add_argument('-s', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the prompt.')
     parser.add_argument('-r', '--rewind', action='store_true', default=False, help='Rewind to the system prompt after each generation. Defaults to false')
     args = parser.parse_args()
