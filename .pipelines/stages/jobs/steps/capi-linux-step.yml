@@ -93,14 +93,9 @@ steps:
     target="${target}"
     config="${build_config}"
     if [ "$ep" == "cuda" ]; then
-      cuda_home="--cuda_home=$(Build.Repository.LocalPath)/cuda_sdk/v${cuda_version}"
+      use_cuda="--use_cuda"
     else
-      cuda_home=""
-    fi
-    if [ "$ep" == "directml" ]; then
-      use_dml="--use_dml"
-    else
-      use_dml=""
+      use_cuda=""
     fi
     if [ "$target" == "onnxruntime-genai" ]; then
       package_c="--package"
@@ -111,7 +106,6 @@ steps:
       skip_wheel="--skip_wheel"
     else
       skip_wheel=""
-      python3 -m pip install wheel
     fi
     if [ "$config" == "release" ]; then
       build_config="Release"
@@ -120,17 +114,18 @@ steps:
     else
       build_config="Debug"
     fi
-    python3 -m pip install requests
 
     docker run \
     --rm \
     --volume $(Build.Repository.LocalPath):/ort_genai_src \
     -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
     bash -c " \
-        python3 build.py --parallel $cuda_home $use_dml $package_c $skip_wheel \
-          --config=$build_config \
-          --build_dir='$(Build.Repository.LocalPath)/${buildDir}'"
+        /opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) -m pip install requests && \
+        /opt/python/cp$(PyNoDotVer)-cp$(PyDotVer)/bin/python$(PyDotVer) -m pip install wheel && \
+        /opt/python/cp$(PyNoDotVer)-cp$(PyDotVer)/bin/python$(PyDotVer) \
+          build.py --parallel $use_cuda $package_c $skip_wheel --config=$build_config --build_dir='$(Build.Repository.LocalPath)/${buildDir}'"
     ls $(Build.Repository.LocalPath) -R
+    echo "BuildDir: $(Build.Repository.LocalPath)/${buildDir}"
     mv -f "$(Build.Repository.LocalPath)/${buildDir}/Release" "${os}-${arch}"
   displayName: 'Build GenAi'
   workingDirectory: '$(Build.Repository.LocalPath)'
