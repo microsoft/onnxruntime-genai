@@ -130,6 +130,7 @@ steps:
         python3 build.py --parallel $cuda_home $use_dml $package_c $skip_wheel \
           --config=$build_config \
           --build_dir='$(Build.Repository.LocalPath)/${buildDir}'"
+    ls $(Build.Repository.LocalPath) -R
     mv -f "$(Build.Repository.LocalPath)/${buildDir}/Release" "${os}-${arch}"
   displayName: 'Build GenAi'
   workingDirectory: '$(Build.Repository.LocalPath)'
