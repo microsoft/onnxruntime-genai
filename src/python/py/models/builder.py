@@ -9,7 +9,6 @@ Run this script to create the desired ONNX model.
 """
 from __future__ import annotations
 
-from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
 from onnxruntime import __version__ as ort_version
 from packaging import version
 
@@ -488,38 +487,26 @@ class Model:
             print(f"Failed to get prompt templates. Error: {e}")
             return None
 
-    def save_model(self, out_dir):
-        print(f"Saving ONNX model in {out_dir}")
-        gc.collect()
+    def make_value(self, name: str, *, output: bool = False) -> ir.Value | None:
+        """Obtain an IR value by value name. If the value does not exist a new one is created.
 
-        # Create ONNX model
-        model = helper.make_model(
-            opset_imports=[self.clear_field(helper.make_operatorsetid('', 21 if self.quant_attrs["use_qdq"] else 14), 'domain'), helper.make_operatorsetid('com.microsoft', 1)],
-            ir_version=7,
-            producer_name="onnxruntime-genai",
-            producer_version="0.0.0",
-            graph=self.make_graph(
-                name="main_graph",
-                inputs=self.inputs,
-                outputs=self.outputs,
-                initializer=self.initializers,
-                value_info=self.value_infos,
-                nodes=self.nodes,
-            )
-        )
+        Args:
+            name: The name of the value.
+            output: Whether the value is an output value.
+        """
+        if name == "":
+            if not output:
+                # ONNX IR uses None to represent an empty input
+                return None
+            else:
+                # Use empty string to represent an empty output because all outputs
+                # need to be of type ir.Value
+                return ir.Value(name="")
 
-        # Load external data into ONNX model
-        external_data_helper.load_external_data_for_model(model, self.cache_dir)
+        return self._values.setdefault(name, ir.Value(name=name))
 
-        # Delete external data files on disk before re-saving
-        for path in os.listdir(self.cache_dir):
-            if path.endswith(".bin"):
-                os.remove(os.path.join(self.cache_dir, path))
-
-        # Delete temporary cache dir if empty
-        if len(os.listdir(self.cache_dir)) == 0:
-            os.rmdir(self.cache_dir)
-
+    def as_ir_model(self) -> ir.Model:
+        """Return the IR model."""
         # Quantize ONNX model to desired precision
         # TODO: Replace by quantizing the MatMuls as they are created
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
@@ -893,9 +880,9 @@ class Model:
 
         if hasattr(quantized_op, "qzeros") and quantized_op.qzeros is not None:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
-            zeros_npy = quantized_op.qzeros.detach().cpu()
-            zeros_npy = zeros_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] // quantized_op.group_size)
-            self.make_external_tensor(zeros_npy.contiguous(), zeros, True)
+            zeros_tensor = quantized_op.qzeros.detach().cpu()
+            zeros_tensor = zeros_tensor.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] // quantized_op.group_size)
+            self.make_external_tensor(zeros_tensor, zeros)
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
@@ -987,7 +974,7 @@ class Model:
         # Create dummy PackedMatMul class
         class PackedMatMul:
             def __init__(self):
-                self.weight = torch.cat([q_matmul.weight.detach().cpu(), k_matmul.weight.detach().cpu(), v_matmul.weight.detach().cpu()], dim=0).reshape(N_q + N_kv + N_kv, H)
+                self.weight = torch.cat([q_matmul.weight.detach(), k_matmul.weight.detach(), v_matmul.weight.detach()], dim=0).reshape(N_q + N_kv + N_kv, H)
         matmul = PackedMatMul()
         new_name = self.make_matmul(matmul, basename, root_input, **kwargs)
 
@@ -1074,7 +1061,7 @@ class Model:
 
         # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor(layernorm.weight.detach().cpu().to(new_torch_dtype).contiguous() + self.layernorm_attrs["add_offset"], weight)
+        self.make_external_tensor(layernorm.weight.detach().to(new_torch_dtype).contiguous() + self.layernorm_attrs["add_offset"], weight)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
             self.make_external_tensor(layernorm.bias.detach().cpu().to(new_torch_dtype).contiguous(), bias)
@@ -2753,7 +2740,7 @@ class Model:
         self.make_where(where_name, where_inputs, dtype=ir.DataType.INT64, shape=[4])
         expand_name = f"{basename}/Expand"
         expand_inputs = [f"{unsqueeze_for_expand}/output_0", f"{where_name}/output_0"]
-        expand_dtype = self.io_dtype if input_ids_subgraph else TensorProto.INT64
+        expand_dtype = self.io_dtype if input_ids_subgraph else ir.DataType.INT64
         expand_shape = None if input_ids_subgraph else ["unk", "unk", "unk", "unk"]
         self.make_expand(expand_name, expand_inputs, dtype=expand_dtype, shape=expand_shape)
 
@@ -2959,7 +2946,7 @@ class Gemma2Model(GemmaModel):
 
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy
-        self.output_types["logits"] = TensorProto.FLOAT
+        self.output_types["logits"] = ir.DataType.FLOAT
         super().make_outputs_init()
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
@@ -3183,7 +3170,7 @@ class Phi3SmallModel(Model):
         self.mask_attrs["block_row_indices"] = crows_name
 
         cols_name = "block_col_indices"
-        self.make_external_tensor(cols.detach().cpu().to(torch.int32).contiguous(), cols_name)
+        self.make_external_tensor(cols.detach().to(torch.int32).contiguous(), cols_name)
         self.mask_attrs["block_col_indices"] = cols_name
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
@@ -3322,7 +3309,7 @@ class Phi3VModel(Phi3MiniLongRoPEModel):
 class Phi3MoELongRoPEModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        assert io_dtype == TensorProto.FLOAT16, "This model only supports float16 io type."
+        assert io_dtype == ir.DataType.FLOAT16, "This model only supports float16 io type."
 
         self.layernorm_attrs["simple"] = False
 
@@ -3595,6 +3582,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     onnx_dtype = {
         "fp32": ir.DataType.FLOAT,
         "fp16": ir.DataType.FLOAT16,
+        "bf16": ir.DataType.BFLOAT16,
         "int4": ir.DataType.UINT4,
     }[precision]
     if "config_only" not in extra_options:
