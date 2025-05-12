@@ -41,37 +41,37 @@ steps:
     echo "build_config=${{ parameters.build_config }}"
   displayName: 'Print Parameters'
 
-# - bash: |
-#     set -e -x
-#     az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-#     az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
-#     python3 -m pip install requests
-#     python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep)_$(cuda_version) \
-#       --context tools/ci_build/github/linux/docker/manylinux \
-#       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-#       --container-registry onnxruntimebuildcache \
-#       --manylinux-src manylinux \
-#       --multiple_repos \
-#       --repository ortgenai$(ep)build$(arch)
-#   displayName: 'Get CUDA Docker Image $(cuda_version)'
-#   condition: eq(variables['ep'], 'cuda')
-#   workingDirectory: '$(Build.Repository.LocalPath)'
+- bash: |
+    set -e -x
+    az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+    az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+    python3 -m pip install requests
+    python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep)_$(cuda_version) \
+      --context tools/ci_build/github/linux/docker/manylinux \
+      --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+      --container-registry onnxruntimebuildcache \
+      --manylinux-src manylinux \
+      --multiple_repos \
+      --repository ortgenai$(ep)build$(arch)
+  displayName: 'Get CUDA Docker Image $(cuda_version)'
+  condition: eq(variables['ep'], 'cuda')
+  workingDirectory: '$(Build.Repository.LocalPath)'
 
-# - bash: |
-#     set -e -x
-#     az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-#     az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
-#     python3 -m pip install requests
-#     python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep) \
-#       --context tools/ci_build/github/linux/docker/manylinux \
-#       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-#       --container-registry onnxruntimebuildcache \
-#       --manylinux-src manylinux \
-#       --multiple_repos \
-#       --repository ortgenai$(ep)build$(arch)
-#   displayName: 'Get Docker Image'
-#   condition: ne(variables['ep'], 'cuda')
-#   workingDirectory: '$(Build.Repository.LocalPath)'
+- bash: |
+    set -e -x
+    az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+    az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+    python3 -m pip install requests
+    python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep) \
+      --context tools/ci_build/github/linux/docker/manylinux \
+      --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+      --container-registry onnxruntimebuildcache \
+      --manylinux-src manylinux \
+      --multiple_repos \
+      --repository ortgenai$(ep)build$(arch)
+  displayName: 'Get Docker Image'
+  condition: ne(variables['ep'], 'cuda')
+  workingDirectory: '$(Build.Repository.LocalPath)'
 
 # - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
 #   - script: |
