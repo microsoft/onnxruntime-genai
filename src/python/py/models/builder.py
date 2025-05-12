@@ -2245,6 +2245,28 @@ class Model:
         return mul_act_name
 
     def make_gelu(self, layer_id, root_input, activation):
+        # NvTensorRtRtx (Opset 21) uses standard "Gelu" replacing "Gelu" & "FastGelu" contrib ops, otherwise fallback to contrib ops
+        if self.ep == "NvTensorRtRtx" and activation in ["Gelu", "FastGelu"]:
+            return self._make_gelu_op(layer_id, root_input, activation)
+        else:
+            return self.make_gelu_op(layer_id, root_input, activation)
+
+    def make_gelu_op(self, layer_id, root_input, activation):
+        # Make nodes for this activation subgraph
+        #
+        #       root_input (Add)
+        #           |
+        #        GeluAct
+        gelu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
+        output = f"{gelu_name}/output_0"
+
+        self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
+
+        return gelu_name
+    
+    # This expansion of contrib-op can be updated / deprecated in future.
+    def _make_gelu_op(self, layer_id, root_input, activation):
         # Make nodes for this activation subgraph
         #
         #       root_input (Add)
@@ -2254,12 +2276,12 @@ class Model:
         output = f"{gelu_name}/output_0"
 
         # NvTensorRtRtx (Opset 21) uses standard "Gelu" replacing "Gelu" & "FastGelu" contrib ops, otherwise fallback to contrib ops
-        if activation == "Gelu" and self.ep == "NvTensorRtRtx":
+        if activation == "Gelu":
             self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="none") 
-        elif activation == "FastGelu" and self.ep == "NvTensorRtRtx":
+        elif activation == "FastGelu":
             self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="tanh")
         else:
-            self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
+            raise NotImplementedError(f"The {activation} activation function is not currently supported.")
 
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
 
