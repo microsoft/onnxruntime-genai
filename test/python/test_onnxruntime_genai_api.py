@@ -29,6 +29,9 @@ if og.is_dml_available():
 if og.is_rocm_available():
     devices.append("rocm")
 
+if og.is_openvino_available():
+    devices.append("openvino")
+
 def test_config(test_data_path):
     model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
@@ -307,9 +310,6 @@ def test_e2e(device, phi2_for):
 
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=20, batch_size=len(prompts))  # To run faster
-
-    if device == "dml":
-        params.try_graph_capture_with_max_batch_size(len(prompts))
 
     generator = og.Generator(model, params)
     generator.append_tokens(tokenizer.encode_batch(prompts))

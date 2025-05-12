@@ -83,10 +83,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                      bool value);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(IntPtr /* OgaGeneratorParams* */ generatorParams,
-                                                                                                       int /* int32_t */ maxBatchSize);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetModelInput(IntPtr /* OgaGeneratorParams* */ generatorParams,
                                                                                      byte[] /* const char* */ name,
                                                                                      IntPtr /* const OgaTensor* */ tensor);
@@ -99,6 +95,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaCreateGenerator(IntPtr /* const OgaModel* */ model,
                                                                         IntPtr /* const OgaGeneratorParams* */ generatorParams,
                                                                         out IntPtr /* OgaGenerator** */ generator);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetGuidance(IntPtr /* OgaGeneratorParams* */ generatorParams,
+                                                                                   byte[] /* const char* */ type,
+                                                                                   byte[] /* const char* */ data);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyGenerator(IntPtr /* OgaGenerator* */ generator);
@@ -174,6 +175,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                      UIntPtr /* size_t */ sequenceIndex);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaAppendTokenToSequence(int token /* int32_t */,
+                                                                              IntPtr /* const OgaSequences* */ sequences,
+                                                                              UIntPtr /* size_t** */ sequenceIndex);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateTokenizer(IntPtr /* const OgaModel* */ model,
                                                                         out IntPtr /* OgaTokenizer** */ tokenizer);
 
@@ -185,7 +191,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                         byte[] /* const char* */ strings,
                                                                         IntPtr /* OgaSequences* */ sequences);
 
-
         // This function is used to decode the given token into a string. The caller is responsible for freeing the
         // returned string using the OgaDestroyString function when it is no longer needed.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -193,6 +198,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                int* /* const int32_t* */ sequence,
                                                                                UIntPtr /* size_t */ sequenceLength,
                                                                                out IntPtr /* const char** */ outStr);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerApplyChatTemplate(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                                   byte[] /* const char* */ template_string,
+                                                                                   byte[] /* const char* */ message,
+                                                                                   bool /* bool */ add_gen_prompt,
+                                                                                   out IntPtr /* const char** */ outStr);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyString(IntPtr /* const char* */ str);

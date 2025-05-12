@@ -41,6 +41,12 @@ struct Model;
 struct State;
 struct Search;
 struct Tokenizer;
+struct ConstrainedLogitsProcessor;
+
+template <typename T, typename V>
+bool contains(const T& t, V&& v) {
+  return std::find(t.begin(), t.end(), v) != t.end();
+}
 
 template <typename T>
 DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
@@ -50,17 +56,6 @@ DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
 }
 
 DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value);
-
-template <typename T>
-struct OrtTensor {
-  OrtTensor(std::unique_ptr<OrtValue> ort_value, DeviceInterface& device)
-      : ort_value_{std::move(ort_value)}, device_span_{WrapTensor<T>(device, *ort_value_)} {}
-
-  operator OrtValue*() { return ort_value_.get(); }
-
-  std::unique_ptr<OrtValue> ort_value_;
-  DeviceSpan<T> device_span_;
-};
 
 // OgaSequences are a vector of int32 vectors
 using TokenSequences = std::vector<std::vector<int32_t>>;
@@ -76,7 +71,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   Config::Search search{config.search};  // Copy of the search parameters from the config
 
   int max_batch_size{0};
-  bool use_cuda_graph{};
+  bool use_graph_capture{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
   DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
@@ -98,12 +93,11 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   // A list of extra model inputs that will be matched at runtime based on name
   std::vector<Input> extra_inputs;
 
-  void TryGraphCapture(int max_bs);
-
   void SetInputs(const NamedTensors& inputs);
 
- private:
-  bool is_cuda_graph_enabled_{};
+  std::string guidance_type;  // e.g. json_schema or regex
+  std::string guidance_data;  // e.g. rules data in json_schema or regex
+  void SetGuidance(std::string_view type, std::string_view data);
 };
 
 struct Generator : LeakChecked<Generator> {
@@ -123,6 +117,7 @@ struct Generator : LeakChecked<Generator> {
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
+  std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
 
  private:
@@ -139,7 +134,12 @@ struct OrtGlobals {
   OrtGlobals();
 
   std::unique_ptr<OrtEnv> env_;
-  std::unique_ptr<Ort::Allocator> allocator_device_[static_cast<int>(DeviceType::MAX)];
+
+  struct Allocator {
+    std::unique_ptr<Ort::Allocator> allocator_;
+    std::unique_ptr<OrtSession> session_;
+  };
+  Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
 
  private:
   OrtGlobals(const OrtGlobals&) = delete;

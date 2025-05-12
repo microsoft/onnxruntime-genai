@@ -1,6 +1,7 @@
 parameters:
 - name: nuget_version_type
   type: string
+  default: 'stable'
 
 steps:
 - task: PowerShell@2

@@ -6,6 +6,7 @@
 #define OGA_USE_SPAN 1
 #include "../models/onnxruntime_api.h"
 #include "../ort_genai.h"
+#include <iostream>
 
 using namespace pybind11::literals;
 
@@ -201,7 +202,11 @@ struct PyGeneratorParams {
   }
 
   void TryGraphCaptureWithMaxBatchSize(pybind11::int_ max_batch_size) {
-    params_->TryGraphCaptureWithMaxBatchSize(max_batch_size.cast<int>());
+    std::cerr << "TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release" << std::endl;
+  }
+
+  void SetGuidance(const std::string& type, const std::string& data) {
+    params_->SetGuidance(type.c_str(), data.c_str());
   }
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
@@ -301,15 +306,16 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 #endif
       .def("set_inputs", &PyGeneratorParams::SetInputs)
       .def("set_model_input", &PyGeneratorParams::SetModelInput)
+      .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
-      .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize);
+      .def("set_guidance", &PyGeneratorParams::SetGuidance);
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
 
   pybind11::class_<OgaNamedTensors>(m, "NamedTensors")
       .def(pybind11::init([]() { return OgaNamedTensors::Create(); }))
-      .def("__getitem__", [](const OgaNamedTensors& named_tensors, const std::string& name) {
+      .def("__getitem__", [](OgaNamedTensors& named_tensors, const std::string& name) {
         auto tensor = named_tensors.Get(name.c_str());
         if (!tensor)
           throw std::runtime_error("Tensor with name: " + name + " not found.");
@@ -322,7 +328,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         named_tensors.Set(name.c_str(), value);
       })
       .def("__contains__", [](const OgaNamedTensors& named_tensors, const std::string& name) {
-        return named_tensors.Get(name.c_str()) != nullptr;
+        return const_cast<OgaNamedTensors&>(named_tensors).Get(name.c_str()) != nullptr;
       })
       .def("__delitem__", [](OgaNamedTensors& named_tensors, const std::string& name) {
         named_tensors.Delete(name.c_str());
@@ -352,19 +358,18 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def("to_token_id", &OgaTokenizer::ToTokenId)
       .def("decode", [](const OgaTokenizer& t, pybind11::array_t<int32_t> tokens) -> std::string { return t.Decode(ToSpan(tokens)).p_; })
+      .def("apply_chat_template", [](const OgaTokenizer& t, const char* template_str, const char* messages, bool add_generation_prompt) -> std::string { return t.ApplyChatTemplate(template_str, messages, add_generation_prompt).p_; }, pybind11::arg("template_str") = nullptr, pybind11::arg("messages"), pybind11::arg("add_generation_prompt"))
       .def("encode_batch", [](const OgaTokenizer& t, std::vector<std::string> strings) {
         std::vector<const char*> c_strings;
         for (const auto& s : strings)
           c_strings.push_back(s.c_str());
-        return t.EncodeBatch(c_strings.data(), c_strings.size());
-      })
+        return t.EncodeBatch(c_strings.data(), c_strings.size()); })
       .def("decode_batch", [](const OgaTokenizer& t, const OgaTensor& tokens) {
         std::vector<std::string> strings;
         auto decoded = t.DecodeBatch(tokens);
         for (size_t i = 0; i < decoded->Count(); i++)
           strings.push_back(decoded->Get(i));
-        return strings;
-      })
+        return strings; })
       .def("create_stream", [](const OgaTokenizer& t) { return OgaTokenizerStream::Create(t); });
 
   pybind11::class_<OgaConfig>(m, "Config")
@@ -483,6 +488,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("is_rocm_available", []() { return USE_ROCM != 0; });
   m.def("is_webgpu_available", []() { return true; });
   m.def("is_qnn_available", []() { return true; });
+  m.def("is_openvino_available", []() { return true; });
 
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });

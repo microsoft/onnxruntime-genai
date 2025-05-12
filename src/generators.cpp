@@ -6,12 +6,14 @@
 #include "models/env_utils.h"
 #include "models/model.h"
 #include "models/decoder_only.h"
+#include "constrained_logits_processor.h"
 #include "search.h"
 #include "cpu/interface.h"
 #include "cuda/interface.h"
 #include "dml/interface.h"
 #include "qnn/interface.h"
 #include "webgpu/interface.h"
+#include "openvino/interface.h"
 
 #if defined(_WIN32)
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
@@ -30,6 +32,8 @@ std::string CurrentModulePath() {
 
   return out_path;
 }
+
+#include "dll_load_error.h"
 #endif
 
 void ThrowErrorIfSessionTerminated(bool is_session_terminated) {
@@ -132,7 +136,7 @@ struct LibraryHandle {
     auto path = CurrentModulePath() + filename;
     handle_ = LoadLibrary(path.c_str());
     if (!handle_)
-      throw std::runtime_error(std::string("Failed to load library: ") + path + " Error: " + std::to_string(GetLastError()));
+      throw std::runtime_error(std::string("Failed to load library: ") + DetermineLoadLibraryError(filename));
   };
 
   ~LibraryHandle() { FreeLibrary(handle_); }
@@ -204,9 +208,11 @@ std::string to_string(DeviceType device_type) {
     case DeviceType::DML:
       return "DirectML";
     case DeviceType::WEBGPU:
-      return "WebGpu";
+      return "WebGPU";
     case DeviceType::QNN:
       return "QnnWithSharedMemory";
+    case DeviceType::OpenVINO:
+      return "OpenVINO";
     default:
       throw std::runtime_error("Unknown device type");
   }
@@ -227,6 +233,8 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
       return GetWebGPUInterface();
     case DeviceType::QNN:
       return GetQNNInterface();
+    case DeviceType::OpenVINO:
+      return GetOpenVINOInterface();
   }
 }
 
@@ -237,28 +245,10 @@ GeneratorParams::GeneratorParams(const Config& config)
 
 GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
-      p_device{model.p_device_inputs_},
-      is_cuda_graph_enabled_{IsCudaGraphEnabled(model.config_->model.decoder.session_options)} {
-  use_cuda_graph = is_cuda_graph_enabled_;
-  if (use_cuda_graph) {
+      use_graph_capture{IsGraphCaptureEnabled(model.config_->model.decoder.session_options)},
+      p_device{model.p_device_inputs_} {
+  if (use_graph_capture) {
     max_batch_size = 1;  // set it to 1 by default
-  }
-}
-
-void GeneratorParams::TryGraphCapture(int max_bs) {
-  if (!is_cuda_graph_enabled_ || p_device->GetType() == DeviceType::CPU) {
-    // no-op
-    return;
-  }
-
-  if (DeviceType::CUDA == p_device->GetType() || DeviceType::DML == p_device->GetType()) {
-    if (max_bs == 0) {
-      throw std::runtime_error("Graph capture is enabled, but max_batch_size is not set.");
-    }
-    use_cuda_graph = true;
-    max_batch_size = max_bs;
-  } else {
-    throw std::runtime_error("CUDA graph is not supported on this device");
   }
 }
 
@@ -281,6 +271,11 @@ void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
       extra_inputs.push_back({graph_name, tensor});
     }
   }
+}
+
+void GeneratorParams::SetGuidance(std::string_view type, std::string_view data) {
+  guidance_type = type;
+  guidance_data = data;
 }
 
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
@@ -306,6 +301,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);  // Search sequence lengths set when creating state
 
+  guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
   // Temporary solution for multimodal and whisper models
   if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
     AuxAppendTokens(params.aux_input_ids);
@@ -320,10 +316,17 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
     const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
     padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
   }
+
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
-  std::fill_n(cpu_span.begin(), padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
-  std::copy_backward(input_ids.begin(), input_ids.end(), cpu_span.end());
+  auto padding_begin = cpu_span.begin();
+  auto data_end = cpu_span.end();
+  if (model_->config_->model.decoder.sliding_window.has_value() && model_->config_->model.decoder.sliding_window->alignment == "left") {
+    padding_begin = cpu_span.begin() + input_ids.size();
+    data_end = padding_begin;
+  }
+  std::fill_n(padding_begin, padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
+  std::copy_backward(input_ids.begin(), input_ids.end(), data_end);
   input_ids_device.CopyCpuToDevice();
   return input_ids_device;
 }
@@ -356,8 +359,9 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   constexpr std::array<DeviceType, 3> devices_supporting_continuous_decoding{DeviceType::CPU, DeviceType::CUDA, DeviceType::WEBGPU};
   if (search_->GetSequenceLength() != 0 &&
       std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
-                   [this](DeviceType device_type) { return device_type == state_->params_->p_device->GetType(); }))
-    throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->params_->p_device->GetType()) +
+                   [this](DeviceType device_type) { return device_type == state_->model_.p_device_kvcache_->GetType(); }))
+    // Support for continuous decoding should be based on the type of device used for KV cache
+    throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
   if (last_action_ == Action::generated) {
@@ -373,11 +377,14 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
-
+  if (last_action_ == Action::generated && guidance_logits_processor_) {
+    auto next_tokens_span = next_tokens.CopyDeviceToCpu();
+    guidance_logits_processor_->CommitTokens(next_tokens_span);
+  }
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
-    DumpSpan(stream, logits.CopyDeviceToCpu());
+    DumpValues(stream, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
     stream << std::endl;
   }
   SetLogits(logits);
@@ -449,6 +456,10 @@ void Generator::GenerateNextToken() {
       search_->AppendTokens(next_tokens);
     ComputeLogits(next_tokens);
   }
+  if (guidance_logits_processor_) {
+    auto logits = GetLogits();
+    guidance_logits_processor_->ProcessLogits(logits);
+  }
   computed_logits_ = false;
   auto& search = search_->params_->search;
   search_->ApplyMinLength(search.min_length);
@@ -502,6 +513,9 @@ void Generator::RewindToLength(size_t new_length) {
     throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
+  if (guidance_logits_processor_) {
+    guidance_logits_processor_->Reset();
+  }
   computed_logits_ = false;
   last_action_ = Action::rewound;
 }

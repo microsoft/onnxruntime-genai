@@ -61,6 +61,7 @@ parameters:
 
 - name: nuget_version_type
   type: string
+  default: 'stable'
 
 stages:
 - stage: nuget_packaging
@@ -99,6 +100,7 @@ stages:
       - template: jobs/nuget-packaging-job.yml
         parameters:
           ep: 'cpu'
+          ort_version: ${{ parameters.ort_version }}
           build_config: ${{ parameters.build_config }}
           enable_linux_cpu: false
           enable_win_cpu: false

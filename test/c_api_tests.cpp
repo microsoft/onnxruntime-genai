@@ -6,6 +6,7 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#include <regex>
 #include "span.h"
 
 #define OGA_USE_SPAN 1
@@ -37,6 +38,7 @@ TEST(CAPITests, Config) {
   config->SetProviderOption("brainium", "custom_field2", "hello2");
   config->ClearProviders();
   config->AppendProvider("cuda");
+  config->AppendProvider("dml");
 #endif
 }
 
@@ -91,6 +93,41 @@ TEST(CAPITests, TokenizerCAPI) {
     if (strcmp(input_strings[i], stream_result.c_str()) != 0)
       throw std::runtime_error("Stream token decoding mismatch");
   }
+#endif
+}
+
+TEST(CAPITests, ChatTemplate) {
+#if TEST_PHI2
+  // We load the phi-2 model just to get a tokenizer (phi-2 does not have a chat template)
+  auto tokenizer = OgaTokenizer::Create(*OgaModel::Create(PHI2_PATH));
+
+  // Testing phi-4 chat template
+  const char* messages_json = R"(
+    [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant.",
+        "tools": "Calculator"
+      },
+      {
+        "role": "user",
+        "content": "How do I add two numbers?"
+      },
+      {
+        "role": "assistant",
+        "content": "You can add numbers by using the '+' operator."
+      }
+    ])";
+  const char* chat_template = R"({% for message in messages %}{% if message['role'] == 'system' and 'tools' in message and message['tools'] is not none %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|tool|>' + message['tools'] + '<|/tool|>' + '<|end|>' }}{% else %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|end|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>' }}{% else %}{{ eos_token }}{% endif %})";
+
+  // From HuggingFace Python output for 'microsoft/Phi-4-multimodal-instruct'
+  const char* expected_output =
+      "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>"
+      "How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
+
+  auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages_json, true);
+  ASSERT_STREQ(expected_output, out_string);
+
 #endif
 }
 
@@ -208,7 +245,7 @@ TEST(CAPITests, EndToEndPhiBatch) {
       1212, 318, 257, 1332, 13, 50256, 50256, 50256, 50256, 50256, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278, 6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417, 6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974,
       49, 1381, 389, 7427, 17252, 0, 50256, 50256, 50256, 50256, 198, 50284, 37811, 628, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256,
       464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13, 198, 50284, 37811, 628, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256};
-  
+
   for (size_t i = 0; i < 3; i++) {
     const auto sequence_length = generator->GetSequenceCount(i);
     const auto* sequence_data = generator->GetSequenceData(i);
@@ -226,19 +263,15 @@ TEST(CAPITests, EndToEndPhi) {
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
 
-  const char* input_strings[] = {
-      "This is a test."
-  };
-
-  auto input_sequences = OgaSequences::Create();
-  for (auto& string : input_strings)
-    tokenizer->Encode(string, *input_sequences);
+  const char* input_string = "This is a test.";
+  auto input_sequence = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequence);
 
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 40);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  generator->AppendTokenSequences(*input_sequences);
+  generator->AppendTokenSequences(*input_sequence);
 
   while (!generator->IsDone()) {
     generator->GenerateNextToken();
@@ -250,8 +283,8 @@ TEST(CAPITests, EndToEndPhi) {
 
   // Verify outputs match expected outputs
   std::vector<int32_t> expected_output{
-      1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278, 
-      6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417, 
+      1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278,
+      6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417,
       6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974, 82, 1039, 889, 263, 3684};
 
   const auto sequence_length = generator->GetSequenceCount(0);
@@ -475,14 +508,10 @@ TEST(CAPITests, SetTerminate) {
   };
 
   auto GenerateOutput = [](OgaGenerator* generator, std::unique_ptr<OgaTokenizerStream> tokenizer_stream) {
-    try {
+    EXPECT_THROW({
       while (!generator->IsDone()) {
         generator->GenerateNextToken();
-      }
-    } catch (const std::exception& e) {
-      EXPECT_EQ(generator->IsSessionTerminated(), true);
-      std::cout << "Session Terminated: " << e.what() << std::endl;
-    }
+      } }, std::runtime_error);
   };
 
   auto model = OgaModel::Create(PHI2_PATH);
@@ -503,7 +532,6 @@ TEST(CAPITests, SetTerminate) {
   threads.push_back(std::thread(GeneratorSetTerminateCall, generator.get()));
 
   for (auto& th : threads) {
-    std::cout << "Waiting for threads completion" << std::endl;
     th.join();  // Wait for each thread to finish
   }
   EXPECT_EQ(generator->IsSessionTerminated(), true);
@@ -592,14 +620,9 @@ TEST(CAPITests, TopKTopPCAPI) {
   test.Run();
 }
 
-#endif  // TEST_PHI2 && !USE_DML
-
-#if TEST_PHI2
 TEST(CAPITests, AdaptersTest) {
 #ifdef USE_CUDA
   using OutputType = Ort::Float16_t;
-#elif defined(USE_DML)
-  using OutputType = Ort::Float16_t; 
 #else
   using OutputType = float;
 #endif
@@ -677,10 +700,8 @@ TEST(CAPITests, AdaptersTest) {
   // So, the generator must go out of scope before the adapter can be unloaded.
   adapters->UnloadAdapter("adapters_a_and_b");
 }
-#endif
 
 TEST(CAPITests, AdaptersTestMultipleAdapters) {
-#if TEST_PHI2
   // The python unit tests create the adapter model.
   // In order to run this test, the python unit test must have been run first.
   auto model = OgaModel::Create(MODEL_PATH "multiple_adapters");
@@ -719,8 +740,8 @@ TEST(CAPITests, AdaptersTestMultipleAdapters) {
   // So, the generator must go out of scope before the adapter can be unloaded.
   adapters->UnloadAdapter("adapter_a");
   adapters->UnloadAdapter("adapter_b");
-#endif
 }
+#endif  // TEST_PHI2 && !USE_DML
 
 void CheckResult(OgaResult* result) {
   if (result) {
@@ -730,6 +751,7 @@ void CheckResult(OgaResult* result) {
   }
 }
 
+#if !USE_DML
 TEST(CAPITests, BatchedRewindGptFp32CAPI) {
   std::vector<int64_t> input_ids_shape{2, 4};
   std::vector<int32_t> input_ids{0, 0, 0, 52, 0, 0, 195, 731};
@@ -848,3 +870,32 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
 }
+#endif
+
+#if USE_GUIDANCE
+TEST(CAPITests, SetGuidance) {
+#if TEST_PHI2
+
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+
+  const char* input_string = "who are you?";
+  auto input_sequences = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequences);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 32);
+  params->SetGuidance("regex", "answer: .*");
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*input_sequences);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+  auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
+  auto output = std::string(out_string).substr(std::string(input_string).size());
+  EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
+
+#endif
+}
+#endif

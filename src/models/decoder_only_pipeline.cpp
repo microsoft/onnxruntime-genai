@@ -9,30 +9,14 @@
 namespace Generators {
 
 DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
-    : Model{std::move(config)} {
+    : Model{std::move(config)}, ort_env_{ort_env} {
   for (const auto& model : config_->model.decoder.pipeline) {
     sessions_.emplace_back(OrtSession::Create(ort_env, (config_->config_path / fs::path(model.filename)).c_str(),
                                               GetSessionOptions(model.model_id)));
-
-    if (!p_device_inputs_ && model.session_options.has_value()) {
-      const auto& provider_options = (*model.session_options).provider_options;
-      if (std::any_of(provider_options.begin(), provider_options.end(),
-                      [](const auto& elem) { return !elem.name.empty(); })) {
-        InitDeviceAllocator(*sessions_.back());
-      }
-    }
-  }
-
-  if (!p_device_inputs_) {
-    // If the device allocator has not been created, it implies all
-    // sessions are configured to run on CPU.
-    // Pick any session to create the device allocator.
-    // Device allocator is guaranteed to be the cpu allocator.
-    InitDeviceAllocator(*sessions_.front());
   }
 
   for (auto& session : sessions_) {
-    session_info_->Add(*session);
+    session_info_.Add(*session);
   }
 }
 
@@ -83,7 +67,12 @@ bool IntermediatePipelineState::SupportsPrimaryDevice() const {
 
 DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                  DeviceSpan<int32_t> next_indices) {
-  State::Run(*model_.sessions_[id_], params_->BatchBeamSize());
+  if (!model_.sessions_[id_]) {
+    const_cast<DecoderOnlyPipelineModel*>(&model_)->sessions_[id_] =
+        OrtSession::Create(model_.ort_env_, (model_.config_->config_path / fs::path(model_.config_->model.decoder.pipeline[id_].filename)).c_str(),
+                           model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
+  }
+  State::Run(*model_.sessions_[id_]);
   return {};
 }
 
@@ -174,6 +163,16 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
       continue;
     } else if (!first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
       continue;
+    }
+
+    if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx > -1) {
+      if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx >=
+          static_cast<int>(model_.sessions_.size())) {
+        throw std::runtime_error(
+            MakeString("Invalid reset_session_idx ", model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx,
+                       " for pipeline model ", model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id));
+      }
+      (const_cast<DecoderOnlyPipelineModel*>(&model_))->sessions_[model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx].reset();
     }
 
     // Clear the intermediate pipeline state outputs from the previous runs.

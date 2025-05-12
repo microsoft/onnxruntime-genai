@@ -31,14 +31,14 @@ steps:
     cp -R $(Build.BinariesDirectory)/apple_framework/framework_out/onnxruntime-genai.xcframework \
           $(Build.BinariesDirectory)/artifacts_staging/
     pushd $(Build.BinariesDirectory)/artifacts_staging
-    zip -vr $(Build.BinariesDirectory)/artifacts/onnxruntime-genai-ios-$(genai_version).zip \
+    zip --symlinks -vr $(Build.BinariesDirectory)/artifacts/onnxruntime-genai-ios-$(genai_version).zip \
           onnxruntime-genai.xcframework
     popd
   displayName: 'Build Apple XCFramework'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
-- task: PublishBuildArtifacts@1
+- task: 1ES.PublishPipelineArtifact@1
   displayName: 'Publish Artifact: ONNXRuntime GenAI XCFramework'
   inputs:
-    ArtifactName: onnxruntime-genai-ios-xcframework
-    PathtoPublish: '$(Build.BinariesDirectory)/artifacts'
+    artifactName: onnxruntime-genai-ios-xcframework
+    targetPath: '$(Build.BinariesDirectory)/artifacts'

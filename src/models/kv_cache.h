@@ -1,7 +1,6 @@
 #pragma once
 
 #include "model.h"
-#include "static_buffer.h"
 
 namespace Generators {
 
@@ -100,7 +99,6 @@ struct DefaultKeyValueCache : KeyValueCache {
   std::unique_ptr<OrtValue> empty_past_;
   std::vector<std::unique_ptr<OrtValue>> pasts_, presents_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
-  std::vector<StaticBuffer*> sb_kv_caches_;
 };
 
 // Very similar to the DefaultKeyValueCache, but is only created once at the encoder step, then used without modification for every decoder step
@@ -123,6 +121,21 @@ struct CrossCache {
 
   std::vector<std::unique_ptr<OrtValue>> values_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
+};
+
+// A (mostly) NO-OP KeyValueCache variant that is used for stateful models
+// i.e. Models that manage KV Cache internally to the session.
+struct ModelManagedKeyValueCache : KeyValueCache {
+  ModelManagedKeyValueCache(State& state);
+
+  virtual void Add() override;
+  virtual void AddEncoder() override;
+  virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
+  virtual void RewindTo(size_t index) override;
+
+ private:
+  State& state_;
+  const Model& model_{state_.model_};
 };
 
 std::string ComposeKeyValueName(const std::string& template_string, int index);

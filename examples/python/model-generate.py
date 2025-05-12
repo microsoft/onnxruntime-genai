@@ -5,11 +5,12 @@ import time
 def main(args):
     if args.verbose: print("Loading model...")
     config = og.Config(args.model_path)
-    config.clear_providers()
-    if args.execution_provider != "cpu":
-        if args.verbose:
-            print(f"Setting model to {args.execution_provider}...")
-        config.append_provider(args.execution_provider)
+    if args.execution_provider != "follow_config":
+        config.clear_providers()
+        if args.execution_provider != "cpu":
+            if args.verbose:
+                print(f"Setting model to {args.execution_provider}...")
+            config.append_provider(args.execution_provider)
     model = og.Model(config)
 
     if args.verbose: print("Model loaded")
@@ -46,10 +47,6 @@ def main(args):
     if (args.verbose): print(f'Search options: {search_options}')
 
     params.set_search_options(**search_options)
-    # Set the batch size for the CUDA graph to the number of prompts if the user didn't specify a batch size
-    params.try_graph_capture_with_max_batch_size(len(prompts))
-    if args.batch_size_for_cuda_graph:
-        params.try_graph_capture_with_max_batch_size(args.batch_size_for_cuda_graph)
     if args.verbose: print("GeneratorParams created")
 
     generator = og.Generator(model, params)
@@ -78,11 +75,11 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end token generation loop example for gen-ai")
     parser.add_argument('-m', '--model_path', type=str, required=True, help='Onnx model folder path (must contain genai_config.json and model.onnx)')
-    parser.add_argument("-e", "--execution_provider", type=str, required=True, choices=["cpu", "cuda", "dml"], help="Provider to run model")
+    parser.add_argument('-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
     parser.add_argument('-pr', '--prompts', nargs='*', required=False, help='Input prompts to generate tokens from. Provide this parameter multiple times to batch multiple prompts')
     parser.add_argument('-i', '--min_length', type=int, default=25, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, default=50, help='Max number of tokens to generate including the prompt')
-    parser.add_argument('-ds', '--do_random_sampling', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
+    parser.add_argument('-ds', '--do_sample', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
     parser.add_argument('--top_p', type=float, help='Top p probability to sample with')
     parser.add_argument('-k', '--top_k', type=int, help='Top k tokens to sample from')
     parser.add_argument('-t', '--temperature', type=float, help='Temperature to sample with')

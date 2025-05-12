@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.AI;
@@ -16,14 +16,18 @@ namespace Microsoft.ML.OnnxRuntimeGenAI;
 /// <summary>Provides an <see cref="IChatClient"/> implementation for interacting with an ONNX Runtime GenAI <see cref="Model"/>.</summary>
 public sealed class OnnxRuntimeGenAIChatClient : IChatClient
 {
-    /// <summary>The options used to configure the instance.</summary>
-    private readonly OnnxRuntimeGenAIChatClientOptions _options;
+    /// <summary>Options used to configure the instance's behavior.</summary>
+    private readonly OnnxRuntimeGenAIChatClientOptions? _options;
     /// <summary>The wrapped <see cref="Model"/>.</summary>
     private readonly Model _model;
+    /// <summary>The wrapped <see cref="Config"/>.</summary>
+    private readonly Config? _config;
     /// <summary>The wrapped <see cref="Tokenizer"/>.</summary>
     private readonly Tokenizer _tokenizer;
     /// <summary>Whether to dispose of <see cref="_model"/> when this instance is disposed.</summary>
     private readonly bool _ownsModel;
+    /// <summary>Whether to dispose of <see cref="_config"/> when this instance is disposed.</summary>
+    private readonly bool _ownsConfig;
     /// <summary>Metadata for the chat client.</summary>
     private readonly ChatClientMetadata _metadata;
 
@@ -32,58 +36,74 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
     private CachedGenerator? _cachedGenerator;
 
     /// <summary>Initializes an instance of the <see cref="OnnxRuntimeGenAIChatClient"/> class.</summary>
-    /// <param name="options">Options used to configure the client instance.</param>
     /// <param name="modelPath">The file path to the model to load.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <param name="options">Options used to configure the client instance.</param>
     /// <exception cref="ArgumentNullException"><paramref name="modelPath"/> is <see langword="null"/>.</exception>
-    public OnnxRuntimeGenAIChatClient(OnnxRuntimeGenAIChatClientOptions options, string modelPath)
+    public OnnxRuntimeGenAIChatClient(string modelPath, OnnxRuntimeGenAIChatClientOptions? options = null)
     {
-        if (options is null)
-        {
-            throw new ArgumentNullException(nameof(options));
-        }
-
         if (modelPath is null)
         {
             throw new ArgumentNullException(nameof(modelPath));
         }
 
-        _options = options;
-
         _ownsModel = true;
+        _ownsConfig = false;
+        _config = null;
         _model = new Model(modelPath);
         _tokenizer = new Tokenizer(_model);
+        _options = options;
 
         _metadata = new("onnx", new Uri($"file://{modelPath}"), modelPath);
     }
 
     /// <summary>Initializes an instance of the <see cref="OnnxRuntimeGenAIChatClient"/> class.</summary>
-    /// <param name="options">Options used to configure the client instance.</param>
     /// <param name="model">The model to employ.</param>
     /// <param name="ownsModel">
     /// <see langword="true"/> if this <see cref="IChatClient"/> owns the <paramref name="model"/> and should
     /// dispose of it when this <see cref="IChatClient"/> is disposed; otherwise, <see langword="false"/>.
     /// The default is <see langword="true"/>.
     /// </param>
-    /// <exception cref="ArgumentNullException"><paramref name="options"/> is <see langword="null"/>.</exception>
+    /// <param name="options">Options used to configure the client instance.</param>
     /// <exception cref="ArgumentNullException"><paramref name="model"/> is <see langword="null"/>.</exception>
-    public OnnxRuntimeGenAIChatClient(OnnxRuntimeGenAIChatClientOptions options, Model model, bool ownsModel = true)
+    public OnnxRuntimeGenAIChatClient(Model model, bool ownsModel = true, OnnxRuntimeGenAIChatClientOptions? options = null)
     {
-        if (options is null)
-        {
-            throw new ArgumentNullException(nameof(options));
-        }
-
         if (model is null)
         {
             throw new ArgumentNullException(nameof(model));
         }
 
-        _options = options;
-
         _ownsModel = ownsModel;
+        _ownsConfig = false;
+        _config = null;
         _model = model;
         _tokenizer = new Tokenizer(_model);
+        _options = options;
+
+        _metadata = new("onnx");
+    }
+
+    /// <summary>Initializes an instance of the <see cref="OnnxRuntimeGenAIChatClient"/> class.</summary>
+    /// <param name="config">The config to employ.</param>
+    /// <param name="ownsConfig">
+    /// <see langword="true"/> if this <see cref="IChatClient"/> owns the <paramref name="config"/> and should
+    /// dispose of it when this <see cref="IChatClient"/> is disposed; otherwise, <see langword="false"/>.
+    /// The default is <see langword="true"/>.
+    /// </param>
+    /// <param name="options">Options used to configure the client instance.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="config"/> is <see langword="null"/>.</exception>
+    public OnnxRuntimeGenAIChatClient(Config config, bool ownsConfig = true, OnnxRuntimeGenAIChatClientOptions? options = null)
+    {
+        if (config is null)
+        {
+            throw new ArgumentNullException(nameof(config));
+        }
+
+        _ownsModel = true;
+        _ownsConfig = ownsConfig;
+        _config = config;
+        _model = new Model(_config);
+        _tokenizer = new Tokenizer(_model);
+        _options = options;
 
         _metadata = new("onnx");
     }
@@ -102,45 +122,60 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
         {
             _model.Dispose();
         }
+
+        if (_ownsConfig)
+        {
+            _config?.Dispose();
+        }
     }
 
     /// <inheritdoc/>
     public Task<ChatResponse> GetResponseAsync(
-        IList<ChatMessage> chatMessages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
-        GetStreamingResponseAsync(chatMessages, options, cancellationToken).ToChatResponseAsync(cancellationToken: cancellationToken);
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+        GetStreamingResponseAsync(messages, options, cancellationToken).ToChatResponseAsync(cancellationToken: cancellationToken);
 
     /// <inheritdoc/>
     public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
-        IList<ChatMessage> chatMessages, ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        IEnumerable<ChatMessage> messages, ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        if (chatMessages is null)
+        if (messages is null)
         {
-            throw new ArgumentNullException(nameof(chatMessages));
+            throw new ArgumentNullException(nameof(messages));
         }
+
+        bool enableCaching = _options?.EnableCaching is true;
+
+        // Format and tokenize the message.
+        string formattedPrompt = _options?.PromptFormatter is { } formatter ?
+            formatter(messages, options) :
+            FormatPromptDefault(messages, options);
+
+        using Sequences tokens = _tokenizer.Encode(formattedPrompt);
+        int inputTokens = tokens[0].Length;
 
         // Check to see whether there's a cached generator. If there is, and if its id matches what we got from the client,
         // we can use it; otherwise, we need to create a new one.
         CachedGenerator? generator = Interlocked.Exchange(ref _cachedGenerator, null);
         if (generator is null ||
-            generator.ChatThreadId is null ||
-            generator.ChatThreadId != options?.ChatThreadId)
+            generator.ConversationId is null ||
+            generator.ConversationId != options?.ConversationId)
         {
             generator?.Dispose();
 
             using GeneratorParams p = new(_model); // we can dispose of this after we create the generator
-            UpdateGeneratorParamsFromOptions(p, options);
+            UpdateGeneratorParamsFromOptions(p, options, enableCaching, inputTokens);
             generator = new(new Generator(_model, p));
         }
 
         // If caching is enabled, generate a new ID to represent the state of the generator when we finish this response.
-        generator.ChatThreadId = _options.EnableCaching ? Guid.NewGuid().ToString("N") : null;
-
-        // Format and tokenize the message.
-        using Sequences tokens = _tokenizer.Encode(_options.PromptFormatter(chatMessages, options));
+        generator.ConversationId = enableCaching ? Guid.NewGuid().ToString("N") : null;
         try
         {
+            string messageId = Guid.NewGuid().ToString("N");
+            string responseId = Guid.NewGuid().ToString("N");
+
             generator.Generator.AppendTokenSequences(tokens);
-            int inputTokens = tokens[0].Length, outputTokens = 0;
+            int outputTokens = 0;
 
             // Loop while we still want to produce more tokens.
             using var tokenizerStream = _tokenizer.CreateStream();
@@ -172,18 +207,18 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
 
                 // Yield the next token in the stream.
                 outputTokens++;
-                yield return new()
+                yield return new(ChatRole.Assistant, next)
                 {
                     CreatedAt = DateTimeOffset.UtcNow,
-                    Role = ChatRole.Assistant,
-                    Text = next,
+                    MessageId = messageId,
+                    ResponseId = responseId,
                 };
             }
 
             // Yield a final update containing metadata.
             yield return new()
             {
-                ChatThreadId = generator.ChatThreadId,
+                ConversationId = generator.ConversationId,
                 Contents = [new UsageContent(new()
                 {
                     InputTokenCount = inputTokens,
@@ -192,15 +227,15 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
                 })],
                 CreatedAt = DateTimeOffset.UtcNow,
                 FinishReason = options is not null && options.MaxOutputTokens <= outputTokens ? ChatFinishReason.Length : ChatFinishReason.Stop,
-                ModelId = _metadata.ModelId,
-                ResponseId = Guid.NewGuid().ToString(),
+                MessageId = messageId,
+                ResponseId = responseId,
                 Role = ChatRole.Assistant,
             };
         }
         finally
         {
             // Cache the generator for subsequent use if it's cachable and there isn't already a generator cached.
-            if (generator.ChatThreadId is null ||
+            if (generator.ConversationId is null ||
                 Interlocked.CompareExchange(ref _cachedGenerator, generator, null) != null)
             {
                 generator.Dispose();
@@ -221,6 +256,7 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
             serviceType == typeof(ChatClientMetadata) ? _metadata :
             serviceType == typeof(Model) ? _model :
             serviceType == typeof(Tokenizer) ? _tokenizer :
+            serviceType == typeof(Config) ? _config :
             serviceType?.IsInstanceOfType(this) is true ? this :
             null;
     }
@@ -228,14 +264,39 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
     /// <summary>Gets whether the specified token is a stop sequence.</summary>
     private bool IsStop(string token, ChatOptions? options) =>
         options?.StopSequences?.Contains(token) is true ||
-        _options.StopSequences.Contains(token);
+        _options?.StopSequences?.Contains(token) is true;
+
+    /// <summary>Formats messages into a prompt using a default format.</summary>
+    private static string FormatPromptDefault(IEnumerable<ChatMessage> messages, ChatOptions? options)
+    {
+        StringBuilder sb = new();
+        foreach (var message in messages)
+        {
+            sb.Append(message).AppendLine();
+        }
+
+        return sb.ToString();
+    }
 
     /// <summary>Updates the <paramref name="generatorParams"/> based on the supplied <paramref name="options"/>.</summary>
-    private static void UpdateGeneratorParamsFromOptions(GeneratorParams generatorParams, ChatOptions? options)
+    private static void UpdateGeneratorParamsFromOptions(GeneratorParams generatorParams, ChatOptions? options, bool enableCaching, int inputTokens)
     {
         if (options is null)
         {
             return;
+        }
+
+        if (options.MaxOutputTokens is int maxOutputTokens &&
+            !enableCaching) // don't set this if we're caching, since we want to be able to generate more tokens later
+        {
+            try
+            {
+                generatorParams.SetSearchOption("max_length", inputTokens + maxOutputTokens);
+            }
+            catch (OnnxRuntimeGenAIException)
+            {
+                // Ignore failure to set max_length. It'll default to the context window length.
+            }
         }
 
         if (options.Temperature.HasValue)
@@ -296,7 +357,7 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
     {
         public Generator Generator { get; } = generator;
 
-        public string? ChatThreadId { get; set; }
+        public string? ConversationId { get; set; }
 
         public void Dispose() => Generator?.Dispose();
     }

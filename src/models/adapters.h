@@ -4,6 +4,8 @@
 
 namespace Generators {
 
+struct Model;
+
 struct Adapter {
   Adapter() = delete;
   Adapter(const Adapter&) = delete;

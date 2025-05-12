@@ -2,8 +2,6 @@
 // Licensed under the MIT License.
 #pragma once
 
-#include "static_buffer.h"
-
 namespace Generators {
 
 struct Logits {
@@ -18,8 +16,6 @@ struct Logits {
   void Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length);
 
  private:
-  void HandleEOSArray(std::span<float> logits);
-
   State& state_;
   const Model& model_{state_.model_};
   size_t output_index_{~0U};
@@ -33,13 +29,14 @@ struct Logits {
   std::unique_ptr<OrtValue> output_last_tokens_;
   std::unique_ptr<OrtValue> logits_of_last_token_fp32_;
 
-  std::unique_ptr<OrtValue> output_raw_;  // Raw logits output from model
+  std::unique_ptr<Tensor> output_raw_;  // Raw logits output from model
 
   std::vector<int> input_sequence_lengths;
   // OrtValue wrapped in a DeviceMemory object to make it universal
   DeviceSpan<float> logits_;
 
-  DeviceSpan<int32_t> cuda_eos_token_ids_;  // eos_token_ids from params, but in cuda accessible memory
+  // Set to true when prefill will generate the already 'trimmed' logits required for sampling.
+  bool trimmed_prefill_logits_ = false;
 };
 
 }  // namespace Generators
