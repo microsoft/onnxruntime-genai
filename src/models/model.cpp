@@ -283,7 +283,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
   auto providers_list = providers;
   if (!is_primary_session_options) {
     // Providers specified in a non-primary provider options list are added
-    // to the primary providers. They are considered immutable and implcitly
+    // to the primary providers. They are considered immutable and implicitly
     // added as providers.
     std::transform(provider_options_list.begin(), provider_options_list.end(), std::back_inserter(providers_list),
                    [](const auto& provider_options) { return provider_options.name; });
@@ -642,6 +642,9 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
   if (!p_device_) {
     p_device_ = session_device;
+  } else if (session_device != nullptr && session_device->GetType() != p_device_->GetType()) {
+    throw std::runtime_error("Running a model with multiple providers is not supported. Encountered " +
+                             to_string(session_device->GetType()) + " and " + to_string(p_device_->GetType()));
   }
 }
 

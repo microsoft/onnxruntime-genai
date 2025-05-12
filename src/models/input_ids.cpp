@@ -106,7 +106,7 @@ void DefaultInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
 WindowedInputIDs::WindowedInputIDs(State& state) : state_{state} {
   if (model_.p_device_inputs_->GetType() != DeviceType::QNN &&
       model_.p_device_inputs_->GetType() != DeviceType::CPU) {
-    throw std::runtime_error("Sliding a window over input_ids works with either the QNN or the CPU provider.");
+    throw std::runtime_error("Sliding a window over input_ids only works with either the QNN or the CPU provider.");
   }
 
   name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
