@@ -41,71 +41,118 @@ steps:
     echo "build_config=${{ parameters.build_config }}"
   displayName: 'Print Parameters'
 
-- bash: |
-    set -e -x
-    az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-    az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
-    python3 -m pip install requests
-    python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep)_$(cuda_version) \
-      --context tools/ci_build/github/linux/docker/manylinux \
-      --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-      --container-registry onnxruntimebuildcache \
-      --manylinux-src manylinux \
-      --multiple_repos \
-      --repository ortgenai$(ep)build$(arch)
-  displayName: 'Get CUDA Docker Image $(cuda_version)'
-  condition: eq(variables['ep'], 'cuda')
-  workingDirectory: '$(Build.Repository.LocalPath)'
+# - bash: |
+#     set -e -x
+#     az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+#     az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+#     python3 -m pip install requests
+#     python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep)_$(cuda_version) \
+#       --context tools/ci_build/github/linux/docker/manylinux \
+#       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+#       --container-registry onnxruntimebuildcache \
+#       --manylinux-src manylinux \
+#       --multiple_repos \
+#       --repository ortgenai$(ep)build$(arch)
+#   displayName: 'Get CUDA Docker Image $(cuda_version)'
+#   condition: eq(variables['ep'], 'cuda')
+#   workingDirectory: '$(Build.Repository.LocalPath)'
 
-- bash: |
-    set -e -x
-    az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
-    az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+# - bash: |
+#     set -e -x
+#     az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+#     az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
+#     python3 -m pip install requests
+#     python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep) \
+#       --context tools/ci_build/github/linux/docker/manylinux \
+#       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
+#       --container-registry onnxruntimebuildcache \
+#       --manylinux-src manylinux \
+#       --multiple_repos \
+#       --repository ortgenai$(ep)build$(arch)
+#   displayName: 'Get Docker Image'
+#   condition: ne(variables['ep'], 'cuda')
+#   workingDirectory: '$(Build.Repository.LocalPath)'
+
+# - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
+#   - script: |
+#       set -e -x
+#       docker run \
+#       --rm \
+#       --volume $(Build.Repository.LocalPath):/ort_genai_src \
+#       -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
+#       bash -c " \
+#           /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
+#             -DENABLE_TESTS=OFF && \
+#           /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
+#             --target onnxruntime-genai"
+#     displayName: 'Build GenAi'
+#     workingDirectory: '$(Build.Repository.LocalPath)'
+
+- script: |
+    ep="${ep}"
+    target="${target}"
+    config="${build_config}"
+    if [ "$ep" == "cuda" ]; then
+      cuda_home="--cuda_home=$(Build.Repository.LocalPath)/cuda_sdk/v${cuda_version}"
+    else
+      cuda_home=""
+    fi
+    if [ "$ep" == "directml" ]; then
+      use_dml="--use_dml"
+    else
+      use_dml=""
+    fi
+    if [ "$target" == "onnxruntime-genai" ]; then
+      package_c="--package"
+    else
+      package_c=""
+    fi
+    if [ "$target" != "python" ]; then
+      skip_wheel="--skip_wheel"
+    else
+      skip_wheel=""
+      python3 -m pip install wheel
+    fi
+    if [ "$config" == "release" ]; then
+      build_config="Release"
+    elif [ "$config" == "relwithdebinfo" ]; then
+      build_config="RelWithDebInfo"
+    else
+      build_config="Debug"
+    fi
     python3 -m pip install requests
-    python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep) \
-      --context tools/ci_build/github/linux/docker/manylinux \
-      --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
-      --container-registry onnxruntimebuildcache \
-      --manylinux-src manylinux \
-      --multiple_repos \
-      --repository ortgenai$(ep)build$(arch)
-  displayName: 'Get Docker Image'
-  condition: ne(variables['ep'], 'cuda')
+
+    docker run \
+    --rm \
+    --volume $(Build.Repository.LocalPath):/ort_genai_src \
+    -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
+    bash -c " \
+        python3 build.py --parallel $cuda_home $use_dml $package_c $skip_wheel \
+          --config=$build_config \
+          --build_dir='$(Build.Repository.LocalPath)/${buildDir}'"
+    mv -f "$(Build.Repository.LocalPath)/${buildDir}/Release" "${os}-${arch}"
+  displayName: 'Build GenAi'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
-  - script: |
-      set -e -x
-      docker run \
-      --rm \
-      --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
-      bash -c " \
-          /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
-            -DENABLE_TESTS=OFF && \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
-            --target onnxruntime-genai"
-    displayName: 'Build GenAi'
-    workingDirectory: '$(Build.Repository.LocalPath)'
-
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
       AnalyzeTargetGlob: '$(Build.Repository.LocalPath)/build/**/*genai.so'
     continueOnError: true
-  - template: utils/capi-archive.yml
-    parameters:
-      archiveType: tar
-  - script: |
-      set -e -x
-      docker run \
-      --rm \
-      --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
-      bash -c " \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) --target package"
-    displayName: 'Package C/C++ API'
-    workingDirectory: '$(Build.Repository.LocalPath)'
+  # - template: utils/capi-archive.yml
+  #   parameters:
+  #     archiveType: tar
+  # - script: |
+  #     set -e -x
+  #     docker run \
+  #     --rm \
+  #     --volume $(Build.Repository.LocalPath):/ort_genai_src \
+  #     -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
+  #     bash -c " \
+  #         /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) --target package"
+  #   displayName: 'Package C/C++ API'
+  #   workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
@@ -114,41 +161,41 @@ steps:
       targetPath: '$(Build.Repository.LocalPath)/build/$(ep)/package'
 
 - ${{ if eq(parameters.target, 'python') }}:
-  - bash: |
-      set -e -x
-      docker run \
-      --rm \
-      --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ \
-      -e ONNXRUNTIME_VERSION=$(ONNXRUNTIME_VERSION) \
-      ortgenai$(ep)build$(arch) \
-      bash -c " \
-          /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
-            -DENABLE_TESTS=OFF \
-            -DMANYLINUX=ON \
-            -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
-            --target python"
-    displayName: 'Build Python $(PyNoDotVer)'
-    workingDirectory: '$(Build.Repository.LocalPath)'
+  # - bash: |
+  #     set -e -x
+  #     docker run \
+  #     --rm \
+  #     --volume $(Build.Repository.LocalPath):/ort_genai_src \
+  #     -w /ort_genai_src/ \
+  #     -e ONNXRUNTIME_VERSION=$(ONNXRUNTIME_VERSION) \
+  #     ortgenai$(ep)build$(arch) \
+  #     bash -c " \
+  #         /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
+  #           -DENABLE_TESTS=OFF \
+  #           -DMANYLINUX=ON \
+  #           -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
+  #         /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
+  #           --target python"
+  #   displayName: 'Build Python $(PyNoDotVer)'
+  #   workingDirectory: '$(Build.Repository.LocalPath)'
 
-  - bash: |
-      set -e -x
-      docker run \
-      --rm \
-      --volume $(Build.Repository.LocalPath):/ort_genai_src \
-      -w /ort_genai_src/ \
-      -e ONNXRUNTIME_VERSION=$(ONNXRUNTIME_VERSION) \
-      ortgenai$(ep)build$(arch) \
-      bash -c " \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
-            -DENABLE_TESTS=OFF \
-            -DMANYLINUX=ON \
-            -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
-          /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
-            --target PyPackageBuild"
-    displayName: 'PyPackageBuild $(PyNoDotVer)'
-    workingDirectory: '$(Build.Repository.LocalPath)'
+  # - bash: |
+  #     set -e -x
+  #     docker run \
+  #     --rm \
+  #     --volume $(Build.Repository.LocalPath):/ort_genai_src \
+  #     -w /ort_genai_src/ \
+  #     -e ONNXRUNTIME_VERSION=$(ONNXRUNTIME_VERSION) \
+  #     ortgenai$(ep)build$(arch) \
+  #     bash -c " \
+  #         /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
+  #           -DENABLE_TESTS=OFF \
+  #           -DMANYLINUX=ON \
+  #           -DPYTHON_EXECUTABLE=/opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) && \
+  #         /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
+  #           --target PyPackageBuild"
+  #   displayName: 'PyPackageBuild $(PyNoDotVer)'
+  #   workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: CopyFiles@2
     displayName: 'Copy Python Wheel to: $(Build.ArtifactStagingDirectory)'
