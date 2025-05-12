@@ -486,6 +486,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
         command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}"]
 
+    if args.package and util.is_windows():
+        command += _get_windows_build_args(args)
+
     if args.android:
         command += [
             "-DCMAKE_TOOLCHAIN_FILE="
