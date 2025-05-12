@@ -6,6 +6,7 @@
 #include <iostream>
 #include <thread>
 #include <vector>
+#include <regex>
 #include "span.h"
 
 #define OGA_USE_SPAN 1
@@ -37,6 +38,7 @@ TEST(CAPITests, Config) {
   config->SetProviderOption("brainium", "custom_field2", "hello2");
   config->ClearProviders();
   config->AppendProvider("cuda");
+  config->AppendProvider("dml");
 #endif
 }
 
@@ -117,11 +119,12 @@ TEST(CAPITests, ChatTemplate) {
       }
     ])";
   const char* chat_template = R"({% for message in messages %}{% if message['role'] == 'system' and 'tools' in message and message['tools'] is not none %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|tool|>' + message['tools'] + '<|/tool|>' + '<|end|>' }}{% else %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|end|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>' }}{% else %}{{ eos_token }}{% endif %})";
-  
+
   // From HuggingFace Python output for 'microsoft/Phi-4-multimodal-instruct'
-  const char* expected_output = "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>"
-    "How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
-  
+  const char* expected_output =
+      "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>"
+      "How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
+
   auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages_json, true);
   ASSERT_STREQ(expected_output, out_string);
 
@@ -242,7 +245,7 @@ TEST(CAPITests, EndToEndPhiBatch) {
       1212, 318, 257, 1332, 13, 50256, 50256, 50256, 50256, 50256, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278, 6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417, 6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974,
       49, 1381, 389, 7427, 17252, 0, 50256, 50256, 50256, 50256, 198, 50284, 37811, 628, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256,
       464, 2068, 7586, 21831, 18045, 625, 262, 16931, 3290, 13, 198, 50284, 37811, 628, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256, 50256};
-  
+
   for (size_t i = 0; i < 3; i++) {
     const auto sequence_length = generator->GetSequenceCount(i);
     const auto* sequence_data = generator->GetSequenceData(i);
@@ -280,8 +283,8 @@ TEST(CAPITests, EndToEndPhi) {
 
   // Verify outputs match expected outputs
   std::vector<int32_t> expected_output{
-      1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278, 
-      6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417, 
+      1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278,
+      6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417,
       6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974, 82, 1039, 889, 263, 3684};
 
   const auto sequence_length = generator->GetSequenceCount(0);
@@ -508,8 +511,7 @@ TEST(CAPITests, SetTerminate) {
     EXPECT_THROW({
       while (!generator->IsDone()) {
         generator->GenerateNextToken();
-      }
-    }, std::runtime_error);
+      } }, std::runtime_error);
   };
 
   auto model = OgaModel::Create(PHI2_PATH);
@@ -867,5 +869,33 @@ TEST(CAPITests, RewindGptFp32CAPI) {
   ASSERT_LE(sequence_length, max_length);
   expected_output_start = &expected_output[0];
   EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
+}
+#endif
+
+#if USE_GUIDANCE
+TEST(CAPITests, SetGuidance) {
+#if TEST_PHI2
+
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+  auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+
+  const char* input_string = "who are you?";
+  auto input_sequences = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequences);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 32);
+  params->SetGuidance("regex", "answer: .*");
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*input_sequences);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+  auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
+  auto output = std::string(out_string).substr(std::string(input_string).size());
+  EXPECT_TRUE(std::regex_match(output, std::regex("answer: .*")));
+
+#endif
 }
 #endif

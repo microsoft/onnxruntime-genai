@@ -53,6 +53,7 @@ DeviceSpan<float> Search_Cpu::GetLogits() const {
 
 void Search_Cpu::SetLogits(DeviceSpan<float> logits) {
   next_token_scores_ = logits;
+  next_token_scores_.CopyDeviceToCpu();  // To the device->cpu copy once here as all later calls use CpuSpan()
 }
 
 DeviceSpan<int32_t> GreedySearch_Cpu::GetNextTokens() {
@@ -205,9 +206,8 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
 void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
   std::uniform_real_distribution<float> dis(0, p);
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
-    if (PadIfAlreadyEOS(batch_id)) {
+    if (PadIfAlreadyEOS(batch_id))
       continue;
-    }
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     // Find the top K scores
     std::vector<int> indices(scores.size());
@@ -217,11 +217,7 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
     for (int i = 0; i < k; i++) {
       scores_top_k[i] = scores[indices[i]];
     }
-    if (k > 1) {
-      SoftmaxWithMax(scores_top_k, temperature, scores_top_k[0]);
-    } else {
-      scores_top_k[0] = 1.0f;
-    }
+    SoftmaxWithMax(scores_top_k, temperature, scores_top_k[0]);
     // Sample a probability threshold
     float threshold = dis(gen_);
     int32_t token = indices[k - 1];
@@ -251,7 +247,7 @@ bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {
 
 void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
   next_tokens_[batch_id] = token;
-  if (token == params_->config.model.eos_token_id) {
+  if (contains(params_->config.model.eos_token_id, token)) {
     eos_seen_[batch_id] = true;
     if (g_log.enabled && g_log.hit_eos)
       Log("hit_eos", "EOS seen on batch " + std::to_string(batch_id));
@@ -401,7 +397,8 @@ void Search_Cpu::ApplyMinLength(int min_length) {
   const int batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
-    beam_token_scores[params_->config.model.eos_token_id] = std::numeric_limits<float>::lowest();
+    for (auto token_id : params_->config.model.eos_token_id)
+      beam_token_scores[token_id] = std::numeric_limits<float>::lowest();
   }
 }
 
