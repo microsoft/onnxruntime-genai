@@ -119,12 +119,12 @@ steps:
     --rm \
     --volume $(Build.Repository.LocalPath):/ort_genai_src \
     -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
-    bash -c " \
-        /opt/python/cp$(PyNoDotVer)-cp$(PyNoDotVer)/bin/python$(PyDotVer) -m pip install requests && \
-        /opt/python/cp$(PyNoDotVer)-cp$(PyDotVer)/bin/python$(PyDotVer) -m pip install wheel && \
-        /opt/python/cp$(PyNoDotVer)-cp$(PyDotVer)/bin/python$(PyDotVer) \
-          build.py --parallel $use_cuda $package_c $skip_wheel --config=$build_config --build_dir='$(Build.Repository.LocalPath)/${buildDir}'"
-    ls $(Build.Repository.LocalPath) -R
+    python:3.11 bash -c " \
+        python -m pip install requests && \
+        python -m pip install wheel && \
+        python build.py --parallel $use_cuda $package_c $skip_wheel && \
+          --config=$build_config --build_dir='$(Build.Repository.LocalPath)/${buildDir}'"
+    ls $(Build.Repository.LocalPath)/build
     echo "BuildDir: $(Build.Repository.LocalPath)/${buildDir}"
     mv -f "$(Build.Repository.LocalPath)/${buildDir}/Release" "${os}-${arch}"
   displayName: 'Build GenAi'
