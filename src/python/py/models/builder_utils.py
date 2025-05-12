@@ -12,7 +12,19 @@ from typing import Sequence
 import ml_dtypes
 import numpy as np
 from onnxscript import ir
-from onnxruntime.quantization import matmul_4bits_quantizer
+from onnxruntime import __version__ as ort_version
+from packaging import version
+
+if version.parse(ort_version) > version.parse("1.21.1"):
+    from onnxruntime.quantization.matmul_nbits_quantizer import (
+        MatMulNBitsQuantizer,
+        QuantFormat,
+    )
+else:
+    from onnxruntime.quantization.matmul_4bits_quantizer import (
+        MatMul4BitsQuantizer as MatMulNBitsQuantizer,
+        QuantFormat,
+    )
 
 
 def _unpack_uint4_as_uint8(data: np.ndarray, dims: Sequence[int]) -> np.ndarray:
@@ -63,17 +75,13 @@ def to_int4(
 ) -> ir.Model:
     """Quantize the model to int4."""
     ir.external_data.load_to_model(model)
-    quant = matmul_4bits_quantizer.MatMul4BitsQuantizer(
+    quant = MatMulNBitsQuantizer(
         model=ir.to_proto(model),
         block_size=block_size,
         is_symmetric=is_symmetric,
         accuracy_level=accuracy_level,
         nodes_to_exclude=[],
-        quant_format=(
-            matmul_4bits_quantizer.QuantFormat.QDQ
-            if use_qdq
-            else matmul_4bits_quantizer.QuantFormat.QOperator
-        ),
+        quant_format=(QuantFormat.QDQ if use_qdq else QuantFormat.QOperator),
         op_types_to_quantize=op_types_to_quantize,
     )
     quant.process()
