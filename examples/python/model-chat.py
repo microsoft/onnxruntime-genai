@@ -139,8 +139,9 @@ def main(args):
     final_input = tokenizer.encode(final_prompt)
     # Ignoring the last end of text token as it is messes up the generation when grammar is enabled
     if guidance_type:
-        final_input = final_input[:-1]
-    generator.append_tokens(final_input)
+        input_tokens = input_tokens[:-1]
+    system_prompt_length = len(input_tokens)
+    generator.append_tokens(input_tokens)
 
     # Keep asking for input prompts in a loop
     while True:
