@@ -875,7 +875,7 @@ class Model:
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
         qweight_pt = quantized_op.qweight.detach().cpu()
         qweight_pt = qweight_pt.reshape(*qweight_pt.shape[:-2], qweight_pt.shape[-2] * qweight_pt.shape[-1])
-        self.make_external_tensor(qweight_pt.contiguous(), qweight, True)
+        self.make_external_tensor(qweight_pt.contiguous(), qweight, unpack_int4=True)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
         scales_pt = quantized_op.scales.detach().cpu().to(self.to_torch_dtype[self.io_dtype])
