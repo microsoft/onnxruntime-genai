@@ -538,7 +538,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, std::unique_ptr<Config>& confi
   std::vector<Config::ProviderOptions> provider_options_list;
   provider_options_list.emplace_back(Config::ProviderOptions{device_type_names[static_cast<int>(type)], {}});
   const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
-  SetProviderSessionOptions(*session_options, provider_options_list, true, false, config->model); 
+  SetProviderSessionOptions(*session_options, providers, provider_options_list, true, false, config->model); 
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
