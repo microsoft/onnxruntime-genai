@@ -314,7 +314,7 @@ class Model:
                 "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
                 "algo_config": int4_algo_config,
             },
-            "use_qdq": True if self.ep == "NvTensorRtRtx" else extra_options.get("use_qdq", False),
+            "use_qdq": extra_options.get("use_qdq", False),
         }
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
@@ -3630,6 +3630,9 @@ def check_extra_options(kv_pairs):
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
         raise ValueError(f"Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
+    # NvTensorRtRtx EP requires Opset 21, so force use_qdq which controlls it.
+    if args.execution_provider == "NvTensorRtRtx":
+        kv_pairs["use_qdq"] = True
 
 def parse_extra_options(kv_items):
     """
