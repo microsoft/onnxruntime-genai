@@ -346,6 +346,15 @@ class Model:
         self._model = ir.Model(graph, ir_version=7, producer_name="onnxruntime-genai")
         self._values: dict[str, ir.Value] = {}
 
+    def make_outputs_init(self):
+        self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
+        self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
+
+        if self.exclude_lm_head:
+            self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
+        elif self.include_hidden_states:
+            self.output_names = ["hidden_states"] + self.output_names
+
     def make_attention_init(self):
         valid_gqa_configurations = {
             ("cpu", ir.DataType.FLOAT),
