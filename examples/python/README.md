@@ -52,7 +52,7 @@ We have integrated [LLGuidance](https://github.com/guidance-ai/llguidance) for c
 
 To ensure that the function/tool call works correctly with the Lark Grammar, you need to modify tokenizer.json file by setting special as true for <|tool_call|> token.
 
-To run the python examples with function/tool call...
+To run the Python examples with function/tool calling:
 ```
 # Using Lark Grammar with 1 function/tool call
 python model-qa.py -m {path to model folder} -e {execution provider} --guidance_type "lark_grammar"  --guidance_info '[{"name": "get_weather", "description": "Get weather of a city.", "parameters": {"city": {"description": "The city for which weather information is requested", "type": "string", "default": "Dallas"}}}]'
