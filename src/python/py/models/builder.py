@@ -1091,15 +1091,7 @@ class Model:
         if not simple:
             self.make_external_tensor(layernorm.bias.detach().cpu().to(new_torch_dtype).contiguous(), bias)
 
-        name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
-        # NvTensorRtRtx EP doesn't support Skip/SimplifiedLayerNormalization and SkipLayerNormalization, so we fallback to primitive ops
-        if self.ep == "NvTensorRtRtx" and (skip or simple):
-            self._make_layernormlization(name, skip, simple, root_input, skip_input, weight, bias)
-        else:
-            self.make_layernormlization(name, skip, simple, root_input, skip_input, weight, bias)
-
-    def make_layernormlization(self, basename, skip, simple, root_input, skip_input, weight, bias):
-        # Create input names for op
+         # Create input names for op
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
             inputs.append(bias)
@@ -1111,19 +1103,22 @@ class Model:
             kwargs.update({"axis": -1, "stash_type": 1})
 
         # Create output names for op
-        output_0 = f"{basename}/output_0"
-        output_3 = f"{basename}/output_3"
+        output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
+        output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
         if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
             output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
 
         # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
         if cast:
-            inputs, outputs = self.make_layernorm_casts(basename, inputs, outputs, old_io_dtype, new_io_dtype)
+            inputs, outputs = self.make_layernorm_casts(name, inputs, outputs, old_io_dtype, new_io_dtype)
 
-        # Make op and its shape
-        self.make_node(op_type, inputs=inputs, outputs=outputs, name=basename, domain=("com.microsoft" if skip else None), **kwargs)
-        self.make_value_info(outputs[0], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        # NvTensorRtRtx EP doesn't support Skip/SimplifiedLayerNormalization and SkipLayerNormalization, so we fallback to primitive ops
+        if self.ep == "NvTensorRtRtx" and (skip or simple):
+            self._make_layernormlization(name, skip, simple, op_type, new_io_dtype, inputs, outputs, **kwargs)
+        else:
+            self.make_layernormlization(name, skip, simple, op_type, new_io_dtype, inputs, outputs, **kwargs)
+
         if skip and not self.layernorm_attrs["last_layernorm"]:
             self.make_value_info(outputs[3], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
@@ -1135,14 +1130,28 @@ class Model:
             # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
 
-    def _make_layernormlization(self, basename, skip, simple, root_input, skip_input, weight, bias):
-        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
+    def make_layernormlization(self, basename, skip, simple, op_type, io_dtype, inputs, outputs, **kwargs):
+        # Make op and its shape
+        self.make_node(op_type, inputs=inputs, outputs=outputs, name=basename, domain=("com.microsoft" if skip else None), **kwargs)
+        self.make_value_info(outputs[0], io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        if skip and not self.layernorm_attrs["last_layernorm"]:
+            self.make_value_info(outputs[3], io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+
+
+    def _make_layernormlization(self, basename, skip, simple, op_type, io_dtype, inputs, outputs, **kwargs):
+        root_input = inputs[0]
+        skip_input = inputs[1] if skip else None
+        weight = inputs[2]
+        bias = inputs[3] if not simple else None
+        output_0 = outputs[0]
+        output_3 = outputs[3] if skip and not self.layernorm_attrs["last_layernorm"] else None
+
         if op_type == "SimplifiedLayerNormalization":
-            self._make_simplified_layer_norm(basename, root_input, weight, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self._make_simplified_layer_norm(basename, root_input, weight, output_0, io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         elif op_type == "SkipSimplifiedLayerNormalization":
-            self._make_skip_simplified_layer_norm(basename, root_input, skip_input, weight, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self._make_skip_simplified_layer_norm(basename, root_input, skip_input, weight, output_0, output_3, io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         elif op_type == "SkipLayerNormalization":
-            self._make_skip_layer_norm(basename, root_input, skip_input, weight, bias, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self._make_skip_layer_norm(basename, root_input, skip_input, weight, bias, output_0, output_3, io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         else:
             raise ValueError(f"Invalid op_type: {op_type}")
 
@@ -1389,7 +1398,7 @@ class Model:
         self.make_value_info(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
     # This expansion of contrib-op can be updated / deprecated in future.
-    def _make_skip_simplified_layer_norm(self, basename, root_input, skip_input, weight_name, shape, **kwargs):
+    def _make_skip_simplified_layer_norm(self, basename, root_input, skip_input, weight_name, output_0, output_3, io_dtype, shape):
         #                          root_input         skip_input
         #                              |                  |
         #                              +------------------+
@@ -1397,21 +1406,16 @@ class Model:
         #                             Add-------------> output (1)
         #                              |
         #                      SimplifiedLayerNorm----> output (0)
-        make_add_name = f"{basename}/skip_simplified_layer_norm/Add"
-        make_add_inputs = [root_input, skip_input]
-        self.make_add(make_add_name, make_add_inputs, dtype=self.io_dtype, shape=shape)
+        make_add_name = f"{basename}/Add"
+        self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
+        if not self.layernorm_attrs["last_layernorm"]:
+            self.make_value_info(output_3, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
         make_simplified_layer_norm_name = f"{basename}/skip_simplified_layer_norm"
-        self._make_simplified_layer_norm(make_simplified_layer_norm_name,  f"{make_add_name}/output_0", weight_name, shape=shape, **kwargs)
-
-        if not self.layernorm_attrs["last_layernorm"]:
-            self.make_value_info(f"{make_add_name}/output_0", self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
-            self.layernorm_attrs["output_3"] = f"{make_add_name}/output_0"      
-            # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
-            self.layernorm_attrs["root_input"] = f"{make_add_name}/output_0"
+        self._make_simplified_layer_norm(make_simplified_layer_norm_name, output_3, weight_name, output_0, io_dtype, shape=shape)
 
     # This expansion contrib-op can be updated / depricated in future.
-    def _make_skip_layer_norm(self, basename, root_input, skip_input, weight_name, bias_name, shape, **kwargs):
+    def _make_skip_layer_norm(self, basename, root_input, skip_input, weight_name, bias_name, output_0, output_3, io_dtype, shape):
         #                          root_input         skip_input
         #                              |                  |
         #                              +------------------+
@@ -1419,32 +1423,23 @@ class Model:
         #                             Add-------------> output (1)
         #                              |
         #                      LayerNormalization-----> output (0)
-        make_add_name = f"{basename}/skip_layer_norm/Add"
-        make_add_inputs = [root_input, skip_input]
-        self.make_add(make_add_name, make_add_inputs, dtype=self.io_dtype, shape=shape)
+        output_3 = f"{basename}/Add/output_0" if output_3 is None else output_3
+        make_add_name = f"{basename}/Add"
+        self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
+        if not self.layernorm_attrs["last_layernorm"]:
+            self.make_value_info(output_3, io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+
+        make_layer_norm_name = f"{basename}/LayerNormalization"
+        inputs = [output_3, weight_name, bias_name]
 
         kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
         kwargs.update({"axis": -1, "stash_type": 1})
 
-        make_layer_norm_name = f"{basename}/skip_layer_norm/LayerNormalization"
-        inputs = [f"{make_add_name}/output_0", weight_name, bias_name]
-        output = f"{make_layer_norm_name}/output_0"
-
-        if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
-            output = ["hidden_states"]
-
-        self.make_node("LayerNormalization", inputs=inputs, outputs=[output], name=make_layer_norm_name, **kwargs)
-        self.make_value_info(f"{make_layer_norm_name}/output_0", self.io_dtype, shape=shape)
-
-        self.layernorm_attrs["output_0"] = output
-        if not self.layernorm_attrs["last_layernorm"]:
-            self.make_value_info(f"{make_add_name}/output_0", self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
-            self.layernorm_attrs["output_3"] = f"{make_add_name}/output_0"        
-            # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
-            self.layernorm_attrs["root_input"] = f"{make_add_name}/output_0"
+        self.make_node("LayerNormalization", inputs=inputs, outputs=[output_0], name=make_layer_norm_name, **kwargs)
+        self.make_value_info(output_0, io_dtype, shape=shape)
 
     # This expansion contrib-op can be updated / depricated in future.
-    def _make_simplified_layer_norm(self, basename, root_input, weight_name, shape, **kwargs):
+    def _make_simplified_layer_norm(self, basename, root_input, weight_name, output_0, io_dtype, shape):
         
         #                            Cast (float32) - most calc happens in higher precision
         #                              |
@@ -1464,54 +1459,47 @@ class Model:
         #                              |  
         #                             Mul
         #                              |
-        #                            Cast_1 (float16)
+        #                            Cast_1 (io_dtype - float16)
         #                              |
         #                            Mul_1
         
-        make_cast_name = f"{basename}/simplified_layer_norm/Cast"
+        make_cast_name = f"{basename}/Cast"
         self.make_cast(make_cast_name, root_input, TensorProto.FLOAT, shape=shape)
 
-        make_pow_name = f"{basename}/simplified_layer_norm/Pow"
+        make_pow_name = f"{basename}/Pow"
         make_pow_inputs = [f"{make_cast_name}/output_0", f"/model/constants/TensorProto.FLOAT/0D/2"]
 
         self.make_node("Pow", inputs=make_pow_inputs, outputs=[f"{make_pow_name}/output_0"], name=make_pow_name, domain="")
         self.make_value_info(f"{make_pow_name}/output_0", TensorProto.FLOAT, shape=shape)
 
-        make_reducemean_name = f"{basename}/simplified_layer_norm/ReduceMean"
+        make_reducemean_name = f"{basename}/ReduceMean"
         make_reducemean_inputs = [f"{make_pow_name}/output_0"]
         self.make_reduce_mean(make_reducemean_name, make_reducemean_inputs, TensorProto.FLOAT, keepdims=True, axes=[-1], shape=shape)
 
-        make_add_name = f"{basename}/simplified_layer_norm/Add"
+        make_add_name = f"{basename}/Add"
         make_add_inputs = [f"{make_reducemean_name}/output_0", f"/model/constants/TensorProto.FLOAT/0D/{self.layernorm_attrs['epsilon']}"]
         self.make_add(make_add_name, make_add_inputs, TensorProto.FLOAT, shape=shape)
 
-        make_sqrt_name = f"{basename}/simplified_layer_norm/Sqrt"
+        make_sqrt_name = f"{basename}/Sqrt"
         make_sqrt_inputs = [f"{make_add_name}/output_0"]
         self.make_sqrt(make_sqrt_name, make_sqrt_inputs, TensorProto.FLOAT, shape=shape)
 
-        make_div_name = f"{basename}/simplified_layer_norm/Div"
+        make_div_name = f"{basename}/Div"
         make_div_inputs = [f"/model/constants/TensorProto.FLOAT/0D/1", f"{make_sqrt_name}/output_0"]
         self.make_div(make_div_name, make_div_inputs, TensorProto.FLOAT, shape=shape)
         
-        make_mul_name = f"{basename}/simplified_layer_norm/Mul"
+        make_mul_name = f"{basename}/Mul"
         make_mul_inputs = [f"{make_div_name}/output_0", f"{make_cast_name}/output_0"]
         self.make_mul(make_mul_name, make_mul_inputs, TensorProto.FLOAT, shape=shape)
 
-        make_cast_1_name = f"{basename}/simplified_layer_norm/Cast_1"
-        self.make_cast(make_cast_1_name, f"{make_mul_name}/output_0", dtype=self.io_dtype, shape=shape)
+        make_cast_1_name = f"{basename}/Cast_1"
+        self.make_cast(make_cast_1_name, f"{make_mul_name}/output_0", dtype=io_dtype, shape=shape)
 
-        make_mul_1_name = f"{basename}/simplified_layer_norm/Mul_1"
+        make_mul_1_name = f"{basename}/Mul_1"
         make_mul_1_inputs = [f"{make_cast_1_name}/output_0", weight_name]
 
-        make_mul_1_output = f"{make_mul_1_name}/output_0"
-        if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
-            make_mul_1_output = "hidden_states"
-
-        self.make_node("Mul", inputs=make_mul_1_inputs, outputs=[make_mul_1_output], name=make_mul_1_name)
-        self.make_value_info(make_mul_1_output, dtype=self.io_dtype, shape=shape)
-
-        # Update LayerNorm attributes
-        self.layernorm_attrs["output_0"] = make_mul_1_output
+        self.make_node("Mul", inputs=make_mul_1_inputs, outputs=[output_0], name=make_mul_1_name)
+        self.make_value_info(output_0, dtype=io_dtype, shape=shape)
 
 
     def make_qk_norm(self, layer_id, attention):
@@ -3909,7 +3897,7 @@ def get_args():
     )
 
     args = parser.parse_args()
-    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WEBGPU")
+    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 NvTensorRtRtx, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WEBGPU")
     return args
 
 if __name__ == '__main__':
