@@ -50,7 +50,7 @@ We have integrated [LLGuidance](https://github.com/guidance-ai/llguidance) for c
 2. Regex: If a particular regular expression is desired.
 3. Lark Grammar (Recommended): This is when you want to have an option for a regular output as well as function/tool output.
 
-To ensure that the function/tool call works correctly with the Lark Grammar, you need to modify tokenizer.json file by setting special as true for <|tool_call|> token.
+To ensure that the function/tool call works correctly with constrained decoding, you need to modify your tokenizer.json file. For each model that has its own tool calling token, the tool calling token's `special` attribute needs to be set to true. For example, Phi-4 mini uses the <|tool_call|> token so you should set the `special` attribute for <|tool_call|> as `true` inside `tokenizer.json`.
 
 To run the Python examples with function/tool calling:
 ```
