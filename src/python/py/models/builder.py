@@ -1141,8 +1141,9 @@ class Model:
     def _make_layernormlization(self, basename, skip, simple, op_type, io_dtype, inputs, outputs, **kwargs):
         root_input = inputs[0]
         skip_input = inputs[1] if skip else None
-        weight = inputs[2]
-        bias = inputs[3] if not simple else None
+        weight = inputs[2] if skip else inputs[1]
+        biasIndex = 3 if skip else 2
+        bias = inputs[biasIndex] if not simple else None
         output_0 = outputs[0]
         output_3 = outputs[3] if skip and not self.layernorm_attrs["last_layernorm"] else None
 
@@ -1407,9 +1408,9 @@ class Model:
         #                              |
         #                      SimplifiedLayerNorm----> output (0)
         make_add_name = f"{basename}/Add"
+        output_3 = f"{basename}/Add/output_0" if output_3 is None else output_3
         self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
-        if not self.layernorm_attrs["last_layernorm"]:
-            self.make_value_info(output_3, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        self.make_value_info(output_3, io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
         make_simplified_layer_norm_name = f"{basename}/skip_simplified_layer_norm"
         self._make_simplified_layer_norm(make_simplified_layer_norm_name, output_3, weight_name, output_0, io_dtype, shape=shape)
@@ -1426,8 +1427,7 @@ class Model:
         output_3 = f"{basename}/Add/output_0" if output_3 is None else output_3
         make_add_name = f"{basename}/Add"
         self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
-        if not self.layernorm_attrs["last_layernorm"]:
-            self.make_value_info(output_3, io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        self.make_value_info(output_3, io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
         make_layer_norm_name = f"{basename}/LayerNormalization"
         inputs = [output_3, weight_name, bias_name]
