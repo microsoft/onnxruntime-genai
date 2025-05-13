@@ -45,5 +45,5 @@ TEST(StableDiffusionTests, TextEmbeddings) {
   tokenizer->Encode("Capybara with his mom and dad in a beautiful stream", *sequences);
 
   OgaTensor* output{};
-  OgaCheckResult(OgaSelenaTest(&output, sequences->SequenceData(0), sequences->SequenceCount(0), MODEL_PATH "sd/text_encoder/model.onnx"));
+  OgaCheckResult(OgaSelenaTest(&output, sequences->SequenceData(0), sequences->SequenceCount(0), MODEL_PATH "sd/text_encoder/model.onnx", MODEL_PATH "sd/unet/model.onnx", MODEL_PATH "sd/vae_decoder/model.onnx"));
 }
