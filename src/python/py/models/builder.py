@@ -873,17 +873,18 @@ class Model:
         self.make_external_tensor(qweight_npy, qweight)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
-        scales_npy = quantized_op.scales.numpy(force=True).astype(self.io_dtype.numpy())
-        scales_npy = scales_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size)
-        self.make_external_tensor(scales_npy.contiguous(), scales)
+        scales_pt = quantized_op.scales.detach().cpu().to(self.to_torch_dtype[self.io_dtype])
+        scales_pt = scales_pt.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size)
+        self.make_external_tensor(scales_pt.contiguous(), scales)
 
         dequantize_inputs = [qweight, scales]
 
         if hasattr(quantized_op, "qzeros") and quantized_op.qzeros is not None:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
-            zeros_tensor = quantized_op.qzeros.detach().cpu()
-            zeros_tensor = zeros_tensor.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] // quantized_op.group_size)
-            self.make_external_tensor(zeros_tensor, zeros)
+            zeros_pt = quantized_op.qzeros.detach().cpu()
+            zeros_pt = zeros_pt.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] // quantized_op.group_size)
+            # TODO(justinchuby): Do we need to uncpack the zeros tensor?
+            self.make_external_tensor(zeros_pt, zeros)
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
@@ -1007,7 +1008,7 @@ class Model:
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
-        self.make_external_tensor(add.to(self.to_torch_dtype[self.io_dtype]).contiguous(), bias)
+        self.make_external_tensor(add.to(self.to_torch_dtype[self.io_dtype]).detach().cpu().contiguous(), bias)
 
         add_bias_inputs = [root_input, bias]
         shape = ['batch_size', 'sequence_length', add.shape[0]]
@@ -1026,7 +1027,7 @@ class Model:
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
-        self.make_external_tensor(embedding.to(self.to_torch_dtype[self.io_dtype]).contiguous(), weight)
+        self.make_external_tensor(embedding.to(self.to_torch_dtype[self.io_dtype]).detach().cpu().contiguous(), weight)
 
         basename = "/model/embed_tokens"
         gather_name = f"{basename}/Gather"
