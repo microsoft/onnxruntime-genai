@@ -331,7 +331,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParam
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* generator_params, const char* name, OgaTensor* tensor);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams*, OgaTensor* tensor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams* generator_params, OgaTensor* tensor);
+
+/**
+ * \brief Sets the guidance type and data for the Generator params
+ * \param[in] generator_params The generator params to set the guidance on
+ * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar
+ * \param[in] data The input string, which is the guidance data. Examples are present in test/test_models/grammars folder
+ * \return OgaResult containing the error message if the setting of the guidance failed
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* generator_params, const char* type, const char* data);
 
 /**
  * \brief Creates a generator from the given model and generator params.
@@ -502,11 +511,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcess
  * \param[in] tokenizer OgaTokenizer used for template processing.
  * \param[in] template_str Null-terminated string representing the chat template. Use nullptr to fall back to the default chat template from the tokenizer config.
  * \param[in] messages Null-terminated string containing the input messages to be processed.
+ * \param[in] tools Null-terminated string containing the chat function calls if any. Use nullptr if none.
  * \param[in] add_generation_prompt Indicates whether to add a generation prompt to the output.
  * \param[out] out_string Pointer to where the output will be stored. The returned pointer must be freed with OgaDestroyString
  * \return OgaResult* containing the error message if the function fails
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer*, const char* template_str, const char* messages, bool add_generation_prompt, const char** out_string);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer*, const char* template_str, const char* messages, const char* tools, bool add_generation_prompt, const char** out_string);
 
 /** OgaTokenizerStream is to decoded token strings incrementally, one token at a time.
  */

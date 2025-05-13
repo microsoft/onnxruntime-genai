@@ -205,6 +205,10 @@ struct PyGeneratorParams {
     std::cerr << "TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release" << std::endl;
   }
 
+  void SetGuidance(const std::string& type, const std::string& data) {
+    params_->SetGuidance(type.c_str(), data.c_str());
+  }
+
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
 
@@ -303,7 +307,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("set_inputs", &PyGeneratorParams::SetInputs)
       .def("set_model_input", &PyGeneratorParams::SetModelInput)
       .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
-      .def("set_search_options", &PyGeneratorParams::SetSearchOptions);  // See config.h 'struct Search' for the options
+      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
+      .def("set_guidance", &PyGeneratorParams::SetGuidance);
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
@@ -353,7 +358,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def("to_token_id", &OgaTokenizer::ToTokenId)
       .def("decode", [](const OgaTokenizer& t, pybind11::array_t<int32_t> tokens) -> std::string { return t.Decode(ToSpan(tokens)).p_; })
-      .def("apply_chat_template", [](const OgaTokenizer& t, const char* template_str, const char* messages, bool add_generation_prompt) -> std::string { return t.ApplyChatTemplate(template_str, messages, add_generation_prompt).p_; }, pybind11::arg("template_str") = nullptr, pybind11::arg("messages"), pybind11::arg("add_generation_prompt"))
+      .def("apply_chat_template", [](const OgaTokenizer& t, const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) -> std::string { return t.ApplyChatTemplate(template_str, messages, tools, add_generation_prompt).p_; }, pybind11::arg("template_str") = nullptr, pybind11::arg("messages"), pybind11::arg("tools") = nullptr, pybind11::arg("add_generation_prompt"))
       .def("encode_batch", [](const OgaTokenizer& t, std::vector<std::string> strings) {
         std::vector<const char*> c_strings;
         for (const auto& s : strings)

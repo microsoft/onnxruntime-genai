@@ -466,19 +466,14 @@ def convert_gather_to_use_lm_head_weights(model_path, output_path):
     model_name = "model.onnx"
     model = onnx.load(model_path + model_name, load_external_data=False)
     load_external_data_for_model(model, model_path)
-
-    if model.opset_import[0].version < 18:
-        print("Model is not in opset 18 or higher. DequantizeLinear block_size is not supported. Skipping weight tying optimization")
-        return
      
     # If embedding weight tying is enabled, replace the embedding Gather
-    convert_gather_to_use_lm_head_weights_helper_2(model.graph)
-    converted_model = version_converter.convert_version(model, 21) 
+    convert_gather_to_use_lm_head_weights_helper(model.graph) 
 
     # Save the modified model
     print(f"Saving model to {output_path}...")
     data_file = os.path.basename(output_path) + model_name + ".data"
-    onnx.save(converted_model, output_path + model_name, save_as_external_data=True, location=data_file)
+    onnx.save(model, output_path + model_name, save_as_external_data=True, location=data_file)
 
     print(f"Saved to {output_path} with external data in {data_file}")
 

@@ -80,12 +80,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
-        public string ApplyChatTemplate(string template_str, string messages, bool add_generation_prompt)
+        public string ApplyChatTemplate(string template_str, string messages, string tools, bool add_generation_prompt)
         {
             IntPtr outStr = IntPtr.Zero;
             try
             {
-                Result.VerifySuccess(NativeMethods.OgaTokenizerApplyChatTemplate(_tokenizerHandle, StringUtils.ToUtf8(template_str), StringUtils.ToUtf8(messages), add_generation_prompt, out outStr));
+                Result.VerifySuccess(NativeMethods.OgaTokenizerApplyChatTemplate(_tokenizerHandle, StringUtils.ToUtf8(template_str), StringUtils.ToUtf8(messages), StringUtils.ToUtf8(tools), add_generation_prompt, out outStr));
                 return StringUtils.FromUtf8(outStr);
             }
             finally

@@ -333,7 +333,6 @@ class Model:
     def make_attention_init(self):
         valid_gqa_configurations = [
             ("cpu", TensorProto.FLOAT),
-            ("cpu", TensorProto.BFLOAT16),
             ("cuda", TensorProto.FLOAT16),
             ("cuda", TensorProto.BFLOAT16),
             ("rocm", TensorProto.FLOAT16),
@@ -447,8 +446,8 @@ class Model:
 
         # Create ONNX model
         model = helper.make_model(
-            opset_imports=[self.clear_field(helper.make_operatorsetid('', 21), 'domain'), helper.make_operatorsetid('com.microsoft', 1)],
-            ir_version=10,
+            opset_imports=[self.clear_field(helper.make_operatorsetid('', 21 if self.quant_attrs["use_qdq"] else 14), 'domain'), helper.make_operatorsetid('com.microsoft', 1)],
+            ir_version=7,
             producer_name="onnxruntime-genai",
             producer_version="0.0.0",
             graph=self.make_graph(
@@ -550,12 +549,12 @@ class Model:
         repeated_proto.sort(key=lambda x: order.index(getattr(x, key_name)))
 
     def make_tensor_proto_from_tensor(self, tensor, name):
-        if not tensor.is_contiguous:
-            # Make tensor contiguous
-            tensor = tensor.contiguous()
-        if tensor.get_device != -1:
+        if tensor.get_device() != -1:
             # Tensor must be on CPU (device id = -1)
             tensor = tensor.cpu()
+        if not tensor.is_contiguous():
+            # Make tensor contiguous
+            tensor = tensor.contiguous()
 
         raw_data = bytes(
             (ctypes.c_ubyte * tensor.element_size() * tensor.numel()).from_address(
@@ -874,22 +873,22 @@ class Model:
     def make_dequantize_linear(self, dequantize_name, quantized_op):
         # Input weights are quantized, save quantized MatMul weights for onnx model
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
-        qweight_npy = quantized_op.qweight.detach().cpu()
-        qweight_npy = qweight_npy.reshape(*qweight_npy.shape[:-2], qweight_npy.shape[-2] * qweight_npy.shape[-1])
-        self.make_external_tensor(qweight_npy.contiguous(), qweight, True)
+        qweight_pt = quantized_op.qweight.detach().cpu()
+        qweight_pt = qweight_pt.reshape(*qweight_pt.shape[:-2], qweight_pt.shape[-2] * qweight_pt.shape[-1])
+        self.make_external_tensor(qweight_pt.contiguous(), qweight, unpack_int4=True)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
-        scales_npy = quantized_op.scales.detach().cpu().to(self.to_torch_dtype[self.io_dtype])
-        scales_npy = scales_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size)
-        self.make_external_tensor(scales_npy.contiguous(), scales)
+        scales_pt = quantized_op.scales.detach().cpu().to(self.to_torch_dtype[self.io_dtype])
+        scales_pt = scales_pt.reshape(*qweight_pt.shape[:-1], qweight_pt.shape[-1] * 2 // quantized_op.group_size)
+        self.make_external_tensor(scales_pt.contiguous(), scales)
 
         dequantize_inputs = [qweight, scales]
 
         if hasattr(quantized_op, "qzeros") and quantized_op.qzeros is not None:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
-            zeros_npy = quantized_op.qzeros.detach().cpu()
-            zeros_npy = zeros_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] // quantized_op.group_size)
-            self.make_external_tensor(zeros_npy.contiguous(), zeros, True)
+            zeros_pt = quantized_op.qzeros.detach().cpu()
+            zeros_pt = zeros_pt.reshape(*qweight_pt.shape[:-1], qweight_pt.shape[-1] // quantized_op.group_size)
+            self.make_external_tensor(zeros_pt.contiguous(), zeros, unpack_int4=True)
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
@@ -1013,7 +1012,7 @@ class Model:
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
-        self.make_external_tensor(add.to(self.to_torch_dtype[self.io_dtype]).contiguous(), bias)
+        self.make_external_tensor(add.to(self.to_torch_dtype[self.io_dtype]).detach().cpu().contiguous(), bias)
 
         add_bias_inputs = [root_input, bias]
         shape = ['batch_size', 'sequence_length', add.shape[0]]
@@ -1032,7 +1031,7 @@ class Model:
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
-        self.make_external_tensor(embedding.to(self.to_torch_dtype[self.io_dtype]).contiguous(), weight)
+        self.make_external_tensor(embedding.to(self.to_torch_dtype[self.io_dtype]).detach().cpu().contiguous(), weight)
 
         basename = "/model/embed_tokens"
         gather_name = f"{basename}/Gather"
@@ -1068,7 +1067,7 @@ class Model:
 
         # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor(layernorm.weight.detach().cpu().to(new_torch_dtype).contiguous() + self.layernorm_attrs["add_offset"], weight)
+        self.make_external_tensor((layernorm.weight.detach().cpu().to(new_torch_dtype) + self.layernorm_attrs["add_offset"]).contiguous(), weight)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
             self.make_external_tensor(layernorm.bias.detach().cpu().to(new_torch_dtype).contiguous(), bias)
@@ -3716,7 +3715,7 @@ def get_args():
     )
 
     args = parser.parse_args()
-    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CPU, BF16 CUDA, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WEBGPU")
+    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WEBGPU")
     return args
 
 if __name__ == '__main__':
