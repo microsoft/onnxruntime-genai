@@ -53,7 +53,7 @@ struct BeamSearchScorer {
   int num_beams_;
   int max_length_;
   int pad_token_id_;
-  int eos_token_id_;
+  std::vector<int> eos_token_id_;
   bool early_stopping_;
   int not_done_count_;  // When zero, every batch entry is done (starts at batch_size_)
 

@@ -47,21 +47,62 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
-  displayName: 'Configure CMake C API with CUDA'
-  condition: eq(variables['ep'], 'cuda')
+    $exePath = "$env:TEMP\rustup-init.exe"
+    (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+    & $exePath -y --default-toolchain=1.86.0
+    $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+  displayName: 'Install Rust Toolchain'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --preset windows_$(arch)_$(ep)_$(build_config)
-  displayName: 'Configure CMake C API without CUDA'
-  condition: ne(variables['ep'], 'cuda')
+    $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-woa64.exe"
+    $installerPath = "$(Agent.TempDirectory)\LLVM-18.1.8-woa64.exe"
+    Write-Host "Downloading LLVM..."
+    Invoke-WebRequest -Uri $llvmUrl -OutFile $installerPath
+    Write-Host "Installing LLVM silently..."
+    Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
+    # Add LLVM to PATH
+    $llvmBin = "C:\Program Files\LLVM\bin"
+    if (!(Test-Path $llvmBin)) {
+      Write-Error "LLVM install failed or path not found: $llvmBin"
+      exit 1
+    }
+    $env:PATH = "$llvmBin;$env:PATH"
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+    # Confirm clang installed
+    clang --version
+    python -m pip install wheel
+  displayName: 'Install LLVM'
+  condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
-  displayName: 'Build C API'
+    $ep = '${{ parameters.ep }}'
+    $target = '${{ parameters.target }}'
+    $config = '${{ parameters.build_config }}'
+    $cuda_home = if ($ep -eq 'cuda') { '--cuda_home=$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' } else { '' }
+    $use_dml = if ($ep -eq 'directml') { '--use_dml' } else { '' }
+    $package_c = if ($target -eq 'onnxruntime-genai') { '--package' } else { '' }
+    if ($target -ne 'python') {
+      $skip_wheel = '--skip_wheel'
+    } else {
+      $skip_wheel = ''
+      python -m pip install wheel
+    }
+    if ($config -eq 'release') {
+      $build_config = 'Release'
+    } elseif ($config -eq 'relwithdebinfo') {
+      $build_config = 'RelWithDebInfo'
+    } else {
+      $build_config = 'Debug'
+    }
+    python -m pip install requests
+    python build.py --use_guidance --parallel $cuda_home $use_dml $package_c $skip_wheel --config=$build_config --build_dir='$(Build.Repository.LocalPath)\$(buildDir)'
+    Rename-Item -Path '$(Build.Repository.LocalPath)\$(buildDir)\Release' -NewName '$(os)-$(arch)' -Force
+  displayName: 'Build C API and package / wheel'
   workingDirectory: '$(Build.Repository.LocalPath)'
+
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - template: compliant/win-esrp-dll-step.yml
@@ -75,15 +116,6 @@ steps:
     inputs:
       AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*genai.dll'
     continueOnError: true
-
-  - powershell: |
-      python -m pip install wheel
-    displayName: 'Install wheel'
-
-  - powershell: |
-      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --target package
-    displayName: 'Package C/C++ API'
-    workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
@@ -104,14 +136,6 @@ steps:
       DisplayName: 'ESRP - PYD Sign'
       DoEsrp: true
       Pattern: '*.pyd'
-
-  - powershell: |
-      python -m pip install wheel
-    displayName: 'Install wheel'
-
-  - powershell: |
-      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --PyPackageBuild
-    displayName: 'Build Python Wheel'
 
   - powershell: |
       Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse

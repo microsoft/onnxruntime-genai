@@ -67,6 +67,7 @@ class Model:
             "cpu": {},
             "cuda": {
                 "enable_cuda_graph": "1" if extra_options.get("enable_cuda_graph", False) else "0",              # "1" if the model is able to enable cuda graph, "0" otherwise
+                "enable_skip_layer_norm_strict_mode": "1"
             },
             "rocm": {
                 "tunable_op_enable": "1",
@@ -113,12 +114,7 @@ class Model:
             "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
             "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
-        self.exclude_lm_head = extra_options.get("exclude_lm_head", False)
-        self.include_hidden_states = extra_options.get("include_hidden_states", False)
-        if self.exclude_lm_head:
-            self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
-        elif self.include_hidden_states:
-            self.output_names = ["hidden_states"] + self.output_names
+        self.make_outputs_init()
 
         # Store names of nodes already created
         self.node_names = set()
@@ -183,6 +179,13 @@ class Model:
             "output_3": "",             # Output 3 for SkipLayerNorm
             "add_offset": 0,            # Offset value for LayerNorm weight
             "epsilon": epsilon,         # Epsilon value to avoid `sqrt(0)` in LayerNorm
+            "cast": {                   # Casting LayerNorm-specific variables
+                "use_fp32": False,      # Use float32 precision to compute LayerNorm
+                "root_input": False,    # Cast root_input
+                "skip_input": False,    # Cast skip_input
+                "output_0": False,      # Cast output_0
+                "output_3": False,      # Cast output_3
+            }
         }
 
         # MatMul-specific variables
@@ -318,10 +321,19 @@ class Model:
             self.quant_attrs["config"] = config.quantization_config
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
 
+
+    def make_outputs_init(self):
+        self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
+        self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
+
+        if self.exclude_lm_head:
+            self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
+        elif self.include_hidden_states:
+            self.output_names = ["hidden_states"] + self.output_names
+
     def make_attention_init(self):
         valid_gqa_configurations = [
             ("cpu", TensorProto.FLOAT),
-            ("cpu", TensorProto.BFLOAT16),
             ("cuda", TensorProto.FLOAT16),
             ("cuda", TensorProto.BFLOAT16),
             ("rocm", TensorProto.FLOAT16),
@@ -539,12 +551,12 @@ class Model:
         repeated_proto.sort(key=lambda x: order.index(getattr(x, key_name)))
 
     def make_tensor_proto_from_tensor(self, tensor, name):
-        if not tensor.is_contiguous:
-            # Make tensor contiguous
-            tensor = tensor.contiguous()
-        if tensor.get_device != -1:
+        if tensor.get_device() != -1:
             # Tensor must be on CPU (device id = -1)
             tensor = tensor.cpu()
+        if not tensor.is_contiguous():
+            # Make tensor contiguous
+            tensor = tensor.contiguous()
 
         raw_data = bytes(
             (ctypes.c_ubyte * tensor.element_size() * tensor.numel()).from_address(
@@ -880,22 +892,22 @@ class Model:
     def make_dequantize_linear(self, dequantize_name, quantized_op):
         # Input weights are quantized, save quantized MatMul weights for onnx model
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
-        qweight_npy = quantized_op.qweight.detach().cpu()
-        qweight_npy = qweight_npy.reshape(*qweight_npy.shape[:-2], qweight_npy.shape[-2] * qweight_npy.shape[-1])
-        self.make_external_tensor(qweight_npy.contiguous(), qweight, True)
+        qweight_pt = quantized_op.qweight.detach().cpu()
+        qweight_pt = qweight_pt.reshape(*qweight_pt.shape[:-2], qweight_pt.shape[-2] * qweight_pt.shape[-1])
+        self.make_external_tensor(qweight_pt.contiguous(), qweight, unpack_int4=True)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
-        scales_npy = quantized_op.scales.detach().cpu().to(self.to_torch_dtype[self.io_dtype])
-        scales_npy = scales_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size)
-        self.make_external_tensor(scales_npy.contiguous(), scales)
+        scales_pt = quantized_op.scales.detach().cpu().to(self.to_torch_dtype[self.io_dtype])
+        scales_pt = scales_pt.reshape(*qweight_pt.shape[:-1], qweight_pt.shape[-1] * 2 // quantized_op.group_size)
+        self.make_external_tensor(scales_pt.contiguous(), scales)
 
         dequantize_inputs = [qweight, scales]
 
         if hasattr(quantized_op, "qzeros") and quantized_op.qzeros is not None:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
-            zeros_npy = quantized_op.qzeros.detach().cpu()
-            zeros_npy = zeros_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] // quantized_op.group_size)
-            self.make_external_tensor(zeros_npy.contiguous(), zeros, True)
+            zeros_pt = quantized_op.qzeros.detach().cpu()
+            zeros_pt = zeros_pt.reshape(*qweight_pt.shape[:-1], qweight_pt.shape[-1] // quantized_op.group_size)
+            self.make_external_tensor(zeros_pt.contiguous(), zeros, unpack_int4=True)
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
@@ -1019,7 +1031,7 @@ class Model:
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
-        self.make_external_tensor(add.to(self.to_torch_dtype[self.io_dtype]).contiguous(), bias)
+        self.make_external_tensor(add.to(self.to_torch_dtype[self.io_dtype]).detach().cpu().contiguous(), bias)
 
         add_bias_inputs = [root_input, bias]
         shape = ['batch_size', 'sequence_length', add.shape[0]]
@@ -1038,7 +1050,7 @@ class Model:
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
-        self.make_external_tensor(embedding.to(self.to_torch_dtype[self.io_dtype]).contiguous(), weight)
+        self.make_external_tensor(embedding.to(self.to_torch_dtype[self.io_dtype]).detach().cpu().contiguous(), weight)
 
         basename = "/model/embed_tokens"
         gather_name = f"{basename}/Gather"
@@ -1065,11 +1077,19 @@ class Model:
         root_input = self.layernorm_attrs["root_input"]
         skip_input = self.layernorm_attrs["skip_input"]
 
+        # Get precision types to use
+        old_torch_dtype = self.to_torch_dtype[self.io_dtype]
+        old_io_dtype = self.io_dtype
+        new_torch_dtype = torch.float32 if self.layernorm_attrs["cast"]["use_fp32"] else self.to_torch_dtype[self.io_dtype]
+        new_io_dtype = self.to_onnx_dtype[new_torch_dtype]
+        cast = old_torch_dtype != new_torch_dtype
+
+        # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor(layernorm.weight.detach().cpu().to(self.to_torch_dtype[self.io_dtype]).contiguous() + self.layernorm_attrs["add_offset"], weight)
+        self.make_external_tensor((layernorm.weight.detach().cpu().to(new_torch_dtype) + self.layernorm_attrs["add_offset"]).contiguous(), weight)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
-            self.make_external_tensor(layernorm.bias.detach().cpu().to(self.to_torch_dtype[self.io_dtype]).contiguous(), bias)
+            self.make_external_tensor(layernorm.bias.detach().cpu().to(new_torch_dtype).contiguous(), bias)
 
         name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
         # NvTensorRtRtx EP doesn't support Skip/SimplifiedLayerNormalization and SkipLayerNormalization, so we fallback to primitive ops
@@ -1079,25 +1099,33 @@ class Model:
             self.make_layernormlization(name, skip, simple, root_input, skip_input, weight, bias)
 
     def make_layernormlization(self, basename, skip, simple, root_input, skip_input, weight, bias):
+        # Create input names for op
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
             inputs.append(bias)
 
+        name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
+        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
+        kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
+        if not skip:
+            kwargs.update({"axis": -1, "stash_type": 1})
+
+        # Create output names for op
         output_0 = f"{basename}/output_0"
         output_3 = f"{basename}/output_3"
         if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
             output_0 = "hidden_states"
         outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
 
-        kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
-        if not skip:
-            kwargs.update({"axis": -1, "stash_type": 1})
+        # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
+        if cast:
+            inputs, outputs = self.make_layernorm_casts(basename, inputs, outputs, old_io_dtype, new_io_dtype)
 
-        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
+        # Make op and its shape
         self.make_node(op_type, inputs=inputs, outputs=outputs, name=basename, domain=("com.microsoft" if skip else None), **kwargs)
-        self.make_value_info(output_0, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        self.make_value_info(outputs[0], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.make_value_info(output_3, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self.make_value_info(outputs[3], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
         # Update LayerNorm attributes
         self.layernorm_attrs["output_0"] = output_0
@@ -1117,6 +1145,64 @@ class Model:
             self._make_skip_layer_norm(basename, root_input, skip_input, weight, bias, shape=['batch_size', 'sequence_length', self.hidden_size])
         else:
             raise ValueError(f"Invalid op_type: {op_type}")
+
+    def make_layernorm_casts(self, name, inputs, outputs, old_dtype, new_dtype):
+        # Name = name of original LayerNorm op as if the cast nodes did not exist
+        # Inputs = inputs into the original LayerNorm op as if the cast nodes did not exist
+        # Outputs = outputs from the original LayerNorm op as if the cast nodes did not exist
+        def get_shape_of_value_info(target_name):
+            for value_info in self.value_infos:
+                if value_info.name == target_name:
+                    shape = []
+                    for dim in value_info.type.tensor_type.shape.dim:
+                        if dim.HasField("dim_value"):
+                            shape.append(dim.dim_value)
+                        elif dim.HasField("dim_param"):
+                            shape.append(dim.dim_param)
+                        else:
+                            shape.append(None)
+                    return shape
+
+        # Save original inputs and outputs
+        skip = len(inputs) > 2  # [root_input, skip_input, weight] vs. [root_input, weight]
+        root_input = inputs[0]
+        skip_input = inputs[1] if skip else None
+        output_0 = outputs[0]
+        output_3 = outputs[3] if skip and not self.layernorm_attrs["last_layernorm"] else None
+
+        if self.layernorm_attrs["cast"]["root_input"]:
+            # Cast root_input
+            root_input_cast_name = f"{name}/root_input/Cast"
+            root_input_cast_output = f"{root_input_cast_name}/output_0"
+            self.make_node("Cast", inputs=[root_input], outputs=[root_input_cast_output], name=root_input_cast_name, to=new_dtype)
+            self.make_value_info(root_input_cast_output, new_dtype, shape=get_shape_of_value_info(root_input))
+            inputs[0] = root_input_cast_output
+
+        if skip and self.layernorm_attrs["cast"]["skip_input"]:
+            # Cast skip_input
+            skip_input_cast_name = f"{name}/skip_input/Cast"
+            skip_input_cast_output = f"{skip_input_cast_name}/output_0"
+            self.make_node("Cast", inputs=[skip_input], outputs=[skip_input_cast_output], name=skip_input_cast_name, to=new_dtype)
+            self.make_value_info(skip_input_cast_output, new_dtype, shape=get_shape_of_value_info(skip_input))
+            inputs[1] = skip_input_cast_output
+
+        if self.layernorm_attrs["cast"]["output_0"]:
+            # Cast output_0
+            output_0_cast_name = f"{name}/output_0/Cast"
+            output_0_cast_output = f"{output_0_cast_name}/output_0"
+            self.make_node("Cast", inputs=[output_0_cast_output], outputs=[output_0], name=output_0_cast_name, to=old_dtype)
+            self.make_value_info(output_0, old_dtype, shape=get_shape_of_value_info(root_input))
+            outputs[0] = output_0_cast_output
+
+        if skip and not self.layernorm_attrs["last_layernorm"] and self.layernorm_attrs["cast"]["output_3"]:
+            # Cast output_3
+            output_3_cast_name = f"{name}/output_3/Cast"
+            output_3_cast_output = f"{output_3_cast_name}/output_3"
+            self.make_node("Cast", inputs=[output_3_cast_output], outputs=[output_3], name=output_3_cast_name, to=old_dtype)
+            self.make_value_info(output_3, old_dtype, shape=get_shape_of_value_info(root_input))
+            outputs[3] = output_3_cast_output
+
+        return inputs, outputs
 
     def make_mscale_su(self, mscale):
         if mscale <= 1.0:
@@ -1439,8 +1525,13 @@ class Model:
         #          |
         #       Reshape (BxSxD)
 
-        # Save kwargs shared by LayerNorm ops
+        # Save kwargs shared by LayerNorm ops and precision types to use
         layernorm_kwargs = {"epsilon": self.layernorm_attrs["epsilon"], "axis": -1, "stash_type": 1}
+        old_torch_dtype = self.to_torch_dtype[self.io_dtype]
+        old_io_dtype = self.io_dtype
+        new_torch_dtype = torch.float32 if self.layernorm_attrs["cast"]["use_fp32"] else self.to_torch_dtype[self.io_dtype]
+        new_io_dtype = self.to_onnx_dtype[new_torch_dtype]
+        cast = old_torch_dtype != new_torch_dtype
 
         # Reshape Q MatMul from BxSxD to Bx(SxN)xH before LayerNorm
         q_reshape_1_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_1"
@@ -1452,9 +1543,16 @@ class Model:
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
         q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
         q_layernorm_output = f"{q_layernorm_name}/output_0"
-        self.make_external_tensor((attention.q_norm.weight.detach().cpu().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), q_weight_name)
-        self.make_node("SimplifiedLayerNormalization", inputs=[q_reshape_1_output, q_weight_name], outputs=[q_layernorm_output], name=q_layernorm_name, **layernorm_kwargs)
-        self.make_value_info(q_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
+        self.make_external_tensor((attention.q_norm.weight.detach().cpu().to(new_torch_dtype) + self.layernorm_attrs["add_offset"]).contiguous(), q_weight_name)
+
+        # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
+        q_layernorm_inputs = [q_reshape_1_output, q_weight_name]
+        q_layernorm_outputs = [q_layernorm_output]
+        if cast:
+            q_layernorm_inputs, q_layernorm_outputs = self.make_layernorm_casts(q_layernorm_name, q_layernorm_inputs, q_layernorm_outputs, old_io_dtype, new_io_dtype)
+
+        self.make_node("SimplifiedLayerNormalization", inputs=q_layernorm_inputs, outputs=q_layernorm_outputs, name=q_layernorm_name, **layernorm_kwargs)
+        self.make_value_info(q_layernorm_outputs[0], dtype=new_io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
 
         # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD
         q_reshape_2_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
@@ -1471,9 +1569,16 @@ class Model:
         k_layernorm_name = f"/model/layers.{layer_id}/attn/k_norm/SimplifiedLayerNormalization"
         k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
         k_layernorm_output = f"{k_layernorm_name}/output_0"
-        self.make_external_tensor((attention.k_norm.weight.detach().cpu().to(self.to_torch_dtype[self.io_dtype]) + self.layernorm_attrs["add_offset"]).contiguous(), k_weight_name)
-        self.make_node("SimplifiedLayerNormalization", inputs=[k_reshape_1_output, k_weight_name], outputs=[k_layernorm_output], name=k_layernorm_name, **layernorm_kwargs)
-        self.make_value_info(k_layernorm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
+        self.make_external_tensor((attention.k_norm.weight.detach().cpu().to(new_torch_dtype) + self.layernorm_attrs["add_offset"]).contiguous(), k_weight_name)
+
+        # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
+        k_layernorm_inputs = [k_reshape_1_output, k_weight_name]
+        k_layernorm_outputs = [k_layernorm_output]
+        if cast:
+            k_layernorm_inputs, k_layernorm_outputs = self.make_layernorm_casts(k_layernorm_name, k_layernorm_inputs, k_layernorm_outputs, old_io_dtype, new_io_dtype)
+
+        self.make_node("SimplifiedLayerNormalization", inputs=k_layernorm_inputs, outputs=k_layernorm_outputs, name=k_layernorm_name, **layernorm_kwargs)
+        self.make_value_info(k_layernorm_outputs[0], dtype=new_io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
         # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD
         k_reshape_2_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_2"
@@ -2326,21 +2431,26 @@ class Model:
         scale_exists = self.lm_head_attrs["scale"] != 1
         mask_exists = self.lm_head_attrs["mask"] is not None
         softcap_exists = self.lm_head_attrs["softcap"] != 0.0
+        cast_exists = self.io_dtype != self.output_types["logits"]
+
+        # List order matters here. It should match the order of the below if condition checks.
+        # Add new checks to the end of the list and after the below if condition checks.
+        exists_checks = [bias_exists, scale_exists, mask_exists, softcap_exists, cast_exists]
 
         matmul_basename = "/lm_head/MatMul"
         root_input = self.layernorm_attrs["output_0"]
-        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not(bias_exists or scale_exists or mask_exists or softcap_exists))
+        matmul_name = self.make_matmul(lm_head, matmul_basename, root_input, logits=not any(exists_checks))
         lm_name = matmul_name
 
         if bias_exists:
             add_name = "/lm_head/Add"
-            self.make_add_bias(lm_head.bias.detach().cpu(), add_name, root_input=f"{lm_name}/output_0", logits=not(scale_exists or mask_exists or softcap_exists))
+            self.make_add_bias(lm_head.bias.detach().cpu(), add_name, root_input=f"{lm_name}/output_0", logits=not any(exists_checks[1:]))
             lm_name = add_name
 
         if scale_exists:
             mul_name = "/lm_head/Mul"
             mul_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
-            mul_output = "logits" if not(mask_exists or softcap_exists) else f"{mul_name}/output_0"
+            mul_output = "logits" if not any(exists_checks[2:]) else f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
             self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
             lm_name = mul_name
@@ -2352,7 +2462,7 @@ class Model:
 
             where_name = "/lm_head/Where"
             where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{torch.finfo(self.to_torch_dtype[self.io_dtype]).min}", f"{lm_name}/output_0"]
-            where_output = "logits" if not softcap_exists else f"{where_name}/output_0"
+            where_output = "logits" if not any(exists_checks[3:]) else f"{where_name}/output_0"
             self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
             self.make_value_info(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
             lm_name = where_name
@@ -2368,10 +2478,17 @@ class Model:
 
             mul_name = "/lm_head/softcap/Mul"
             mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['softcap']}"]
-            mul_output = "logits"
+            mul_output = "logits" if not any(exists_checks[4:]) else f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
             self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
-            lm_head = mul_name
+            lm_name = mul_name
+
+        if cast_exists:
+            # Add final cast from io_dtype to logits_dtype
+            cast_name = "/lm_head/Cast"
+            cast_output = "logits"
+            self.make_node('Cast', inputs=[f"{lm_name}/output_0"], outputs=[cast_output], name=cast_name, to=self.output_types['logits'])
+            self.make_value_info(cast_output, self.output_types['logits'], shape=['batch_size', 'sequence_length', self.vocab_size])
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
@@ -2402,6 +2519,7 @@ class Model:
                 from onnxruntime_genai.models.gguf_model import GGUFModel
             model = GGUFModel.from_pretrained(self.model_type, input_path, self.head_size, self.hidden_size, self.intermediate_size, self.num_attn_heads, self.num_kv_heads, self.vocab_size)
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
+
         elif self.quant_type is not None:
             # Load quantized PyTorch model
             try:
@@ -2411,6 +2529,7 @@ class Model:
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
             model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs, q_size, kv_size, self.intermediate_size, self.num_layers)
+
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
@@ -2423,7 +2542,7 @@ class Model:
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
         for module in model.modules():
-            if isinstance(module, torch.nn.Embedding) or (hasattr(model, "embedding") and module == model.embedding):
+            if (isinstance(module, torch.nn.Embedding) and module.weight.shape[0] == self.vocab_size) or (hasattr(model, "embedding") and module == model.embedding):
                 # Checks (Hugging Face logic) or (GGUF logic)
                 if not self.exclude_embeds:
                     # Embedding layer
@@ -2455,7 +2574,15 @@ class Model:
         del model
 
     def has_final_norm(self, module, orig_model):
-        if hasattr(orig_model, "base_model") and hasattr(orig_model.base_model, "model"):
+        # Find where the language model is stored to check attributes. Some classes
+        # store the language model in a different attribute than `model.model`.
+        if hasattr(orig_model, "language_model"):
+            # Model is multimodal
+            # Note: This case is checked first because the `language_model` attribute and the `base_model` attribute
+            # exist for both multimodal models and PEFT models. However they represent different classes and their attributes
+            # differ.
+            model = orig_model.language_model
+        elif hasattr(orig_model, "base_model") and hasattr(orig_model.base_model, "model"):
             # Model is from PEFT
             model = orig_model.base_model.model
         else:
@@ -2465,12 +2592,11 @@ class Model:
         hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
         hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
         hf_transformer_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
-        hf_multimodal_final_layernorm = hasattr(model, "language_model") and hasattr(model.language_model, "model") and hasattr(model.language_model.model, "norm") and module == model.language_model.model.norm
 
         # GGUF names
         gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
 
-        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm, hf_multimodal_final_layernorm]
+        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm]
         gguf_names = [gguf_final_norm]
         return any(hf_names + gguf_names)
 
@@ -2982,33 +3108,72 @@ class GemmaModel(MistralModel):
 class Gemma2Model(GemmaModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.layernorm_attrs["cast"]["use_fp32"] = True
+        self.layernorm_attrs["cast"]["root_input"] = True
+        self.layernorm_attrs["cast"]["skip_input"] = False
+        self.layernorm_attrs["cast"]["output_0"] = True
+        self.layernorm_attrs["cast"]["output_3"] = False
         self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
         self.is_local = lambda layer_id: layer_id % 2 == 1
+
+    def make_outputs_init(self):
+        # Always use float32 logits to improve accuracy
+        self.output_types["logits"] = TensorProto.FLOAT
+        super().make_outputs_init()
+
+    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
+        if "final_norm" in location:
+            # Set cast for final LayerNorm since it is a special case and not covered in `make_layer`
+            self.layernorm_attrs["cast"]["root_input"] = False
+        super().make_layernorm(layer_id, layernorm, skip, simple, location)
 
     def make_layer(self, layer_id, layer):
         # Gemma2 decoder layer is typically defined as:
         # input_layernorm --> attention --> post_attention_layernorm --> pre_ffn_layernorm --> MLP --> post_ffn_layernorm
+
+        # Adjust LayerNorm attributes because of extra LayerNorms inserted
+        # 1. Only cast root_input if the first layer of LayerNorms are being created
+        original_cast_root_input = self.layernorm_attrs["cast"]["root_input"]
+        self.layernorm_attrs["cast"]["root_input"] = self.layernorm_attrs["first_layernorm"]
         self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
+        self.layernorm_attrs["cast"]["root_input"] = original_cast_root_input
+
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
 
-        # Temporarily set root_input for LayerNorm to skip_input for post_attention_layernorm
-        # Set skip_input to output of post_attention_layernorm
+        # Adjust LayerNorm attributes for extra LayerNorm to insert
+        # 1. Temporarily set root_input for LayerNorm to skip_input for post_attention_layernorm
+        # 2. Set skip_input to output of post_attention_layernorm
+        # 3. Do not cast outputs from post_attention_layernorm
         original_root_input = self.layernorm_attrs["root_input"]
+        original_cast_output_0 = self.layernorm_attrs["cast"]["output_0"]
         self.layernorm_attrs["root_input"] = self.layernorm_attrs["skip_input"]
+        self.layernorm_attrs["cast"]["output_0"] = False
         self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="post_attention")
         self.layernorm_attrs["root_input"] = original_root_input
         self.layernorm_attrs["skip_input"] = self.layernorm_attrs["output_0"]
+        self.layernorm_attrs["cast"]["output_0"] = original_cast_output_0
 
+        # Adjust LayerNorm attributes because of extra LayerNorms inserted
+        # 1. Only cast root_input if the first layer of LayerNorms are being created
+        original_cast_root_input = self.layernorm_attrs["cast"]["root_input"]
+        self.layernorm_attrs["cast"]["root_input"] = self.layernorm_attrs["first_layernorm"]
         self.make_layernorm(layer_id, layer.pre_feedforward_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="pre_feedforward")
+        self.layernorm_attrs["cast"]["root_input"] = original_cast_root_input
+
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
-        # Temporarily set root_input for LayerNorm to skip_input for post_feedforward_layernorm
-        # Set skip_input to output of post_ffn_layernorm
+        # Adjust LayerNorm attributes for extra LayerNorm to insert
+        # 1. Temporarily set root_input for LayerNorm to skip_input for post_feedforward_layernorm
+        # 2. Set skip_input to output of post_feedforward_layernorm
+        # 3. Do not cast outputs from post_feedforward_layernorm
         original_root_input = self.layernorm_attrs["root_input"]
+        original_cast_output_0 = self.layernorm_attrs["cast"]["output_0"]
         self.layernorm_attrs["root_input"] = self.layernorm_attrs["skip_input"]
+        self.layernorm_attrs["cast"]["output_0"] = False
         self.make_layernorm(layer_id, layer.post_feedforward_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="post_feedforward")
         self.layernorm_attrs["root_input"] = original_root_input
         self.layernorm_attrs["skip_input"] = self.layernorm_attrs["output_0"]
+        self.layernorm_attrs["cast"]["output_0"] = original_cast_output_0
 
         self.layernorm_attrs["first_layernorm"] = False
         if layer_id == self.num_layers - 1:
@@ -3552,8 +3717,14 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         elif config.architectures[0] == "GemmaForCausalLM":
             onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
+            if precision == "fp16":
+                print("WARNING: This model loses accuracy with float16 precision. Setting `--precision bf16` by default.")
+                precision = "bf16"
             onnx_model = Gemma2Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma3ForCausalLM":
+            if precision == "fp16":
+                print("WARNING: This model loses accuracy with float16 precision. Setting `--precision bf16` by default.")
+                precision = "bf16"
             onnx_model = Gemma3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
             onnx_model.model_type = "gemma3_text"
         elif config.architectures[0] == "Gemma3ForConditionalGeneration":
@@ -3562,7 +3733,9 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             for key in text_config:
                 if not hasattr(config, key):
                     setattr(config, key, getattr(text_config, key))
-            extra_options["exclude_embeds"] = True
+            if precision == "fp16":
+                print("WARNING: This model loses accuracy with float16 precision. Setting `--precision bf16` by default.")
+                precision = "bf16"
             onnx_model = Gemma3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GraniteForCausalLM":
             onnx_model = GraniteModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
@@ -3582,7 +3755,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
             print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
-            print("WARNING: This model currently only supports quantized version. Setting `--precision int4` by default.")
+            print("WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default.")
             execution_provider = "cuda"
             precision = "int4"
             onnx_model = Phi3MoELongRoPEModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
@@ -3736,7 +3909,7 @@ def get_args():
     )
 
     args = parser.parse_args()
-    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CPU, BF16 CUDA, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WEBGPU")
+    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WEBGPU")
     return args
 
 if __name__ == '__main__':
