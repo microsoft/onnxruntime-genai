@@ -285,7 +285,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                            const std::vector<Config::ProviderOptions>& provider_options_list,
                                            bool is_primary_session_options,
                                            bool disable_graph_capture,
-										   Config::Model& model_config) {
+                                           Config::Model& model_config) {
   DeviceInterface* p_device{};
 
   for (auto& provider : providers) {
