@@ -888,7 +888,7 @@ class Model:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
             zeros_pt = quantized_op.qzeros.detach().cpu()
             zeros_pt = zeros_pt.reshape(*qweight_pt.shape[:-1], qweight_pt.shape[-1] // quantized_op.group_size)
-            self.make_external_tensor(zeros_pt.contiguous(), zeros, True)
+            self.make_external_tensor(zeros_pt.contiguous(), zeros, unpack_int4=True)
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
