@@ -228,10 +228,12 @@ def build_ort(args, build_dir, artifacts_dir):
             ]
         )
         if args.qnn_sdk_path:
-            cmd_args.extend(["--use_qnn", "static_lib", "--qnn_home", args.qnn_sdk_path])
+            cmd_args.extend(
+                ["--use_qnn", "static_lib", "--qnn_home", args.qnn_sdk_path]
+            )
 
-    cmd_args.extend(["--cmake_extra_defines","onnxruntime_BUILD_UNIT_TESTS=OFF"])
-    
+    cmd_args.extend(["--cmake_extra_defines", "onnxruntime_BUILD_UNIT_TESTS=OFF"])
+
     # now build the ORT library
     print(f"{MAGENTA}Building ONNX Runtime{CLEAR}")
     os.chdir("src/onnxruntime")
@@ -589,9 +591,9 @@ def main():
     ort_home = None
     if args.build_ort_from_source:
         if args.ort_version_to_use is None:
-            # If not Windows then use 1.21.0
+            # If not Windows then use 1.22.0
             if platform.system() != "Windows":
-                args.ort_version_to_use = "v1.21.0"
+                args.ort_version_to_use = "v1.22.0"
             else:
                 args.ort_version_to_use = "main"
         ort_home = build_ort(args, dep_src_dir, artifacts_dir)
@@ -602,7 +604,7 @@ def main():
             # The ORT binaries are available as they were downloaded during the GenAI build
             # This is the supported version for most platforms
             if args.ort_version_to_use is None:
-                ORT_VERSION = "1.21.0"
+                ORT_VERSION = "1.22.0"
             else:
                 ORT_VERSION = args.ort_version_to_use
             # Copy the ORT artifacts to the artifacts directory.
