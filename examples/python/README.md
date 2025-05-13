@@ -57,6 +57,6 @@ To run the Python examples with function/tool calling:
 # Using Lark Grammar with 1 function/tool call
 python model-qa.py -m {path to model folder} -e {execution provider} --guidance_type "lark_grammar"  --guidance_info '[{"name": "get_weather", "description": "Get weather of a city.", "parameters": {"city": {"description": "The city for which weather information is requested", "type": "string", "default": "Dallas"}}}]'
 
-# With 2 function/tool call in chat mode
+# With 2 function/tool calls in chat mode
 python model-chat.py -m {path to model folder} -e {execution provider} --guidance_type "lark_grammar"  --guidance_info '[{"name": "get_weather", "description": "Get weather of a city.", "parameters": {"city": {"description": "The city for which weather information is requested", "type": "string", "default": "Dallas"}}},{"name": "get_population", "description": "Get population of a city.", "parameters": {"city": {"description": "The city for which population information is requested", "type": "string", "default": "Dallas"}}}]'
 ```
