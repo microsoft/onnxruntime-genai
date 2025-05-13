@@ -740,7 +740,7 @@ bool IsMultiProfileEnabled(Config::SessionOptions& session_options)
   for (const auto& provider_options : session_options.provider_options) {
     if (provider_options.name == "NvTensorRtRtx") {
       return true;
-	}
+    }
   }
   return false;
 }

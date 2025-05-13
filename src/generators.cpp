@@ -246,7 +246,7 @@ GeneratorParams::GeneratorParams(const Config& config)
 GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
       use_graph_capture{IsGraphCaptureEnabled(model.config_->model.decoder.session_options)},
-	  use_multi_profile{IsMultiProfileEnabled(model.config_->model.decoder.session_options)},
+      use_multi_profile{IsMultiProfileEnabled(model.config_->model.decoder.session_options)},
       p_device{model.p_device_inputs_} {
   if (use_graph_capture) {
     max_batch_size = 1;  // set it to 1 by default
