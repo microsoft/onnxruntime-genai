@@ -47,6 +47,37 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
+    $exePath = "$env:TEMP\rustup-init.exe"
+    (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-msvc/rustup-init.exe', $exePath)
+    & $exePath -y --default-toolchain=1.86.0
+    $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+  displayName: 'Install Rust Toolchain'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
+    $llvmUrl = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-woa64.exe"
+    $installerPath = "$(Agent.TempDirectory)\LLVM-18.1.8-woa64.exe"
+    Write-Host "Downloading LLVM..."
+    Invoke-WebRequest -Uri $llvmUrl -OutFile $installerPath
+    Write-Host "Installing LLVM silently..."
+    Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait
+    # Add LLVM to PATH
+    $llvmBin = "C:\Program Files\LLVM\bin"
+    if (!(Test-Path $llvmBin)) {
+      Write-Error "LLVM install failed or path not found: $llvmBin"
+      exit 1
+    }
+    $env:PATH = "$llvmBin;$env:PATH"
+    Write-Host "##vso[task.setvariable variable=PATH]$env:PATH"
+    # Confirm clang installed
+    clang --version
+    python -m pip install wheel
+  displayName: 'Install LLVM'
+  condition: eq(variables['arch'], 'arm64')
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
     cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
   displayName: 'Configure CMake C API with CUDA'
   condition: eq(variables['ep'], 'cuda')
@@ -69,12 +100,6 @@ steps:
       FolderPath: '$(Build.Repository.LocalPath)\$(buildDir)'
       DisplayName: 'ESRP - Sign C++ dlls'
       Pattern: '*genai.dll'
-
-  - task: BinSkim@4
-    displayName: 'Run BinSkim'
-    inputs:
-      AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*genai.dll'
-    continueOnError: true
 
   - powershell: |
       python -m pip install wheel

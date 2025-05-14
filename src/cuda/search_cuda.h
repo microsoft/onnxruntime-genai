@@ -31,8 +31,9 @@ struct Search_Cuda : Search {
 
   DeviceSpan<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
 
-  gpu_span<bool> eos_meet_;  // shape (beam_size*batch_size)
-  cuda_unique_ptr<bool> eos_meet_buffer_;
+  gpu_span<bool> eos_seen_;  // shape (beam_size*batch_size)
+  cuda_unique_ptr<bool> eos_seen_buffer_;
+  DeviceSpan<int32_t> eos_token_ids_;
 
   gpu_span<int32_t> next_tokens_;        // shape (beam_size*batch_size)
   DeviceSpan<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
