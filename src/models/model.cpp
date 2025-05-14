@@ -215,9 +215,9 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   return string;
 }
 
-std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, bool add_generation_prompt) const {
+std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const {
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> templated_text;
-  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, templated_text.ToBeAssigned(), add_generation_prompt, false /*tokenize*/));
+  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, tools, templated_text.ToBeAssigned(), add_generation_prompt, false /*tokenize*/));
 
   ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
   CheckResult(OrtxTensorResultGetAt(templated_text.get(), 0, tensor.ToBeAssigned()));
@@ -280,7 +280,16 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                            bool disable_graph_capture) {
   DeviceInterface* p_device{};
 
-  for (auto& provider : providers) {
+  auto providers_list = providers;
+  if (!is_primary_session_options) {
+    // Providers specified in a non-primary provider options list are added
+    // to the primary providers. They are considered immutable and implicitly
+    // added as providers.
+    std::transform(provider_options_list.begin(), provider_options_list.end(), std::back_inserter(providers_list),
+                   [](const auto& provider_options) { return provider_options.name; });
+  }
+
+  for (auto& provider : providers_list) {
     auto provider_options_it = std::find_if(provider_options_list.begin(), provider_options_list.end(),
                                             [&provider](const Config::ProviderOptions& po) { return po.name == provider; });
 
@@ -424,6 +433,11 @@ void EnsureDeviceOrtInit(DeviceInterface& device) {
   auto session_options = OrtSessionOptions::Create();
   std::vector<Config::ProviderOptions> provider_options_list;
   provider_options_list.emplace_back(Config::ProviderOptions{device_type_names[static_cast<int>(type)], {}});
+  // QnnHtpShared is a special case. This allocator is only made available when the provider option
+  // 'enable_htp_shared_memory_allocator' is set to 1.
+  if (type == DeviceType::QNN) {
+    provider_options_list.back().options.emplace_back("enable_htp_shared_memory_allocator", "1");
+  }
   const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
   SetProviderSessionOptions(*session_options, providers, provider_options_list, true, false);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
@@ -622,13 +636,16 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
 
-  p_device_ = SetProviderSessionOptions(session_options, config_session_options.providers,
-                                        config_session_options.provider_options, is_primary_session_options,
-                                        disable_graph_capture);
+  auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
+                                                  config_session_options.provider_options, is_primary_session_options,
+                                                  disable_graph_capture);
 
-  // Fallback to CPU if no provider specific interface was set
-  if (!p_device_)
-    p_device_ = GetDeviceInterface(DeviceType::CPU);
+  if (!p_device_) {
+    p_device_ = session_device;
+  } else if (session_device != nullptr && session_device->GetType() != p_device_->GetType()) {
+    throw std::runtime_error("Running a model with multiple providers is not supported. Encountered " +
+                             to_string(session_device->GetType()) + " and " + to_string(p_device_->GetType()));
+  }
 }
 
 void Model::CreateSessionOptions() {
@@ -642,6 +659,10 @@ void Model::CreateSessionOptions() {
       CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false, false);
     }
   }
+
+  // Fallback to CPU if no provider specific interface was set
+  if (!p_device_)
+    p_device_ = GetDeviceInterface(DeviceType::CPU);
 }
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {

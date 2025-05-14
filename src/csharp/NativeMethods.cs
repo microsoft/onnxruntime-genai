@@ -97,6 +97,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                         out IntPtr /* OgaGenerator** */ generator);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetGuidance(IntPtr /* OgaGeneratorParams* */ generatorParams,
+                                                                                   byte[] /* const char* */ type,
+                                                                                   byte[] /* const char* */ data);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyGenerator(IntPtr /* OgaGenerator* */ generator);
 
         // This function is used to check if the generator has finished generating all sequences.
@@ -198,6 +203,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaTokenizerApplyChatTemplate(IntPtr /* const OgaTokenizer* */ tokenizer,
                                                                                    byte[] /* const char* */ template_string,
                                                                                    byte[] /* const char* */ message,
+                                                                                   byte[] /* const char* */ tool_calls,
                                                                                    bool /* bool */ add_gen_prompt,
                                                                                    out IntPtr /* const char** */ outStr);
 
