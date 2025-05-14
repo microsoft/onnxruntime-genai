@@ -377,112 +377,120 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
         session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
       } else if (provider_options.name == "NvTensorRtRtx") {
-        // Get model parameters from decoder config
-        const int num_layers = model_config.decoder.num_hidden_layers;
-        const int num_kv_heads = model_config.decoder.num_key_value_heads;
-        const int head_dim = model_config.decoder.head_size;
-
-        // Get max context length from config
-        const int max_context_len =  model_config.context_length;
-        const int opt_context_len = 512;  // Optimal is half of max, capped at 512
-        const int min_seq_len = 1;
-
-        // Extract KV cache name patterns from decoder config
-        std::string past_key_pattern = model_config.decoder.inputs.past_key_names;
-        std::string past_value_pattern = model_config.decoder.inputs.past_value_names;
-
-        // If patterns are empty, use defaults
-        if (past_key_pattern.empty()) past_key_pattern = "past_key_values.%d.key";
-        if (past_value_pattern.empty()) past_value_pattern = "past_key_values.%d.value";
-
-        std::ostringstream min_shapes, opt_shapes, max_shapes;
-
-        // MIN SHAPES (context phase and first token generation)
-        min_shapes << "input_ids:1x" << min_seq_len << ",attention_mask:1x" << min_seq_len 
-        << ",position_ids:1x" << min_seq_len;
-
-        // Add empty KV cache entries for all layers
-        for (int i = 0; i < num_layers; i++) {
-        char key_name[256], value_name[256];
-        snprintf(key_name, sizeof(key_name), past_key_pattern.c_str(), i);
-        snprintf(value_name, sizeof(value_name), past_value_pattern.c_str(), i);
-
-        min_shapes << "," << key_name << ":1x" << num_kv_heads << "x0x" << head_dim;
-        min_shapes << "," << value_name << ":1x" << num_kv_heads << "x0x" << head_dim;
-        }
-
-        // Generation phase with single token and KV cache of length 1
-        min_shapes << ",attention_mask:1x" << min_seq_len << ",input_ids:1x1,position_ids:1x1";
-
-        // Add KV cache with single token for all layers
-        for (int i = 0; i < num_layers; i++) {
-        char key_name[256], value_name[256];
-        snprintf(key_name, sizeof(key_name), past_key_pattern.c_str(), i);
-        snprintf(value_name, sizeof(value_name), past_value_pattern.c_str(), i);
-
-        min_shapes << "," << key_name << ":1x" << num_kv_heads << "x" << min_seq_len << "x" << head_dim;
-        min_shapes << "," << value_name << ":1x" << num_kv_heads << "x" << min_seq_len << "x" << head_dim;
-        }
-
-        // OPT SHAPES (prefill with medium context and generation after medium context)
-        opt_shapes << "input_ids:1x" << opt_context_len << ",attention_mask:1x" << opt_context_len 
-        << ",position_ids:1x" << opt_context_len;
-
-        // Add empty KV cache entries for all layers
-        for (int i = 0; i < num_layers; i++) {
-        char key_name[256], value_name[256];
-        snprintf(key_name, sizeof(key_name), past_key_pattern.c_str(), i);
-        snprintf(value_name, sizeof(value_name), past_value_pattern.c_str(), i);
-
-        opt_shapes << "," << key_name << ":1x" << num_kv_heads << "x0x" << head_dim;
-        opt_shapes << "," << value_name << ":1x" << num_kv_heads << "x0x" << head_dim;
-        }
-
-        // Generation phase with single token and KV cache of optimal length minus 1
-        opt_shapes << ",attention_mask:1x" << opt_context_len << ",input_ids:1x1,position_ids:1x1";
-
-        // Add KV cache with optimal length-1 for all layers
-        for (int i = 0; i < num_layers; i++) {
-        char key_name[256], value_name[256];
-        snprintf(key_name, sizeof(key_name), past_key_pattern.c_str(), i);
-        snprintf(value_name, sizeof(value_name), past_value_pattern.c_str(), i);
-
-        opt_shapes << "," << key_name << ":1x" << num_kv_heads << "x" << (opt_context_len-1) << "x" << head_dim;
-        opt_shapes << "," << value_name << ":1x" << num_kv_heads << "x" << (opt_context_len-1) << "x" << head_dim;
-        }
-
-        // MAX SHAPES (prefill with maximum context and generation after maximum context)
-        max_shapes << "input_ids:1x" << max_context_len << ",attention_mask:1x" << max_context_len 
-        << ",position_ids:1x" << max_context_len;
-
-        // Add empty KV cache entries for all layers
-        for (int i = 0; i < num_layers; i++) {
-        char key_name[256], value_name[256];
-        snprintf(key_name, sizeof(key_name), past_key_pattern.c_str(), i);
-        snprintf(value_name, sizeof(value_name), past_value_pattern.c_str(), i);
-  
-        max_shapes << "," << key_name << ":1x" << num_kv_heads << "x0x" << head_dim;
-        max_shapes << "," << value_name << ":1x" << num_kv_heads << "x0x" << head_dim;
-        }
-
-        // Generation phase with single token and KV cache of maximum length minus 1
-        max_shapes << ",attention_mask:1x" << max_context_len << ",input_ids:1x1,position_ids:1x1";
-
-        // Add KV cache with maximum length-1 for all layers
-        for (int i = 0; i < num_layers; i++) {
-        char key_name[256], value_name[256];
-        snprintf(key_name, sizeof(key_name), past_key_pattern.c_str(), i);
-        snprintf(value_name, sizeof(value_name), past_value_pattern.c_str(), i);
-
-        max_shapes << "," << key_name << ":1x" << num_kv_heads << "x" << (max_context_len-1) << "x" << head_dim;
-        max_shapes << "," << value_name << ":1x" << num_kv_heads << "x" << (max_context_len-1) << "x" << head_dim;
-        }
-
-        // Add the constructed profiles to session options
+        // Always enable CUDA graph
         session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_cuda_graph_enable", "1");
-        session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes", min_shapes.str().c_str());
-        session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_opt_shapes", opt_shapes.str().c_str());
-        session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_max_shapes", max_shapes.str().c_str());
+
+        // Check for multi-profile option
+        if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
+                                             [](const auto& pair) { return pair.first == "nv_multi_profile_enable"; });
+            opt_it != provider_options.options.end() && opt_it->second == "1") {
+
+          // Get model parameters from decoder config
+          const int num_layers = model_config.decoder.num_hidden_layers;
+          const int num_kv_heads = model_config.decoder.num_key_value_heads;
+          const int head_dim = model_config.decoder.head_size;
+
+          // Get max context length from config
+          const int max_context_len = model_config.context_length;
+          const int opt_context_len = 512;  // Optimal is half of max, capped at 512
+          const int min_seq_len = 1;
+
+          // Extract KV cache name patterns from decoder config
+          std::string past_key_pattern = model_config.decoder.inputs.past_key_names;
+          std::string past_value_pattern = model_config.decoder.inputs.past_value_names;
+
+          // If patterns are empty, use defaults
+          if (past_key_pattern.empty()) past_key_pattern = "past_key_values.%d.key";
+          if (past_value_pattern.empty()) past_value_pattern = "past_key_values.%d.value";
+
+          std::ostringstream min_shapes, opt_shapes, max_shapes;
+
+          // MIN SHAPES (context phase and first token generation)
+          min_shapes << "input_ids:1x" << min_seq_len << ",attention_mask:1x" << min_seq_len 
+                   << ",position_ids:1x" << min_seq_len;
+
+          // Add empty KV cache entries for all layers
+          for (int i = 0; i < num_layers; i++) {
+            char key_name[256], value_name[256];
+            snprintf(key_name, sizeof(key_name), past_key_pattern.c_str(), i);
+            snprintf(value_name, sizeof(value_name), past_value_pattern.c_str(), i);
+
+            min_shapes << "," << key_name << ":1x" << num_kv_heads << "x0x" << head_dim;
+            min_shapes << "," << value_name << ":1x" << num_kv_heads << "x0x" << head_dim;
+          }
+
+          // Generation phase with single token and KV cache of length 1
+          min_shapes << ",attention_mask:1x" << min_seq_len << ",input_ids:1x1,position_ids:1x1";
+
+          // Add KV cache with single token for all layers
+          for (int i = 0; i < num_layers; i++) {
+            char key_name[256], value_name[256];
+            snprintf(key_name, sizeof(key_name), past_key_pattern.c_str(), i);
+            snprintf(value_name, sizeof(value_name), past_value_pattern.c_str(), i);
+
+            min_shapes << "," << key_name << ":1x" << num_kv_heads << "x" << min_seq_len << "x" << head_dim;
+            min_shapes << "," << value_name << ":1x" << num_kv_heads << "x" << min_seq_len << "x" << head_dim;
+          }
+
+          // OPT SHAPES (prefill with medium context and generation after medium context)
+          opt_shapes << "input_ids:1x" << opt_context_len << ",attention_mask:1x" << opt_context_len 
+                    << ",position_ids:1x" << opt_context_len;
+
+          // Add empty KV cache entries for all layers
+          for (int i = 0; i < num_layers; i++) {
+            char key_name[256], value_name[256];
+            snprintf(key_name, sizeof(key_name), past_key_pattern.c_str(), i);
+            snprintf(value_name, sizeof(value_name), past_value_pattern.c_str(), i);
+
+            opt_shapes << "," << key_name << ":1x" << num_kv_heads << "x0x" << head_dim;
+            opt_shapes << "," << value_name << ":1x" << num_kv_heads << "x0x" << head_dim;
+          }
+
+          // Generation phase with single token and KV cache of optimal length minus 1
+          opt_shapes << ",attention_mask:1x" << opt_context_len << ",input_ids:1x1,position_ids:1x1";
+
+          // Add KV cache with optimal length-1 for all layers
+          for (int i = 0; i < num_layers; i++) {
+            char key_name[256], value_name[256];
+            snprintf(key_name, sizeof(key_name), past_key_pattern.c_str(), i);
+            snprintf(value_name, sizeof(value_name), past_value_pattern.c_str(), i);
+
+            opt_shapes << "," << key_name << ":1x" << num_kv_heads << "x" << (opt_context_len-1) << "x" << head_dim;
+            opt_shapes << "," << value_name << ":1x" << num_kv_heads << "x" << (opt_context_len-1) << "x" << head_dim;
+          }
+
+          // MAX SHAPES (prefill with maximum context and generation after maximum context)
+          max_shapes << "input_ids:1x" << max_context_len << ",attention_mask:1x" << max_context_len 
+                    << ",position_ids:1x" << max_context_len;
+
+          // Add empty KV cache entries for all layers
+          for (int i = 0; i < num_layers; i++) {
+            char key_name[256], value_name[256];
+            snprintf(key_name, sizeof(key_name), past_key_pattern.c_str(), i);
+            snprintf(value_name, sizeof(value_name), past_value_pattern.c_str(), i);
+
+            max_shapes << "," << key_name << ":1x" << num_kv_heads << "x0x" << head_dim;
+            max_shapes << "," << value_name << ":1x" << num_kv_heads << "x0x" << head_dim;
+          }
+
+          // Generation phase with single token and KV cache of maximum length minus 1
+          max_shapes << ",attention_mask:1x" << max_context_len << ",input_ids:1x1,position_ids:1x1";
+
+          // Add KV cache with maximum length-1 for all layers
+          for (int i = 0; i < num_layers; i++) {
+            char key_name[256], value_name[256];
+            snprintf(key_name, sizeof(key_name), past_key_pattern.c_str(), i);
+            snprintf(value_name, sizeof(value_name), past_value_pattern.c_str(), i);
+
+            max_shapes << "," << key_name << ":1x" << num_kv_heads << "x" << (max_context_len-1) << "x" << head_dim;
+            max_shapes << "," << value_name << ":1x" << num_kv_heads << "x" << (max_context_len-1) << "x" << head_dim;
+          }
+
+          // Add the constructed profiles to session options
+          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes", min_shapes.str().c_str());
+          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_opt_shapes", opt_shapes.str().c_str());
+          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_max_shapes", max_shapes.str().c_str());
+        }
 
         p_device = GetDeviceInterface(DeviceType::CUDA);
       }
