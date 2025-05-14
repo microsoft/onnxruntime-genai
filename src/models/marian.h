@@ -33,7 +33,6 @@ struct MarianState : State {
   DefaultPositionInputs encoder_attention_mask_;
   std::unique_ptr<OrtValue> encoder_outputs_;
 
-
   // Decoder IOs
   DecoderInputIDs decoder_input_ids_{*this};
   DefaultPositionInputs attention_mask_;

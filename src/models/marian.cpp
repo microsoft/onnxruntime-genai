@@ -7,7 +7,7 @@
 
 namespace Generators {
 
-  MarianModel::MarianModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
+MarianModel::MarianModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   session_encoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.encoder.filename)).c_str(), session_options_.get());
   session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
@@ -25,12 +25,12 @@ MarianState::MarianState(const MarianModel& model, DeviceSpan<int32_t> sequence_
     : State{params, model},
       model_{model},
       encoder_attention_mask_{model, *this, sequence_lengths_unk},
-      attention_mask_{model, *this, sequence_lengths_unk}  {
+      attention_mask_{model, *this, sequence_lengths_unk} {
 }
 
 DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  if(first_run_) {
-    //INITIALIZE THE ENCODER AND RUN IT ONCE
+  if (first_run_) {
+    // INITIALIZE THE ENCODER AND RUN IT ONCE
 
     encoder_input_ids_.name_ = "input_ids";
     encoder_input_ids_.Add();
@@ -54,7 +54,7 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     // CLEAR INPUTS AND OUTPUTS
     ClearIO();
 
-    //INITIALIZE THE DECODER
+    // INITIALIZE THE DECODER
     decoder_input_ids_.name_ = "input_ids";
     decoder_input_ids_.AddDecoderInputs(static_cast<int>(model_.config_->model.bos_token_id));
 
@@ -81,9 +81,9 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     rnn_states_prev_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), rnn_states_prev_shape, rnn_states_prev_type);
 
     input_names_.push_back("rnn_states_prev");
-    for(int i=0;i<rnn_states_prev_shape[0];i++) {
-      for(int j=0;j<rnn_states_prev_shape[1];j++) {
-        for(int k=0;k<rnn_states_prev_shape[2];k++) {
+    for (int i = 0; i < rnn_states_prev_shape[0]; i++) {
+      for (int j = 0; j < rnn_states_prev_shape[1]; j++) {
+        for (int k = 0; k < rnn_states_prev_shape[2]; k++) {
           auto data = rnn_states_prev_->GetTensorMutableData<int32_t>();
           data[i * rnn_states_prev_shape[1] * rnn_states_prev_shape[2] + j * rnn_states_prev_shape[2] + k] = 0;
         }
@@ -110,29 +110,29 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     return logits_.Get();
   }
 
-    // UPDATE THE DECODER
-    decoder_input_ids_.Update(next_tokens);
+  // UPDATE THE DECODER
+  decoder_input_ids_.Update(next_tokens);
 
-    auto rnn_states_prev_shape = std::array<int64_t, 3>{3, decoder_input_ids_.GetDecoderInputShape()[0], 512};
+  auto rnn_states_prev_shape = std::array<int64_t, 3>{3, decoder_input_ids_.GetDecoderInputShape()[0], 512};
 
-    for(int i=0;i<rnn_states_prev_shape[0];i++) {
-      for(int j=0;j<rnn_states_prev_shape[1];j++) {
-        for(int k=0;k<rnn_states_prev_shape[2];k++) {
-          auto data = rnn_states_prev_->GetTensorMutableData<int32_t>();
-          auto rnn_states_data = rnn_states_->GetTensorMutableData<int32_t>();
-          data[i * rnn_states_prev_shape[1] * rnn_states_prev_shape[2] + j * rnn_states_prev_shape[2] + k] = rnn_states_data[i * rnn_states_prev_shape[1] * rnn_states_prev_shape[2] + j * rnn_states_prev_shape[2] + k];
-        }
+  for (int i = 0; i < rnn_states_prev_shape[0]; i++) {
+    for (int j = 0; j < rnn_states_prev_shape[1]; j++) {
+      for (int k = 0; k < rnn_states_prev_shape[2]; k++) {
+        auto data = rnn_states_prev_->GetTensorMutableData<int32_t>();
+        auto rnn_states_data = rnn_states_->GetTensorMutableData<int32_t>();
+        data[i * rnn_states_prev_shape[1] * rnn_states_prev_shape[2] + j * rnn_states_prev_shape[2] + k] = rnn_states_data[i * rnn_states_prev_shape[1] * rnn_states_prev_shape[2] + j * rnn_states_prev_shape[2] + k];
       }
     }
+  }
 
-    auto data = past_key_values_length_->GetTensorMutableData<int64_t>();
-    *data += 1;
+  auto data = past_key_values_length_->GetTensorMutableData<int64_t>();
+  *data += 1;
 
-    logits_.Update(next_tokens, 1);
+  logits_.Update(next_tokens, 1);
 
-    // RUN THE DECODER
-    State::Run(*model_.session_decoder_);
-    return logits_.Get();
+  // RUN THE DECODER
+  State::Run(*model_.session_decoder_);
+  return logits_.Get();
 }
 
 }  // namespace Generators

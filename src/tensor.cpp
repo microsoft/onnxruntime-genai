@@ -38,7 +38,7 @@ void Tensor::CreateTensor(std::span<const int64_t> shape, bool make_static) {
 
 void Tensor::CreateValueTensor(OrtAllocator& allocator, std::span<const int64_t> shape, ONNXTensorElementDataType input_type, int32_t value) {
   ort_tensor_ = OrtValue::CreateTensor(allocator, shape, input_type);
-  for(int i=0;i<shape[0];i++) {
+  for (int i = 0; i < shape[0]; i++) {
     ort_tensor_->GetTensorMutableData<int64_t>()[i] = value;
   }
 }

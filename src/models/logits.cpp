@@ -135,7 +135,7 @@ DeviceSpan<float> RNNLogits::Get() {
 
   // TODO(apsonawane): Fix the issue with output_raw not getting updated properly
   // OrtValue* logits_of_last_token = output_raw_->GetOrtTensor();
-  OrtValue* logits_of_last_token = state_.outputs_[state_.output_names_.size() - 1];
+  OrtValue* logits_of_last_token = state_.outputs_[output_index_];
   std::array<int64_t, 2> shape_last{shape_[0], shape_[1]};
 
   // Convert from float16 to float32 if necessary

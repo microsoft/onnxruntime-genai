@@ -1,6 +1,5 @@
 import onnxruntime_genai as og
 import argparse
-import numpy as np
 import time
 
 # og.set_log_options(enabled=True, model_input_values=True, model_output_values=True, model_logits=True)
@@ -85,8 +84,6 @@ if __name__ == "__main__":
     parser.add_argument('-t', '--temperature', type=float, help='Temperature to sample with')
     parser.add_argument('-r', '--repetition_penalty', type=float, help='Repetition penalty to sample with')
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
-    parser.add_argument('-b', '--batch_size_for_cuda_graph', type=int, default=1, help='Max batch size for CUDA graph')
-    parser.add_argument('-c', '--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}. If not set, the prompt is used as is.')
     parser.add_argument('--non-interactive', action=argparse.BooleanOptionalAction, required=False, default=False, help='Non-interactive mode, mainly for CI usage')
 
     args = parser.parse_args()

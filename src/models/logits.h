@@ -34,7 +34,7 @@ struct BaseLogits {
 struct Logits : BaseLogits {
   Logits(State& state);
 
-  DeviceSpan<float> Get() override;  // Specific implementation for Logits
+  DeviceSpan<float> Get() override;                                                    // Specific implementation for Logits
   void Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length) override;  // Specific implementation for Logits
 
  private:
@@ -45,7 +45,7 @@ struct Logits : BaseLogits {
 struct RNNLogits : BaseLogits {
   RNNLogits(State& state);
 
-  DeviceSpan<float> Get() override;  // Specific implementation for RNNLogits
+  DeviceSpan<float> Get() override;                                                    // Specific implementation for RNNLogits
   void Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length) override;  // Specific implementation for RNNLogits
 
  private:

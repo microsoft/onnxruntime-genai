@@ -179,7 +179,6 @@ struct Encoder_Inputs_Element : JSON::Element {
   Config::Model::Encoder::Inputs& v_;
 };
 
-
 struct Encoder_Outputs_Element : JSON::Element {
   explicit Encoder_Outputs_Element(Config::Model::Encoder::Outputs& v) : v_{v} {}
 
