@@ -1115,9 +1115,9 @@ class Model:
 
         # NvTensorRtRtx EP doesn't support Skip/SimplifiedLayerNormalization and SkipLayerNormalization, so we fallback to primitive ops
         if self.ep == "NvTensorRtRtx" and (skip or simple):
-            self._make_layernormlization(name, skip, simple, op_type, new_io_dtype, inputs, outputs, **kwargs)
+            self._make_layernormalization(name, skip, simple, op_type, new_io_dtype, inputs, outputs, **kwargs)
         else:
-            self.make_layernormlization(name, skip, simple, op_type, new_io_dtype, inputs, outputs, **kwargs)
+            self.make_layernormalization(name, skip, simple, op_type, new_io_dtype, inputs, outputs, **kwargs)
 
         if skip and not self.layernorm_attrs["last_layernorm"]:
             self.make_value_info(outputs[3], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
@@ -3630,7 +3630,7 @@ def check_extra_options(kv_pairs):
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
         raise ValueError(f"Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
-    # NvTensorRtRtx EP requires Opset 21, so force use_qdq which controlls it.
+    # NvTensorRtRtx EP requires Opset 21, so force use_qdq which controls it.
     if args.execution_provider == "NvTensorRtRtx":
         kv_pairs["use_qdq"] = True
 
