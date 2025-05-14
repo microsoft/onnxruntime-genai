@@ -1130,7 +1130,7 @@ class Model:
             # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
 
-    def make_layernormlization(self, basename, skip, simple, op_type, io_dtype, inputs, outputs, **kwargs):
+    def make_layernormalization(self, basename, skip, simple, op_type, io_dtype, inputs, outputs, **kwargs):
         # Make op and its shape
         self.make_node(op_type, inputs=inputs, outputs=outputs, name=basename, domain=("com.microsoft" if skip else None), **kwargs)
         self.make_value_info(outputs[0], io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
@@ -1138,7 +1138,7 @@ class Model:
             self.make_value_info(outputs[3], io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
 
-    def _make_layernormlization(self, basename, skip, simple, op_type, io_dtype, inputs, outputs, **kwargs):
+    def _make_layernormalization(self, basename, skip, simple, op_type, io_dtype, inputs, outputs, **kwargs):
         root_input = inputs[0]
         skip_input = inputs[1] if skip else None
         weight = inputs[2] if skip else inputs[1]
