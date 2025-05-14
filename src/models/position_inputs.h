@@ -16,6 +16,7 @@ struct DefaultPositionInputs : PositionInputs {
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
 
   void RewindTo(size_t index) override;
+  std::string name_;
 
  private:
   void AddAttentionMask();

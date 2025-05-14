@@ -16,6 +16,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "multi_modal.h"
+#include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "../dml/interface.h"
 
@@ -198,7 +199,7 @@ std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
 
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   OrtxPtr<OrtxTokenId2DArray> ids;
-  CheckResult(OrtxTokenizeWithOptions(tokenizer_, &text, 1, ids.Address(), false /* add_special_tokens */));
+  CheckResult(OrtxTokenizeWithOptions(tokenizer_, &text, 1, ids.Address(), true /* add_special_tokens */));
 
   const extTokenId_t* tokens;
   size_t count;
@@ -710,6 +711,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
   if (config->model.type == "gemma3")
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
+  if (config->model.type == "marian-ssru")
+    return std::make_shared<MarianModel>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }
