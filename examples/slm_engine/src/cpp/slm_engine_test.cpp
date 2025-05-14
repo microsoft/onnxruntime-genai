@@ -9,11 +9,13 @@
 #include <filesystem>
 #include <vector>
 
-using namespace std;
+#define MAGENTA "\033[35;1m"
+#define RED "\033[31;1m"
+#define BLUE "\033[34;1m"
+#define GREEN "\033[32;1m"
+#define CLEAR "\033[0m"
 
-namespace microsoft {
-namespace slm_engine {
-namespace testing {
+using namespace std;
 
 // Define the path to the model file
 // This should be set in the environment variable MODEL_FILE_PATH
@@ -22,6 +24,14 @@ const char* MODEL_FILE_PATH = getenv("MODEL_FILE_PATH");
 // Define the path to the model root directory
 // Al the model directories are expected to be under this directory
 const char* MODEL_ROOT_DIR = getenv("MODEL_ROOT_DIR");
+
+// Define the path to the model root directory
+// Al the model directories are expected to be under this directory
+const char* ADAPTER_ROOT_DIR = getenv("ADAPTER_ROOT_DIR");
+
+namespace microsoft {
+namespace slm_engine {
+namespace testing {
 
 struct ModelInfo {
   string model_path;
@@ -80,7 +90,7 @@ TEST(SLMEngineTest, LoadUnloadModel) {
     cout << "Before Engine Create Memory Usage: "
          << microsoft::slm_engine::SLMEngine::GetMemoryUsage() << " MB"
          << endl;
-    auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
+    auto slm_engine = microsoft::slm_engine::SLMEngine::Create(
         MODEL_FILE_PATH, false);
 
     cout << "After Loading Model Memory Usage: "
@@ -144,7 +154,7 @@ const TestPrompt TEST_PROMPTS[] = {
 TEST(SLMEngineTest, TestGeneration) {
   ASSERT_TRUE(MODEL_FILE_PATH != nullptr) << "MODEL_FILE_PATH is not set";
 
-  auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
+  auto slm_engine = microsoft::slm_engine::SLMEngine::Create(
       MODEL_FILE_PATH, false);
   ASSERT_NE(slm_engine, nullptr);
 
@@ -209,7 +219,7 @@ TEST(SLMEngineTest, CaptureMemoryUsage) {
 
   overall_status_json["memory_before_run"] = SLMEngine::GetMemoryUsage();
 
-  auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
+  auto slm_engine = microsoft::slm_engine::SLMEngine::Create(
       MODEL_FILE_PATH, false);
   ASSERT_NE(slm_engine, nullptr) << "Failed to create SLMEngine";
   overall_status_json["memory_after_load"] = SLMEngine::GetMemoryUsage();
@@ -277,6 +287,94 @@ TEST(SLMEngineTest, CaptureMemoryUsage) {
     output_file.close();
   } else {
     FAIL() << "Failed to open output file for writing";
+  }
+}
+
+TEST(SLMEngineTest, LoRAAdapterTest) {
+  ASSERT_TRUE(ADAPTER_ROOT_DIR != nullptr) << "ADAPTER_ROOT_DIR is not set";
+
+  auto adapters = vector<SLMEngine::LoRAAdapter>();
+  adapters.push_back(SLMEngine::LoRAAdapter(
+      "function_caller",
+      string(ADAPTER_ROOT_DIR) + "/function_calling.onnx_adapter"));
+
+  SLMEngine::Status status;
+  auto slm_engine = microsoft::slm_engine::SLMEngine::Create(
+      (string(ADAPTER_ROOT_DIR) + "/adapted_model").c_str(), adapters, false, status);
+
+  ASSERT_NE(slm_engine, nullptr) << "Failed to create SLMEngine with adapters: " << status.message;
+
+  adapters.clear();
+  adapters = slm_engine->get_adapter_list();
+  ASSERT_EQ(adapters.size(), 1) << "Adapter list size mismatch";
+  ASSERT_EQ(adapters[0].name, "function_caller") << "Adapter name mismatch";
+  ASSERT_EQ(adapters[0].adapter_path,
+            string(ADAPTER_ROOT_DIR) + "/function_calling.onnx_adapter")
+      << "Adapter path mismatch";
+
+  // Send some test data
+  const char* SYS_PROMPT =
+      "You are an in car virtual assistant that maps user's inputs to the "
+      "corresponding function call in the vehicle. You must respond with only "
+      "a JSON object matching the following schema: "
+      "{\"function_name\": <name of the function>, \"arguments\": <arguments of the function>}";
+
+  const TestPrompt TEST_INPUTS[] = {
+      {SYS_PROMPT,
+       "Can you please set the radio to 90.3?",
+       "{\"function_name\": \"tune_radio\", \"arguments\": {\"station\": 90.3}}"},
+      {SYS_PROMPT,
+       "Please text Dominik that I am running behind",
+       "{\"function_name\": \"text\", \"arguments\": {\"name\": \"Dominik\", \"message\": \"I am running behind\"}}"},
+      {SYS_PROMPT,
+       "Can you please set it to 74 degrees?",
+       "{\"function_name\": \"set_car_temperature_setpoint\", \"arguments\": {\"temperature\": 74}}"},
+      {SYS_PROMPT,
+       "Drive to 1020 South Figueroa Street.",
+       "{\"function_name\": \"navigate\", \"arguments\": {\"destination\": \"1020 South Figueroa Street\"}}"},
+  };
+
+  for (const auto& next_input : TEST_INPUTS) {
+    cout << "Question: " << next_input.user_prompt << endl;
+    auto formatted_prompt = slm_engine->format_prompt(
+        next_input.system_prompt, next_input.user_prompt);
+
+    // cout << "Formatted Prompt: " BLUE << formatted_prompt << CLEAR << endl;
+
+    SLMEngine::GenerationOptions generator_options;
+    generator_options.MaxGeneratedTokens = 500;
+    generator_options.Temperature = 0.000000001f;
+    string response;
+    SLMEngine::RuntimePerf kpi;
+    slm_engine->generate("function_caller", formatted_prompt, generator_options, response, kpi);
+    cout << "Response (LoRA): " << MAGENTA
+         << "Total Time: " << kpi.TotalTime << " TPS: " << kpi.TokenRate
+         << " Avg Generation Time: " << kpi.GenerationTimePerToken
+         << " Prompt Tokens: " << kpi.PromptTokenCount
+         << " TTFT: " << kpi.TimeToFirstToken
+         << " Generated Tokens: " << kpi.GeneratedTokenCount
+         << " Memory: " << kpi.CurrentMemoryUsed
+         << "\n"
+         << response << CLEAR << endl;
+
+    slm_engine->generate(formatted_prompt, generator_options, response, kpi);
+    cout << "Response: "
+         << GREEN
+         << "Total Time: " << kpi.TotalTime << " TPS: " << kpi.TokenRate
+         << " Avg Generation Time: " << kpi.GenerationTimePerToken
+         << " Prompt Tokens: " << kpi.PromptTokenCount
+         << " TTFT: " << kpi.TimeToFirstToken
+         << " Generated Tokens: " << kpi.GeneratedTokenCount
+         << " Memory: " << kpi.CurrentMemoryUsed
+         << "\n"
+         << response << CLEAR << endl;
+
+    // auto resp_json = nlohmann::json::parse(response);
+    // auto expected_json = nlohmann::json::parse(next_input.expected_answer);
+
+    // EXPECT_EQ(resp_json.dump(), expected_json.dump())
+    //     << "Test failed for prompt: " << next_input.user_prompt
+    //     << " \nwith response: " << resp_json.dump() << " \nexpected: " << expected_json.dump();
   }
 }
 }  // namespace testing

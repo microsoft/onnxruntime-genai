@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import argparse
 import json
 import requests
@@ -57,7 +59,9 @@ def run_test(url: str):
     # Test the API
     print("Testing the API with a test message")
     test_message = """
-        {"messages":
+        {   
+            "model": "",
+            "messages":
             [
                 {"role": "system", "content": "You are a helpful assistant. Be very brief and precise"}, 
                 {"role": "user", "content": "How to make pizza in five steps?"}
