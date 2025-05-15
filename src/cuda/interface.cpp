@@ -68,15 +68,13 @@ struct GpuMemory final : DeviceBuffer {
   bool owned_;  // If we own the memory, we delete it on destruction
 };
 
-struct CudaInterfaceImpl : DeviceInterface {
-  CudaInterfaceImpl() {
+struct CudaInterfaceImplBase : DeviceInterface {
+  CudaInterfaceImplBase() {
     g_stream.Create();
   }
 
-  ~CudaInterfaceImpl() {
+  ~CudaInterfaceImplBase() {
   }
-
-  DeviceType GetType() const override { return DeviceType::CUDA; }
 
   void InitOrt(const OrtApi& api, Ort::Allocator& allocator) override {
     Ort::api = &api;
@@ -164,7 +162,11 @@ struct CudaInterfaceImpl : DeviceInterface {
   }
 };
 
-struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImpl {
+struct CudaInterfaceImpl final : CudaInterfaceImplBase {
+  DeviceType GetType() const override { return DeviceType::CUDA; }
+};
+
+struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImplBase {
   DeviceType GetType() const override { return DeviceType::NvTensorRtRtx; }
 };
 

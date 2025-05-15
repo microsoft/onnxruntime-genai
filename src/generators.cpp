@@ -192,7 +192,9 @@ DeviceInterface* GetCudaInterface(DeviceType type) {
       throw std::runtime_error("Shared library load failure (see first error)");
 
     Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const char* deviceType);
-    static DeviceInterface* cuda_interface = reinterpret_cast<decltype(&GetInterface)>(library.GetSymbol("GetInterface"))(&g_genai, to_string(type).c_str()); 
+    static DeviceInterface* cuda_interface =
+        reinterpret_cast<decltype(&GetInterface)>(
+            library.GetSymbol("GetInterface"))(&g_genai, to_string(type).c_str());
 
     return cuda_interface;
   } catch (const std::exception& e) {
