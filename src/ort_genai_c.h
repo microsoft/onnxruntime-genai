@@ -678,7 +678,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, 
                                                        const char* adapter_name);
 
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaSelenaTest(OgaTensor** result, const int32_t *sequences_data, size_t sequences_size, const char* model_path, const char* unet_model_path, const char* vae_model_path);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSelenaTest(const char *prompt, const char* model_path, uint8_t** result);
 
 #ifdef __cplusplus
 }
