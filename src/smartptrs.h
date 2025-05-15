@@ -91,6 +91,7 @@ enum struct DeviceType {
   WEBGPU,
   QNN,
   OpenVINO,
+  NvTensorRtRtx,
   MAX
 };
 
