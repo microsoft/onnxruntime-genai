@@ -68,7 +68,7 @@ struct GpuMemory final : DeviceBuffer {
   bool owned_;  // If we own the memory, we delete it on destruction
 };
 
-struct CudaInterfaceImpl final : DeviceInterface {
+struct CudaInterfaceImpl : DeviceInterface {
   CudaInterfaceImpl() {
     g_stream.Create();
   }
@@ -164,6 +164,10 @@ struct CudaInterfaceImpl final : DeviceInterface {
   }
 };
 
+struct NvTensorRtRtxInterfaceImpl final : CudaInterfaceImpl {
+  DeviceType GetType() const override { return DeviceType::NvTensorRtRtx; }
+};
+
 std::unique_ptr<DeviceInterface> g_cuda_device;
 
 DeviceInterface& GetCudaDeviceInterface() { return *g_cuda_device; }
@@ -205,9 +209,13 @@ void operator delete(void* p, size_t /*size*/) noexcept { Generators::gp_genai->
 #endif
 
 extern "C" {
-Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai) {
+Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const char* deviceType) {
   Generators::gp_genai = p_genai;
-  Generators::g_cuda_device = std::make_unique<Generators::CudaInterfaceImpl>();
+  if (_stricmp(deviceType, "NvTensorRtRtx") == 0) {
+    Generators::g_cuda_device = std::make_unique<Generators::NvTensorRtRtxInterfaceImpl>();
+  } else {
+    Generators::g_cuda_device = std::make_unique<Generators::CudaInterfaceImpl>();
+  }
   return Generators::g_cuda_device.get();
 }
 }
