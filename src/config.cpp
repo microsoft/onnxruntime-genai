@@ -723,17 +723,17 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 }
 
 bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
-  for (const auto& provider_options : session_options.provider_options) {
-    if (provider_options.name == "cuda") {
+  for (const auto& provider : session_options.providers) {
+    if (provider == "cuda") {
       // Graph Capture is currently broken for CUDA
       for (const auto& value : provider_options.options) {
         if (value.first == "enable_cuda_graph" && value.second == "1") {
           throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
         }
       }
-    } else if (provider_options.name == "DML") {
+    } else if (provider == "DML") {
       return true;
-    } else if (provider_options.name == "NvTensorRtRtx") {
+    } else if (provider == "NvTensorRtRtx") {
       return true;
     }
   }
