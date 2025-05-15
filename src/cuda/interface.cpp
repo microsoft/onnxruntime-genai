@@ -9,6 +9,11 @@
 #include "kernels.h"
 #include <cstdarg>
 
+#if defined(_WIN32) || defined(_WIN64)
+#define strcasecmp _stricmp
+#define strncasecmp _strnicmp
+#endif
+
 namespace Generators {
 
 GenaiInterface* gp_genai{};
@@ -213,7 +218,7 @@ void operator delete(void* p, size_t /*size*/) noexcept { Generators::gp_genai->
 extern "C" {
 Generators::DeviceInterface* GetInterface(GenaiInterface* p_genai, const char* deviceType) {
   Generators::gp_genai = p_genai;
-  if (_stricmp(deviceType, "NvTensorRtRtx") == 0) {
+  if (strcasecmp(deviceType, "NvTensorRtRtx") == 0) {
     Generators::g_cuda_device = std::make_unique<Generators::NvTensorRtRtxInterfaceImpl>();
   } else {
     Generators::g_cuda_device = std::make_unique<Generators::CudaInterfaceImpl>();
