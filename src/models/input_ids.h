@@ -9,6 +9,13 @@ struct InputIDs {
   virtual void Update(DeviceSpan<int32_t> next_tokens) = 0;
 };
 
+struct DecoderInputs {
+  virtual ~DecoderInputs() = default;
+  virtual void AddDecoderInputs(int32_t pad_value) = 0;
+  virtual std::array<int64_t, 1> GetDecoderInputShape() const = 0;
+  virtual void Update(DeviceSpan<int32_t> next_tokens) = 0;
+};
+
 struct DefaultInputIDs : InputIDs {
   DefaultInputIDs(State& state);
   DefaultInputIDs(const DefaultInputIDs&) = delete;
@@ -40,6 +47,34 @@ struct DefaultInputIDs : InputIDs {
 
   std::unique_ptr<OrtValue> current_sequence_length_;
   std::unique_ptr<OrtValue> past_sequence_length_;
+};
+
+struct DecoderInputIDs : DecoderInputs {
+  DecoderInputIDs(State& state);
+  DecoderInputIDs(const DecoderInputIDs&) = delete;
+  DecoderInputIDs& operator=(const DecoderInputIDs&) = delete;
+
+  void AddDecoderInputs(int32_t value);
+
+  void Update(DeviceSpan<int32_t> next_tokens) override;
+
+  std::array<int64_t, 1> GetDecoderInputShape() const override { return shape_; }
+  const char* name_;
+  std::array<int64_t, 1> vec_shape_{};
+
+  OrtValue* Get() { return value_->GetOrtTensor(); }
+
+ private:
+  State& state_;
+  const Model& model_{state_.model_};
+  size_t input_index_{~0U};
+
+  bool is_prompt_{true};
+
+  std::array<int64_t, 1> shape_{};
+  ONNXTensorElementDataType type_;
+  std::unique_ptr<Tensor> value_;
+  std::unique_ptr<Tensor> cast_value_;
 };
 
 // Certain models can only process a fixed number of tokens at a time.
