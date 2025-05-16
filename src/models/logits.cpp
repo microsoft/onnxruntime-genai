@@ -46,7 +46,7 @@ DeviceSpan<float> Logits::Get() {
 
     logits_of_last_token = output_last_tokens_.get();
 
-    size_t element_size = SizeOf(type_);
+    size_t element_size = Ort::SizeOf(type_);
     size_t vocab_index = 0;  // Simpler math to have this index go up by vocab_size for every logit chunk we process
 
     auto logits_raw = output_raw_->GetByteSpan();
