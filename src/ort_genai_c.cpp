@@ -788,7 +788,7 @@ std::unique_ptr<OrtValue> initial_latents_tensor(int64_t batch_size, int64_t une
   // Fill the latents_tensor_data with random values
 
   for (int i = 0; i < batch_size * unet_channels * latent_height * latent_width; i++) {
-    // Scale the initial noise by the standard deviation required by the scheduler
+    
     latents_data[i] = dist(gen);
   }
   return latents_tensor;
@@ -806,7 +806,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSelenaTest(const char* prompt, const char*
 
   auto input_ids = tokenizer->Encode(prompt);
 
-  int32_t* sequences_data = input_ids.data();
+
+  int32_t* sequences_data = &input_ids[0];
   size_t sequences_size = input_ids.size();
   // The following are params (currently hardcoded) for the model
   int32_t batch_size = 1;
@@ -817,7 +818,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSelenaTest(const char* prompt, const char*
   int32_t image_width = 512;
 
   float init_noise_sigma = 1.0;
-  float vae_scaling_factor = 0.18215;
+  float vae_scaling_factor = 0.18215f;
 
   // create the OrtSession
   Ort::InitApi();
@@ -868,9 +869,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSelenaTest(const char* prompt, const char*
   io_binding->SynchronizeOutputs();
 
   // Get output text_embeddings tensor
-  auto text_embeddings_tensor = io_binding->GetOutputValues();
+  auto text_embeddings_output = io_binding->GetOutputValues();
+  auto text_embeddings_tensor = text_embeddings_output[0].get();
 
-  auto text_embeddings_tensor_data = text_embeddings_tensor[0]->GetTensorMutableData<float>();
+  auto text_embeddings_tensor_data = text_embeddings_tensor->GetTensorMutableData<float>();
 
   // Create a new OrtValue for the latents tensor
   int64_t latent_height = image_height / 8;
@@ -1010,6 +1012,15 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSelenaTest(const char* prompt, const char*
                                        0.0052, 0.0051, 0.0051, 0.0050, 0.0049, 0.0049, 0.0048, 0.0048, 0.0047,
                                        0.0047};
 
+  // create the unet session
+  auto unet_session_options = OrtSessionOptions::Create();
+  std::unique_ptr<OrtSession> p_unet_session_ = OrtSession::Create(
+    *p_env,
+    unet_model_path.c_str(),
+    unet_session_options.get());
+  auto unet_allocator = Ort::Allocator::Create(*p_unet_session_, *p_memory_info);
+  auto io_binding_unet = OrtIoBinding::Create(*p_unet_session_);
+
   for (size_t i = 0; i < tiemsteps.size(); i++) {
     std::vector<int64_t> timestep_shape{1};
     std::vector<float> timestep_data{static_cast<float>(tiemsteps[i])};
@@ -1019,15 +1030,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSelenaTest(const char* prompt, const char*
     std::map<std::string, OrtValue*> params;
     params["sample"] = latents_tensor.get();
     params["timestep"] = timestep_tensor.get();
-    params["encoder_hidden_states"] = text_embeddings_tensor[0].get();
+    params["encoder_hidden_states"] = text_embeddings_tensor;
 
     // Bind the input tensors and run inference
-    std::unique_ptr<OrtSession> p_unet_session_ = OrtSession::Create(
-        *p_env,
-        unet_model_path.c_str(),
-        session_options.get());
-    auto unet_allocator = Ort::Allocator::Create(*p_unet_session_, *p_memory_info);
-    auto io_binding_unet = OrtIoBinding::Create(*p_unet_session_);
+
 
     io_binding_unet->BindInput("sample", *params["sample"]);
     io_binding_unet->BindInput("timestep", *params["timestep"]);
@@ -1060,7 +1066,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSelenaTest(const char* prompt, const char*
 
     // 2. compute alphas, betas
     auto alpha_prod_t = alphas_cumprod[tiemsteps[i]];
-    auto alpha_prod_t_prev = alphas_cumprod[prev_timestep] ? prev_timestep >= 0 : alphas_cumprod[0];
+    auto alpha_prod_t_prev = prev_timestep >= 0 ? alphas_cumprod[prev_timestep] : alphas_cumprod[0];
 
     auto beta_prod_t = 1 - alpha_prod_t;
     auto beta_prod_t_prev = 1 - alpha_prod_t_prev;
@@ -1111,10 +1117,11 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSelenaTest(const char* prompt, const char*
 
   // VAE decode latents
   // Bind the vae input tensors
+  auto vae_session_options = OrtSessionOptions::Create();
   std::unique_ptr<OrtSession> p_vae_session_ = OrtSession::Create(
       *p_env,
       vae_model_path.c_str(),
-      session_options.get());
+      vae_session_options.get());
   auto vae_allocator = Ort::Allocator::Create(*p_vae_session_, *p_memory_info);
   auto io_binding_vae = OrtIoBinding::Create(*p_vae_session_);
 

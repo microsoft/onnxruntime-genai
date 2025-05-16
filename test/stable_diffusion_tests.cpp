@@ -63,7 +63,7 @@ static_assert(sizeof(BITMAPINFOHEADER) == 40, "BITMAPINFOHEADER size mismatch");
 
 #pragma pack(pop)
 
-TEST(StableDiffusionTests, TextEmbeddings) {
+TEST(StableDiffusionTests, StableDiffusion) {
   // auto config = OgaConfig::Create(MODEL_PATH "sd");
 
   // auto model = OgaModel::Create(*config);
@@ -74,7 +74,8 @@ TEST(StableDiffusionTests, TextEmbeddings) {
 
   OgaTensor* images;
   uint8_t* image_data;
-  OgaCheckResult(OgaSelenaTest("Capybara with his mom and dad in a beautiful stream", MODEL_PATH "sd", &image_data));
+  //OgaCheckResult(OgaSelenaTest("Capybara with his mom and dad in a beautiful stream", MODEL_PATH "sd", &image_data));
+  OgaCheckResult(OgaSelenaTest("There are two cats playing in couch", MODEL_PATH "sd", &image_data));
 
   size_t rank = 4;
   //OgaCheckResult(OgaTensorGetShapeRank(images, &rank));
