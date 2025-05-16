@@ -24,7 +24,7 @@ See documentation at https://onnxruntime.ai/docs/genai.
 |API| Python <br/>C# <br/>C/C++ <br/> Java ^ |Objective-C||
 |Platform| Linux <br/> Windows <br/>Mac ^ <br/>Android ^  ||iOS |||
 |Architecture|x86 <br/> x64 <br/> Arm64 ~ ||||
-|Hardware Acceleration|CUDA<br/>DirectML<br/>|QNN <br/> OpenVINO <br/> ROCm ||
+|Hardware Acceleration|CUDA<br/>DirectML<br/>|QNN <br/> OpenVINO <br/> ROCm | NvTensorRtRtx |
 |Features|MultiLoRA <br/> Continuous decoding (session continuation)^ | Constrained decoding | Speculative decoding |
 
 \* The Llama model architecture supports similar model families such as CodeLlama, Vicuna, Yi, and more.
