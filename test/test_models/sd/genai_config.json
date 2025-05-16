@@ -1,0 +1,6 @@
+{
+    "model": {
+        "context_length": 2048,
+        "type": "sd"
+    }
+}
