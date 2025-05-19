@@ -45,7 +45,10 @@ void CXX_API(const char* model_path, const char* execution_provider) {
       break;  // Exit the loop
     }
 
-    const std::string prompt = tokenizer->ApplyChatTemplate("", text.c_str(), true);
+    // Escape the JSON content (or use nlohmann:json)
+    std::string messages_json = "[{\"role\": \"user\", \"content\": \"" + text + "\"}]";
+
+    const std::string prompt = tokenizer->ApplyChatTemplate("", messages_json.c_str(), "", true);
 
     bool is_first_token = true;
     Timing timing;

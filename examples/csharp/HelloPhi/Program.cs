@@ -116,7 +116,8 @@ if (option == 1 || option == 2)
         {
             break;
         }
-        var sequences = tokenizer.Encode(tokenizer.ApplyChatTemplate("", prompt, true));
+        string messagesJson = $"[{{\"role\": \"user\", \"content\": \"{prompt}\"}}]";
+        var sequences = tokenizer.Encode(tokenizer.ApplyChatTemplate("", messagesJson, "", true));
 
         if (option == 1) // Complete Output
         {
