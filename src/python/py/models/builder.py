@@ -1175,15 +1175,13 @@ class Model:
             inputs, outputs = self.make_layernorm_casts(name, inputs, outputs, old_io_dtype, new_io_dtype)
             root_input = inputs[0]
             skip_input = inputs[1] if skip else None
-            output_0 = outputs[0]
-            output_3 = outputs[3] if skip and not self.layernorm_attrs["last_layernorm"] else None
 
         if op_type == "SimplifiedLayerNormalization":
-            self._make_simplified_layer_norm(name, root_input, weight, output_0, new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self._make_simplified_layer_norm(name, root_input, weight, outputs[0], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         elif op_type == "SkipSimplifiedLayerNormalization":
-            self._make_skip_simplified_layer_norm(name, root_input, skip_input, weight, output_0, output_3, new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self._make_skip_simplified_layer_norm(name, root_input, skip_input, weight, outputs[0], output_3, new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         elif op_type == "SkipLayerNormalization":
-            self._make_skip_layer_norm(name, root_input, skip_input, weight, bias, output_0, output_3, new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self._make_skip_layer_norm(name, root_input, skip_input, weight, bias, outputs[0], output_3, new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         else:
             raise ValueError(f"Invalid op_type: {op_type}")
 
