@@ -496,17 +496,11 @@ bool SessionInfo::HasOutput(const std::string& name) const {
 }
 
 ONNXTensorElementDataType SessionInfo::GetInputDataType(const std::string& name) const {
-  auto result = inputs_.find(name);
-  if (result == inputs_.end())
-    throw std::runtime_error("Model input was not found: " + name);
-  return result->second->GetTensorTypeAndShapeInfo().GetElementType();
+  return GetInputTensorTypeAndShapeInfo(name).GetElementType();
 }
 
 ONNXTensorElementDataType SessionInfo::GetOutputDataType(const std::string& name) const {
-  auto result = outputs_.find(name);
-  if (result == outputs_.end())
-    throw std::runtime_error("Model output was not found: " + name);
-  return result->second->GetTensorTypeAndShapeInfo().GetElementType();
+  return GetOutputTensorTypeAndShapeInfo(name).GetElementType();
 }
 
 std::vector<std::string> SessionInfo::GetInputNames() const {
@@ -518,17 +512,27 @@ std::vector<std::string> SessionInfo::GetInputNames() const {
 }
 
 std::vector<const char*> SessionInfo::GetInputSymbolicShape(const std::string& name) const {
-  auto type_info = inputs_.find(name);
-  if (type_info == inputs_.end())
-    throw std::runtime_error("Model input was not found: " + name);
-  return type_info->second->GetTensorTypeAndShapeInfo().GetSymbolicDimensions();
+  return GetInputTensorTypeAndShapeInfo(name).GetSymbolicDimensions();
 }
 
 std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& name) const {
+  return GetOutputTensorTypeAndShapeInfo(name).GetSymbolicDimensions();
+}
+
+const OrtTensorTypeAndShapeInfo& SessionInfo::GetInputTensorTypeAndShapeInfo(const std::string& name) const {
+  auto type_info = inputs_.find(name);
+  if (type_info == inputs_.end()) {
+    throw std::runtime_error("Model input was not found: " + name);
+  }
+  return type_info->second->GetTensorTypeAndShapeInfo();
+}
+
+const OrtTensorTypeAndShapeInfo& SessionInfo::GetOutputTensorTypeAndShapeInfo(const std::string& name) const {
   auto type_info = outputs_.find(name);
-  if (type_info == outputs_.end())
+  if (type_info == outputs_.end()) {
     throw std::runtime_error("Model output was not found: " + name);
-  return type_info->second->GetTensorTypeAndShapeInfo().GetSymbolicDimensions();
+  }
+  return type_info->second->GetTensorTypeAndShapeInfo();
 }
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
@@ -536,7 +540,8 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   EnsureDeviceOrtInit(*p_device_);
 
   // Only CUDA and DML does every input on the device
-  if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML)
+  if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML ||
+      p_device_->GetType() == DeviceType::QNN)
     p_device_inputs_ = p_device_;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);

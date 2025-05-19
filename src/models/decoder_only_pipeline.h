@@ -27,6 +27,8 @@ struct DecoderOnlyPipelineModel : Model {
                                      const GeneratorParams& params) const override;
 
   std::vector<std::unique_ptr<OrtSession>> sessions_;
+  std::vector<std::unique_ptr<SessionInfo>> session_infos_;  // weird that it has to be vector<unique_ptr<SessionInfo>> instead of vector<SessionInfo>
+
   OrtEnv& ort_env_;
 };
 
@@ -81,7 +83,6 @@ struct DecoderOnlyPipelineState : State {
 
   std::vector<std::optional<OverlappedKeyValueCacheUpdateRecord>> pipeline_overlapped_kv_cache_update_records_;
 
-  // Stores all the outputs from the previous pipeline state(s)
   std::unordered_map<std::string, std::unique_ptr<OrtValue>> ortvalue_store_;
 
   std::unique_ptr<InputIDs> input_ids_;

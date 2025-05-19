@@ -124,6 +124,9 @@ struct SessionInfo {
   std::vector<const char*> GetInputSymbolicShape(const std::string& name) const;
   std::vector<const char*> GetOutputSymbolicShape(const std::string& name) const;
 
+  const OrtTensorTypeAndShapeInfo& GetInputTensorTypeAndShapeInfo(const std::string& name) const;
+  const OrtTensorTypeAndShapeInfo& GetOutputTensorTypeAndShapeInfo(const std::string& name) const;
+
  private:
   std::unordered_map<std::string, std::unique_ptr<OrtTypeInfo>> inputs_, outputs_;
 };

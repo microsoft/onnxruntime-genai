@@ -14,6 +14,9 @@ DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> confi
   for (const auto& model : config_->model.decoder.pipeline) {
     sessions_.emplace_back(OrtSession::Create(ort_env, (config_->config_path / fs::path(model.filename)).c_str(),
                                               GetSessionOptions(model.model_id)));
+    auto session_info = std::make_unique<SessionInfo>();
+    session_info->Add(*sessions_.back());
+    session_infos_.emplace_back(std::move(session_info));
   }
 
   for (auto& session : sessions_) {
@@ -183,11 +186,11 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
 
     // Clear the intermediate pipeline state outputs from the previous runs.
     // These outputs will be replaced by the outputs from the current run.
-    for (const auto& output_name : pipeline_state->output_names_) {
-      if (auto iter = ortvalue_store_.find(output_name); iter != ortvalue_store_.end()) {
-        ortvalue_store_.erase(iter);
-      }
-    }
+    //for (const auto& output_name : pipeline_state->output_names_) {
+    //  if (auto iter = ortvalue_store_.find(output_name); iter != ortvalue_store_.end()) {
+    //    ortvalue_store_.erase(iter);
+    //  }
+    //}
     pipeline_state->ClearIO();
 
     // Managed inputs and outputs are those inputs and outputs that the
@@ -248,12 +251,71 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
       }
     }
 
+    const auto& output_names_forwarder =
+        model_.config_->model.decoder.pipeline[pipeline_state->id_].output_names_forwarder;
+
+    auto get_forwarded_output_name = [&output_names_forwarder](std::string output_name) {
+      const auto forwarded_name_it = output_names_forwarder.find(output_name);
+      if (forwarded_name_it != output_names_forwarder.end()) {
+        output_name = forwarded_name_it->second;
+      }
+      return output_name;
+    };
+
+    auto add_output_to_ort_value_store =
+        [this, &get_forwarded_output_name](
+            std::string output_name, std::unique_ptr<OrtValue> output_value) -> OrtValue* {
+      output_name = get_forwarded_output_name(std::move(output_name));
+      auto [it, inserted] = ortvalue_store_.insert_or_assign(std::move(output_name),
+                                                             std::move(output_value));
+      if (!inserted) {
+        // log warning?
+      }
+      return it->second.get();
+    };
+
     // Add all the remaining outputs for the intermediate pipeline state
-    for (const auto& output_name : model_.config_->model.decoder.pipeline[pipeline_state->id_].outputs) {
-      if (std::none_of(pipeline_state->output_names_.begin(), pipeline_state->output_names_.end(),
-                       [&](const std::string& elem) { return elem == output_name; })) {
+    std::vector<size_t> intermediate_pipeline_state_outputs_allocated_by_ort_indices{};
+    {
+      for (const auto& output_name : model_.config_->model.decoder.pipeline[pipeline_state->id_].outputs) {
+        if (std::any_of(pipeline_state->output_names_.begin(), pipeline_state->output_names_.end(),
+                        [&](const std::string& elem) { return elem == output_name; })) {
+          continue;
+        }
+
         pipeline_state->output_names_.push_back(output_name.c_str());
-        pipeline_state->outputs_.push_back(nullptr);
+
+        const auto& output_type_and_shape =
+            model_.session_infos_[pipeline_state->id_]->GetOutputTensorTypeAndShapeInfo(output_name);
+        const auto output_shape = output_type_and_shape.GetShape();
+
+        const bool is_output_shape_static = std::all_of(output_shape.begin(), output_shape.end(),
+                                                        [](int64_t dim) { return dim >= 0; });
+
+        // pre-allocate with device allocator if shape is static
+        if (is_output_shape_static) {
+          const auto has_same_type_and_shape = [](const OrtTensorTypeAndShapeInfo& a,
+                                                  const OrtTensorTypeAndShapeInfo& b) {
+            return a.GetElementType() == b.GetElementType() && a.GetShape() == b.GetShape();
+          };
+
+          OrtValue* output_ptr{};
+          auto ortvalue_it = ortvalue_store_.find(get_forwarded_output_name(output_name));
+          if (ortvalue_it != ortvalue_store_.end() &&
+              has_same_type_and_shape(output_type_and_shape, *ortvalue_it->second->GetTensorTypeAndShapeInfo())) {
+            // re-use existing stored value with the same shape
+            output_ptr = ortvalue_it->second.get();
+          } else {
+            auto device_output = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), output_shape,
+                                                        output_type_and_shape.GetElementType());
+            output_ptr = add_output_to_ort_value_store(output_name, std::move(device_output));
+          }
+          pipeline_state->outputs_.push_back(output_ptr);
+
+        } else {
+          intermediate_pipeline_state_outputs_allocated_by_ort_indices.push_back(pipeline_state->outputs_.size());
+          pipeline_state->outputs_.push_back(nullptr);
+        }
       }
     }
 
@@ -281,18 +343,9 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
 
     // Transfer ownership of all the non-managed outputs from the current pipeline state to the ortvalue store.
     // All non managed outputs are assumed to be on CPU
-    for (size_t i = 0; i < pipeline_state->output_names_.size(); ++i) {
-      if (std::none_of(output_names_.begin(), output_names_.end(),
-                       [&](const std::string& elem) { return elem == pipeline_state->output_names_[i]; }) &&
-          std::none_of(input_names_.begin(), input_names_.end(),
-                       [&](const std::string& elem) { return elem == pipeline_state->output_names_[i]; })) {
-        auto forwarded_output = model_.config_->model.decoder.pipeline[pipeline_state->id_].output_names_forwarder.find(pipeline_state->output_names_[i]);
-        if (forwarded_output != model_.config_->model.decoder.pipeline[pipeline_state->id_].output_names_forwarder.end()) {
-          ortvalue_store_[forwarded_output->second] = std::unique_ptr<OrtValue>(pipeline_state->outputs_[i]);
-        } else {
-          ortvalue_store_[pipeline_state->output_names_[i]] = std::unique_ptr<OrtValue>(pipeline_state->outputs_[i]);
-        }
-      }
+    for (const auto i : intermediate_pipeline_state_outputs_allocated_by_ort_indices) {
+      auto output_name = pipeline_state->output_names_[i];
+      add_output_to_ort_value_store(output_name, std::unique_ptr<OrtValue>(pipeline_state->outputs_[i]));
     }
   }
 }
