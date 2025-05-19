@@ -20,7 +20,7 @@ struct OrtxPtr {
   T* p_{};
 };
 
-size_t SizeOf(ONNXTensorElementDataType type);
+const char* TypeToString(ONNXTensorElementDataType type);
 
 int64_t ElementCountFromShape(std::span<const int64_t> shape);
 

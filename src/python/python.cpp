@@ -277,6 +277,20 @@ void SetLogOptions(const pybind11::kwargs& dict) {
   }
 }
 
+void SetLogCallback(std::optional<const pybind11::function> callback) {
+  static std::optional<pybind11::function> log_callback;
+  log_callback = callback;
+
+  if (log_callback.has_value()) {
+    Oga::SetLogCallback([](const char* message, size_t length) {
+      pybind11::gil_scoped_acquire gil;
+      (*log_callback)(std::string_view(message, length));
+    });
+  } else {
+    Oga::SetLogCallback(nullptr);
+  }
+}
+
 PYBIND11_MODULE(onnxruntime_genai, m) {
   m.doc() = R"pbdoc(
         Ort Generators library
@@ -482,6 +496,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("load", &OgaAdapters::LoadAdapter);
 
   m.def("set_log_options", &SetLogOptions);
+  m.def("set_log_callback", &SetLogCallback);
 
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });
