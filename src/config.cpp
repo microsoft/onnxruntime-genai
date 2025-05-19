@@ -735,6 +735,21 @@ bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
   return false;
 }
 
+bool IsMultiProfileEnabled(Config::SessionOptions& session_options)
+{
+  for (const auto& provider_options : session_options.provider_options) {
+    if (provider_options.name == "NvTensorRtRtx") {
+      for (const auto& value : provider_options.options) {
+        if (value.first == "nv_multi_profile_enable" && value.second == "1") {
+          return true;
+        }
+      }
+      return false;
+    }
+  }
+  return false;
+}
+
 struct Root_Element : JSON::Element {
   explicit Root_Element(Config& config) : config_{config} {}
 

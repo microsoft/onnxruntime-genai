@@ -29,7 +29,7 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
 
   // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
   bool graph_capture_this_run = params_->use_graph_capture && input_ids_.GetShape()[1] == 1;
-  State::Run(*model_.session_decoder_, graph_capture_this_run);
+  State::Run(*model_.session_decoder_, graph_capture_this_run, params_->use_multi_profile);
 
   return logits_.Get();
 }
