@@ -45,7 +45,7 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, bool enable_mu
 
   if (first_run_) {
     extra_outputs_.Add(session.GetOutputNames());
-    if(enable_mutiprofile){
+    if (enable_multi_profile){
       // Run the context phase profile for the first run
       run_options_->AddConfigEntry("nv_profile_index", "0");
     }
