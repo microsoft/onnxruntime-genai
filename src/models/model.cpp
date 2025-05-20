@@ -52,7 +52,7 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, bool enable_mu
     first_run_ = false;
   } else {
     extra_outputs_.Update();
-    if(enable_mutiprofile){
+    if (enable_multi_profile){
       run_options_->AddConfigEntry("nv_profile_index", "1");
     }
   }
