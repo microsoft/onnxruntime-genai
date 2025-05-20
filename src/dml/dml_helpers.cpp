@@ -22,7 +22,7 @@ static bool IsSoftwareAdapter(IDXGIAdapter1* adapter) {
 };
 
 static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters(PLUID device_luid = nullptr,
-                                                            UINT* deviceIndex = nullptr) {
+                                                            uint32_t* deviceIndex = nullptr) {
   ComPtr<IDXGIFactory4> dxgi_factory;
   THROW_IF_FAILED(CreateDXGIFactory(IID_PPV_ARGS(&dxgi_factory)));
 
@@ -112,7 +112,7 @@ static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters(PLUID device_luid = 
   return adapter_infos;
 }
 
-static ComPtr<IDXGIAdapter1> CreateAdapter(PLUID device_luid = nullptr, UINT* deviceIndex = nullptr) {
+static ComPtr<IDXGIAdapter1> CreateAdapter(PLUID device_luid = nullptr, uint32_t* deviceIndex = nullptr) {
   auto filtered_adapters = EnumerateAdapters(device_luid, deviceIndex);
   if (filtered_adapters.empty()) {
     throw std::runtime_error("No adapter is available for DML.");
@@ -120,7 +120,7 @@ static ComPtr<IDXGIAdapter1> CreateAdapter(PLUID device_luid = nullptr, UINT* de
   return filtered_adapters.front();
 }
 
-DmlObjects CreateDmlObjects(const std::string& current_module_path, PLUID device_luid, UINT* deviceIndex) {
+DmlObjects CreateDmlObjects(const std::string& current_module_path, PLUID device_luid, uint32_t* deviceIndex) {
   D3D12_COMMAND_QUEUE_DESC command_queue_description = {
       D3D12_COMMAND_LIST_TYPE_COMPUTE,
       0,

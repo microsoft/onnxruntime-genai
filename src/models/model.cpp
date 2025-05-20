@@ -333,8 +333,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       if (!GetDmlInterface()) {
         LUID device_luid{};
         LUID* p_device_luid{};
-        UINT device_index{};
-        UINT* p_device_index{};
+        uint32_t device_index{};
+        uint32_t* p_device_index{};
         for (const auto& [name, value] : provider_options.options) {
           if (name == "luid") {
             if (auto separator_position = value.find(":"); separator_position != std::string::npos) {
