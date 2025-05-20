@@ -244,8 +244,8 @@ def test_tokenizer_encode_decode(device, phi2_for, batch):
     reason="Python 3.8 is required for downloading models.",
 )
 @pytest.mark.parametrize("device", devices)
-def test_qwen_chat_template(device, qwen_for):
-    model_path = qwen_for(device)
+def test_phi3_chat_template(device, phi3_for):
+    model_path = phi3_for(device)
 
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
