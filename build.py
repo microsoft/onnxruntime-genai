@@ -433,7 +433,6 @@ def _run_android_tests(args: argparse.Namespace):
             # util.run([adb, "logcat", "-d", "*:E"])
             raise exception
 
-
 def _get_windows_build_args(args: argparse.Namespace):
     win_args = [
         "-DCMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
@@ -633,6 +632,21 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         csharp_build_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
+
+    # If Java was built, install it to the local Maven repository
+    if args.build_java:
+        # Use the Gradle wrapper to publish to the local Maven repository
+        log.info("Publishing Java API to local Maven repository using Gradle...")
+        gradle_executable = str(REPO_ROOT / "src" / "java" / ("gradlew.bat" if util.is_windows() else "gradlew"))
+        # Use the src/java directory where build.gradle is located
+        java_build_dir = REPO_ROOT / "src" / "java"
+        # Pass build properties to Gradle.
+        gradle_properties = {
+            "cmakeBuildDir": str(args.build_dir)
+        }
+        # We've updated the Gradle build file to make signing optional, so we don't need to skip it explicitly
+        util.run([gradle_executable, "--no-daemon", "publishToMavenLocal"] + [f"-D{key}={value}" for key, value in gradle_properties.items()],
+                 cwd=java_build_dir)
 
 
 def package(args: argparse.Namespace, env: dict[str, str]):

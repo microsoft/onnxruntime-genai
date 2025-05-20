@@ -108,43 +108,104 @@ sourceSets.test {
 	}
 }
 
-if (cmakeNativeLibDir != null) {
-	// generate tasks to be called from cmake
+// generate tasks to be called from cmake
 
-	// Overwrite jar location
-	task allJar(type: Jar) {
-		manifest {
-			attributes('Automatic-Module-Name': "com.microsoft.onnxruntime.genai",
-					'Implementation-Title': 'onnxruntime-genai',
-					'Implementation-Version': project.version)
+// Overwrite jar location
+task allJar(type: Jar) {
+	manifest {
+		attributes('Automatic-Module-Name': "com.microsoft.onnxruntime.genai",
+				'Implementation-Title': 'onnxruntime-genai',
+				'Implementation-Version': project.version)
+	}
+	into("META-INF/maven/$project.group/$mavenArtifactId") {
+		from { generatePomFileForMavenPublication }
+		rename ".*", "pom.xml"
+	}
+
+	// Include compiled Java classes in their standard location
+	from sourceSets.main.output
+
+	// Determine the OS and architecture string similar to GenAI.java
+	def osArch = ""
+	def os = System.getProperty("os.name", "generic").toLowerCase(Locale.ENGLISH)
+	def arch = System.getProperty("os.arch", "generic").toLowerCase(Locale.ENGLISH)
+
+	def detectedOS = ""
+	if (os.contains("mac") || os.contains("darwin")) {
+		detectedOS = "osx"
+	} else if (os.contains("win")) {
+		detectedOS = "win"
+	} else if (os.contains("nux")) {
+		detectedOS = "linux"
+	} else if (os == "android") { // Assuming "android" comes from System.getProperty
+		detectedOS = "android"
+	} else {
+		throw new IllegalStateException("Unsupported os:" + os)
+	}
+
+	def detectedArch = ""
+	if (arch.startsWith("amd64") || arch.startsWith("x86_64")) {
+		detectedArch = "x64"
+	} else if (arch.startsWith("x86")) {
+		detectedArch = "x86"
+	} else if (arch.startsWith("aarch64")) {
+		detectedArch = "aarch64"
+	} else if (arch.startsWith("ppc64")) {
+		detectedArch = "ppc64"
+	} else if (detectedOS == "android") {
+		detectedArch = arch // On Android, use the reported arch directly
+	} else {
+		throw new IllegalStateException("Unsupported arch:" + arch)
+	}
+
+	osArch = detectedOS + '-' + detectedArch
+
+	// Correctly determine the native library directory based on cmakeBuildDir
+	def nativeLibDir = file("${cmakeBuildDir}/src/java/native-lib/ai/onnxruntime/genai/native/${osArch}")
+
+	// Copy only native libraries to the platform-specific directory within the JAR
+	if (nativeLibDir.exists()) {
+		from(nativeLibDir) {
+			def nativeLibName
+			def nativeJniLibName
+			if (os.contains("win")) {
+				nativeLibName = "onnxruntime-genai.dll"
+				nativeJniLibName = "onnxruntime-genai-jni.dll"
+			} else if (os.contains("mac") || os.contains("darwin")) {
+				nativeLibName = "libonnxruntime-genai.dylib"
+				nativeJniLibName = "libonnxruntime-genai-jni.dylib"
+			} else if (os.contains("nux")) {
+				nativeLibName = "libonnxruntime-genai.so"
+				nativeJniLibName = "libonnxruntime-genai-jni.so"
+			} else {
+				throw new IllegalStateException("Unsupported os for native library inclusion:" + os)
+			}
+
+			include nativeLibName
+			include nativeJniLibName
+			into "ai/onnxruntime/genai/native/${osArch}"
 		}
-		into("META-INF/maven/$project.group/$mavenArtifactId") {
-			from { generatePomFileForMavenPublication }
-			rename ".*", "pom.xml"
-		}
-		from sourceSets.main.output
-		from cmakeNativeLibDir
 	}
-
-	task cmakeBuild(type: Copy) {
-		from project.buildDir
-		include 'libs/**'
-		include 'docs/**'
-		into cmakeBuildOutputDir
-	}
-
-	cmakeBuild.dependsOn allJar
-	cmakeBuild.dependsOn sourcesJar
-	cmakeBuild.dependsOn javadocJar
-	cmakeBuild.dependsOn javadoc
-
-	task cmakeCheck(type: Copy) {
-		from project.buildDir
-		include 'reports/**'
-		into cmakeBuildOutputDir
-	}
-	cmakeCheck.dependsOn check
 }
+
+task cmakeBuild(type: Copy) {
+	from project.buildDir
+	include 'libs/**'
+	include 'docs/**'
+	into cmakeBuildOutputDir
+}
+
+cmakeBuild.dependsOn allJar
+cmakeBuild.dependsOn sourcesJar
+cmakeBuild.dependsOn javadocJar
+cmakeBuild.dependsOn javadoc
+
+task cmakeCheck(type: Copy) {
+	from project.buildDir
+	include 'reports/**'
+	into cmakeBuildOutputDir
+}
+cmakeCheck.dependsOn check
 
 dependencies {
 	testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'
@@ -189,7 +250,12 @@ publishing {
 			groupId = project.group
 			artifactId = mavenArtifactId
 
-			from components.java
+			// Replace the Java component with our custom JAR that includes native libraries
+			// from components.java
+			artifact tasks.allJar
+			artifact sourcesJar
+			artifact javadocJar
+
 			pom {
 				name = 'onnxruntime-genai'
 				description = defaultDescription
@@ -240,6 +306,12 @@ signing {
 	// ORG_GRADLE_PROJECT_signingPassword but can be changed to properties
 	def signingKey = findProperty("signingKey")
 	def signingPassword = findProperty("signingPassword")
-	useInMemoryPgpKeys(signingKey, signingPassword)
-	sign publishing.publications.maven
+
+	// Only enable signing if credentials are available
+	required = signingKey != null && signingPassword != null
+
+	if (required) {
+		useInMemoryPgpKeys(signingKey, signingPassword)
+		sign publishing.publications.maven
+	}
 }
