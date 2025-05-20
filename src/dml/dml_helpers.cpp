@@ -78,35 +78,34 @@ static std::vector<ComPtr<IDXGIAdapter1>> EnumerateAdapters(PLUID device_luid = 
         }
       }
     }
-  }
-  else {
-      // Enumerate adapters without ordering.
-      ComPtr<IDXGIAdapter1> adapter;
-      uint32_t hwAdapterIndex = 0;
-      for (uint32_t adapter_index = 0; dxgi_factory->EnumAdapters1(adapter_index, &adapter) != DXGI_ERROR_NOT_FOUND; adapter_index++) {
-          // We can't assume the ordering of hardware and software adapters, so keep looping. This path should only execute on Windows 10
-          // version 1709 or earlier; IDD (e.g. remote desktop) adapters do not exist when taking this code path.
-          if (IsSoftwareAdapter(adapter.Get())) {
-              continue;
-          }
-
-          // Make sure that we are able to create the device
-          ComPtr<ID3D12Device> d3d12_device;
-          THROW_IF_FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12_device)));
-
-          if (d3d12_device && deviceIndex) {
-              // get device specified by the deviceIndex
-              if (*deviceIndex == hwAdapterIndex) {
-                  adapter_infos.emplace_back(std::move(adapter));
-                  break;
-              }
-          }
-          else if (d3d12_device) {
-              adapter_infos.emplace_back(std::move(adapter));
-          }
-
-          hwAdapterIndex++;
+  } else {
+    // Enumerate adapters without ordering.
+    ComPtr<IDXGIAdapter1> adapter;
+    uint32_t hwAdapterIndex = 0;
+    for (uint32_t adapter_index = 0; dxgi_factory->EnumAdapters1(adapter_index, &adapter) != DXGI_ERROR_NOT_FOUND; adapter_index++) {
+      // We can't assume the ordering of hardware and software adapters, so keep looping. This path should only execute on Windows 10
+      // version 1709 or earlier; IDD (e.g. remote desktop) adapters do not exist when taking this code path.
+      if (IsSoftwareAdapter(adapter.Get())) {
+        continue;
       }
+
+      // Make sure that we are able to create the device
+      ComPtr<ID3D12Device> d3d12_device;
+      THROW_IF_FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d3d12_device)));
+
+      if (d3d12_device && deviceIndex) {
+        // get device specified by the deviceIndex
+        if (*deviceIndex == hwAdapterIndex) {
+          adapter_infos.emplace_back(std::move(adapter));
+          break;
+        }
+      }
+      else if (d3d12_device) {
+        adapter_infos.emplace_back(std::move(adapter));
+      }
+
+      hwAdapterIndex++;
+    }
   }
 
   return adapter_infos;
