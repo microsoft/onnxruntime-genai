@@ -49,7 +49,7 @@ struct State {
   std::vector<std::pair<std::string, std::string>> ep_dynamic_options_next_run_;
 
  protected:
-  void Run(OrtSession& session, bool graph_capture_this_run = false, bool enable_mutiprofile = false);  // Uses the inputs below to run
+  void Run(OrtSession& session, bool graph_capture_this_run = false, bool enable_multi_profile = false);  // Uses the inputs below to run
   bool first_run_{true};
 
   std::unique_ptr<OrtRunOptions> run_options_;
