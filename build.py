@@ -11,6 +11,8 @@ import shlex
 import shutil
 import sys
 import textwrap
+import subprocess
+import re
 
 from pathlib import Path
 
@@ -434,6 +436,71 @@ def _run_android_tests(args: argparse.Namespace):
             raise exception
 
 
+def _install_java_to_maven_repo(args: argparse.Namespace):
+    """
+    Install the ONNX Runtime GenAI Java API JAR to the local Maven repository.
+    """
+    # Read the version from VERSION_INFO file
+    version = ""
+    try:
+        with open(REPO_ROOT / "VERSION_INFO", "r") as f:
+            version = f.read().strip()
+    except Exception as e:
+        log.warning(f"Failed to read VERSION_INFO: {e}")
+        version = "0.1.0-SNAPSHOT"  # Default version if VERSION_INFO cannot be read
+
+    # Define Maven coordinates
+    group_id = "com.microsoft.onnxruntime.genai"
+    artifact_id = "onnxruntime-genai"
+
+    # Determine the path to the generated JAR file
+    build_dir = args.build_dir
+    jar_path = build_dir / "src" / "java" / "build" / "libs" / "onnxruntime-genai.jar"
+    
+    # Check if JAR file exists
+    if not jar_path.exists():
+        log.warning(f"JAR file not found at {jar_path}, looking for alternative locations...")
+        # Try to find the JAR file in alternative locations
+        build_output_dir = build_dir / "src" / "java" / "build" / "libs"
+        
+        if build_output_dir.exists():
+            jar_files = list(build_output_dir.glob("*.jar"))
+            if jar_files:
+                jar_path = jar_files[0]  # Use the first JAR file found
+                log.info(f"Found JAR file at {jar_path}")
+            else:
+                log.warning(f"No JAR files found in {build_output_dir}")
+                return
+        else:
+            log.warning(f"Build output directory not found at {build_output_dir}")
+            return
+
+    log.info(f"Installing {jar_path} to local Maven repository...")
+    try:
+        mvn_command = [
+            "mvn",
+            "install:install-file",
+            f"-Dfile={jar_path}",
+            f"-DgroupId={group_id}",
+            f"-DartifactId={artifact_id}",
+            f"-Dversion={version}",
+            "-Dpackaging=jar",
+            "-DgeneratePom=true"
+        ]
+        
+        # Try to run the Maven command
+        result = subprocess.run(mvn_command, check=True, capture_output=True, text=True)
+        log.info("ONNX Runtime GenAI Java API successfully installed to local Maven repository.")
+        log.debug(result.stdout)
+        
+    except subprocess.CalledProcessError as e:
+        log.error(f"Error installing Java API to local Maven repository: {e}")
+        log.error(e.stdout)
+        log.error(e.stderr)
+    except FileNotFoundError:
+        log.error("Maven (mvn) command not found. Please ensure Maven is installed and in your PATH.")
+
+
 def _get_windows_build_args(args: argparse.Namespace):
     win_args = [
         "-DCMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
@@ -633,6 +700,10 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         csharp_build_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
+
+    # If Java was built, install it to the local Maven repository
+    if args.build_java:
+        _install_java_to_maven_repo(args)
 
 
 def package(args: argparse.Namespace, env: dict[str, str]):
