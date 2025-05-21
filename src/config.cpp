@@ -735,16 +735,22 @@ bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
   return false;
 }
 
-bool IsMultiProfileEnabled(Config::SessionOptions& session_options)
+bool IsMultiProfileEnabled(const Config::SessionOptions& session_options)
 {
-  for (const auto& provider_options : session_options.provider_options) {
-    if (provider_options.name == "NvTensorRtRtx") {
-      for (const auto& value : provider_options.options) {
-        if (value.first == "nv_multi_profile_enable" && value.second == "1") {
-          return true;
+  for (const auto& provider : session_options.providers) {
+    const auto provider_options = std::find_if(session_options.provider_options.begin(),
+                                               session_options.provider_options.end(),
+                                               [&provider](const Config::ProviderOptions& po) {
+                                                 return po.name == provider;
+                                               });
+    if (provider_options != session_options.provider_options.end()) {
+      if (provider_options->name == "NvTensorRtRtx") {
+        for (const auto& value : provider_options->options) {
+          if (value.first == "nv_multi_profile_enable" && value.second == "1") {
+            return true;
+          }
         }
       }
-      return false;
     }
   }
   return false;

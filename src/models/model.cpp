@@ -35,7 +35,7 @@ State::State(const GeneratorParams& params, const Model& model)
   }
 }
 
-void State::Run(OrtSession& session, bool graph_capture_this_run, bool enable_multi_profile) {
+void State::Run(OrtSession& session, bool graph_capture_this_run) {
   if (params_->use_graph_capture) {
     if (graph_capture_this_run)
       run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
@@ -45,14 +45,14 @@ void State::Run(OrtSession& session, bool graph_capture_this_run, bool enable_mu
 
   if (first_run_) {
     extra_outputs_.Add(session.GetOutputNames());
-    if (enable_multi_profile){
+    if (params_->use_multi_profile){
       // Run the context phase profile for the first run
       run_options_->AddConfigEntry("nv_profile_index", "0");
     }
     first_run_ = false;
   } else {
     extra_outputs_.Update();
-    if (enable_multi_profile){
+    if (params_->use_multi_profile){
       run_options_->AddConfigEntry("nv_profile_index", "1");
     }
   }
@@ -280,12 +280,112 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   return token_id;
 }
 
+/**
+ * @brief Creates multi-profile shapes for TensorRT execution provider optimization.
+ *
+ * This function generates separate profiles for each of the context and generation phases to optimize performance
+ * Each profile includes shapes for input tensors (input_ids, attention_mask, position_ids)
+ * and key-value cache tensors with appropriate dimensions based on the model configuration.
+ *
+ */
+void ConfigureMultiProfile(const Config& config, OrtSessionOptions& session_options) {
+
+  // Get model parameters from decoder config
+  const int num_layers = config.model.decoder.num_hidden_layers;
+  const int num_kv_heads = config.model.decoder.num_key_value_heads;
+  const int head_dim = config.model.decoder.head_size;
+
+  // Get max context length from config
+  const int max_context_len = config.model.context_length;
+  const int opt_context_len = config.model.context_length/2;
+  const int min_seq_len = 1;
+
+  // Extract KV cache name patterns from decoder config
+  std::string_view past_key_pattern = config.model.decoder.inputs.past_key_names;
+  std::string_view past_value_pattern = config.model.decoder.inputs.past_value_names;
+
+  // Helper function to add input shapes (input_ids, attention_mask, position_ids)
+  const auto add_input_shapes = [](std::ostringstream& shapes, int seq_len, bool append = false) {
+    if (append) shapes << ",";
+    shapes << Config::Defaults::InputIdsName << ":1x" << seq_len << ","
+           << Config::Defaults::AttentionMaskName << ":1x" << seq_len << ","
+           << Config::Defaults::PositionIdsName << ":1x" << seq_len;
+  };
+
+  // Helper function to add generation phase input shapes
+  const auto add_generation_input_shapes = [](std::ostringstream& shapes, int context_len) {
+    shapes << "," << Config::Defaults::AttentionMaskName << ":1x" << context_len << ","
+           << Config::Defaults::InputIdsName << ":1x1,"
+           << Config::Defaults::PositionIdsName << ":1x1";
+  };
+
+  // Helper function to add empty KV cache shapes for all layers
+  const auto add_empty_key_value_cache_shapes = [](std::ostringstream& shapes,
+                                  std::string_view key_pattern,
+                                  std::string_view value_pattern,
+                                  int num_layers,
+                                  int num_kv_heads,
+                                  int head_dim) {
+    for (int i = 0; i < num_layers; i++) {
+      // Use the existing function to format the key/value names
+      std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
+      std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
+
+      shapes << "," << key_name << ":1x" << num_kv_heads << "x0x" << head_dim;
+      shapes << "," << value_name << ":1x" << num_kv_heads << "x0x" << head_dim;
+    }
+  };
+
+  // Helper function to add KV cache with sequence length
+  const auto add_key_value_cache_shapes = [](std::ostringstream& shapes,
+                             std::string_view key_pattern,
+                             std::string_view value_pattern,
+                             int seq_len,
+                             int num_layers,
+                             int num_kv_heads,
+                             int head_dim) {
+    for (int i = 0; i < num_layers; i++) {
+      // Use the existing function to format the key/value names
+      std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
+      std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
+
+      shapes << "," << key_name << ":1x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
+      shapes << "," << value_name << ":1x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
+    }
+  };
+
+  std::ostringstream min_shapes, opt_shapes, max_shapes;
+
+  // MIN SHAPES (context phase and first token generation)
+  add_input_shapes(min_shapes, min_seq_len);
+  add_empty_key_value_cache_shapes(min_shapes, past_key_pattern, past_value_pattern, num_layers, num_kv_heads, head_dim);
+  add_generation_input_shapes(min_shapes, min_seq_len);
+  add_key_value_cache_shapes(min_shapes, past_key_pattern, past_value_pattern, min_seq_len, num_layers, num_kv_heads, head_dim);
+
+  // OPT SHAPES (prefill with medium context and generation after medium context)
+  add_input_shapes(opt_shapes, opt_context_len);
+  add_empty_key_value_cache_shapes(opt_shapes, past_key_pattern, past_value_pattern, num_layers, num_kv_heads, head_dim);
+  add_generation_input_shapes(opt_shapes, opt_context_len);
+  add_key_value_cache_shapes(opt_shapes, past_key_pattern, past_value_pattern, opt_context_len-1, num_layers, num_kv_heads, head_dim);
+
+  // MAX SHAPES (prefill with maximum context and generation after maximum context)
+  add_input_shapes(max_shapes, max_context_len);
+  add_empty_key_value_cache_shapes(max_shapes, past_key_pattern, past_value_pattern, num_layers, num_kv_heads, head_dim);
+  add_generation_input_shapes(max_shapes, max_context_len);
+  add_key_value_cache_shapes(max_shapes, past_key_pattern, past_value_pattern, max_context_len-1, num_layers, num_kv_heads, head_dim);
+
+  // Add the constructed profiles to session options
+  session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes", min_shapes.str().c_str());
+  session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_opt_shapes", opt_shapes.str().c_str());
+  session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_max_shapes", max_shapes.str().c_str());
+}
+
 DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                            const std::vector<std::string>& providers,
                                            const std::vector<Config::ProviderOptions>& provider_options_list,
                                            bool is_primary_session_options,
                                            bool disable_graph_capture,
-                                           Config::Model& model_config) {
+                                           const Config& config) {
   DeviceInterface* p_device{};
 
   for (auto& provider : providers) {
@@ -377,100 +477,11 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
         session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
       } else if (provider_options.name == "NvTensorRtRtx") {
-        // Always enable CUDA graph
+        // After setting the NvTensorRtRtx provider in Onnxruntime, GenAI will then treat it as the cuda device.
         session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_cuda_graph_enable", "1");
 
-        // Check for multi-profile option
-        if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
-                                             [](const auto& pair) { return pair.first == "nv_multi_profile_enable"; });
-            opt_it != provider_options.options.end() && opt_it->second == "1") {
-
-          // Get model parameters from decoder config
-          const int num_layers = model_config.decoder.num_hidden_layers;
-          const int num_kv_heads = model_config.decoder.num_key_value_heads;
-          const int head_dim = model_config.decoder.head_size;
-
-          // Get max context length from config
-          const int max_context_len = model_config.context_length;
-          const int opt_context_len = model_config.context_length/2; // opt shape is half of max context len
-          const int min_seq_len = 1;
-
-          // Extract KV cache name patterns from decoder config
-          std::string past_key_pattern = model_config.decoder.inputs.past_key_names;
-          std::string past_value_pattern = model_config.decoder.inputs.past_value_names;
-
-          // If patterns are empty, use defaults
-          if (past_key_pattern.empty()) past_key_pattern = Config::Defaults::PastKeyName;
-          if (past_value_pattern.empty()) past_value_pattern = Config::Defaults::PastValueName;
-
-          // Helper function to add input shapes (input_ids, attention_mask, position_ids)
-          auto addInputShapes = [](std::ostringstream& shapes, int seq_len, bool append = false) {
-            if (append) shapes << ",";
-            shapes << Config::Defaults::InputIdsName << ":1x" << seq_len << ","
-                   << Config::Defaults::AttentionMaskName << ":1x" << seq_len << ","
-                   << Config::Defaults::PositionIdsName << ":1x" << seq_len;
-          };
-
-          // Helper function to add generation phase input shapes
-          auto addGenerationInputShapes = [](std::ostringstream& shapes, int context_len) {
-            shapes << "," << Config::Defaults::AttentionMaskName << ":1x" << context_len << ","
-                   << Config::Defaults::InputIdsName << ":1x1,"
-                   << Config::Defaults::PositionIdsName << ":1x1";
-          };
-
-          // Helper function to add empty KV cache shapes for all layers
-          auto addEmptyKVCacheShapes = [&](std::ostringstream& shapes,
-                                          const std::string& key_pattern,
-                                          const std::string& value_pattern) {
-            for (int i = 0; i < num_layers; i++) {
-              char key_name[256], value_name[256];
-              snprintf(key_name, sizeof(key_name), key_pattern.c_str(), i);
-              snprintf(value_name, sizeof(value_name), value_pattern.c_str(), i);
-
-              shapes << "," << key_name << ":1x" << num_kv_heads << "x0x" << head_dim;
-              shapes << "," << value_name << ":1x" << num_kv_heads << "x0x" << head_dim;
-            }
-          };
-
-          // Helper function to add KV cache with sequence length
-          auto addKVCacheShapes = [&](std::ostringstream& shapes,
-                                     const std::string& key_pattern,
-                                     const std::string& value_pattern,
-                                     int seq_len) {
-            for (int i = 0; i < num_layers; i++) {
-              char key_name[256], value_name[256];
-              snprintf(key_name, sizeof(key_name), key_pattern.c_str(), i);
-              snprintf(value_name, sizeof(value_name), value_pattern.c_str(), i);
-
-              shapes << "," << key_name << ":1x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
-              shapes << "," << value_name << ":1x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
-            }
-          };
-
-          std::ostringstream min_shapes, opt_shapes, max_shapes;
-
-          // MIN SHAPES (context phase and first token generation)
-          addInputShapes(min_shapes, min_seq_len);
-          addEmptyKVCacheShapes(min_shapes, past_key_pattern, past_value_pattern);
-          addGenerationInputShapes(min_shapes, min_seq_len);
-          addKVCacheShapes(min_shapes, past_key_pattern, past_value_pattern, min_seq_len);
-
-          // OPT SHAPES (prefill with medium context and generation after medium context)
-          addInputShapes(opt_shapes, opt_context_len);
-          addEmptyKVCacheShapes(opt_shapes, past_key_pattern, past_value_pattern);
-          addGenerationInputShapes(opt_shapes, opt_context_len);
-          addKVCacheShapes(opt_shapes, past_key_pattern, past_value_pattern, opt_context_len-1);
-
-          // MAX SHAPES (prefill with maximum context and generation after maximum context)
-          addInputShapes(max_shapes, max_context_len);
-          addEmptyKVCacheShapes(max_shapes, past_key_pattern, past_value_pattern);
-          addGenerationInputShapes(max_shapes, max_context_len);
-          addKVCacheShapes(max_shapes, past_key_pattern, past_value_pattern, max_context_len-1);
-
-          // Add the constructed profiles to session options
-          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes", min_shapes.str().c_str());
-          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_opt_shapes", opt_shapes.str().c_str());
-          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_max_shapes", max_shapes.str().c_str());
+        if (IsMultiProfileEnabled(config.model.decoder.session_options)) {
+          ConfigureMultiProfile(config, session_options);
         }
 
         p_device = GetDeviceInterface(DeviceType::CUDA);
@@ -502,7 +513,7 @@ static const uint8_t g_trivial_model[] = {
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-void EnsureDeviceOrtInit(DeviceInterface& device, std::unique_ptr<Config>& config) {
+void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
   // OpenVINO delegates to the CPU device allocator
   auto type = device.GetType();
@@ -527,7 +538,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, std::unique_ptr<Config>& confi
   std::vector<Config::ProviderOptions> provider_options_list;
   provider_options_list.emplace_back(Config::ProviderOptions{device_type_names[static_cast<int>(type)], {}});
   const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
-  SetProviderSessionOptions(*session_options, providers, provider_options_list, true, false, config->model); 
+  SetProviderSessionOptions(*session_options, providers, provider_options_list, true, false, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
@@ -613,7 +624,7 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
-  EnsureDeviceOrtInit(*p_device_, config_);
+  EnsureDeviceOrtInit(*p_device_, *config_);
 
   // Only CUDA and DML does every input on the device
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML)
@@ -726,7 +737,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
   p_device_ = SetProviderSessionOptions(session_options, config_session_options.providers,
                                         config_session_options.provider_options, is_primary_session_options,
-                                        disable_graph_capture, config_->model);
+                                        disable_graph_capture, *config_);
 
   // Fallback to CPU if no provider specific interface was set
   if (!p_device_)
