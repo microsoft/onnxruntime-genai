@@ -733,6 +733,8 @@ bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
       }
     } else if (provider_options.name == "DML") {
       return true;
+    } else if (provider_options.name == "NvTensorRtRtx") {
+      return true;
     }
   }
   return false;
