@@ -695,7 +695,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   std::set<std::string> llm_types = {"chatglm", "decoder", "gemma", "gemma2", "gemma3_text",
                                      "granite", "llama", "mistral", "nemotron", "olmo",
-                                     "phi", "phimoe", "phi3", "phi3small", "qwen2"};
+                                     "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen3"};
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (llm_types.find(config->model.type) != llm_types.end())
