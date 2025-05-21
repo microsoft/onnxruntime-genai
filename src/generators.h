@@ -72,6 +72,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   int max_batch_size{0};
   bool use_graph_capture{};
+  bool use_multi_profile{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
   DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
