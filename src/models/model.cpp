@@ -45,14 +45,14 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
 
   if (first_run_) {
     extra_outputs_.Add(session.GetOutputNames());
-    if (params_->use_multi_profile){
+    if (params_->use_multi_profile) {
       // Run the context phase profile for the first run
       run_options_->AddConfigEntry("nv_profile_index", "0");
     }
     first_run_ = false;
   } else {
     extra_outputs_.Update();
-    if (params_->use_multi_profile){
+    if (params_->use_multi_profile) {
       run_options_->AddConfigEntry("nv_profile_index", "1");
     }
   }
@@ -289,7 +289,6 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
  *
  */
 void ConfigureMultiProfile(const Config& config, OrtSessionOptions& session_options) {
-
   // Get model parameters from decoder config
   const int num_layers = config.model.decoder.num_hidden_layers;
   const int num_kv_heads = config.model.decoder.num_key_value_heads;
@@ -297,7 +296,7 @@ void ConfigureMultiProfile(const Config& config, OrtSessionOptions& session_opti
 
   // Get max context length from config
   const int max_context_len = config.model.context_length;
-  const int opt_context_len = config.model.context_length/2;
+  const int opt_context_len = config.model.context_length / 2;
   const int min_seq_len = 1;
 
   // Extract KV cache name patterns from decoder config
@@ -321,11 +320,11 @@ void ConfigureMultiProfile(const Config& config, OrtSessionOptions& session_opti
 
   // Helper function to add empty KV cache shapes for all layers
   const auto add_empty_key_value_cache_shapes = [](std::ostringstream& shapes,
-                                  std::string_view key_pattern,
-                                  std::string_view value_pattern,
-                                  int num_layers,
-                                  int num_kv_heads,
-                                  int head_dim) {
+                                                   std::string_view key_pattern,
+                                                   std::string_view value_pattern,
+                                                   int num_layers,
+                                                   int num_kv_heads,
+                                                   int head_dim) {
     for (int i = 0; i < num_layers; i++) {
       // Use the existing function to format the key/value names
       std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
@@ -338,12 +337,12 @@ void ConfigureMultiProfile(const Config& config, OrtSessionOptions& session_opti
 
   // Helper function to add KV cache with sequence length
   const auto add_key_value_cache_shapes = [](std::ostringstream& shapes,
-                             std::string_view key_pattern,
-                             std::string_view value_pattern,
-                             int seq_len,
-                             int num_layers,
-                             int num_kv_heads,
-                             int head_dim) {
+                                             std::string_view key_pattern,
+                                             std::string_view value_pattern,
+                                             int seq_len,
+                                             int num_layers,
+                                             int num_kv_heads,
+                                             int head_dim) {
     for (int i = 0; i < num_layers; i++) {
       // Use the existing function to format the key/value names
       std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
@@ -366,13 +365,13 @@ void ConfigureMultiProfile(const Config& config, OrtSessionOptions& session_opti
   add_input_shapes(opt_shapes, opt_context_len);
   add_empty_key_value_cache_shapes(opt_shapes, past_key_pattern, past_value_pattern, num_layers, num_kv_heads, head_dim);
   add_generation_input_shapes(opt_shapes, opt_context_len);
-  add_key_value_cache_shapes(opt_shapes, past_key_pattern, past_value_pattern, opt_context_len-1, num_layers, num_kv_heads, head_dim);
+  add_key_value_cache_shapes(opt_shapes, past_key_pattern, past_value_pattern, opt_context_len - 1, num_layers, num_kv_heads, head_dim);
 
   // MAX SHAPES (prefill with maximum context and generation after maximum context)
   add_input_shapes(max_shapes, max_context_len);
   add_empty_key_value_cache_shapes(max_shapes, past_key_pattern, past_value_pattern, num_layers, num_kv_heads, head_dim);
   add_generation_input_shapes(max_shapes, max_context_len);
-  add_key_value_cache_shapes(max_shapes, past_key_pattern, past_value_pattern, max_context_len-1, num_layers, num_kv_heads, head_dim);
+  add_key_value_cache_shapes(max_shapes, past_key_pattern, past_value_pattern, max_context_len - 1, num_layers, num_kv_heads, head_dim);
 
   // Add the constructed profiles to session options
   session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes", min_shapes.str().c_str());
