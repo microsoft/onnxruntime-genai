@@ -150,9 +150,9 @@ def main(args):
         else:
             messages = f"""[{{"role": "system", "content": "{system_prompt}"}}, {{"role": "user", "content": "{text}"}}]"""
         # Apply Chat Template
-        final_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
-        final_input = tokenizer.encode(final_prompt)
-        generator.append_tokens(final_input)
+        prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+        input_tokens = tokenizer.encode(prompt)
+        generator.append_tokens(input_tokens)
 
         if args.verbose: print("Running generation loop ...")
         if args.timings:

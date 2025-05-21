@@ -9,6 +9,17 @@
 
 namespace Generators {
 
+// Fix casing of certain historical names to match current Onnxruntime names
+std::string_view NormalizeProviderName(std::string_view name) {
+  if (name == "qnn") {
+    return "QNN";
+  } else if (name == "webgpu") {
+    return "WebGPU";
+  } else if (name == "dml") {
+    return "DML";
+  }
+  return name;  // Return name unchanged
+}
 ONNXTensorElementDataType TranslateTensorType(std::string_view value) {
   if (value == "float32") {
     return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
@@ -72,13 +83,7 @@ struct ProviderOptionsArray_Element : JSON::Element {
   void OnComplete(bool /*empty*/) override {
     // For backwards compatibility turn our old names like 'qnn' into 'QNN', and 'webgpu' to 'WebGPU'
     for (auto& v : v_) {
-      if (v.name == "qnn") {
-        v.name = "QNN";
-      } else if (v.name == "webgpu") {
-        v.name = "WebGPU";
-      } else if (v.name == "dml") {
-        v.name = "DML";
-      }
+      v.name = NormalizeProviderName(v.name);
     }
   }
 
@@ -703,8 +708,8 @@ void ClearProviders(Config& config) {
 }
 
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
-  if (!contains(config.model.decoder.session_options.providers, provider_name))
-    config.model.decoder.session_options.providers.push_back(std::string(provider_name));
+  if (auto normalized_provider = NormalizeProviderName(provider_name); !contains(config.model.decoder.session_options.providers, normalized_provider))
+    config.model.decoder.session_options.providers.push_back(std::string(normalized_provider));
 
   std::ostringstream json;
   json << R"({")" << provider_name << R"(":{)";
@@ -718,20 +723,28 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 }
 
 bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
-  for (const auto& provider_options : session_options.provider_options) {
-    if (provider_options.name == "cuda") {
-      // Graph Capture is currently broken for CUDA
-      for (const auto& value : provider_options.options) {
-        if (value.first == "enable_cuda_graph" && value.second == "1") {
-          throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
+  for (const auto& provider : session_options.providers) {
+    const auto provider_options = std::find_if(session_options.provider_options.begin(),
+                                               session_options.provider_options.end(),
+                                               [&provider](const Config::ProviderOptions& po) {
+                                                 return po.name == provider;
+                                               });
+    if (provider_options != session_options.provider_options.end()) {
+      if (provider_options->name == "cuda") {
+        // Graph Capture is currently broken for CUDA
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enable_cuda_graph" && value.second == "1") {
+            throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
+          }
         }
+      } else if (provider_options->name == "DML") {
+        return true;
+      } else if (provider_options->name == "NvTensorRtRtx") {
+        return true;
       }
-    } else if (provider_options.name == "DML") {
-      return true;
-    } else if (provider_options.name == "NvTensorRtRtx") {
-      return true;
     }
   }
+
   return false;
 }
 

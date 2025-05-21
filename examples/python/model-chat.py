@@ -135,12 +135,13 @@ def main(args):
     else:
         messages = f"""[{{"role": "system", "content": "{system_prompt}"}}]"""
     # Apply Chat Template
-    final_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=False)
-    final_input = tokenizer.encode(final_prompt)
+    tokenizer_input_system_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=False)
+    input_tokens = tokenizer.encode(tokenizer_input_system_prompt)
     # Ignoring the last end of text token as it is messes up the generation when grammar is enabled
     if guidance_type:
-        final_input = final_input[:-1]
-    generator.append_tokens(final_input)
+        input_tokens = input_tokens[:-1]
+    system_prompt_length = len(input_tokens)
+    generator.append_tokens(input_tokens)
 
     # Keep asking for input prompts in a loop
     while True:
@@ -156,9 +157,9 @@ def main(args):
 
         messages = f"""[{{"role": "user", "content": "{text}"}}]"""
         # Apply Chat Template
-        final_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
-        final_input = tokenizer.encode(final_prompt)
-        generator.append_tokens(final_input)
+        user_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+        input_tokens = tokenizer.encode(user_prompt)
+        generator.append_tokens(input_tokens)
 
         if args.verbose: print("Running generation loop ...")
         if args.timings:

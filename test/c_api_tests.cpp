@@ -125,7 +125,7 @@ TEST(CAPITests, ChatTemplate) {
       "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>"
       "How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
 
-  auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages_json, true);
+  auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages_json, nullptr, true);
   ASSERT_STREQ(expected_output, out_string);
 
 #endif
