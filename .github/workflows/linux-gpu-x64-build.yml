@@ -3,12 +3,12 @@ on:
   workflow_dispatch:
   push:
     branches:
-    - main
-    - rel-*
+      - main
+      - rel-*
   pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 
 env:
@@ -19,9 +19,9 @@ env:
 
 jobs:
   linux-cuda-x64-build:
-    env :
+    env:
       PYTHON_EXECUTABLE: "/opt/python/cp310-cp310/bin/python3.10"
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10" ]
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
@@ -68,7 +68,7 @@ jobs:
           rustup override set 1.86.0
           rustup component add rust-src
           rustup show active-toolchain
-      
+
       - name: Get the Latest OnnxRuntime Nightly Version
         shell: pwsh
         run: |
@@ -103,7 +103,7 @@ jobs:
       - name: Get Docker Image
         run: |
           set -e -x
-          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+          az login --identity --object-id c90de106-42dc-405a-8bad-2438f4279448
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_cuda_12.2  \
             --context tools/ci_build/github/linux/docker/manylinux  \
