@@ -327,8 +327,8 @@ void ConfigureMultiProfile(const Config& config, OrtSessionOptions& session_opti
                                                    int head_dim) {
     for (int i = 0; i < num_layers; i++) {
       // Use the existing function to format the key/value names
-      std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
-      std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
+      const std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
+      const std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
 
       shapes << "," << key_name << ":1x" << num_kv_heads << "x0x" << head_dim;
       shapes << "," << value_name << ":1x" << num_kv_heads << "x0x" << head_dim;
@@ -345,8 +345,8 @@ void ConfigureMultiProfile(const Config& config, OrtSessionOptions& session_opti
                                              int head_dim) {
     for (int i = 0; i < num_layers; i++) {
       // Use the existing function to format the key/value names
-      std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
-      std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
+      const std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
+      const std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
 
       shapes << "," << key_name << ":1x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
       shapes << "," << value_name << ":1x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
