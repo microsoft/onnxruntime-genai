@@ -12,7 +12,6 @@ import shutil
 import sys
 import textwrap
 import subprocess
-import re
 
 from pathlib import Path
 
