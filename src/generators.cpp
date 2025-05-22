@@ -8,6 +8,7 @@
 #include "models/decoder_only.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
+#include "timer.h"
 #include "cpu/interface.h"
 #include "cuda/interface.h"
 #include "dml/interface.h"
@@ -364,6 +365,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
+  Timer timer{};
+
   if (last_action_ == Action::generated) {
     ComputeLogits(search_->GetNextTokens());
   }
@@ -372,6 +375,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
   ComputeLogits(input_ids_device);
+
+  LogTiming("Generator::AppendTokens", timer.Elapsed());
 }
 
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
