@@ -213,6 +213,16 @@ std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   return {tokens, tokens + count};
 }
 
+std::vector<int32_t> Tokenizer::EncodeWithOptions(const char* text, bool add_special_tokens) const {
+  OrtxPtr<OrtxTokenId2DArray> ids;
+  CheckResult(OrtxTokenizeWithOptions(tokenizer_, &text, 1, ids.Address(), add_special_tokens));
+
+  const extTokenId_t* tokens;
+  size_t count;
+  CheckResult(OrtxTokenId2DArrayGetItem(ids, 0, &tokens, &count));
+  return {tokens, tokens + count};
+}
+
 std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   OrtxPtr<OrtxStringArray> ortx_string_array;
   CheckResult(OrtxDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address()));

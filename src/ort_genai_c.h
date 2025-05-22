@@ -471,6 +471,14 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer*, const char* str, OgaSequences* sequences);
 
 /**
+ * Encodes a single string and adds the encoded sequence of tokens to the OgaSequences, with options such as whether to add or omit special tokens.
+ * The OgaSequences must be freed with OgaDestroySequences when it is no longer needed.
+ * 
+ * Note: this method may be used to add more options in the future, to leverage OrtxTokenizeWithOptions from ORT Extensions.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeWithOptions(const OgaTokenizer*, const char* str, OgaSequences* sequences, bool add_special_tokens);
+
+/**
  * Batch encode an array of strings and return a single tensor output
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer*, const char** strings, size_t count, OgaTensor** out);

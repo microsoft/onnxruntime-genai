@@ -191,6 +191,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                         byte[] /* const char* */ strings,
                                                                         IntPtr /* OgaSequences* */ sequences);
 
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerEncodeWithOptions(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                                   byte[] /* const char* */ strings,
+                                                                                   IntPtr /* OgaSequences* */ sequences,
+                                                                                   bool /* bool */ add_special_tokens);
+
         // This function is used to decode the given token into a string. The caller is responsible for freeing the
         // returned string using the OgaDestroyString function when it is no longer needed.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
