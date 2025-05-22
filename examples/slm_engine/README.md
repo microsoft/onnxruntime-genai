@@ -374,7 +374,7 @@ target_link_libraries(inference_server slm_engine ort ort_genai)
 
 int main(int argc, char **argv) {
 
-    auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
+    auto slm_engine = microsoft::slm_engine::SLMEngine::Create(
         "path to ONNX Model Directory", "phi", true);
 
     if (!slm_engine) {
