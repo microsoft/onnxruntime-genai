@@ -2567,7 +2567,7 @@ class Model:
         self.make_concat(concat_2_name, concat_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
         constant_shape_name = f"{basename}/ConstantOfShape_2"
         constant_shape_torch_dtype = self.to_torch_dtype[self.io_dtype]
-        constant_shape_value = self.make_tensor_proto_from_tensor(torch.tensor([torch.finfo(constant_shape_torch_dtype).min], dtype=constant_shape_torch_dtype))
+        constant_shape_value = self.make_tensor_proto_from_tensor(torch.tensor([torch.finfo(constant_shape_torch_dtype).min], dtype=constant_shape_torch_dtype), "make_input_ids_subgraph_shape")
         self.make_constant_of_shape(constant_shape_name, f"{concat_2_name}/output_0", value=constant_shape_value, dtype=self.io_dtype, shape=['unk', 'unk'])
 
         # Top path
