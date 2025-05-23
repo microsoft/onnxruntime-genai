@@ -1,6 +1,7 @@
 import onnxruntime_genai as og
 import argparse
 import time
+import json
 
 def main(args):
     if args.verbose: print("Loading model...")
@@ -29,8 +30,6 @@ def main(args):
     if 'max_length' not in search_options:
         search_options['max_length'] = 2048
 
-    chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
-
     # Keep asking for input prompts in a loop
     while True:
         text = input("Input: ")
@@ -41,9 +40,10 @@ def main(args):
         if args.timings: started_timestamp = time.time()
 
         # If there is a chat template, use it
-        prompt = f'{chat_template.format(input=text)}'
+        input_message = [{"role": "user", "content": text }]
+        input_prompt = tokenizer.apply_chat_template(json.dumps(input_message), add_generation_prompt=True)
 
-        input_tokens = tokenizer.encode(prompt)
+        input_tokens = tokenizer.encode(input_prompt)
 
         params = og.GeneratorParams(model)
         params.set_search_options(**search_options)

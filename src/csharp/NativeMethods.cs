@@ -203,6 +203,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaTokenizerApplyChatTemplate(IntPtr /* const OgaTokenizer* */ tokenizer,
                                                                                    byte[] /* const char* */ template_string,
                                                                                    byte[] /* const char* */ message,
+                                                                                   byte[] /* const char* */ tool_calls,
                                                                                    bool /* bool */ add_gen_prompt,
                                                                                    out IntPtr /* const char** */ outStr);
 

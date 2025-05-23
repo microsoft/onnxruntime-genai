@@ -316,7 +316,7 @@ class Model:
         int4_algo_config = self.make_int4_algo_config(extra_options.get("int4_algo_config", "default"))
         self.quant_attrs = {
             "int4": {
-                "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep == "cpu" else 0)),
+                "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
                 "block_size": int(extra_options.get("int4_block_size", 32)),
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
@@ -347,6 +347,10 @@ class Model:
         self._values: dict[str, ir.Value] = {}
 
     def make_outputs_init(self):
+        # Always use float32 logits to improve accuracy in the case of bf16 models.
+        if self.onnx_dtype == "bf16":
+            self.output_types["logits"] = TensorProto.FLOAT
+
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
 
@@ -561,6 +565,34 @@ class Model:
         # Delete temporary cache dir if empty
         if not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
+
+    def make_int4_algo_config(self, quant_method):
+        int4_algo_config = None
+        if quant_method == "rtn":
+            from onnxruntime.quantization.matmul_nbits_quantizer import RTNWeightOnlyQuantConfig
+            int4_algo_config = RTNWeightOnlyQuantConfig()
+        elif quant_method in ["k_quant_mixed", "k_quant_last"]:
+            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
+            if quant_method == "k_quant_mixed":
+                # k_quant_mixed is from llama.cpp.
+                # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
+                # We also consider some MatMuls are more senstive to quantization than other MatMuls.
+                layers_to_exclude = [
+                    i
+                    for i in range(self.num_layers)
+                    if i < self.num_layers / 8 or i >= 7 * self.num_layers / 8 or (i - (round)(self.num_layers / 8)) % 3 == 2
+                ]
+                customized_weight_config = {}
+                for i in layers_to_exclude:
+                    customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
+                    customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
+                    # Gemma model
+                    customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
+                customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
+            elif quant_method == "k_quant_last":
+                customized_weight_config = {"/lm_head/MatMul": {"bits": 8}}
+            int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+        return int4_algo_config
 
     def make_external_tensor(self, tensor: ir.ArrayCompatible | np.ndarray | ir.TensorProtocol, name: str):
         ir_tensor = ir.tensor(tensor, name=name)
@@ -2577,7 +2609,7 @@ class Model:
         self.make_concat(concat_2_name, concat_inputs, dtype=ir.DataType.INT64, shape=[2], axis=0)
         constant_shape_name = f"{basename}/ConstantOfShape_2"
         constant_shape_torch_dtype = self.to_torch_dtype[self.io_dtype]
-        constant_shape_value = self.make_tensor_proto_from_tensor(torch.tensor([torch.finfo(constant_shape_torch_dtype).min], dtype=constant_shape_torch_dtype))
+        constant_shape_value = self.make_tensor_proto_from_tensor(torch.tensor([torch.finfo(constant_shape_torch_dtype).min], dtype=constant_shape_torch_dtype), "make_input_ids_subgraph_shape")
         self.make_constant_of_shape(constant_shape_name, f"{concat_2_name}/output_0", value=constant_shape_value, dtype=self.io_dtype, shape=['unk', 'unk'])
 
         # Top path
@@ -2946,10 +2978,6 @@ class Gemma2Model(GemmaModel):
         self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
         self.is_local = lambda layer_id: layer_id % 2 == 1
 
-    def make_outputs_init(self):
-        # Always use float32 logits to improve accuracy
-        self.output_types["logits"] = ir.DataType.FLOAT
-        super().make_outputs_init()
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         if "final_norm" in location:
