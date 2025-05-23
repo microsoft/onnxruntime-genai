@@ -307,15 +307,13 @@ void ConfigureMultiProfile(const Config& config, OrtSessionOptions& session_opti
   const auto add_input_shapes = [](std::ostringstream& shapes, int seq_len, bool append = false) {
     if (append) shapes << ",";
     shapes << Config::Defaults::InputIdsName << ":1x" << seq_len << ","
-           << Config::Defaults::AttentionMaskName << ":1x" << seq_len << ","
-           << Config::Defaults::PositionIdsName << ":1x" << seq_len;
+           << Config::Defaults::AttentionMaskName << ":1x" << seq_len;
   };
 
   // Helper function to add generation phase input shapes
   const auto add_generation_input_shapes = [](std::ostringstream& shapes, int context_len) {
     shapes << "," << Config::Defaults::AttentionMaskName << ":1x" << context_len << ","
-           << Config::Defaults::InputIdsName << ":1x1,"
-           << Config::Defaults::PositionIdsName << ":1x1";
+           << Config::Defaults::InputIdsName << ":1x1";
   };
 
   // Helper function to add empty KV cache shapes for all layers
@@ -369,7 +367,7 @@ void ConfigureMultiProfile(const Config& config, OrtSessionOptions& session_opti
 
   // MAX SHAPES (prefill with maximum context and generation after maximum context)
   add_input_shapes(max_shapes, max_context_len);
-  add_empty_key_value_cache_shapes(max_shapes, past_key_pattern, past_value_pattern, num_layers, num_kv_heads, head_dim);
+  add_key_value_cache_shapes(max_shapes, past_key_pattern, past_value_pattern, max_context_len - 1, num_layers, num_kv_heads, head_dim);
   add_generation_input_shapes(max_shapes, max_context_len);
   add_key_value_cache_shapes(max_shapes, past_key_pattern, past_value_pattern, max_context_len - 1, num_layers, num_kv_heads, head_dim);
 
