@@ -2924,16 +2924,6 @@ class Qwen3Model(QwenModel):
         super().make_attention_init()
 
 
-class Qwen3Model(QwenModel):
-    def __init__(self, config, io_dtype: int, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-    def make_attention_init(self):
-        self.attention_attrs["q_norm"] = True
-        self.attention_attrs["k_norm"] = True
-        super().make_attention_init()
-
-
 class PhiModel(Model):
     def __init__(self, config, io_dtype: int, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
@@ -3080,50 +3070,6 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         self.make_add(add_1_name, add_1_inputs, dtype=proto_dtype, shape=["batch_size", "sequence_length"])
 
         return add_1_name
-
-    def make_rotary_embedding_caches(self, **kwargs):
-        if self.ep != "dml":
-            cos_cache_name, sin_cache_name = super().make_rotary_embedding_caches(**kwargs)
-            return cos_cache_name, sin_cache_name
-
-        cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
-        sin_cache_name = kwargs.get("sin_cache_name", "sin_cache")
-
-        if self.rotemb_attrs["create_caches"]:
-            # Create 4K and 128K cos/sin caches
-            cos_cache_large, sin_cache_large = self.make_rotary_embedding_caches_from_scratch()
-            self.rotemb_attrs["rescale_factors"] = self.rotemb_attrs["multi_cache"]["short_factor"]
-            self.rotemb_attrs["cache_length"] = self.original_context_length
-            self.rotemb_attrs["mscale"] = self.rotemb_attrs["multi_cache"]["short_mscale"]
-            cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches_from_scratch()
-
-            # Concat 4K and 128K cos/sin caches for DML EP only
-            cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
-            sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
-
-            # Slice cos/sin caches from (M, H) to (M, H/2)
-            hidden_dim = cos_cache.shape[-1]
-            cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
-            cos_cache = cos_cache.astype(self.to_numpy_dtype[self.io_dtype])
-            sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)].detach().numpy()
-            sin_cache = sin_cache.astype(self.to_numpy_dtype[self.io_dtype])
-
-            # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
-            if self.rotemb_attrs["partial_rotary_factor"] != 1.0:
-                cos_cache = cos_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
-                sin_cache = sin_cache[:, : (self.rotemb_attrs["rotary_embedding_dim"] // 2)]
-
-            if self.rotemb_attrs["save_caches"]:
-                # Save cos/sin caches to disk
-                self.make_external_tensor(cos_cache, cos_cache_name)
-                self.make_external_tensor(sin_cache, sin_cache_name)
-            else:
-                # Return cos/sin caches since they will be custom-saved
-                return cos_cache, sin_cache
-
-            self.rotemb_attrs["create_caches"] = False
-
-        return cos_cache_name, sin_cache_name
 
 
 class Phi3SmallModel(Model):
