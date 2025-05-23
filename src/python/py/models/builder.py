@@ -306,7 +306,7 @@ class Model:
         int4_algo_config = self.make_int4_algo_config(extra_options.get("int4_algo_config", "default"))
         self.quant_attrs = {
             "int4": {
-                "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep == "cpu" else 0)),
+                "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
                 "block_size": int(extra_options.get("int4_block_size", 32)),
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
@@ -322,6 +322,10 @@ class Model:
 
 
     def make_outputs_init(self):
+        # Always use float32 logits to improve accuracy in the case of bf16 models.
+        if self.onnx_dtype == "bf16":
+            self.output_types["logits"] = TensorProto.FLOAT
+
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
 
@@ -549,12 +553,12 @@ class Model:
         repeated_proto.sort(key=lambda x: order.index(getattr(x, key_name)))
 
     def make_tensor_proto_from_tensor(self, tensor, name):
-        if not tensor.is_contiguous:
-            # Make tensor contiguous
-            tensor = tensor.contiguous()
-        if tensor.get_device != -1:
+        if tensor.get_device() != -1:
             # Tensor must be on CPU (device id = -1)
             tensor = tensor.cpu()
+        if not tensor.is_contiguous():
+            # Make tensor contiguous
+            tensor = tensor.contiguous()
 
         raw_data = bytes(
             (ctypes.c_ubyte * tensor.element_size() * tensor.numel()).from_address(
@@ -873,22 +877,22 @@ class Model:
     def make_dequantize_linear(self, dequantize_name, quantized_op):
         # Input weights are quantized, save quantized MatMul weights for onnx model
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
-        qweight_npy = quantized_op.qweight.detach().cpu()
-        qweight_npy = qweight_npy.reshape(*qweight_npy.shape[:-2], qweight_npy.shape[-2] * qweight_npy.shape[-1])
-        self.make_external_tensor(qweight_npy.contiguous(), qweight, True)
+        qweight_pt = quantized_op.qweight.detach().cpu()
+        qweight_pt = qweight_pt.reshape(*qweight_pt.shape[:-2], qweight_pt.shape[-2] * qweight_pt.shape[-1])
+        self.make_external_tensor(qweight_pt.contiguous(), qweight, unpack_int4=True)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
-        scales_npy = quantized_op.scales.detach().cpu().to(self.to_torch_dtype[self.io_dtype])
-        scales_npy = scales_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size)
-        self.make_external_tensor(scales_npy.contiguous(), scales)
+        scales_pt = quantized_op.scales.detach().cpu().to(self.to_torch_dtype[self.io_dtype])
+        scales_pt = scales_pt.reshape(*qweight_pt.shape[:-1], qweight_pt.shape[-1] * 2 // quantized_op.group_size)
+        self.make_external_tensor(scales_pt.contiguous(), scales)
 
         dequantize_inputs = [qweight, scales]
 
         if hasattr(quantized_op, "qzeros") and quantized_op.qzeros is not None:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
-            zeros_npy = quantized_op.qzeros.detach().cpu()
-            zeros_npy = zeros_npy.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] // quantized_op.group_size)
-            self.make_external_tensor(zeros_npy.contiguous(), zeros, True)
+            zeros_pt = quantized_op.qzeros.detach().cpu()
+            zeros_pt = zeros_pt.reshape(*qweight_pt.shape[:-1], qweight_pt.shape[-1] // quantized_op.group_size)
+            self.make_external_tensor(zeros_pt.contiguous(), zeros, unpack_int4=True)
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
@@ -1012,7 +1016,7 @@ class Model:
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
-        self.make_external_tensor(add.to(self.to_torch_dtype[self.io_dtype]).contiguous(), bias)
+        self.make_external_tensor(add.to(self.to_torch_dtype[self.io_dtype]).detach().cpu().contiguous(), bias)
 
         add_bias_inputs = [root_input, bias]
         shape = ['batch_size', 'sequence_length', add.shape[0]]
@@ -1031,7 +1035,7 @@ class Model:
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
-        self.make_external_tensor(embedding.to(self.to_torch_dtype[self.io_dtype]).contiguous(), weight)
+        self.make_external_tensor(embedding.to(self.to_torch_dtype[self.io_dtype]).detach().cpu().contiguous(), weight)
 
         basename = "/model/embed_tokens"
         gather_name = f"{basename}/Gather"
@@ -1067,7 +1071,7 @@ class Model:
 
         # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor(layernorm.weight.detach().cpu().to(new_torch_dtype).contiguous() + self.layernorm_attrs["add_offset"], weight)
+        self.make_external_tensor((layernorm.weight.detach().cpu().to(new_torch_dtype) + self.layernorm_attrs["add_offset"]).contiguous(), weight)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
             self.make_external_tensor(layernorm.bias.detach().cpu().to(new_torch_dtype).contiguous(), bias)
@@ -2334,7 +2338,7 @@ class Model:
                 from onnxruntime_genai.models.quantized_model import QuantModel
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
-            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs, q_size, kv_size, self.intermediate_size, self.num_layers)
+            model = QuantModel.from_pretrained(self.quant_type, input_path=input_path, quant_attrs=self.quant_attrs, q_size=q_size, kv_size=kv_size, intermediate_size=self.intermediate_size, num_layers=self.num_layers)
 
         else:
             # Load PyTorch model
@@ -2563,7 +2567,7 @@ class Model:
         self.make_concat(concat_2_name, concat_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
         constant_shape_name = f"{basename}/ConstantOfShape_2"
         constant_shape_torch_dtype = self.to_torch_dtype[self.io_dtype]
-        constant_shape_value = self.make_tensor_proto_from_tensor(torch.tensor([torch.finfo(constant_shape_torch_dtype).min], dtype=constant_shape_torch_dtype))
+        constant_shape_value = self.make_tensor_proto_from_tensor(torch.tensor([torch.finfo(constant_shape_torch_dtype).min], dtype=constant_shape_torch_dtype), "make_input_ids_subgraph_shape")
         self.make_constant_of_shape(constant_shape_name, f"{concat_2_name}/output_0", value=constant_shape_value, dtype=self.io_dtype, shape=['unk', 'unk'])
 
         # Top path
@@ -2921,11 +2925,6 @@ class Gemma2Model(GemmaModel):
         self.layernorm_attrs["cast"]["output_3"] = False
         self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
         self.is_local = lambda layer_id: layer_id % 2 == 1
-
-    def make_outputs_init(self):
-        # Always use float32 logits to improve accuracy
-        self.output_types["logits"] = TensorProto.FLOAT
-        super().make_outputs_init()
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         if "final_norm" in location:
