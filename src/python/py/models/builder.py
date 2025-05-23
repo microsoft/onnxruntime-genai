@@ -2340,7 +2340,7 @@ class Model:
                 from onnxruntime_genai.models.quantized_model import QuantModel
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
-            model = QuantModel.from_pretrained(self.quant_type, input_path, self.quant_attrs, q_size, kv_size, self.intermediate_size, self.num_layers)
+            model = QuantModel.from_pretrained(self.quant_type, input_path=input_path, quant_attrs=self.quant_attrs, q_size=q_size, kv_size=kv_size, intermediate_size=self.intermediate_size, num_layers=self.num_layers)
 
         else:
             # Load PyTorch model
