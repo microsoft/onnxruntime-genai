@@ -349,7 +349,7 @@ class Model:
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy in the case of bf16 models.
         if self.onnx_dtype == "bf16":
-            self.output_types["logits"] = TensorProto.FLOAT
+            self.output_types["logits"] = ir.DataType.FLOAT
 
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
