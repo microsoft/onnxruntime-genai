@@ -51,7 +51,7 @@ class Model:
         self,
         config,
         io_dtype: Literal[ir.DataType.FLOAT, ir.DataType.FLOAT16] | int,
-        onnx_dtype: Literal[ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.UINT4] | int,
+        precision: str,
         ep: str,
         cache_dir,
         extra_options,
@@ -71,7 +71,13 @@ class Model:
         self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]
         self.io_dtype: ir.DataType = ir.DataType(io_dtype)
-        self.onnx_dtype: ir.DataType = ir.DataType(onnx_dtype)
+        onnx_dtype = {
+            "fp32": ir.DataType.FLOAT,
+            "fp16": ir.DataType.FLOAT16,
+            "bf16": ir.DataType.BFLOAT16,
+            "int4": ir.DataType.UINT4,
+        }[precision]
+        self.onnx_dtype: ir.DataType = onnx_dtype
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
         self.adapter_path = extra_options.get("adapter_path", None)
 
@@ -342,7 +348,7 @@ class Model:
 
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy in the case of bf16 models.
-        if self.onnx_dtype == "bf16":
+        if self.onnx_dtype == ir.DataType.BFLOAT16:
             self.output_types["logits"] = ir.DataType.FLOAT
 
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
@@ -2890,13 +2896,13 @@ class Model:
 
 
 class LlamaModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
 
 
 class MistralModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.position_ids_name = f"{self.make_position_ids_reformatting()}/output_0" if not self.attention_attrs["use_rope_in_attn"] else "position_ids"
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
@@ -2904,13 +2910,13 @@ class MistralModel(Model):
 
 
 class QwenModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
 
 
 class Qwen3Model(QwenModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
 
     def make_attention_init(self):
         self.attention_attrs["q_norm"] = True
@@ -2919,8 +2925,8 @@ class Qwen3Model(QwenModel):
 
 
 class PhiModel(Model):
-    def __init__(self, config, io_dtype: int, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype: int, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
         self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = False, True
 
@@ -2945,15 +2951,15 @@ class PhiModel(Model):
 
 
 class GemmaModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.embed_attrs["scale"] = np.round(np.sqrt(self.hidden_size), decimals=2)
         self.layernorm_attrs["add_offset"] = 1
 
 
 class Gemma2Model(GemmaModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.layernorm_attrs["cast"]["use_fp32"] = True
         self.layernorm_attrs["cast"]["root_input"] = True
         self.layernorm_attrs["cast"]["skip_input"] = False
@@ -3030,13 +3036,13 @@ class Gemma2Model(GemmaModel):
 
 
 class Phi3MiniModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
 
 
 class Phi3MiniLongRoPEModel(Phi3MiniModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
 
     def make_position_ids_reformatting(self):
@@ -3067,8 +3073,8 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
 
 
 class Phi3SmallModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
         self.embed_attrs["scale"] = config.mup_embedding_multiplier
         self.rotemb_attrs["t_dtype"] = torch.float32
@@ -3266,19 +3272,19 @@ class Phi3SmallModel(Model):
 
 
 class Phi3SmallLongRoPEModel(Phi3SmallModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
 
 
 class Phi3VModel(Phi3MiniLongRoPEModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
 
 
 class Phi3MoELongRoPEModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         assert io_dtype == ir.DataType.FLOAT16, "This model only supports float16 io type."
 
         self.layernorm_attrs["simple"] = False
@@ -3307,8 +3313,8 @@ class Phi3MoELongRoPEModel(MistralModel):
 
 
 class NemotronModel(LlamaModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
         self.layernorm_attrs["add_offset"] = 1
 
@@ -3337,8 +3343,8 @@ class NemotronModel(LlamaModel):
 
 
 class ChatGLMModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.rotemb_attrs["partial_rotary_factor"] = 0.5  # Line 755 of modeling_chatglm.py check self.rotary_pos_emb declaration
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
         self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
@@ -3356,8 +3362,8 @@ class ChatGLMModel(Model):
 
 
 class OLMoModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         layernorm.weight = torch.ones(self.hidden_size)
@@ -3366,8 +3372,8 @@ class OLMoModel(Model):
 
 
 class GraniteModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.embed_attrs["scale"] = config.embedding_multiplier
         self.attention_attrs["scale"] = config.attention_multiplier
         self.lm_head_attrs["scale"] = 1 / config.logits_scaling
@@ -3401,8 +3407,8 @@ class GraniteModel(MistralModel):
 
 
 class Phi4MMModel(Phi3VModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.matmul_attrs["use_lora"] = True
         self.attention_attrs["use_packed_matmul"] = False
 
@@ -3425,8 +3431,8 @@ class Phi4MMModel(Phi3VModel):
 
 
 class Gemma3Model(Gemma2Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.is_local = lambda layer_id: bool((layer_id + 1) % config.sliding_window_pattern)
         self.rope_local_theta = config.rope_local_base_freq
         self.make_rotary_embedding_multi_cache()
@@ -3549,30 +3555,24 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     # Set input/output precision of ONNX model
     io_dtype = set_io_dtype(precision, execution_provider, extra_options)
-    onnx_dtype = {
-        "fp32": ir.DataType.FLOAT,
-        "fp16": ir.DataType.FLOAT16,
-        "bf16": ir.DataType.BFLOAT16,
-        "int4": ir.DataType.UINT4,
-    }[precision]
     if "config_only" not in extra_options:
         # List architecture options in alphabetical order
         if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
             # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
             config.hidden_act = "swiglu"
-            onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = ChatGLMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GemmaForCausalLM":
-            onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = GemmaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
             if precision == "fp16":
                 print("WARNING: This model loses accuracy with float16 precision. Setting `--precision bf16` by default.")
                 precision = "bf16"
-            onnx_model = Gemma2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = Gemma2Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma3ForCausalLM":
             if precision == "fp16":
                 print("WARNING: This model loses accuracy with float16 precision. Setting `--precision bf16` by default.")
                 precision = "bf16"
-            onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = Gemma3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
             onnx_model.model_type = "gemma3_text"
         elif config.architectures[0] == "Gemma3ForConditionalGeneration":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
@@ -3583,45 +3583,45 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             if precision == "fp16":
                 print("WARNING: This model loses accuracy with float16 precision. Setting `--precision bf16` by default.")
                 precision = "bf16"
-            onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = Gemma3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GraniteForCausalLM":
-            onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = GraniteModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "LlamaForCausalLM":
-            onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = LlamaModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "MistralForCausalLM":
-            onnx_model = MistralModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = MistralModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "NemotronForCausalLM":
-            onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = NemotronModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "OlmoForCausalLM":
-            onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = OLMoModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiForCausalLM":
-            onnx_model = PhiModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = PhiModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
-            onnx_model = Phi3MiniModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3MiniModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
-            onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
             print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
             print("WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default.")
             execution_provider = "cuda"
-            onnx_dtype = ir.DataType.UINT4
-            onnx_model = Phi3MoELongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            precision = "int4"
+            onnx_model = Phi3MoELongRoPEModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
-            onnx_model = Phi3SmallModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3SmallModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
-            onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3VForCausalLM":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             extra_options["exclude_embeds"] = True
-            onnx_model = Phi3VModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi3VModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi4MMForCausalLM":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             extra_options["exclude_embeds"] = True
-            onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = Phi4MMModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen2ForCausalLM":
-            onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = QwenModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen3ForCausalLM":
-            onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model = Qwen3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
@@ -3631,7 +3631,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         # Save ONNX model
         onnx_model.save_model(output_dir)
     else:
-        onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model = Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
 
     # Make GenAI config
     onnx_model.make_genai_config(hf_name, extra_kwargs, output_dir)
