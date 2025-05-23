@@ -7,11 +7,11 @@
 namespace Generators {
 
 WhisperProcessor::WhisperProcessor(Config& config, const SessionInfo& session_info)
-    : input_features_type_{session_info.GetInputDataType(config.model.encoder_decoder_init.inputs.input_features)} {
+    : input_features_type_{session_info.GetInputDataType(config.model.encoder.inputs.input_features)} {
   auto processor_config = (config.config_path / fs::path(config.model.speech.config_filename)).string();
   processor_ = ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor>(OrtxCreateSpeechFeatureExtractor, processor_config.c_str());
 
-  config.AddMapping(std::string(Config::Defaults::InputFeaturesName), config.model.encoder_decoder_init.inputs.input_features);
+  config.AddMapping(std::string(Config::Defaults::InputFeaturesName), config.model.encoder.inputs.input_features);
 }
 
 std::unique_ptr<NamedTensors> WhisperProcessor::Process([[maybe_unused]] const Tokenizer& tokenizer, const Payload& payload) const {

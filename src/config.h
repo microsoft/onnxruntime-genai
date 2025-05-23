@@ -43,6 +43,14 @@ struct Config {
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
     static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
+
+    // Machine Translation names
+    static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
+    static constexpr std::string_view EncoderOutputsName = "encoder_outputs";
+    static constexpr std::string_view EncoderAttentionMaskName = "encoder_attention_mask";
+    static constexpr std::string_view RnnStatesName = "rnn_states";
+    static constexpr std::string_view RnnStatesPrevName = "rnn_states_prev";
+    static constexpr std::string_view PastKeyValuesLengthName = "past_key_values_length";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -90,13 +98,27 @@ struct Config {
     int context_length{};
 
     // For models like whisper
-    struct EncoderDecoderInit {
+    struct Encoder {
       std::string filename;
+      SessionOptions session_options;
+
+      int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
+      int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
+      int num_key_value_heads{};
+      int num_hidden_layers{};
+      int head_size{};
 
       struct Inputs {
         std::string input_features{Defaults::InputFeaturesName};
+        std::string input_ids{Defaults::InputIdsName};
+        std::string attention_mask{Defaults::AttentionMaskName};
       } inputs;
-    } encoder_decoder_init;
+
+      struct Outputs {
+        std::string encoder_outputs{Defaults::EncoderOutputsName};
+      } outputs;
+
+    } encoder;
 
     struct Embedding {
       std::string filename;
@@ -174,7 +196,11 @@ struct Config {
         std::string cross_past_key_names, cross_past_value_names;
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
         std::string past_sequence_length{Defaults::PastSequenceLengthName};
+        std::string past_key_values_length{Defaults::PastKeyValuesLengthName};
         std::string total_sequence_length{Defaults::TotalSequenceLengthName};
+        std::string encoder_hidden_states{Defaults::EncoderHiddenStatesName};
+        std::string rnn_prev_states{Defaults::RnnStatesPrevName};
+        std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
       } inputs;
 
       struct Outputs {
@@ -183,6 +209,7 @@ struct Config {
         std::string present_value_names{Defaults::PresentValueName};
         std::string present_names;  // When key/value pairs are combined
         std::string cross_present_key_names, cross_present_value_names;
+        std::string rnn_states{Defaults::RnnStatesName};
       } outputs;
 
       struct PipelineModel {
