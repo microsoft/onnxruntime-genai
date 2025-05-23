@@ -75,6 +75,7 @@ class Model:
             },
             "dml": {},
             "webgpu": {},
+            "NvTensorRtRtx": {},
         }
 
         # Map input names to their types and shapes
@@ -343,6 +344,7 @@ class Model:
             ("dml", TensorProto.FLOAT16),
             ("webgpu", TensorProto.FLOAT16),
             ("webgpu", TensorProto.FLOAT),
+            ("NvTensorRtRtx", TensorProto.FLOAT16),
         ]
         if (self.ep, self.io_dtype) in valid_gqa_configurations:
             # Change model settings for GroupQueryAttention
@@ -757,6 +759,23 @@ class Model:
         self.make_node("ReduceMax", inputs=inputs, outputs=[output], name=name, keepdims=False)
         self.make_value_info(output, dtype, shape=shape)
 
+    def make_reduce_mean(self, name, inputs, dtype, shape, axes=[-1], keepdims=False):
+        output = f"{name}/output_0"
+        if self.quant_attrs["use_qdq"]:
+            # Opset 18 uses axes as input[1]
+            inputs.append(f"/model/constants/TensorProto.INT64/1D/{','.join(map(str, axes))}")
+            self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
+            self.make_value_info(output, dtype, shape=shape)
+        else:
+            # Opset 17 uses axes as attribute
+            self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, axes=axes, keepdims=keepdims)
+            self.make_value_info(output, dtype, shape=shape)
+
+    def make_sqrt(self, name, inputs, dtype, shape):
+        output = f"{name}/output_0"
+        self.make_node("Sqrt", inputs=inputs, outputs=[output], name=name)
+        self.make_value_info(output, dtype, shape=shape)
+
     def make_cast(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Cast", inputs=[root_input], outputs=[output], name=name, to=dtype)
@@ -1059,6 +1078,13 @@ class Model:
         self.layernorm_attrs["skip_input"] = layernorm_attrs_value
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
+        if self.ep == "NvTensorRtRtx" and (skip or simple):
+            # NvTensorRtRtx EP doesn't support Skip/SimplifiedLayerNormalization and SkipLayerNormalization, so we fallback to primitive ops
+            self._make_layernorm_op(layer_id, layernorm, skip, simple, location)
+        else:
+            self.make_layernorm_op(layer_id, layernorm, skip, simple, location)
+
+    def make_layernorm_op(self, layer_id, layernorm, skip, simple, location):
         root_input = self.layernorm_attrs["root_input"]
         skip_input = self.layernorm_attrs["skip_input"]
 
@@ -1101,6 +1127,68 @@ class Model:
         # Make op and its shape
         self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
         self.make_value_info(outputs[0], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        if skip and not self.layernorm_attrs["last_layernorm"]:
+            self.make_value_info(outputs[3], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+
+        # Update LayerNorm attributes
+        self.layernorm_attrs["output_0"] = output_0
+        if skip and not self.layernorm_attrs["last_layernorm"]:
+            self.layernorm_attrs["output_3"] = output_3
+
+            # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
+            self.layernorm_attrs["root_input"] = output_3
+
+    def _make_layernorm_op(self, layer_id, layernorm, skip, simple, location):
+        root_input = self.layernorm_attrs["root_input"]
+        skip_input = self.layernorm_attrs["skip_input"]
+
+        # Get precision types to use
+        old_torch_dtype = self.to_torch_dtype[self.io_dtype]
+        old_io_dtype = self.io_dtype
+        new_torch_dtype = torch.float32 if self.layernorm_attrs["cast"]["use_fp32"] else self.to_torch_dtype[self.io_dtype]
+        new_io_dtype = self.to_onnx_dtype[new_torch_dtype]
+        cast = old_torch_dtype != new_torch_dtype
+
+        # Create weight and bias tensors
+        weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
+        self.make_external_tensor((layernorm.weight.detach().cpu().to(new_torch_dtype) + self.layernorm_attrs["add_offset"]).contiguous(), weight)
+        bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
+        if not simple:
+            self.make_external_tensor(layernorm.bias.detach().cpu().to(new_torch_dtype).contiguous(), bias)
+
+         # Create input names for op
+        inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
+        if not simple:
+            inputs.append(bias)
+
+        name = f"/model/layers.{layer_id}/{location}_layernorm/{'Skip' if skip else ''}LayerNorm"
+        op_type = f"{'Skip' if skip else ''}{'Simplified' if simple else ''}LayerNormalization"
+        kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
+        if not skip:
+            kwargs.update({"axis": -1, "stash_type": 1})
+
+        # Create output names for op
+        output_0 = f"/model/layers.{layer_id}/{location}_layernorm/output_0"
+        output_3 = f"/model/layers.{layer_id}/{location}_layernorm/output_3"
+        if self.layernorm_attrs["last_layernorm"] and (self.include_hidden_states or self.exclude_lm_head):
+            output_0 = "hidden_states"
+        outputs = [output_0, "", "", output_3] if skip and not self.layernorm_attrs["last_layernorm"] else [output_0]
+
+        # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
+        if cast:
+            inputs, outputs = self.make_layernorm_casts(name, inputs, outputs, old_io_dtype, new_io_dtype)
+            root_input = inputs[0]
+            skip_input = inputs[1] if skip else None
+
+        if op_type == "SimplifiedLayerNormalization":
+            self._make_simplified_layer_norm(name, root_input, weight, outputs[0], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        elif op_type == "SkipSimplifiedLayerNormalization":
+            self._make_skip_simplified_layer_norm(name, root_input, skip_input, weight, outputs[0], output_3, new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        elif op_type == "SkipLayerNormalization":
+            self._make_skip_layer_norm(name, root_input, skip_input, weight, bias, outputs[0], output_3, new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        else:
+            raise ValueError(f"Invalid op_type: {op_type}")
+
         if skip and not self.layernorm_attrs["last_layernorm"]:
             self.make_value_info(outputs[3], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
@@ -1353,6 +1441,110 @@ class Model:
         )
         self.make_value_info(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value_info(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+
+    # This expansion of contrib-op can be updated / deprecated in future.
+    def _make_skip_simplified_layer_norm(self, basename, root_input, skip_input, weight_name, output_0, output_3, io_dtype, shape):
+        #                          root_input         skip_input
+        #                              |                  |
+        #                              +------------------+
+        #                              |
+        #                             Add-------------> output (1)
+        #                              |
+        #                      SimplifiedLayerNorm----> output (0)
+        make_add_name = f"{basename}/Add"
+        output_3 = f"{basename}/Add/output_0" if output_3 is None else output_3
+        self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
+        self.make_value_info(output_3, io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+
+        make_simplified_layer_norm_name = f"{basename}/skip_simplified_layer_norm"
+        self._make_simplified_layer_norm(make_simplified_layer_norm_name, output_3, weight_name, output_0, io_dtype, shape=shape)
+
+    # This expansion contrib-op can be updated / depricated in future.
+    def _make_skip_layer_norm(self, basename, root_input, skip_input, weight_name, bias_name, output_0, output_3, io_dtype, shape):
+        #                          root_input         skip_input
+        #                              |                  |
+        #                              +------------------+
+        #                              |
+        #                             Add-------------> output (1)
+        #                              |
+        #                      LayerNormalization-----> output (0)
+        output_3 = f"{basename}/Add/output_0" if output_3 is None else output_3
+        make_add_name = f"{basename}/Add"
+        self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
+        self.make_value_info(output_3, io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+
+        make_layer_norm_name = f"{basename}/LayerNormalization"
+        inputs = [output_3, weight_name, bias_name]
+
+        kwargs = {"epsilon": self.layernorm_attrs["epsilon"]}
+        kwargs.update({"axis": -1, "stash_type": 1})
+
+        self.make_node("LayerNormalization", inputs=inputs, outputs=[output_0], name=make_layer_norm_name, **kwargs)
+        self.make_value_info(output_0, io_dtype, shape=shape)
+
+    # This expansion contrib-op can be updated / depricated in future.
+    def _make_simplified_layer_norm(self, basename, root_input, weight_name, output_0, io_dtype, shape):
+        
+        #                            Cast (float32) - most calc happens in higher precision
+        #                              |
+        #                      +-------+-------+
+        #                      |               |
+        #                     Pow              |
+        #                      |               |
+        #                  ReduceMean          |
+        #                      |               |
+        #                     Add              |
+        #                      |               |
+        #                    Sqrt              |
+        #                      |               |
+        #                     Div              |
+        #                      |               |
+        #                      +-------+-------+
+        #                              |  
+        #                             Mul
+        #                              |
+        #                            Cast_1 (io_dtype - float16)
+        #                              |
+        #                            Mul_1
+        
+        make_cast_name = f"{basename}/Cast"
+        self.make_cast(make_cast_name, root_input, TensorProto.FLOAT, shape=shape)
+
+        make_pow_name = f"{basename}/Pow"
+        make_pow_inputs = [f"{make_cast_name}/output_0", f"/model/constants/TensorProto.FLOAT/0D/2"]
+
+        self.make_node("Pow", inputs=make_pow_inputs, outputs=[f"{make_pow_name}/output_0"], name=make_pow_name, domain="")
+        self.make_value_info(f"{make_pow_name}/output_0", TensorProto.FLOAT, shape=shape)
+
+        make_reducemean_name = f"{basename}/ReduceMean"
+        make_reducemean_inputs = [f"{make_pow_name}/output_0"]
+        self.make_reduce_mean(make_reducemean_name, make_reducemean_inputs, TensorProto.FLOAT, keepdims=True, axes=[-1], shape=shape)
+
+        make_add_name = f"{basename}/Add"
+        make_add_inputs = [f"{make_reducemean_name}/output_0", f"/model/constants/TensorProto.FLOAT/0D/{self.layernorm_attrs['epsilon']}"]
+        self.make_add(make_add_name, make_add_inputs, TensorProto.FLOAT, shape=shape)
+
+        make_sqrt_name = f"{basename}/Sqrt"
+        make_sqrt_inputs = [f"{make_add_name}/output_0"]
+        self.make_sqrt(make_sqrt_name, make_sqrt_inputs, TensorProto.FLOAT, shape=shape)
+
+        make_div_name = f"{basename}/Div"
+        make_div_inputs = [f"/model/constants/TensorProto.FLOAT/0D/1", f"{make_sqrt_name}/output_0"]
+        self.make_div(make_div_name, make_div_inputs, TensorProto.FLOAT, shape=shape)
+        
+        make_mul_name = f"{basename}/Mul"
+        make_mul_inputs = [f"{make_div_name}/output_0", f"{make_cast_name}/output_0"]
+        self.make_mul(make_mul_name, make_mul_inputs, TensorProto.FLOAT, shape=shape)
+
+        make_cast_1_name = f"{basename}/Cast_1"
+        self.make_cast(make_cast_1_name, f"{make_mul_name}/output_0", dtype=io_dtype, shape=shape)
+
+        make_mul_1_name = f"{basename}/Mul_1"
+        make_mul_1_inputs = [f"{make_cast_1_name}/output_0", weight_name]
+
+        self.make_node("Mul", inputs=make_mul_1_inputs, outputs=[output_0], name=make_mul_1_name)
+        self.make_value_info(output_0, dtype=io_dtype, shape=shape)
+
 
     def make_qk_norm(self, layer_id, attention):
         # Make subgraph to compute SimplifiedLayerNorm after Q and K MatMuls in attention:
@@ -2190,6 +2382,13 @@ class Model:
         return mul_act_name
 
     def make_gelu(self, layer_id, root_input, activation):
+        # NvTensorRtRtx (Opset 21) uses standard "Gelu" replacing "Gelu" & "FastGelu" contrib ops, otherwise fallback to contrib ops
+        if self.ep == "NvTensorRtRtx" and activation in ["Gelu", "FastGelu"]:
+            return self._make_gelu_op(layer_id, root_input, activation)
+        else:
+            return self.make_gelu_op(layer_id, root_input, activation)
+
+    def make_gelu_op(self, layer_id, root_input, activation):
         # Make nodes for this activation subgraph
         #
         #       root_input (Add)
@@ -2197,7 +2396,30 @@ class Model:
         #        GeluAct
         gelu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         output = f"{gelu_name}/output_0"
+
         self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
+        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
+
+        return gelu_name
+    
+    # This expansion of contrib-op can be updated / deprecated in future.
+    def _make_gelu_op(self, layer_id, root_input, activation):
+        # Make nodes for this activation subgraph
+        #
+        #       root_input (Add)
+        #           |
+        #        GeluAct
+        gelu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
+        output = f"{gelu_name}/output_0"
+
+        # NvTensorRtRtx (Opset 21) uses standard "Gelu" replacing "Gelu" & "FastGelu" contrib ops, otherwise fallback to contrib ops
+        if activation == "Gelu":
+            self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="none") 
+        elif activation == "FastGelu":
+            self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="tanh")
+        else:
+            raise NotImplementedError(f"The {activation} activation function is not currently supported.")
+
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
 
         return gelu_name
@@ -3447,6 +3669,9 @@ def check_extra_options(kv_pairs):
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
         raise ValueError(f"Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
+    # NvTensorRtRtx EP requires Opset 21, so force use_qdq which controls it.
+    if args.execution_provider == "NvTensorRtRtx":
+        kv_pairs["use_qdq"] = True
 
 def parse_extra_options(kv_items):
     """
@@ -3640,7 +3865,7 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "rocm", "dml", "webgpu"],
+        choices=["cpu", "cuda", "rocm", "dml", "webgpu", "NvTensorRtRtx"],
         help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WEBGPU)",
     )
 
@@ -3714,7 +3939,7 @@ def get_args():
     )
 
     args = parser.parse_args()
-    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WEBGPU")
+    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 NvTensorRtRtx, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WEBGPU")
     return args
 
 if __name__ == '__main__':
