@@ -55,7 +55,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
       break;  // Exit the loop
     }
 
-    const std::string prompt = tokenizer->ApplyChatTemplate("", text.c_str(), true);
+    const std::string prompt = tokenizer->ApplyChatTemplate("", text.c_str(), "", true);
 
     bool is_first_token = true;
     Timing timing;
