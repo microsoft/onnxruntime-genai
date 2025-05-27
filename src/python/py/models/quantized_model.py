@@ -86,8 +86,6 @@ class QuantizedDecoderLayer:
         self.mlp = QuantizedMLP(bits, group_size)
         self.bits = bits
         self.group_size = group_size
-        self.k_norm = TensorModule()
-        self.q_norm = TensorModule()
 
     def is_empty(self):
         return self.input_layernorm.weight is None
