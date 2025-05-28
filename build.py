@@ -1,6 +1,12 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+# Note on Java Maven Publishing:
+# The --publish-java-maven flag is used to control whether the Java artifacts are published to
+# the local Maven repository. This step happens after tests have passed to ensure only working
+# artifacts are published. When the version ends with "-dev", it's automatically converted to
+# "-SNAPSHOT" for Maven compatibility, ensuring proper handling of development versions.
+
 from __future__ import annotations
 
 import argparse
@@ -87,6 +93,7 @@ def _parse_args():
     # Default to not building the language bindings
     parser.add_argument("--build_csharp", action="store_true", help="Build the C# API.")
     parser.add_argument("--build_java", action="store_true", help="Build Java bindings.")
+    parser.add_argument("--publish-java-maven", action="store_true", help="Publish Java bindings to local Maven repository after tests.")
 
     parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
 
@@ -633,21 +640,6 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
-    # If Java was built, install it to the local Maven repository
-    if args.build_java:
-        # Use the Gradle wrapper to publish to the local Maven repository
-        log.info("Publishing Java API to local Maven repository using Gradle...")
-        gradle_executable = str(REPO_ROOT / "src" / "java" / ("gradlew.bat" if util.is_windows() else "gradlew"))
-        # Use the src/java directory where build.gradle is located
-        java_build_dir = REPO_ROOT / "src" / "java"
-        # Pass build properties to Gradle.
-        gradle_properties = {
-            "cmakeBuildDir": str(args.build_dir)
-        }
-        # We've updated the Gradle build file to make signing optional, so we don't need to skip it explicitly
-        util.run([gradle_executable, "--no-daemon", "publishToMavenLocal"] + [f"-D{key}={value}" for key, value in gradle_properties.items()],
-                 cwd=java_build_dir)
-
 
 def package(args: argparse.Namespace, env: dict[str, str]):
     """
@@ -686,6 +678,70 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     if args.build_java:
         ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
         util.run(ctest_cmd, cwd=str(args.build_dir / "src" / "java"))
+
+        # Publish to local Maven repository if requested and Java tests passed
+        if args.publish_java_maven:
+            log.info("Publishing Java API to local Maven repository using Gradle...")
+            gradle_executable = str(REPO_ROOT / "src" / "java" / ("gradlew.bat" if util.is_windows() else "gradlew"))
+            java_build_dir = REPO_ROOT / "src" / "java"
+            
+            # Read the version from VERSION_INFO and handle -dev suffix for Maven
+            version_file = REPO_ROOT / "VERSION_INFO"
+            version = version_file.read_text().strip()
+            
+            # Clean up any unexpected characters in the version string
+            version = ''.join(c for c in version if c.isalnum() or c in '.-_')
+            
+            gradle_properties = {
+                "cmakeBuildDir": str(args.build_dir)
+            }
+            
+            # If version ends with -dev, convert to -SNAPSHOT for Maven compatibility
+            if version.endswith("-dev"):
+                snapshot_version = version.replace("-dev", "-SNAPSHOT")
+                log.info(f"Converting version '{version}' to '{snapshot_version}' for Maven compatibility")
+                
+                # Create a temporary build.gradle with the SNAPSHOT version
+                temp_build_gradle = java_build_dir / "build.gradle.temp"
+                build_gradle = java_build_dir / "build.gradle"
+                
+                with open(build_gradle, 'r') as f:
+                    content = f.read()
+                
+                # Replace the version line with the SNAPSHOT version
+                content = content.replace(
+                    f"version = rootProject.file('../../VERSION_INFO').text.trim()",
+                    f"version = '{snapshot_version}'"
+                )
+                
+                with open(temp_build_gradle, 'w') as f:
+                    f.write(content)
+                
+                # Rename the temporary file to the original
+                shutil.move(temp_build_gradle, build_gradle)
+                
+                # After publishing, restore the original build.gradle
+                try:
+                    # Build the Gradle command with properties
+                    gradle_cmd = [gradle_executable, "--no-daemon", "publishToMavenLocal"]
+                    for key, value in gradle_properties.items():
+                        gradle_cmd.append(f"-D{key}={value}")
+                    
+                    util.run(gradle_cmd, cwd=java_build_dir)
+                finally:
+                    # Restore the original build.gradle
+                    with open(build_gradle, 'w') as f:
+                        f.write(content.replace(
+                            f"version = '{snapshot_version}'",
+                            f"version = rootProject.file('../../VERSION_INFO').text.trim()"
+                        ))
+            else:
+                # Build the Gradle command with properties
+                gradle_cmd = [gradle_executable, "--no-daemon", "publishToMavenLocal"]
+                for key, value in gradle_properties.items():
+                    gradle_cmd.append(f"-D{key}={value}")
+                
+                util.run(gradle_cmd, cwd=java_build_dir)
 
     if args.android:
         _run_android_tests(args)

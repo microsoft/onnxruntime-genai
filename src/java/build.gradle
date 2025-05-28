@@ -108,8 +108,6 @@ sourceSets.test {
 	}
 }
 
-// generate tasks to be called from cmake
-
 // Overwrite jar location
 task allJar(type: Jar) {
 	manifest {
@@ -163,7 +161,7 @@ task allJar(type: Jar) {
 	// Correctly determine the native library directory based on cmakeBuildDir
 	def nativeLibDir = file("${cmakeBuildDir}/src/java/native-lib/ai/onnxruntime/genai/native/${osArch}")
 
-	// Copy only native libraries to the platform-specific directory within the JAR
+	// Copy only the required native libraries to the platform-specific directory within the JAR
 	if (nativeLibDir.exists()) {
 		from(nativeLibDir) {
 			def nativeLibName
@@ -251,7 +249,6 @@ publishing {
 			artifactId = mavenArtifactId
 
 			// Replace the Java component with our custom JAR that includes native libraries
-			// from components.java
 			artifact tasks.allJar
 			artifact sourcesJar
 			artifact javadocJar
@@ -314,4 +311,9 @@ signing {
 		useInMemoryPgpKeys(signingKey, signingPassword)
 		sign publishing.publications.maven
 	}
+}
+
+// Make the publish task depend on the test task
+tasks.named("publishMavenPublicationToMavenLocal").configure {
+	dependsOn test
 }
