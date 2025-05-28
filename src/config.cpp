@@ -381,6 +381,8 @@ struct Encoder_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_size") {
+      v_.hidden_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "num_key_value_heads") {
       v_.num_key_value_heads = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "num_hidden_layers") {

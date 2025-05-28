@@ -101,6 +101,7 @@ struct Config {
     struct Encoder {
       std::string filename;
 
+      int hidden_size{};
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};

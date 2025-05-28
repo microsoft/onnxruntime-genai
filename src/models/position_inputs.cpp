@@ -7,13 +7,13 @@ namespace Generators {
 DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk)
     : model_{model},
       state_{state} {
-  name_ = model_.config_->model.decoder.inputs.attention_mask;
-  has_mask_input_ = model_.session_info_.HasInput(name_);
+  attention_mask_name_ = model_.config_->model.decoder.inputs.attention_mask;
+  has_mask_input_ = model_.session_info_.HasInput(attention_mask_name_);
   has_posid_input_ = model_.session_info_.HasInput(model_.config_->model.decoder.inputs.position_ids);
 
   type_ = Ort::TypeToTensorType<int32_t>;
   if (has_mask_input_) {
-    type_ = model_.session_info_.GetInputDataType(name_);
+    type_ = model_.session_info_.GetInputDataType(attention_mask_name_);
   }
   if (has_posid_input_) {
     if (has_mask_input_) {
@@ -102,7 +102,7 @@ void DefaultPositionInputs::AddAttentionMask() {
   mask_input_index_ = state_.inputs_.size();
 
   state_.inputs_.push_back(attention_mask_->GetOrtTensor());
-  state_.input_names_.push_back(name_.c_str());
+  state_.input_names_.push_back(attention_mask_name_.c_str());
 }
 
 void DefaultPositionInputs::AddPositionIDs() {

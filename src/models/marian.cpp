@@ -2,8 +2,6 @@
 // Licensed under the MIT License.
 #include "../generators.h"
 #include "marian.h"
-#include <vector>
-#include "../sequences.h"
 
 namespace Generators {
 
@@ -42,7 +40,6 @@ DeviceSpan<float> MarianLogits::Get() {
   // TODO(apsonawane): Fix the issue with output_raw not getting updated properly
   // OrtValue* logits_of_last_token = output_raw_->GetOrtTensor();
   OrtValue* logits_of_last_token = state_.outputs_[output_index_];
-  std::array<int64_t, 2> shape_last{shape_[0], shape_[1]};
 
   // Convert from float16 to float32 if necessary
   if (type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
@@ -58,22 +55,6 @@ DeviceSpan<float> MarianLogits::Get() {
 
 void MarianLogits::Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length) {
   if (output_raw_->ort_tensor_ && static_cast<size_t>(output_raw_->GetShape()[1]) == new_kv_length && new_kv_length == 1) {
-    return;
-  }
-
-  // Store length of input sequence for each batch for the get step
-  for (int b = 0; b < state_.params_->search.batch_size; b++) {
-    // Find the first non pad token from the end
-    size_t token_index = new_kv_length;
-    while (token_index-- > 0) {
-      auto next_token = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan()[b * new_kv_length + token_index];
-      if (next_token != model_.config_->model.pad_token_id)
-        break;
-    }
-    input_sequence_lengths[b] = static_cast<int>(token_index + 1);
-  }
-
-  if (output_raw_->ort_tensor_ && static_cast<size_t>(output_raw_->GetShape()[1]) == new_kv_length) {
     return;
   }
 
@@ -106,16 +87,6 @@ void MarianInputIDs::AddMarianInputs() {
 }
 
 void MarianInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
-  auto new_tokens_cpu = new_tokens.CopyDeviceToCpu();
-
-  const auto get_unpadded_sequence_length = [](std::span<const int32_t> input_ids, int32_t pad_token_id) {
-    for (int32_t i = 0; i < input_ids.size(); i++) {
-      if (input_ids[i] == pad_token_id)
-        return i;
-    }
-    return static_cast<int32_t>(input_ids.size());
-  };
-
   value_->CreateTensor(shape_, state_.params_->use_graph_capture);
   state_.inputs_[input_index_] = value_->GetOrtTensor();
 
@@ -124,46 +95,44 @@ void MarianInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   data_span.CopyFrom(new_tokens);
 
   if (type_ == Ort::TypeToTensorType<int64_t>) {
-    if (!cast_value_->ort_tensor_)
+    if (!cast_value_->GetOrtTensor())
       cast_value_->CreateTensor(shape_, state_.params_->use_graph_capture);
     Cast(*value_->GetOrtTensor(), cast_value_->ort_tensor_, *model_.p_device_inputs_, type_);
     state_.inputs_[input_index_] = cast_value_->GetOrtTensor();
   }
-
-  is_prompt_ = false;
 }
 
 DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  int64_t encoder_hidden_size = model_.config_->model.encoder.hidden_size;
   if (first_run_) {
-    // INITIALIZE THE ENCODER AND RUN IT ONCE
-
+    // Initialize the encoder and run it once
     encoder_input_ids_.name_ = model_.config_->model.encoder.inputs.input_ids.c_str();
     encoder_input_ids_.Add();
 
-    encoder_attention_mask_.name_ = model_.config_->model.encoder.inputs.attention_mask;
+    encoder_attention_mask_.attention_mask_name_ = model_.config_->model.encoder.inputs.attention_mask;
     encoder_attention_mask_.Add();
 
     encoder_input_ids_.Update(next_tokens);
     size_t new_length = static_cast<size_t>(encoder_input_ids_.GetShape()[1]);
     encoder_attention_mask_.Update(next_tokens, current_length, static_cast<int>(new_length));
 
-    auto encoder_outputs_type = model_.session_info_.GetOutputDataType("encoder_outputs");
-    auto encoder_outputs_shape = std::array<int64_t, 3>{encoder_input_ids_.GetShape()[0], encoder_input_ids_.GetShape()[1], 512};
-    encoder_outputs_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), encoder_outputs_shape, encoder_outputs_type);
+    auto encoder_outputs_type = model_.session_info_.GetOutputDataType(model_.config_->model.encoder.outputs.encoder_outputs.c_str());
+    const std::array<int64_t, 3> encoder_outputs_shape{encoder_input_ids_.GetShape()[0], encoder_input_ids_.GetShape()[1], encoder_hidden_size};
+    encoder_outputs_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), encoder_outputs_shape, encoder_outputs_type);
 
-    output_names_.push_back("encoder_outputs");
+    output_names_.push_back(model_.config_->model.encoder.outputs.encoder_outputs.c_str());
     outputs_.push_back(encoder_outputs_.get());
 
     State::Run(*model_.session_encoder_);
 
-    // CLEAR INPUTS AND OUTPUTS
+    // Clear inputs and outputs for the decoder
     ClearIO();
 
-    // INITIALIZE THE DECODER
+    // Initialize the decoder inputs and outputs
     decoder_input_ids_.name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
     decoder_input_ids_.AddMarianInputs();
 
-    next_tokens.CpuSpan()[next_tokens.size() - 1] = model_.config_->model.decoder_start_token_id;
+    next_tokens.CpuSpan()[next_tokens.size() - 1] = model_.config_->model.bos_token_id;
 
     decoder_input_ids_.Update(next_tokens.subspan(next_tokens.size() - 1, 1));
 
@@ -174,38 +143,33 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     *past_key_values_length_->GetTensorMutableData<int64_t>() = -1;
 
-    attention_mask_.name_ = model_.config_->model.decoder.inputs.encoder_attention_mask;
+    attention_mask_.attention_mask_name_ = model_.config_->model.decoder.inputs.encoder_attention_mask;
     attention_mask_.Add();
     attention_mask_.Update(next_tokens, current_length, static_cast<int>(new_length));
 
-    auto hidden_states_type = model_.session_info_.GetInputDataType("encoder_hidden_states");
-    int64_t encoder_hidden_size = model_.config_->model.encoder.head_size * model_.config_->model.encoder.num_key_value_heads;
-    auto encoder_hidden_states_shape = std::array<int64_t, 3>{decoder_input_ids_.GetMarianInputsShape()[0], encoder_input_ids_.GetShape()[1], encoder_hidden_size};
-    encoder_hidden_states_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), encoder_hidden_states_shape, hidden_states_type);
+    auto hidden_states_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.encoder_hidden_states.c_str());
+    const std::array<int64_t, 3> encoder_hidden_states_shape{decoder_input_ids_.GetMarianInputsShape()[0], encoder_input_ids_.GetShape()[1], encoder_hidden_size};
+    encoder_hidden_states_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), encoder_hidden_states_shape, hidden_states_type);
 
-    input_names_.push_back("encoder_hidden_states");
+    input_names_.push_back(model_.config_->model.decoder.inputs.encoder_hidden_states.c_str());
     inputs_.push_back(encoder_outputs_.get());
 
-    auto rnn_states_prev_type = model_.session_info_.GetInputDataType("rnn_states_prev");
-    auto rnn_states_prev_shape = std::array<int64_t, 3>{3, decoder_input_ids_.GetMarianInputsShape()[0], 512};
-    rnn_states_prev_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), rnn_states_prev_shape, rnn_states_prev_type);
+    auto rnn_states_prev_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.rnn_prev_states.c_str());
+    const std::array<int64_t, 3> rnn_states_prev_shape{3, decoder_input_ids_.GetMarianInputsShape()[0], encoder_hidden_size};
+    rnn_states_prev_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), rnn_states_prev_shape, rnn_states_prev_type);
 
-    input_names_.push_back("rnn_states_prev");
-    for (int i = 0; i < rnn_states_prev_shape[0]; i++) {
-      for (int j = 0; j < rnn_states_prev_shape[1]; j++) {
-        for (int k = 0; k < rnn_states_prev_shape[2]; k++) {
-          auto data = rnn_states_prev_->GetTensorMutableData<int32_t>();
-          data[i * rnn_states_prev_shape[1] * rnn_states_prev_shape[2] + j * rnn_states_prev_shape[2] + k] = 0;
-        }
-      }
-    }
+    input_names_.push_back(model_.config_->model.decoder.inputs.rnn_prev_states.c_str());
+    auto* device_span = rnn_states_prev_->GetTensorMutableData<int32_t>();
+    size_t numel = 1;
+    for (auto dim : rnn_states_prev_shape) numel *= dim;
+    std::memset(device_span, 0, numel * sizeof(int32_t));
     inputs_.push_back(rnn_states_prev_.get());
 
-    auto rnn_states_type = model_.session_info_.GetOutputDataType("rnn_states");
-    auto rnn_states_shape = std::array<int64_t, 3>{3, decoder_input_ids_.GetMarianInputsShape()[0], 512};
-    rnn_states_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), rnn_states_shape, rnn_states_type);
+    auto rnn_states_type = model_.session_info_.GetOutputDataType(model_.config_->model.decoder.outputs.rnn_states.c_str());
+    const std::array<int64_t, 3> rnn_states_shape{3, decoder_input_ids_.GetMarianInputsShape()[0], encoder_hidden_size};
+    rnn_states_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), rnn_states_shape, rnn_states_type);
 
-    output_names_.push_back("rnn_states");
+    output_names_.push_back(model_.config_->model.decoder.outputs.rnn_states.c_str());
     outputs_.push_back(rnn_states_.get());
     *past_key_values_length_->GetTensorMutableData<int64_t>() += 1;
 
@@ -218,26 +182,22 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     return logits_.Get();
   }
 
-  // UPDATE THE DECODER
+  // Update the decoder inputs with the next tokens
   decoder_input_ids_.Update(next_tokens);
-  auto rnn_states_prev_shape = std::array<int64_t, 3>{3, decoder_input_ids_.GetMarianInputsShape()[0], 512};
+  const std::array<int64_t, 3> rnn_states_prev_shape{3, decoder_input_ids_.GetMarianInputsShape()[0], encoder_hidden_size};
 
-  for (int i = 0; i < rnn_states_prev_shape[0]; i++) {
-    for (int j = 0; j < rnn_states_prev_shape[1]; j++) {
-      for (int k = 0; k < rnn_states_prev_shape[2]; k++) {
-        auto data = rnn_states_prev_->GetTensorMutableData<int32_t>();
-        auto rnn_states_data = rnn_states_->GetTensorMutableData<int32_t>();
-        data[i * rnn_states_prev_shape[1] * rnn_states_prev_shape[2] + j * rnn_states_prev_shape[2] + k] = rnn_states_data[i * rnn_states_prev_shape[1] * rnn_states_prev_shape[2] + j * rnn_states_prev_shape[2] + k];
-      }
-    }
-  }
+  const auto* rnn_states_data = rnn_states_->GetTensorMutableData<int32_t>();
+  auto* rnn_states_prev_data = rnn_states_prev_->GetTensorMutableData<int32_t>();
+  size_t numel = 1;
+  for (auto dim : rnn_states_prev_shape) numel *= dim;
+  std::memcpy(rnn_states_prev_data, rnn_states_data, numel * sizeof(int32_t));
 
   auto data = past_key_values_length_->GetTensorMutableData<int64_t>();
   *data += 1;
 
   logits_.Update(next_tokens, 1);
 
-  // RUN THE DECODER
+  // Run the decoder
   State::Run(*model_.session_decoder_);
   return logits_.Get();
 }

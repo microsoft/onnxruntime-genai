@@ -151,7 +151,9 @@ def main(args):
             messages = f"""[{{"role": "system", "content": "{system_prompt}"}}, {{"role": "user", "content": "{text}"}}]"""
         # Apply Chat Template
         prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+        print("Prompt = ", prompt)
         input_tokens = tokenizer.encode(prompt)
+        print("Input tokens = ", input_tokens)
         generator.append_tokens(input_tokens)
 
         if args.verbose: print("Running generation loop ...")
@@ -161,6 +163,8 @@ def main(args):
 
         print()
         print("Output: ", end='', flush=True)
+        for input_token in input_tokens:
+            print(f"{input_token}:{tokenizer_stream.decode(input_token)}")
 
         try:
             while not generator.is_done():
