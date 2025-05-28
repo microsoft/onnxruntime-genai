@@ -258,7 +258,7 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> /* beam_indices */, int c
   }
 }
 
-void WindowedKeyValueCache::PartialTokenGenerationUpdate(DeviceSpan<int32_t> /* beam_indices */, int /* total_length */,
+void WindowedKeyValueCache::PartialUpdate(DeviceSpan<int32_t> /* beam_indices */, int /* total_length */,
                                                          std::span<const size_t> layer_indices_to_update) {
   assert(window_size_ == 1);
   SlideLayers(layer_indices_to_update);

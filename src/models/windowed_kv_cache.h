@@ -17,9 +17,9 @@ struct WindowedKeyValueCache : KeyValueCache {
 
   void Update(DeviceSpan<int32_t> beam_indices, int current_length) override;
 
-  bool IsPartialTokenGenerationUpdateSupported() const override { return true; }
+  bool IsPartialUpdateSupported() const override { return true; }
 
-  void PartialTokenGenerationUpdate(DeviceSpan<int32_t> beam_indices, int total_length,
+  void PartialUpdate(DeviceSpan<int32_t> beam_indices, int total_length,
                                     std::span<const size_t> layer_indices_to_update) override;
 
   void RewindTo(size_t index) override {

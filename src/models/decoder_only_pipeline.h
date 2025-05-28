@@ -68,6 +68,8 @@ struct DecoderOnlyPipelineState : State {
                    DeviceSpan<int32_t> next_indices);
 
  private:
+  void UpdateKeyValueCache(DeviceSpan<int32_t> beam_indices, int total_length);
+
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                            int total_length);
 
@@ -88,7 +90,7 @@ struct DecoderOnlyPipelineState : State {
   Logits logits_{*this};
 
   std::unique_ptr<KeyValueCache> key_value_cache_;
-  const bool do_key_value_cache_partial_token_generation_update_;
+  const bool do_key_value_cache_partial_update_;
   std::optional<WorkerThread> key_value_cache_update_worker_thread_{};
 
   std::unique_ptr<PositionInputs> position_inputs_;
