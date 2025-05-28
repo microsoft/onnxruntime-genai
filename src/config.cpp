@@ -381,10 +381,6 @@ struct Encoder_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
-    } else if (name == "hidden_size") {
-      v_.hidden_size = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "num_attention_heads") {
-      v_.num_attention_heads = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "num_key_value_heads") {
       v_.num_key_value_heads = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "num_hidden_layers") {
@@ -396,9 +392,6 @@ struct Encoder_Element : JSON::Element {
   }
 
   Element& OnObject(std::string_view name) override {
-    if (name == "session_options") {
-      return session_options_;
-    }
     if (name == "inputs") {
       return inputs_;
     }
@@ -410,7 +403,6 @@ struct Encoder_Element : JSON::Element {
 
  private:
   Config::Model::Encoder& v_;
-  SessionOptions_Element session_options_{v_.session_options};
   Encoder_Inputs_Element inputs_{v_.inputs};
   Encoder_Outputs_Element outputs_{v_.outputs};
 };

@@ -21,6 +21,10 @@ struct Config {
     static constexpr std::string_view LogitsName = "logits";
     static constexpr std::string_view PresentKeyName = "present.%d.key";
     static constexpr std::string_view PresentValueName = "present.%d.value";
+    static constexpr std::string_view RnnStatesName = "rnn_states";
+    static constexpr std::string_view RnnStatesPrevName = "rnn_states_prev";
+    static constexpr std::string_view PastKeyValuesLengthName = "past_key_values_length";
+    static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
 
     static constexpr std::string_view InputsEmbedsName = "inputs_embeds";
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
@@ -44,13 +48,9 @@ struct Config {
     static constexpr std::string_view AudioFeaturesName = "audio_features";
     static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
 
-    // Machine Translation names
-    static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
+    // Encoder names
     static constexpr std::string_view EncoderOutputsName = "encoder_outputs";
     static constexpr std::string_view EncoderAttentionMaskName = "encoder_attention_mask";
-    static constexpr std::string_view RnnStatesName = "rnn_states";
-    static constexpr std::string_view RnnStatesPrevName = "rnn_states_prev";
-    static constexpr std::string_view PastKeyValuesLengthName = "past_key_values_length";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -100,10 +100,7 @@ struct Config {
     // For models like whisper
     struct Encoder {
       std::string filename;
-      SessionOptions session_options;
 
-      int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
-      int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};

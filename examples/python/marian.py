@@ -2,7 +2,7 @@ import onnxruntime_genai as og
 import argparse
 import time
 
-# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True, model_logits=True)
+# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True, model_logits=False)
 
 def main(args):
     if args.verbose: print("Loading model...")
