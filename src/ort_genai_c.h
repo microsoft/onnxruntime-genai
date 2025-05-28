@@ -686,6 +686,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUnloadAdapter(OgaAdapters* adapters, const
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters,
                                                        const char* adapter_name);
+
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSelenaTest(const char *prompt, const char* model_path, uint8_t** result);
+
 #ifdef __cplusplus
 }
 #endif
