@@ -34,6 +34,9 @@ final class GenAI {
   /** The short name of the ONNX runtime shared library */
   static final String ONNXRUNTIME_LIBRARY_NAME = "onnxruntime";
 
+  static final String ONNXRUNTIME_GENAI_RESOURCE_PATH = "/ai/onnxruntime/genai/native/";
+  static final String ONNXRUNTIME_RESOURCE_PATH = "/ai/onnxruntime/native/";
+
   /** The value of the GENAI_NATIVE_PATH system property */
   private static String libraryDirPathProperty;
 
@@ -56,9 +59,9 @@ final class GenAI {
     try {
       libraryDirPathProperty = System.getProperty(GENAI_NATIVE_PATH);
 
-      load(ONNXRUNTIME_LIBRARY_NAME); // ORT native
-      load(GENAI_LIBRARY_NAME); // ORT GenAI native
-      load(GENAI_JNI_LIBRARY_NAME); // GenAI JNI layer
+      load(ONNXRUNTIME_LIBRARY_NAME, ONNXRUNTIME_RESOURCE_PATH); // ORT native
+      load(GENAI_LIBRARY_NAME, ONNXRUNTIME_GENAI_RESOURCE_PATH); // ORT GenAI native
+      load(GENAI_JNI_LIBRARY_NAME, ONNXRUNTIME_GENAI_RESOURCE_PATH); // GenAI JNI layer
       loaded = true;
     } finally {
       if (tempDirectory != null) {
@@ -137,7 +140,7 @@ final class GenAI {
    * @param library The bare name of the library.
    * @throws IOException If the file failed to read or write.
    */
-  private static void load(String library) throws IOException {
+  private static void load(String library, String resourcePath) throws IOException {
     if (isAndroid()) {
       // On Android, we simply use System.loadLibrary.
       // We only need to load the JNI library as it will load the GenAI native library and ORT
@@ -204,7 +207,7 @@ final class GenAI {
     }
 
     // 4) try loading from resources or library path:
-    Optional<File> extractedPath = extractFromResources(library);
+    Optional<File> extractedPath = extractFromResources(library, resourcePath);
     if (extractedPath.isPresent()) {
       // extracted library from resources
       System.load(extractedPath.get().getAbsolutePath());
@@ -223,12 +226,13 @@ final class GenAI {
    * extract or couldn't be found.
    *
    * @param library The library name
+   * @param baseResourcePath The base resource path
    * @return An optional containing the file if it is successfully extracted, or an empty optional
    *     if it failed to extract or couldn't be found.
    */
-  private static Optional<File> extractFromResources(String library) {
+  private static Optional<File> extractFromResources(String library, String baseResourcePath) {
     String libraryFileName = mapLibraryName(library);
-    String resourcePath = "/ai/onnxruntime/genai/native/" + OS_ARCH_STR + '/' + libraryFileName;
+    String resourcePath = baseResourcePath + OS_ARCH_STR + '/' + libraryFileName;
     File tempFile = tempDirectory.resolve(libraryFileName).toFile();
 
     try (InputStream is = GenAI.class.getResourceAsStream(resourcePath)) {
