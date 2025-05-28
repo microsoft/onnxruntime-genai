@@ -25,7 +25,6 @@ struct Config {
     static constexpr std::string_view InputsEmbedsName = "inputs_embeds";
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
-    static constexpr std::string_view promptTemplate = "{Content}";
     static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
     static constexpr std::string_view TokenTypeIdsName = "token_type_ids";
 
@@ -75,18 +74,18 @@ struct Config {
     std::vector<NamedString> config_entries;  // Entries go into OrtSessionOptions::AddConfigEntry
 
     std::vector<ProviderOptions> provider_options;
+    std::vector<std::string> providers;  // List of providers to use at runtime, not persisted in the json currently
     std::optional<GraphOptimizationLevel> graph_optimization_level;
   };
 
   struct Model {
     std::string type;
 
-    int pad_token_id{};              // The id of the padding token.
-    int eos_token_id{};              // The id of the end-of-stream token.
-    std::vector<int> eos_token_ids;  // If eos_token_id is passed as an array, this is where the values go (eos_token_id gets set to the first entry in the array)
-    int bos_token_id{};              // The id of the beginning-of-stream token.
-    int sep_token_id{};              // The id of the separation token.
-    int decoder_start_token_id{};    // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
+    int pad_token_id{};             // The id of the padding token.
+    std::vector<int> eos_token_id;  // The end-of-stream tokens (when set as a single value it is converted to a vector with one value).
+    int bos_token_id{};             // The id of the beginning-of-stream token.
+    int sep_token_id{};             // The id of the separation token.
+    int decoder_start_token_id{};   // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
     int vocab_size{};
     int context_length{};
 
@@ -206,13 +205,6 @@ struct Config {
 
     } decoder;
 
-    struct PromptTemplates {
-      std::string assistant{Defaults::promptTemplate};
-      std::string prompt{Defaults::promptTemplate};
-      std::string system{Defaults::promptTemplate};
-      std::string user{Defaults::promptTemplate};
-    };
-    std::optional<PromptTemplates> prompt_templates;
   } model;
 
   struct Search {
@@ -248,5 +240,6 @@ void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
 bool IsGraphCaptureEnabled(Config::SessionOptions& session_options);
+bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
 
 }  // namespace Generators

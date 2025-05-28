@@ -39,7 +39,7 @@ WindowedKeyValueCache::WindowedKeyValueCache(State& state)
     output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.present_value_names, i));
   }
 
-  type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
+  type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
   if (type_ != Ort::TypeToTensorType<uint8_t>) {
     throw std::runtime_error("Expected input data type to be uint8_t for WindowedKeyValueCache. Actual: " +
                              std::to_string(type_));

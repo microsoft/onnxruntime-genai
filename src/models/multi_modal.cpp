@@ -84,13 +84,13 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   decoder_session_ = OrtSession::Create(
       ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
 
-  InitDeviceAllocator(*decoder_session_);
-  session_info_->Add(*embedding_session_);
+  session_info_.Add(*decoder_session_);
+  session_info_.Add(*embedding_session_);
   if (speech) {
-    session_info_->Add(*speech_session_);
+    session_info_.Add(*speech_session_);
   }
   if (vision) {
-    session_info_->Add(*vision_session_);
+    session_info_.Add(*vision_session_);
   }
 }
 

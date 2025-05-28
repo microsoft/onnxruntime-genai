@@ -123,6 +123,21 @@ struct CrossCache {
   std::vector<std::string> input_name_strings_, output_name_strings_;
 };
 
+// A (mostly) NO-OP KeyValueCache variant that is used for stateful models
+// i.e. Models that manage KV Cache internally to the session.
+struct ModelManagedKeyValueCache : KeyValueCache {
+  ModelManagedKeyValueCache(State& state);
+
+  virtual void Add() override;
+  virtual void AddEncoder() override;
+  virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
+  virtual void RewindTo(size_t index) override;
+
+ private:
+  State& state_;
+  const Model& model_{state_.model_};
+};
+
 std::string ComposeKeyValueName(const std::string& template_string, int index);
 
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state);

@@ -76,6 +76,7 @@ def _parse_args():
     parser.add_argument("--update", action="store_true", help="Update makefiles.")
     parser.add_argument("--build", action="store_true", help="Build.")
     parser.add_argument("--test", action="store_true", help="Run tests.")
+    parser.add_argument("--package", action="store_true", help="Package the build.") # Does not override other phases.
     parser.add_argument(
         "--clean", action="store_true", help="Run 'cmake --build --target clean' for the selected config."
     )
@@ -128,6 +129,8 @@ def _parse_args():
 
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
+    parser.add_argument("--use_guidance", action="store_true", help="Whether to add guidance support. Default is False.")
+    
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
     platform_group = parser.add_mutually_exclusive_group()
     platform_group.add_argument("--android", action="store_true", help="Build for Android")
@@ -431,6 +434,30 @@ def _run_android_tests(args: argparse.Namespace):
             raise exception
 
 
+def _get_windows_build_args(args: argparse.Namespace):
+    win_args = [
+        "-DCMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
+        "-DCMAKE_MODULE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
+        "-DCMAKE_SHARED_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
+    ]
+    cmake_c_flags = "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000"
+    if args.config == "Release":
+        cmake_c_flags += " /O2 /Ob2 /DNDEBUG"
+    elif args.config == "RelWithDebInfo":
+        cmake_c_flags += " /O2 /Ob1 /DNDEBUG"
+    elif args.config == "Debug":
+        cmake_c_flags += " /Ob0 /Od /RTC1"
+    win_args += [
+        "-DCMAKE_C_FLAGS_INIT=" + cmake_c_flags,
+        "-DCMAKE_CXX_FLAGS_INIT=" + cmake_c_flags,
+    ]
+    if args.use_cuda:
+        win_args += [
+            "-DCMAKE_CUDA_FLAGS_INIT=/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=\" /MP /guard:cf /Qspectre \" -allow-unsupported-compiler",
+        ]
+    return win_args
+
+
 def update(args: argparse.Namespace, env: dict[str, str]):
     """
     Update the cmake build files.
@@ -474,6 +501,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
+        f"-DUSE_GUIDANCE={'ON' if args.use_guidance else 'OFF'}",
     ]
 
     if args.ort_home:
@@ -482,6 +510,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     if args.use_cuda:
         cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
         command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}"]
+
+    if args.package and util.is_windows():
+        command += _get_windows_build_args(args)
 
     if args.android:
         command += [
@@ -536,6 +567,8 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             # The following arguments are specific to the OpenCV toolchain file
             f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file()}",
         ]
+        if args.use_guidance:
+            command += ["-DRust_CARGO_TARGET=aarch64-apple-ios-sim"]
 
     if args.macos == "Catalyst":
         if args.cmake_generator == "Xcode":
@@ -602,6 +635,16 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
 
+def package(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Package the build output with CMake targets.
+    """
+    make_command = [str(args.cmake_path), "--build", str(args.build_dir), "--config", args.config, "--target", "package"]
+    if args.parallel:
+        make_command.append("--parallel")
+    util.run(make_command, env=env)
+
+
 def test(args: argparse.Namespace, env: dict[str, str]):
     """
     Run the tests.
@@ -660,6 +703,9 @@ if __name__ == "__main__":
 
     if arguments.build:
         build(arguments, environment)
+    
+    if arguments.package:
+        package(arguments, environment)
 
     if arguments.test and not arguments.skip_tests:
         test(arguments, environment)

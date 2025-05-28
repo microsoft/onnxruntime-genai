@@ -3,11 +3,11 @@ on:
   workflow_dispatch:
   push:
     branches:
-    - main
-    - rel-*
+      - main
+      - rel-*
   pull_request:
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
@@ -52,13 +52,27 @@ jobs:
           mv ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
           mv ${{ env.ORT_PACKAGE_NAME }}/runtimes/osx-arm64/native/* ort/lib/
 
+      - name: Install Rust Toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          source "$HOME/.cargo/env"
+          rustup install 1.86.0
+          rustup override set 1.86.0
+          rustup component add rust-src
+          rustup show active-toolchain
+
       - name: Configure CMake
         run: |
-          cmake --preset macos_arm64_cpu_release
+          export MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1,2)
+          export RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
+          cmake --preset macos_arm64_cpu_release -DUSE_GUIDANCE=ON
 
       - name: Build with CMake
         run: |
-          cmake --build --preset macos_arm64_cpu_release --parallel
+          export MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1,2)
+          export RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
+          cmake --build --preset macos_arm64_cpu_release --parallel -DUSE_GUIDANCE=ON
         continue-on-error: false
 
       - name: Install the python wheel and test dependencies

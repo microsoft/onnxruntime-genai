@@ -65,5 +65,12 @@ fi
 GetFile https://nodejs.org/dist/v18.17.1/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz /tmp/src/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz
 tar --strip 1 -xf /tmp/src/node-v18.17.1-linux-${NODEJS_ARCH}.tar.gz -C /usr
 
+# Install Rust
+export RUSTUP_HOME=/usr/.rustup 
+export CARGO_HOME=/usr/.cargo 
+curl --proto '=https' --tlsv1.2 https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain=1.86.0
+chmod -R 777 /usr/.rustup
+chmod -R 777 /usr/.cargo
+
 cd /
 rm -rf /tmp/src

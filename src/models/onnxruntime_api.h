@@ -729,6 +729,8 @@ struct OrtSession {
 
   void Run(_In_opt_ const OrtRunOptions* run_options, const OrtIoBinding&);  ///< Wraps OrtApi::RunWithBinding
 
+  void SetEpDynamicOptions(_In_opt_ const char* const* keys, const char* const* values, size_t kv_len);
+
   static void operator delete(void* p) { Ort::api->ReleaseSession(reinterpret_cast<OrtSession*>(p)); }
   Ort::Abstract make_abstract;
 };

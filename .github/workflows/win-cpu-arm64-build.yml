@@ -3,12 +3,12 @@ on:
   workflow_dispatch:
   push:
     branches:
-    - main
-    - rel-*
+      - main
+      - rel-*
   pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 env:
   binaryDir: 'build/cpu/win-arm64'
@@ -17,90 +17,104 @@ env:
 
 jobs:
   windows-cpu-arm64-build:
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-win11-arm64-cpu" ]
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-win11-arm64-cpu"]
     steps:
-    - name: Checkout OnnxRuntime GenAI repo
-      uses: actions/checkout@v4
-      with:
-        submodules: true
+      - name: Checkout OnnxRuntime GenAI repo
+        uses: actions/checkout@v4
+        with:
+          submodules: true
 
-    - name: Setup Visual Studio 2022
-      uses: microsoft/setup-msbuild@v1.1
-      with:
-        vs-version: '17.4'
-        msbuild-architecture: arm64
+      - name: Setup Visual Studio 2022
+        uses: microsoft/setup-msbuild@v1.1
+        with:
+          vs-version: '17.4'
+          msbuild-architecture: arm64
 
-    - uses: nuget/setup-nuget@v2
-      with:
-        nuget-version: '5.x'
+      - uses: nuget/setup-nuget@v2
+        with:
+          nuget-version: '5.x'
 
-    - name: Setup Java 21
-      uses: actions/setup-java@v4
-      with:
-        java-version: '21'
-        distribution: 'temurin'
-        cache: 'gradle'
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
 
-    - name: Setup Gradle
-      uses: gradle/actions/setup-gradle@v3
-      with:
-        gradle-version: '8.6'
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.6'
 
-    - name: Download OnnxRuntime Nightly
-      shell: powershell
-      run: |
-        $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
-        $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
-        Write-Host "$ORT_NIGHTLY_VERSION"
-        "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-        nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
+      - name: Download OnnxRuntime Nightly
+        shell: powershell
+        run: |
+          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+          Write-Host "$ORT_NIGHTLY_VERSION"
+          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
 
-    - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
-      continue-on-error: true
+      - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
+        continue-on-error: true
 
-    - name: Extract OnnxRuntime library and header files
-      run: |
-        mkdir ort/lib
-        move ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
-        move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-arm64/native/* ort/lib/
+      - name: Extract OnnxRuntime library and header files
+        run: |
+          mkdir ort/lib
+          move ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
+          move ${{ env.ORT_PACKAGE_NAME }}/runtimes/win-arm64/native/* ort/lib/
 
-    - name: Configure CMake
-      run: |
-        python -m pip install wheel requests
+      - name: Install Rust Toolchain
+        run: |
+          $exePath = "$env:TEMP\rustup-init.exe"
+          (New-Object Net.WebClient).DownloadFile('https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe', $exePath)
+          & $exePath -y --default-toolchain=1.86.0
+          Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
 
-        cmake --preset windows_arm64_cpu_release
+      - name: Install LLVM
+        run: |
+          choco install llvm --yes
+          Add-Content $env:GITHUB_PATH "C:\Program Files\LLVM\bin"
 
-    - name: Build with CMake
-      run: |
-        cmake --build --preset windows_arm64_cpu_release --parallel
+      - name: Configure CMake
+        run: |
+          python -m pip install wheel requests
 
-    - name: Install the Python Wheel and Test Dependencies
-      run: |
-        python -m pip install "numpy<2" coloredlogs flatbuffers packaging protobuf sympy pytest
-        python -m pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ ort-nightly-qnn
-        python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
+          cmake --preset windows_arm64_cpu_release -DUSE_GUIDANCE=ON
 
-    - name: Run the Python Tests
-      run: |
-        python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
+      - name: Build with CMake
+        run: |
+          cmake --build --preset windows_arm64_cpu_release --parallel -DUSE_GUIDANCE=ON
 
-    - name: Build the C# API and Run the C# Tests
-      run: |
-        cd test\csharp
-        dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
+      - name: Install the Python Wheel and Test Dependencies
+        run: |
+          # Uninstalling LLVM/Clang as it is no longer required and causes issues with numpy installation
+          choco uninstall llvm --yes
+          python -m pip install "numpy<2" coloredlogs flatbuffers packaging protobuf sympy pytest
+          python -m pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ ort-nightly-qnn
+          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
 
-    - name: Build the Java API and Run the Java Tests
-      run: |
-        python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
+      - name: Run the Python Tests
+        run: |
+          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models"
 
-    - name: Verify Build Artifacts
-      if: always()
-      continue-on-error: true
-      run: |
-        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir -Recurse
-        Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir\test -Recurse
+      - name: Build the C# API and Run the C# Tests
+        run: |
+          cd test\csharp
+          dotnet test /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
 
-    - name: Run tests
-      run: |
-        copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
-        & .\$env:binaryDir\Release\unit_tests.exe
+      - name: Build the Java API and Run the Java Tests
+        run: |
+          python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
+
+      - name: Verify Build Artifacts
+        if: always()
+        continue-on-error: true
+        run: |
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir -Recurse
+          Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir\test -Recurse
+
+      - name: Run tests
+        run: |-
+          copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
+          & .\$env:binaryDir\Release\unit_tests.exe
