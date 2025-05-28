@@ -307,7 +307,7 @@ class Model:
         int4_algo_config = self.make_int4_algo_config(extra_options.get("int4_algo_config", "default"))
         self.quant_attrs = {
             "int4": {
-                "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep == "cpu" else 0)),
+                "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
                 "block_size": int(extra_options.get("int4_block_size", 32)),
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
@@ -323,6 +323,10 @@ class Model:
 
 
     def make_outputs_init(self):
+        # Always use float32 logits to improve accuracy in the case of bf16 models.
+        if self.onnx_dtype == "bf16":
+            self.output_types["logits"] = TensorProto.FLOAT
+
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
 
@@ -3143,11 +3147,6 @@ class Gemma2Model(GemmaModel):
         self.layernorm_attrs["cast"]["output_3"] = False
         self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
         self.is_local = lambda layer_id: layer_id % 2 == 1
-
-    def make_outputs_init(self):
-        # Always use float32 logits to improve accuracy
-        self.output_types["logits"] = TensorProto.FLOAT
-        super().make_outputs_init()
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         if "final_norm" in location:
