@@ -19,8 +19,6 @@ MarianLogits::MarianLogits(State& state)
       shape_{static_cast<int64_t>(state_.params_->BatchBeamSize()), model_.config_->model.vocab_size},
       type_{model_.session_info_.GetOutputDataType(model_.config_->model.decoder.outputs.logits)} {
   output_raw_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
-
-  input_sequence_lengths.resize(state_.params_->search.batch_size);
 }
 
 std::unique_ptr<State> MarianModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
@@ -79,7 +77,7 @@ MarianInputIDs::MarianInputIDs(State& state)
   cast_value_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<int64_t>);
 }
 
-void MarianInputIDs::AddMarianInputs() {
+void MarianInputIDs::Add() {
   input_index_ = state_.inputs_.size();
 
   state_.inputs_.push_back(value_->GetOrtTensor());
@@ -103,7 +101,7 @@ void MarianInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
 }
 
 DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  int64_t encoder_hidden_size = model_.config_->model.encoder.hidden_size;
+  const int64_t encoder_hidden_size = model_.config_->model.encoder.hidden_size;
   if (first_run_) {
     // Initialize the encoder and run it once
     encoder_input_ids_.name_ = model_.config_->model.encoder.inputs.input_ids.c_str();
@@ -113,10 +111,10 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     encoder_attention_mask_.Add();
 
     encoder_input_ids_.Update(next_tokens);
-    size_t new_length = static_cast<size_t>(encoder_input_ids_.GetShape()[1]);
+    const size_t new_length = static_cast<size_t>(encoder_input_ids_.GetShape()[1]);
     encoder_attention_mask_.Update(next_tokens, current_length, static_cast<int>(new_length));
 
-    auto encoder_outputs_type = model_.session_info_.GetOutputDataType(model_.config_->model.encoder.outputs.encoder_outputs.c_str());
+    const auto encoder_outputs_type = model_.session_info_.GetOutputDataType(model_.config_->model.encoder.outputs.encoder_outputs.c_str());
     const std::array<int64_t, 3> encoder_outputs_shape{encoder_input_ids_.GetShape()[0], encoder_input_ids_.GetShape()[1], encoder_hidden_size};
     encoder_outputs_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), encoder_outputs_shape, encoder_outputs_type);
 
@@ -130,7 +128,7 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     // Initialize the decoder inputs and outputs
     decoder_input_ids_.name_ = model_.config_->model.decoder.inputs.input_ids.c_str();
-    decoder_input_ids_.AddMarianInputs();
+    decoder_input_ids_.Add();
 
     next_tokens.CpuSpan()[next_tokens.size() - 1] = model_.config_->model.bos_token_id;
 
@@ -147,30 +145,31 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     attention_mask_.Add();
     attention_mask_.Update(next_tokens, current_length, static_cast<int>(new_length));
 
-    auto hidden_states_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.encoder_hidden_states.c_str());
+    const auto hidden_states_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.encoder_hidden_states.c_str());
     const std::array<int64_t, 3> encoder_hidden_states_shape{decoder_input_ids_.GetMarianInputsShape()[0], encoder_input_ids_.GetShape()[1], encoder_hidden_size};
     encoder_hidden_states_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), encoder_hidden_states_shape, hidden_states_type);
 
     input_names_.push_back(model_.config_->model.decoder.inputs.encoder_hidden_states.c_str());
     inputs_.push_back(encoder_outputs_.get());
 
-    auto rnn_states_prev_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.rnn_prev_states.c_str());
+    const auto rnn_states_prev_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.rnn_prev_states.c_str());
     const std::array<int64_t, 3> rnn_states_prev_shape{3, decoder_input_ids_.GetMarianInputsShape()[0], encoder_hidden_size};
-    rnn_states_prev_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), rnn_states_prev_shape, rnn_states_prev_type);
+    rnn_states_prev_ = std::make_unique<Tensor>(model_.p_device_inputs_, rnn_states_prev_type);
+    rnn_states_prev_->CreateTensor(rnn_states_prev_shape);
 
     input_names_.push_back(model_.config_->model.decoder.inputs.rnn_prev_states.c_str());
-    auto* device_span = rnn_states_prev_->GetTensorMutableData<int32_t>();
-    size_t numel = 1;
-    for (auto dim : rnn_states_prev_shape) numel *= dim;
-    std::memset(device_span, 0, numel * sizeof(int32_t));
-    inputs_.push_back(rnn_states_prev_.get());
 
-    auto rnn_states_type = model_.session_info_.GetOutputDataType(model_.config_->model.decoder.outputs.rnn_states.c_str());
+    auto device_span = rnn_states_prev_->GetDeviceSpan<int32_t>();
+    device_span.Zero();
+    inputs_.push_back(rnn_states_prev_->GetOrtTensor());
+
+    const auto rnn_states_type = model_.session_info_.GetOutputDataType(model_.config_->model.decoder.outputs.rnn_states.c_str());
     const std::array<int64_t, 3> rnn_states_shape{3, decoder_input_ids_.GetMarianInputsShape()[0], encoder_hidden_size};
-    rnn_states_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), rnn_states_shape, rnn_states_type);
+    rnn_states_ = std::make_unique<Tensor>(model_.p_device_inputs_, rnn_states_type);
+    rnn_states_->CreateTensor(rnn_states_shape);
 
     output_names_.push_back(model_.config_->model.decoder.outputs.rnn_states.c_str());
-    outputs_.push_back(rnn_states_.get());
+    outputs_.push_back(rnn_states_->GetOrtTensor());
     *past_key_values_length_->GetTensorMutableData<int64_t>() += 1;
 
     logits_.Add();
@@ -186,11 +185,9 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
   decoder_input_ids_.Update(next_tokens);
   const std::array<int64_t, 3> rnn_states_prev_shape{3, decoder_input_ids_.GetMarianInputsShape()[0], encoder_hidden_size};
 
-  const auto* rnn_states_data = rnn_states_->GetTensorMutableData<int32_t>();
-  auto* rnn_states_prev_data = rnn_states_prev_->GetTensorMutableData<int32_t>();
-  size_t numel = 1;
-  for (auto dim : rnn_states_prev_shape) numel *= dim;
-  std::memcpy(rnn_states_prev_data, rnn_states_data, numel * sizeof(int32_t));
+  auto rnn_states_prev_data = rnn_states_prev_->GetDeviceSpan<int32_t>();
+  auto rnn_states_data = rnn_states_->GetDeviceSpan<int32_t>();
+  rnn_states_prev_data.CopyFrom(rnn_states_data);
 
   auto data = past_key_values_length_->GetTensorMutableData<int64_t>();
   *data += 1;

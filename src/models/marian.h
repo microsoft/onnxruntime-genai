@@ -2,9 +2,6 @@
 // Licensed under the MIT License.
 #include "model.h"
 #include "input_ids.h"
-#include "logits.h"
-#include "kv_cache.h"
-#include "extra_inputs.h"
 #include "position_inputs.h"
 
 namespace Generators {
@@ -14,22 +11,17 @@ struct MarianInputIDs {
   MarianInputIDs(const MarianInputIDs&) = delete;
   MarianInputIDs& operator=(const MarianInputIDs&) = delete;
 
-  void AddMarianInputs();
+  void Add();
 
   void Update(DeviceSpan<int32_t> next_tokens);
 
   std::array<int64_t, 1> GetMarianInputsShape() const { return shape_; }
   const char* name_;
-  std::array<int64_t, 1> vec_shape_{};
-
-  OrtValue* Get() { return value_->GetOrtTensor(); }
 
  private:
   State& state_;
   const Model& model_{state_.model_};
   size_t input_index_{~0U};
-
-  bool is_prompt_{true};
 
   std::array<int64_t, 1> shape_{};
   ONNXTensorElementDataType type_;
@@ -55,12 +47,9 @@ struct MarianLogits {
 
   ONNXTensorElementDataType type_;
   std::unique_ptr<Tensor> output_raw_;
-  std::unique_ptr<OrtValue> output_last_tokens_;
   std::unique_ptr<OrtValue> logits_of_last_token_fp32_;
 
-  std::vector<int> input_sequence_lengths;
   DeviceSpan<float> logits_;
-  bool trimmed_prefill_logits_ = false;
 };
 
 struct MarianModel : Model {
@@ -92,9 +81,9 @@ struct MarianState : State {
 
   DefaultPositionInputs attention_mask_;
   std::unique_ptr<OrtValue> encoder_hidden_states_;
-  std::unique_ptr<OrtValue> rnn_states_prev_;
+  std::unique_ptr<Tensor> rnn_states_prev_;
   std::unique_ptr<OrtValue> past_key_values_length_;
-  std::unique_ptr<OrtValue> rnn_states_;
+  std::unique_ptr<Tensor> rnn_states_;
   std::vector<std::unique_ptr<OrtValue>> values_;
   MarianLogits logits_{*this};
 };
