@@ -3766,9 +3766,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             if precision == "fp16":
                 print("WARNING: This model loses accuracy with float16 precision. Setting `--precision bf16` by default.")
                 precision = "bf16"
-            print("Setting gemma3_text")
             onnx_model = Gemma3Model(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
-            onnx_model.model_type = "gemma3_text"
         elif config.architectures[0] == "GraniteForCausalLM":
             onnx_model = GraniteModel(config, io_dtype, precision, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "LlamaForCausalLM":
