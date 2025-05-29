@@ -31,8 +31,7 @@ steps:
 
 - powershell: |
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
-    export MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1,2)
-    export RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
+    $env:RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
     cmake --preset macos_$(arch)_$(ep)_$(build_config)
   displayName: 'Configure CMake C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
