@@ -4,7 +4,13 @@
 #pragma once
 
 #include <stdint.h>
-#include <cstddef>
+
+#ifdef __cplusplus
+# include <cstddef>
+#else
+# include <stddef.h>
+# include <stdbool.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
