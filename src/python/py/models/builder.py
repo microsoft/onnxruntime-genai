@@ -310,11 +310,8 @@ class Model:
                 "block_size": int(extra_options.get("int4_block_size", 32)),
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
-<<<<<<< HEAD
-=======
                 "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
                 "algo_config": int4_algo_config,
->>>>>>> 89a28898 (Support k_quant in model builder (#1444))
             },
             "use_qdq": extra_options.get("use_qdq", False),
         }
