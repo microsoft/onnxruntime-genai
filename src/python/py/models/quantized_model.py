@@ -183,7 +183,7 @@ class QuantizedModel:
                             # model.layers.layer_id.self_attn.q_norm.weight
                             module.self_attn.q_norm.weight = tensor   
                         elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.q_norm\.bias$", name)):
-                            #model.layers.layer_id.self_attn.q_norm.bias
+                            # model.layers.layer_id.self_attn.q_norm.bias
                             module.self_attn.q_norm.bias = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.k_proj\.q?weight$", name)):
                             # model.layers.layer_id.self_attn.k_proj.qweight
@@ -204,10 +204,10 @@ class QuantizedModel:
                             # model.layers.layer_id.self_attn.k_proj.bias
                             module.self_attn.k_proj.bias = tensor
                         elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.k_norm\.weight$", name)):
-                            #model.layers.layer_id.self_attn.k_norm.weight
+                            # model.layers.layer_id.self_attn.k_norm.weight
                             module.self_attn.k_norm.weight = tensor
                         elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.k_norm\.bias$", name)):
-                            #model.layers.layer_id.self_attn.k_norm.bias
+                            # model.layers.layer_id.self_attn.k_norm.bias
                             module.self_attn.k_norm.bias = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.v_proj\.q?weight$", name)):
                             # model.layers.layer_id.self_attn.v_proj.qweight
