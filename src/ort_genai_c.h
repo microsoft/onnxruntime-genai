@@ -6,10 +6,10 @@
 #include <stdint.h>
 
 #ifdef __cplusplus
-# include <cstddef>
+#include <cstddef>
 #else
-# include <stddef.h>
-# include <stdbool.h>
+#include <stddef.h>
+#include <stdbool.h>
 #endif
 
 #ifdef __cplusplus
