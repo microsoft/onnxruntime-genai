@@ -33,9 +33,11 @@ steps:
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     echo '##vso[task.prependpath]$HOME/.cargo/bin'
     source "$HOME/.cargo/env"
-    rustup install 1.86.0
-    rustup override set 1.86.0
-    rustup component add rust-src
+    rustup toolchain install 1.86.0
+    rustup default 1.86.0
+    rustup component add rust-src --toolchain 1.86.0
+    # Apple-silicon (arm64)
+    rustup target add aarch64-apple-darwin --toolchain 1.86.0
     rustup show active-toolchain
   displayName: 'Install Rust Toolchain'
   workingDirectory: '$(Build.Repository.LocalPath)'
