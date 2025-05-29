@@ -2615,8 +2615,12 @@ class Model:
             # differ.
             model = orig_model.language_model
         elif hasattr(orig_model, "base_model") and hasattr(orig_model.base_model, "model"):
-            # Model is from PEFT
-            model = orig_model.base_model.model
+            if hasattr(orig_model.base_model.model, "model"):
+                # Model is from PEFT
+                model = orig_model.base_model.model
+            else:
+                # Model is text-based only.
+                model = orig_model.base_model
         else:
             model = orig_model
 
