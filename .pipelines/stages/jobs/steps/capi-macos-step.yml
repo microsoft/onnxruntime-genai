@@ -29,6 +29,17 @@ steps:
     echo "build_config=${{ parameters.build_config }}"
   displayName: 'Print Parameters'
 
+- bash: |
+    # Fetch the correct rustup-init binary for the host arch (arm64 or x86_64)
+    curl --proto '=https' --tlsv1.2 -sSf https://static.rust-lang.org/rustup/dist/$(uname -m)-apple-darwin/rustup-init -o rustup-init
+    chmod +x rustup-init
+    # Install the desired toolchain non-interactively
+    ./rustup-init -y --default-toolchain 1.86.0
+    # Make the newly installed cargo binaries available to later tasks
+    echo '##vso[task.prependpath]$HOME/.cargo/bin'
+  displayName: 'Install Rust Toolchain'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
 - powershell: |
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
     $env:RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
