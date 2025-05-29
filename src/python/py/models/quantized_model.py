@@ -180,7 +180,7 @@ class QuantizedModel:
                             # model.layers.layer_id.self_attn.q_proj.bias
                             module.self_attn.q_proj.bias = tensor
                         elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.q_norm\.weight$", name)):
-                            #model.layers.layer_id.self_attn.q_norm.weight
+                            # model.layers.layer_id.self_attn.q_norm.weight
                             module.self_attn.q_norm.weight = tensor   
                         elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.q_norm\.bias$", name)):
                             #model.layers.layer_id.self_attn.q_norm.bias
