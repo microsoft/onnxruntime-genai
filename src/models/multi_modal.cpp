@@ -165,7 +165,7 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
 DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      position_inputs_{model, *this, sequence_lengths} {
+      position_inputs_{model, *this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask} {
   inputs_embeds_.Add();
   position_inputs_.Add();
   logits_.Add();

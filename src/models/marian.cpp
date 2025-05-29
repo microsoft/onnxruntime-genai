@@ -28,8 +28,8 @@ std::unique_ptr<State> MarianModel::CreateState(DeviceSpan<int32_t> sequence_len
 MarianState::MarianState(const MarianModel& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      encoder_attention_mask_{model, *this, sequence_lengths_unk},
-      attention_mask_{model, *this, sequence_lengths_unk} {
+      encoder_attention_mask_{model, *this, sequence_lengths_unk, model_.config_->model.encoder.inputs.attention_mask},
+      attention_mask_{model, *this, sequence_lengths_unk, model_.config_->model.decoder.inputs.encoder_attention_mask} {
 }
 
 DeviceSpan<float> MarianLogits::Get() {
@@ -107,7 +107,7 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     encoder_input_ids_.name_ = model_.config_->model.encoder.inputs.input_ids.c_str();
     encoder_input_ids_.Add();
 
-    encoder_attention_mask_.attention_mask_name_ = model_.config_->model.encoder.inputs.attention_mask;
+    // encoder_attention_mask_.attention_mask_name_ = model_.config_->model.encoder.inputs.attention_mask;
     encoder_attention_mask_.Add();
 
     encoder_input_ids_.Update(next_tokens);
@@ -141,7 +141,7 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     *past_key_values_length_->GetTensorMutableData<int64_t>() = -1;
 
-    attention_mask_.attention_mask_name_ = model_.config_->model.decoder.inputs.encoder_attention_mask;
+    // attention_mask_.attention_mask_name_ = model_.config_->model.decoder.inputs.encoder_attention_mask;
     attention_mask_.Add();
     attention_mask_.Update(next_tokens, current_length, static_cast<int>(new_length));
 
