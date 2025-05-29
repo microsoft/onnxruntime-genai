@@ -470,30 +470,6 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
-    def _get_prompt_templates(self, hf_name, extra_kwargs):
-        try:
-            # disable end of sentence padding with eos_token=None
-            tokenizer = AutoTokenizer.from_pretrained(hf_name, token=self.hf_token, trust_remote_code=True, eos_token=None, **extra_kwargs)
-            system_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}], tokenize=False)
-            system_user_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}], tokenize=False)
-            system_user_assistant_template = tokenizer.apply_chat_template([{'role': 'system', 'content': '{Content}'}, {'role': 'user', 'content': '{Content}'}, {'role': 'assistant', 'content': '{Content}'}], tokenize=False)
-            assert system_user_template.startswith(system_template), "Chat templates may contain padding tokens, leading to incorrect prompt templates"
-            assert system_user_assistant_template.startswith(system_user_template), "Chat templates may contain padding tokens, leading to incorrect prompt templates"
-            user_template = system_user_template[len(system_template):]
-            assistant_template = system_user_assistant_template[len(system_user_template):]
-            prompt_template = system_user_assistant_template[len(system_template):]
-            prompt_template = prompt_template[:prompt_template.rfind('{Content}')]
-            templates = {
-                "system": system_template,
-                "user": user_template,
-                "assistant": assistant_template,
-                "prompt": prompt_template
-            }
-            return templates
-        except Exception as e:
-            print(f"Failed to get prompt templates. Error: {e}")
-            return None
-
     def make_value(self, name: str, *, output: bool = False) -> ir.Value | None:
         """Obtain an IR value by value name. If the value does not exist a new one is created.
 
