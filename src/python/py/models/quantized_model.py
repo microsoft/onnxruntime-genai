@@ -150,7 +150,7 @@ class QuantizedModel:
 
                         # Map weights and biases of norm, attention, and feed-forward network
                         # Graph order is input_layernorm --> q_proj/k_proj/v_proj --> o_proj --> post_attention_layernorm --> gate_proj/up_proj --> down_proj
-                        #If model uses q_norm and k_norm, graph order is input_layernorm --> q_proj --> q_norm/k_proj --> k_norm/v_proj --> o_proj --> post_attention_layernorm --> gate_proj/up_proj --> down_proj
+                        # If model uses q_norm and k_norm, graph order is input_layernorm --> q_norm/q_proj/k_norm/k_proj/v_proj --> o_proj --> post_attention_layernorm --> gate_proj/up_proj --> down_proj
                         if bool(re.match(r"^model.layers\.\d+\.input_layernorm\.weight$", name)):
                             # model.layers.layer_id.input_layernorm.weight
                             module.input_layernorm.weight = tensor
