@@ -16,6 +16,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "multi_modal.h"
+#include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "../dml/interface.h"
 
@@ -307,15 +308,13 @@ void ConfigureMultiProfile(const Config& config, OrtSessionOptions& session_opti
   const auto add_input_shapes = [](std::ostringstream& shapes, int seq_len, bool append = false) {
     if (append) shapes << ",";
     shapes << Config::Defaults::InputIdsName << ":1x" << seq_len << ","
-           << Config::Defaults::AttentionMaskName << ":1x" << seq_len << ","
-           << Config::Defaults::PositionIdsName << ":1x" << seq_len;
+           << Config::Defaults::AttentionMaskName << ":1x" << seq_len;
   };
 
   // Helper function to add generation phase input shapes
   const auto add_generation_input_shapes = [](std::ostringstream& shapes, int context_len) {
     shapes << "," << Config::Defaults::AttentionMaskName << ":1x" << context_len << ","
-           << Config::Defaults::InputIdsName << ":1x1,"
-           << Config::Defaults::PositionIdsName << ":1x1";
+           << Config::Defaults::InputIdsName << ":1x1";
   };
 
   // Helper function to add empty KV cache shapes for all layers
@@ -369,7 +368,7 @@ void ConfigureMultiProfile(const Config& config, OrtSessionOptions& session_opti
 
   // MAX SHAPES (prefill with maximum context and generation after maximum context)
   add_input_shapes(max_shapes, max_context_len);
-  add_empty_key_value_cache_shapes(max_shapes, past_key_pattern, past_value_pattern, num_layers, num_kv_heads, head_dim);
+  add_key_value_cache_shapes(max_shapes, past_key_pattern, past_value_pattern, max_context_len - 1, num_layers, num_kv_heads, head_dim);
   add_generation_input_shapes(max_shapes, max_context_len);
   add_key_value_cache_shapes(max_shapes, past_key_pattern, past_value_pattern, max_context_len - 1, num_layers, num_kv_heads, head_dim);
 
@@ -485,14 +484,10 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
         session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
       } else if (provider_options.name == "NvTensorRtRtx") {
-        // After setting the NvTensorRtRtx provider in Onnxruntime, GenAI will then treat it as the cuda device.
-        session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_cuda_graph_enable", "1");
-
         if (IsMultiProfileEnabled(config.model.decoder.session_options)) {
           ConfigureMultiProfile(config, session_options);
         }
-
-        p_device = GetDeviceInterface(DeviceType::CUDA);
+        p_device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
       }
 
       std::vector<const char*> keys, values;
@@ -538,7 +533,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
@@ -557,7 +552,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
 
   // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)"};
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
@@ -822,6 +817,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
   if (config->model.type == "gemma3")
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
+  if (config->model.type == "marian-ssru")
+    return std::make_shared<MarianModel>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }

@@ -178,7 +178,8 @@ struct LibraryHandle {
 };
 #endif
 
-DeviceInterface* GetCudaInterface() {
+DeviceInterface* GetCudaInterface(DeviceType type) {
+  assert(type == DeviceType::NvTensorRtRtx || type == DeviceType::CUDA);
   try {
 #if defined(_WIN32)
     static LibraryHandle library{"onnxruntime-genai-cuda.dll"};
@@ -190,8 +191,10 @@ DeviceInterface* GetCudaInterface() {
     if (!library)
       throw std::runtime_error("Shared library load failure (see first error)");
 
-    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai);
-    static DeviceInterface* cuda_interface = reinterpret_cast<decltype(&GetInterface)>(library.GetSymbol("GetInterface"))(&g_genai);
+    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const char* deviceType);
+    static DeviceInterface* cuda_interface =
+        reinterpret_cast<decltype(&GetInterface)>(
+            library.GetSymbol("GetInterface"))(&g_genai, to_string(type).c_str());
 
     return cuda_interface;
   } catch (const std::exception& e) {
@@ -213,6 +216,8 @@ std::string to_string(DeviceType device_type) {
       return "QnnWithSharedMemory";
     case DeviceType::OpenVINO:
       return "OpenVINO";
+    case DeviceType::NvTensorRtRtx:
+      return "NvTensorRtRtx";
     default:
       throw std::runtime_error("Unknown device type");
   }
@@ -224,7 +229,8 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
     case DeviceType::CPU:
       return GetCpuInterface();
     case DeviceType::CUDA:
-      return GetCudaInterface();
+    case DeviceType::NvTensorRtRtx:
+      return GetCudaInterface(type);
 #if USE_DML
     case DeviceType::DML:
       return GetDmlInterface();
