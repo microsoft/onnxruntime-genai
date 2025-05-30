@@ -5,7 +5,7 @@
 
 // Generators::narrow_cast(), Generators::narrow(), and Generators::narrowing_error are similar to the GSL
 // functions/types of the same name.
-// See: https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines#es49-if-you-must-use-a-cast-use-a-named-cast
+// See: https://github.com/isocpp/CppCoreGuidelines/blob/cb0744e931fd9f441649d9a31b6acdbaa789109d/CppCoreGuidelines.md#es49-if-you-must-use-a-cast-use-a-named-cast
 
 #include <stdexcept>  // std::runtime_error
 #include <type_traits>
@@ -13,7 +13,7 @@
 
 namespace Generators {
 
-struct narrowing_error : public std::runtime_error {
+struct narrowing_error : std::runtime_error {
   narrowing_error() : std::runtime_error("narrowing error") {}
 };
 
