@@ -31,7 +31,7 @@ struct DmlObjects {
 };
 
 namespace DmlHelpers {
-DmlObjects CreateDmlObjects(const std::string& current_module_path, PLUID device_luid = nullptr);
+DmlObjects CreateDmlObjects(const std::string& current_module_path, PLUID device_luid = nullptr, uint32_t* p_device_index = nullptr);
 
 DmlReusedCommandListState BuildReusableCommandList(
     IDMLDevice* dml_device,

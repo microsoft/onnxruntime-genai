@@ -439,6 +439,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       if (!GetDmlInterface()) {
         LUID device_luid{};
         LUID* p_device_luid{};
+        uint32_t device_index{};
+        uint32_t* p_device_index{};
         for (const auto& [name, value] : provider_options.options) {
           if (name == "luid") {
             if (auto separator_position = value.find(":"); separator_position != std::string::npos) {
@@ -446,10 +448,13 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
               device_luid.LowPart = std::stol(value.substr(separator_position + 1));
               p_device_luid = &device_luid;
             }
+          } else if (name == "device_index") {
+            device_index = std::stoi(value);
+            p_device_index = &device_index;
           }
         }
 
-        InitDmlInterface(p_device_luid);
+        InitDmlInterface(p_device_luid, p_device_index);
       }
 
       if (!disable_graph_capture) {

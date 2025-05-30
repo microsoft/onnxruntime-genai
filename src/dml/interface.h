@@ -10,7 +10,7 @@ typedef struct _LUID {
 
 namespace Generators {
 
-void InitDmlInterface(LUID* p_device_luid);
+void InitDmlInterface(LUID* p_device_luid, uint32_t* p_device_index);
 void SetDmlProvider(OrtSessionOptions& options);
 
 DeviceInterface* GetDmlInterface();
