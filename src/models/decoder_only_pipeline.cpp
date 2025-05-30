@@ -88,16 +88,20 @@ static NameToLayerIdxMap GeneratePastKeyNameToLayerIdxMap(const Config& config) 
   return m;
 }
 
-static std::vector<size_t> DetectLayerIndicesFromPastKeyNameInputs(
+static std::vector<size_t> GetLayerIndicesSetFromPastKeyNameInputs(
     const NameToLayerIdxMap& past_key_name_to_layer_idx, std::span<const std::string> inputs) {
-  std::vector<size_t> detected_layer_indices{};
+  std::vector<size_t> layer_indices{};
   for (const auto& input_name : inputs) {
     const auto it = past_key_name_to_layer_idx.find(input_name);
     if (it != past_key_name_to_layer_idx.end()) {
-      detected_layer_indices.push_back(it->second);
+      layer_indices.push_back(it->second);
     }
   }
-  return detected_layer_indices;
+  // sort and remove duplicates
+  std::sort(layer_indices.begin(), layer_indices.end());
+  layer_indices.erase(std::unique(layer_indices.begin(), layer_indices.end()),
+                      layer_indices.end());
+  return layer_indices;
 }
 
 DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineModel& model,
@@ -117,38 +121,68 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   }
   extra_inputs_.Add();
 
-  const auto past_key_name_to_layer_idx = [&]() -> std::optional<NameToLayerIdxMap> {
-    if (do_key_value_cache_partial_update_) {
-      return GeneratePastKeyNameToLayerIdxMap(*model_.config_);
-    }
-    return std::nullopt;
-  }();
+  const auto& config_pipeline = model_.config_->model.decoder.pipeline;
 
-  for (const auto& pipeline_model : model_.config_->model.decoder.pipeline) {
+  for (size_t i = 0; i < config_pipeline.size(); ++i) {
     auto pipeline_model_state = std::make_unique<IntermediatePipelineState>(model_, params, pipeline_states_.size());
-
-    auto overlapped_kv_cache_update_record = [&]() -> std::optional<OverlappedKeyValueCacheUpdateRecord> {
-      if (do_key_value_cache_partial_update_) {
-        auto layer_indices = DetectLayerIndicesFromPastKeyNameInputs(*past_key_name_to_layer_idx,
-                                                                     pipeline_model.inputs);
-        if (!layer_indices.empty()) {
-          // model with KV cache tensors - we should overlap KV cache update
-          auto record = OverlappedKeyValueCacheUpdateRecord{};
-          record.layer_indices = std::move(layer_indices);
-          return record;
-        }
-      }
-      return std::nullopt;
-    }();
-
     pipeline_states_.emplace_back(std::move(pipeline_model_state));
-    pipeline_overlapped_kv_cache_update_records_.emplace_back(std::move(overlapped_kv_cache_update_record));
   }
 
-  if (std::any_of(pipeline_overlapped_kv_cache_update_records_.begin(),
-                  pipeline_overlapped_kv_cache_update_records_.end(),
-                  [](const auto& record) { return record.has_value(); })) {
-    key_value_cache_update_worker_thread_.emplace();
+  if (do_key_value_cache_partial_update_) {
+    const auto past_key_name_to_layer_idx = GeneratePastKeyNameToLayerIdxMap(*model_.config_);
+
+    std::map<std::vector<size_t>, PartialKeyValueCacheUpdateRecord*> layer_indices_to_update_record{};
+    std::unordered_set<size_t> layer_indices_encountered{};
+
+    for (size_t i = 0; i < config_pipeline.size(); ++i) {
+      const auto& pipeline_model = config_pipeline[i];
+
+      const auto layer_indices = GetLayerIndicesSetFromPastKeyNameInputs(past_key_name_to_layer_idx,
+                                                                         pipeline_model.inputs);
+
+      if (layer_indices.empty()) {
+        continue;
+      }
+
+      PartialKeyValueCacheUpdateRecord* record_ptr{};
+
+      if (auto layer_indices_to_update_record_it = layer_indices_to_update_record.find(layer_indices);
+          layer_indices_to_update_record_it != layer_indices_to_update_record.end()) {
+        // we have seen this exact set of layer indices before. reuse the existing record.
+        record_ptr = layer_indices_to_update_record_it->second;
+      } else {
+        // verify that the new set of layer indices is valid.
+        // i.e., it is disjoint with the set of all layer indices we've seen so far.
+        const bool layer_indices_valid =
+            std::all_of(layer_indices.begin(), layer_indices.end(),
+                        [&layer_indices_encountered](size_t layer_idx) {
+                          return layer_indices_encountered.find(layer_idx) == layer_indices_encountered.end();
+                        });
+
+        if (!layer_indices_valid) {
+          throw std::runtime_error(
+              "Invalid layer indices. Layer index sets for partial key value cache update must be either an exact "
+              "match with another set or disjoint with all other sets.");
+        }
+
+        // add a new record
+        PartialKeyValueCacheUpdateRecord record{};
+        record.layer_indices = layer_indices;
+
+        partial_kv_cache_update_records_.emplace_back(std::move(record));
+        record_ptr = &partial_kv_cache_update_records_.back();
+
+        // add layer_indices to what we've seen so far
+        layer_indices_encountered.insert(layer_indices.begin(), layer_indices.end());
+        layer_indices_to_update_record.emplace(layer_indices, record_ptr);
+      }
+
+      pipeline_state_id_to_partial_kv_cache_update_record_.emplace(i, *record_ptr);
+    }
+
+    if (!partial_kv_cache_update_records_.empty()) {
+      key_value_cache_update_worker_thread_.emplace();
+    }
   }
 }
 
@@ -247,26 +281,30 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
       }
     }
 
-    auto& overlapped_kv_update_record = pipeline_overlapped_kv_cache_update_records_[pipeline_state->id_];
-    if (overlapped_kv_update_record.has_value()) {
+    auto* partial_kv_cache_update_record = [&]() -> PartialKeyValueCacheUpdateRecord* {
+      auto it = pipeline_state_id_to_partial_kv_cache_update_record_.find(pipeline_state->id_);
+      return it != pipeline_state_id_to_partial_kv_cache_update_record_.end() ? &it->second.get() : nullptr;
+    }();
+
+    if (partial_kv_cache_update_record) {
       // wait for any outstanding KV cache update to finish
-      if (overlapped_kv_update_record->outstanding_update.valid()) {
-        overlapped_kv_update_record->outstanding_update.get();
+      if (partial_kv_cache_update_record->outstanding_update.valid()) {
+        partial_kv_cache_update_record->outstanding_update.get();
       }
     }
 
     // Run the intermediate pipeline state
     pipeline_state->Run(total_length, next_tokens, next_indices);
 
-    if (overlapped_kv_update_record.has_value()) {
+    if (partial_kv_cache_update_record) {
       assert(key_value_cache_update_worker_thread_.has_value());
       // enqueue the next KV cache update
       auto update_fn = [&key_value_cache = *key_value_cache_.get(),
-                        layer_indices = overlapped_kv_update_record->layer_indices,
+                        layer_indices = partial_kv_cache_update_record->layer_indices,
                         next_indices, total_length]() {
         key_value_cache.PartialUpdate(next_indices, total_length, layer_indices);
       };
-      overlapped_kv_update_record->outstanding_update = key_value_cache_update_worker_thread_->Enqueue(update_fn);
+      partial_kv_cache_update_record->outstanding_update = key_value_cache_update_worker_thread_->Enqueue(update_fn);
     }
 
     // Transfer ownership of all the non-managed outputs from the current pipeline state to the ortvalue store.
@@ -308,23 +346,6 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
     }
   }
 
-  // After the prompt processing models have run, wait for any outstanding KV cache updates to finish.
-  // We need to ensure that these updates finish before the KV cache tensor shapes are updated for token generation.
-  if (first_run_) {
-    for (auto& overlapped_kv_update_record : pipeline_overlapped_kv_cache_update_records_) {
-      if (overlapped_kv_update_record.has_value()) {
-        // wait for any outstanding KV cache update to finish
-        if (overlapped_kv_update_record->outstanding_update.valid()) {
-          overlapped_kv_update_record->outstanding_update.get();
-        }
-      }
-    }
-  }
-
-  // TODO need to resize the KV cache for token generation
-  // have a PartialResize() task that we can enqueue per model, like PartialUpdate()?
-  // or have a separate KV cache per model, with separate ones for pp and tg models?
-
   // Clear the outputs of the pipeline models that are only run on prompt since this cannot happen earlier.
   if (!first_run_) {
     for (auto& pipeline_state : pipeline_states_) {
@@ -347,10 +368,10 @@ void DecoderOnlyPipelineState::UpdateKeyValueCache(DeviceSpan<int32_t> beam_indi
   if (key_value_cache_) {
     const bool outstanding_key_value_cache_partial_update =
         do_key_value_cache_partial_update_ &&
-        std::any_of(pipeline_overlapped_kv_cache_update_records_.rbegin(),
-                    pipeline_overlapped_kv_cache_update_records_.rend(),
-                    [](const std::optional<OverlappedKeyValueCacheUpdateRecord>& record) {
-                      return record.has_value() && record->outstanding_update.valid();
+        std::any_of(partial_kv_cache_update_records_.rbegin(),
+                    partial_kv_cache_update_records_.rend(),
+                    [](const PartialKeyValueCacheUpdateRecord& record) {
+                      return record.outstanding_update.valid();
                     });
 
     if (outstanding_key_value_cache_partial_update) {

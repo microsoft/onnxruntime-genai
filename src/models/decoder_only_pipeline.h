@@ -76,12 +76,13 @@ struct DecoderOnlyPipelineState : State {
   const DecoderOnlyPipelineModel& model_;
   std::vector<std::unique_ptr<IntermediatePipelineState>> pipeline_states_;
 
-  struct OverlappedKeyValueCacheUpdateRecord {
+  struct PartialKeyValueCacheUpdateRecord {
     std::vector<size_t> layer_indices{};     // indicates which layers of the KV cache are to be updated
     std::future<void> outstanding_update{};  // future for an outstanding update task
   };
 
-  std::vector<std::optional<OverlappedKeyValueCacheUpdateRecord>> pipeline_overlapped_kv_cache_update_records_;
+  std::map<size_t, std::reference_wrapper<PartialKeyValueCacheUpdateRecord>> pipeline_state_id_to_partial_kv_cache_update_record_;
+  std::vector<PartialKeyValueCacheUpdateRecord> partial_kv_cache_update_records_;
 
   // Stores all the outputs from the previous pipeline state(s)
   std::unordered_map<std::string, std::unique_ptr<OrtValue>> ortvalue_store_;
