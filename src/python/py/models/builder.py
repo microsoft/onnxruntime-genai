@@ -7,30 +7,55 @@
 """
 Run this script to create the desired ONNX model.
 """
-
-from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
-from onnxruntime import __version__ as ort_version
-from packaging import version
-
-if version.parse(ort_version) > version.parse("1.21.1"):
-    from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer, QuantFormat
-else:
-    from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer as MatMulNBitsQuantizer, QuantFormat
+from __future__ import annotations
 
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
 import torch
 
 import argparse
-import ctypes
+import ast
 import gc
 import json
+import logging
 import os
 import textwrap
+from typing import Literal, Sequence
+
+import numpy as np
+import torch
+from onnxscript import ir
+from transformers import (
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    GenerationConfig,
+)
+
+try:
+    # For users who runs this script from source
+    import builder_utils
+except ImportError:
+    from onnxruntime_genai.models import builder_utils
+
+# NOTE: Avoid importing from onnx helper and numpy_helper. Instead, leverage
+# ONNX IR methods like ir.tensor, ir.DataType.numpy() and other methods for constructing
+# the ONNX graph efficiently.
+
+
+logger = logging.getLogger(__name__)
 
 
 class Model:
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options): 
+    def __init__(
+        self,
+        config,
+        io_dtype: Literal[ir.DataType.FLOAT, ir.DataType.FLOAT16] | int,
+        precision: str,
+        ep: str,
+        cache_dir,
+        extra_options,
+    ):
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
         self.original_context_length = config.original_max_position_embeddings if hasattr(config, "original_max_position_embeddings") else config.rope_scaling["original_max_position_embeddings"] if hasattr(config, "rope_scaling") and hasattr(config.rope_scaling, "original_max_position_embeddings") else self.context_length
         self.window_size = config.sliding_window if hasattr(config, "sliding_window") else -1  # default is -1 in GroupQueryAttention kernel
@@ -45,8 +70,14 @@ class Model:
 
         self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]
-        self.io_dtype = io_dtype      # {"bf16", "fp16", "fp32"}
-        self.onnx_dtype = onnx_dtype  # {"int4", "bf16", "fp16", "fp32"}
+        self.io_dtype: ir.DataType = ir.DataType(io_dtype)
+        onnx_dtype = {
+            "fp32": ir.DataType.FLOAT,
+            "fp16": ir.DataType.FLOAT16,
+            "bf16": ir.DataType.BFLOAT16,
+            "int4": ir.DataType.UINT4,
+        }[precision]
+        self.onnx_dtype: ir.DataType = onnx_dtype
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
         self.adapter_path = extra_options.get("adapter_path", None)
 
@@ -54,12 +85,6 @@ class Model:
         self.filename = extra_options.get("filename", "model.onnx")
         self.hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
         self.extra_options = extra_options
-
-        self.inputs = []
-        self.outputs = []
-        self.initializers = []
-        self.value_infos = []
-        self.nodes = []
 
         # EP-specific variables
         self.ep = ep
@@ -81,9 +106,9 @@ class Model:
         # Map input names to their types and shapes
         self.input_names = ["input_ids", "attention_mask", "position_ids"]
         self.input_types = {
-            "input_ids": TensorProto.INT64,                                                                      # For standard models
-            "attention_mask": TensorProto.INT64,                                                                 # For standard models
-            "position_ids": TensorProto.INT64,                                                                   # For standard models
+            "input_ids": ir.DataType.INT64,                                                                      # For standard models
+            "attention_mask": ir.DataType.INT64,                                                                 # For standard models
+            "position_ids": ir.DataType.INT64,                                                                   # For standard models
             "inputs_embeds": self.io_dtype,                                                                      # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
             "past_key_values.key": self.io_dtype,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
             "past_key_values.value": self.io_dtype,                                                              # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
@@ -117,39 +142,20 @@ class Model:
         self.make_outputs_init()
 
         # Store names of nodes already created
-        self.node_names = set()
-
-        # Map TensorProto dtypes to NumPy dtypes
-        self.to_numpy_dtype = {
-            TensorProto.INT8: np.uint8,
-            TensorProto.INT32: np.int32,
-            TensorProto.INT64: np.int64,
-            TensorProto.FLOAT16: np.float16,
-            TensorProto.FLOAT: np.float32,
-        }
+        self.node_names: set[str] = set()
 
         # Map TensorProto dtypes to PyTorch dtypes
         self.to_torch_dtype = {
-            TensorProto.INT8: torch.int8,
-            TensorProto.INT32: torch.int32,
-            TensorProto.INT64: torch.int64,
-            TensorProto.BFLOAT16: torch.bfloat16,
-            TensorProto.FLOAT16: torch.float16,
-            TensorProto.FLOAT: torch.float32,
+            ir.DataType.INT8: torch.int8,
+            ir.DataType.INT32: torch.int32,
+            ir.DataType.INT64: torch.int64,
+            ir.DataType.BFLOAT16: torch.bfloat16,
+            ir.DataType.FLOAT16: torch.float16,
+            ir.DataType.FLOAT: torch.float32,
         }
 
         # Map PyTorch dtypes to TensorProto dtypes
         self.to_onnx_dtype = {v: k for k, v in self.to_torch_dtype.items()}
-
-        # Map TensorProto dtypes to string dtypes
-        self.to_str_dtype = {
-            TensorProto.INT8: "TensorProto.INT8",
-            TensorProto.INT32: "TensorProto.INT32",
-            TensorProto.INT64: "TensorProto.INT64",
-            TensorProto.BFLOAT16: "TensorProto.BFLOAT16",
-            TensorProto.FLOAT16: "TensorProto.FLOAT16",
-            TensorProto.FLOAT: "TensorProto.FLOAT",
-        }
 
         # Mask-specific variables
         # TODO: Reconcile differences between `seqlens_k` and `key_total_seq_lens` in the GroupQueryAttention and SparseAttention implementations. Ideally the same subgraph can be shared for both.
@@ -321,11 +327,30 @@ class Model:
             self.quant_attrs["config"] = config.quantization_config
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
 
+        # States for building the model
+        graph = ir.Graph(
+            inputs=(),
+            outputs=(),
+            nodes=(),
+            opset_imports={
+                "": 21 if self.quant_attrs["use_qdq"] else 14,
+                "com.microsoft": 1,
+            },
+            name="main_graph",
+        )
+        # A tracer for recording the nodes added
+        # TODO(justinchuby): Bump IR version to 10
+        self._model = ir.Model(graph, ir_version=7, producer_name="onnxruntime-genai")
+        self._values: dict[str, ir.Value] = {}
+
+    def to_str_dtype(self, dtype: ir.DataType) -> str:
+        # TODO(justinchuby): Simplify and remove "TensorProto." from name
+        return f"TensorProto.{dtype.name}"
 
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy in the case of bf16 models.
-        if self.onnx_dtype == "bf16":
-            self.output_types["logits"] = TensorProto.FLOAT
+        if self.onnx_dtype == ir.DataType.BFLOAT16:
+            self.output_types["logits"] = ir.DataType.FLOAT
 
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
@@ -336,16 +361,15 @@ class Model:
             self.output_names = ["hidden_states"] + self.output_names
 
     def make_attention_init(self):
-        valid_gqa_configurations = [
-            ("cpu", TensorProto.FLOAT),
-            ("cuda", TensorProto.FLOAT16),
-            ("cuda", TensorProto.BFLOAT16),
-            ("rocm", TensorProto.FLOAT16),
-            ("dml", TensorProto.FLOAT16),
-            ("webgpu", TensorProto.FLOAT16),
-            ("webgpu", TensorProto.FLOAT),
-            ("NvTensorRtRtx", TensorProto.FLOAT16),
-        ]
+        valid_gqa_configurations = {
+            ("cpu", ir.DataType.FLOAT),
+            ("cuda", ir.DataType.FLOAT16),
+            ("rocm", ir.DataType.FLOAT16),
+            ("dml", ir.DataType.FLOAT16),
+            ("webgpu", ir.DataType.FLOAT16),
+            ("webgpu", ir.DataType.FLOAT),
+            ("NvTensorRtRtx", ir.DataType.FLOAT16),
+        }
         if (self.ep, self.io_dtype) in valid_gqa_configurations:
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
@@ -394,7 +418,7 @@ class Model:
 
         genai_config = {
             "model": {
-                "bos_token_id": config.bos_token_id if hasattr(config, "bos_token_id") and config.bos_token_id != None else 1,  # config.bos_token_id not present in ChatGLM model configs.
+                "bos_token_id": config.bos_token_id if hasattr(config, "bos_token_id") and config.bos_token_id is not None else 1,  # config.bos_token_id not present in ChatGLM model configs.
                 "context_length": self.context_length,
                 "decoder": {
                     "session_options" : {
@@ -445,44 +469,50 @@ class Model:
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
-        
+
+    def make_value(self, name: str, *, output: bool = False) -> ir.Value | None:
+        """Obtain an IR value by value name. If the value does not exist a new one is created.
+
+        Args:
+            name: The name of the value.
+            output: Whether the value is an output value.
+        """
+        if name == "":
+            if not output:
+                # ONNX IR uses None to represent an empty input
+                return None
+            else:
+                # Use empty string to represent an empty output because all outputs
+                # need to be of type ir.Value
+                return ir.Value(name="")
+
+        return self._values.setdefault(name, ir.Value(name=name))
+
+    def as_ir_model(self) -> ir.Model:
+        """Return the IR model."""
+        # Quantize ONNX model to desired precision
+        # TODO: Replace by quantizing the MatMuls as they are created
+        already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
+        if self.onnx_dtype == ir.DataType.UINT4 and not already_quantized_in_qdq_format:
+            model = builder_utils.to_int4(
+                self._model,
+                block_size=self.quant_attrs["int4"]["block_size"],
+                is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
+                accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
+                use_qdq=self.quant_attrs["use_qdq"],
+                op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
+            )
+        else:
+            model = self._model
+        return model
+
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
         gc.collect()
 
-        # Create ONNX model
-        model = helper.make_model(
-            opset_imports=[self.clear_field(helper.make_operatorsetid('', 21 if self.quant_attrs["use_qdq"] else 14), 'domain'), helper.make_operatorsetid('com.microsoft', 1)],
-            ir_version=7,
-            producer_name="onnxruntime-genai",
-            producer_version="0.0.0",
-            graph=self.make_graph(
-                name="main_graph",
-                inputs=self.inputs,
-                outputs=self.outputs,
-                initializer=self.initializers,
-                value_info=self.value_infos,
-                nodes=self.nodes,
-            )
-        )
-
-        # Load external data into ONNX model
-        external_data_helper.load_external_data_for_model(model, self.cache_dir)
-
-        # Delete external data files on disk before re-saving
-        for path in os.listdir(self.cache_dir):
-            if path.endswith(".bin"):
-                os.remove(os.path.join(self.cache_dir, path))
-
-        # Delete temporary cache dir if empty
-        if len(os.listdir(self.cache_dir)) == 0:
-            os.rmdir(self.cache_dir)
-
-        # Quantize ONNX model to desired precision
-        # TODO: Replace by quantizing the MatMuls as they are created
-        already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
-        if self.onnx_dtype == "int4" and not already_quantized_in_qdq_format:
-            model = self.to_int4(model)
+        model = self.as_ir_model()
+        # Make sure all nodes are topologically sorted
+        model.graph.sort()
 
         # Save ONNX model with only one external data file and delete any existing duplicate copies
         out_path = os.path.join(out_dir, self.filename)
@@ -493,16 +523,26 @@ class Model:
         if os.path.exists(data_path):
             print(f"Overwriting {data_path}")
             os.remove(data_path)
-
-        save_model(
+        ir.save(
             model,
             out_path,
-            save_as_external_data=True,
-            all_tensors_to_one_file=True,
-            location=os.path.basename(data_path),
-            size_threshold=0,
-            convert_attribute=False,
+            external_data=os.path.basename(data_path),
+            size_threshold_bytes=0,
         )
+
+        # TODO(justinchuby): This makes the model not savable again when the weight
+        # files are deleted.
+        # Delete external data files on disk before re-saving
+        for path in os.listdir(self.cache_dir):
+            if path.endswith(".bin"):
+                try:
+                    os.remove(os.path.join(self.cache_dir, path))
+                except OSError:
+                    logger.debug("Error deleting file", stack_info=True)
+
+        # Delete temporary cache dir if empty
+        if not os.listdir(self.cache_dir):
+            os.rmdir(self.cache_dir)
 
     def make_int4_algo_config(self, quant_method):
         int4_algo_config = None
@@ -532,80 +572,33 @@ class Model:
             int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
         return int4_algo_config
 
-    def to_int4(self, model):
-        quant = MatMulNBitsQuantizer(
-            model=model,
-            block_size=self.quant_attrs["int4"]["block_size"],
-            is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
-            accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
-            nodes_to_exclude=self.quant_attrs["int4"]["nodes_to_exclude"],
-            quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
-            op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
-            algo_config=self.quant_attrs["int4"]["algo_config"],
-        )
-        quant.process()
-        return quant.model.model
-
-    def clear_field(self, proto, field):
-        proto.ClearField(field)
-        return proto
-
-    def order_repeated_field(self, repeated_proto, key_name, order):
-        order = list(order)
-        repeated_proto.sort(key=lambda x: order.index(getattr(x, key_name)))
-
-    def make_tensor_proto_from_tensor(self, tensor, name):
-        if tensor.get_device() != -1:
-            # Tensor must be on CPU (device id = -1)
-            tensor = tensor.cpu()
-        if not tensor.is_contiguous():
-            # Make tensor contiguous
-            tensor = tensor.contiguous()
-
-        raw_data = bytes(
-            (ctypes.c_ubyte * tensor.element_size() * tensor.numel()).from_address(
-                tensor.data_ptr()
-            )
-        )
-        tensor_proto = helper.make_tensor(
-            name=name,
-            data_type=self.to_onnx_dtype[tensor.dtype],
-            dims=tensor.shape,
-            vals=raw_data,
-            raw=True,
-        )
-        return tensor_proto
-
-    def make_external_tensor(self, tensor, name, **kwargs):
-        tensor_proto = self.make_tensor_proto_from_tensor(tensor, name)
-
+    def make_external_tensor(self, tensor: ir.ArrayCompatible | np.ndarray | ir.TensorProtocol, name: str):
+        ir_tensor = ir.tensor(tensor, name=name)
         filename = f"{name}.bin"
-        external_data_helper.set_external_data(tensor_proto, location=filename)
-        with open(os.path.join(self.cache_dir, filename), "wb") as f:
-            f.write(tensor_proto.raw_data)
-        tensor_proto.ClearField("raw_data")
-        tensor_proto.data_location = TensorProto.EXTERNAL
+        (ir_tensor,) = ir.external_data.convert_tensors_to_external(
+            [ir_tensor], self.cache_dir, filename
+        )
+        initializer = self.make_value(name)
+        initializer.const_value = ir_tensor
+        self.make_value_info(name, ir_tensor.dtype, ir_tensor.shape)
+        self._model.graph.register_initializer(initializer)
 
-        if kwargs.get("unpack_int4", False) and self.onnx_dtype == 'int4':
-            tensor_proto.data_type = TensorProto.UINT4
-            tensor_proto.dims[-1] *= 2
+    def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name: str, domain="", **kwargs):
+        assert name, "Node name must be provided"
+        if name in self.node_names:
+            return
 
-        self.initializers.append(tensor_proto)
-
-    def make_node(self, op_type, inputs, outputs, name=None, doc_string=None, domain=None, **kwargs):
         # Save any constants as nodes
         for input_name in inputs:
             if input_name.startswith("/model/constants") and input_name not in self.node_names:
                 self.make_constant(input_name)
 
-        # Make node only if it does not already exist
-        if name not in self.node_names:
-            node = helper.make_node(op_type, inputs, outputs, name, doc_string, domain, **kwargs)
-            if doc_string == '':
-                node.doc_string = ''
-            self.order_repeated_field(node.attribute, 'name', kwargs.keys())
-            self.nodes.append(node)
-            self.node_names.add(name)
+        # Resolve values from names
+        input_values = [self.make_value(name) for name in inputs]
+        output_values = [self.make_value(name, output=True) for name in outputs]
+        node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
+        self._model.graph.append(node)
+        self.node_names.add(name)
 
         # Note:
         #
@@ -617,67 +610,72 @@ class Model:
         # status in the graph. The above checks can then decide whether the proposed node actually
         # needs to be added into the graph or not.
 
-    def make_value_info(self, name, dtype, shape):
-        value_info = helper.make_tensor_value_info(name, dtype, shape=shape)
-        self.value_infos.append(value_info)
-
-    def make_graph(self, *args, doc_string=None, **kwargs):
-        graph = helper.make_graph(*args, doc_string=doc_string, **kwargs)
-        if doc_string == '':
-            graph.doc_string = ''
-        return graph
+    def make_value_info(self, name, dtype: ir.DataType | int| None, shape: Sequence[int | str] | ir.Shape | None) -> None:
+        if name not in self._values:
+            raise KeyError(f"Value {name} not found in model values. You must create the node before creating the value info.")
+        if dtype is not None:
+            self._values[name].dtype = ir.DataType(dtype)
+        if shape is not None:
+            self._values[name].shape = ir.Shape(shape)
 
     def make_inputs_and_outputs(self):
         # Add model-specific inputs to list of model inputs
-        inputs = []
+        inputs = self._model.graph.inputs
         for name in self.input_names:
             dtype = self.input_types[name]
             shape = self.input_shapes[name]
-            inputs.append(helper.make_tensor_value_info(name, dtype, shape=shape))
+            inputs.append(self.make_value(name))
+            self.make_value_info(name, dtype=dtype, shape=shape)
 
         # Add model-specific outputs to list of model outputs
-        outputs = []
+        outputs = self._model.graph.outputs
         for name in self.output_names:
             dtype = self.output_types[name]
             shape = self.output_shapes[name]
-            outputs.append(helper.make_tensor_value_info(name, dtype, shape=shape))
+            outputs.append(self.make_value(name))
+            self.make_value_info(name, dtype=dtype, shape=shape)
 
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(helper.make_tensor_value_info(key_name, self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
+            inputs.append(self.make_value(key_name))
+            self.make_value_info(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"])
             value_name = f"past_key_values.{i}.value"
-            inputs.append(helper.make_tensor_value_info(value_name, self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
+            inputs.append(self.make_value(value_name))
+            self.make_value_info(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"])
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(helper.make_tensor_value_info(key_name, self.output_types["present.key"], shape=self.output_shapes["present.key"]))
+            outputs.append(self.make_value(key_name))
+            self.make_value_info(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"])
             value_name = f"present.{i}.value"
-            outputs.append(helper.make_tensor_value_info(value_name, self.output_types["present.value"], shape=self.output_shapes["present.value"]))
-
-        self.inputs = inputs
-        self.outputs = outputs
+            outputs.append(self.make_value(value_name))
+            self.make_value_info(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"])
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
         # Format of name is "/model/constants/{dtype}/{shape}/{num}"
-        path = name.split("/")
-        onnx_dtype, dims, num = eval(path[-3]), path[-2], eval(path[-1])
 
-        torch_dtype = self.to_torch_dtype[onnx_dtype]
-        tensor = torch.tensor(num if dims == "0D" else list(num) if type(num) == tuple else [num], dtype=torch_dtype).contiguous()
-        value = self.make_tensor_proto_from_tensor(tensor, name.replace("constants", "torch_helper"))
+        path = name.split("/")
+        onnx_dtype = ir.DataType[path[-3].split(".")[-1]]
+        dims = path[-2]
+        # NOTE: Use ast.literal_eval instead of eval as eval allows arbitrary code execution
+        num = ast.literal_eval(path[-1])
+        assert dims in {"0D", "1D"}, f"Unexpected dimension {dims} in constant name"
+        if not(dims == "0D"):
+            # Convert to 1D tensor
+            num = [num]
+        tensor = ir.tensor(num, dtype=onnx_dtype, name=name)
 
         node_name = name.replace("constants", "constant_nodes")
-        self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=value)
+        self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=tensor)
         self.make_value_info(name, onnx_dtype, shape=[])
-        self.node_names.add(name)
 
     def make_gather(self, name, inputs, axis):
         output = f"{name}/output_0"
         self.make_node("Gather", inputs=inputs, outputs=[output], name=name, axis=axis)
-        self.make_value_info(output, TensorProto.INT64, shape=[])
+        self.make_value_info(output, ir.DataType.INT64, shape=[])
 
     def make_reshape(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -687,7 +685,7 @@ class Model:
     def make_shape(self, name, root_input, shape):
         output = f"{name}/output_0"
         self.make_node("Shape", inputs=[root_input], outputs=[output], name=name)
-        self.make_value_info(output, TensorProto.INT64, shape=shape)
+        self.make_value_info(output, ir.DataType.INT64, shape=shape)
 
     def make_constant_of_shape(self, name, root_input, value, dtype, shape):
         output = f"{name}/output_0"
@@ -702,7 +700,7 @@ class Model:
     def make_squeeze(self, name, inputs):
         output = f"{name}/output_0"
         self.make_node("Squeeze", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, TensorProto.INT64, shape=[])
+        self.make_value_info(output, ir.DataType.INT64, shape=[])
 
     def make_concat(self, name, inputs, dtype, shape, axis=0):
         output = f"{name}/output_0"
@@ -717,22 +715,22 @@ class Model:
     def make_equal(self, name, inputs, shape):
         output = f"{name}/output_0"
         self.make_node("Equal", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, TensorProto.BOOL, shape=shape)
+        self.make_value_info(output, ir.DataType.BOOL, shape=shape)
 
     def make_greater(self, name, inputs, shape):
         output = f"{name}/output_0"
         self.make_node("Greater", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, TensorProto.BOOL, shape=shape)
-    
+        self.make_value_info(output, ir.DataType.BOOL, shape=shape)
+
     def make_greater_or_equal(self, name, inputs, shape):
         output = f"{name}/output_0"
         self.make_node("GreaterOrEqual", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, TensorProto.BOOL, shape=shape)
+        self.make_value_info(output, ir.DataType.BOOL, shape=shape)
 
     def make_isinf(self, name, root_input, shape):
         output = f"{name}/output_0"
         self.make_node("IsInf", inputs=[root_input], outputs=[output], name=name)
-        self.make_value_info(output, TensorProto.BOOL, shape=shape)
+        self.make_value_info(output, ir.DataType.BOOL, shape=shape)
 
     def make_clip(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -794,12 +792,12 @@ class Model:
     def make_less(self, name, inputs):
         output = f"{name}/output_0"
         self.make_node("Less", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, TensorProto.BOOL, shape=None)
+        self.make_value_info(output, ir.DataType.BOOL, shape=None)
 
     def make_range(self, name, inputs):
         output = f"{name}/output_0"
         self.make_node("Range", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, TensorProto.INT64, shape=["unk"])
+        self.make_value_info(output, ir.DataType.INT64, shape=["unk"])
 
     def make_slice(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -833,11 +831,11 @@ class Model:
         else:
             # For regular `MatMul`
             return self.make_matmul_op(matmul, basename, root_input, **kwargs)
-    
+
     def make_matmul_op(self, matmul, basename, root_input, **kwargs):
-        if self.onnx_dtype in {"bf16", "fp16", "fp32"}:
+        if self.onnx_dtype in {ir.DataType.FLOAT16, ir.DataType.FLOAT}:
             return self.make_matmul_float(matmul, basename, root_input, **kwargs)
-        elif self.onnx_dtype == "int4":
+        elif self.onnx_dtype == ir.DataType.UINT4:
             if self.quant_attrs["use_qdq"]:
                 return self.make_matmul_int4_qdq(matmul, basename, root_input, **kwargs)
             else:
@@ -867,9 +865,9 @@ class Model:
 
         # Input weights are quantized, save quantized MatMul weights for onnx model
         weight = name[1:].replace("/", ".") + ".qweight"
-        self.make_external_tensor(matmul.qweight.detach().cpu().contiguous(), weight)
+        self.make_external_tensor(matmul.qweight, weight)
         scales = name[1:].replace("/", ".") + ".scales"
-        self.make_external_tensor(matmul.scales.detach().cpu().to(self.to_torch_dtype[self.io_dtype]).contiguous(), scales)
+        self.make_external_tensor(matmul.scales.detach().to(self.to_torch_dtype[self.io_dtype]).contiguous(), scales)
 
         inputs = [root_input, weight, scales]
 
@@ -896,13 +894,14 @@ class Model:
     def make_dequantize_linear(self, dequantize_name, quantized_op):
         # Input weights are quantized, save quantized MatMul weights for onnx model
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
-        qweight_pt = quantized_op.qweight.detach().cpu()
-        qweight_pt = qweight_pt.reshape(*qweight_pt.shape[:-2], qweight_pt.shape[-2] * qweight_pt.shape[-1])
-        self.make_external_tensor(qweight_pt.contiguous(), qweight, unpack_int4=True)
+        qweight_npy = quantized_op.qweight.numpy(force=True)
+        qweight_npy = qweight_npy.reshape(*qweight_npy.shape[:-2], qweight_npy.shape[-2] * qweight_npy.shape[-1])
+        qweight_npy = builder_utils.unpack_uint4(qweight_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2])
+        self.make_external_tensor(qweight_npy, qweight)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
         scales_pt = quantized_op.scales.detach().cpu().to(self.to_torch_dtype[self.io_dtype])
-        scales_pt = scales_pt.reshape(*qweight_pt.shape[:-1], qweight_pt.shape[-1] * 2 // quantized_op.group_size)
+        scales_pt = scales_pt.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size)
         self.make_external_tensor(scales_pt.contiguous(), scales)
 
         dequantize_inputs = [qweight, scales]
@@ -910,8 +909,9 @@ class Model:
         if hasattr(quantized_op, "qzeros") and quantized_op.qzeros is not None:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
             zeros_pt = quantized_op.qzeros.detach().cpu()
-            zeros_pt = zeros_pt.reshape(*qweight_pt.shape[:-1], qweight_pt.shape[-1] // quantized_op.group_size)
-            self.make_external_tensor(zeros_pt.contiguous(), zeros, unpack_int4=True)
+            zeros_pt = zeros_pt.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] // quantized_op.group_size)
+            # TODO(justinchuby): Do we need to uncpack the zeros tensor?
+            self.make_external_tensor(zeros_pt, zeros)
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
@@ -985,9 +985,9 @@ class Model:
         return add_name
 
     def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
-        if self.onnx_dtype in {"bf16", "fp16", "fp32"}:
+        if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
             return self.make_packed_matmul_float(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
-        elif self.onnx_dtype == "int4":
+        elif self.onnx_dtype == ir.DataType.UINT4:
             return self.make_packed_matmul_int4(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
@@ -1003,7 +1003,7 @@ class Model:
         # Create dummy PackedMatMul class
         class PackedMatMul:
             def __init__(self):
-                self.weight = torch.cat([q_matmul.weight.detach().cpu(), k_matmul.weight.detach().cpu(), v_matmul.weight.detach().cpu()], dim=0).reshape(N_q + N_kv + N_kv, H)
+                self.weight = torch.cat([q_matmul.weight.detach(), k_matmul.weight.detach(), v_matmul.weight.detach()], dim=0).reshape(N_q + N_kv + N_kv, H)
         matmul = PackedMatMul()
         new_name = self.make_matmul(matmul, basename, root_input, **kwargs)
 
@@ -1065,7 +1065,7 @@ class Model:
         if self.embed_attrs["scale"] != 1:
             # Scale the embeddings
             mul_name = f"{basename}/Mul"
-            mul_inputs = [gather_output, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.embed_attrs['scale']}"]
+            mul_inputs = [gather_output, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.embed_attrs['scale']}"]
             mul_output = f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
             self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
@@ -1097,7 +1097,7 @@ class Model:
 
         # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor((layernorm.weight.detach().cpu().to(new_torch_dtype) + self.layernorm_attrs["add_offset"]).contiguous(), weight)
+        self.make_external_tensor(layernorm.weight.detach().to(new_torch_dtype).contiguous() + self.layernorm_attrs["add_offset"], weight)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
             self.make_external_tensor(layernorm.bias.detach().cpu().to(new_torch_dtype).contiguous(), bias)
@@ -1408,35 +1408,53 @@ class Model:
         greater_inputs = [f"{gather_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.original_context_length}"]
         self.make_greater(greater_name, greater_inputs, shape=[])
         if_name = f"{basename}/If"
+
+        cos_cache_large_node = ir.node(
+            "Constant", [], outputs=[
+                ir.Value(name=cos_cache_large_name, type=ir.TensorType(self.io_dtype), shape=cos_cache_large.shape)
+            ],
+            name="/large/cos_cache/Constant", attributes=dict(value=ir.tensor(cos_cache_large)))
+        sin_cache_large_node = ir.node(
+            "Constant", [], outputs=[
+                ir.Value(name=sin_cache_large_name, type=ir.TensorType(self.io_dtype), shape=sin_cache_large.shape)
+            ],
+            name="/large/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_large)))
+        cos_cache_small_node = ir.node(
+            "Constant", [], outputs=[
+                ir.Value(name=cos_cache_small_name, type=ir.TensorType(self.io_dtype), shape=cos_cache_small.shape)
+            ],
+            name="/small/cos_cache/Constant", attributes=dict(value=ir.tensor(cos_cache_small)))
+        sin_cache_small_node = ir.node(
+            "Constant", [], outputs=[
+                ir.Value(name=sin_cache_small_name, type=ir.TensorType(self.io_dtype), shape=sin_cache_small.shape)
+            ],
+            name="/small/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_small)))
         self.make_node(
-            "If", inputs=[f"{greater_name}/output_0"], outputs=[cos_cache_name, sin_cache_name], name=if_name,
-            then_branch=self.make_graph(
+            "If", inputs=[f"{greater_name}/output_0"], outputs=[if_cos_cache_output, if_sin_cache_output], name=if_name,
+            then_branch=ir.Graph(
+                inputs=[],
+                outputs=[
+                    cos_cache_large_node.outputs[0],
+                    sin_cache_large_node.outputs[0],
+                ],
+                nodes=[
+                    cos_cache_large_node,
+                    sin_cache_large_node,
+                ],
                 name="large_rotemb_caches_graph",
-                inputs=[],
-                outputs=[
-                    helper.make_tensor_value_info(cos_cache_large_name, self.io_dtype, shape=cos_cache_large.shape),
-                    helper.make_tensor_value_info(sin_cache_large_name, self.io_dtype, shape=sin_cache_large.shape),
-                ],
-                initializer=[],
-                value_info=[],
-                nodes=[
-                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_large_name], name="/large/cos_cache/Constant", value=self.make_tensor_proto_from_tensor(cos_cache_large, "cos_cache_large_torch_helper")),
-                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_large_name], name="/large/sin_cache/Constant", value=self.make_tensor_proto_from_tensor(sin_cache_large, "sin_cache_large_torch_helper")),
-                ],
             ),
-            else_branch=self.make_graph(
-                name="small_rotemb_caches_graph",
+            else_branch=ir.Graph(
+
                 inputs=[],
                 outputs=[
-                    helper.make_tensor_value_info(cos_cache_small_name, self.io_dtype, shape=cos_cache_small.shape),
-                    helper.make_tensor_value_info(sin_cache_small_name, self.io_dtype, shape=sin_cache_small.shape),
+                    cos_cache_small_node.outputs[0],
+                    sin_cache_small_node.outputs[0],
                 ],
-                initializer=[],
-                value_info=[],
                 nodes=[
-                    helper.make_node("Constant", inputs=[], outputs=[cos_cache_small_name], name="/small/cos_cache/Constant", value=self.make_tensor_proto_from_tensor(cos_cache_small, "cos_cache_small_torch_helper")),
-                    helper.make_node("Constant", inputs=[], outputs=[sin_cache_small_name], name="/small/sin_cache/Constant", value=self.make_tensor_proto_from_tensor(sin_cache_small, "sin_cache_small_torch_helper")),
+                    cos_cache_small_node,
+                    sin_cache_small_node,
                 ],
+                name="small_rotemb_caches_graph",
             ),
         )
         self.make_value_info(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
@@ -1484,7 +1502,7 @@ class Model:
 
     # This expansion contrib-op can be updated / depricated in future.
     def _make_simplified_layer_norm(self, basename, root_input, weight_name, output_0, io_dtype, shape):
-        
+
         #                            Cast (float32) - most calc happens in higher precision
         #                              |
         #                      +-------+-------+
@@ -1500,13 +1518,13 @@ class Model:
         #                     Div              |
         #                      |               |
         #                      +-------+-------+
-        #                              |  
+        #                              |
         #                             Mul
         #                              |
         #                            Cast_1 (io_dtype - float16)
         #                              |
         #                            Mul_1
-        
+
         make_cast_name = f"{basename}/Cast"
         self.make_cast(make_cast_name, root_input, TensorProto.FLOAT, shape=shape)
 
@@ -1531,7 +1549,7 @@ class Model:
         make_div_name = f"{basename}/Div"
         make_div_inputs = [f"/model/constants/TensorProto.FLOAT/0D/1", f"{make_sqrt_name}/output_0"]
         self.make_div(make_div_name, make_div_inputs, TensorProto.FLOAT, shape=shape)
-        
+
         make_mul_name = f"{basename}/Mul"
         make_mul_inputs = [f"{make_div_name}/output_0", f"{make_cast_name}/output_0"]
         self.make_mul(make_mul_name, make_mul_inputs, TensorProto.FLOAT, shape=shape)
@@ -1720,35 +1738,35 @@ class Model:
         self.make_gather(gather_1_name, gather_1_inputs, axis=0)
         unsqueeze_1_name = f"{basename}/Unsqueeze_1"
         unsqueeze_1_inputs = [f"{gather_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_unsqueeze(unsqueeze_1_name, unsqueeze_1_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_1_name, unsqueeze_1_inputs, dtype=ir.DataType.INT64, shape=[1])
         gather_2_name = f"{basename}/Gather_2"
         gather_2_inputs = [f"{shape_1_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
         self.make_gather(gather_2_name, gather_2_inputs, axis=0)
         unsqueeze_2_name = f"{basename}/Unsqueeze_2"
         unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_unsqueeze(unsqueeze_2_name, unsqueeze_2_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_2_name, unsqueeze_2_inputs, dtype=ir.DataType.INT64, shape=[1])
         gather_3_name = f"{basename}/Gather_3"
         gather_3_inputs = [f"{shape_1_name}/output_0", "/model/constants/TensorProto.INT64/0D/2"]
         self.make_gather(gather_3_name, gather_3_inputs, axis=0)
         unsqueeze_3_name = f"{basename}/Unsqueeze_3"
         unsqueeze_3_inputs = [f"{gather_3_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=ir.DataType.INT64, shape=[1])
         gather_4_name = f"{basename}/Gather_4"
         gather_4_inputs = [f"{shape_1_name}/output_0", "/model/constants/TensorProto.INT64/0D/3"]
         self.make_gather(gather_4_name, gather_4_inputs, axis=0)
         unsqueeze_4_name = f"{basename}/Unsqueeze_4"
         unsqueeze_4_inputs = [f"{gather_4_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_unsqueeze(unsqueeze_4_name, unsqueeze_4_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_4_name, unsqueeze_4_inputs, dtype=ir.DataType.INT64, shape=[1])
         concat_2_name = f"{basename}/Concat_2"
         concat_2_inputs = [f"{unsqueeze_1_name}/output_0", f"{unsqueeze_2_name}/output_0", f"/model/constants/TensorProto.INT64/1D/{self.num_attn_heads // self.num_kv_heads}", f"{unsqueeze_3_name}/output_0", f"{unsqueeze_4_name}/output_0"]
-        self.make_concat(concat_2_name, concat_2_inputs, dtype=TensorProto.INT64, shape=[5], axis=0)
+        self.make_concat(concat_2_name, concat_2_inputs, dtype=ir.DataType.INT64, shape=[5], axis=0)
 
         mul_1_name = f"{basename}/Mul_1"
         mul_1_inputs = [f"{unsqueeze_2_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.num_attn_heads // self.num_kv_heads}"]
-        self.make_mul(mul_1_name, mul_1_inputs, dtype=TensorProto.INT64, shape=None)
+        self.make_mul(mul_1_name, mul_1_inputs, dtype=ir.DataType.INT64, shape=None)
         concat_3_name = f"{basename}/Concat_3"
         concat_3_inputs = [f"{unsqueeze_1_name}/output_0", f"{mul_1_name}/output_0", f"{unsqueeze_3_name}/output_0", f"{unsqueeze_4_name}/output_0"]
-        self.make_concat(concat_3_name, concat_3_inputs, dtype=TensorProto.INT64, shape=[4], axis=0)
+        self.make_concat(concat_3_name, concat_3_inputs, dtype=ir.DataType.INT64, shape=[4], axis=0)
 
         # Make the subgraph that follows the initial subgraph
         #
@@ -1759,21 +1777,21 @@ class Model:
         #    +----------------------------------------+
         reshape_2_name = f"{basename}/Reshape_2"
         reshape_2_inputs = [f"{concat_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/-1"]
-        self.make_reshape(reshape_2_name, reshape_2_inputs, dtype=TensorProto.INT64, shape=None)
+        self.make_reshape(reshape_2_name, reshape_2_inputs, dtype=ir.DataType.INT64, shape=None)
         shape_2_name = f"{basename}/Shape_2"
         self.make_shape(shape_2_name, f"{reshape_2_name}/output_0", shape=[1])
         constant_shape_name = f"{basename}/ConstantOfShape"
-        constant_shape_value = numpy_helper.from_array(np.array([1], dtype="int64"))
-        self.make_constant_of_shape(constant_shape_name, f"{shape_2_name}/output_0", value=constant_shape_value, dtype=TensorProto.INT64, shape=[5])
+        constant_shape_value = ir.tensor([1], dtype=ir.DataType.INT64)
+        self.make_constant_of_shape(constant_shape_name, f"{shape_2_name}/output_0", value=constant_shape_value, dtype=ir.DataType.INT64, shape=[5])
         mul_2_name = f"{basename}/Mul"
         mul_2_inputs = [f"{constant_shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/-1"]
-        self.make_mul(mul_2_name, mul_2_inputs, dtype=TensorProto.INT64, shape=[5])
+        self.make_mul(mul_2_name, mul_2_inputs, dtype=ir.DataType.INT64, shape=[5])
         equal_name = f"{basename}/Equal"
         equal_inputs = [f"{reshape_2_name}/output_0", f"{mul_2_name}/output_0"]
         self.make_equal(equal_name, equal_inputs, shape=[5])
         where_name = f"{basename}/Where"
         where_inputs = [f"{equal_name}/output_0", f"{constant_shape_name}/output_0", f"{reshape_2_name}/output_0"]
-        self.make_where(where_name, where_inputs, dtype=TensorProto.INT64, shape=[5])
+        self.make_where(where_name, where_inputs, dtype=ir.DataType.INT64, shape=[5])
 
         # Make the final nodes
         #
@@ -1974,14 +1992,14 @@ class Model:
         # Make MatMul node (output projection weight node)
         o_proj = 'o_proj' if hasattr(attention, 'o_proj') else 'dense'
         o_matmul_basename = f"/model/layers.{layer_id}/attn/o_proj/MatMul"
-        o_weight = eval(f"attention.{o_proj}")
+        o_weight = getattr(attention, o_proj)
         o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, f"{attn_name}/output_0")
 
         # Make Add node (output projection bias node if bias exists)
-        o_bias_exists = eval(f"attention.{o_proj}.bias") is not None
+        o_bias_exists = getattr(attention, o_proj).bias is not None
         if o_bias_exists:
             o_add_name = f"/model/layers.{layer_id}/attn/o_proj/Add"
-            o_bias = eval(f"attention.{o_proj}.bias.detach().cpu()")
+            o_bias = getattr(attention, o_proj).bias
             self.make_add_bias(o_bias, o_add_name, root_input=f"{o_matmul_name}/output_0")
 
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
@@ -2283,9 +2301,9 @@ class Model:
         gather_name = f"{gate_ops_base}/Gather"
         self.make_gather(gather_name, [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/2"], axis=0)
         unsqueeze_name = f"{gate_ops_base}/Unsqueeze"
-        self.make_unsqueeze(unsqueeze_name, [f"{gather_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"], dtype=TensorProto.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_name, [f"{gather_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"], dtype=ir.DataType.INT64, shape=[1])
         concat_name = f"{gate_ops_base}/Concat"
-        self.make_concat(concat_name, ["/model/constants/TensorProto.INT64/1D/-1", f"{unsqueeze_name}/output_0"], dtype=TensorProto.INT64, shape=[2], axis=0)
+        self.make_concat(concat_name, ["/model/constants/TensorProto.INT64/1D/-1", f"{unsqueeze_name}/output_0"], dtype=ir.DataType.INT64, shape=[2], axis=0)
         gate_reshape_name = f"{gate_ops_base}/Reshape"
         self.make_reshape(gate_reshape_name, [f"{gate_name}/output_0", f"{concat_name}/output_0"], dtype=self.io_dtype, shape=['num_rows', num_experts])
 
@@ -2401,7 +2419,7 @@ class Model:
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
 
         return gelu_name
-    
+
     # This expansion of contrib-op can be updated / deprecated in future.
     def _make_gelu_op(self, layer_id, root_input, activation):
         # Make nodes for this activation subgraph
@@ -2414,7 +2432,7 @@ class Model:
 
         # NvTensorRtRtx (Opset 21) uses standard "Gelu" replacing "Gelu" & "FastGelu" contrib ops, otherwise fallback to contrib ops
         if activation == "Gelu":
-            self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="none") 
+            self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="none")
         elif activation == "FastGelu":
             self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="tanh")
         else:
@@ -2481,7 +2499,7 @@ class Model:
 
         if scale_exists:
             mul_name = "/lm_head/Mul"
-            mul_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['scale']}"]
+            mul_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.lm_head_attrs['scale']}"]
             mul_output = "logits" if not any(exists_checks[2:]) else f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
             self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
@@ -2493,7 +2511,7 @@ class Model:
             self.make_external_tensor(self.lm_head_attrs["mask"].detach().cpu().contiguous(), logits_mask_name)
 
             where_name = "/lm_head/Where"
-            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{torch.finfo(self.to_torch_dtype[self.io_dtype]).min}", f"{lm_name}/output_0"]
+            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{torch.finfo(self.to_torch_dtype[self.io_dtype]).min}", f"{lm_name}/output_0"]
             where_output = "logits" if not any(exists_checks[3:]) else f"{where_name}/output_0"
             self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
             self.make_value_info(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
@@ -2502,14 +2520,14 @@ class Model:
         if softcap_exists:
             # Add final logit softcapping (Div --> Tanh --> Mul)
             div_name = "/lm_head/softcap/Div"
-            div_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['softcap']}"]
+            div_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.lm_head_attrs['softcap']}"]
             self.make_div(div_name, div_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
             tanh_name = "/lm_head/softcap/Tanh"
             self.make_tanh(tanh_name, f"{div_name}/output_0", dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
             mul_name = "/lm_head/softcap/Mul"
-            mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.lm_head_attrs['softcap']}"]
+            mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.lm_head_attrs['softcap']}"]
             mul_output = "logits" if not any(exists_checks[4:]) else f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
             self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
@@ -2595,7 +2613,7 @@ class Model:
                 # SkipLayerNorm after last decoder layer (MatMul --> SkipLayerNorm)
                 print("Reading final norm")
                 self.make_layernorm(self.layer_id, module, skip=True, simple=self.layernorm_attrs["simple"], location="final_norm")
-            
+
             elif (isinstance(module, torch.nn.Linear) and module.out_features == self.vocab_size) or (hasattr(model, "lm_head") and module == model.lm_head):
                 # Checks (Hugging Face logic) or (GGUF logic)
                 if not self.exclude_lm_head:
@@ -2769,10 +2787,10 @@ class Model:
         #              Unsqueeze
         shared_add_name = f"{basename}/Add_1"
         shared_add_inputs = [f"{basename}/Gather_2/output_0", f"{past_key_gather_name}/output_0"]
-        self.make_add(shared_add_name, shared_add_inputs, dtype=TensorProto.INT64, shape=[])
+        self.make_add(shared_add_name, shared_add_inputs, dtype=ir.DataType.INT64, shape=[])
         unsqueeze_3_name = f"{basename}/Unsqueeze_3"  # shared unsqueeze for input_ids and past_key_values.0.key
         unsqueeze_3_inputs = [f"{shared_add_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=ir.DataType.INT64, shape=[1])
 
         # Make the additional subgraph for input_ids
         #
@@ -2783,17 +2801,17 @@ class Model:
         #       Unsqueeze (unsqueeze_5)                   Shape --> Slice --> Squeeze --> Range --> Add -------+
         unsqueeze_inputs = [f"{basename}/Gather_2/output_0", "/model/constants/TensorProto.INT64/1D/0"]
         unsqueeze_4_name = f"{basename}/Unsqueeze_4"
-        self.make_unsqueeze(unsqueeze_4_name, unsqueeze_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_4_name, unsqueeze_inputs, dtype=ir.DataType.INT64, shape=[1])
         unsqueeze_5_name = f"{basename}/Unsqueeze_5"
-        self.make_unsqueeze(unsqueeze_5_name, unsqueeze_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_5_name, unsqueeze_inputs, dtype=ir.DataType.INT64, shape=[1])
         unsqueeze_6_name = f"{basename}/Unsqueeze_6"  # shared unsqueeze for input_ids and attention_mask
-        self.make_unsqueeze(unsqueeze_6_name, unsqueeze_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_6_name, unsqueeze_inputs, dtype=ir.DataType.INT64, shape=[1])
         concat_2_name = f"{basename}/Concat_2"
         concat_inputs = [f"{unsqueeze_4_name}/output_0", f"{unsqueeze_5_name}/output_0"]
-        self.make_concat(concat_2_name, concat_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
+        self.make_concat(concat_2_name, concat_inputs, dtype=ir.DataType.INT64, shape=[2], axis=0)
         constant_shape_name = f"{basename}/ConstantOfShape_2"
         constant_shape_torch_dtype = self.to_torch_dtype[self.io_dtype]
-        constant_shape_value = self.make_tensor_proto_from_tensor(torch.tensor([torch.finfo(constant_shape_torch_dtype).min], dtype=constant_shape_torch_dtype), "make_input_ids_subgraph_shape")
+        constant_shape_value = ir.tensor(torch.tensor([torch.finfo(constant_shape_torch_dtype).min], dtype=constant_shape_torch_dtype), name="make_input_ids_subgraph_shape")
         self.make_constant_of_shape(constant_shape_name, f"{concat_2_name}/output_0", value=constant_shape_value, dtype=self.io_dtype, shape=['unk', 'unk'])
 
         # Top path
@@ -2801,23 +2819,23 @@ class Model:
         self.make_shape(shape_4_name, f"{constant_shape_name}/output_0", shape=[2])
         slice_1_name = f"{basename}/Slice_1"
         slice_1_inputs = [f"{shape_4_name}/output_0", "/model/constants/TensorProto.INT64/1D/-1", f"/model/constants/TensorProto.INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_slice(slice_1_name, slice_1_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_slice(slice_1_name, slice_1_inputs, dtype=ir.DataType.INT64, shape=[1])
         squeeze_1_name = f"{basename}/Squeeze_1"
         squeeze_1_inputs = [f"{slice_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
         self.make_squeeze(squeeze_1_name, squeeze_1_inputs)
         unsqueeze_7_name = f"{basename}/output_0"
         unsqueeze_7_inputs = [f"{squeeze_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_unsqueeze(unsqueeze_7_name, unsqueeze_7_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_7_name, unsqueeze_7_inputs, dtype=ir.DataType.INT64, shape=[1])
         concat_3_name = f"{basename}/Concat_3"
         concat_3_inputs = [f"{unsqueeze_7_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
-        self.make_concat(concat_3_name, concat_3_inputs, dtype=TensorProto.INT64, shape=[2], axis=0)
+        self.make_concat(concat_3_name, concat_3_inputs, dtype=ir.DataType.INT64, shape=[2], axis=0)
 
         # Bottom path
         shape_5_name = f"{basename}/Shape_5"
         self.make_shape(shape_5_name, f"{constant_shape_name}/output_0", shape=[2])
         slice_2_name = f"{basename}/Slice_2"
         slice_2_inputs = [f"{shape_5_name}/output_0", "/model/constants/TensorProto.INT64/1D/-1", f"/model/constants/TensorProto.INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_slice(slice_2_name, slice_2_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_slice(slice_2_name, slice_2_inputs, dtype=ir.DataType.INT64, shape=[1])
         squeeze_2_name = f"{basename}/Squeeze_2"
         squeeze_2_inputs = [f"{slice_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
         self.make_squeeze(squeeze_2_name, squeeze_2_inputs)
@@ -2826,17 +2844,17 @@ class Model:
         self.make_range(range_name, range_inputs)
         add_2_name = f"{basename}/Add_2"
         add_inputs = [f"{range_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
-        self.make_add(add_2_name, add_inputs, dtype=TensorProto.INT64, shape=["unk"])
+        self.make_add(add_2_name, add_inputs, dtype=ir.DataType.INT64, shape=["unk"])
 
         # Merged path
         reshape_name = f"{basename}/Reshape"
         reshape_inputs = [f"{add_2_name}/output_0", f"{concat_3_name}/output_0"]
-        self.make_reshape(reshape_name, reshape_inputs, dtype=TensorProto.INT64, shape=None)
+        self.make_reshape(reshape_name, reshape_inputs, dtype=ir.DataType.INT64, shape=None)
         less_name = f"{basename}/Less"
         less_inputs = [f"{range_name}/output_0", f"{reshape_name}/output_0"]
         self.make_less(less_name, less_inputs)
         where_2_name = f"{basename}/Where_2"
-        where_2_inputs = [f"{less_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/0", f"{constant_shape_name}/output_0"]
+        where_2_inputs = [f"{less_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/0", f"{constant_shape_name}/output_0"]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=None)
         unsqueeze_8_name = f"{basename}/Unsqueeze_8"
         unsqueeze_8_inputs = [f"{where_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
@@ -2856,11 +2874,11 @@ class Model:
         unsqueeze_3_name = f"{basename}/Unsqueeze_3"
         unsqueeze_3_inputs = ["attention_mask", "/model/constants/TensorProto.INT64/1D/1"]
         attention_mask_shape.insert(1, 1) # ['batch_size', 'total_sequence_length'] --> ['batch_size', 1, 'total_sequence_length']
-        self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=TensorProto.INT64, shape=attention_mask_shape)
+        self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=ir.DataType.INT64, shape=attention_mask_shape)
         unsqueeze_4_name = f"{basename}/Unsqueeze_4"
         unsqueeze_4_inputs = [f"{unsqueeze_3_name}/output_0", "/model/constants/TensorProto.INT64/1D/2"]
         attention_mask_shape.insert(1, 1) # ['batch_size', 1, 'total_sequence_length'] --> ['batch_size', 1, 1, 'total_sequence_length']
-        self.make_unsqueeze(unsqueeze_4_name, unsqueeze_4_inputs, dtype=TensorProto.INT64, shape=attention_mask_shape)
+        self.make_unsqueeze(unsqueeze_4_name, unsqueeze_4_inputs, dtype=ir.DataType.INT64, shape=attention_mask_shape)
 
         # Make the main subgraph
         expand_name = self.make_common_mask_reformat_subgraph(basename, root_input="attention_mask", unsqueeze_for_concat=unsqueeze_for_concat, unsqueeze_for_expand=unsqueeze_4_name)
@@ -2872,12 +2890,12 @@ class Model:
         cast_1_name = f"{basename}/Cast_1"
         self.make_cast(cast_1_name, f"{expand_name}/output_0", dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
         sub_name = f"{basename}/Sub"
-        sub_inputs = [f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/1", f"{cast_1_name}/output_0"]
+        sub_inputs = [f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/1", f"{cast_1_name}/output_0"]
         self.make_sub(sub_name, sub_inputs, dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
         cast_2_name = f"{basename}/Cast_2"
-        self.make_cast(cast_2_name, f"{sub_name}/output_0", dtype=TensorProto.BOOL, shape=["unk", "unk", "unk", "unk"])
+        self.make_cast(cast_2_name, f"{sub_name}/output_0", dtype=ir.DataType.BOOL, shape=["unk", "unk", "unk", "unk"])
         where_2_name = f"{basename}/Where_2"
-        where_2_inputs = [f"{cast_2_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{torch.finfo(self.to_torch_dtype[self.io_dtype]).min}", f"{sub_name}/output_0"]
+        where_2_inputs = [f"{cast_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{torch.finfo(self.to_torch_dtype[self.io_dtype]).min}", f"{sub_name}/output_0"]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
 
         return where_2_name
@@ -2931,34 +2949,34 @@ class Model:
         self.make_gather(gather_2_name, gather_2_inputs, axis=0)
         unsqueeze_1_name = f"{basename}/Unsqueeze_1"
         unsqueeze_1_inputs = [f"{gather_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_unsqueeze(unsqueeze_1_name, unsqueeze_1_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_1_name, unsqueeze_1_inputs, dtype=ir.DataType.INT64, shape=[1])
         unsqueeze_2_name = f"{basename}/Unsqueeze_2"
         unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
-        self.make_unsqueeze(unsqueeze_2_name, unsqueeze_2_inputs, dtype=TensorProto.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_2_name, unsqueeze_2_inputs, dtype=ir.DataType.INT64, shape=[1])
 
         concat_name = f"{basename}/Concat" if not input_ids_subgraph else f"{basename}/Concat_1"
         concat_first_two_inputs = [f"{unsqueeze_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
         concat_last_two_inputs = [f"{unsqueeze_for_concat}/output_0", f"{unsqueeze_2_name}/output_0"] if not input_ids_subgraph else [f"{unsqueeze_2_name}/output_0", f"{unsqueeze_for_concat}/output_0"]
         concat_inputs = concat_first_two_inputs + concat_last_two_inputs
-        self.make_concat(concat_name, concat_inputs, dtype=TensorProto.INT64, shape=[4], axis=0)
+        self.make_concat(concat_name, concat_inputs, dtype=ir.DataType.INT64, shape=[4], axis=0)
         shape_3_name = f"{basename}/Shape_3"
         self.make_shape(shape_3_name, f"{concat_name}/output_0", shape=[1])
         constant_shape_name = f"{basename}/ConstantOfShape" if not input_ids_subgraph else f"{basename}/ConstantOfShape_1"
-        constant_shape_value = numpy_helper.from_array(np.array([1], dtype="int64"))
-        self.make_constant_of_shape(constant_shape_name, f"{shape_3_name}/output_0", value=constant_shape_value, dtype=TensorProto.INT64, shape=["unk"])
+        constant_shape_value = ir.tensor([1], dtype=ir.DataType.INT64)
+        self.make_constant_of_shape(constant_shape_name, f"{shape_3_name}/output_0", value=constant_shape_value, dtype=ir.DataType.INT64, shape=["unk"])
         mul_name = f"{basename}/Mul"
         mul_inputs = [f"{constant_shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/-1"]
-        self.make_mul(mul_name, mul_inputs, dtype=TensorProto.INT64, shape=["unk"])
+        self.make_mul(mul_name, mul_inputs, dtype=ir.DataType.INT64, shape=["unk"])
         equal_name = f"{basename}/Equal"
         equal_inputs = [f"{concat_name}/output_0", f"{mul_name}/output_0"]
         self.make_equal(equal_name, equal_inputs, shape=[4])
 
         where_name = f"{basename}/Where_1"
         where_inputs = [f"{equal_name}/output_0", f"{constant_shape_name}/output_0", f"{concat_name}/output_0"]
-        self.make_where(where_name, where_inputs, dtype=TensorProto.INT64, shape=[4])
+        self.make_where(where_name, where_inputs, dtype=ir.DataType.INT64, shape=[4])
         expand_name = f"{basename}/Expand"
         expand_inputs = [f"{unsqueeze_for_expand}/output_0", f"{where_name}/output_0"]
-        expand_dtype = self.io_dtype if input_ids_subgraph else TensorProto.INT64
+        expand_dtype = self.io_dtype if input_ids_subgraph else ir.DataType.INT64
         expand_shape = None if input_ids_subgraph else ["unk", "unk", "unk", "unk"]
         self.make_expand(expand_name, expand_inputs, dtype=expand_dtype, shape=expand_shape)
 
@@ -2984,12 +3002,12 @@ class Model:
         # Left path
         reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
         reduce_sum_inputs = ["attention_mask", "/model/constants/TensorProto.INT64/1D/1"]
-        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=TensorProto.INT64, shape=["batch_size", 1])
+        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
         sub_name = f"{attn_mask_basename}/Sub"
         sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
-        self.make_sub(sub_name, sub_inputs, dtype=TensorProto.INT64, shape=["batch_size", 1])
+        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
         cast_1_name = f"{attn_mask_basename}/Sub/Cast"
-        self.make_cast(cast_1_name, f"{sub_name}/output_0", dtype=TensorProto.INT32, shape=["batch_size", 1])
+        self.make_cast(cast_1_name, f"{sub_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size", 1])
 
         # Right path
         shape_name = f"{attn_mask_basename}/Shape"
@@ -2998,7 +3016,7 @@ class Model:
         gather_inputs = [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
         self.make_gather(gather_name, gather_inputs, axis=0)
         cast_2_name = f"{attn_mask_basename}/Gather/Cast"
-        self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=TensorProto.INT32, shape=None)
+        self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=ir.DataType.INT32, shape=None)
 
         self.mask_attrs["seqlens_k"] = cast_1_name
         self.mask_attrs["total_seq_len"] = cast_2_name
@@ -3024,9 +3042,9 @@ class Model:
         # Left path
         reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
         reduce_sum_inputs = ["attention_mask", "/model/constants/TensorProto.INT64/1D/1"]
-        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=TensorProto.INT64, shape=["batch_size", 1])
+        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
         cast_1_name = f"{attn_mask_basename}/ReduceSum/Cast"
-        self.make_cast(cast_1_name, f"{reduce_sum_name}/output_0", dtype=TensorProto.INT32, shape=["batch_size", 1])
+        self.make_cast(cast_1_name, f"{reduce_sum_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size", 1])
 
         # Right path
         shape_name = f"{attn_mask_basename}/Shape"
@@ -3035,7 +3053,7 @@ class Model:
         gather_inputs = [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
         self.make_gather(gather_name, gather_inputs, axis=0)
         cast_2_name = f"{attn_mask_basename}/Gather/Cast"
-        self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=TensorProto.INT32, shape=None)
+        self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=ir.DataType.INT32, shape=None)
 
         self.mask_attrs["key_total_seq_lens"] = cast_1_name
         self.mask_attrs["total_seq_len"] = cast_2_name
@@ -3059,7 +3077,7 @@ class Model:
 
         basename = "/model/pos_ids_reformat"
         proto_dtype = self.input_types["position_ids"]
-        str_dtype = self.to_str_dtype[proto_dtype]
+        str_dtype = self.to_str_dtype(proto_dtype)
 
         shape_name = f"{basename}/Shape"
         self.make_shape(shape_name, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", shape=[2] if not self.exclude_embeds else [3])
@@ -3080,13 +3098,13 @@ class Model:
 
 
 class LlamaModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
 
 
 class MistralModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.position_ids_name = f"{self.make_position_ids_reformatting()}/output_0" if not self.attention_attrs["use_rope_in_attn"] else "position_ids"
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
@@ -3094,13 +3112,13 @@ class MistralModel(Model):
 
 
 class QwenModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
 
 
 class Qwen3Model(QwenModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
 
     def make_attention_init(self):
         self.attention_attrs["q_norm"] = True
@@ -3109,8 +3127,8 @@ class Qwen3Model(QwenModel):
 
 
 class PhiModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype: int, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
         self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = False, True
 
@@ -3135,15 +3153,15 @@ class PhiModel(Model):
 
 
 class GemmaModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.embed_attrs["scale"] = np.round(np.sqrt(self.hidden_size), decimals=2)
         self.layernorm_attrs["add_offset"] = 1
 
 
 class Gemma2Model(GemmaModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.layernorm_attrs["cast"]["use_fp32"] = True
         self.layernorm_attrs["cast"]["root_input"] = True
         self.layernorm_attrs["cast"]["skip_input"] = False
@@ -3151,6 +3169,7 @@ class Gemma2Model(GemmaModel):
         self.layernorm_attrs["cast"]["output_3"] = False
         self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
         self.is_local = lambda layer_id: layer_id % 2 == 1
+
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         if "final_norm" in location:
@@ -3219,15 +3238,15 @@ class Gemma2Model(GemmaModel):
 
 
 class Phi3MiniModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
 
 
 class Phi3MiniLongRoPEModel(Phi3MiniModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
-   
+
     def make_position_ids_reformatting(self):
         if self.ep != "dml":
             position_ids_input_to_rotemb = super().make_position_ids_reformatting()
@@ -3235,7 +3254,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
 
         basename = "/model/pos_ids_reformat"
         proto_dtype = self.input_types["position_ids"]
-        str_dtype = self.to_str_dtype[proto_dtype]
+        str_dtype = self.to_str_dtype(proto_dtype)
 
         reduce_max_name = f"{basename}/ReduceMax"
         reduce_max_inputs = ["position_ids"]
@@ -3256,8 +3275,8 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
 
 
 class Phi3SmallModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
         self.embed_attrs["scale"] = config.mup_embedding_multiplier
         self.rotemb_attrs["t_dtype"] = torch.float32
@@ -3329,7 +3348,7 @@ class Phi3SmallModel(Model):
         self.mask_attrs["block_row_indices"] = crows_name
 
         cols_name = "block_col_indices"
-        self.make_external_tensor(cols.detach().cpu().to(torch.int32).contiguous(), cols_name)
+        self.make_external_tensor(cols.detach().to(torch.int32).contiguous(), cols_name)
         self.mask_attrs["block_col_indices"] = cols_name
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
@@ -3409,11 +3428,11 @@ class Phi3SmallModel(Model):
         slice_1_inputs = [f"{up_add_name}/output_0", "/model/constants/TensorProto.INT64/1D/0", f"/model/constants/TensorProto.INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/TensorProto.INT64/1D/-1", "/model/constants/TensorProto.INT64/1D/2"]
         self.make_slice(slice_1_name, slice_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
         cast_1_name = f"/model/layers.{layer_id}/mlp/gelu/Cast"
-        self.make_cast(cast_1_name, f"{slice_1_name}/output_0", dtype=TensorProto.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_cast(cast_1_name, f"{slice_1_name}/output_0", dtype=ir.DataType.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
         isinf_1_name = f"/model/layers.{layer_id}/mlp/gelu/IsInf"
         self.make_isinf(isinf_1_name, f"{cast_1_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size])
         clip_1_name = f"/model/layers.{layer_id}/mlp/gelu/Clip"
-        clip_1_inputs = [f"{slice_1_name}/output_0", "", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.clamp_limit}"]
+        clip_1_inputs = [f"{slice_1_name}/output_0", "", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.clamp_limit}"]
         self.make_clip(clip_1_name, clip_1_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
         where_1_name = f"/model/layers.{layer_id}/mlp/gelu/Where"
         where_1_inputs = [f"{isinf_1_name}/output_0", f"{slice_1_name}/output_0", f"{clip_1_name}/output_0"]
@@ -3426,17 +3445,17 @@ class Phi3SmallModel(Model):
         slice_2_inputs = [f"{up_add_name}/output_0", "/model/constants/TensorProto.INT64/1D/1", f"/model/constants/TensorProto.INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/TensorProto.INT64/1D/-1", "/model/constants/TensorProto.INT64/1D/2"]
         self.make_slice(slice_2_name, slice_2_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
         cast_2_name = f"/model/layers.{layer_id}/mlp/linear/Cast"
-        self.make_cast(cast_2_name, f"{slice_2_name}/output_0", dtype=TensorProto.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_cast(cast_2_name, f"{slice_2_name}/output_0", dtype=ir.DataType.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
         isinf_2_name = f"/model/layers.{layer_id}/mlp/linear/IsInf"
         self.make_isinf(isinf_2_name, f"{cast_2_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size])
         clip_2_name = f"/model/layers.{layer_id}/mlp/linear/Clip"
-        clip_2_inputs = [f"{slice_2_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/-{self.clamp_limit}", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.clamp_limit}"]
+        clip_2_inputs = [f"{slice_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/-{self.clamp_limit}", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.clamp_limit}"]
         self.make_clip(clip_2_name, clip_2_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
         where_2_name = f"/model/layers.{layer_id}/mlp/linear/Where"
         where_2_inputs = [f"{isinf_2_name}/output_0", f"{slice_2_name}/output_0", f"{clip_2_name}/output_0"]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
         add_name = f"/model/layers.{layer_id}/mlp/linear/Add"
-        add_inputs = [f"{where_2_name}/output_0", f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/1"]
+        add_inputs = [f"{where_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/1"]
         self.make_add(add_name, add_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         # Make Mul node after activation
@@ -3455,20 +3474,20 @@ class Phi3SmallModel(Model):
 
 
 class Phi3SmallLongRoPEModel(Phi3SmallModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
 
 
 class Phi3VModel(Phi3MiniLongRoPEModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
 
 
 class Phi3MoELongRoPEModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        assert io_dtype == TensorProto.FLOAT16, "This model only supports float16 io type."
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
+        assert io_dtype == ir.DataType.FLOAT16, "This model only supports float16 io type."
 
         self.layernorm_attrs["simple"] = False
 
@@ -3496,8 +3515,8 @@ class Phi3MoELongRoPEModel(MistralModel):
 
 
 class NemotronModel(LlamaModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
         self.layernorm_attrs["add_offset"] = 1
 
@@ -3526,8 +3545,8 @@ class NemotronModel(LlamaModel):
 
 
 class ChatGLMModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.rotemb_attrs["partial_rotary_factor"] = 0.5  # Line 755 of modeling_chatglm.py check self.rotary_pos_emb declaration
         self.rotemb_attrs["num_heads"] = self.num_attn_heads
         self.rotemb_attrs["rotary_embedding_dim"] = int(self.head_size * self.rotemb_attrs["partial_rotary_factor"])
@@ -3545,8 +3564,8 @@ class ChatGLMModel(Model):
 
 
 class OLMoModel(Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
         layernorm.weight = torch.ones(self.hidden_size)
@@ -3555,8 +3574,8 @@ class OLMoModel(Model):
 
 
 class GraniteModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.embed_attrs["scale"] = config.embedding_multiplier
         self.attention_attrs["scale"] = config.attention_multiplier
         self.lm_head_attrs["scale"] = 1 / config.logits_scaling
@@ -3569,7 +3588,7 @@ class GraniteModel(MistralModel):
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
 
         residual_mul_1_name = f"/model/layers.{layer_id}/residual_mul/Mul_1"
-        residual_mul_1_inputs = [self.layernorm_attrs["skip_input"], f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.residual_scale}"]
+        residual_mul_1_inputs = [self.layernorm_attrs["skip_input"], f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.residual_scale}"]
         self.make_mul(residual_mul_1_name, residual_mul_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{residual_mul_1_name}/output_0"
@@ -3578,7 +3597,7 @@ class GraniteModel(MistralModel):
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
         residual_mul_2_name = f"/model/layers.{layer_id}/residual_mul/Mul_2"
-        residual_mul_2_inputs = [self.layernorm_attrs["skip_input"], f"/model/constants/{self.to_str_dtype[self.io_dtype]}/0D/{self.residual_scale}"]
+        residual_mul_2_inputs = [self.layernorm_attrs["skip_input"], f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.residual_scale}"]
         self.make_mul(residual_mul_2_name, residual_mul_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{residual_mul_2_name}/output_0"
@@ -3590,8 +3609,8 @@ class GraniteModel(MistralModel):
 
 
 class Phi4MMModel(Phi3VModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.matmul_attrs["use_lora"] = True
         self.attention_attrs["use_packed_matmul"] = False
 
@@ -3614,8 +3633,8 @@ class Phi4MMModel(Phi3VModel):
 
 
 class Gemma3Model(Gemma2Model):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+    def __init__(self, config, io_dtype, precision, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, precision, ep, cache_dir, extra_options)
         self.is_local = lambda layer_id: bool((layer_id + 1) % config.sliding_window_pattern)
         self.rope_local_theta = config.rope_local_base_freq
         self.make_rotary_embedding_multi_cache()
@@ -3655,13 +3674,13 @@ def check_extra_options(kv_pairs):
                 kv_pairs[key] = True
             else:
                 raise ValueError(f"{key} must be false/False/0 or true/True/1.")
-    
+
     if "int4_op_types_to_quantize" in kv_pairs:
         op_types_to_quantize = ()
         for op_type in kv_pairs["int4_op_types_to_quantize"].split("/"):
             op_types_to_quantize += (op_type, )
         kv_pairs["int4_op_types_to_quantize"] = op_types_to_quantize
-    
+
     if "int4_nodes_to_exclude" in kv_pairs:
         nodes_to_exclude = []
         for node in kv_pairs["int4_nodes_to_exclude"].split(","):
@@ -3710,17 +3729,17 @@ def parse_hf_token(hf_token):
     return hf_token
 
 
-def set_io_dtype(precision, execution_provider, extra_options):
+def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") or extra_options.get("use_webgpu_fp32", False):
         # FP32 precision
-        return TensorProto.FLOAT
+        return ir.DataType.FLOAT
 
     if precision == "bf16":
         # BF16 precision
-        return TensorProto.BFLOAT16
+        return ir.DataType.BFLOAT16
 
     # FP16 precision
-    return TensorProto.FLOAT16
+    return ir.DataType.FLOAT16
 
 
 def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
@@ -3741,7 +3760,6 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     # Set input/output precision of ONNX model
     io_dtype = set_io_dtype(precision, execution_provider, extra_options)
-
     if "config_only" not in extra_options:
         # List architecture options in alphabetical order
         if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
@@ -3901,7 +3919,7 @@ def get_args():
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
                     Use this option when you want to quantize specific ops.
                     Separate the op types with a '/' when passing them here (e.g. int4_op_types_to_quantize=MatMul/Gather)
-                int4_nodes_to_exclude = Specify nodes to exclude from int4 quantization. 
+                int4_nodes_to_exclude = Specify nodes to exclude from int4 quantization.
                     Use this option when you want to exclude certain nodes from being quantized.
                     Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
                 int4_algo_config = Method for int4 quantization. Default is 'default'.
