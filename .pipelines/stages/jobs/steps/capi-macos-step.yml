@@ -60,6 +60,8 @@ steps:
     export CXXFLAGS="$CFLAGS"
     export MACOSX_DEPLOYMENT_TARGET=12.0
     export CARGO_BUILD_TARGET=aarch64-apple-darwin
+    echo "##vso[task.setvariable variable=CARGO_BUILD_TARGET]aarch64-apple-darwin"
+    echo "##vso[task.setvariable variable=RUST_TARGET_TRIPLE]aarch64-apple-darwin"
   displayName: 'Install Rust Toolchain'
   condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
@@ -91,7 +93,8 @@ steps:
     $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
     # Write-Host "##vso[task.setvariable variable=RUSTFLAGS]-C link-arg=-undefined -C link-arg=dynamic_lookup"
     $env:CARGO_BUILD_TARGET="aarch64-apple-darwin"
-    cmake --preset macos_$(arch)_$(ep)_$(build_config)
+    remove-item env:RUSTFLAGS -ErrorAction SilentlyContinue   # drop dynamic_lookup
+    cmake --preset macos_$(arch)_$(ep)_$(build_config) -DRUST_TARGET_TRIPLE=$(RUST_TARGET_TRIPLE)
   displayName: 'Configure CMake C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
