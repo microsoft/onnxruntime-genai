@@ -73,8 +73,15 @@ steps:
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
     # $env:RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
     $env:RUST_TARGET_TRIPLE="$(RUST_TARGET_TRIPLE)"
-    $env:CC="$env:LLVM_PREFIX/bin/clang"
-    $env:CXX="$env:LLVM_PREFIX/bin/clang++"
+    $env:CC="$env:LLVM_PREFIX\bin\clang"
+    $env:CXX="$env:LLVM_PREFIX\bin\clang++"
+    $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = $clang
+    $env:CC_aarch64_apple_darwin = $clang
+    $env:CXX_aarch64_apple_darwin = $clangxx
+
+    # (Optional but keeps things clean)
+    Remove-Item Env:CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER -ErrorAction SilentlyContinue
+    Remove-Item Env:CC_x86_64_apple_darwin -ErrorAction SilentlyContinue
     Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue   # no dynamic_lookup
     cmake --preset macos_$(arch)_$(ep)_$(build_config) -DRUST_TARGET_TRIPLE=$(RUST_TARGET_TRIPLE) -DCMAKE_OSX_ARCHITECTURES=arm64
   displayName: 'Configure CMake C API'
