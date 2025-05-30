@@ -83,14 +83,17 @@ steps:
 
 - powershell: |
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
-    $env:RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
+    # $env:RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
     $env:CC="$LLVM_PREFIX/bin/clang"
     $env:CXX="$LLVM_PREFIX/bin/clang++"
+    $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
+    # Write-Host "##vso[task.setvariable variable=RUSTFLAGS]-C link-arg=-undefined -C link-arg=dynamic_lookup"
     cmake --preset macos_$(arch)_$(ep)_$(build_config)
   displayName: 'Configure CMake C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
+    $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
     cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
@@ -150,6 +153,7 @@ steps:
     displayName: 'Install wheel'
 
   - powershell: |
+      $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
       # From: https://github.com/pypa/cibuildwheel/blob/93542c397cfe940bcbb8f1eff5c37d345ea16653/cibuildwheel/macos.py#L247-L260
       if ("$(arch)" -eq "arm64") {
           $env:_PYTHON_HOST_PLATFORM = "macosx-12.0-arm64"
