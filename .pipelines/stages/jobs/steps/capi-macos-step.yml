@@ -89,14 +89,14 @@ steps:
     $env:CXX="$LLVM_PREFIX/bin/clang++"
     $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
     # Write-Host "##vso[task.setvariable variable=RUSTFLAGS]-C link-arg=-undefined -C link-arg=dynamic_lookup"
-    $env:CARGO_BUILD_TARGET=aarch64-apple-darwin
+    $env:CARGO_BUILD_TARGET="aarch64-apple-darwin"
     cmake --preset macos_$(arch)_$(ep)_$(build_config)
   displayName: 'Configure CMake C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
     $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
-    $env:CARGO_BUILD_TARGET=aarch64-apple-darwin
+    $env:CARGO_BUILD_TARGET="aarch64-apple-darwin"
     cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
