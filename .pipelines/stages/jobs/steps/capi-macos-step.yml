@@ -36,7 +36,12 @@ steps:
     rustup toolchain install 1.86.0
     rustup default 1.86.0
     rustup component add rust-src --toolchain 1.86.0
+    rustup target add aarch64-apple-darwin --toolchain 1.86.0
+    rustup target add x86_64-apple-darwin --toolchain 1.86.0
     rustup show active-toolchain
+    export CFLAGS="-arch arm64"
+    export CXXFLAGS="$CFLAGS"
+    export MACOSX_DEPLOYMENT_TARGET=12.0
   displayName: 'Install Rust Toolchain'
   condition: eq(variables['arch'], 'x64')
   workingDirectory: '$(Build.Repository.LocalPath)'
@@ -45,11 +50,15 @@ steps:
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     echo '##vso[task.prependpath]$HOME/.cargo/bin'
     source "$HOME/.cargo/env"
-    rustup toolchain install stable-aarch64-apple-darwin
-    rustup default stable-aarch64-apple-darwin
-    rustup override set stable-aarch64-apple-darwin
-    rustup component add rust-src --toolchain stable-aarch64-apple-darwin
+    rustup toolchain install 1.86.0
+    rustup default 1.86.0
+    rustup component add rust-src --toolchain 1.86.0
+    rustup target add aarch64-apple-darwin --toolchain 1.86.0
+    rustup target add x86_64-apple-darwin --toolchain 1.86.0
     rustup show active-toolchain
+    export CFLAGS="-arch arm64"
+    export CXXFLAGS="$CFLAGS"
+    export MACOSX_DEPLOYMENT_TARGET=12.0
   displayName: 'Install Rust Toolchain'
   condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
