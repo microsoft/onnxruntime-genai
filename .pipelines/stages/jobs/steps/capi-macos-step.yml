@@ -42,6 +42,8 @@ steps:
     export CFLAGS="-arch arm64"
     export CXXFLAGS="$CFLAGS"
     export MACOSX_DEPLOYMENT_TARGET=12.0
+    export CARGO_BUILD_TARGET=aarch64-apple-darwin
+    cargo build --target=aarch64-apple-darwin
   displayName: 'Install Rust Toolchain'
   condition: eq(variables['arch'], 'x64')
   workingDirectory: '$(Build.Repository.LocalPath)'
