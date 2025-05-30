@@ -70,6 +70,7 @@ steps:
     # Resolve the actual install prefix (/opt/homebrew or /usr/local)
     LLVM_PREFIX="$(brew --prefix llvm@18)"
     echo "Adding LLVM to PATH for subsequent tasks…"
+    echo "##vso[task.setvariable variable=LLVM_PREFIX]$LLVM_PREFIX"
     echo "##vso[task.prependpath]$LLVM_PREFIX/bin"
     export PATH="$LLVM_PREFIX/bin:$PATH"
     # tell build tools to prefer the freshly installed clang
@@ -85,8 +86,8 @@ steps:
 - powershell: |
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
     # $env:RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
-    $env:CC="$LLVM_PREFIX/bin/clang"
-    $env:CXX="$LLVM_PREFIX/bin/clang++"
+    $env:CC="$env:LLVM_PREFIX/bin/clang"
+    $env:CXX="$env:LLVM_PREFIX/bin/clang++"
     $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
     # Write-Host "##vso[task.setvariable variable=RUSTFLAGS]-C link-arg=-undefined -C link-arg=dynamic_lookup"
     $env:CARGO_BUILD_TARGET="aarch64-apple-darwin"
@@ -97,6 +98,8 @@ steps:
 - powershell: |
     $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
     $env:CARGO_BUILD_TARGET="aarch64-apple-darwin"
+    $env:CC="$env:LLVM_PREFIX/bin/clang"
+    $env:CXX="$env:LLVM_PREFIX/bin/clang++"
     cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
