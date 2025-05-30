@@ -45,13 +45,32 @@ steps:
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     echo '##vso[task.prependpath]$HOME/.cargo/bin'
     source "$HOME/.cargo/env"
-    rustup toolchain install 1.86.0-aarch64-apple-darwin
-    rustup default 1.86.0-aarch64-apple-darwin
-    rustup component add rust-src --toolchain 1.86.0-aarch64-apple-darwin
+    rustup target add aarch64-apple-darwin --toolchain 1.86.0
+    rustup toolchain install 1.86.0
+    rustup default 1.86.0
+    rustup component add rust-src --toolchain 1.86.0
     rustup show active-toolchain
   displayName: 'Install Rust Toolchain'
   condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
+
+- bash: |
+    brew update --quiet
+    brew install llvm@18
+    # Resolve the actual install prefix (/opt/homebrew or /usr/local)
+    LLVM_PREFIX="$(brew --prefix llvm@18)"
+    echo "🔗  Adding LLVM to PATH for subsequent tasks…"
+    echo "##vso[task.prependpath]$LLVM_PREFIX/bin"
+    export PATH="$LLVM_PREFIX/bin:$PATH"
+    # tell build tools to prefer the freshly installed clang
+    export CC="$LLVM_PREFIX/bin/clang"
+    export CXX="$LLVM_PREFIX/bin/clang++"
+    clang --version
+    # Install Python wheel package
+    python -m pip install --quiet wheel
+  displayName: 'Install LLVM'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
 
 - powershell: |
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
