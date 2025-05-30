@@ -75,8 +75,8 @@ steps:
 - powershell: |
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
     $env:RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
-    export CC="$LLVM_PREFIX/bin/clang"
-    export CXX="$LLVM_PREFIX/bin/clang++"
+    $env:CC="$LLVM_PREFIX/bin/clang"
+    $env:CXX="$LLVM_PREFIX/bin/clang++"
     cmake --preset macos_$(arch)_$(ep)_$(build_config)
   displayName: 'Configure CMake C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
