@@ -38,6 +38,13 @@ steps:
     rustup component add rust-src --toolchain 1.86.0
     # Apple-silicon (arm64)
     rustup target add aarch64-apple-darwin --toolchain 1.86.0
+    # Make C/C++ match the target
+    export CFLAGS="-arch arm64"
+    export CXXFLAGS="$CFLAGS"
+    export MACOSX_DEPLOYMENT_TARGET=12.0
+    # Build for arm64
+    cargo build --release --target aarch64-apple-darwin
+    # Show the active toolchain
     rustup show active-toolchain
   displayName: 'Install Rust Toolchain'
   workingDirectory: '$(Build.Repository.LocalPath)'
