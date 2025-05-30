@@ -84,7 +84,7 @@ steps:
     $env:RUST_TARGET_TRIPLE = "$(RUST_TARGET_TRIPLE)"
     $env:CC  = "$(LLVM_PREFIX)\bin\clang"
     $env:CXX = "$(LLVM_PREFIX)\bin\clang++"
-    cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }} --clean-first
+    cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }} --clean-first --verbose
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
