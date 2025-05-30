@@ -45,10 +45,10 @@ steps:
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     echo '##vso[task.prependpath]$HOME/.cargo/bin'
     source "$HOME/.cargo/env"
-    rustup target add aarch64-apple-darwin --toolchain 1.86.0
-    rustup toolchain install 1.86.0
-    rustup default 1.86.0
-    rustup component add rust-src --toolchain 1.86.0
+    rustup toolchain install stable-aarch64-apple-darwin
+    rustup default stable-aarch64-apple-darwin
+    rustup override set stable-aarch64-apple-darwin
+    rustup component add rust-src --toolchain stable-aarch64-apple-darwin
     rustup show active-toolchain
   displayName: 'Install Rust Toolchain'
   condition: eq(variables['arch'], 'arm64')
@@ -59,7 +59,7 @@ steps:
     brew install llvm@18
     # Resolve the actual install prefix (/opt/homebrew or /usr/local)
     LLVM_PREFIX="$(brew --prefix llvm@18)"
-    echo "🔗  Adding LLVM to PATH for subsequent tasks…"
+    echo "Adding LLVM to PATH for subsequent tasks…"
     echo "##vso[task.prependpath]$LLVM_PREFIX/bin"
     export PATH="$LLVM_PREFIX/bin:$PATH"
     # tell build tools to prefer the freshly installed clang
@@ -75,6 +75,8 @@ steps:
 - powershell: |
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
     $env:RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
+    export CC="$LLVM_PREFIX/bin/clang"
+    export CXX="$LLVM_PREFIX/bin/clang++"
     cmake --preset macos_$(arch)_$(ep)_$(build_config)
   displayName: 'Configure CMake C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
