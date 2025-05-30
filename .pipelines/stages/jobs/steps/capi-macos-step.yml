@@ -52,35 +52,19 @@ steps:
     source "$HOME/.cargo/env"
     rustup toolchain install 1.86.0
     rustup default 1.86.0
-    rustup component add rust-src --toolchain 1.86.0
-    rustup target add aarch64-apple-darwin --toolchain 1.86.0
-    rustup target add x86_64-apple-darwin --toolchain 1.86.0
-    rustup show active-toolchain
-    export CFLAGS="-arch arm64"
-    export CXXFLAGS="$CFLAGS"
-    export MACOSX_DEPLOYMENT_TARGET=12.0
-    export CARGO_BUILD_TARGET=aarch64-apple-darwin
-    echo "##vso[task.setvariable variable=CARGO_BUILD_TARGET]aarch64-apple-darwin"
+    rustup target add aarch64-apple-darwin
     echo "##vso[task.setvariable variable=RUST_TARGET_TRIPLE]aarch64-apple-darwin"
+    rustup show active-toolchain
   displayName: 'Install Rust Toolchain'
   condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - bash: |
     brew update --quiet
-    brew install llvm@18
-    # Resolve the actual install prefix (/opt/homebrew or /usr/local)
+    brew install --quiet llvm@18
     LLVM_PREFIX="$(brew --prefix llvm@18)"
-    echo "Adding LLVM to PATH for subsequent tasks…"
     echo "##vso[task.setvariable variable=LLVM_PREFIX]$LLVM_PREFIX"
     echo "##vso[task.prependpath]$LLVM_PREFIX/bin"
-    export PATH="$LLVM_PREFIX/bin:$PATH"
-    # tell build tools to prefer the freshly installed clang
-    export CC="$LLVM_PREFIX/bin/clang"
-    export CXX="$LLVM_PREFIX/bin/clang++"
-    clang --version
-    # Install Python wheel package
-    python -m pip install --quiet wheel
   displayName: 'Install LLVM'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -88,22 +72,19 @@ steps:
 - powershell: |
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
     # $env:RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
+    $env:RUST_TARGET_TRIPLE="$(RUST_TARGET_TRIPLE)"
     $env:CC="$env:LLVM_PREFIX/bin/clang"
     $env:CXX="$env:LLVM_PREFIX/bin/clang++"
-    $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
-    # Write-Host "##vso[task.setvariable variable=RUSTFLAGS]-C link-arg=-undefined -C link-arg=dynamic_lookup"
-    $env:CARGO_BUILD_TARGET="aarch64-apple-darwin"
-    remove-item env:RUSTFLAGS -ErrorAction SilentlyContinue   # drop dynamic_lookup
-    cmake --preset macos_$(arch)_$(ep)_$(build_config) -DRUST_TARGET_TRIPLE=$(RUST_TARGET_TRIPLE)
+    Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue   # no dynamic_lookup
+    cmake --preset macos_$(arch)_$(ep)_$(build_config) -DRUST_TARGET_TRIPLE=$(RUST_TARGET_TRIPLE) -DCMAKE_OSX_ARCHITECTURES=arm64
   displayName: 'Configure CMake C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
-    $env:CARGO_BUILD_TARGET="aarch64-apple-darwin"
-    $env:CC="$env:LLVM_PREFIX/bin/clang"
-    $env:CXX="$env:LLVM_PREFIX/bin/clang++"
-    cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
+    $env:RUST_TARGET_TRIPLE = "$(RUST_TARGET_TRIPLE)"
+    $env:CC  = "$(LLVM_PREFIX)\bin\clang"
+    $env:CXX = "$(LLVM_PREFIX)\bin\clang++"
+    cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }} --clean-first
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
