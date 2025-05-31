@@ -55,11 +55,5 @@ fi
 # Run the docker to build dependencies
 docker run --rm $VOLUME_MOUNTS \
     -u $(id -u):$(id -g) -w `pwd` \
-    slm-engine-builder $BUILD_DEPS_CMD
-
-# Next build the slm_engine
-docker run --rm -v \
-    `pwd`/../../../:`pwd`/../../../  \
-    -u $(id -u):$(id -g) -w `pwd` \
-    slm-engine-builder python3 build.py \
-    --android_ndk_path /opt/android-sdk/ndk/27.2.12479018/ \
+    -w $HOME \
+    -it slm-engine-builder bash

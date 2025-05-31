@@ -42,6 +42,9 @@ class InputDecoder {
     std::vector<std::pair<Role, std::string>> Messages;
     // The user prompt is the last message in the sequence
     std::string UserPrompt;
+    // The LoRAAdapterName is sent by the client as "model" in the
+    // OpenAI API. In our implementation, this is the name of the adapter that will be used
+    std::string LoRAAdapterName;
     uint32_t MaxGeneratedTokens;
     std::vector<std::string> StopTokens;
     float Temperature;
