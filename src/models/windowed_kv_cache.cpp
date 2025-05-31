@@ -327,8 +327,8 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current
 void WindowedKeyValueCache::PartialUpdate(DeviceSpan<int32_t> beam_indices, int total_length,
                                           std::span<const size_t> layer_indices) {
   ThreadPool thread_pool{layer_indices.size()};
-  thread_pool.Compute([&](size_t layer_idx) {
-    UpdateLayer(beam_indices, total_length, layer_idx);
+  thread_pool.Compute([&](size_t i) {
+    UpdateLayer(beam_indices, total_length, layer_indices[i]);
   });
 }
 

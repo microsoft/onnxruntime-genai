@@ -131,7 +131,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   if (do_key_value_cache_partial_update_) {
     const auto past_key_name_to_layer_idx = GeneratePastKeyNameToLayerIdxMap(*model_.config_);
 
-    std::map<std::vector<size_t>, PartialKeyValueCacheUpdateRecord*> layer_indices_to_update_record{};
+    std::map<std::vector<size_t>, size_t> layer_indices_to_update_record_idx{};
     std::unordered_set<size_t> layer_indices_encountered{};
 
     for (size_t i = 0; i < config_pipeline.size(); ++i) {
@@ -144,12 +144,12 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
         continue;
       }
 
-      PartialKeyValueCacheUpdateRecord* record_ptr{};
+      size_t record_idx{};
 
-      if (auto layer_indices_to_update_record_it = layer_indices_to_update_record.find(layer_indices);
-          layer_indices_to_update_record_it != layer_indices_to_update_record.end()) {
+      if (auto layer_indices_to_update_record_it = layer_indices_to_update_record_idx.find(layer_indices);
+          layer_indices_to_update_record_it != layer_indices_to_update_record_idx.end()) {
         // we have seen this exact set of layer indices before. reuse the existing record.
-        record_ptr = layer_indices_to_update_record_it->second;
+        record_idx = layer_indices_to_update_record_it->second;
       } else {
         // verify that the new set of layer indices is valid.
         // i.e., it is disjoint with the set of all layer indices we've seen so far.
@@ -166,18 +166,18 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
         }
 
         // add a new record
-        PartialKeyValueCacheUpdateRecord record{};
+        auto record = PartialKeyValueCacheUpdateRecord{};
         record.layer_indices = layer_indices;
 
         partial_kv_cache_update_records_.emplace_back(std::move(record));
-        record_ptr = &partial_kv_cache_update_records_.back();
+        record_idx = partial_kv_cache_update_records_.size() - 1;
 
         // add layer_indices to what we've seen so far
         layer_indices_encountered.insert(layer_indices.begin(), layer_indices.end());
-        layer_indices_to_update_record.emplace(layer_indices, record_ptr);
+        layer_indices_to_update_record_idx.emplace(layer_indices, record_idx);
       }
 
-      pipeline_state_id_to_partial_kv_cache_update_record_.emplace(i, *record_ptr);
+      pipeline_state_id_to_partial_kv_cache_update_record_idx_.emplace(i, record_idx);
     }
 
     if (!partial_kv_cache_update_records_.empty()) {
@@ -203,6 +203,23 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
                        " for pipeline model ", model_.config_->model.decoder.pipeline[pipeline_state->id_].model_id));
       }
       (const_cast<DecoderOnlyPipelineModel*>(&model_))->sessions_[model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx].reset();
+    }
+
+    auto* const partial_kv_cache_update_record = [&]() -> PartialKeyValueCacheUpdateRecord* {
+      auto it = pipeline_state_id_to_partial_kv_cache_update_record_idx_.find(pipeline_state->id_);
+      if (it != pipeline_state_id_to_partial_kv_cache_update_record_idx_.end()) {
+        return &partial_kv_cache_update_records_[it->second];
+      }
+      return nullptr;
+    }();
+
+    // If there is any outstanding partial KV cache update, wait for it to finish.
+    // It is important to synchronize at this point, before setting input/output tensors for this pipeline state run,
+    // because a KV cache update may replace the KV cache input/output tensors.
+    if (partial_kv_cache_update_record) {
+      if (partial_kv_cache_update_record->outstanding_update.valid()) {
+        partial_kv_cache_update_record->outstanding_update.get();
+      }
     }
 
     // Clear the intermediate pipeline state outputs from the previous runs.
@@ -281,24 +298,12 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
       }
     }
 
-    auto* partial_kv_cache_update_record = [&]() -> PartialKeyValueCacheUpdateRecord* {
-      auto it = pipeline_state_id_to_partial_kv_cache_update_record_.find(pipeline_state->id_);
-      return it != pipeline_state_id_to_partial_kv_cache_update_record_.end() ? &it->second.get() : nullptr;
-    }();
-
-    if (partial_kv_cache_update_record) {
-      // wait for any outstanding KV cache update to finish
-      if (partial_kv_cache_update_record->outstanding_update.valid()) {
-        partial_kv_cache_update_record->outstanding_update.get();
-      }
-    }
-
     // Run the intermediate pipeline state
     pipeline_state->Run(total_length, next_tokens, next_indices);
 
+    // If there is any partial KV cache update to start, enqueue it.
     if (partial_kv_cache_update_record) {
       assert(key_value_cache_update_worker_thread_.has_value());
-      // enqueue the next KV cache update
       auto update_fn = [&key_value_cache = *key_value_cache_.get(),
                         layer_indices = partial_kv_cache_update_record->layer_indices,
                         next_indices, total_length]() {

@@ -81,7 +81,7 @@ struct DecoderOnlyPipelineState : State {
     std::future<void> outstanding_update{};  // future for an outstanding update task
   };
 
-  std::map<size_t, std::reference_wrapper<PartialKeyValueCacheUpdateRecord>> pipeline_state_id_to_partial_kv_cache_update_record_;
+  std::map<size_t, size_t> pipeline_state_id_to_partial_kv_cache_update_record_idx_;
   std::vector<PartialKeyValueCacheUpdateRecord> partial_kv_cache_update_records_;
 
   // Stores all the outputs from the previous pipeline state(s)
