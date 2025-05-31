@@ -1,6 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-
+#define _CRT_SECURE_NO_WARNINGS
 #include <algorithm>
 #include <array>
 #include <span>
@@ -64,25 +64,28 @@ static_assert(sizeof(BITMAPINFOHEADER) == 40, "BITMAPINFOHEADER size mismatch");
 #pragma pack(pop)
 
 TEST(StableDiffusionTests, StableDiffusion) {
-  // auto config = OgaConfig::Create(MODEL_PATH "sd");
+  auto config = OgaConfig::Create(MODEL_PATH "sd");
 
-  // auto model = OgaModel::Create(*config);
-  // auto tokenizer = OgaTokenizer::Create(*model);
+  auto model = OgaModel::Create(*config);
 
-  // auto sequences = OgaSequences::Create();
-  // tokenizer->Encode("Capybara with his mom and dad in a beautiful stream", *sequences);
+
+  auto params = OgaImageGeneratorParams::Create(*model);
+  //params->SetPrompts("Capybara with his mom and dad in a beautiful stream");
+  //params->SetPrompts("Two cats are playing on a couch");
+  //params->SetPrompts("Sunset on a Beach");
+  //params->SetPrompts("little cute gremlin wearing a jacket, cinematic, vivid colors, intricate masterpiece, golden ratio, highly detailed");
+  params->SetPrompts("an astronaut riding a rainbow unicorn, cinematic, dramatic");
 
   OgaTensor* images;
-  uint8_t* image_data;
-  //OgaCheckResult(OgaSelenaTest("Capybara with his mom and dad in a beautiful stream", MODEL_PATH "sd", &image_data));
-  OgaCheckResult(OgaSelenaTest("There are two cats playing in couch", MODEL_PATH "sd", &image_data));
+  OgaCheckResult(OgaGenerateImage(model.get(), params.get(), &images));
 
-  size_t rank = 4;
-  //OgaCheckResult(OgaTensorGetShapeRank(images, &rank));
-  std::vector<int64_t> shape{1, 512, 512, 3};
-  //OgaCheckResult(OgaTensorGetShape(images, shape.data(), rank));
 
-  //OgaCheckResult(OgaTensorGetData(images, &image_data));
+  size_t rank;
+  OgaCheckResult(OgaTensorGetShapeRank(images, &rank));
+  std::vector<int64_t> shape(rank);
+  OgaCheckResult(OgaTensorGetShape(images, shape.data(), rank));
+  void* image_data;
+  OgaCheckResult(OgaTensorGetData(images, &image_data));
 
   BITMAPFILEHEADER bfh;
   bfh.bfType = 0x4D42;  // 'BM'
@@ -131,22 +134,22 @@ TEST(StableDiffusionTests, StableDiffusion) {
       image_bitmap_data.data() + sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER),
       reversed_image_data.data(),
       shape[1] * row_size);
-  // HANDLE hFile = CreateFileA("test.bmp", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-  // if (hFile != INVALID_HANDLE_VALUE) {
-  //   DWORD dwWritten;
-  //   WriteFile(hFile, image_bitmap_data.data(), static_cast<DWORD>(image_bitmap_data.size()), &dwWritten, NULL);
-  //   CloseHandle(hFile);
-  // } else {
-  //   std::cerr << "Failed to create file" << std::endl;
-  // }
+  //HANDLE hFile = CreateFileA("test.bmp", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+  //if (hFile != INVALID_HANDLE_VALUE) {
+  //    DWORD dwWritten;
+  //    WriteFile(hFile, image_bitmap_data.data(), static_cast<DWORD>(image_bitmap_data.size()), &dwWritten, NULL);
+  //    CloseHandle(hFile);
+  //  } else {
+  //    std::cerr << "Failed to create file" << std::endl;
+  //  }
 
-  FILE* file = fopen("test.bmp", "wb");
+  FILE* file = fopen("test_new.bmp", "wb");
   if (file) {
-    fwrite(image_bitmap_data.data(), sizeof(uint8_t), image_bitmap_data.size(), file);
-    fclose(file);
+   fwrite(image_bitmap_data.data(), sizeof(uint8_t), image_bitmap_data.size(), file);
+   fclose(file);
   } else {
-    std::cerr << "Failed to create file" << std::endl;
+   std::cerr << "Failed to create file" << std::endl;
   }
 
-  //OgaDestroyTensor(images);
+  OgaDestroyTensor(images);
 }

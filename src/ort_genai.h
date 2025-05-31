@@ -335,6 +335,24 @@ struct OgaTokenizerStream : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyTokenizerStream(reinterpret_cast<OgaTokenizerStream*>(p)); }
 };
 
+
+struct OgaImageGeneratorParams : OgaAbstract {
+  static std::unique_ptr<OgaImageGeneratorParams> Create(const OgaModel& model) {
+    OgaImageGeneratorParams* p;
+    OgaCheckResult(OgaCreateImageGeneratorParams(&model, &p));
+    return std::unique_ptr<OgaImageGeneratorParams>(p);
+  }
+  /**
+   * Set single prompt for image generation
+   */
+  void SetPrompts(const char* prompt, const char* negative_prompt = nullptr) {
+    const char* prompt_ptr = prompt;
+    const char* negative_prompt_ptr = negative_prompt;
+    OgaCheckResult(OgaImageGeneratorParamsSetPrompts(this, &prompt_ptr, &negative_prompt_ptr, 1));
+  }
+  static void operator delete(void* p) { OgaDestroyImageGeneratorParams(reinterpret_cast<OgaImageGeneratorParams*>(p)); }
+};
+
 struct OgaGeneratorParams : OgaAbstract {
   static std::unique_ptr<OgaGeneratorParams> Create(const OgaModel& model) {
     OgaGeneratorParams* p;

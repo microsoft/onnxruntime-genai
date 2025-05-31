@@ -15,6 +15,7 @@ struct Search;
 struct Tensor;
 struct Tokenizer;
 struct TokenizerStream;
+struct ImageGeneratorParams;
 
 template <typename... Types>
 struct LeakTypeList {
@@ -23,7 +24,7 @@ struct LeakTypeList {
   static bool Dump();
 };
 
-using LeakTypes = LeakTypeList<GeneratorParams, Generator, Model, Search, Tensor, Tokenizer, TokenizerStream>;
+using LeakTypes = LeakTypeList<GeneratorParams, Generator, Model, Search, Tensor, Tokenizer, TokenizerStream, ImageGeneratorParams>;
 
 template <typename T>
 struct LeakChecked {

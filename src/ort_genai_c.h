@@ -55,6 +55,7 @@ typedef enum OgaElementType {
 
 typedef struct OgaResult OgaResult;
 typedef struct OgaGeneratorParams OgaGeneratorParams;
+typedef struct OgaImageGeneratorParams OgaImageGeneratorParams;
 typedef struct OgaGenerator OgaGenerator;
 typedef struct OgaRuntimeSettings OgaRuntimeSettings;
 typedef struct OgaConfig OgaConfig;
@@ -332,6 +333,32 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParam
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* generator_params, const char* name, OgaTensor* tensor);
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams*, OgaTensor* tensor);
+
+/**
+ * \brief Creates a OgaImageGeneratorParams from the given model.
+ * \param[in] model The model to use for generation.
+ * \param[out] out The created image generation params.
+ * \return OgaResult containing the error message if the image generation params creation failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateImageGeneratorParams(const OgaModel* model, OgaImageGeneratorParams** out);
+
+/**
+ * \brief Destroys the given image generation params.
+ * \param[in] image_generation_params The image generation params to be destroyed.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyImageGeneratorParams(OgaImageGeneratorParams* image_generation_params);
+
+/**
+ * \brief Sets the search option for the image generation params.
+ * \param[in] image_generation_params The image generation params to set the search option on.
+ * \param[in] prompt The prompts.
+ * \param[in] negative_prompt The negative prompts.
+ * \param[in] prompt_count The number of prompts.
+ * \return OgaResult containing the error message if the setting of the search option failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaImageGeneratorParamsSetPrompts(OgaImageGeneratorParams* image_generation_params, const char** prompt, const char** negative_prompt, size_t prompt_count);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerateImage(const OgaModel* model, const OgaImageGeneratorParams* image_generation_params, OgaTensor** out);
 
 /**
  * \brief Creates a generator from the given model and generator params.

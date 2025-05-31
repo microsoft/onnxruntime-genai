@@ -57,6 +57,15 @@ using TokenSequences = std::vector<std::vector<int32_t>>;
 std::string to_string(DeviceType device_type);
 DeviceInterface* GetDeviceInterface(DeviceType type);
 
+struct ImageGeneratorParams : std::enable_shared_from_this<ImageGeneratorParams>, LeakChecked<ImageGeneratorParams>, ExternalRefCounted<ImageGeneratorParams> {
+  ImageGeneratorParams(const Model& model);
+
+  const Config& config;  // The model outlives the GeneratorParams
+
+  std::vector<std::string> prompts;
+  std::vector<std::string> negative_prompts;
+};
+
 struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChecked<GeneratorParams>, ExternalRefCounted<GeneratorParams> {
   GeneratorParams(const Config& config);  // This constructor is only used for internal generator benchmarks
   GeneratorParams(const Model& model);

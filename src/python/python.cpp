@@ -171,6 +171,15 @@ pybind11::array ToNumpy(OgaTensor& v) {
   return pybind11::array{bufinfo};
 }
 
+struct PyImageGeneratorParams {
+  PyImageGeneratorParams(const OgaModel& model) : params_{OgaImageGeneratorParams::Create(model)} {}
+  operator const OgaImageGeneratorParams&() const { return *params_; }
+  std::unique_ptr<OgaImageGeneratorParams> params_;
+  void SetPrompt(const std::string& prompt) {
+    params_->SetPrompts(prompt.c_str());
+  }
+};
+
 struct PyGeneratorParams {
   PyGeneratorParams(const OgaModel& model) : params_{OgaGeneratorParams::Create(model)} {}
 
@@ -292,6 +301,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         OgaShutdown();
       });
   m.add_object("_cleanup", cleanup);
+
+  pybind11::class_<PyImageGeneratorParams>(m, "ImageGeneratorParams")
+      .def(pybind11::init<const OgaModel&>())
+      .def("set_prompt", &PyImageGeneratorParams::SetPrompt);
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
@@ -475,6 +488,13 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       }))
       .def("unload", &OgaAdapters::UnloadAdapter)
       .def("load", &OgaAdapters::LoadAdapter);
+
+  m.def("generate_image", [](const OgaModel& model, PyImageGeneratorParams& params) {
+    OgaTensor* result = nullptr;
+    const OgaImageGeneratorParams& params_ref = params;
+    OgaCheckResult(OgaGenerateImage(&model, &params_ref, &result));
+    return std::unique_ptr<OgaTensor>(result);
+  });
 
   m.def("set_log_options", &SetLogOptions);
 

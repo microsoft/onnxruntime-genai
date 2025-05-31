@@ -237,6 +237,10 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
   }
 }
 
+ImageGeneratorParams::ImageGeneratorParams(const Model& model)
+    : config{*model.config_.get()} {}
+
+
 GeneratorParams::GeneratorParams(const Config& config)
     : config{config},
       p_device{GetDeviceInterface(DeviceType::CPU)} {
