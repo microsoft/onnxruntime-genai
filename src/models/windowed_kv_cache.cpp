@@ -7,6 +7,7 @@
 #include "../logging.h"
 #include "../make_string.h"
 #include "../narrow.h"
+#include "../tracing.h"
 #include "model.h"
 #include "threadpool.h"
 #include "utils.h"
@@ -137,6 +138,8 @@ void WindowedKeyValueCache::Add() {
 }
 
 void WindowedKeyValueCache::SlideLayer(size_t layer_idx) {
+  DurationTrace trace{"WindowedKeyValueCache::SlideLayer"};
+
   const auto& layer_state = per_layer_states_[layer_idx];
 
   const auto window_size = layer_state.window_size;
@@ -190,6 +193,8 @@ void WindowedKeyValueCache::SlideLayer(size_t layer_idx) {
 }
 
 void WindowedKeyValueCache::TransitionLayerToTokenGeneration(size_t layer_idx) {
+  DurationTrace trace{"WindowedKeyValueCache::TransitionLayerToTokenGeneration"};
+
   // Transition from prompt processing to token generation.
   // Concatenate the last window_size elements to the end of the cache
 
@@ -326,6 +331,8 @@ void WindowedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int current
 
 void WindowedKeyValueCache::PartialUpdate(DeviceSpan<int32_t> beam_indices, int total_length,
                                           std::span<const size_t> layer_indices) {
+  DurationTrace trace{"WindowedKeyValueCache::PartialUpdate"};
+
   ThreadPool thread_pool{layer_indices.size()};
   thread_pool.Compute([&](size_t i) {
     UpdateLayer(beam_indices, total_length, layer_indices[i]);
