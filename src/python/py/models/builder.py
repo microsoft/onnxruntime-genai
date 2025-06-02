@@ -3618,12 +3618,25 @@ class Gemma3Model(Gemma2Model):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.is_local = lambda layer_id: bool((layer_id + 1) % config.sliding_window_pattern)
         self.rope_local_theta = config.rope_local_base_freq
+
+        if self.ep == "NvTensorRtRtx":
+            self.original_theta = self.rotemb_attrs.get("theta")
+
         self.make_rotary_embedding_multi_cache()
 
     def make_attention_init(self):
         self.attention_attrs["q_norm"] = True
         self.attention_attrs["k_norm"] = True
+
+        # For NvTensorRtRtx, force RoPE to be handled inside GroupQueryAttention
+        if self.ep == "NvTensorRtRtx":
+            self.attention_attrs["use_rope_in_attn"] = True
+
         super().make_attention_init()
+
+        # Re-enforce use_rope_in_attn for NvTensorRtRtx after parent init
+        if self.ep == "NvTensorRtRtx":
+            self.attention_attrs["use_rope_in_attn"] = True
 
     def make_rotary_embedding_multi_cache(self):
         self.cos_cache_global_name, self.sin_cache_global_name = "cos_cache_global", "sin_cache_global"
@@ -3640,6 +3653,36 @@ class Gemma3Model(Gemma2Model):
         cos_cache_name = kwargs.get("cos_cache_name", self.cos_cache_global_name if self.window_size == -1 else self.cos_cache_local_name)
         sin_cache_name = kwargs.get("sin_cache_name", self.sin_cache_global_name if self.window_size == -1 else self.sin_cache_local_name)
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)
+
+    def make_rotary_embedding(self, name, **kwargs):
+        # For NvTensorRtRtx, completely skip RotaryEmbedding node creation
+        if self.ep == "NvTensorRtRtx":
+            return
+        return super().make_rotary_embedding(name, **kwargs)
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        # Store original window size
+        original_window_size = self.window_size
+
+        # Set window size based on whether this is a local attention layer
+        self.window_size = original_window_size if self.is_local(layer_id) else -1
+
+        # For NvTensorRtRtx, dynamically set the theta value based on layer type
+        if self.ep == "NvTensorRtRtx":
+            if self.is_local(layer_id):
+                # Local attention layer - use local theta
+                self.rotemb_attrs["theta"] = self.rope_local_theta
+            else:
+                # Global attention layer - use original theta
+                self.rotemb_attrs["theta"] = self.original_theta
+
+        # Call parent make_attention
+        super().make_attention(layer_id, attention, root_input, **kwargs)
+
+        # Restore original values
+        if self.ep == "NvTensorRtRtx":
+            self.rotemb_attrs["theta"] = self.original_theta
+        self.window_size = original_window_size
 
 
 def check_extra_options(kv_pairs):
