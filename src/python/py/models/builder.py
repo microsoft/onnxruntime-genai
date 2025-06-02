@@ -3657,7 +3657,7 @@ class Gemma3Model(Gemma2Model):
     def make_rotary_embedding(self, name, **kwargs):
         # For NvTensorRtRtx, completely skip RotaryEmbedding node creation
         if self.ep == "NvTensorRtRtx":
-            return
+            return None
         return super().make_rotary_embedding(name, **kwargs)
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
