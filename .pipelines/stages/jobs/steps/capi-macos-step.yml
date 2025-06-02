@@ -52,8 +52,9 @@ steps:
     source "$HOME/.cargo/env"
     rustup toolchain install 1.86.0
     rustup default 1.86.0
-    rustup target add aarch64-apple-darwin
+    rustup target add aarch64-apple-darwin --toolchain 1.86.0
     echo "##vso[task.setvariable variable=RUST_TARGET_TRIPLE]aarch64-apple-darwin"
+    rustc --version
     rustup show active-toolchain
   displayName: 'Install Rust Toolchain'
   condition: eq(variables['arch'], 'arm64')
@@ -68,6 +69,12 @@ steps:
   displayName: 'Install LLVM'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
+- bash: |
+    clang --version              # should say clang 18.1.x
+    clang -arch arm64 -c /dev/null -o /tmp/empty.o
+    file /tmp/empty.o            # → Mach-O 64-bit arm64 object
+  displayName: "Verify LLVM arm64 cross-compile"
+  workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
@@ -82,7 +89,7 @@ steps:
     # (Optional but keeps things clean)
     Remove-Item Env:CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER -ErrorAction SilentlyContinue
     Remove-Item Env:CC_x86_64_apple_darwin -ErrorAction SilentlyContinue
-    Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue   # no dynamic_lookup
+    # Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue   # no dynamic_lookup
     cmake --preset macos_$(arch)_$(ep)_$(build_config) -DRUST_TARGET_TRIPLE=$(RUST_TARGET_TRIPLE) -DCMAKE_OSX_ARCHITECTURES=arm64
   displayName: 'Configure CMake C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
