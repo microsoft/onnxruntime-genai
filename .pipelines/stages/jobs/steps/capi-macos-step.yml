@@ -105,6 +105,12 @@ steps:
     # # $env:RUSTFLAGS         = "-C target-cpu=apple-a14" # optional tuning
     # $env:target="aarch64-apple-darwin"
     # $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = "$env:LLVM_PREFIX\bin\clang"
+    $env:CARGO_BUILD_TARGET                      = 'aarch64-apple-darwin'
+    $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = "$env:LLVM_PREFIX\bin\clang"
+    $env:CC_aarch64_apple_darwin                 = "$env:LLVM_PREFIX\bin\clang"
+    $env:CXX_aarch64_apple_darwin                = "$env:LLVM_PREFIX\bin\clang++"
+    $env:CC                                       = "$env:LLVM_PREFIX\bin\clang"
+    $env:CXX                                      = "$env:LLVM_PREFIX\bin\clang++"
     cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }} --clean-first --verbose
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
