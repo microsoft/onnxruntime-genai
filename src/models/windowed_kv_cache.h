@@ -28,7 +28,16 @@ struct WindowedKeyValueCache : KeyValueCache {
 
  private:
   using CacheTensorShape = std::array<int64_t, 4>;
-  struct LayerState;
+
+  struct LayerState {
+    size_t window_index{0};
+    size_t window_size{};
+    size_t num_windows{};
+    bool is_first_update{true};
+
+    CacheTensorShape key_cache_shape_in{}, key_cache_shape_out{};
+    CacheTensorShape value_cache_shape_in{}, value_cache_shape_out{};
+  };
 
   static std::vector<LayerState> MakeInitialPerLayerStates(size_t layer_count,
                                                            size_t initial_window_size,
@@ -44,19 +53,13 @@ struct WindowedKeyValueCache : KeyValueCache {
   DeviceInterface& Device() { return *model_.p_device_kvcache_; }
   Ort::Allocator& Allocator() { return model_.p_device_kvcache_->GetAllocator(); }
 
+  // Note: The KV cache may be partially updated by multiple threads. However, the updates should happen at a per-layer
+  // granularity. Within a single layer's state, there should not be any shared state that needs to be synchronized
+  // between multiple threads.
+
   State& state_;
   const Model& model_{state_.model_};
   const size_t layer_count_;
-
-  struct LayerState {
-    size_t window_index{0};
-    size_t window_size{};
-    size_t num_windows{};
-    bool is_first_update{true};
-
-    CacheTensorShape key_cache_shape_in, key_cache_shape_out;
-    CacheTensorShape value_cache_shape_in, value_cache_shape_out;
-  };
 
   std::vector<LayerState> per_layer_states_;
 
