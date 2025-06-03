@@ -93,7 +93,7 @@ steps:
     Remove-Item Env:CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER -ErrorAction SilentlyContinue
     Remove-Item Env:CC_x86_64_apple_darwin -ErrorAction SilentlyContinue
     # Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue   # no dynamic_lookup
-    cmake --preset macos_$(arch)_$(ep)_$(build_config) -DCMAKE_OSX_ARCHITECTURES=arm64 -DCORROSION_RUST_TARGET=aarch64-apple-darwin
+    cmake --preset macos_$(arch)_$(ep)_$(build_config) -DCMAKE_OSX_ARCHITECTURES=arm64 -DRust_CARGO_TARGET=aarch64-apple-darwin
   displayName: 'Configure CMake C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
