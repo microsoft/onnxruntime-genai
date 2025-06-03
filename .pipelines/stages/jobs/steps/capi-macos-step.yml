@@ -60,6 +60,10 @@ steps:
     if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") {
         $env:CARGO_BUILD_TARGET = "aarch64-apple-darwin"
         $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = $env:CC
+        $env:CC_aarch64_apple_darwin = $env:CC
+        $env:CXX_aarch64_apple_darwin = $env:CXX
+        Remove-Item Env:CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER -ErrorAction SilentlyContinue
+        Remove-Item Env:CC_x86_64_apple_darwin -ErrorAction SilentlyContinue
         cmake --preset macos_$(arch)_$(ep)_$(build_config) -DCMAKE_OSX_ARCHITECTURES=arm64 -DRust_CARGO_TARGET=aarch64-apple-darwin
     } else {
         cmake --preset macos_$(arch)_$(ep)_$(build_config)
