@@ -9,6 +9,17 @@
 
 namespace Generators {
 
+// Fix casing of certain historical names to match current Onnxruntime names
+std::string_view NormalizeProviderName(std::string_view name) {
+  if (name == "qnn") {
+    return "QNN";
+  } else if (name == "webgpu") {
+    return "WebGPU";
+  } else if (name == "dml") {
+    return "DML";
+  }
+  return name;  // Return name unchanged
+}
 ONNXTensorElementDataType TranslateTensorType(std::string_view value) {
   if (value == "float32") {
     return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
@@ -29,6 +40,17 @@ struct NamedStrings_Element : JSON::Element {
 
  private:
   std::vector<Config::NamedString>& v_;
+};
+
+struct Int_Array_Element : JSON::Element {
+  explicit Int_Array_Element(std::vector<int>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.emplace_back(static_cast<int>(JSON::Get<double>(value)));
+  }
+
+ private:
+  std::vector<int>& v_;
 };
 
 struct ProviderOptionsObject_Element : JSON::Element {
@@ -61,13 +83,7 @@ struct ProviderOptionsArray_Element : JSON::Element {
   void OnComplete(bool /*empty*/) override {
     // For backwards compatibility turn our old names like 'qnn' into 'QNN', and 'webgpu' to 'WebGPU'
     for (auto& v : v_) {
-      if (v.name == "qnn") {
-        v.name = "QNN";
-      } else if (v.name == "webgpu") {
-        v.name = "WebGPU";
-      } else if (v.name == "dml") {
-        v.name = "DML";
-      }
+      v.name = NormalizeProviderName(v.name);
     }
   }
 
@@ -147,18 +163,34 @@ struct SessionOptions_Element : JSON::Element {
   NamedStrings_Element config_entries_{v_.config_entries};
 };
 
-struct EncoderDecoderInit_Element : JSON::Element {
-  explicit EncoderDecoderInit_Element(Config::Model::EncoderDecoderInit& v) : v_{v} {}
+struct Encoder_Inputs_Element : JSON::Element {
+  explicit Encoder_Inputs_Element(Config::Model::Encoder::Inputs& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "filename") {
-      v_.filename = JSON::Get<std::string_view>(value);
+    if (name == "input_ids") {
+      v_.input_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_mask") {
+      v_.attention_mask = JSON::Get<std::string_view>(value);
     } else
       throw JSON::unknown_value_error{};
   }
 
  private:
-  Config::Model::EncoderDecoderInit& v_;
+  Config::Model::Encoder::Inputs& v_;
+};
+
+struct Encoder_Outputs_Element : JSON::Element {
+  explicit Encoder_Outputs_Element(Config::Model::Encoder::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "encoder_outputs") {
+      v_.encoder_outputs = JSON::Get<std::string_view>(value);
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Encoder::Outputs& v_;
 };
 
 struct Inputs_Element : JSON::Element {
@@ -189,6 +221,14 @@ struct Inputs_Element : JSON::Element {
       v_.past_sequence_length = JSON::Get<std::string_view>(value);
     } else if (name == "total_sequence_length") {
       v_.total_sequence_length = JSON::Get<std::string_view>(value);
+    } else if (name == "encoder_hidden_states") {
+      v_.encoder_hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "encoder_attention_mask") {
+      v_.encoder_attention_mask = JSON::Get<std::string_view>(value);
+    } else if (name == "rnn_states_prev") {
+      v_.rnn_prev_states = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_values_length") {
+      v_.past_key_values_length = JSON::Get<std::string_view>(value);
     } else
       throw JSON::unknown_value_error{};
   }
@@ -213,6 +253,8 @@ struct Outputs_Element : JSON::Element {
       v_.cross_present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "cross_present_value_names") {
       v_.cross_present_value_names = JSON::Get<std::string_view>(value);
+    } else if (name == "rnn_states") {
+      v_.rnn_states = JSON::Get<std::string_view>(value);
     } else
       throw JSON::unknown_value_error{};
   }
@@ -331,6 +373,40 @@ struct SlidingWindow_Element : JSON::Element {
 
  private:
   std::optional<Config::Model::Decoder::SlidingWindow>& v_;
+};
+
+struct Encoder_Element : JSON::Element {
+  explicit Encoder_Element(Config::Model::Encoder& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_size") {
+      v_.hidden_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_key_value_heads") {
+      v_.num_key_value_heads = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_hidden_layers") {
+      v_.num_hidden_layers = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "head_size") {
+      v_.head_size = static_cast<int>(JSON::Get<double>(value));
+    } else
+      throw JSON::unknown_value_error{};
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "inputs") {
+      return inputs_;
+    }
+    if (name == "outputs") {
+      return outputs_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Encoder& v_;
+  Encoder_Inputs_Element inputs_{v_.inputs};
+  Encoder_Outputs_Element outputs_{v_.outputs};
 };
 
 struct Decoder_Element : JSON::Element {
@@ -509,29 +585,6 @@ struct Speech_Element : JSON::Element {
   SpeechOutputs_Element outputs_{v_.outputs};
 };
 
-struct Eos_Array_Element : JSON::Element {
-  explicit Eos_Array_Element(Config::Model& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    v_.eos_token_ids.push_back(static_cast<int>(JSON::Get<double>(value)));
-  }
-
-  void OnComplete(bool empty) override {
-    if (v_.eos_token_ids.empty())
-      return;  // Empty array, nothign to do
-
-    // Copy the first eos_token_id into the eos_token_id value, it will be our primary eos token
-    v_.eos_token_id = v_.eos_token_ids.front();
-
-    // If the array is just one value, clear the array and just act like a single value was set
-    if (v_.eos_token_ids.size() == 1)
-      v_.eos_token_ids.clear();
-  }
-
- private:
-  Config::Model& v_;
-};
-
 struct EmbeddingInputs_Element : JSON::Element {
   explicit EmbeddingInputs_Element(Config::Model::Embedding::Inputs& v) : v_{v} {}
 
@@ -589,38 +642,6 @@ struct Embedding_Element : JSON::Element {
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
 
-struct PromptTemplates_Element : JSON::Element {
-  explicit PromptTemplates_Element(std::optional<Config::Model::PromptTemplates>& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    // if one of templates is given in json, then any non-specified template will be default "{Content}"
-    if (name == "assistant") {
-      EnsureAvailable();
-      v_->assistant = JSON::Get<std::string_view>(value);
-    } else if (name == "prompt") {
-      EnsureAvailable();
-      v_->prompt = JSON::Get<std::string_view>(value);
-    } else if (name == "system") {
-      EnsureAvailable();
-      v_->system = JSON::Get<std::string_view>(value);
-    } else if (name == "user") {
-      EnsureAvailable();
-      v_->user = JSON::Get<std::string_view>(value);
-    } else {
-      throw JSON::unknown_value_error{};
-    }
-  }
-
- private:
-  std::optional<Config::Model::PromptTemplates>& v_;
-
-  void EnsureAvailable() {
-    if (!v_.has_value()) {
-      v_.emplace();
-    }
-  }
-};
-
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v) : v_{v} {}
 
@@ -634,7 +655,7 @@ struct Model_Element : JSON::Element {
     } else if (name == "pad_token_id") {
       v_.pad_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "eos_token_id") {
-      v_.eos_token_id = static_cast<int>(JSON::Get<double>(value));
+      v_.eos_token_id.assign(1, static_cast<int>(JSON::Get<double>(value)));
     } else if (name == "bos_token_id") {
       v_.bos_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "decoder_start_token_id") {
@@ -647,13 +668,13 @@ struct Model_Element : JSON::Element {
 
   Element& OnArray(std::string_view name) override {
     if (name == "eos_token_id")
-      return eos_token_ids_;
+      return eos_token_id_;
     throw JSON::unknown_value_error{};
   }
 
   Element& OnObject(std::string_view name) override {
-    if (name == "encoder_decoder_init") {
-      return encoder_decoder_init_;
+    if (name == "encoder") {
+      return encoder_;
     }
     if (name == "decoder") {
       return decoder_;
@@ -664,9 +685,6 @@ struct Model_Element : JSON::Element {
     if (name == "embedding") {
       return embedding_;
     }
-    if (name == "prompt_templates") {
-      return prompt_templates_;
-    }
     if (name == "speech") {
       return speech_;
     }
@@ -675,12 +693,11 @@ struct Model_Element : JSON::Element {
 
  private:
   Config::Model& v_;
-  EncoderDecoderInit_Element encoder_decoder_init_{v_.encoder_decoder_init};
+  Encoder_Element encoder_{v_.encoder};
   Decoder_Element decoder_{v_.decoder};
-  Eos_Array_Element eos_token_ids_{v_};
+  Int_Array_Element eos_token_id_{v_.eos_token_id};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
-  PromptTemplates_Element prompt_templates_{v_.prompt_templates};
   Speech_Element speech_{v_.speech};
 };
 
@@ -747,33 +764,65 @@ void SetSearchBool(Config::Search& search, std::string_view name, bool value) {
 }
 
 void ClearProviders(Config& config) {
-  config.model.decoder.session_options.provider_options.clear();
+  config.model.decoder.session_options.providers.clear();
 }
 
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
+  if (auto normalized_provider = NormalizeProviderName(provider_name); !contains(config.model.decoder.session_options.providers, normalized_provider))
+    config.model.decoder.session_options.providers.push_back(std::string(normalized_provider));
+
   std::ostringstream json;
   json << R"({")" << provider_name << R"(":{)";
   if (!option_name.empty()) {
     json << R"(")" << option_name << R"(":")" << option_value << R"(")";
   }
   json << R"(}})";
+
   ProviderOptionsArray_Element element{config.model.decoder.session_options.provider_options};
   JSON::Parse(element, json.str());
 }
 
 bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
-  for (const auto& provider_options : session_options.provider_options) {
-    if (provider_options.name == "cuda") {
-      // Graph Capture is currently broken for CUDA
-      for (const auto& value : provider_options.options) {
-        if (value.first == "enable_cuda_graph" && value.second == "1") {
-          throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
+  for (const auto& provider : session_options.providers) {
+    const auto provider_options = std::find_if(session_options.provider_options.begin(),
+                                               session_options.provider_options.end(),
+                                               [&provider](const Config::ProviderOptions& po) {
+                                                 return po.name == provider;
+                                               });
+    if (provider_options != session_options.provider_options.end()) {
+      if (provider_options->name == "cuda") {
+        // Graph Capture is currently broken for CUDA
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enable_cuda_graph" && value.second == "1") {
+            throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
+          }
+        }
+      } else if (provider_options->name == "DML") {
+        return true;
+      } else if (provider_options->name == "NvTensorRtRtx") {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+bool IsMultiProfileEnabled(const Config::SessionOptions& session_options) {
+  for (const auto& provider : session_options.providers) {
+    const auto provider_options = std::find_if(session_options.provider_options.begin(),
+                                               session_options.provider_options.end(),
+                                               [&provider](const Config::ProviderOptions& po) {
+                                                 return po.name == provider;
+                                               });
+    if (provider_options != session_options.provider_options.end()) {
+      if (provider_options->name == "NvTensorRtRtx") {
+        for (const auto& value : provider_options->options) {
+          if (value.first == "nv_multi_profile_enable" && value.second == "1") {
+            return true;
+          }
         }
       }
-    } else if (provider_options.name == "DML") {
-      return true;
-    } else if (provider_options.name == "NvTensorRtRtx") {
-      return true;
     }
   }
   return false;
@@ -858,6 +907,14 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
 
   if (search.max_length == 0)
     search.max_length = model.context_length;
+
+  // If no eos_token_id was set, set it to the pad token id
+  if (model.eos_token_id.empty())
+    model.eos_token_id.push_back(model.pad_token_id);
+
+  for (const auto& provider_option : model.decoder.session_options.provider_options) {
+    model.decoder.session_options.providers.push_back(provider_option.name);
+  }
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {

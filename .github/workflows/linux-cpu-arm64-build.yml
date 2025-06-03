@@ -3,12 +3,12 @@ on:
   workflow_dispatch:
   push:
     branches:
-    - main
-    - rel-*
+      - main
+      - rel-*
   pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
@@ -18,7 +18,7 @@ env:
 
 jobs:
   linux-cpu-arm64-build:
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU" ]
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
@@ -28,6 +28,16 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+
+      - name: Install Rust with rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          source "$HOME/.cargo/env"
+          rustup install 1.86.0
+          rustup override set 1.86.0
+          rustup component add rust-src
+          rustup show active-toolchain
 
       - name: Get the Latest OnnxRuntime Nightly Version
         shell: pwsh
@@ -62,7 +72,7 @@ jobs:
       - name: Download Docker Image
         run: |
           set -e -x
-          az login --identity --username 63b63039-6328-442f-954b-5a64d124e5b4
+          az login --identity --object-id c90de106-42dc-405a-8bad-2438f4279448
           az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
           python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/inference/aarch64/default/cpu/Dockerfile \
           --context tools/ci_build/github/linux/docker/inference/aarch64/default/cpu \

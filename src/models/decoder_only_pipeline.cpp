@@ -109,7 +109,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
       key_value_cache_{CreateKeyValueCache(*this)},
       do_key_value_cache_partial_token_generation_update_{
           key_value_cache_ && key_value_cache_->IsPartialTokenGenerationUpdateSupported()},
-      position_inputs_{CreatePositionInputs(*this, sequence_lengths)} {
+      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_->Add();
   position_inputs_->Add();
   logits_.Add();

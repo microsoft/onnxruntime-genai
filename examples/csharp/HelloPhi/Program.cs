@@ -116,7 +116,7 @@ if (option == 1 || option == 2)
         {
             break;
         }
-        var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
+        var sequences = tokenizer.Encode(tokenizer.ApplyChatTemplate("", prompt, "", true));
 
         if (option == 1) // Complete Output
         {
@@ -183,7 +183,7 @@ if (option == 3) // Streaming Chat
         {
             break;
         }
-        var sequences = tokenizer.Encode($"<|user|>{prompt}<|end|><|assistant|>");
+        var sequences = tokenizer.Encode(tokenizer.ApplyChatTemplate("", prompt, "", true));
         var watch = System.Diagnostics.Stopwatch.StartNew();
         generator.AppendTokenSequences(sequences);
         while (!generator.IsDone())

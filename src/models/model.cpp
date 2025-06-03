@@ -16,6 +16,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "multi_modal.h"
+#include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "../dml/interface.h"
 
@@ -45,9 +46,16 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
 
   if (first_run_) {
     extra_outputs_.Add(session.GetOutputNames());
+    if (params_->use_multi_profile) {
+      // Run the context phase profile for the first run
+      run_options_->AddConfigEntry("nv_profile_index", "0");
+    }
     first_run_ = false;
   } else {
     extra_outputs_.Update();
+    if (params_->use_multi_profile) {
+      run_options_->AddConfigEntry("nv_profile_index", "1");
+    }
   }
 
   if (g_log.enabled && g_log.model_input_values) {
@@ -215,9 +223,9 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   return string;
 }
 
-std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, bool add_generation_prompt) const {
+std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const {
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> templated_text;
-  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, templated_text.ToBeAssigned(), add_generation_prompt, false /*tokenize*/));
+  CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, tools, templated_text.ToBeAssigned(), add_generation_prompt, false /*tokenize*/));
 
   ort_extensions::OrtxObjectPtr<OrtxTensor> tensor;
   CheckResult(OrtxTensorResultGetAt(templated_text.get(), 0, tensor.ToBeAssigned()));
@@ -273,13 +281,129 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   return token_id;
 }
 
+/**
+ * @brief Creates multi-profile shapes for TensorRT execution provider optimization.
+ *
+ * This function generates separate profiles for each of the context and generation phases to optimize performance
+ * Each profile includes shapes for input tensors (input_ids, attention_mask, position_ids)
+ * and key-value cache tensors with appropriate dimensions based on the model configuration.
+ *
+ */
+void ConfigureMultiProfile(const Config& config, OrtSessionOptions& session_options) {
+  // Get model parameters from decoder config
+  const int num_layers = config.model.decoder.num_hidden_layers;
+  const int num_kv_heads = config.model.decoder.num_key_value_heads;
+  const int head_dim = config.model.decoder.head_size;
+
+  // Get max context length from config
+  const int max_context_len = config.model.context_length;
+  const int opt_context_len = config.model.context_length / 2;
+  const int min_seq_len = 1;
+
+  // Extract KV cache name patterns from decoder config
+  std::string_view past_key_pattern = config.model.decoder.inputs.past_key_names;
+  std::string_view past_value_pattern = config.model.decoder.inputs.past_value_names;
+
+  // Helper function to add input shapes (input_ids, attention_mask, position_ids)
+  const auto add_input_shapes = [](std::ostringstream& shapes, int seq_len, bool append = false) {
+    if (append) shapes << ",";
+    shapes << Config::Defaults::InputIdsName << ":1x" << seq_len << ","
+           << Config::Defaults::AttentionMaskName << ":1x" << seq_len;
+  };
+
+  // Helper function to add generation phase input shapes
+  const auto add_generation_input_shapes = [](std::ostringstream& shapes, int context_len) {
+    shapes << "," << Config::Defaults::AttentionMaskName << ":1x" << context_len << ","
+           << Config::Defaults::InputIdsName << ":1x1";
+  };
+
+  // Helper function to add empty KV cache shapes for all layers
+  const auto add_empty_key_value_cache_shapes = [](std::ostringstream& shapes,
+                                                   std::string_view key_pattern,
+                                                   std::string_view value_pattern,
+                                                   int num_layers,
+                                                   int num_kv_heads,
+                                                   int head_dim) {
+    for (int i = 0; i < num_layers; i++) {
+      // Use the existing function to format the key/value names
+      const std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
+      const std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
+
+      shapes << "," << key_name << ":1x" << num_kv_heads << "x0x" << head_dim;
+      shapes << "," << value_name << ":1x" << num_kv_heads << "x0x" << head_dim;
+    }
+  };
+
+  // Helper function to add KV cache with sequence length
+  const auto add_key_value_cache_shapes = [](std::ostringstream& shapes,
+                                             std::string_view key_pattern,
+                                             std::string_view value_pattern,
+                                             int seq_len,
+                                             int num_layers,
+                                             int num_kv_heads,
+                                             int head_dim) {
+    for (int i = 0; i < num_layers; i++) {
+      // Use the existing function to format the key/value names
+      const std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
+      const std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
+
+      shapes << "," << key_name << ":1x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
+      shapes << "," << value_name << ":1x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
+    }
+  };
+
+  std::ostringstream min_shapes, opt_shapes, max_shapes;
+
+  // MIN SHAPES (context phase and first token generation)
+  add_input_shapes(min_shapes, min_seq_len);
+  add_empty_key_value_cache_shapes(min_shapes, past_key_pattern, past_value_pattern, num_layers, num_kv_heads, head_dim);
+  add_generation_input_shapes(min_shapes, min_seq_len);
+  add_key_value_cache_shapes(min_shapes, past_key_pattern, past_value_pattern, min_seq_len, num_layers, num_kv_heads, head_dim);
+
+  // OPT SHAPES (prefill with medium context and generation after medium context)
+  add_input_shapes(opt_shapes, opt_context_len);
+  add_empty_key_value_cache_shapes(opt_shapes, past_key_pattern, past_value_pattern, num_layers, num_kv_heads, head_dim);
+  add_generation_input_shapes(opt_shapes, opt_context_len);
+  add_key_value_cache_shapes(opt_shapes, past_key_pattern, past_value_pattern, opt_context_len - 1, num_layers, num_kv_heads, head_dim);
+
+  // MAX SHAPES (prefill with maximum context and generation after maximum context)
+  add_input_shapes(max_shapes, max_context_len);
+  add_key_value_cache_shapes(max_shapes, past_key_pattern, past_value_pattern, max_context_len - 1, num_layers, num_kv_heads, head_dim);
+  add_generation_input_shapes(max_shapes, max_context_len);
+  add_key_value_cache_shapes(max_shapes, past_key_pattern, past_value_pattern, max_context_len - 1, num_layers, num_kv_heads, head_dim);
+
+  // Add the constructed profiles to session options
+  session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes", min_shapes.str().c_str());
+  session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_opt_shapes", opt_shapes.str().c_str());
+  session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_max_shapes", max_shapes.str().c_str());
+}
+
 DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
+                                           const std::vector<std::string>& providers,
                                            const std::vector<Config::ProviderOptions>& provider_options_list,
                                            bool is_primary_session_options,
-                                           bool disable_graph_capture) {
+                                           bool disable_graph_capture,
+                                           const Config& config) {
   DeviceInterface* p_device{};
 
-  for (auto& provider_options : provider_options_list) {
+  auto providers_list = providers;
+  if (!is_primary_session_options) {
+    // Providers specified in a non-primary provider options list are added
+    // to the primary providers. They are considered immutable and implicitly
+    // added as providers.
+    std::transform(provider_options_list.begin(), provider_options_list.end(), std::back_inserter(providers_list),
+                   [](const auto& provider_options) { return provider_options.name; });
+  }
+
+  for (auto& provider : providers_list) {
+    auto provider_options_it = std::find_if(provider_options_list.begin(), provider_options_list.end(),
+                                            [&provider](const Config::ProviderOptions& po) { return po.name == provider; });
+
+    if (provider_options_it == provider_options_list.end()) {
+      throw std::runtime_error("Provider options not found for provider: " + provider);
+    }
+    const auto& provider_options = *provider_options_it;
+
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
       std::vector<const char*> keys, values;
@@ -299,7 +423,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       }
 
       session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
-
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 
@@ -361,9 +484,10 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
         session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
       } else if (provider_options.name == "NvTensorRtRtx") {
-        // After setting the NvTensorRtRtx provider in Onnxruntime, GenAI will then treat it as the cuda device.
-        session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_cuda_graph_enable", "1");
-        p_device = GetDeviceInterface(DeviceType::CUDA);
+        if (IsMultiProfileEnabled(config.model.decoder.session_options)) {
+          ConfigureMultiProfile(config, session_options);
+        }
+        p_device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
       }
 
       std::vector<const char*> keys, values;
@@ -392,7 +516,7 @@ static const uint8_t g_trivial_model[] = {
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
 // has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-void EnsureDeviceOrtInit(DeviceInterface& device) {
+void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
   // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
   // OpenVINO delegates to the CPU device allocator
   auto type = device.GetType();
@@ -409,20 +533,26 @@ void EnsureDeviceOrtInit(DeviceInterface& device) {
   // This ensures memory allocated on-device for model inputs/outputs is valid for the lifetime of GenAI.
 
   // Names for the device types used by 'SetProviderSessionOptions'
-  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)"};
+  static const char* device_type_names[] = {"CPU (Not used, see above)", "cuda", "DML", "WebGPU", "QNN", "OpenVINO (Not used, see above)", "NvTensorRtRtx"};
   static_assert(std::size(device_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Create an OrtSessionOptions and set the options to use the DeviceType we're using here
   auto session_options = OrtSessionOptions::Create();
   std::vector<Config::ProviderOptions> provider_options_list;
   provider_options_list.emplace_back(Config::ProviderOptions{device_type_names[static_cast<int>(type)], {}});
-  SetProviderSessionOptions(*session_options, provider_options_list, true, false);
+  // QnnHtpShared is a special case. This allocator is only made available when the provider option
+  // 'enable_htp_shared_memory_allocator' is set to 1.
+  if (type == DeviceType::QNN) {
+    provider_options_list.back().options.emplace_back("enable_htp_shared_memory_allocator", "1");
+  }
+  const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
+  SetProviderSessionOptions(*session_options, providers, provider_options_list, true, false, config);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
 
   // Names for the device memory types used by 'OrtMemoryInfo::Create'
-  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)"};
+  static const char* device_memory_type_names[] = {"CPU (Not used, see above)", "Cuda", "DML", "WebGPU_Buffer", "QnnHtpShared", "OpenVINO (Not used, see above)", "Cuda"};
   static_assert(std::size(device_memory_type_names) == static_cast<size_t>(DeviceType::MAX));
 
   // Get the allocator from the OrtSession for the DeviceType (it's called 'AllocatorCreate' but it's really 'AllocatorGet')
@@ -502,7 +632,7 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
-  EnsureDeviceOrtInit(*p_device_);
+  EnsureDeviceOrtInit(*p_device_, *config_);
 
   // Only CUDA and DML does every input on the device
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML)
@@ -613,11 +743,16 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetGraphOptimizationLevel(config_session_options.graph_optimization_level.value());
   }
 
-  p_device_ = SetProviderSessionOptions(session_options, config_session_options.provider_options, is_primary_session_options, disable_graph_capture);
+  auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
+                                                  config_session_options.provider_options, is_primary_session_options,
+                                                  disable_graph_capture, *config_);
 
-  // Fallback to CPU if no provider specific interface was set
-  if (!p_device_)
-    p_device_ = GetDeviceInterface(DeviceType::CPU);
+  if (!p_device_) {
+    p_device_ = session_device;
+  } else if (session_device != nullptr && session_device->GetType() != p_device_->GetType()) {
+    throw std::runtime_error("Running a model with multiple providers is not supported. Encountered " +
+                             to_string(session_device->GetType()) + " and " + to_string(p_device_->GetType()));
+  }
 }
 
 void Model::CreateSessionOptions() {
@@ -631,6 +766,10 @@ void Model::CreateSessionOptions() {
       CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false, false);
     }
   }
+
+  // Fallback to CPU if no provider specific interface was set
+  if (!p_device_)
+    p_device_ = GetDeviceInterface(DeviceType::CPU);
 }
 
 OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
@@ -663,7 +802,7 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
   std::set<std::string> llm_types = {"chatglm", "decoder", "gemma", "gemma2", "gemma3_text",
                                      "granite", "llama", "mistral", "nemotron", "olmo",
-                                     "phi", "phimoe", "phi3", "phi3small", "qwen2"};
+                                     "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen3"};
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (llm_types.find(config->model.type) != llm_types.end())
@@ -678,6 +817,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
   if (config->model.type == "gemma3")
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
+  if (config->model.type == "marian-ssru")
+    return std::make_shared<MarianModel>(std::move(config), ort_env);
 
   throw std::runtime_error("Unsupported model_type in config.json: " + config->model.type);
 }

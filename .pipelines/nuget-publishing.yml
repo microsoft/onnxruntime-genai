@@ -125,6 +125,13 @@ extends:
       sourceRepositoriesToScan:
         include:
         - repository: manylinux
+      policheck:
+        enabled: true
+        break: true # always break the build on policheck issues. You can disable it by setting to 'false'
+        exclusionsFile: '$(Build.SourcesDirectory)\.pipelines\policheck_exclusions.xml'
+      tsa:
+        enabled: true
+        configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
     stages:
     - template: stages/capi-packaging-stage.yml
       parameters:

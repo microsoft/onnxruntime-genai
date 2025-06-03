@@ -32,8 +32,11 @@ if og.is_rocm_available():
 if og.is_openvino_available():
     devices.append("openvino")
 
+
 def test_config(test_data_path):
-    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+    model_path = os.fspath(
+        Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32"
+    )
     config = og.Config(model_path)
     config.clear_providers()
     config.append_provider("cuda")
@@ -42,16 +45,21 @@ def test_config(test_data_path):
     config.set_provider_option("quantum", "break_universe", "true")
     config.append_provider("slide rule")
 
+
 def test_NamedTensors():
     named_tensors = og.NamedTensors()
-    named_tensors["input_ids"] = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
-    named_tensors["attention_mask"] = np.array([[1, 1, 1, 1], [1, 1, 1, 1]], dtype=np.int32)
+    named_tensors["input_ids"] = np.array(
+        [[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32
+    )
+    named_tensors["attention_mask"] = np.array(
+        [[1, 1, 1, 1], [1, 1, 1, 1]], dtype=np.int32
+    )
     named_tensors["test1"] = og.Tensor(np.random.rand(2, 2).astype(np.float32))
     named_tensors["test2"] = og.Tensor(np.random.rand(2, 2).astype(np.float32))
 
     # List out the tensors:
-    names = named_tensors.keys();
-    print() # To not print on the same line as the test name
+    names = named_tensors.keys()
+    print()  # To not print on the same line as the test name
     for name in names:
         print(name)
         # Assert that the named tensors contains the name
@@ -61,6 +69,7 @@ def test_NamedTensors():
 
     # Test that the named tensors is empty
     assert len(named_tensors) == 0
+
 
 @pytest.mark.parametrize(
     "relative_model_path",
@@ -77,14 +86,16 @@ def test_NamedTensors():
 def test_greedy_search(test_data_path, relative_model_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
 
-    config = og.Config(model_path) # Test using config vs path directly
+    config = og.Config(model_path)  # Test using config vs path directly
     model = og.Model(config)
 
     search_params = og.GeneratorParams(model)
     input_ids_shape = [2, 4]
     batch_size = input_ids_shape[0]
     search_params = og.GeneratorParams(model)
-    search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
+    search_params.set_search_options(
+        do_sample=False, max_length=10, batch_size=batch_size
+    )
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32))
@@ -92,7 +103,7 @@ def test_greedy_search(test_data_path, relative_model_path):
         # Test getting/setting logits
         logits = generator.get_logits()
         generator.set_logits(logits)
-        generator.set_logits(logits) # twice just to be sure buffer is still valid
+        generator.set_logits(logits)  # twice just to be sure buffer is still valid
 
         generator.generate_next_token()
 
@@ -128,7 +139,9 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     input_ids_shape = [1, 4]
     batch_size = input_ids_shape[0]
     search_params = og.GeneratorParams(model)
-    search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
+    search_params.set_search_options(
+        do_sample=False, max_length=10, batch_size=batch_size
+    )
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
@@ -142,26 +155,35 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
-    
+
     assert generator.get_sequence(0) is not None
 
     # Batch size > 1 case
     input_ids_shape = [3, 4]
     batch_size = input_ids_shape[0]
     search_params = og.GeneratorParams(model)
-    search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
+    search_params.set_search_options(
+        do_sample=False, max_length=10, batch_size=batch_size
+    )
 
     generator = og.Generator(model, search_params)
-    generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731], [64, 65, 66, 67]], dtype=np.int32))
+    generator.append_tokens(
+        np.array([[0, 0, 0, 52], [0, 0, 195, 731], [64, 65, 66, 67]], dtype=np.int32)
+    )
     while not generator.is_done():
         generator.generate_next_token()
-    
+
     for i in range(batch_size):
         assert generator.get_sequence(i) is not None
-    
+
     generator.rewind_to(0)
 
-    generator.append_tokens(np.array([[52, 204, 204, 204], [731, 731, 114, 114], [67, 68, 69, 70]], dtype=np.int32))
+    generator.append_tokens(
+        np.array(
+            [[52, 204, 204, 204], [731, 731, 114, 114], [67, 68, 69, 70]],
+            dtype=np.int32,
+        )
+    )
     while not generator.is_done():
         generator.generate_next_token()
 
@@ -171,9 +193,7 @@ def test_rewind_cuda(test_data_path, relative_model_path):
 
 @pytest.mark.parametrize(
     "relative_model_path",
-    (
-        [Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]
-    ),
+    ([Path("hf-internal-testing") / "tiny-random-gpt2-fp32"]),
 )
 def test_rewind(test_data_path, relative_model_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
@@ -184,11 +204,13 @@ def test_rewind(test_data_path, relative_model_path):
         [0, 0, 195, 731, 731, 114, 114, 114, 114, 114],
         dtype=np.int32,
     )
-    
+
     input_ids_shape = [1, 4]
     batch_size = input_ids_shape[0]
     search_params = og.GeneratorParams(model)
-    search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
+    search_params.set_search_options(
+        do_sample=False, max_length=10, batch_size=batch_size
+    )
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
@@ -202,9 +224,12 @@ def test_rewind(test_data_path, relative_model_path):
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
     while not generator.is_done():
         generator.generate_next_token()
-    
+
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
-    
+
+
+# Test Model Loading with No Chat Template
+
 
 # TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
 # requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
@@ -235,6 +260,51 @@ def test_tokenizer_encode_decode(device, phi2_for, batch):
             sequence = tokenizer.encode(prompt)
             decoded_string = tokenizer.decode(sequence)
             assert prompt == decoded_string
+
+
+# Test Chat Template Supported Model
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
+)
+@pytest.mark.parametrize("device", devices)
+def test_phi3_chat_template(device, phi3_for):
+    model_path = phi3_for(device)
+
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+
+    messages = f"""[{{"role": "system", "content": "This is a test."}}, {{"role": "user", "content": "Hi, how are you?"}}]"""
+
+    try:
+        tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+    except Exception as e:
+        assert False, f"Error while trying to apply chat template: {e}"
+
+
+# Test Chat Template Unsupported Model with Template String Override
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
+    reason="Python 3.8 is required for downloading models.",
+)
+@pytest.mark.parametrize("device", devices)
+def test_phi2_chat_template(device, phi2_for):
+    model_path = phi2_for(device)
+
+    model = og.Model(model_path)
+    tokenizer = og.Tokenizer(model)
+
+    messages = f"""[{{"role": "system", "content": "This is a test."}}, {{"role": "user", "content": "Hi, how are you?"}}]"""
+
+    # Note: this should work, even though phi-2 has no official chat template, as we override it and pass one in
+    template = """{% for message in messages %}{% if message['role'] == 'system' %}{{'<|system|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'user' %}{{'<|user|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'assistant' %}{{'<|assistant|>\n' + message['content'] + '<|end|>\n'}}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\n' }}{% else %}{{ eos_token }}{% endif %}"""
+    template_string = f"""{template}"""
+    try:
+        tokenizer.apply_chat_template(
+            template_str=template_string, messages=messages, add_generation_prompt=True
+        )
+    except Exception as e:
+        assert False, f"Error while trying to override chat template: {e}"
 
 
 @pytest.mark.skipif(
@@ -363,10 +433,10 @@ def test_get_output(test_data_path, relative_model_path):
     model = og.Model(model_path)
 
     search_params = og.GeneratorParams(model)
-    input_ids = np.array(
-        [[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32
+    input_ids = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
+    search_params.set_search_options(
+        do_sample=False, max_length=10, batch_size=input_ids.shape[0]
     )
-    search_params.set_search_options(do_sample=False, max_length=10, batch_size=input_ids.shape[0])
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(input_ids)
@@ -407,6 +477,7 @@ def test_get_output(test_data_path, relative_model_path):
         logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3
     )
 
+
 @pytest.mark.skipif(
     sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
     reason="Python 3.8 is required for downloading models.",
@@ -416,10 +487,10 @@ def test_hidden_states(qwen_for, device):
     model = og.Model(qwen_for(device))
 
     search_params = og.GeneratorParams(model)
-    input_ids = np.array(
-        [[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32
+    input_ids = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
+    search_params.set_search_options(
+        do_sample=False, max_length=10, batch_size=input_ids.shape[0]
     )
-    search_params.set_search_options(do_sample=False, max_length=10, batch_size=input_ids.shape[0])
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(input_ids)
@@ -429,6 +500,7 @@ def test_hidden_states(qwen_for, device):
     generator.generate_next_token()
     hidden_states = generator.get_output("hidden_states")
     assert hidden_states.shape == (2, 1, 896)
+
 
 @pytest.mark.skipif(
     not og.is_cuda_available(), reason="Pipeline model uses a mix of CPU and CUDA EP."
@@ -510,7 +582,7 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
         generator.generate_next_token()
 
     expected_output = [
-        'This is a test.\n        # TOD import * doct proofingrad',
+        "This is a test.\n        # TOD import * doct proofingrad",
         'Rats are awesome pets!\n    """\n\n',
         'The quick brown fox jumps over the lazy dog.\n    """\n\n',
     ]
@@ -523,6 +595,7 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
             print(f"expected = {repr(expected_output[i])}", flush=True)
             print(f"actual = {repr(actual_output)}", flush=True)
         assert equal
+
 
 @pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
@@ -625,12 +698,14 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
         model.graph.input.extend([adapter_a, adapter_b])
 
         for adapter_name in ["adapter_a", "adapter_b"]:
-            adapter_weight = np.zeros([vocab_size], dtype=(np.float32 if device == "cpu" else np.float16))
+            adapter_weight = np.zeros(
+                [vocab_size], dtype=(np.float32 if device == "cpu" else np.float16)
+            )
             adapter_weight_tensor = onnx.helper.make_tensor(
                 adapter_name,
                 onnx.TensorProto.FLOAT if device == "cpu" else onnx.TensorProto.FLOAT16,
                 [vocab_size],
-                adapter_weight.flatten()
+                adapter_weight.flatten(),
             )
             model.graph.initializer.append(adapter_weight_tensor)
 
@@ -680,7 +755,9 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
         adapter_paths = []
         if multiple_adapters:
             for i, adapter in enumerate(adapters):
-                adapter_file_name = str(Path(adapter_model_path) / f"adapter_{i}.onnx_adapter")
+                adapter_file_name = str(
+                    Path(adapter_model_path) / f"adapter_{i}.onnx_adapter"
+                )
                 _export_adapter(adapter, adapter_file_name)
                 adapter_paths.append(adapter_file_name)
         else:
@@ -689,7 +766,7 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
             adapter_paths.append(adapter_file_name)
 
         return adapter_model_path, adapter_paths
-    
+
     if device == "dml":
         pytest.skip("EP DML does not support adapters")
 
@@ -712,7 +789,7 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
     generator = og.Generator(model, params)
     for i in range(len(adapter_paths)):
         generator.set_active_adapter(adapters, f"adapter_{i}")
-        
+
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
@@ -723,7 +800,10 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
     sysconfig.get_platform().endswith("arm64"),
     reason="ONNX is not available on ARM64",
 )
-@pytest.mark.parametrize("extra_inputs", [("num_logits_to_keep", True), ("onnx::Neg_67", True), ("abcde", False)])
+@pytest.mark.parametrize(
+    "extra_inputs",
+    [("num_logits_to_keep", True), ("onnx::Neg_67", True), ("abcde", False)],
+)
 def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
     def _prepare_model(test_data_path):
         phi2_model_path = phi2_for(device)
@@ -750,10 +830,16 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
         model.graph.input.append(extra_input)
 
         cast_node = onnx.helper.make_node(
-            "Cast", [extra_input_name], [f"{extra_input_name}_cast"], to=onnx.TensorProto.FLOAT if device == "cpu" else onnx.TensorProto.FLOAT16
+            "Cast",
+            [extra_input_name],
+            [f"{extra_input_name}_cast"],
+            to=onnx.TensorProto.FLOAT if device == "cpu" else onnx.TensorProto.FLOAT16,
         )
         add_node = onnx.helper.make_node(
-            "Add", [f"{extra_input_name}_cast", "logits_0"], ["logits"], name="add_to_logits"
+            "Add",
+            [f"{extra_input_name}_cast", "logits_0"],
+            ["logits"],
+            name="add_to_logits",
         )
         model.graph.node.extend([cast_node, add_node])
 

@@ -41,6 +41,12 @@ struct Model;
 struct State;
 struct Search;
 struct Tokenizer;
+struct ConstrainedLogitsProcessor;
+
+template <typename T, typename V>
+bool contains(const T& t, V&& v) {
+  return std::find(t.begin(), t.end(), v) != t.end();
+}
 
 template <typename T>
 DeviceSpan<T> WrapTensor(DeviceInterface& device, OrtValue& value) {
@@ -66,6 +72,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   int max_batch_size{0};
   bool use_graph_capture{};
+  bool use_multi_profile{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
   DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
@@ -88,6 +95,10 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   std::vector<Input> extra_inputs;
 
   void SetInputs(const NamedTensors& inputs);
+
+  std::string guidance_type;  // e.g. json_schema or regex
+  std::string guidance_data;  // e.g. rules data in json_schema or regex
+  void SetGuidance(std::string_view type, std::string_view data);
 };
 
 struct Generator : LeakChecked<Generator> {
@@ -107,6 +118,7 @@ struct Generator : LeakChecked<Generator> {
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
+  std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
   bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
 
  private:

@@ -3,11 +3,11 @@ on:
   workflow_dispatch:
   push:
     branches:
-    - main
-    - rel-*
+      - main
+      - rel-*
   pull_request:
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
@@ -16,7 +16,7 @@ env:
   DOTNET_INSTALL_DIR: "${{ github.workspace }}/dotnet"
 jobs:
   linux_cpu_x64:
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
@@ -47,6 +47,16 @@ jobs:
           cmake-hash: '42395e20b10a8e9ef3e33014f9a4eed08d46ab952e02d2c1bbc8f6133eca0d7719fb75680f9bbff6552f20fcd1b73d86860f7f39388d631f98fb6f622b37cf04'
           add-cmake-to-path: 'true'
           disable-terrapin: 'true'
+
+      - name: Install Rust with rustup
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          source "$HOME/.cargo/env"
+          rustup install 1.86.0
+          rustup override set 1.86.0
+          rustup component add rust-src
+          rustup show active-toolchain
 
       - name: Get the Latest OnnxRuntime Nightly Version
         shell: pwsh
@@ -83,8 +93,8 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release
-          cmake --build --preset linux_gcc_cpu_release
+          cmake --preset linux_gcc_cpu_release -DUSE_GUIDANCE=ON
+          cmake --build --preset linux_gcc_cpu_release -DUSE_GUIDANCE=ON
 
       - name: Install the python wheel and test dependencies
         run: |
