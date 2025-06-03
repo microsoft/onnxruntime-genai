@@ -34,30 +34,13 @@ steps:
     echo '##vso[task.prependpath]$HOME/.cargo/bin'
     source "$HOME/.cargo/env"
     rustup toolchain install 1.86.0
-    rustup default 1.86.0
-    rustup component add rust-src --toolchain 1.86.0
-    rustup target add aarch64-apple-darwin --toolchain 1.86.0
-    rustup target add x86_64-apple-darwin --toolchain 1.86.0
-    rustup show active-toolchain
-    export CFLAGS="-arch arm64"
-    export CXXFLAGS="$CFLAGS"
-    export MACOSX_DEPLOYMENT_TARGET=12.0
-  displayName: 'Install Rust Toolchain'
-  condition: eq(variables['arch'], 'x64')
-  workingDirectory: '$(Build.Repository.LocalPath)'
-
-- bash: |
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    echo '##vso[task.prependpath]$HOME/.cargo/bin'
-    source "$HOME/.cargo/env"
-    rustup toolchain install 1.86.0
     rustup override set 1.86.0
-    rustup target add aarch64-apple-darwin --toolchain 1.86.0
-    echo "##vso[task.setvariable variable=RUST_TARGET_TRIPLE]aarch64-apple-darwin"
+    if [ "$(arch)" = "arm64" ]; then
+      rustup target add aarch64-apple-darwin --toolchain 1.86.0
+    fi
     rustc --version
     rustup show active-toolchain
   displayName: 'Install Rust Toolchain'
-  condition: eq(variables['arch'], 'arm64')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - bash: |
@@ -69,17 +52,8 @@ steps:
   displayName: 'Install LLVM'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
-- bash: |
-    clang --version              # should say clang 18.1.x
-    clang -arch arm64 -c /dev/null -o /tmp/empty.o
-    file /tmp/empty.o            # → Mach-O 64-bit arm64 object
-  displayName: "Verify LLVM arm64 cross-compile"
-  workingDirectory: '$(Build.Repository.LocalPath)'
-
 - powershell: |
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
-    # $env:RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
-    # $env:RUST_TARGET_TRIPLE="$(RUST_TARGET_TRIPLE)"
     $env:CC="$env:LLVM_PREFIX\bin\clang"
     $env:CXX="$env:LLVM_PREFIX\bin\clang++"
 
@@ -87,8 +61,6 @@ steps:
     $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = $env:CC
     $env:CC_aarch64_apple_darwin = $env:CC
     $env:CXX_aarch64_apple_darwin = $env:CXX
-    # $env:target="aarch64-apple-darwin"
-    
     # (Optional but keeps things clean)
     Remove-Item Env:CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER -ErrorAction SilentlyContinue
     Remove-Item Env:CC_x86_64_apple_darwin -ErrorAction SilentlyContinue
@@ -98,13 +70,6 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    # $env:RUST_TARGET_TRIPLE = "$(RUST_TARGET_TRIPLE)"
-    # $env:CC  = "$(LLVM_PREFIX)\bin\clang"
-    # $env:CXX = "$(LLVM_PREFIX)\bin\clang++"
-    # $env:CARGO_BUILD_TARGET = "aarch64-apple-darwin"   # ← NEW (cargo-wide)
-    # # $env:RUSTFLAGS         = "-C target-cpu=apple-a14" # optional tuning
-    # $env:target="aarch64-apple-darwin"
-    # $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = "$env:LLVM_PREFIX\bin\clang"
     $env:CARGO_BUILD_TARGET                      = 'aarch64-apple-darwin'
     $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = "$env:LLVM_PREFIX\bin\clang"
     $env:CC_aarch64_apple_darwin                 = "$env:LLVM_PREFIX\bin\clang"
