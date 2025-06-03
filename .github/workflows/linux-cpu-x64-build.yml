@@ -93,8 +93,8 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          cmake --preset linux_gcc_cpu_release -DUSE_GUIDANCE=ON
-          cmake --build --preset linux_gcc_cpu_release -DUSE_GUIDANCE=ON
+          cmake --preset linux_gcc_cpu_release
+          cmake --build --preset linux_gcc_cpu_release
 
       - name: Install the python wheel and test dependencies
         run: |

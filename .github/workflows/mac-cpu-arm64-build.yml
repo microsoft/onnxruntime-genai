@@ -66,13 +66,13 @@ jobs:
         run: |
           export MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1,2)
           export RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
-          cmake --preset macos_arm64_cpu_release -DUSE_GUIDANCE=ON
+          cmake --preset macos_arm64_cpu_release
 
       - name: Build with CMake
         run: |
           export MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1,2)
           export RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
-          cmake --build --preset macos_arm64_cpu_release --parallel -DUSE_GUIDANCE=ON
+          cmake --build --preset macos_arm64_cpu_release --parallel
         continue-on-error: false
 
       - name: Install the python wheel and test dependencies
