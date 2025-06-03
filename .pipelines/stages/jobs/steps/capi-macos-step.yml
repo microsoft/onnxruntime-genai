@@ -81,6 +81,7 @@ steps:
     displayName: 'Install wheel'
 
   - powershell: |
+      $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
       cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --target package
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
