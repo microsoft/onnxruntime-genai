@@ -130,6 +130,7 @@ steps:
     displayName: 'Install wheel'
 
   - powershell: |
+      $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
       # From: https://github.com/pypa/cibuildwheel/blob/93542c397cfe940bcbb8f1eff5c37d345ea16653/cibuildwheel/macos.py#L247-L260
       if ("$(arch)" -eq "arm64") {
           $env:_PYTHON_HOST_PLATFORM = "macosx-12.0-arm64"
