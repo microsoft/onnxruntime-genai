@@ -3,7 +3,6 @@
 
 #include "../generators.h"
 #include "../logging.h"
-#include "../tracing.h"
 #include "decoder_only_pipeline.h"
 #include "windowed_kv_cache.h"
 
@@ -196,8 +195,6 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
       continue;
     }
 
-    DurationTrace trace{MakeString("DecoderOnlyPipelineState::RunPipeline[", pipeline_state->id_, "]")};
-
     if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx > -1) {
       if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx >=
           static_cast<int>(model_.sessions_.size())) {
@@ -335,8 +332,6 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
 
 DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                                                 DeviceSpan<int32_t> next_indices) {
-  DurationTrace trace{"DecoderOnlyPipelineState::Run"};
-
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
   size_t num_chunks{1};

@@ -11,7 +11,6 @@
 
 #include "../generators.h"
 #include "../search.h"
-#include "../tracing.h"
 #include "model.h"
 #include "gpt.h"
 #include "decoder_only.h"
@@ -37,8 +36,6 @@ State::State(const GeneratorParams& params, const Model& model)
 }
 
 void State::Run(OrtSession& session, bool graph_capture_this_run) {
-  DurationTrace trace{"State::Run"};
-
   if (params_->use_graph_capture) {
     if (graph_capture_this_run)
       run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
