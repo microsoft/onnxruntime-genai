@@ -112,7 +112,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
       input_ids_{CreateInputIDs(*this)},
       key_value_cache_{CreateKeyValueCache(*this)},
       do_key_value_cache_partial_update_{key_value_cache_ && key_value_cache_->IsPartialUpdateSupported()},
-      position_inputs_{CreatePositionInputs(*this, sequence_lengths)} {
+      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_->Add();
   position_inputs_->Add();
   logits_.Add();

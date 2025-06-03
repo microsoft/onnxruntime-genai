@@ -150,7 +150,10 @@ def main(args):
         else:
             messages = f"""[{{"role": "system", "content": "{system_prompt}"}}, {{"role": "user", "content": "{text}"}}]"""
         # Apply Chat Template
-        prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+        if model.type == "marian-ssru":
+            prompt = text
+        else:
+            prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
         input_tokens = tokenizer.encode(prompt)
         generator.append_tokens(input_tokens)
 

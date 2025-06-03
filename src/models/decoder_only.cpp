@@ -16,7 +16,7 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     : State{params, model},
       model_{model},
       kv_cache_(CreateKeyValueCache(*this)),
-      position_inputs_{model, *this, sequence_lengths_unk} {
+      position_inputs_{model, *this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask} {
   input_ids_.Add();
   position_inputs_.Add();
   logits_.Add();
