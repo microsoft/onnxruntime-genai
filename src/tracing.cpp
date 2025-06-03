@@ -5,23 +5,32 @@
 
 #include <chrono>
 #include <fstream>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <thread>
 
+#include "models/env_utils.h"
+
 namespace Generators {
 
-namespace {
-using TracingClock = std::chrono::steady_clock;
+#if defined(ORTGENAI_ENABLE_TRACING)
 
-class FileTracer : public Tracer {
+namespace {
+
+// Writes trace events to a file in Chrome tracing format.
+// See more details about the format here:
+// https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU
+class FileTraceSink : public TraceSink {
  public:
-  FileTracer(std::string_view file_path)
-      : ostream_{std::ofstream{file_path.data()}}, start_{TracingClock::now()} {
+  FileTraceSink(std::string_view file_path)
+      : ostream_{std::ofstream{file_path.data()}},
+        start_{Clock::now()},
+        insert_event_delimiter_{false} {
     ostream_ << "[";
   }
 
-  ~FileTracer() {
+  ~FileTraceSink() {
     ostream_ << "]\n";
   }
 
@@ -34,43 +43,84 @@ class FileTracer : public Tracer {
   }
 
  private:
+  using Clock = std::chrono::steady_clock;
+
   void LogEvent(std::string_view phase_type, std::optional<std::string_view> label = std::nullopt) {
     const auto thread_id = std::this_thread::get_id();
-    const auto ts = std::chrono::duration_cast<std::chrono::microseconds>(TracingClock::now() - start_);
+    const auto ts = std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start_);
 
-    std::ostringstream os{};
+    std::ostringstream event{};
 
-    if (event_count_ > 0) {
-      os << ",\n";
-    }
-
-    os << "{";
+    event << "{";
 
     if (label.has_value()) {
-      os << "\"name\": \"" << *label << "\", ";
+      event << "\"name\": \"" << *label << "\", ";
     }
 
-    os << "\"cat\": \"perf\", "
-       << "\"ph\": \"" << phase_type << "\", "
-       << "\"pid\": 0, "
-       << "\"tid\": " << thread_id << ", "
-       << "\"ts\": " << ts.count()
-       << "}";
+    event << "\"cat\": \"perf\", "
+          << "\"ph\": \"" << phase_type << "\", "
+          << "\"pid\": 0, "
+          << "\"tid\": " << thread_id << ", "
+          << "\"ts\": " << ts.count()
+          << "}";
 
-    ostream_ << os.str();
+    {
+      std::scoped_lock g{output_mutex_};
 
-    ++event_count_;
+      // add the delimiter only after writing the first event
+      if (insert_event_delimiter_) {
+        ostream_ << ",\n";
+      } else {
+        insert_event_delimiter_ = true;
+      }
+
+      ostream_ << event.str();
+    }
   }
 
   std::ofstream ostream_;
-  TracingClock::time_point start_;
-  size_t event_count_{};
+  const Clock::time_point start_;
+  bool insert_event_delimiter_;
+
+  std::mutex output_mutex_;
 };
+
+std::string GetTraceFileName() {
+  constexpr const char* kTraceFileEnvironmentVariableName = "ORTGENAI_TRACE_FILE_PATH";
+  auto trace_file_name = GetEnv(kTraceFileEnvironmentVariableName);
+  if (trace_file_name.empty()) {
+    trace_file_name = "ortgenai_trace.log";
+  }
+  return trace_file_name;
+}
 
 }  // namespace
 
+#endif  // defined(ORTGENAI_ENABLE_TRACING)
+
+Tracer::Tracer() {
+#if defined(ORTGENAI_ENABLE_TRACING)
+  const auto trace_file_name = GetTraceFileName();
+  sink_ = std::make_unique<FileTraceSink>(trace_file_name);
+#endif
+}
+
+void Tracer::BeginDuration(std::string_view label) {
+#if defined(ORTGENAI_ENABLE_TRACING)
+  sink_->BeginDuration(label);
+#else
+  static_cast<void>(label);
+#endif
+}
+
+void Tracer::EndDuration() {
+#if defined(ORTGENAI_ENABLE_TRACING)
+  sink_->EndDuration();
+#endif
+}
+
 Tracer& DefaultTracerInstance() {
-  static auto tracer = FileTracer{"trace.log"};
+  static auto tracer = Tracer{};
   return tracer;
 }
 
