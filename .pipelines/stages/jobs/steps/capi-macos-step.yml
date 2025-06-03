@@ -79,7 +79,7 @@ steps:
 - powershell: |
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
     # $env:RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
-    $env:RUST_TARGET_TRIPLE="$(RUST_TARGET_TRIPLE)"
+    # $env:RUST_TARGET_TRIPLE="$(RUST_TARGET_TRIPLE)"
     $env:clang="$env:LLVM_PREFIX\bin\clang"
     $env:clangxx="$env:LLVM_PREFIX\bin\clang++"
     $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = $clang
@@ -97,12 +97,13 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    $env:RUST_TARGET_TRIPLE = "$(RUST_TARGET_TRIPLE)"
+    # $env:RUST_TARGET_TRIPLE = "$(RUST_TARGET_TRIPLE)"
     $env:CC  = "$(LLVM_PREFIX)\bin\clang"
     $env:CXX = "$(LLVM_PREFIX)\bin\clang++"
     $env:CARGO_BUILD_TARGET = "aarch64-apple-darwin"   # ← NEW (cargo-wide)
     # $env:RUSTFLAGS         = "-C target-cpu=apple-a14" # optional tuning
     $env:target="aarch64-apple-darwin"
+    $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = "$env:LLVM_PREFIX\bin\clang"
     cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }} --clean-first --verbose
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
