@@ -36,6 +36,7 @@ steps:
     rustup toolchain install 1.86.0
     rustup override set 1.86.0
     if [ "$(arch)" = "arm64" ]; then
+      echo "Adding target for ARM64"
       rustup target add aarch64-apple-darwin --toolchain 1.86.0
     fi
     rustc --version
@@ -80,12 +81,12 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    # $env:CARGO_BUILD_TARGET                      = 'aarch64-apple-darwin'
-    # $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = "$env:LLVM_PREFIX\bin\clang"
-    # $env:CC_aarch64_apple_darwin                 = "$env:LLVM_PREFIX\bin\clang"
-    # $env:CXX_aarch64_apple_darwin                = "$env:LLVM_PREFIX\bin\clang++"
-    # $env:CC                                       = "$env:LLVM_PREFIX\bin\clang"
-    # $env:CXX                                      = "$env:LLVM_PREFIX\bin\clang++"
+    $env:CARGO_BUILD_TARGET                      = 'aarch64-apple-darwin'
+    $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = "$env:LLVM_PREFIX\bin\clang"
+    $env:CC_aarch64_apple_darwin                 = "$env:LLVM_PREFIX\bin\clang"
+    $env:CXX_aarch64_apple_darwin                = "$env:LLVM_PREFIX\bin\clang++"
+    $env:CC                                       = "$env:LLVM_PREFIX\bin\clang"
+    $env:CXX                                      = "$env:LLVM_PREFIX\bin\clang++"
     cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }} --clean-first --verbose
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
