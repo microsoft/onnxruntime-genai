@@ -36,7 +36,6 @@ steps:
     rustup toolchain install 1.86.0
     rustup override set 1.86.0
     if [ "$(arch)" = "arm64" ]; then
-      echo "Adding target for ARM64"
       rustup target add aarch64-apple-darwin --toolchain 1.86.0
     fi
     rustc --version
@@ -57,33 +56,21 @@ steps:
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
     $env:CC="$env:LLVM_PREFIX\bin\clang"
     $env:CXX="$env:LLVM_PREFIX\bin\clang++"
-    $env:CARGO_BUILD_TARGET = "aarch64-apple-darwin"
-    $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = $env:CC
-    $env:CC_aarch64_apple_darwin = $env:CC
-    $env:CXX_aarch64_apple_darwin = $env:CXX
-    Remove-Item Env:CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER -ErrorAction SilentlyContinue
-    Remove-Item Env:CC_x86_64_apple_darwin -ErrorAction SilentlyContinue
-    cmake --preset macos_$(arch)_$(ep)_$(build_config) -DCMAKE_OSX_ARCHITECTURES=arm64 -DRust_CARGO_TARGET=aarch64-apple-darwin
-  displayName: 'Configure CMake C for ARM64'
-  condition: eq(variables['arch'], 'arm64')
+    if ($env:arch -eq "arm64") {
+      $env:CARGO_BUILD_TARGET = "aarch64-apple-darwin"
+      $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = $env:CC
+      $env:CC_aarch64_apple_darwin = $env:CC
+      $env:CXX_aarch64_apple_darwin = $env:CXX
+      Remove-Item Env:CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER -ErrorAction SilentlyContinue
+      Remove-Item Env:CC_x86_64_apple_darwin -ErrorAction SilentlyContinue
+      cmake --preset macos_$(arch)_$(ep)_$(build_config) -DCMAKE_OSX_ARCHITECTURES=arm64 -DRust_CARGO_TARGET=aarch64-apple-darwin
+    } else {
+      cmake --preset macos_$(arch)_$(ep)_$(build_config)
+    }
+  displayName: 'Configure CMake C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
-    $env:CC="$env:LLVM_PREFIX\bin\clang"
-    $env:CXX="$env:LLVM_PREFIX\bin\clang++"
-    cmake --preset macos_$(arch)_$(ep)_$(build_config)
-  displayName: 'Configure CMake C for x64'
-  condition: eq(variables['arch'], 'x64')
-  workingDirectory: '$(Build.Repository.LocalPath)'
-
-- powershell: |
-    # $env:CARGO_BUILD_TARGET                      = 'aarch64-apple-darwin'
-    # $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = "$env:LLVM_PREFIX\bin\clang"
-    # $env:CC_aarch64_apple_darwin                 = "$env:LLVM_PREFIX\bin\clang"
-    # $env:CXX_aarch64_apple_darwin                = "$env:LLVM_PREFIX\bin\clang++"
-    # $env:CC                                       = "$env:LLVM_PREFIX\bin\clang"
-    # $env:CXX                                      = "$env:LLVM_PREFIX\bin\clang++"
     cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }} --clean-first --verbose
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
