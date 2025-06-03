@@ -433,7 +433,7 @@ class Model:
             },
         }
 
-        if self.window_size > 0:
+        if self.window_size is not None and self.window_size > 0:
             genai_config["model"]["decoder"]["sliding_window_size"] = self.window_size
 
         if self.ep != "cpu":
