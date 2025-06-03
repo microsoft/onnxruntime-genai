@@ -80,11 +80,11 @@ jobs:
         run: |
           python -m pip install wheel requests
 
-          cmake --preset windows_arm64_cpu_release -DUSE_GUIDANCE=ON
+          cmake --preset windows_arm64_cpu_release
 
       - name: Build with CMake
         run: |
-          cmake --build --preset windows_arm64_cpu_release --parallel -DUSE_GUIDANCE=ON
+          cmake --build --preset windows_arm64_cpu_release --parallel
 
       - name: Install the Python Wheel and Test Dependencies
         run: |
