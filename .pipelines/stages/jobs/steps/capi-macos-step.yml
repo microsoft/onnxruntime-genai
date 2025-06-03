@@ -56,7 +56,7 @@ steps:
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
     $env:CC="$env:LLVM_PREFIX\bin\clang"
     $env:CXX="$env:LLVM_PREFIX\bin\clang++"
-    if ($env:arch -eq "arm64") {
+    if ("$(arch)" -eq "arm64") {
       $env:CARGO_BUILD_TARGET = "aarch64-apple-darwin"
       $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = $env:CC
       $env:CC_aarch64_apple_darwin = $env:CC
