@@ -13,7 +13,6 @@
 
 namespace Generators::test {
 
-#define NARROW_FAILURE_TEST_SUITE NarrowTest
 #define ASSERT_NARROW_FAILURE(expr) \
   ASSERT_THROW((expr), narrowing_error)
 
@@ -30,21 +29,21 @@ TEST(NarrowTest, Basic) {
   EXPECT_EQ(narrow<std::complex<float>>(std::complex<double>(4, 2)), std::complex<float>(4, 2));
 }
 
-TEST(NARROW_FAILURE_TEST_SUITE, CharOutOfRange) {
+TEST(NarrowTest, CharOutOfRange) {
   constexpr int n = 300;
   ASSERT_NARROW_FAILURE(narrow<char>(n));
 }
 
-TEST(NARROW_FAILURE_TEST_SUITE, MinusOneToUint32OutOfRange) {
+TEST(NarrowTest, MinusOneToUint32OutOfRange) {
   ASSERT_NARROW_FAILURE(narrow<uint32_t>(int32_t(-1)));
 }
 
-TEST(NARROW_FAILURE_TEST_SUITE, Int32MinToUint32OutOfRange) {
+TEST(NarrowTest, Int32MinToUint32OutOfRange) {
   constexpr auto int32_min = std::numeric_limits<int32_t>::min();
   ASSERT_NARROW_FAILURE(narrow<uint32_t>(int32_min));
 }
 
-TEST(NARROW_FAILURE_TEST_SUITE, UnsignedOutOfRange) {
+TEST(NarrowTest, UnsignedOutOfRange) {
   constexpr int n = -42;
   ASSERT_NARROW_FAILURE(narrow<unsigned>(n));
 }
@@ -55,11 +54,11 @@ static_assert(static_cast<double>(static_cast<float>(kDoubleWithLossyRoundTripFl
               kDoubleWithLossyRoundTripFloatConversion);
 }  // namespace
 
-TEST(NARROW_FAILURE_TEST_SUITE, FloatLossyRoundTripConversion) {
+TEST(NarrowTest, FloatLossyRoundTripConversion) {
   ASSERT_NARROW_FAILURE(narrow<float>(kDoubleWithLossyRoundTripFloatConversion));
 }
 
-TEST(NARROW_FAILURE_TEST_SUITE, ComplexFloatLossyRoundTripConversion) {
+TEST(NarrowTest, ComplexFloatLossyRoundTripConversion) {
   ASSERT_NARROW_FAILURE(narrow<std::complex<float>>(std::complex<double>(kDoubleWithLossyRoundTripFloatConversion)));
 }
 

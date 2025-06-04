@@ -33,7 +33,7 @@ constexpr T narrow_cast(U&& u) noexcept {
 
 // narrow() : a checked version of narrow_cast() that throws narrowing_error if the cast changed the value
 template <class T, class U, typename std::enable_if<std::is_arithmetic<T>::value>::type* = nullptr>
-constexpr T narrow(U u) noexcept {
+constexpr T narrow(U u) {
   constexpr const bool is_different_signedness =
       (std::is_signed<T>::value != std::is_signed<U>::value);
 
@@ -49,7 +49,7 @@ constexpr T narrow(U u) noexcept {
 }
 
 template <class T, class U, typename std::enable_if<!std::is_arithmetic<T>::value>::type* = nullptr>
-constexpr T narrow(U u) noexcept {
+constexpr T narrow(U u) {
   const T t = narrow_cast<T>(u);
 
   if (static_cast<U>(t) != u) {
