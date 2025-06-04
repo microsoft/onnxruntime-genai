@@ -306,7 +306,7 @@ class Model:
         int4_algo_config = self.make_int4_algo_config(extra_options.get("int4_algo_config", "default"))
         self.quant_attrs = {
             "int4": {
-                "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep == "cpu" else 0)),
+                "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
                 "block_size": int(extra_options.get("int4_block_size", 32)),
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),

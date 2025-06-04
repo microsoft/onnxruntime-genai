@@ -29,9 +29,44 @@ steps:
     echo "build_config=${{ parameters.build_config }}"
   displayName: 'Print Parameters'
 
+- bash: |
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    echo '##vso[task.prependpath]$HOME/.cargo/bin'
+    source "$HOME/.cargo/env"
+    rustup toolchain install 1.86.0
+    rustup override set 1.86.0
+    if [ "$(arch)" = "arm64" ]; then
+      rustup target add aarch64-apple-darwin --toolchain 1.86.0
+    fi
+    rustc --version
+    rustup show active-toolchain
+  displayName: 'Install Rust Toolchain'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- bash: |
+    brew update --quiet
+    brew install --quiet llvm@18
+    LLVM_PREFIX="$(brew --prefix llvm@18)"
+    echo "##vso[task.setvariable variable=LLVM_PREFIX]$LLVM_PREFIX"
+    echo "##vso[task.prependpath]$LLVM_PREFIX/bin"
+  displayName: 'Install LLVM'
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
 - powershell: |
     $env:MACOSX_DEPLOYMENT_TARGET = "12.0" # Monterey
-    cmake --preset macos_$(arch)_$(ep)_$(build_config)
+    $env:CC="$env:LLVM_PREFIX\bin\clang"
+    $env:CXX="$env:LLVM_PREFIX\bin\clang++"
+    if ("$(arch)" -eq "arm64") {
+      $env:CARGO_BUILD_TARGET = "aarch64-apple-darwin"
+      $env:CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER = $env:CC
+      $env:CC_aarch64_apple_darwin = $env:CC
+      $env:CXX_aarch64_apple_darwin = $env:CXX
+      Remove-Item Env:CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER -ErrorAction SilentlyContinue
+      Remove-Item Env:CC_x86_64_apple_darwin -ErrorAction SilentlyContinue
+      cmake --preset macos_$(arch)_$(ep)_$(build_config) -DCMAKE_OSX_ARCHITECTURES=arm64 -DRust_CARGO_TARGET=aarch64-apple-darwin
+    } else {
+      cmake --preset macos_$(arch)_$(ep)_$(build_config)
+    }
   displayName: 'Configure CMake C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
@@ -46,6 +81,7 @@ steps:
     displayName: 'Install wheel'
 
   - powershell: |
+      $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
       cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --target package
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -95,6 +131,7 @@ steps:
     displayName: 'Install wheel'
 
   - powershell: |
+      $env:RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup"
       # From: https://github.com/pypa/cibuildwheel/blob/93542c397cfe940bcbb8f1eff5c37d345ea16653/cibuildwheel/macos.py#L247-L260
       if ("$(arch)" -eq "arm64") {
           $env:_PYTHON_HOST_PLATFORM = "macosx-12.0-arm64"
