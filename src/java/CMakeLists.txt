@@ -123,7 +123,7 @@ else()
 endif()
 
 # run the build process
-set(GRADLE_ARGS cmakeBuild -DcmakeBuildDir=${JAVA_OUTPUT_DIR} -DnativeLibDir=${JAVA_PACKAGE_LIB_DIR})
+set(GRADLE_ARGS cmakeBuild publishToMavenLocal -DcmakeBuildDir=${JAVA_OUTPUT_DIR} -DnativeLibDir=${JAVA_NATIVE_LIB_DIR})
 add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                    COMMAND ${POST_BUILD_GRADLE_EXECUTABLE} ${GRADLE_OPTIONS} ${GRADLE_ARGS}
                    WORKING_DIRECTORY ${JAVA_SRC_ROOT})
@@ -217,7 +217,7 @@ if (ENABLE_TESTS)
   else()
     add_test(NAME onnxruntime-genai4j_test
              COMMAND ${GRADLE_EXECUTABLE} cmakeCheck
-               -DcmakeBuildDir=${JAVA_OUTPUT_DIR} -DnativeLibDir=${JAVA_PACKAGE_LIB_DIR}
+               -DcmakeBuildDir=${JAVA_OUTPUT_DIR} -DnativeLibDir=${JAVA_NATIVE_LIB_DIR}
              WORKING_DIRECTORY ${JAVA_SRC_ROOT})
   endif()
 
