@@ -123,7 +123,11 @@ else()
 endif()
 
 # run the build process
-set(GRADLE_ARGS cmakeBuild publishToMavenLocal -DcmakeBuildDir=${JAVA_OUTPUT_DIR} -DnativeLibDir=${JAVA_NATIVE_LIB_DIR})
+set(GRADLE_ARGS cmakeBuild)
+if(PUBLISH_JAVA_MAVEN)
+  set(GRADLE_ARGS ${GRADLE_ARGS} publishToMavenLocal)
+endif()
+set(GRADLE_ARGS ${GRADLE_ARGS} -DcmakeBuildDir=${JAVA_OUTPUT_DIR} -DnativeLibDir=${JAVA_NATIVE_LIB_DIR})
 add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                    COMMAND ${POST_BUILD_GRADLE_EXECUTABLE} ${GRADLE_OPTIONS} ${GRADLE_ARGS}
                    WORKING_DIRECTORY ${JAVA_SRC_ROOT})
