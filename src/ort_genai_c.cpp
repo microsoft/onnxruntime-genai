@@ -494,6 +494,13 @@ OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaTokenizerEncodeWithOptions(const OgaTokenizer* tokenizer, const char* str, OgaSequences* sequences, bool add_special_tokens) {
+  OGA_TRY
+  sequences->emplace_back(tokenizer->EncodeWithOptions(str, add_special_tokens));
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer* tokenizer, const char** strings, size_t count, OgaTensor** out) {
   OGA_TRY
   auto tensor = tokenizer->EncodeBatch(std::span<const char*>(strings, count));
