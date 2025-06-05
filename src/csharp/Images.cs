@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
 {
@@ -23,7 +22,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaCreateStringArray(out IntPtr stringArray));
             foreach (string imagePath in imagePaths)
             {
-                Result.VerifySuccess(NativeMethods.OgaStringArrayAddString(stringArray, StringUtils.ToUtf8(imagePath)));
+                Result.VerifySuccess(NativeMethods.OgaStringArrayAddString(
+                    stringArray,
+                    StringUtils.ToNullTerminatedUtf8(imagePath)));
             }
             Result.VerifySuccess(NativeMethods.OgaLoadImages(stringArray, out IntPtr imagesHandle));
             NativeMethods.OgaDestroyStringArray(stringArray);
