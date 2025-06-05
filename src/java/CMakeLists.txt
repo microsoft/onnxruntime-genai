@@ -102,6 +102,10 @@ set(JAVA_NATIVE_LIB_DIR ${JAVA_OUTPUT_DIR}/native-lib)
 set(JAVA_PACKAGE_LIB_DIR ${JAVA_NATIVE_LIB_DIR}/ai/onnxruntime/genai/native/${JAVA_OS_ARCH})
 file(MAKE_DIRECTORY ${JAVA_PACKAGE_LIB_DIR})
 
+# Create directory for ONNX Runtime native libs
+set(ORT_PACKAGE_LIB_DIR ${JAVA_NATIVE_LIB_DIR}/ai/onnxruntime/native/${JAVA_OS_ARCH})
+file(MAKE_DIRECTORY ${ORT_PACKAGE_LIB_DIR})
+
 # Add the native genai library to the native-lib dir
 add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -237,11 +241,21 @@ if (ENABLE_TESTS)
 
   # Copy ORT native libs for Java tests
   foreach(LIB_FILE ${ort_native_libs})
-    add_custom_command(
-            TARGET onnxruntime-genai-jni POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy
-                    ${LIB_FILE}
-                    ${JAVA_PACKAGE_LIB_DIR}/)
+    if(LIB_FILE MATCHES ".*onnxruntime[^/]*$")
+        # Copy onnxruntime library to the ORT-specific directory
+        add_custom_command(
+                TARGET onnxruntime-genai-jni POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy
+                        ${LIB_FILE}
+                        ${ORT_PACKAGE_LIB_DIR}/)
+    else()
+        # Copy other libraries to the GenAI directory
+        add_custom_command(
+                TARGET onnxruntime-genai-jni POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy
+                        ${LIB_FILE}
+                        ${JAVA_PACKAGE_LIB_DIR}/)
+    endif()
   endforeach()
 
   set_property(TEST onnxruntime-genai4j_test APPEND PROPERTY DEPENDS onnxruntime-genai-jni)
