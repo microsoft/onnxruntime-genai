@@ -58,10 +58,10 @@ public class SimpleGenAI implements AutoCloseable {
    *
    * @param generatorParams The prompt and settings to run the model with.
    * @param prompt The prompt text to encode.
-   * @param listener Optional callback for tokens to be provided as they are generated.
-   *     NOTE: Token generation will be blocked until the listener's `accept` method returns.
-   *     `listener` will be called within the token generation loop and these calls will be made
-   *     sequentially, not concurrently.
+   * @param listener Optional callback for tokens to be provided as they are generated. NOTE: Token
+   *     generation will be blocked until the listener's `accept` method returns. `listener` will be
+   *     called within the token generation loop and these calls will be made sequentially, not
+   *     concurrently.
    * @return The generated text.
    * @throws GenAIException on failure
    */
