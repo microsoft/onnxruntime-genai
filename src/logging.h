@@ -24,8 +24,11 @@
  */
 namespace Generators {
 
+using CallbackFn = void (*)(const char* string, size_t length);
+
 void SetLogBool(std::string_view name, bool value);
 void SetLogString(std::string_view name, std::string_view value);
+void SetLogCallback(CallbackFn callback);
 
 struct LogItems {
   // Special log related entries

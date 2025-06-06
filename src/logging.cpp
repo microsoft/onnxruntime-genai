@@ -12,6 +12,35 @@ namespace Generators {
 LogItems g_log;
 static std::ostream* gp_stream{&std::cerr};
 static std::unique_ptr<std::ofstream> gp_logfile;
+static CallbackFn gp_callback{};
+
+// Custom stream that calls gp_callback on every line of output
+struct CallbackStream : std::ostream {
+  CallbackStream() : std::ostream{&m_buffer} {
+    gp_stream = this;
+  }
+
+  struct CustomBuffer : std::stringbuf {
+    int sync() override {
+      auto string = str();
+      if (gp_callback)
+        gp_callback(string.c_str(), string.size());
+      str("");
+      return 0;
+    }
+  };
+
+  CustomBuffer m_buffer;
+} gp_callback_stream;
+
+void SetLogStream() {
+  if (gp_callback)
+    gp_stream = &gp_callback_stream;
+  else if (gp_logfile)
+    gp_stream = gp_logfile.get();
+  else
+    gp_stream = &std::cerr;
+}
 
 void SetLogBool(std::string_view name, bool value) {
   if (name == "enabled")
@@ -51,14 +80,21 @@ void SetLogString(std::string_view name, std::string_view value) {
     else {
       fs::path filename{std::string(value)};
       gp_logfile = std::make_unique<std::ofstream>(filename.open_for_write());
+      // If a filename was provided, log callback will be disabled
+      gp_callback = nullptr;
     }
 
-    if (gp_logfile)
-      gp_stream = gp_logfile.get();
-    else
-      gp_stream = &std::cerr;
+    SetLogStream();
   } else
     throw JSON::unknown_value_error{};
+}
+
+void SetLogCallback(CallbackFn fn) {
+  gp_callback = fn;
+  // If a callback was provided, file logging will be disabled
+  gp_logfile.reset();
+
+  SetLogStream();
 }
 
 std::ostream& operator<<(std::ostream& stream, SGR sgr_code) {
