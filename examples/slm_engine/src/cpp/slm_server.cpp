@@ -31,7 +31,7 @@ using namespace std;
 int run_server(const string& model_path,
                int port_number, bool verbose) {
   // Create the SLM
-  auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
+  auto slm_engine = microsoft::slm_engine::SLMEngine::Create(
       model_path.c_str(), verbose);
   if (!slm_engine) {
     cout << "Cannot create engine!\n";
