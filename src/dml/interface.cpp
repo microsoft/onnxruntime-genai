@@ -96,13 +96,13 @@ struct GpuMemory final : DeviceBuffer {
 };
 
 struct InterfaceImpl : DeviceInterface {
-  InterfaceImpl(LUID* p_device_luid) {
+  InterfaceImpl(LUID* p_device_luid, uint32_t* p_device_index) {
     Ort::ThrowOnError(Ort::api->GetExecutionProviderApi("DML", ORT_API_VERSION, reinterpret_cast<const void**>(&dml_api_)));
     if (!dml_api_) {
       throw std::runtime_error("Unexpected nullptr getting OrtDmlApi");
     }
 
-    dml_objects_ = DmlHelpers::CreateDmlObjects(CurrentModulePath(), p_device_luid);
+    dml_objects_ = DmlHelpers::CreateDmlObjects(CurrentModulePath(), p_device_luid, p_device_index);
 
     constexpr auto directml_dll = "DirectML.dll";
     smart_directml_dll_ = wil::unique_hmodule{LoadLibraryEx(directml_dll, nullptr, 0)};
@@ -213,9 +213,9 @@ struct InterfaceImpl : DeviceInterface {
 
 std::unique_ptr<Dml::InterfaceImpl> g_dml_device;
 
-void InitDmlInterface(LUID* p_device_luid) {
+void InitDmlInterface(LUID* p_device_luid, uint32_t* p_device_index) {
   if (!g_dml_device)
-    g_dml_device = std::make_unique<Dml::InterfaceImpl>(p_device_luid);
+    g_dml_device = std::make_unique<Dml::InterfaceImpl>(p_device_luid, p_device_index);
 }
 
 void SetDmlProvider(OrtSessionOptions& session_options) {

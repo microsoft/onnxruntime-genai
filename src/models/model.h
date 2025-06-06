@@ -82,7 +82,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
 
   std::vector<int32_t> Encode(const char* text) const;
   std::string Decode(std::span<const int32_t> tokens) const;
-  std::string ApplyChatTemplate(const char* template_str, const char* messages, bool add_generation_prompt) const;
+  std::string ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const;
 
   std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
   std::shared_ptr<Tensor> EncodeBatch(std::span<const char*> strings) const;

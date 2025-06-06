@@ -10,7 +10,8 @@
         "CMAKE_MODULE_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
         "CMAKE_SHARED_LINKER_FLAGS_INIT": "/profile /DYNAMICBASE",
         "USE_CUDA": "OFF",
-        "USE_ROCM": "OFF"
+        "USE_ROCM": "OFF",
+        "USE_GUIDANCE": "ON"
       },
       "condition": {
         "type": "equals",
