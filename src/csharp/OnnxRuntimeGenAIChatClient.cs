@@ -285,7 +285,7 @@ public sealed partial class OnnxRuntimeGenAIChatClient : IChatClient
 
                 m.Role = message.Role.Value;
                 m.Content = text;
-                prompt.Append(JsonSerializer.Serialize(m));
+                prompt.Append(JsonSerializer.Serialize(m, OnnxJsonContext.Default.SerializableMessage));
             }
         }
         prompt.Append(']');
