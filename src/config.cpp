@@ -425,6 +425,8 @@ struct Decoder_Element : JSON::Element {
       v_.num_hidden_layers = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "head_size") {
       v_.head_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "sliding_window_size") {
+      v_.sliding_window_size = static_cast<int>(JSON::Get<double>(value));
     } else
       throw JSON::unknown_value_error{};
   }
