@@ -100,6 +100,8 @@ OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(const OgaResult* result);
  * \brief Control the logging behavior of the library.
  *        If OgaSetLogString is called with name "filename", and value is a valid file path,
  *        the library will log to that file. This will override any previously set logging destination.
+ *        If OgaSetLogString is called with name "filename" and the value provided is an empty string,
+ *        the library will log to the default destination (i.e. std::cerr) thereafter.
  * \param[in] name logging option name, see logging.h 'struct LogItems' for the list of available options
  * \param[in] value logging option value.
  */
