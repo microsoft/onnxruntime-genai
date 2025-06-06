@@ -80,7 +80,7 @@ void SetLogString(std::string_view name, std::string_view value) {
     else {
       fs::path filename{std::string(value)};
       gp_logfile = std::make_unique<std::ofstream>(filename.open_for_write());
-      // If a filename was provided, we log callback will be disabled
+      // If a filename was provided, log callback will be disabled
       gp_callback = nullptr;
     }
 
@@ -91,7 +91,7 @@ void SetLogString(std::string_view name, std::string_view value) {
 
 void SetLogCallback(CallbackFn fn) {
   gp_callback = fn;
-  // If a callback was provided, we disable the file logging
+  // If a callback was provided, file logging will be disabled
   gp_logfile.reset();
 
   SetLogStream();
