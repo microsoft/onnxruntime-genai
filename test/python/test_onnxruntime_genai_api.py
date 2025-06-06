@@ -8,6 +8,7 @@ import sys
 import sysconfig
 from pathlib import Path
 import shutil
+import tempfile
 import onnxruntime
 
 import numpy as np
@@ -45,12 +46,15 @@ def test_config(test_data_path):
     config.set_provider_option("quantum", "break_universe", "true")
     config.append_provider("slide rule")
 
-def log_callback(log):
-    print("Python log callback: "+log, flush=True)
+def test_log_callback(test_data_path):
+    callback_invoked = False
 
-def test_logging(test_data_path):
+    def _log_callback(log: str):
+        nonlocal callback_invoked
+        callback_invoked = True
+
     og.set_log_options(enabled=True, generate_next_token=True)
-    og.set_log_callback(log_callback)
+    og.set_log_callback(_log_callback)
 
     model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
@@ -61,8 +65,37 @@ def test_logging(test_data_path):
     generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
     generator.generate_next_token()
 
+    assert callback_invoked, "Log callback was not invoked"
+
     og.set_log_callback(None)
     og.set_log_options(enabled=False)
+
+def test_log_filename(test_data_path):
+    callback_invoked = False
+
+    def _log_callback(log: str):
+        nonlocal callback_invoked
+        callback_invoked = True
+
+    og.set_log_callback(_log_callback)
+
+    with tempfile.NamedTemporaryFile() as log_file:
+        og.set_log_options(enabled=True, generate_next_token=True, filename=log_file.name)
+
+        model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
+        config = og.Config(model_path)
+        model = og.Model(config)
+
+        search_params = og.GeneratorParams(model)
+        generator = og.Generator(model, search_params)
+        generator.append_tokens(np.array([[0, 0, 0, 52]], dtype=np.int32))
+        generator.generate_next_token()
+
+        assert os.path.exists(log_file.name), f"Log file {log_file.name} was not created"
+        assert os.path.getsize(log_file.name) > 0, f"Log file {log_file.name} is empty"
+        assert not callback_invoked, "Log callback was invoked. It should not have been since it was overridden by the log file."
+
+    og.set_log_options(enabled=False, filename="")
 
 def test_NamedTensors():
     named_tensors = og.NamedTensors()
