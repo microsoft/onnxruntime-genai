@@ -22,7 +22,7 @@ import java.util.function.Consumer;
  * </ul>
  *
  * <p>The listener is used as a callback mechanism so that tokens can be used as they are generated.
- * It should be an instance of a type that implements the Consumer<String> interface.
+ * It should be an instance of a type that implements the Consumer&lt;String&gt; interface.
  */
 public class SimpleGenAI implements AutoCloseable {
   private Model model;
