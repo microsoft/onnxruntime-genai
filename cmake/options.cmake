@@ -17,3 +17,6 @@ option(TEST_PHI2 "Enable tests for Phi2" OFF)
 
 # performance
 option(ENABLE_MODEL_BENCHMARK "Build model benchmark program" ON)
+
+# diagnostics
+option(ENABLE_TRACING "Enable recording of tracing data" OFF)

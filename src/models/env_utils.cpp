@@ -11,7 +11,7 @@
 
 namespace Generators {
 
-std::string GetEnvironmentVariable(const char* var_name) {
+std::string GetEnv(const char* var_name) {
 #if _MSC_VER
   // Why getenv() should be avoided on Windows:
   // https://docs.microsoft.com/en-us/cpp/c-runtime-library/reference/getenv-wgetenv
@@ -40,8 +40,8 @@ std::string GetEnvironmentVariable(const char* var_name) {
 #endif  // _MSC_VER
 }
 
-void GetEnvironmentVariable(const char* var_name, bool& value) {
-  std::string str_value = GetEnvironmentVariable(var_name);
+void GetEnv(const char* var_name, bool& value) {
+  std::string str_value = GetEnv(var_name);
   if (str_value == "1" || str_value == "true") {
     value = true;
   } else if (str_value == "0" || str_value == "false") {

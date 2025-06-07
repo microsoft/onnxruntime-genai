@@ -80,6 +80,11 @@ if(ENABLE_TESTS)
   endif()
 endif()
 
+if(ENABLE_TRACING)
+  message(STATUS "Tracing is enabled.")
+  add_compile_definitions(ORTGENAI_ENABLE_TRACING)
+endif()
+
 find_package(Threads REQUIRED)
 
 if(WIN32)
