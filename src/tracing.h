@@ -51,11 +51,11 @@ Tracer& DefaultTracerInstance();
 // Records a traced duration while in scope.
 class DurationTrace {
  public:
-  DurationTrace(std::string_view label)
+  [[nodiscard]] DurationTrace(std::string_view label)
       : DurationTrace{DefaultTracerInstance(), label} {
   }
 
-  DurationTrace(Tracer& tracer, std::string_view label)
+  [[nodiscard]] DurationTrace(Tracer& tracer, std::string_view label)
       : tracer_{tracer} {
     tracer_.BeginDuration(label);
   }
