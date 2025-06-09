@@ -234,11 +234,11 @@ jobs:
       Get-ChildItem -Path $nativeBuildOutputDir -Recurse
       # For non-stable versions, we don't need the complete version, just the first two parts
       # e.g. "0.9.0-dev-rest" → "0.9.0-dev"
-      $version_parts = $(genai_version) -split '-', 3
+      $version_parts = "$(genai_version)" -split '-', 3
       if ($version_parts.Count -ge 2) {
         $req_genai_version = "$($version_parts[0])-$($version_parts[1])"
       } else {
-        $req_genai_version = $(genai_version)
+        $req_genai_version = "$(genai_version)"
       }
 
       mkdir -Force $outputDir
