@@ -79,7 +79,7 @@ def test_log_filename(test_data_path):
 
     og.set_log_callback(_log_callback)
 
-    with tempfile.NamedTemporaryFile() as log_file:
+    with tempfile.NamedTemporaryFile(mode='w+', suffix='.txt', delete=False) as log_file:
         og.set_log_options(enabled=True, generate_next_token=True, filename=log_file.name)
 
         model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
