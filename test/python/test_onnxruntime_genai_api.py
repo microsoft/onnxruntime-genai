@@ -96,6 +96,7 @@ def test_log_filename(test_data_path):
         assert not callback_invoked, "Log callback was invoked. It should not have been since it was overridden by the log file."
 
     og.set_log_options(enabled=False, filename="")
+    og.set_log_callback(None)
 
 def test_NamedTensors():
     named_tensors = og.NamedTensors()

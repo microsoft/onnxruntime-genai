@@ -92,7 +92,9 @@ void SetLogString(std::string_view name, std::string_view value) {
 void SetLogCallback(CallbackFn fn) {
   gp_callback = fn;
   // If a callback was provided, file logging will be disabled
-  gp_logfile.reset();
+  if (gp_callback) {
+    gp_logfile.reset();
+  }
 
   SetLogStream();
 }
