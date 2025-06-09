@@ -233,6 +233,9 @@ jobs:
       Write-Host "List extracted artifacts"
       Get-ChildItem -Path $nativeBuildOutputDir -Recurse
 
+      Write-Host "Print Genai version"
+      Write-Host $(genai_version)
+
       mkdir -Force $outputDir
       foreach ($file in $artifacts) {
         $a = $file.Name
