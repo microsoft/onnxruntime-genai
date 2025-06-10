@@ -9,7 +9,7 @@ Run this script to create the desired ONNX model.
 """
 
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
-from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig, MatMulNBitsQuantizer, RTNWeightOnlyQuantConfig, QuantFormat
+from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer, RTNWeightOnlyQuantConfig, QuantFormat
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
 import torch
@@ -498,6 +498,7 @@ class Model:
         if quant_method == "rtn":
             int4_algo_config = RTNWeightOnlyQuantConfig()
         elif quant_method in ["k_quant_mixed", "k_quant_last"]:
+            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
             if quant_method == "k_quant_mixed":
                 # k_quant_mixed is from llama.cpp.
                 # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
