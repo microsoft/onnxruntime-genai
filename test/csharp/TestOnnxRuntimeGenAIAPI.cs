@@ -61,6 +61,20 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         });
 
         private static string _phi2Path => _lazyPhi2Path.Value;
+/*
+        private static Lazy<string> _lazyStableDiffusionPath = new Lazy<string>(() =>
+        {
+            string modelPath = Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
+                                        "test_models", "sd");
+            if (System.IO.Directory.Exists(modelPath))
+            {
+                return modelPath;
+            }
+
+            return null;
+        });
+
+        private static string _stableDiffusionPath => _lazyStableDiffusionPath.Value;*/
 
         private static Lazy<string> _lazyTinyRandomGpt2ModelPath = new Lazy<string>(() =>
         {
@@ -693,5 +707,61 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 Assert.Equal(output_shape, logits.Shape());
             }
         }
+/*
+        [Fact(DisplayName = "TestStableDiffusion")]
+        public void TestStableDiffusion()
+        {
+            string modelPath = "C:\\Users\\yangselena\\onnxruntime-genai\\onnxruntime-genai\\test\\test_models\\sd";
+            using (var model = new Model(modelPath))
+            {
+
+                    using ImageGeneratorParams imageGeneratorParams = new ImageGeneratorParams(model);
+                    Assert.NotNull(imageGeneratorParams);
+
+                    imageGeneratorParams.SetPrompts("a photo of a cat");
+
+                    using Tensor imageTensor = Generator.GenerateImage(model, imageGeneratorParams);
+
+                    Assert.NotNull(imageTensor);
+            }
+        }*/
+        /*
+        [Fact(DisplayName = "TestStableDiffusion")]
+        public void TestStableDiffusion()
+        {
+            string modelPath = _stableDiffusionPath;
+            
+            using (var model = new Model(modelPath))
+            {
+                Assert.NotNull(model);
+                
+                using (var imageGeneratorParams = new ImageGeneratorParams(model))
+                {
+                    Assert.NotNull(imageGeneratorParams);
+
+                    // Set a prompt for the image generation
+                    imageGeneratorParams.SetPrompts("a photo of a cat");
+
+                    // Generate the image
+                    using (var imageTensor = Generator.GenerateImage(model, imageGeneratorParams))
+                    {
+                        Assert.NotNull(imageTensor);
+                        
+                        // Verify the tensor properties
+                        var shape = imageTensor.Shape();
+                        Assert.Equal(4, shape.Length); // [batch_size, channels, height, width]
+                        
+                        // Check that we have a valid image (NCHW format)
+                        Assert.Equal(3, shape[1]); // 3 channels (RGB)
+                        Assert.True(shape[2] > 0); // Height
+                        Assert.True(shape[3] > 0); // Width
+                        
+                        // Optional: Save the generated image for manual inspection
+                        // SaveImageTensor(imageTensor, "generated_cat.png");
+                    }
+                }
+            }
+        }*/
+
     }
 }

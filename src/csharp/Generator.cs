@@ -15,6 +15,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaCreateGenerator(model.Handle, generatorParams.Handle, out _generatorHandle));
         }
 
+        public static Tensor GenerateImage(Model model, ImageGeneratorParams imageGeneratorParams)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerateImage(model.Handle,
+                                                                imageGeneratorParams.Handle,
+                                                                out IntPtr outputTensor));
+            return new Tensor(outputTensor);
+        }
+
         public bool IsDone()
         {
             return NativeMethods.OgaGenerator_IsDone(_generatorHandle) != 0;

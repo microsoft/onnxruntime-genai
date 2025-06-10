@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Drawing;
 using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
@@ -322,5 +323,25 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaUnloadAdapter(IntPtr /* OgaAdapters* */ adapters,
                                                                       byte[] /* const char* */ adapterName);
+
+        // Image generation functions
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaCreateImageGeneratorParams(IntPtr /* const OgaModel* */ model,
+                                                                                   out IntPtr /* OgaImageGeneratorParams* */ imageGeneratorParams);        
+
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaImageGeneratorParamsSetPrompts(IntPtr /* OgaImageGeneratorParams* */ imageGeneratorParams,
+                                                                                       byte[] /* const char* */ prompt,
+                                                                                       byte[] /* const char* */ negativePrompt,
+                                                                                       int /* int */ promptCount);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerateImage(IntPtr /* const OgaModel* */ model,
+                                                                      IntPtr /* const OgaImageGeneratorParams* */ imageGeneratorParams, 
+                                                                      out IntPtr /* OgaTensor* */ tensor);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern void OgaDestroyImageGeneratorParams(IntPtr /* OgaImageGeneratorParams* */ imageGeneratorParams);
     }
 }
