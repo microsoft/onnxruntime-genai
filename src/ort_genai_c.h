@@ -111,7 +111,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogString(const char* name, const char*
 /**
  * \brief Register a callback function to receive log messages from the library. If invoked, the callback will override
  *        the previously set logging destination (e.g. a file or std::cerr).
- * \param[in] callback function pointer to the logging callback function (use nullptr to disable callback)
+ * \param[in] callback function pointer to the logging callback function (use nullptr to disable callback and revert to
+ *                     the default logging destination - std::cerr).
  * \return OgaResult containing the error message when the callback could not be set, else nullptr.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogCallback(void (*callback)(const char* string, size_t length));

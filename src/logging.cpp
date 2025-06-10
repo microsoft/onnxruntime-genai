@@ -16,9 +16,7 @@ static CallbackFn gp_callback{};
 
 // Custom stream that calls gp_callback on every line of output
 struct CallbackStream : std::ostream {
-  CallbackStream() : std::ostream{&m_buffer} {
-    gp_stream = this;
-  }
+  CallbackStream() : std::ostream{&m_buffer} {}
 
   struct CustomBuffer : std::stringbuf {
     int sync() override {
