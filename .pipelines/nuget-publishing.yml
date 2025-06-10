@@ -46,12 +46,12 @@ parameters:
 - name: enable_apple_framework
   displayName: 'Whether Apple framework for iOS & MacCatalyst is built.'
   type: boolean
-  default: false
+  default: true
 
 - name: enable_win_qnn
   displayName: 'Whether QNN nuget package should be built.'
   type: boolean
-  default: false
+  default: true
 
 - name: ort_version
   displayName: 'OnnxRuntime version'
@@ -74,7 +74,7 @@ parameters:
   values:
   - '11.8'
   - '12.2'
-  default: '11.8'
+  default: '12.2'
 
 - name: build_config
   displayName: 'Build Configuration'
@@ -184,7 +184,7 @@ extends:
           cuda_version: ${{ parameters.cuda_version }}
           SpecificArtifact: false
 
-    - ${{ if and(and(and(ne(parameters.custom_ort_package_versioned_name, 'None'), eq(parameters.enable_win_arm64, true)), eq(parameters.enable_win_cuda, true)), eq(parameters.enable_macos_cpu, true)) }}:
+    - ${{ if and(and(and(ne(parameters.custom_ort_package_versioned_name, 'Microsoft.ML.OnnxRuntime.Foundry.1.23.0-dev-20250516-0447-261c2b7a80.nupkg'), eq(parameters.enable_win_arm64, true)), eq(parameters.enable_win_cuda, true)), eq(parameters.enable_macos_cpu, true)) }}:
       - template: stages/custom-nuget-packaging-stage.yml
         parameters:
           custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
