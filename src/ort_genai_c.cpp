@@ -784,7 +784,7 @@ OgaResult* OGA_API_CALL OgaCreateImageGeneratorParams(const OgaModel* model, Oga
   OGA_CATCH
 }
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaImageGeneratorParamsSetPrompts(OgaImageGeneratorParams* image_generation_params, const char** prompt, const char** negative_prompt, size_t prompt_count) {
+OgaResult* OGA_API_CALL OgaImageGeneratorParamsSetPrompts(OgaImageGeneratorParams* image_generation_params, const char** prompt, const char** negative_prompt, size_t prompt_count) {
   OGA_TRY
   for (size_t i = 0; i < prompt_count; i++) {
     if (prompt[i] == nullptr) {
@@ -802,7 +802,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaImageGeneratorParamsSetPrompts(OgaImageGen
   OGA_CATCH
 }
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerateImage(const OgaModel* model, const OgaImageGeneratorParams* image_generation_params, OgaTensor** out) {
+OgaResult* OGA_API_CALL OgaGenerateImage(const OgaModel* model, const OgaImageGeneratorParams* image_generation_params, OgaTensor** out) {
   OGA_TRY
   // Unfortunately the current design does not offer a way to avoid using dynamic_cast
   auto image_generation_model = dynamic_cast<const Generators::DiffusionModel*>((const Generators::Model*)model);

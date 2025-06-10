@@ -4,7 +4,7 @@ import numpy as np
 
 m = og.Model('C:\\Users\\yangselena\\onnxruntime-genai\\onnxruntime-genai\\test\\test_models\\sd')
 p = og.ImageGeneratorParams(m)
-p.set_prompt('a photo of a cat')
+p.set_prompt('a dog is running in the park')
 
 t = og.generate_image(m, p)
 
