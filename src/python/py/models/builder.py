@@ -354,11 +354,7 @@ class Model:
             )
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
-            self.attention_attrs["use_rope_in_attn"] = (
-                self.ep not in ["dml", "webgpu"]
-                and not self.attention_attrs["q_norm"]
-                and not self.attention_attrs["k_norm"]
-            )
+            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml", "webgpu"]
             if self.attention_attrs["use_rope_in_attn"]:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 self.input_names.remove("position_ids")

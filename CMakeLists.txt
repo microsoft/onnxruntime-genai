@@ -80,6 +80,11 @@ if(ENABLE_TESTS)
   endif()
 endif()
 
+if(ENABLE_TRACING)
+  message(STATUS "Tracing is enabled.")
+  add_compile_definitions(ORTGENAI_ENABLE_TRACING)
+endif()
+
 find_package(Threads REQUIRED)
 
 if(WIN32)
@@ -95,8 +100,7 @@ else()
 endif()
 
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
-target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
-target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api/)
+target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(onnxruntime-genai PRIVATE Threads::Threads)

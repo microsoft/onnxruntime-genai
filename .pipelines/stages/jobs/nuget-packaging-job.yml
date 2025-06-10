@@ -237,12 +237,12 @@ jobs:
       foreach ($file in $artifacts) {
         $a = $file.Name
         Write-Host "Extracting " $a
-        $rid_match = $a -match "onnxruntime-genai-$(genai_version)-(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
+        $rid_match = $a -match "onnxruntime-genai-$(genai_version_raw)-(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
         if ($rid_match) {
           $rid = $Matches.1
         }
         else {
-          $rid_match = $a -match "onnxruntime-genai-(android|ios)-$(genai_version)(.+?)?(\.zip|\.aar)"
+          $rid_match = $a -match "onnxruntime-genai-(android|ios)-$(genai_version_raw)(.+?)?(\.zip|\.aar)"
           if ($rid_match) {
             $rid = $Matches.1
           }

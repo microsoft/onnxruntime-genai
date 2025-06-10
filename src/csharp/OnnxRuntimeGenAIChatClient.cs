@@ -5,6 +5,8 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.AI;
@@ -14,7 +16,7 @@ using Microsoft.Extensions.AI;
 namespace Microsoft.ML.OnnxRuntimeGenAI;
 
 /// <summary>Provides an <see cref="IChatClient"/> implementation for interacting with an ONNX Runtime GenAI <see cref="Model"/>.</summary>
-public sealed class OnnxRuntimeGenAIChatClient : IChatClient
+public sealed partial class OnnxRuntimeGenAIChatClient : IChatClient
 {
     /// <summary>Options used to configure the instance's behavior.</summary>
     private readonly OnnxRuntimeGenAIChatClientOptions? _options;
@@ -220,11 +222,11 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
             {
                 ConversationId = generator.ConversationId,
                 Contents = [new UsageContent(new()
-                {
-                    InputTokenCount = inputTokens,
-                    OutputTokenCount = outputTokens,
-                    TotalTokenCount = inputTokens + outputTokens,
-                })],
+                    {
+                        InputTokenCount = inputTokens,
+                        OutputTokenCount = outputTokens,
+                        TotalTokenCount = inputTokens + outputTokens,
+                    })],
                 CreatedAt = DateTimeOffset.UtcNow,
                 FinishReason = options is not null && options.MaxOutputTokens <= outputTokens ? ChatFinishReason.Length : ChatFinishReason.Stop,
                 MessageId = messageId,
@@ -251,7 +253,7 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
             throw new ArgumentNullException(nameof(serviceType));
         }
 
-        return 
+        return
             serviceKey is not null ? null :
             serviceType == typeof(ChatClientMetadata) ? _metadata :
             serviceType == typeof(Model) ? _model :
@@ -267,15 +269,41 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
         _options?.StopSequences?.Contains(token) is true;
 
     /// <summary>Formats messages into a prompt using a default format.</summary>
-    private static string FormatPromptDefault(IEnumerable<ChatMessage> messages, ChatOptions? options)
+    private string FormatPromptDefault(IEnumerable<ChatMessage> messages, ChatOptions? options)
     {
-        StringBuilder sb = new();
+        SerializableMessage m = new();
+
+        StringBuilder prompt = new();
+        string separator = "";
+        prompt.Append('[');
         foreach (var message in messages)
         {
-            sb.Append(message).AppendLine();
-        }
+            if (message.Text is string text)
+            {
+                prompt.Append(separator);
+                separator = ",";
 
-        return sb.ToString();
+                m.Role = message.Role.Value;
+                m.Content = text;
+                prompt.Append(JsonSerializer.Serialize(m, OnnxJsonContext.Default.SerializableMessage));
+            }
+        }
+        prompt.Append(']');
+
+        return _tokenizer.ApplyChatTemplate(
+            template_str: null,
+            messages: prompt.ToString(),
+            tools: null,
+            add_generation_prompt: true);
+    }
+
+    private sealed class SerializableMessage
+    {
+        [JsonPropertyName("role")]
+        public string Role { get; set; } = string.Empty;
+
+        [JsonPropertyName("content")]
+        public string Content { get; set; } = string.Empty;
     }
 
     /// <summary>Updates the <paramref name="generatorParams"/> based on the supplied <paramref name="options"/>.</summary>
@@ -351,6 +379,11 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
                 }
             }
         }
+
+        if (options.ResponseFormat is ChatResponseFormatJson json)
+        {
+            generatorParams.SetGuidance("json_schema", json.Schema is { } schema ? schema.ToString() : "{}");
+        }
     }
 
     private sealed class CachedGenerator(Generator generator) : IDisposable
@@ -361,6 +394,9 @@ public sealed class OnnxRuntimeGenAIChatClient : IChatClient
 
         public void Dispose() => Generator?.Dispose();
     }
+
+    [JsonSerializable(typeof(SerializableMessage))]
+    private partial class OnnxJsonContext : JsonSerializerContext;
 
     /// <summary>Polyfill for Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);</summary>
     private sealed class YieldAwaiter : INotifyCompletion
