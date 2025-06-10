@@ -206,6 +206,26 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
     }
   }
 
+  /**
+   * Generates an image using the specified model and image generation parameters.
+   *
+   * @param model The diffusion model to use for generation.
+   * @param params Parameters controlling the image generation process.
+   * @return A Tensor containing the generated image data.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public static Tensor generateImage(Model model, ImageGeneratorParams params)
+      throws GenAIException {
+    if (model.nativeHandle() == 0) {
+      throw new IllegalStateException("model has been freed and is invalid");
+    }
+    if (params.nativeHandle() == 0) {
+      throw new IllegalStateException("params has been freed and is invalid");
+    }
+
+    return new Tensor(generateImageNative(model.nativeHandle(), params.nativeHandle()));
+  }
+
   static {
     try {
       GenAI.init();
@@ -240,4 +260,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
       long nativeHandle, long adaptersNativeHandle, String adapterName) throws GenAIException;
 
   private native long getOutputNative(long nativeHandle, String outputName) throws GenAIException;
+
+  private static native long generateImageNative(long modelHandle, long paramsHandle)
+      throws GenAIException;
 }

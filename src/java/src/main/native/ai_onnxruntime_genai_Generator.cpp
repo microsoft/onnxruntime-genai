@@ -119,3 +119,16 @@ Java_ai_onnxruntime_genai_Generator_getOutputNative(JNIEnv* env, jobject thiz, j
   }
   return reinterpret_cast<jlong>(tensor);
 }
+
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Generator_generateImageNative(JNIEnv* env, jclass cls, jlong model_handle, jlong params_handle) {
+  const OgaModel* model = reinterpret_cast<const OgaModel*>(model_handle);
+  const OgaImageGeneratorParams* params = reinterpret_cast<const OgaImageGeneratorParams*>(params_handle);
+  
+  OgaTensor* tensor = nullptr;
+  if (ThrowIfError(env, OgaGenerateImage(model, params, &tensor))) {
+    return 0;
+  }
+  
+  return reinterpret_cast<jlong>(tensor);
+}
