@@ -122,7 +122,7 @@ void BeamSearchScorer::Process(Sequences& sequences,
 
       int const batch_beam_idx = static_cast<int>(batch * num_beams_) + next_index;
       // Add to generated hypotheses if end of sentence.
-      if ((eos_token_id_ >= 0) && (next_token == eos_token_id_)) {
+      if (contains(eos_token_id_, next_token)) {
         bool const is_beam_token_worse_than_top_num_beams = (j >= num_beams_);
         if (is_beam_token_worse_than_top_num_beams) {
           continue;

@@ -82,23 +82,20 @@ void Launch_UpdateAttentionMask(T* next_mask_data, T* mask_data, int batch_beam_
 template void Launch_UpdateAttentionMask(int32_t* next_mask_data, int32_t* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream);
 template void Launch_UpdateAttentionMask(int64_t* next_mask_data, int64_t* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream);
 
-__global__ void HandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count) {
+__global__ void AddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_size, const uint32_t* logits_mask) {
   int index = blockIdx.x * blockDim.x + threadIdx.x;
-  if (index >= batch_beam_size)
+  if (index >= batch_beam_size * vocab_size)
     return;
-
-  float* logits = batch_logits + index * vocab_size;
-  float max = std::numeric_limits<float>::lowest();
-  for (int i = 0; i < eos_token_ids_count; i++) {
-    max = std::max(max, logits[eos_token_ids[i]]);
-    logits[eos_token_ids[i]] = std::numeric_limits<float>::lowest();  // Set all EOS token options to never happen (the first will get the max of all)
-  }
-
-  logits[eos_token_ids[0]] = max;  // Set the score of the primary EOS token to the highest of any of the EOS tokens
+  int batch_index = index / vocab_size;
+  int vocab_index = index % vocab_size;
+  if (!(logits_mask[(batch_index * vocab_size + vocab_index) / 32] & (1 << (vocab_index % 32))))
+    batch_logits[index] = std::numeric_limits<float>::lowest();
 }
 
-void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream) {
-  HandleEOSArray<<<(batch_beam_size + 255) / 256, 256, 0, stream>>>(batch_logits, batch_beam_size, vocab_size, eos_token_ids, eos_token_ids_count);
+void LaunchAddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_size, const uint32_t* logits_mask, cudaStream_t stream) {
+  int block_size = 256;
+  int num_blocks = (batch_beam_size * vocab_size + block_size - 1) / block_size;
+  AddLogitsMask<<<num_blocks, block_size, 0, stream>>>(batch_logits, batch_beam_size, vocab_size, logits_mask);
 }
 
 __global__ void ConvertFp16ToFp32(const half* src, float* dst, int count) {

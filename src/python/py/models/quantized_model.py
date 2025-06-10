@@ -63,7 +63,8 @@ class QuantizedAttention:
         self.v_proj = QuantizedTensorModule(bits, group_size)
         self.o_proj = QuantizedTensorModule(bits, group_size)
         self.rotary_emb = TensorModule()
-
+        self.k_norm = TensorModule()
+        self.q_norm = TensorModule()
 
 class QuantizedMLP:
     def __init__(self, bits, group_size):
@@ -112,9 +113,6 @@ class QuantizedModel:
                     local_bits = self.get_layer_bits(name)  # codeql[py/init-calls-subclass]
                     local_group_size = self.get_layer_group_size(name)  # codeql[py/init-calls-subclass]
 
-                    if tensor.dtype == torch.bfloat16:
-                        # Cast bfloat16 to float32 since NumPy does not support bfloat16
-                        tensor = tensor.to(torch.float32)
                     if name == "model.embed_tokens.weight" or name == "transformer.embedding.word_embeddings.weight":
                         self.embedding.weight = tensor
                     elif name == "model.norm.weight" or name == "transformer.encoder.final_layernorm.weight":
@@ -152,6 +150,7 @@ class QuantizedModel:
 
                         # Map weights and biases of norm, attention, and feed-forward network
                         # Graph order is input_layernorm --> q_proj/k_proj/v_proj --> o_proj --> post_attention_layernorm --> gate_proj/up_proj --> down_proj
+                        # If model uses q_norm and k_norm, graph order is input_layernorm --> q_norm/q_proj/k_norm/k_proj/v_proj --> o_proj --> post_attention_layernorm --> gate_proj/up_proj --> down_proj
                         if bool(re.match(r"^model.layers\.\d+\.input_layernorm\.weight$", name)):
                             # model.layers.layer_id.input_layernorm.weight
                             module.input_layernorm.weight = tensor
@@ -180,6 +179,12 @@ class QuantizedModel:
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.q_proj\.bias$", name)):
                             # model.layers.layer_id.self_attn.q_proj.bias
                             module.self_attn.q_proj.bias = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.q_norm\.weight$", name)):
+                            # model.layers.layer_id.self_attn.q_norm.weight
+                            module.self_attn.q_norm.weight = tensor   
+                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.q_norm\.bias$", name)):
+                            # model.layers.layer_id.self_attn.q_norm.bias
+                            module.self_attn.q_norm.bias = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.k_proj\.q?weight$", name)):
                             # model.layers.layer_id.self_attn.k_proj.qweight
                             # model.layers.layer_id.self_attn.k_proj.weight
@@ -198,6 +203,12 @@ class QuantizedModel:
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.k_proj\.bias$", name)):
                             # model.layers.layer_id.self_attn.k_proj.bias
                             module.self_attn.k_proj.bias = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.k_norm\.weight$", name)):
+                            # model.layers.layer_id.self_attn.k_norm.weight
+                            module.self_attn.k_norm.weight = tensor
+                        elif bool(re.match(r"^model\.layers\.\d+\.self_attn\.k_norm\.bias$", name)):
+                            # model.layers.layer_id.self_attn.k_norm.bias
+                            module.self_attn.k_norm.bias = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.v_proj\.q?weight$", name)):
                             # model.layers.layer_id.self_attn.v_proj.qweight
                             # model.layers.layer_id.self_attn.v_proj.weight

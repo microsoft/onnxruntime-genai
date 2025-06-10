@@ -21,13 +21,15 @@ struct Config {
     static constexpr std::string_view LogitsName = "logits";
     static constexpr std::string_view PresentKeyName = "present.%d.key";
     static constexpr std::string_view PresentValueName = "present.%d.value";
+    static constexpr std::string_view PastKeyValuesLengthName = "past_key_values_length";
+    static constexpr std::string_view RnnStatesName = "rnn_states";
+    static constexpr std::string_view RnnStatesPrevName = "rnn_states_prev";
 
     // Speech encoder names
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
     static constexpr std::string_view AudioSizesName = "audio_sizes";
     static constexpr std::string_view AudioProjectionModeName = "audio_projection_mode";
     static constexpr std::string_view AudioFeaturesName = "audio_features";
-    static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
     static constexpr std::string_view NumAudioTokens = "num_audio_tokens";
 
     // Vision encoder names
@@ -48,6 +50,11 @@ struct Config {
     static constexpr std::string_view CacheIndirectionName = "cache_indirection";
     static constexpr std::string_view AlignmentHeadsName = "alignment_heads";
     static constexpr std::string_view TokenTypeIdsName = "token_type_ids";
+
+    // Encoder names
+    static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
+    static constexpr std::string_view EncoderOutputsName = "encoder_outputs";
+    static constexpr std::string_view EncoderAttentionMaskName = "encoder_attention_mask";
   };
 
   fs::path config_path;  // Path of the config directory
@@ -86,12 +93,11 @@ struct Config {
   struct Model {
     std::string type;
 
-    int pad_token_id{};              // The id of the padding token.
-    int eos_token_id{};              // The id of the end-of-stream token.
-    std::vector<int> eos_token_ids;  // If eos_token_id is passed as an array, this is where the values go (eos_token_id gets set to the first entry in the array)
-    int bos_token_id{};              // The id of the beginning-of-stream token.
-    int sep_token_id{};              // The id of the separation token.
-    int decoder_start_token_id{};    // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
+    int pad_token_id{};             // The id of the padding token.
+    std::vector<int> eos_token_id;  // The end-of-stream tokens (when set as a single value it is converted to a vector with one value).
+    int bos_token_id{};             // The id of the beginning-of-stream token.
+    int sep_token_id{};             // The id of the separation token.
+    int decoder_start_token_id{};   // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
     int vocab_size{};
     int context_length{};
 
@@ -102,6 +108,7 @@ struct Config {
       int hidden_size{};
       int num_attention_heads{};
       int num_hidden_layers{};
+      int num_key_value_heads{};
       int head_size{};
 
       struct Inputs {
@@ -195,8 +202,13 @@ struct Config {
 
         std::string past_sequence_length{Defaults::PastSequenceLengthName};
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
+        std::string past_sequence_length{Defaults::PastSequenceLengthName};
+        std::string past_key_values_length{Defaults::PastKeyValuesLengthName};
         std::string total_sequence_length{Defaults::TotalSequenceLengthName};
         std::string cache_indirection{Defaults::CacheIndirectionName};
+        std::string encoder_hidden_states{Defaults::EncoderHiddenStatesName};
+        std::string rnn_prev_states{Defaults::RnnStatesPrevName};
+        std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
       } inputs;
 
       struct Outputs {
@@ -205,6 +217,7 @@ struct Config {
         std::string present_value_names{Defaults::PresentValueName};
         std::string present_names;  // When key/value pairs are combined
         std::string output_cross_qk_names{"output_cross_qk_%d"};
+        std::string rnn_states{Defaults::RnnStatesName};
       } outputs;
 
       struct PipelineModel {
@@ -262,5 +275,6 @@ void ClearProviders(Config& config);
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value);
 void OverlayConfig(Config& config, std::string_view json);
 bool IsGraphCaptureEnabled(Config::SessionOptions& session_options);
+bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
 
 }  // namespace Generators

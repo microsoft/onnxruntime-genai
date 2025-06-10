@@ -53,6 +53,7 @@ DeviceSpan<float> Search_Cpu::GetLogits() const {
 
 void Search_Cpu::SetLogits(DeviceSpan<float> logits) {
   next_token_scores_ = logits;
+  next_token_scores_.CopyDeviceToCpu();  // To the device->cpu copy once here as all later calls use CpuSpan()
 }
 
 DeviceSpan<int32_t> GreedySearch_Cpu::GetNextTokens() {
@@ -246,7 +247,7 @@ bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {
 
 void GreedySearch_Cpu::SetNextToken(size_t batch_id, int32_t token) {
   next_tokens_[batch_id] = token;
-  if (token == params_->config.model.eos_token_id) {
+  if (contains(params_->config.model.eos_token_id, token)) {
     eos_seen_[batch_id] = true;
     if (g_log.enabled && g_log.hit_eos)
       Log("hit_eos", "EOS seen on batch " + std::to_string(batch_id));
@@ -396,7 +397,8 @@ void Search_Cpu::ApplyMinLength(int min_length) {
   const int batch_beam_size = params_->BatchBeamSize();
   for (int i = 0; i < batch_beam_size; i++) {
     std::span<float> const beam_token_scores = GetScores(i);
-    beam_token_scores[params_->config.model.eos_token_id] = std::numeric_limits<float>::lowest();
+    for (auto token_id : params_->config.model.eos_token_id)
+      beam_token_scores[token_id] = std::numeric_limits<float>::lowest();
   }
 }
 

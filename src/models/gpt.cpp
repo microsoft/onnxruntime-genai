@@ -16,7 +16,7 @@ std::unique_ptr<State> Gpt_Model::CreateState(DeviceSpan<int32_t> sequence_lengt
 Gpt_State::Gpt_State(const Gpt_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      position_inputs_{model, *this, sequence_lengths_unk} {
+      position_inputs_{model, *this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask} {
   input_ids_.Add();
   position_inputs_.Add();
   logits_.Add();
