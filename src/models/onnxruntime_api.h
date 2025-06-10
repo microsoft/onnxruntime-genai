@@ -200,7 +200,7 @@ inline void InitApi() {
   }
 
   bool ort_lib = false;
-  Generators::GetEnvironmentVariable("ORTGENAI_LOG_ORT_LIB", ort_lib);
+  Generators::GetEnv("ORTGENAI_LOG_ORT_LIB", ort_lib);
   if (ort_lib) {
     Generators::SetLogBool("enabled", true);
     Generators::SetLogBool("ort_lib", true);
