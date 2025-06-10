@@ -188,6 +188,27 @@ struct EncoderInputs_Element : JSON::Element {
   Config::Model::Encoder::Inputs& v_;
 };
 
+struct EncoderOutputs_Element : JSON::Element {
+  explicit EncoderOutputs_Element(Config::Model::Encoder::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "encoder_hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "encoder_outputs") {
+      v_.encoder_outputs = JSON::Get<std::string_view>(value);
+    } else if (name == "cross_present_key_names") {
+      v_.cross_present_key_names = JSON::Get<std::string_view>(value);
+    } else if (name == "cross_present_value_names") {
+      v_.cross_present_value_names = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Encoder::Outputs& v_;
+};
+
 struct DecoderInputs_Element : JSON::Element {
   explicit DecoderInputs_Element(Config::Model::Decoder::Inputs& v) : v_{v} {}
 
@@ -235,25 +256,6 @@ struct DecoderInputs_Element : JSON::Element {
   Config::Model::Decoder::Inputs& v_;
 };
 
-struct EncoderOutputs_Element : JSON::Element {
-  explicit EncoderOutputs_Element(Config::Model::Encoder::Outputs& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "encoder_hidden_states") {
-      v_.hidden_states = JSON::Get<std::string_view>(value);
-    } else if (name == "cross_present_key_names") {
-      v_.cross_present_key_names = JSON::Get<std::string_view>(value);
-    } else if (name == "cross_present_value_names") {
-      v_.cross_present_value_names = JSON::Get<std::string_view>(value);
-    } else {
-      throw JSON::unknown_value_error{};
-    }
-  }
-
- private:
-  Config::Model::Encoder::Outputs& v_;
-};
-
 struct DecoderOutputs_Element : JSON::Element {
   explicit DecoderOutputs_Element(Config::Model::Decoder::Outputs& v) : v_{v} {}
 
@@ -270,7 +272,7 @@ struct DecoderOutputs_Element : JSON::Element {
       v_.output_cross_qk_names = JSON::Get<std::string_view>(value);
     } else if (name == "rnn_states") {
       v_.rnn_states = JSON::Get<std::string_view>(value);
-    } else
+    } else {
       throw JSON::unknown_value_error{};
     }
   }
@@ -950,10 +952,12 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
 
   if (search.max_length == 0) {
     search.max_length = model.context_length;
+  }
 
   // If no eos_token_id was set, set it to the pad token id
-  if (model.eos_token_id.empty())
+  if (model.eos_token_id.empty()) {
     model.eos_token_id.push_back(model.pad_token_id);
+  }
 
   for (const auto& provider_option : model.decoder.session_options.provider_options) {
     model.decoder.session_options.providers.push_back(provider_option.name);

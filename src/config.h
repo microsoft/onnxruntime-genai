@@ -21,7 +21,6 @@ struct Config {
     static constexpr std::string_view LogitsName = "logits";
     static constexpr std::string_view PresentKeyName = "present.%d.key";
     static constexpr std::string_view PresentValueName = "present.%d.value";
-    static constexpr std::string_view PastKeyValuesLengthName = "past_key_values_length";
     static constexpr std::string_view RnnStatesName = "rnn_states";
     static constexpr std::string_view RnnStatesPrevName = "rnn_states_prev";
 
@@ -44,6 +43,7 @@ struct Config {
     static constexpr std::string_view InputsEmbedsName = "inputs_embeds";
 
     // Generation names
+    static constexpr std::string_view PastKeyValuesLengthName = "past_key_values_length";
     static constexpr std::string_view PastSequenceLengthName = "past_sequence_length";
     static constexpr std::string_view CurrentSequenceLengthName = "current_sequence_length";
     static constexpr std::string_view TotalSequenceLengthName = "total_sequence_length";
@@ -120,6 +120,7 @@ struct Config {
       } inputs;
 
       struct Outputs {
+        std::string encoder_outputs{Defaults::EncoderOutputsName};
         std::string hidden_states{Defaults::EncoderHiddenStatesName};
         std::string cross_present_key_names{"present_key_cross_%d"}, cross_present_value_names{"present_value_cross_%d"};
       } outputs;
@@ -200,10 +201,9 @@ struct Config {
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
 
+        std::string past_key_values_length{Defaults::PastKeyValuesLengthName};
         std::string past_sequence_length{Defaults::PastSequenceLengthName};
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
-        std::string past_sequence_length{Defaults::PastSequenceLengthName};
-        std::string past_key_values_length{Defaults::PastKeyValuesLengthName};
         std::string total_sequence_length{Defaults::TotalSequenceLengthName};
         std::string cache_indirection{Defaults::CacheIndirectionName};
         std::string encoder_hidden_states{Defaults::EncoderHiddenStatesName};
