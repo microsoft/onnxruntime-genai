@@ -232,25 +232,17 @@ jobs:
       $outputDir = '$(Build.Repository.LocalPath)/$(buildDir)'
       Write-Host "List extracted artifacts"
       Get-ChildItem -Path $nativeBuildOutputDir -Recurse
-      # For non-stable versions, we don't need the complete version, just the first two parts
-      # e.g. "0.9.0-dev-rest" → "0.9.0-dev"
-      $version_parts = "$(genai_version)" -split '-', 3
-      if ($version_parts.Count -ge 2) {
-        $req_genai_version = "$($version_parts[0])-$($version_parts[1])"
-      } else {
-        $req_genai_version = "$(genai_version)"
-      }
 
       mkdir -Force $outputDir
       foreach ($file in $artifacts) {
         $a = $file.Name
         Write-Host "Extracting " $a
-        $rid_match = $a -match "onnxruntime-genai-$req_genai_version-(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
+        $rid_match = $a -match "onnxruntime-genai-$(genai_version_raw)-(.+?)-?(?:cuda|dml)?(\.zip|\.tar\.gz)"
         if ($rid_match) {
           $rid = $Matches.1
         }
         else {
-          $rid_match = $a -match "onnxruntime-genai-(android|ios)-$req_genai_version(.+?)?(\.zip|\.aar)"
+          $rid_match = $a -match "onnxruntime-genai-(android|ios)-$(genai_version_raw)(.+?)?(\.zip|\.aar)"
           if ($rid_match) {
             $rid = $Matches.1
           }
