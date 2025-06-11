@@ -11,9 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ast
-import gc
 import json
-import logging
 import os
 import textwrap
 from typing import Literal, Sequence
@@ -34,18 +32,10 @@ from transformers import (
     GenerationConfig,
 )
 
-try:
-    # For users who runs this script from source
-    import builder_utils
-except ImportError:
-    from onnxruntime_genai.models import builder_utils
 
 # NOTE: Avoid importing from onnx helper and numpy_helper. Instead, leverage
 # ONNX IR methods like ir.tensor, ir.DataType.numpy() and other methods for constructing
 # the ONNX graph efficiently.
-
-
-logger = logging.getLogger(__name__)
 
 
 def _unpack_uint4_as_uint8(data: np.ndarray, dims: Sequence[int]) -> np.ndarray:
@@ -607,7 +597,7 @@ class Model:
                 try:
                     os.remove(os.path.join(self.cache_dir, path))
                 except OSError:
-                    logger.debug("Error deleting file", stack_info=True)
+                    print("Error deleting temporary file:", path)
 
         # Delete temporary cache dir if empty
         if not os.listdir(self.cache_dir):
