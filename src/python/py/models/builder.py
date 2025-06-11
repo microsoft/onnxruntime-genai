@@ -75,31 +75,6 @@ def unpack_uint4(data: np.ndarray, dims: Sequence[int]) -> np.ndarray:
     return _unpack_uint4_as_uint8(data, dims).view(ml_dtypes.uint4)
 
 
-def to_int4(
-    model: ir.Model,
-    *,
-    block_size: int,
-    is_symmetric: bool,
-    accuracy_level: int,
-    use_qdq: bool,
-    op_types_to_quantize: tuple[str, ...],
-) -> ir.Model:
-    """Quantize the model to int4."""
-    ir.external_data.load_to_model(model)
-    quant = MatMulNBitsQuantizer(
-        model=ir.to_proto(model),
-        block_size=block_size,
-        is_symmetric=is_symmetric,
-        accuracy_level=accuracy_level,
-        nodes_to_exclude=[],
-        quant_format=(QuantFormat.QDQ if use_qdq else QuantFormat.QOperator),
-        op_types_to_quantize=op_types_to_quantize,
-    )
-    quant.process()
-    return ir.from_proto(quant.model.model)
-
-
-
 class Model:
     def __init__(
         self,
