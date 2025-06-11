@@ -9,10 +9,6 @@ Run this script to create the desired ONNX model.
 """
 from __future__ import annotations
 
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
-import numpy as np
-import torch
-
 import argparse
 import ast
 import gc
@@ -22,9 +18,15 @@ import os
 import textwrap
 from typing import Literal, Sequence
 
+import ml_dtypes
 import numpy as np
+import onnx_ir as ir
 import torch
-from onnxscript import ir
+from onnxruntime.quantization.matmul_nbits_quantizer import (
+    MatMulNBitsQuantizer,
+    QuantFormat,
+    RTNWeightOnlyQuantConfig,
+)
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -44,6 +46,68 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _unpack_uint4_as_uint8(data: np.ndarray, dims: Sequence[int]) -> np.ndarray:
+    """Convert a packed uint4 array to unpacked uint4 array represented as uint8.
+
+    Args:
+        data: A numpy array.
+        dims: The dimensions are used to reshape the unpacked buffer.
+
+    Returns:
+        A numpy array of int8/uint8 reshaped to dims.
+    """
+    result = np.empty([data.size * 2], dtype=data.dtype)
+    array_low = data & np.uint8(0x0F)
+    array_high = data & np.uint8(0xF0)
+    array_high >>= np.uint8(4)
+    result[0::2] = array_low
+    result[1::2] = array_high
+    if result.size == np.prod(dims) + 1:
+        # handle single-element padding due to odd number of elements
+        result = result[:-1]
+    result.resize(dims, refcheck=False)
+    return result
+
+
+def unpack_uint4(data: np.ndarray, dims: Sequence[int]) -> np.ndarray:
+    """Convert a packed uint4 array to unpacked uint4 array represented as uint8.
+
+    Args:
+        data: A numpy array.
+        dims: The dimensions are used to reshape the unpacked buffer.
+
+    Returns:
+        A numpy array of int8/uint8 reshaped to dims.
+    """
+    data = data.view(np.uint8).flatten()
+    return _unpack_uint4_as_uint8(data, dims).view(ml_dtypes.uint4)
+
+
+def to_int4(
+    model: ir.Model,
+    *,
+    block_size: int,
+    is_symmetric: bool,
+    accuracy_level: int,
+    use_qdq: bool,
+    op_types_to_quantize: tuple[str, ...],
+) -> ir.Model:
+    """Quantize the model to int4."""
+    ir.external_data.load_to_model(model)
+    quant = MatMulNBitsQuantizer(
+        model=ir.to_proto(model),
+        block_size=block_size,
+        is_symmetric=is_symmetric,
+        accuracy_level=accuracy_level,
+        nodes_to_exclude=[],
+        quant_format=(QuantFormat.QDQ if use_qdq else QuantFormat.QOperator),
+        op_types_to_quantize=op_types_to_quantize,
+    )
+    quant.process()
+    return ir.from_proto(quant.model.model)
+
 
 
 class Model:
@@ -340,7 +404,7 @@ class Model:
         )
         # A tracer for recording the nodes added
         # TODO(justinchuby): Bump IR version to 10
-        self._model = ir.Model(graph, ir_version=7, producer_name="onnxruntime-genai")
+        self.model = ir.Model(graph, ir_version=7, producer_name="onnxruntime-genai")
         self._values: dict[str, ir.Value] = {}
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
@@ -466,23 +530,46 @@ class Model:
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
-    def make_value(self, name: str, *, output: bool = False) -> ir.Value | None:
-        """Obtain an IR value by value name. If the value does not exist a new one is created.
+    def make_int4_algo_config(self, quant_method: str):
+        int4_algo_config = None
+        if quant_method == "rtn":
+            int4_algo_config = RTNWeightOnlyQuantConfig()
+        elif quant_method in {"k_quant_mixed", "k_quant_last"}:
+            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
+            if quant_method == "k_quant_mixed":
+                # k_quant_mixed is from llama.cpp.
+                # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
+                # We also consider some MatMuls are more senstive to quantization than other MatMuls.
+                layers_to_exclude = [
+                    i
+                    for i in range(self.num_layers)
+                    if i < self.num_layers / 8 or i >= 7 * self.num_layers / 8 or (i - (round)(self.num_layers / 8)) % 3 == 2
+                ]
+                customized_weight_config = {}
+                for i in layers_to_exclude:
+                    customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
+                    customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
+                    # Gemma model
+                    customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
+                customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
+            elif quant_method == "k_quant_last":
+                customized_weight_config = {"/lm_head/MatMul": {"bits": 8}}
+            int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+        return int4_algo_config
 
-        Args:
-            name: The name of the value.
-            output: Whether the value is an output value.
-        """
-        if name == "":
-            if not output:
-                # ONNX IR uses None to represent an empty input
-                return None
-            else:
-                # Use empty string to represent an empty output because all outputs
-                # need to be of type ir.Value
-                return ir.Value(name="")
-
-        return self._values.setdefault(name, ir.Value(name=name))
+    def to_int4(self):
+        quant = MatMulNBitsQuantizer(
+            model=ir.to_proto(self.model),
+            block_size=self.quant_attrs["int4"]["block_size"],
+            is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
+            accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
+            nodes_to_exclude=self.quant_attrs["int4"]["nodes_to_exclude"],
+            quant_format=QuantFormat.QDQ if self.quant_attrs["use_qdq"] else QuantFormat.QOperator,
+            op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
+            algo_config=self.quant_attrs["int4"]["algo_config"],
+        )
+        quant.process()
+        return ir.from_proto(quant.model.model)
 
     def as_ir_model(self) -> ir.Model:
         """Return the IR model."""
@@ -491,7 +578,7 @@ class Model:
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
         if self.onnx_dtype == ir.DataType.UINT4 and not already_quantized_in_qdq_format:
             model = builder_utils.to_int4(
-                self._model,
+                self.model,
                 block_size=self.quant_attrs["int4"]["block_size"],
                 is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
                 accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
@@ -499,7 +586,7 @@ class Model:
                 op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
             )
         else:
-            model = self._model
+            model = self.model
         return model
 
     def save_model(self, out_dir):
@@ -545,7 +632,9 @@ class Model:
         if quant_method == "rtn":
             int4_algo_config = RTNWeightOnlyQuantConfig()
         elif quant_method in ["k_quant_mixed", "k_quant_last"]:
-            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
+            from onnxruntime.quantization.matmul_nbits_quantizer import (
+                KQuantWeightOnlyQuantConfig,
+            )
             if quant_method == "k_quant_mixed":
                 # k_quant_mixed is from llama.cpp.
                 # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
@@ -573,10 +662,9 @@ class Model:
         (ir_tensor,) = ir.external_data.convert_tensors_to_external(
             [ir_tensor], self.cache_dir, filename
         )
-        initializer = self.make_value(name)
+        initializer = self.make_value_info(name, ir_tensor.dtype, ir_tensor.shape)
         initializer.const_value = ir_tensor
-        self.make_value_info(name, ir_tensor.dtype, ir_tensor.shape)
-        self._model.graph.register_initializer(initializer)
+        self.model.graph.register_initializer(initializer)
 
     def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name: str, domain="", **kwargs):
         assert name, "Node name must be provided"
@@ -589,10 +677,10 @@ class Model:
                 self.make_constant(input_name)
 
         # Resolve values from names
-        input_values = [self.make_value(name) for name in inputs]
-        output_values = [self.make_value(name, output=True) for name in outputs]
+        input_values = [self.make_value_info(name) for name in inputs]
+        output_values = [self.make_value_info(name) for name in outputs]
         node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
-        self._model.graph.append(node)
+        self.model.graph.append(node)
         self.node_names.add(name)
 
         # Note:
@@ -605,48 +693,54 @@ class Model:
         # status in the graph. The above checks can then decide whether the proposed node actually
         # needs to be added into the graph or not.
 
-    def make_value_info(self, name, dtype: ir.DataType | int| None, shape: Sequence[int | str] | ir.Shape | None) -> None:
-        if name not in self._values:
-            raise KeyError(f"Value {name} not found in model values. You must create the node before creating the value info.")
+    def make_value_info(self, name, dtype: ir.DataType | int| None = None, shape: Sequence[int | str] | ir.Shape | None = None) -> ir.Value:
+        """Obtain or create an IR value by value name.
+
+        If the value does not exist a new one is created.
+        If dtype or shape is provided, it will be set on the value.
+
+        Args:
+            name: The name of the value.
+            output: Whether the value is an output value.
+        """
+        if name == "":
+            # None value
+            return ir.Value(name="")
+        value = self._values.setdefault(name, ir.Value(name=name))
         if dtype is not None:
-            self._values[name].dtype = ir.DataType(dtype)
+            value.dtype = ir.DataType(dtype)
         if shape is not None:
-            self._values[name].shape = ir.Shape(shape)
+            value.shape = ir.Shape(shape)
+        return value
 
     def make_inputs_and_outputs(self):
         # Add model-specific inputs to list of model inputs
-        inputs = self._model.graph.inputs
+        inputs = self.model.graph.inputs
         for name in self.input_names:
             dtype = self.input_types[name]
             shape = self.input_shapes[name]
-            inputs.append(self.make_value(name))
-            self.make_value_info(name, dtype=dtype, shape=shape)
+            inputs.append(self.make_value_info(name, dtype=dtype, shape=shape)))
 
         # Add model-specific outputs to list of model outputs
-        outputs = self._model.graph.outputs
+        outputs = self.model.graph.outputs
         for name in self.output_names:
             dtype = self.output_types[name]
             shape = self.output_shapes[name]
-            outputs.append(self.make_value(name))
-            self.make_value_info(name, dtype=dtype, shape=shape)
+            outputs.append(self.make_value_info(name, dtype=dtype, shape=shape))
 
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(self.make_value(key_name))
-            self.make_value_info(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"])
+            inputs.append(self.make_value_info(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
             value_name = f"past_key_values.{i}.value"
-            inputs.append(self.make_value(value_name))
-            self.make_value_info(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"])
+            inputs.append(self.make_value_info(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(self.make_value(key_name))
-            self.make_value_info(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"])
+            outputs.append(self.make_value_info(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"]))
             value_name = f"present.{i}.value"
-            outputs.append(self.make_value(value_name))
-            self.make_value_info(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"])
+            outputs.append(self.make_value_info(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"]))
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
@@ -891,7 +985,7 @@ class Model:
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
         qweight_npy = quantized_op.qweight.numpy(force=True)
         qweight_npy = qweight_npy.reshape(*qweight_npy.shape[:-2], qweight_npy.shape[-2] * qweight_npy.shape[-1])
-        qweight_npy = builder_utils.unpack_uint4(qweight_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2])
+        qweight_npy = unpack_uint4(qweight_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2])
         self.make_external_tensor(qweight_npy, qweight)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
