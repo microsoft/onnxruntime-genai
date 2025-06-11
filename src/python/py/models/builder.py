@@ -636,9 +636,9 @@ class Model:
         (ir_tensor,) = ir.external_data.convert_tensors_to_external(
             [ir_tensor], self.cache_dir, filename
         )
-        initializer = self.make_value_info(name, ir_tensor.dtype, ir_tensor.shape)
-        initializer.const_value = ir_tensor
-        self.model.graph.register_initializer(initializer)
+        value = self.make_value_info(name, ir_tensor.dtype, ir_tensor.shape)
+        value.const_value = ir_tensor
+        self.model.graph.register_initializer(value)
 
     def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name: str, domain="", **kwargs):
         assert name, "Node name must be provided"
