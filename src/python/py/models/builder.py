@@ -573,42 +573,11 @@ class Model:
         if not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
 
-    def make_int4_algo_config(self, quant_method):
-        int4_algo_config = None
-        if quant_method == "rtn":
-            int4_algo_config = RTNWeightOnlyQuantConfig()
-        elif quant_method in ["k_quant_mixed", "k_quant_last"]:
-            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
-            if quant_method == "k_quant_mixed":
-                # k_quant_mixed is from llama.cpp.
-                # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
-                # We also consider some MatMuls are more senstive to quantization than other MatMuls.
-                layers_to_exclude = [
-                    i
-                    for i in range(self.num_layers)
-                    if i < self.num_layers / 8 or i >= 7 * self.num_layers / 8 or (i - (round)(self.num_layers / 8)) % 3 == 2
-                ]
-                customized_weight_config = {}
-                for i in layers_to_exclude:
-                    customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
-                    customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
-                    # Gemma model
-                    customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
-                customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
-            elif quant_method == "k_quant_last":
-                customized_weight_config = {"/lm_head/MatMul": {"bits": 8}}
-            int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
-        return int4_algo_config
-
     def make_external_tensor(self, tensor: torch.Tensor | np.ndarray | ir.TensorProtocol, name: str):
-        if isinstance(tensor, torch.Tensor):
+        if isinstance(tensor, torch.nn.parameter.Parameter):
             ir_tensor = tensor_adapters.TorchTensor(tensor, name=name)
         else:
             ir_tensor = ir.tensor(tensor, name=name)
-        filename = f"{name}.bin"
-        (ir_tensor,) = ir.external_data.convert_tensors_to_external(
-            [ir_tensor], self.cache_dir, filename
-        )
         value = self.make_value_info(name, ir_tensor.dtype, ir_tensor.shape)
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
