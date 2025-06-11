@@ -9,14 +9,7 @@ Run this script to create the desired ONNX model.
 """
 
 from onnx import helper, numpy_helper, TensorProto, external_data_helper, save_model
-from onnxruntime import __version__ as ort_version
-from packaging import version
-
-if version.parse(ort_version) > version.parse("1.21.1"):
-    from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer, QuantFormat
-else:
-    from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer as MatMulNBitsQuantizer, QuantFormat
-
+from onnxruntime.quantization.matmul_nbits_quantizer import MatMulNBitsQuantizer, RTNWeightOnlyQuantConfig, QuantFormat
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 import numpy as np
 import torch
@@ -503,7 +496,6 @@ class Model:
     def make_int4_algo_config(self, quant_method):
         int4_algo_config = None
         if quant_method == "rtn":
-            from onnxruntime.quantization.matmul_nbits_quantizer import RTNWeightOnlyQuantConfig
             int4_algo_config = RTNWeightOnlyQuantConfig()
         elif quant_method in ["k_quant_mixed", "k_quant_last"]:
             from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
