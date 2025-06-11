@@ -19,6 +19,7 @@ from typing import Literal, Sequence
 import ml_dtypes
 import numpy as np
 import onnx_ir as ir
+from onnx_ir import tensor_adapters
 import torch
 from onnxruntime.quantization.matmul_nbits_quantizer import (
     MatMulNBitsQuantizer,
@@ -599,8 +600,11 @@ class Model:
             int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
         return int4_algo_config
 
-    def make_external_tensor(self, tensor: ir.ArrayCompatible | np.ndarray | ir.TensorProtocol, name: str):
-        ir_tensor = ir.tensor(tensor, name=name)
+    def make_external_tensor(self, tensor: torch.Tensor | np.ndarray | ir.TensorProtocol, name: str):
+        if isinstance(tensor, torch.Tensor):
+            ir_tensor = tensor_adapters.TorchTensor(tensor, name=name)
+        else:
+            ir_tensor = ir.tensor(tensor, name=name)
         filename = f"{name}.bin"
         (ir_tensor,) = ir.external_data.convert_tensors_to_external(
             [ir_tensor], self.cache_dir, filename
