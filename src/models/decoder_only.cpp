@@ -29,7 +29,7 @@ void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   size_t num_tokens = next_tokens.size();
-  const size_t chunk_size = 15;
+  const size_t chunk_size = 1024; // Experimental value
   
   if (num_tokens > chunk_size) {
     // Chunking logic for context phase - process in chunks of 512 tokens
