@@ -963,7 +963,7 @@ class Model:
         self.make_external_tensor(qweight_npy, qweight)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
-        scales_pt = quantized_op.scales.to(self.to_torch_dtype[self.io_dtype])
+        scales_pt = quantized_op.scales.to(self.to_torch_dtype[self.io_dtype]).numpy(force=True)
         scales_pt = scales_pt.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size)
         self.make_external_tensor(scales_pt, scales)
 
@@ -971,15 +971,14 @@ class Model:
 
         if hasattr(quantized_op, "qzeros") and quantized_op.qzeros is not None:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
-            zeros_pt = quantized_op.qzeros
-            zeros_pt = zeros_pt.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] // quantized_op.group_size)
-            # TODO(justinchuby): Do we need to uncpack the zeros tensor?
-            self.make_external_tensor(zeros_pt, zeros)
+            zeros_npy = quantized_op.qzeros.numpy(force=True)
+            zeros_npy = unpack_uint4(zeros_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size])
+            self.make_external_tensor(zeros_npy, zeros)
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
         self.make_node("DequantizeLinear", inputs=dequantize_inputs, outputs=[dequantize_output], name=dequantize_name, block_size=quantized_op.group_size, axis=-1)
-        self.make_value_info(dequantize_output, self.io_dtype, shape=[*scales_npy.shape[:-1], scales_npy.shape[-1] * quantized_op.group_size])
+        self.make_value_info(dequantize_output, self.io_dtype, shape=[*scales_pt.shape[:-1], scales_pt.shape[-1] * quantized_op.group_size])
 
         return dequantize_output
 
