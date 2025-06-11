@@ -661,7 +661,7 @@ class Model:
         for name in self.input_names:
             dtype = self.input_types[name]
             shape = self.input_shapes[name]
-            inputs.append(self.make_value_info(name, dtype=dtype, shape=shape)))
+            inputs.append(self.make_value_info(name, dtype=dtype, shape=shape))
 
         # Add model-specific outputs to list of model outputs
         outputs = self.model.graph.outputs
