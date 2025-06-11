@@ -109,22 +109,6 @@ class Model:
         self.hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
         self.extra_options = extra_options
 
-        # States for building the model
-        graph = ir.Graph(
-            inputs=(),
-            outputs=(),
-            nodes=(),
-            opset_imports={
-                "": 21 if self.quant_attrs["use_qdq"] else 14,
-                "com.microsoft": 1,
-            },
-            name="main_graph",
-        )
-        # A tracer for recording the nodes added
-        # TODO(justinchuby): Bump IR version to 10
-        self.model = ir.Model(graph, ir_version=7, producer_name="onnxruntime-genai")
-        self.values: dict[str, ir.Value] = {}
-
         # EP-specific variables
         self.ep = ep
         self.ep_attrs = {
@@ -365,6 +349,22 @@ class Model:
             # Create quantized attributes from quantization config
             self.quant_attrs["config"] = config.quantization_config
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
+
+        # States for building the model
+        graph = ir.Graph(
+            inputs=(),
+            outputs=(),
+            nodes=(),
+            opset_imports={
+                "": 21 if self.quant_attrs["use_qdq"] else 14,
+                "com.microsoft": 1,
+            },
+            name="main_graph",
+        )
+        # A tracer for recording the nodes added
+        # TODO(justinchuby): Bump IR version to 10
+        self.model = ir.Model(graph, ir_version=7, producer_name="onnxruntime-genai")
+        self.values: dict[str, ir.Value] = {}
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         # TODO(justinchuby): Simplify and remove "TensorProto." from name
