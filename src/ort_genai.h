@@ -676,6 +676,10 @@ inline void SetLogString(const char* name, const char* value) {
   OgaCheckResult(OgaSetLogString(name, value));
 }
 
+inline void SetLogCallback(void (*callback)(const char* string, size_t length)) {
+  OgaCheckResult(OgaSetLogCallback(callback));
+}
+
 inline void SetCurrentGpuDeviceId(int device_id) {
   OgaCheckResult(OgaSetCurrentGpuDeviceId(device_id));
 }

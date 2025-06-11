@@ -880,7 +880,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   auto element_type = input_type_info->GetElementType();
   auto input_shape = input_type_info->GetShape();
   const int64_t batch_size = input_shape[0];
-  const int64_t data_size_bytes = input_type_info->GetElementCount() * SizeOf(element_type) / batch_size;
+  const int64_t data_size_bytes = input_type_info->GetElementCount() * Ort::SizeOf(element_type) / batch_size;
 
   input_shape[0] *= num_beams;
 
