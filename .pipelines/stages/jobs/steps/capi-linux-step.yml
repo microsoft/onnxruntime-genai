@@ -18,11 +18,6 @@ steps:
   path: onnxruntime-genai
   submodules: recursive
 
-- checkout: manylinux
-  clean: true
-  path: onnxruntime-genai/manylinux
-  submodules: recursive
-
 - script: |
     set -e -x
     echo "$(Build.SourcesDirectory)"
