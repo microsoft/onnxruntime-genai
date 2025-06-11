@@ -385,11 +385,7 @@ class Model:
             )
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
-            self.attention_attrs["use_rope_in_attn"] = (
-                self.ep not in ["dml", "webgpu"]
-                and not self.attention_attrs["q_norm"]
-                and not self.attention_attrs["k_norm"]
-            )
+            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml", "webgpu"]
             if self.attention_attrs["use_rope_in_attn"]:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 self.input_names.remove("position_ids")
@@ -547,7 +543,6 @@ class Model:
     def make_int4_algo_config(self, quant_method):
         int4_algo_config = None
         if quant_method == "rtn":
-            from onnxruntime.quantization.matmul_nbits_quantizer import RTNWeightOnlyQuantConfig
             int4_algo_config = RTNWeightOnlyQuantConfig()
         elif quant_method in ["k_quant_mixed", "k_quant_last"]:
             from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
@@ -2633,8 +2628,12 @@ class Model:
             # differ.
             model = orig_model.language_model
         elif hasattr(orig_model, "base_model") and hasattr(orig_model.base_model, "model"):
-            # Model is from PEFT
-            model = orig_model.base_model.model
+            if hasattr(orig_model.base_model.model, "model"):
+                # Model is from PEFT
+                model = orig_model.base_model.model
+            else:
+                # Model is text-based only.
+                model = orig_model.base_model
         else:
             model = orig_model
 

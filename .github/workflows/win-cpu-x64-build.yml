@@ -95,11 +95,11 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_cpu_release -DUSE_GUIDANCE=ON
+          cmake --preset windows_x64_cpu_release
 
       - name: Build with CMake
         run: |
-          cmake --build --preset windows_x64_cpu_release --parallel -DUSE_GUIDANCE=ON
+          cmake --build --preset windows_x64_cpu_release --parallel
 
       - name: Install the python wheel and test dependencies
         run: |

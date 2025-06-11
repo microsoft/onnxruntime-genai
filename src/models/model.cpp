@@ -11,6 +11,7 @@
 
 #include "../generators.h"
 #include "../search.h"
+#include "../tracing.h"
 #include "model.h"
 #include "gpt.h"
 #include "decoder_only.h"
@@ -37,6 +38,8 @@ State::State(const GeneratorParams& params, const Model& model)
 }
 
 void State::Run(OrtSession& session, bool graph_capture_this_run) {
+  DurationTrace trace{"State::Run"};
+
   if (params_->use_graph_capture) {
     if (graph_capture_this_run)
       run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
@@ -439,6 +442,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       if (!GetDmlInterface()) {
         LUID device_luid{};
         LUID* p_device_luid{};
+        uint32_t device_index{};
+        uint32_t* p_device_index{};
         for (const auto& [name, value] : provider_options.options) {
           if (name == "luid") {
             if (auto separator_position = value.find(":"); separator_position != std::string::npos) {
@@ -446,10 +451,13 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
               device_luid.LowPart = std::stol(value.substr(separator_position + 1));
               p_device_luid = &device_luid;
             }
+          } else if (name == "device_index") {
+            device_index = std::stoi(value);
+            p_device_index = &device_index;
           }
         }
 
-        InitDmlInterface(p_device_luid);
+        InitDmlInterface(p_device_luid, p_device_index);
       }
 
       if (!disable_graph_capture) {
