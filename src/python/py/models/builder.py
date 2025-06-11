@@ -612,6 +612,15 @@ class Model:
     def make_node(self, op_type, inputs: Sequence[str], outputs: Sequence[str], *, name: str, domain="", **kwargs):
         assert name, "Node name must be provided"
         if name in self.node_names:
+            # Note:
+            #
+            # This approach allows functions that make similar subgraphs with the same naming schema
+            # to share existing nodes without needing to know whether the nodes already exist or not
+            # (e.g. attention mask subgraphs).
+            #
+            # This means that the nodes can be created in those functions regardless of their actual
+            # status in the graph. This checks can then decide whether the proposed node actually
+            # needs to be added into the graph or not.
             return
 
         # Save any constants as nodes
@@ -625,16 +634,6 @@ class Model:
         node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
         self.model.graph.append(node)
         self.node_names.add(name)
-
-        # Note:
-        #
-        # The above approach allows functions that make similar subgraphs with the same naming schema
-        # to share existing nodes without needing to know whether the nodes already exist or not
-        # (e.g. attention mask subgraphs).
-        #
-        # This means that the nodes can be created in those functions regardless of their actual
-        # status in the graph. The above checks can then decide whether the proposed node actually
-        # needs to be added into the graph or not.
 
     def make_value_info(self, name, dtype: ir.DataType | int| None = None, shape: Sequence[int | str] | ir.Shape | None = None) -> ir.Value:
         """Obtain or create an IR value by value name.
