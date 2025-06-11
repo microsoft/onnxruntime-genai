@@ -150,6 +150,22 @@ class Model:
         self.hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
         self.extra_options = extra_options
 
+        # States for building the model
+        graph = ir.Graph(
+            inputs=(),
+            outputs=(),
+            nodes=(),
+            opset_imports={
+                "": 21 if self.quant_attrs["use_qdq"] else 14,
+                "com.microsoft": 1,
+            },
+            name="main_graph",
+        )
+        # A tracer for recording the nodes added
+        # TODO(justinchuby): Bump IR version to 10
+        self.model = ir.Model(graph, ir_version=7, producer_name="onnxruntime-genai")
+        self.values: dict[str, ir.Value] = {}
+
         # EP-specific variables
         self.ep = ep
         self.ep_attrs = {
@@ -391,22 +407,6 @@ class Model:
             self.quant_attrs["config"] = config.quantization_config
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
 
-        # States for building the model
-        graph = ir.Graph(
-            inputs=(),
-            outputs=(),
-            nodes=(),
-            opset_imports={
-                "": 21 if self.quant_attrs["use_qdq"] else 14,
-                "com.microsoft": 1,
-            },
-            name="main_graph",
-        )
-        # A tracer for recording the nodes added
-        # TODO(justinchuby): Bump IR version to 10
-        self.model = ir.Model(graph, ir_version=7, producer_name="onnxruntime-genai")
-        self._values: dict[str, ir.Value] = {}
-
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         # TODO(justinchuby): Simplify and remove "TensorProto." from name
         return f"TensorProto.{dtype.name}"
@@ -557,7 +557,7 @@ class Model:
             int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
         return int4_algo_config
 
-    def to_int4(self):
+    def to_int4(self) -> ir.Model:
         quant = MatMulNBitsQuantizer(
             model=ir.to_proto(self.model),
             block_size=self.quant_attrs["int4"]["block_size"],
@@ -571,29 +571,15 @@ class Model:
         quant.process()
         return ir.from_proto(quant.model.model)
 
-    def as_ir_model(self) -> ir.Model:
-        """Return the IR model."""
-        # Quantize ONNX model to desired precision
-        # TODO: Replace by quantizing the MatMuls as they are created
-        already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
-        if self.onnx_dtype == ir.DataType.UINT4 and not already_quantized_in_qdq_format:
-            model = builder_utils.to_int4(
-                self.model,
-                block_size=self.quant_attrs["int4"]["block_size"],
-                is_symmetric=self.quant_attrs["int4"]["is_symmetric"],
-                accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
-                use_qdq=self.quant_attrs["use_qdq"],
-                op_types_to_quantize=self.quant_attrs["int4"]["op_types_to_quantize"],
-            )
-        else:
-            model = self.model
-        return model
-
     def save_model(self, out_dir):
         print(f"Saving ONNX model in {out_dir}")
-        gc.collect()
 
-        model = self.as_ir_model()
+        already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
+        if self.onnx_dtype == ir.DataType.UINT4 and not already_quantized_in_qdq_format:
+            model = self.to_int4()
+        else:
+            model = self.model
+
         # Make sure all nodes are topologically sorted
         model.graph.sort()
 
@@ -632,9 +618,7 @@ class Model:
         if quant_method == "rtn":
             int4_algo_config = RTNWeightOnlyQuantConfig()
         elif quant_method in ["k_quant_mixed", "k_quant_last"]:
-            from onnxruntime.quantization.matmul_nbits_quantizer import (
-                KQuantWeightOnlyQuantConfig,
-            )
+            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
             if quant_method == "k_quant_mixed":
                 # k_quant_mixed is from llama.cpp.
                 # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
@@ -706,7 +690,7 @@ class Model:
         if name == "":
             # None value
             return ir.Value(name="")
-        value = self._values.setdefault(name, ir.Value(name=name))
+        value = self.values.setdefault(name, ir.Value(name=name))
         if dtype is not None:
             value.dtype = ir.DataType(dtype)
         if shape is not None:
