@@ -46,12 +46,12 @@ parameters:
 - name: enable_apple_framework
   displayName: 'Whether Apple framework for iOS & MacCatalyst is built.'
   type: boolean
-  default: false
+  default: true
 
 - name: enable_win_qnn
   displayName: 'Whether QNN nuget package should be built.'
   type: boolean
-  default: false
+  default: true
 
 - name: ort_version
   displayName: 'OnnxRuntime version'
@@ -74,7 +74,7 @@ parameters:
   values:
   - '11.8'
   - '12.2'
-  default: '11.8'
+  default: '12.2'
 
 - name: build_config
   displayName: 'Build Configuration'
@@ -96,7 +96,7 @@ parameters:
 - name: custom_ort_package_versioned_name
   displayName: 'Versioned name of ort nuget package. Must follow Microsoft.ML.OnnxRuntime.*.version.nupkg. Keep None to disable building'
   type: string
-  default: 'None'
+  default: 'Microsoft.ML.OnnxRuntime.Foundry.1.23.0-dev-20250516-0447-261c2b7a80.nupkg'
 
 resources:
   repositories:
