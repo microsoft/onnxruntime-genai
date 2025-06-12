@@ -45,7 +45,6 @@ steps:
       --context tools/ci_build/github/linux/docker/manylinux \
       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
       --container-registry onnxruntimebuildcache \
-      --multiple_repos \
       --repository ortgenai$(ep)build$(arch)
   displayName: 'Get CUDA Docker Image $(cuda_version)'
   condition: eq(variables['ep'], 'cuda')
@@ -60,7 +59,6 @@ steps:
       --context tools/ci_build/github/linux/docker/manylinux \
       --docker-build-args "--build-arg BUILD_UID=$( id -u )" \
       --container-registry onnxruntimebuildcache \
-      --multiple_repos \
       --repository ortgenai$(ep)build$(arch)
   displayName: 'Get Docker Image'
   condition: ne(variables['ep'], 'cuda')
