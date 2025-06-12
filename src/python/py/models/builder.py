@@ -1196,18 +1196,6 @@ class Model:
         # Name = name of original LayerNorm op as if the cast nodes did not exist
         # Inputs = inputs into the original LayerNorm op as if the cast nodes did not exist
         # Outputs = outputs from the original LayerNorm op as if the cast nodes did not exist
-        def get_shape_of_value_info(target_name):
-            for value_info in self.value_infos:
-                if value_info.name == target_name:
-                    shape = []
-                    for dim in value_info.type.tensor_type.shape.dim:
-                        if dim.HasField("dim_value"):
-                            shape.append(dim.dim_value)
-                        elif dim.HasField("dim_param"):
-                            shape.append(dim.dim_param)
-                        else:
-                            shape.append(None)
-                    return shape
 
         # Save original inputs and outputs
         skip = len(inputs) > 2  # [root_input, skip_input, weight] vs. [root_input, weight]
@@ -1221,15 +1209,16 @@ class Model:
             root_input_cast_name = f"{name}/root_input/Cast"
             root_input_cast_output = f"{root_input_cast_name}/output_0"
             self.make_node("Cast", inputs=[root_input], outputs=[root_input_cast_output], name=root_input_cast_name, to=new_dtype)
-            self.make_value_info(root_input_cast_output, new_dtype, shape=get_shape_of_value_info(root_input))
+            self.make_value_info(root_input_cast_output, new_dtype, shape=self.values[root_input].shape)
             inputs[0] = root_input_cast_output
 
         if skip and self.layernorm_attrs["cast"]["skip_input"]:
             # Cast skip_input
+            assert skip_input is not None
             skip_input_cast_name = f"{name}/skip_input/Cast"
             skip_input_cast_output = f"{skip_input_cast_name}/output_0"
             self.make_node("Cast", inputs=[skip_input], outputs=[skip_input_cast_output], name=skip_input_cast_name, to=new_dtype)
-            self.make_value_info(skip_input_cast_output, new_dtype, shape=get_shape_of_value_info(skip_input))
+            self.make_value_info(skip_input_cast_output, new_dtype, shape=self.values[skip_input].shape)
             inputs[1] = skip_input_cast_output
 
         if self.layernorm_attrs["cast"]["output_0"]:
@@ -1237,15 +1226,16 @@ class Model:
             output_0_cast_name = f"{name}/output_0/Cast"
             output_0_cast_output = f"{output_0_cast_name}/output_0"
             self.make_node("Cast", inputs=[output_0_cast_output], outputs=[output_0], name=output_0_cast_name, to=old_dtype)
-            self.make_value_info(output_0, old_dtype, shape=get_shape_of_value_info(root_input))
+            self.make_value_info(output_0, old_dtype, shape=self.values[root_input].shape)
             outputs[0] = output_0_cast_output
 
         if skip and not self.layernorm_attrs["last_layernorm"] and self.layernorm_attrs["cast"]["output_3"]:
             # Cast output_3
+            assert output_3 is not None
             output_3_cast_name = f"{name}/output_3/Cast"
             output_3_cast_output = f"{output_3_cast_name}/output_3"
             self.make_node("Cast", inputs=[output_3_cast_output], outputs=[output_3], name=output_3_cast_name, to=old_dtype)
-            self.make_value_info(output_3, old_dtype, shape=get_shape_of_value_info(root_input))
+            self.make_value_info(output_3, old_dtype, shape=self.values[root_input].shape)
             outputs[3] = output_3_cast_output
 
         return inputs, outputs
