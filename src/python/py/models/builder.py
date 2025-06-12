@@ -14,7 +14,7 @@ import ast
 import json
 import os
 import textwrap
-from typing import Literal, Sequence
+from typing import Any, Literal, Sequence
 
 import ml_dtypes
 import numpy as np
@@ -39,52 +39,22 @@ from transformers import (
 # the ONNX graph efficiently.
 
 
-def _unpack_uint4_as_uint8(data: np.ndarray, dims: Sequence[int]) -> np.ndarray:
-    """Convert a packed uint4 array to unpacked uint4 array represented as uint8.
-
-    Args:
-        data: A numpy array.
-        dims: The dimensions are used to reshape the unpacked buffer.
-
-    Returns:
-        A numpy array of int8/uint8 reshaped to dims.
-    """
-    result = np.empty([data.size * 2], dtype=data.dtype)
-    array_low = data & np.uint8(0x0F)
-    array_high = data & np.uint8(0xF0)
-    array_high >>= np.uint8(4)
-    result[0::2] = array_low
-    result[1::2] = array_high
-    if result.size == np.prod(dims) + 1:
-        # handle single-element padding due to odd number of elements
-        result = result[:-1]
-    result.resize(dims, refcheck=False)
-    return result
-
-
-def unpack_uint4(data: np.ndarray, dims: Sequence[int]) -> np.ndarray:
-    """Convert a packed uint4 array to unpacked uint4 array represented as uint8.
-
-    Args:
-        data: A numpy array.
-        dims: The dimensions are used to reshape the unpacked buffer.
-
-    Returns:
-        A numpy array of int8/uint8 reshaped to dims.
-    """
-    data = data.view(np.uint8).flatten()
-    return _unpack_uint4_as_uint8(data, dims).view(ml_dtypes.uint4)
-
-
 class Model:
     def __init__(
         self,
         config,
         io_dtype: Literal[ir.DataType.FLOAT, ir.DataType.FLOAT16] | int,
-        onnx_dtype: ir.DataType | int,
+        onnx_dtype: Literal[
+            ir.DataType.FLOAT,
+            ir.DataType.FLOAT16,
+            ir.DataType.BFLOAT16,
+            ir.DataType.INT4,
+            ir.DataType.UINT4,
+        ]
+        | int,
         ep: str,
-        cache_dir,
-        extra_options,
+        cache_dir: str,
+        extra_options: dict[str, Any],
     ):
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
         self.original_context_length = config.original_max_position_embeddings if hasattr(config, "original_max_position_embeddings") else config.rope_scaling["original_max_position_embeddings"] if hasattr(config, "rope_scaling") and hasattr(config.rope_scaling, "original_max_position_embeddings") else self.context_length
@@ -535,7 +505,7 @@ class Model:
         print(f"Saving ONNX model in {out_dir}")
 
         already_quantized_in_qdq_format = self.quant_type is not None and self.quant_attrs["use_qdq"]  # Skip quantizing `MatMul` in `DequantizeLinear --> Transpose --> MatMul` path
-        if self.onnx_dtype == ir.DataType.UINT4 and not already_quantized_in_qdq_format:
+        if self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4} and not already_quantized_in_qdq_format:
             model = self.to_int4()
         else:
             model = self.model
@@ -839,7 +809,7 @@ class Model:
     def make_matmul_op(self, matmul, basename, root_input, **kwargs):
         if self.onnx_dtype in {ir.DataType.FLOAT16, ir.DataType.FLOAT}:
             return self.make_matmul_float(matmul, basename, root_input, **kwargs)
-        elif self.onnx_dtype == ir.DataType.UINT4:
+        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
             if self.quant_attrs["use_qdq"]:
                 return self.make_matmul_int4_qdq(matmul, basename, root_input, **kwargs)
             else:
@@ -896,11 +866,26 @@ class Model:
         return name
 
     def make_dequantize_linear(self, dequantize_name, quantized_op):
+        def unpack_uint4_as_uint8(data: np.ndarray, dims: Sequence[int]) -> np.ndarray:
+            """Convert a packed (u)int4 array to unpacked (u)int4 array"""
+            data = data.flatten()
+            result = np.empty([data.size * 2], dtype=data.dtype)
+            array_low = data & np.uint8(0x0F)
+            array_high = data & np.uint8(0xF0)
+            array_high >>= np.uint8(4)
+            result[0::2] = array_low
+            result[1::2] = array_high
+            if result.size == np.prod(dims) + 1:
+                # handle single-element padding due to odd number of elements
+                result = result[:-1]
+            result.resize(dims, refcheck=False)
+            return result
+
         # Input weights are quantized, save quantized MatMul weights for onnx model
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
         qweight_npy = quantized_op.qweight.numpy(force=True)
         qweight_npy = qweight_npy.reshape(*qweight_npy.shape[:-2], qweight_npy.shape[-2] * qweight_npy.shape[-1])
-        qweight_npy = unpack_uint4(qweight_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2])
+        qweight_npy = unpack_uint4_as_uint8(qweight_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2])
         self.make_external_tensor(qweight_npy, qweight)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
@@ -913,7 +898,7 @@ class Model:
         if hasattr(quantized_op, "qzeros") and quantized_op.qzeros is not None:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
             zeros_npy = quantized_op.qzeros.numpy(force=True)
-            zeros_npy = unpack_uint4(zeros_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size])
+            zeros_npy = unpack_uint4_as_uint8(zeros_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size])
             self.make_external_tensor(zeros_npy, zeros)
             dequantize_inputs.append(zeros)
 
@@ -990,7 +975,7 @@ class Model:
     def make_packed_matmul(self, q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs):
         if self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}:
             return self.make_packed_matmul_float(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
-        elif self.onnx_dtype == ir.DataType.UINT4:
+        elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
             return self.make_packed_matmul_int4(q_matmul, k_matmul, v_matmul, basename, root_input, **kwargs)
         else:
             raise NotImplementedError(f"The {self.onnx_dtype} precision is not currently supported.")
@@ -3130,7 +3115,7 @@ class Qwen3Model(QwenModel):
 
 
 class PhiModel(Model):
-    def __init__(self, config, io_dtype: int, onnx_dtype: ir.DataType, ep: str, cache_dir, extra_options):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.layernorm_attrs["simple"] = False
         self.mlp_attrs["use_proj"], self.mlp_attrs["use_fc"] = False, True
@@ -3745,13 +3730,19 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     return ir.DataType.FLOAT16
 
 
-def set_onnx_dtype(precision: str) -> ir.DataType:
+def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType:
+    if precision == "int4":
+        if extra_options.get("int4_is_symmetric", True):
+            return ir.DataType.INT4
+        else:
+            return ir.DataType.UINT4
     return {
         "fp32": ir.DataType.FLOAT,
         "fp16": ir.DataType.FLOAT16,
         "bf16": ir.DataType.BFLOAT16,
         "int4": ir.DataType.UINT4,
     }[precision]
+
 
 
 def create_model(model_name, input_path, output_dir, precision: str, execution_provider, cache_dir, **extra_options):
@@ -3772,7 +3763,7 @@ def create_model(model_name, input_path, output_dir, precision: str, execution_p
 
     # Set input/output precision of ONNX model
     io_dtype = set_io_dtype(precision, execution_provider, extra_options)
-    onnx_dtype = set_onnx_dtype(precision)
+    onnx_dtype = set_onnx_dtype(precision, extra_options)
     if "config_only" not in extra_options:
         # List architecture options in alphabetical order
         if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
@@ -3822,7 +3813,7 @@ def create_model(model_name, input_path, output_dir, precision: str, execution_p
             print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
             print("WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default.")
             execution_provider = "cuda"
-            onnx_dtype = ir.DataType.UINT4
+            onnx_dtype = set_onnx_dtype("int4", extra_options)
             onnx_model = Phi3MoELongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
             onnx_model = Phi3SmallModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
