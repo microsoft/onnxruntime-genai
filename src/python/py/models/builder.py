@@ -867,7 +867,7 @@ class Model:
     def make_dequantize_linear(self, dequantize_name, quantized_op):
         def unpack_4bit(data: np.ndarray, dims: Sequence[int]) -> np.ndarray:
             """Convert a packed (u)int4 array to unpacked (u)int4 array"""
-            data = data.flatten()
+            data = data.view(np.uint8).flatten()
             result = np.empty([data.size * 2], dtype=data.dtype)
             array_low = data & np.uint8(0x0F)
             array_high = data & np.uint8(0xF0)
