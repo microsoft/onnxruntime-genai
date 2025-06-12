@@ -142,7 +142,7 @@ class Model:
         # Store names of nodes already created
         self.node_names: set[str] = set()
 
-        # Map TensorProto dtypes to PyTorch dtypes
+        # Map ONNX dtypes to PyTorch dtypes
         self.to_torch_dtype = {
             ir.DataType.INT8: torch.int8,
             ir.DataType.INT32: torch.int32,
@@ -152,7 +152,7 @@ class Model:
             ir.DataType.FLOAT: torch.float32,
         }
 
-        # Map PyTorch dtypes to TensorProto dtypes
+        # Map PyTorch dtypes to ONNX dtypes
         self.to_onnx_dtype = {v: k for k, v in self.to_torch_dtype.items()}
 
         # Mask-specific variables
@@ -1516,33 +1516,33 @@ class Model:
         #                            Mul_1
 
         make_cast_name = f"{basename}/Cast"
-        self.make_cast(make_cast_name, root_input, TensorProto.FLOAT, shape=shape)
+        self.make_cast(make_cast_name, root_input, ir.DataType.FLOAT, shape=shape)
 
         make_pow_name = f"{basename}/Pow"
-        make_pow_inputs = [f"{make_cast_name}/output_0", f"/model/constants/TensorProto.FLOAT/0D/2"]
+        make_pow_inputs = [f"{make_cast_name}/output_0", "/model/constants/TensorProto.FLOAT/0D/2"]
 
         self.make_node("Pow", inputs=make_pow_inputs, outputs=[f"{make_pow_name}/output_0"], name=make_pow_name, domain="")
-        self.make_value_info(f"{make_pow_name}/output_0", TensorProto.FLOAT, shape=shape)
+        self.make_value_info(f"{make_pow_name}/output_0", ir.DataType.FLOAT, shape=shape)
 
         make_reducemean_name = f"{basename}/ReduceMean"
         make_reducemean_inputs = [f"{make_pow_name}/output_0"]
-        self.make_reduce_mean(make_reducemean_name, make_reducemean_inputs, TensorProto.FLOAT, keepdims=True, axes=[-1], shape=shape)
+        self.make_reduce_mean(make_reducemean_name, make_reducemean_inputs, ir.DataType.FLOAT, keepdims=True, axes=[-1], shape=shape)
 
         make_add_name = f"{basename}/Add"
         make_add_inputs = [f"{make_reducemean_name}/output_0", f"/model/constants/TensorProto.FLOAT/0D/{self.layernorm_attrs['epsilon']}"]
-        self.make_add(make_add_name, make_add_inputs, TensorProto.FLOAT, shape=shape)
+        self.make_add(make_add_name, make_add_inputs, ir.DataType.FLOAT, shape=shape)
 
         make_sqrt_name = f"{basename}/Sqrt"
         make_sqrt_inputs = [f"{make_add_name}/output_0"]
-        self.make_sqrt(make_sqrt_name, make_sqrt_inputs, TensorProto.FLOAT, shape=shape)
+        self.make_sqrt(make_sqrt_name, make_sqrt_inputs, ir.DataType.FLOAT, shape=shape)
 
         make_div_name = f"{basename}/Div"
-        make_div_inputs = [f"/model/constants/TensorProto.FLOAT/0D/1", f"{make_sqrt_name}/output_0"]
-        self.make_div(make_div_name, make_div_inputs, TensorProto.FLOAT, shape=shape)
+        make_div_inputs = ["/model/constants/TensorProto.FLOAT/0D/1", f"{make_sqrt_name}/output_0"]
+        self.make_div(make_div_name, make_div_inputs, ir.DataType.FLOAT, shape=shape)
 
         make_mul_name = f"{basename}/Mul"
         make_mul_inputs = [f"{make_div_name}/output_0", f"{make_cast_name}/output_0"]
-        self.make_mul(make_mul_name, make_mul_inputs, TensorProto.FLOAT, shape=shape)
+        self.make_mul(make_mul_name, make_mul_inputs, ir.DataType.FLOAT, shape=shape)
 
         make_cast_1_name = f"{basename}/Cast_1"
         self.make_cast(make_cast_1_name, f"{make_mul_name}/output_0", dtype=io_dtype, shape=shape)
