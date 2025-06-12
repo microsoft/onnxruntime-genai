@@ -1204,12 +1204,14 @@ class Model:
         output_0 = outputs[0]
         output_3 = outputs[3] if skip and not self.layernorm_attrs["last_layernorm"] else None
 
+        root_input_shape = self.values[root_input].shape
+
         if self.layernorm_attrs["cast"]["root_input"]:
             # Cast root_input
             root_input_cast_name = f"{name}/root_input/Cast"
             root_input_cast_output = f"{root_input_cast_name}/output_0"
             self.make_node("Cast", inputs=[root_input], outputs=[root_input_cast_output], name=root_input_cast_name, to=new_dtype)
-            self.make_value_info(root_input_cast_output, new_dtype, shape=self.values[root_input].shape)
+            self.make_value_info(root_input_cast_output, new_dtype, shape=root_input_shape)
             inputs[0] = root_input_cast_output
 
         if skip and self.layernorm_attrs["cast"]["skip_input"]:
@@ -1226,7 +1228,7 @@ class Model:
             output_0_cast_name = f"{name}/output_0/Cast"
             output_0_cast_output = f"{output_0_cast_name}/output_0"
             self.make_node("Cast", inputs=[output_0_cast_output], outputs=[output_0], name=output_0_cast_name, to=old_dtype)
-            self.make_value_info(output_0, old_dtype, shape=self.values[root_input].shape)
+            self.make_value_info(output_0, old_dtype, shape=root_input_shape)
             outputs[0] = output_0_cast_output
 
         if skip and not self.layernorm_attrs["last_layernorm"] and self.layernorm_attrs["cast"]["output_3"]:
@@ -1235,7 +1237,7 @@ class Model:
             output_3_cast_name = f"{name}/output_3/Cast"
             output_3_cast_output = f"{output_3_cast_name}/output_3"
             self.make_node("Cast", inputs=[output_3_cast_output], outputs=[output_3], name=output_3_cast_name, to=old_dtype)
-            self.make_value_info(output_3, old_dtype, shape=self.values[root_input].shape)
+            self.make_value_info(output_3, old_dtype, shape=root_input_shape)
             outputs[3] = output_3_cast_output
 
         return inputs, outputs
