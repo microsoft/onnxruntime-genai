@@ -336,9 +336,7 @@ class Model:
             },
             name="main_graph",
         )
-        # A tracer for recording the nodes added
-        # TODO(justinchuby): Bump IR version to 10
-        self.model = ir.Model(graph, ir_version=7, producer_name="onnxruntime-genai")
+        self.model = ir.Model(graph, ir_version=10, producer_name="onnxruntime-genai")
         self.values: dict[str, ir.Value] = {}
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
