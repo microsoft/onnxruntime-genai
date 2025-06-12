@@ -16,7 +16,6 @@ import os
 import textwrap
 from typing import Any, Literal, Sequence
 
-import ml_dtypes
 import numpy as np
 import onnx_ir as ir
 from onnx_ir import tensor_adapters
@@ -866,7 +865,7 @@ class Model:
         return name
 
     def make_dequantize_linear(self, dequantize_name, quantized_op):
-        def unpack_uint4_as_uint8(data: np.ndarray, dims: Sequence[int]) -> np.ndarray:
+        def unpack_4bit(data: np.ndarray, dims: Sequence[int]) -> np.ndarray:
             """Convert a packed (u)int4 array to unpacked (u)int4 array"""
             data = data.flatten()
             result = np.empty([data.size * 2], dtype=data.dtype)
@@ -879,13 +878,13 @@ class Model:
                 # handle single-element padding due to odd number of elements
                 result = result[:-1]
             result.resize(dims, refcheck=False)
-            return result
+            return result.view(self.onnx_dtype.numpy())
 
         # Input weights are quantized, save quantized MatMul weights for onnx model
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
         qweight_npy = quantized_op.qweight.numpy(force=True)
         qweight_npy = qweight_npy.reshape(*qweight_npy.shape[:-2], qweight_npy.shape[-2] * qweight_npy.shape[-1])
-        qweight_npy = unpack_uint4_as_uint8(qweight_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2])
+        qweight_npy = unpack_4bit(qweight_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2])
         self.make_external_tensor(qweight_npy, qweight)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
@@ -898,7 +897,7 @@ class Model:
         if hasattr(quantized_op, "qzeros") and quantized_op.qzeros is not None:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
             zeros_npy = quantized_op.qzeros.numpy(force=True)
-            zeros_npy = unpack_uint4_as_uint8(zeros_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size])
+            zeros_npy = unpack_4bit(zeros_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size])
             self.make_external_tensor(zeros_npy, zeros)
             dequantize_inputs.append(zeros)
 
