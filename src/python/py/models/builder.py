@@ -42,7 +42,12 @@ class Model:
     def __init__(
         self,
         config,
-        io_dtype: Literal[ir.DataType.FLOAT, ir.DataType.FLOAT16] | int,
+        io_dtype: Literal[
+            ir.DataType.FLOAT,
+            ir.DataType.FLOAT16,
+            ir.DataType.BFLOAT16,
+        ]
+        | int,
         onnx_dtype: Literal[
             ir.DataType.FLOAT,
             ir.DataType.FLOAT16,
