@@ -3739,7 +3739,6 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
         "fp32": ir.DataType.FLOAT,
         "fp16": ir.DataType.FLOAT16,
         "bf16": ir.DataType.BFLOAT16,
-        "int4": ir.DataType.UINT4,
     }[precision]
 
 
