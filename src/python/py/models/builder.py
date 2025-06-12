@@ -330,10 +330,7 @@ class Model:
             inputs=(),
             outputs=(),
             nodes=(),
-            opset_imports={
-                "": 21 if self.quant_attrs["use_qdq"] else 14,
-                "com.microsoft": 1,
-            },
+            opset_imports={"": 21, "com.microsoft": 1},
             name="main_graph",
         )
         # A tracer for recording the nodes added
@@ -737,15 +734,9 @@ class Model:
 
     def make_reduce_mean(self, name, inputs, dtype, shape, axes=[-1], keepdims=False):
         output = f"{name}/output_0"
-        if self.quant_attrs["use_qdq"]:
-            # Opset 18 uses axes as input[1]
-            inputs.append(f"/model/constants/TensorProto.INT64/1D/{','.join(map(str, axes))}")
-            self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
-            self.make_value_info(output, dtype, shape=shape)
-        else:
-            # Opset 17 uses axes as attribute
-            self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, axes=axes, keepdims=keepdims)
-            self.make_value_info(output, dtype, shape=shape)
+        inputs.append(f"/model/constants/TensorProto.INT64/1D/{','.join(map(str, axes))}")
+        self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
+        self.make_value_info(output, dtype, shape=shape)
 
     def make_sqrt(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -2392,13 +2383,6 @@ class Model:
         return mul_act_name
 
     def make_gelu(self, layer_id, root_input, activation):
-        # NvTensorRtRtx (Opset 21) uses standard "Gelu" replacing "Gelu" & "FastGelu" contrib ops, otherwise fallback to contrib ops
-        if self.ep == "NvTensorRtRtx" and activation in ["Gelu", "FastGelu"]:
-            return self._make_gelu_op(layer_id, root_input, activation)
-        else:
-            return self.make_gelu_op(layer_id, root_input, activation)
-
-    def make_gelu_op(self, layer_id, root_input, activation):
         # Make nodes for this activation subgraph
         #
         #       root_input (Add)
@@ -2407,28 +2391,12 @@ class Model:
         gelu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         output = f"{gelu_name}/output_0"
 
-        self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
-
-        return gelu_name
-
-    # This expansion of contrib-op can be updated / deprecated in future.
-    def _make_gelu_op(self, layer_id, root_input, activation):
-        # Make nodes for this activation subgraph
-        #
-        #       root_input (Add)
-        #           |
-        #        GeluAct
-        gelu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
-        output = f"{gelu_name}/output_0"
-
-        # NvTensorRtRtx (Opset 21) uses standard "Gelu" replacing "Gelu" & "FastGelu" contrib ops, otherwise fallback to contrib ops
         if activation == "Gelu":
             self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="none")
         elif activation == "FastGelu":
             self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="tanh")
         else:
-            raise NotImplementedError(f"The {activation} activation function is not currently supported.")
+            self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
 
         self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
 
@@ -3682,7 +3650,7 @@ def check_extra_options(kv_pairs):
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
-        raise ValueError(f"Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
+        raise ValueError("Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
     # NvTensorRtRtx EP requires Opset 21, so force use_qdq which controls it.
     if args.execution_provider == "NvTensorRtRtx":
