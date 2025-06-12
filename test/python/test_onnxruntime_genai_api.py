@@ -17,6 +17,8 @@ import pytest
 
 if not sysconfig.get_platform().endswith("arm64"):
     # Skip importing onnx if running on ARM64
+    # TODO(justinchuby): ONNX 1.18 supports arm64. Remove the condition when
+    # there is a version bump
     import onnx
 
 devices = ["cpu"]
@@ -559,6 +561,9 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
         """Extract a subgraph from the input model and save it to the output path"""
 
         model = onnx.load(input_path)
+        # Add all value info out the model output to value_info list for the
+        # extractor to find the value properly
+        model.graph.value_info.extend(model.graph.output)
 
         e = onnx.utils.Extractor(model)
         extracted = e.extract_model(input_names, output_names)
