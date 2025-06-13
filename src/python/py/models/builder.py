@@ -729,9 +729,8 @@ class Model:
         self.make_node("ReduceMax", inputs=inputs, outputs=[output], name=name, keepdims=False)
         self.make_value_info(output, dtype, shape=shape)
 
-    def make_reduce_mean(self, name, inputs, dtype, shape, axes=[-1], keepdims=False):
+    def make_reduce_mean(self, name, inputs, dtype, shape, keepdims=False):
         output = f"{name}/output_0"
-        inputs.append(f"/model/constants/INT64/1D/{','.join(map(str, axes))}")
         self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
         self.make_value_info(output, dtype, shape=shape)
 
@@ -1507,8 +1506,8 @@ class Model:
         self.make_value_info(f"{make_pow_name}/output_0", ir.DataType.FLOAT, shape=shape)
 
         make_reducemean_name = f"{basename}/ReduceMean"
-        make_reducemean_inputs = [f"{make_pow_name}/output_0"]
-        self.make_reduce_mean(make_reducemean_name, make_reducemean_inputs, ir.DataType.FLOAT, keepdims=True, axes=[-1], shape=shape)
+        make_reducemean_inputs = [f"{make_pow_name}/output_0", "/model/constants/INT64/1D/-1"]
+        self.make_reduce_mean(make_reducemean_name, make_reducemean_inputs, ir.DataType.FLOAT, keepdims=True, shape=shape)
 
         make_add_name = f"{basename}/Add"
         make_add_inputs = [f"{make_reducemean_name}/output_0", f"/model/constants/FLOAT/0D/{self.layernorm_attrs['epsilon']}"]
