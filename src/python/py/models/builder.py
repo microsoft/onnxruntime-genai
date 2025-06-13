@@ -390,7 +390,7 @@ class Model:
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         try:
             config = GenerationConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
-        except:
+        except Exception:
             config = AutoConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
 
         inputs = dict(zip(self.input_names, self.input_names))
@@ -2300,7 +2300,7 @@ class Model:
                 _, processed_q_weight, torch_weight_scales = (
                     torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(weights.T, type)
                 )
-            except:
+            except ImportError:
                 raise RuntimeError("tensorrt_llm is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix()")
 
             return torch_weight_scales.to(torch.float16), processed_q_weight
@@ -2525,7 +2525,7 @@ class Model:
             # Load GGUF model
             try:
                 from gguf_model import GGUFModel
-            except:
+            except ImportError:
                 from onnxruntime_genai.models.gguf_model import GGUFModel
             model = GGUFModel.from_pretrained(self.model_type, input_path, self.head_size, self.hidden_size, self.intermediate_size, self.num_attn_heads, self.num_kv_heads, self.vocab_size)
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
@@ -2534,7 +2534,7 @@ class Model:
             # Load quantized PyTorch model
             try:
                 from quantized_model import QuantModel
-            except:
+            except ImportError:
                 from onnxruntime_genai.models.quantized_model import QuantModel
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
