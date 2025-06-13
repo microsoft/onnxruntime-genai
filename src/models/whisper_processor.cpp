@@ -12,6 +12,7 @@ WhisperProcessor::WhisperProcessor(Config& config, const SessionInfo& session_in
   processor_ = ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor>(OrtxCreateSpeechFeatureExtractor, processor_config.c_str());
 
   config.AddMapping(std::string(Config::Defaults::AudioFeaturesName), config.model.encoder.inputs.audio_features);
+  // config.AddMapping(std::string(Config::Defaults::InputIdsName), config.model.decoder.inputs.input_ids);
 }
 
 std::unique_ptr<NamedTensors> WhisperProcessor::Process([[maybe_unused]] const Tokenizer& tokenizer, const Payload& payload) const {
@@ -36,6 +37,13 @@ std::unique_ptr<NamedTensors> WhisperProcessor::Process([[maybe_unused]] const T
     named_tensors->emplace(std::string(Config::Defaults::AudioFeaturesName),
                            std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(mel.get(), allocator)));
   }
+
+  // // It is assumed that creating input ids using WhisperProcessor will be using batch_size = 1.
+  // // For batch_size > 1 or for more granular control over the input ids, please use AppendTokenSequences instead.
+  // auto input_ids = tokenizer.Encode(payload.text.c_str());
+  // std::unique_ptr<OrtValue> input_ids_value = OrtValue::CreateTensor<int32_t>(allocator, std::vector<int64_t>{1, static_cast<int64_t>(input_ids.size())});
+  // std::copy(input_ids.begin(), input_ids.end(), input_ids_value->GetTensorMutableData<int32_t>());
+  // named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
 
   return named_tensors;
 }

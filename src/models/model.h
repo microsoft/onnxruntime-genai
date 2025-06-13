@@ -165,7 +165,7 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
 struct ModelType {
   // Large-language model (LLM)
-  inline static std::unordered_set<std::string> LLM = {"chatglm", "decoder", "gemma", "gemma2", "gemma3_text", "gpt2", "granite", "llama", "mistral", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2"};
+  inline static std::unordered_set<std::string> LLM = {"chatglm", "decoder", "gemma", "gemma2", "gemma3_text", "gpt2", "granite", "llama", "mistral", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen3"};
 
   // Vision-language model (VLM)
   inline static std::unordered_set<std::string> VLM = {"gemma3", "phi3v"};
