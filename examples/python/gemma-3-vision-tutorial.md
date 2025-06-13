@@ -148,15 +148,15 @@ Currently, both JSON files needed to run with ONNX Runtime GenAI are created by 
 
 ## 4. Run Gemma-3 vision ONNX models
 
-[Here](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/phi3v.py) is an example of how you can run your Gemma-3 vision model with ONNX Runtime GenAI.
+[Here](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-vision.py) is an example of how you can run your Gemma-3 vision model with ONNX Runtime GenAI.
 
 ### CUDA
 ```bash
-$ python .\phi3v.py -m .\gemma3-vision-it\cuda -e cuda
+$ python .\model-vision.py -m .\gemma3-vision-it\cuda -e cuda
 ```
 
 ### DirectML
 
 ```bash
-$ python .\phi3v.py -m .\gemma3-vision-it\dml -e dml
+$ python .\model-vision.py -m .\gemma3-vision-it\dml -e dml
 ```
