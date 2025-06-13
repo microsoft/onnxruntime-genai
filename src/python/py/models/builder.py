@@ -142,7 +142,7 @@ class Model:
         # Store names of nodes already created
         self.node_names: set[str] = set()
 
-        # Map TensorProto dtypes to PyTorch dtypes
+        # Map ONNX dtypes to PyTorch dtypes
         self.to_torch_dtype = {
             ir.DataType.INT8: torch.int8,
             ir.DataType.INT32: torch.int32,
@@ -152,7 +152,7 @@ class Model:
             ir.DataType.FLOAT: torch.float32,
         }
 
-        # Map PyTorch dtypes to TensorProto dtypes
+        # Map PyTorch dtypes to ONNX dtypes
         self.to_onnx_dtype = {v: k for k, v in self.to_torch_dtype.items()}
 
         # Mask-specific variables
@@ -333,14 +333,11 @@ class Model:
             opset_imports={"": 21, "com.microsoft": 1},
             name="main_graph",
         )
-        # A tracer for recording the nodes added
-        # TODO(justinchuby): Bump IR version to 10
-        self.model = ir.Model(graph, ir_version=7, producer_name="onnxruntime-genai")
+        self.model = ir.Model(graph, ir_version=10, producer_name="onnxruntime-genai")
         self.values: dict[str, ir.Value] = {}
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
-        # TODO(justinchuby): Simplify and remove "TensorProto." from name
-        return f"TensorProto.{dtype.name}"
+        return dtype.name
 
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy in the case of bf16 models.
@@ -633,7 +630,7 @@ class Model:
         # Format of name is "/model/constants/{dtype}/{shape}/{num}"
 
         path = name.split("/")
-        onnx_dtype = ir.DataType[path[-3].split(".")[-1]]
+        onnx_dtype = ir.DataType[path[-3]]
         dims = path[-2]
         # NOTE: Use ast.literal_eval instead of eval as eval allows arbitrary code execution
         num = ast.literal_eval(path[-1])
@@ -734,7 +731,7 @@ class Model:
 
     def make_reduce_mean(self, name, inputs, dtype, shape, axes=[-1], keepdims=False):
         output = f"{name}/output_0"
-        inputs.append(f"/model/constants/TensorProto.INT64/1D/{','.join(map(str, axes))}")
+        inputs.append(f"/model/constants/INT64/1D/{','.join(map(str, axes))}")
         self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
         self.make_value_info(output, dtype, shape=shape)
 
@@ -1187,18 +1184,6 @@ class Model:
         # Name = name of original LayerNorm op as if the cast nodes did not exist
         # Inputs = inputs into the original LayerNorm op as if the cast nodes did not exist
         # Outputs = outputs from the original LayerNorm op as if the cast nodes did not exist
-        def get_shape_of_value_info(target_name):
-            for value_info in self.value_infos:
-                if value_info.name == target_name:
-                    shape = []
-                    for dim in value_info.type.tensor_type.shape.dim:
-                        if dim.HasField("dim_value"):
-                            shape.append(dim.dim_value)
-                        elif dim.HasField("dim_param"):
-                            shape.append(dim.dim_param)
-                        else:
-                            shape.append(None)
-                    return shape
 
         # Save original inputs and outputs
         skip = len(inputs) > 2  # [root_input, skip_input, weight] vs. [root_input, weight]
@@ -1207,20 +1192,23 @@ class Model:
         output_0 = outputs[0]
         output_3 = outputs[3] if skip and not self.layernorm_attrs["last_layernorm"] else None
 
+        root_input_shape = self.values[root_input].shape
+
         if self.layernorm_attrs["cast"]["root_input"]:
             # Cast root_input
             root_input_cast_name = f"{name}/root_input/Cast"
             root_input_cast_output = f"{root_input_cast_name}/output_0"
             self.make_node("Cast", inputs=[root_input], outputs=[root_input_cast_output], name=root_input_cast_name, to=new_dtype)
-            self.make_value_info(root_input_cast_output, new_dtype, shape=get_shape_of_value_info(root_input))
+            self.make_value_info(root_input_cast_output, new_dtype, shape=root_input_shape)
             inputs[0] = root_input_cast_output
 
         if skip and self.layernorm_attrs["cast"]["skip_input"]:
             # Cast skip_input
+            assert skip_input is not None
             skip_input_cast_name = f"{name}/skip_input/Cast"
             skip_input_cast_output = f"{skip_input_cast_name}/output_0"
             self.make_node("Cast", inputs=[skip_input], outputs=[skip_input_cast_output], name=skip_input_cast_name, to=new_dtype)
-            self.make_value_info(skip_input_cast_output, new_dtype, shape=get_shape_of_value_info(skip_input))
+            self.make_value_info(skip_input_cast_output, new_dtype, shape=self.values[skip_input].shape)
             inputs[1] = skip_input_cast_output
 
         if self.layernorm_attrs["cast"]["output_0"]:
@@ -1228,15 +1216,16 @@ class Model:
             output_0_cast_name = f"{name}/output_0/Cast"
             output_0_cast_output = f"{output_0_cast_name}/output_0"
             self.make_node("Cast", inputs=[output_0_cast_output], outputs=[output_0], name=output_0_cast_name, to=old_dtype)
-            self.make_value_info(output_0, old_dtype, shape=get_shape_of_value_info(root_input))
+            self.make_value_info(output_0, old_dtype, shape=root_input_shape)
             outputs[0] = output_0_cast_output
 
         if skip and not self.layernorm_attrs["last_layernorm"] and self.layernorm_attrs["cast"]["output_3"]:
             # Cast output_3
+            assert output_3 is not None
             output_3_cast_name = f"{name}/output_3/Cast"
             output_3_cast_output = f"{output_3_cast_name}/output_3"
             self.make_node("Cast", inputs=[output_3_cast_output], outputs=[output_3], name=output_3_cast_name, to=old_dtype)
-            self.make_value_info(output_3, old_dtype, shape=get_shape_of_value_info(root_input))
+            self.make_value_info(output_3, old_dtype, shape=root_input_shape)
             outputs[3] = output_3_cast_output
 
         return inputs, outputs
@@ -1388,7 +1377,7 @@ class Model:
             gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2"
 
         greater_name = f"{basename}/Greater"
-        greater_inputs = [f"{gather_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.original_context_length}"]
+        greater_inputs = [f"{gather_name}/output_0", f"/model/constants/INT64/0D/{self.original_context_length}"]
         self.make_greater(greater_name, greater_inputs, shape=[])
         if_name = f"{basename}/If"
 
@@ -1509,33 +1498,33 @@ class Model:
         #                            Mul_1
 
         make_cast_name = f"{basename}/Cast"
-        self.make_cast(make_cast_name, root_input, TensorProto.FLOAT, shape=shape)
+        self.make_cast(make_cast_name, root_input, ir.DataType.FLOAT, shape=shape)
 
         make_pow_name = f"{basename}/Pow"
-        make_pow_inputs = [f"{make_cast_name}/output_0", f"/model/constants/TensorProto.FLOAT/0D/2"]
+        make_pow_inputs = [f"{make_cast_name}/output_0", "/model/constants/FLOAT/0D/2"]
 
         self.make_node("Pow", inputs=make_pow_inputs, outputs=[f"{make_pow_name}/output_0"], name=make_pow_name, domain="")
-        self.make_value_info(f"{make_pow_name}/output_0", TensorProto.FLOAT, shape=shape)
+        self.make_value_info(f"{make_pow_name}/output_0", ir.DataType.FLOAT, shape=shape)
 
         make_reducemean_name = f"{basename}/ReduceMean"
         make_reducemean_inputs = [f"{make_pow_name}/output_0"]
-        self.make_reduce_mean(make_reducemean_name, make_reducemean_inputs, TensorProto.FLOAT, keepdims=True, axes=[-1], shape=shape)
+        self.make_reduce_mean(make_reducemean_name, make_reducemean_inputs, ir.DataType.FLOAT, keepdims=True, axes=[-1], shape=shape)
 
         make_add_name = f"{basename}/Add"
-        make_add_inputs = [f"{make_reducemean_name}/output_0", f"/model/constants/TensorProto.FLOAT/0D/{self.layernorm_attrs['epsilon']}"]
-        self.make_add(make_add_name, make_add_inputs, TensorProto.FLOAT, shape=shape)
+        make_add_inputs = [f"{make_reducemean_name}/output_0", f"/model/constants/FLOAT/0D/{self.layernorm_attrs['epsilon']}"]
+        self.make_add(make_add_name, make_add_inputs, ir.DataType.FLOAT, shape=shape)
 
         make_sqrt_name = f"{basename}/Sqrt"
         make_sqrt_inputs = [f"{make_add_name}/output_0"]
-        self.make_sqrt(make_sqrt_name, make_sqrt_inputs, TensorProto.FLOAT, shape=shape)
+        self.make_sqrt(make_sqrt_name, make_sqrt_inputs, ir.DataType.FLOAT, shape=shape)
 
         make_div_name = f"{basename}/Div"
-        make_div_inputs = [f"/model/constants/TensorProto.FLOAT/0D/1", f"{make_sqrt_name}/output_0"]
-        self.make_div(make_div_name, make_div_inputs, TensorProto.FLOAT, shape=shape)
+        make_div_inputs = ["/model/constants/FLOAT/0D/1", f"{make_sqrt_name}/output_0"]
+        self.make_div(make_div_name, make_div_inputs, ir.DataType.FLOAT, shape=shape)
 
         make_mul_name = f"{basename}/Mul"
         make_mul_inputs = [f"{make_div_name}/output_0", f"{make_cast_name}/output_0"]
-        self.make_mul(make_mul_name, make_mul_inputs, TensorProto.FLOAT, shape=shape)
+        self.make_mul(make_mul_name, make_mul_inputs, ir.DataType.FLOAT, shape=shape)
 
         make_cast_1_name = f"{basename}/Cast_1"
         self.make_cast(make_cast_1_name, f"{make_mul_name}/output_0", dtype=io_dtype, shape=shape)
@@ -1568,7 +1557,7 @@ class Model:
 
         # Reshape Q MatMul from BxSxD to Bx(SxN)xH before LayerNorm
         q_reshape_1_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_1"
-        q_reshape_1_inputs = [self.attention_attrs["q_path"], f"/model/constants/TensorProto.INT64/1D/0, -1, {self.head_size}"]
+        q_reshape_1_inputs = [self.attention_attrs["q_path"], f"/model/constants/INT64/1D/0, -1, {self.head_size}"]
         q_reshape_1_output = f"{q_reshape_1_name}/output_0"
         self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
 
@@ -1589,12 +1578,12 @@ class Model:
 
         # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD
         q_reshape_2_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
-        q_reshape_2_inputs = [q_layernorm_output, f"/model/constants/TensorProto.INT64/1D/0, -1, {self.num_attn_heads * self.head_size}"]
+        q_reshape_2_inputs = [q_layernorm_output, f"/model/constants/INT64/1D/0, -1, {self.num_attn_heads * self.head_size}"]
         self.make_reshape(q_reshape_2_name, q_reshape_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads * self.head_size])
 
         # Reshape K MatMul from BxSxD to Bx(SxN)xH before LayerNorm
         k_reshape_1_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_1"
-        k_reshape_1_inputs = [self.attention_attrs["k_path"], f"/model/constants/TensorProto.INT64/1D/0, -1, {self.head_size}"]
+        k_reshape_1_inputs = [self.attention_attrs["k_path"], f"/model/constants/INT64/1D/0, -1, {self.head_size}"]
         k_reshape_1_output = f"{k_reshape_1_name}/output_0"
         self.make_reshape(k_reshape_1_name, k_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
@@ -1615,7 +1604,7 @@ class Model:
 
         # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD
         k_reshape_2_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_2"
-        k_reshape_2_inputs = [k_layernorm_output, f"/model/constants/TensorProto.INT64/1D/0, -1, {self.num_kv_heads * self.head_size}"]
+        k_reshape_2_inputs = [k_layernorm_output, f"/model/constants/INT64/1D/0, -1, {self.num_kv_heads * self.head_size}"]
         self.make_reshape(k_reshape_2_name, k_reshape_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_kv_heads * self.head_size])
 
         # Update q_path and k_path now
@@ -1705,7 +1694,7 @@ class Model:
         #                                            |          |                                  |
         #                                        present_kv     +------> Gather --> Unsqueeze -----+
         reshape_1_name = f"{basename}/Reshape_1"
-        reshape_1_inputs = [root_input, f"/model/constants/TensorProto.INT64/1D/0, 0, {self.num_kv_heads}, -1"]
+        reshape_1_inputs = [root_input, f"/model/constants/INT64/1D/0, 0, {self.num_kv_heads}, -1"]
         self.make_reshape(reshape_1_name, reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_kv_heads, self.head_size])
         transpose_1_name = f"{basename}/Transpose_1"
         transpose_1_input = f"{reshape_1_name}/output_0"
@@ -1717,35 +1706,35 @@ class Model:
         shape_1_name = f"{basename}/Shape_1"
         self.make_shape(shape_1_name, present_kv, shape=[4])
         gather_1_name = f"{basename}/Gather_1"
-        gather_1_inputs = [f"{shape_1_name}/output_0", "/model/constants/TensorProto.INT64/0D/0"]
+        gather_1_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0D/0"]
         self.make_gather(gather_1_name, gather_1_inputs, axis=0)
         unsqueeze_1_name = f"{basename}/Unsqueeze_1"
-        unsqueeze_1_inputs = [f"{gather_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
+        unsqueeze_1_inputs = [f"{gather_1_name}/output_0", "/model/constants/INT64/1D/0"]
         self.make_unsqueeze(unsqueeze_1_name, unsqueeze_1_inputs, dtype=ir.DataType.INT64, shape=[1])
         gather_2_name = f"{basename}/Gather_2"
-        gather_2_inputs = [f"{shape_1_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
+        gather_2_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0D/1"]
         self.make_gather(gather_2_name, gather_2_inputs, axis=0)
         unsqueeze_2_name = f"{basename}/Unsqueeze_2"
-        unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
+        unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/INT64/1D/0"]
         self.make_unsqueeze(unsqueeze_2_name, unsqueeze_2_inputs, dtype=ir.DataType.INT64, shape=[1])
         gather_3_name = f"{basename}/Gather_3"
-        gather_3_inputs = [f"{shape_1_name}/output_0", "/model/constants/TensorProto.INT64/0D/2"]
+        gather_3_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0D/2"]
         self.make_gather(gather_3_name, gather_3_inputs, axis=0)
         unsqueeze_3_name = f"{basename}/Unsqueeze_3"
-        unsqueeze_3_inputs = [f"{gather_3_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
+        unsqueeze_3_inputs = [f"{gather_3_name}/output_0", "/model/constants/INT64/1D/0"]
         self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=ir.DataType.INT64, shape=[1])
         gather_4_name = f"{basename}/Gather_4"
-        gather_4_inputs = [f"{shape_1_name}/output_0", "/model/constants/TensorProto.INT64/0D/3"]
+        gather_4_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0D/3"]
         self.make_gather(gather_4_name, gather_4_inputs, axis=0)
         unsqueeze_4_name = f"{basename}/Unsqueeze_4"
-        unsqueeze_4_inputs = [f"{gather_4_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
+        unsqueeze_4_inputs = [f"{gather_4_name}/output_0", "/model/constants/INT64/1D/0"]
         self.make_unsqueeze(unsqueeze_4_name, unsqueeze_4_inputs, dtype=ir.DataType.INT64, shape=[1])
         concat_2_name = f"{basename}/Concat_2"
-        concat_2_inputs = [f"{unsqueeze_1_name}/output_0", f"{unsqueeze_2_name}/output_0", f"/model/constants/TensorProto.INT64/1D/{self.num_attn_heads // self.num_kv_heads}", f"{unsqueeze_3_name}/output_0", f"{unsqueeze_4_name}/output_0"]
+        concat_2_inputs = [f"{unsqueeze_1_name}/output_0", f"{unsqueeze_2_name}/output_0", f"/model/constants/INT64/1D/{self.num_attn_heads // self.num_kv_heads}", f"{unsqueeze_3_name}/output_0", f"{unsqueeze_4_name}/output_0"]
         self.make_concat(concat_2_name, concat_2_inputs, dtype=ir.DataType.INT64, shape=[5], axis=0)
 
         mul_1_name = f"{basename}/Mul_1"
-        mul_1_inputs = [f"{unsqueeze_2_name}/output_0", f"/model/constants/TensorProto.INT64/0D/{self.num_attn_heads // self.num_kv_heads}"]
+        mul_1_inputs = [f"{unsqueeze_2_name}/output_0", f"/model/constants/INT64/0D/{self.num_attn_heads // self.num_kv_heads}"]
         self.make_mul(mul_1_name, mul_1_inputs, dtype=ir.DataType.INT64, shape=None)
         concat_3_name = f"{basename}/Concat_3"
         concat_3_inputs = [f"{unsqueeze_1_name}/output_0", f"{mul_1_name}/output_0", f"{unsqueeze_3_name}/output_0", f"{unsqueeze_4_name}/output_0"]
@@ -1759,7 +1748,7 @@ class Model:
         #    |                                        |
         #    +----------------------------------------+
         reshape_2_name = f"{basename}/Reshape_2"
-        reshape_2_inputs = [f"{concat_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/-1"]
+        reshape_2_inputs = [f"{concat_2_name}/output_0", "/model/constants/INT64/1D/-1"]
         self.make_reshape(reshape_2_name, reshape_2_inputs, dtype=ir.DataType.INT64, shape=None)
         shape_2_name = f"{basename}/Shape_2"
         self.make_shape(shape_2_name, f"{reshape_2_name}/output_0", shape=[1])
@@ -1767,7 +1756,7 @@ class Model:
         constant_shape_value = ir.tensor([1], dtype=ir.DataType.INT64)
         self.make_constant_of_shape(constant_shape_name, f"{shape_2_name}/output_0", value=constant_shape_value, dtype=ir.DataType.INT64, shape=[5])
         mul_2_name = f"{basename}/Mul"
-        mul_2_inputs = [f"{constant_shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/-1"]
+        mul_2_inputs = [f"{constant_shape_name}/output_0", "/model/constants/INT64/0D/-1"]
         self.make_mul(mul_2_name, mul_2_inputs, dtype=ir.DataType.INT64, shape=[5])
         equal_name = f"{basename}/Equal"
         equal_inputs = [f"{reshape_2_name}/output_0", f"{mul_2_name}/output_0"]
@@ -1782,7 +1771,7 @@ class Model:
         #                   \           \
         # Unsqueeze --> Expand --> Reshape --> Transpose --> Reshape
         unsqueeze_5_name = f"{basename}/Unsqueeze_5"
-        unsqueeze_5_inputs = [present_kv, "/model/constants/TensorProto.INT64/1D/2"]
+        unsqueeze_5_inputs = [present_kv, "/model/constants/INT64/1D/2"]
         self.make_unsqueeze(unsqueeze_5_name, unsqueeze_5_inputs, dtype=self.io_dtype, shape=['batch_size', self.num_kv_heads, 1, 'sequence_length', self.head_size])
         expand_name = f"{basename}/Expand"
         expand_inputs = [f"{unsqueeze_5_name}/output_0", f"{where_name}/output_0"]
@@ -1794,7 +1783,7 @@ class Model:
         transpose_2_input = f"{reshape_3_name}/output_0"
         self.make_transpose(transpose_2_name, transpose_2_input, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads, self.head_size], perm=[0,2,1,3])
         reshape_4_name = f"{basename}/Reshape_4"
-        reshape_4_inputs = [f"{transpose_2_name}/output_0", f"/model/constants/TensorProto.INT64/1D/0, 0, {self.num_attn_heads * self.head_size}"]
+        reshape_4_inputs = [f"{transpose_2_name}/output_0", f"/model/constants/INT64/1D/0, 0, {self.num_attn_heads * self.head_size}"]
         self.make_reshape(reshape_4_name, reshape_4_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads * self.head_size])
 
         input_to_attention = f"{reshape_4_name}/output_0"
@@ -2282,11 +2271,11 @@ class Model:
         shape_name = f"{gate_ops_base}/Shape"
         self.make_shape(shape_name, f"{gate_name}/output_0", shape=[3])
         gather_name = f"{gate_ops_base}/Gather"
-        self.make_gather(gather_name, [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/2"], axis=0)
+        self.make_gather(gather_name, [f"{shape_name}/output_0", "/model/constants/INT64/0D/2"], axis=0)
         unsqueeze_name = f"{gate_ops_base}/Unsqueeze"
-        self.make_unsqueeze(unsqueeze_name, [f"{gather_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"], dtype=ir.DataType.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_name, [f"{gather_name}/output_0", "/model/constants/INT64/1D/0"], dtype=ir.DataType.INT64, shape=[1])
         concat_name = f"{gate_ops_base}/Concat"
-        self.make_concat(concat_name, ["/model/constants/TensorProto.INT64/1D/-1", f"{unsqueeze_name}/output_0"], dtype=ir.DataType.INT64, shape=[2], axis=0)
+        self.make_concat(concat_name, ["/model/constants/INT64/1D/-1", f"{unsqueeze_name}/output_0"], dtype=ir.DataType.INT64, shape=[2], axis=0)
         gate_reshape_name = f"{gate_ops_base}/Reshape"
         self.make_reshape(gate_reshape_name, [f"{gate_name}/output_0", f"{concat_name}/output_0"], dtype=self.io_dtype, shape=['num_rows', num_experts])
 
@@ -2413,7 +2402,7 @@ class Model:
         relu_name = self.make_relu(layer_id, root_input, "Relu")
         basename = f"/model/layers.{layer_id}/mlp/square/{activation}"
         pow_name = f"{basename}/pow"
-        pow_inputs = [f"{relu_name}/output_0", "/model/constants/TensorProto.INT32/1D/2"]
+        pow_inputs = [f"{relu_name}/output_0", "/model/constants/INT32/1D/2"]
         self.make_node("Pow", inputs=pow_inputs, outputs=[f"{pow_name}/output_0"], name=pow_name, domain="")
         self.make_value_info(f"{pow_name}/output_0", self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
         return pow_name
@@ -2720,7 +2709,7 @@ class Model:
         self.make_add(end_add_name, end_add_inputs, dtype=self.io_dtype, shape=end_add_shape) # Shape of mask is now (B, 1, S, T)
 
         tile_name = f"{basename}/Tile"
-        tile_inputs = [f"{end_add_name}/output_0", f"/model/constants/TensorProto.INT64/1D/1, {self.num_attn_heads}, 1, 1"]
+        tile_inputs = [f"{end_add_name}/output_0", f"/model/constants/INT64/1D/1, {self.num_attn_heads}, 1, 1"]
         tile_shape = ["batch_size", self.num_attn_heads, "source_sequence_length", "target_sequence_length"]
         self.make_tile(tile_name, tile_inputs, dtype=self.io_dtype, shape=tile_shape) # Shape of mask is now (B, N, S, T)
 
@@ -2730,7 +2719,7 @@ class Model:
         shape_name = f"{basename}/Shape"
         self.make_shape(shape_name, "past_key_values.0.key", shape=[4])
         gather_name = f"{basename}/Gather"
-        gather_inputs = [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/2"]
+        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/0D/2"]
         self.make_gather(gather_name, gather_inputs, axis=0)
         return gather_name
 
@@ -2749,7 +2738,7 @@ class Model:
         shared_add_inputs = [f"{basename}/Gather_2/output_0", f"{past_key_gather_name}/output_0"]
         self.make_add(shared_add_name, shared_add_inputs, dtype=ir.DataType.INT64, shape=[])
         unsqueeze_3_name = f"{basename}/Unsqueeze_3"  # shared unsqueeze for input_ids and past_key_values.0.key
-        unsqueeze_3_inputs = [f"{shared_add_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
+        unsqueeze_3_inputs = [f"{shared_add_name}/output_0", "/model/constants/INT64/1D/0"]
         self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=ir.DataType.INT64, shape=[1])
 
         # Make the additional subgraph for input_ids
@@ -2759,7 +2748,7 @@ class Model:
         # Gather (idx=1)   --> Concat --> ConstantOfShape                                                      Reshape --> Less --> Where --> Unsqueeze --> Unsqueeze --> Expand
         #      \          /                              \                                                     |
         #       Unsqueeze (unsqueeze_5)                   Shape --> Slice --> Squeeze --> Range --> Add -------+
-        unsqueeze_inputs = [f"{basename}/Gather_2/output_0", "/model/constants/TensorProto.INT64/1D/0"]
+        unsqueeze_inputs = [f"{basename}/Gather_2/output_0", "/model/constants/INT64/1D/0"]
         unsqueeze_4_name = f"{basename}/Unsqueeze_4"
         self.make_unsqueeze(unsqueeze_4_name, unsqueeze_inputs, dtype=ir.DataType.INT64, shape=[1])
         unsqueeze_5_name = f"{basename}/Unsqueeze_5"
@@ -2778,32 +2767,32 @@ class Model:
         shape_4_name = f"{basename}/Shape_4"
         self.make_shape(shape_4_name, f"{constant_shape_name}/output_0", shape=[2])
         slice_1_name = f"{basename}/Slice_1"
-        slice_1_inputs = [f"{shape_4_name}/output_0", "/model/constants/TensorProto.INT64/1D/-1", f"/model/constants/TensorProto.INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/TensorProto.INT64/1D/0"]
+        slice_1_inputs = [f"{shape_4_name}/output_0", "/model/constants/INT64/1D/-1", f"/model/constants/INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/INT64/1D/0"]
         self.make_slice(slice_1_name, slice_1_inputs, dtype=ir.DataType.INT64, shape=[1])
         squeeze_1_name = f"{basename}/Squeeze_1"
-        squeeze_1_inputs = [f"{slice_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
+        squeeze_1_inputs = [f"{slice_1_name}/output_0", "/model/constants/INT64/1D/0"]
         self.make_squeeze(squeeze_1_name, squeeze_1_inputs)
         unsqueeze_7_name = f"{basename}/output_0"
-        unsqueeze_7_inputs = [f"{squeeze_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
+        unsqueeze_7_inputs = [f"{squeeze_1_name}/output_0", "/model/constants/INT64/1D/0"]
         self.make_unsqueeze(unsqueeze_7_name, unsqueeze_7_inputs, dtype=ir.DataType.INT64, shape=[1])
         concat_3_name = f"{basename}/Concat_3"
-        concat_3_inputs = [f"{unsqueeze_7_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
+        concat_3_inputs = [f"{unsqueeze_7_name}/output_0", "/model/constants/INT64/1D/1"]
         self.make_concat(concat_3_name, concat_3_inputs, dtype=ir.DataType.INT64, shape=[2], axis=0)
 
         # Bottom path
         shape_5_name = f"{basename}/Shape_5"
         self.make_shape(shape_5_name, f"{constant_shape_name}/output_0", shape=[2])
         slice_2_name = f"{basename}/Slice_2"
-        slice_2_inputs = [f"{shape_5_name}/output_0", "/model/constants/TensorProto.INT64/1D/-1", f"/model/constants/TensorProto.INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/TensorProto.INT64/1D/0"]
+        slice_2_inputs = [f"{shape_5_name}/output_0", "/model/constants/INT64/1D/-1", f"/model/constants/INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/INT64/1D/0"]
         self.make_slice(slice_2_name, slice_2_inputs, dtype=ir.DataType.INT64, shape=[1])
         squeeze_2_name = f"{basename}/Squeeze_2"
-        squeeze_2_inputs = [f"{slice_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
+        squeeze_2_inputs = [f"{slice_2_name}/output_0", "/model/constants/INT64/1D/0"]
         self.make_squeeze(squeeze_2_name, squeeze_2_inputs)
         range_name = f"{basename}/Range"
-        range_inputs = ["/model/constants/TensorProto.INT64/0D/0", f"{squeeze_2_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
+        range_inputs = ["/model/constants/INT64/0D/0", f"{squeeze_2_name}/output_0", "/model/constants/INT64/0D/1"]
         self.make_range(range_name, range_inputs)
         add_2_name = f"{basename}/Add_2"
-        add_inputs = [f"{range_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
+        add_inputs = [f"{range_name}/output_0", "/model/constants/INT64/0D/1"]
         self.make_add(add_2_name, add_inputs, dtype=ir.DataType.INT64, shape=["unk"])
 
         # Merged path
@@ -2817,10 +2806,10 @@ class Model:
         where_2_inputs = [f"{less_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/0", f"{constant_shape_name}/output_0"]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=None)
         unsqueeze_8_name = f"{basename}/Unsqueeze_8"
-        unsqueeze_8_inputs = [f"{where_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
+        unsqueeze_8_inputs = [f"{where_2_name}/output_0", "/model/constants/INT64/1D/0"]
         self.make_unsqueeze(unsqueeze_8_name, unsqueeze_8_inputs, dtype=self.io_dtype, shape=None)
         unsqueeze_9_name = f"{basename}/Unsqueeze_9"
-        unsqueeze_9_inputs = [f"{unsqueeze_8_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
+        unsqueeze_9_inputs = [f"{unsqueeze_8_name}/output_0", "/model/constants/INT64/1D/1"]
         self.make_unsqueeze(unsqueeze_9_name, unsqueeze_9_inputs, dtype=self.io_dtype, shape=None)
 
         expand_name = self.make_common_mask_reformat_subgraph(basename, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", unsqueeze_for_concat=unsqueeze_3_name, unsqueeze_for_expand=unsqueeze_9_name, input_ids_subgraph=True)
@@ -2832,11 +2821,11 @@ class Model:
         attention_mask_shape = self.input_shapes["attention_mask"]
 
         unsqueeze_3_name = f"{basename}/Unsqueeze_3"
-        unsqueeze_3_inputs = ["attention_mask", "/model/constants/TensorProto.INT64/1D/1"]
+        unsqueeze_3_inputs = ["attention_mask", "/model/constants/INT64/1D/1"]
         attention_mask_shape.insert(1, 1) # ['batch_size', 'total_sequence_length'] --> ['batch_size', 1, 'total_sequence_length']
         self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=ir.DataType.INT64, shape=attention_mask_shape)
         unsqueeze_4_name = f"{basename}/Unsqueeze_4"
-        unsqueeze_4_inputs = [f"{unsqueeze_3_name}/output_0", "/model/constants/TensorProto.INT64/1D/2"]
+        unsqueeze_4_inputs = [f"{unsqueeze_3_name}/output_0", "/model/constants/INT64/1D/2"]
         attention_mask_shape.insert(1, 1) # ['batch_size', 1, 'total_sequence_length'] --> ['batch_size', 1, 1, 'total_sequence_length']
         self.make_unsqueeze(unsqueeze_4_name, unsqueeze_4_inputs, dtype=ir.DataType.INT64, shape=attention_mask_shape)
 
@@ -2902,20 +2891,20 @@ class Model:
         shape_2_name = f"{basename}/Shape_2"
         self.make_shape(shape_2_name, root_input, shape=[3] if self.exclude_embeds and input_ids_subgraph else [2])
         gather_1_name = f"{basename}/Gather_1"
-        gather_1_inputs = [f"{shape_1_name}/output_0", "/model/constants/TensorProto.INT64/0D/0"]
+        gather_1_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0D/0"]
         self.make_gather(gather_1_name, gather_1_inputs, axis=0)
         gather_2_name = f"{basename}/Gather_2"
-        gather_2_inputs = [f"{shape_2_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
+        gather_2_inputs = [f"{shape_2_name}/output_0", "/model/constants/INT64/0D/1"]
         self.make_gather(gather_2_name, gather_2_inputs, axis=0)
         unsqueeze_1_name = f"{basename}/Unsqueeze_1"
-        unsqueeze_1_inputs = [f"{gather_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
+        unsqueeze_1_inputs = [f"{gather_1_name}/output_0", "/model/constants/INT64/1D/0"]
         self.make_unsqueeze(unsqueeze_1_name, unsqueeze_1_inputs, dtype=ir.DataType.INT64, shape=[1])
         unsqueeze_2_name = f"{basename}/Unsqueeze_2"
-        unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/TensorProto.INT64/1D/0"]
+        unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/INT64/1D/0"]
         self.make_unsqueeze(unsqueeze_2_name, unsqueeze_2_inputs, dtype=ir.DataType.INT64, shape=[1])
 
         concat_name = f"{basename}/Concat" if not input_ids_subgraph else f"{basename}/Concat_1"
-        concat_first_two_inputs = [f"{unsqueeze_1_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
+        concat_first_two_inputs = [f"{unsqueeze_1_name}/output_0", "/model/constants/INT64/1D/1"]
         concat_last_two_inputs = [f"{unsqueeze_for_concat}/output_0", f"{unsqueeze_2_name}/output_0"] if not input_ids_subgraph else [f"{unsqueeze_2_name}/output_0", f"{unsqueeze_for_concat}/output_0"]
         concat_inputs = concat_first_two_inputs + concat_last_two_inputs
         self.make_concat(concat_name, concat_inputs, dtype=ir.DataType.INT64, shape=[4], axis=0)
@@ -2925,7 +2914,7 @@ class Model:
         constant_shape_value = ir.tensor([1], dtype=ir.DataType.INT64)
         self.make_constant_of_shape(constant_shape_name, f"{shape_3_name}/output_0", value=constant_shape_value, dtype=ir.DataType.INT64, shape=["unk"])
         mul_name = f"{basename}/Mul"
-        mul_inputs = [f"{constant_shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/-1"]
+        mul_inputs = [f"{constant_shape_name}/output_0", "/model/constants/INT64/0D/-1"]
         self.make_mul(mul_name, mul_inputs, dtype=ir.DataType.INT64, shape=["unk"])
         equal_name = f"{basename}/Equal"
         equal_inputs = [f"{concat_name}/output_0", f"{mul_name}/output_0"]
@@ -2961,10 +2950,10 @@ class Model:
 
         # Left path
         reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
-        reduce_sum_inputs = ["attention_mask", "/model/constants/TensorProto.INT64/1D/1"]
+        reduce_sum_inputs = ["attention_mask", "/model/constants/INT64/1D/1"]
         self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
         sub_name = f"{attn_mask_basename}/Sub"
-        sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/TensorProto.INT64/1D/1"]
+        sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/1D/1"]
         self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
         cast_1_name = f"{attn_mask_basename}/Sub/Cast"
         self.make_cast(cast_1_name, f"{sub_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size", 1])
@@ -2973,7 +2962,7 @@ class Model:
         shape_name = f"{attn_mask_basename}/Shape"
         self.make_shape(shape_name, "attention_mask", shape=[2])
         gather_name = f"{attn_mask_basename}/Gather"
-        gather_inputs = [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
+        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/0D/1"]
         self.make_gather(gather_name, gather_inputs, axis=0)
         cast_2_name = f"{attn_mask_basename}/Gather/Cast"
         self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=ir.DataType.INT32, shape=None)
@@ -3001,7 +2990,7 @@ class Model:
 
         # Left path
         reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
-        reduce_sum_inputs = ["attention_mask", "/model/constants/TensorProto.INT64/1D/1"]
+        reduce_sum_inputs = ["attention_mask", "/model/constants/INT64/1D/1"]
         self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
         cast_1_name = f"{attn_mask_basename}/ReduceSum/Cast"
         self.make_cast(cast_1_name, f"{reduce_sum_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size", 1])
@@ -3010,7 +2999,7 @@ class Model:
         shape_name = f"{attn_mask_basename}/Shape"
         self.make_shape(shape_name, "attention_mask", shape=[2])
         gather_name = f"{attn_mask_basename}/Gather"
-        gather_inputs = [f"{shape_name}/output_0", "/model/constants/TensorProto.INT64/0D/1"]
+        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/0D/1"]
         self.make_gather(gather_name, gather_inputs, axis=0)
         cast_2_name = f"{attn_mask_basename}/Gather/Cast"
         self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=ir.DataType.INT32, shape=None)
@@ -3385,7 +3374,7 @@ class Phi3SmallModel(Model):
 
         # Left path
         slice_1_name = f"/model/layers.{layer_id}/mlp/gelu/Slice"
-        slice_1_inputs = [f"{up_add_name}/output_0", "/model/constants/TensorProto.INT64/1D/0", f"/model/constants/TensorProto.INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/TensorProto.INT64/1D/-1", "/model/constants/TensorProto.INT64/1D/2"]
+        slice_1_inputs = [f"{up_add_name}/output_0", "/model/constants/INT64/1D/0", f"/model/constants/INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/INT64/1D/-1", "/model/constants/INT64/1D/2"]
         self.make_slice(slice_1_name, slice_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
         cast_1_name = f"/model/layers.{layer_id}/mlp/gelu/Cast"
         self.make_cast(cast_1_name, f"{slice_1_name}/output_0", dtype=ir.DataType.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
@@ -3402,7 +3391,7 @@ class Phi3SmallModel(Model):
 
         # Right path
         slice_2_name = f"/model/layers.{layer_id}/mlp/linear/Slice"
-        slice_2_inputs = [f"{up_add_name}/output_0", "/model/constants/TensorProto.INT64/1D/1", f"/model/constants/TensorProto.INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/TensorProto.INT64/1D/-1", "/model/constants/TensorProto.INT64/1D/2"]
+        slice_2_inputs = [f"{up_add_name}/output_0", "/model/constants/INT64/1D/1", f"/model/constants/INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/INT64/1D/-1", "/model/constants/INT64/1D/2"]
         self.make_slice(slice_2_name, slice_2_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
         cast_2_name = f"/model/layers.{layer_id}/mlp/linear/Cast"
         self.make_cast(cast_2_name, f"{slice_2_name}/output_0", dtype=ir.DataType.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
