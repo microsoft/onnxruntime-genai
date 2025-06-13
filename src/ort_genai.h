@@ -350,14 +350,6 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
   }
 
-  void SetModelInput(const char* name, OgaTensor& tensor) {
-    OgaCheckResult(OgaGeneratorParamsSetModelInput(this, name, &tensor));
-  }
-
-  void SetInputs(OgaNamedTensors& named_tensors) {
-    OgaCheckResult(OgaGeneratorParamsSetInputs(this, &named_tensors));
-  }
-
   void TryGraphCaptureWithMaxBatchSize(int max_batch_size) {
     printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
   }
@@ -378,6 +370,14 @@ struct OgaGenerator : OgaAbstract {
 
   bool IsDone() const {
     return OgaGenerator_IsDone(this);
+  }
+
+  void SetModelInput(const char* name, OgaTensor& tensor) {
+    OgaCheckResult(OgaGenerator_SetModelInput(this, name, &tensor));
+  }
+
+  void SetInputs(OgaNamedTensors& named_tensors) {
+    OgaCheckResult(OgaGenerator_SetInputs(this, &named_tensors));
   }
 
   void AppendTokenSequences(const OgaSequences& sequences) {

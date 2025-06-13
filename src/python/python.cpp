@@ -178,15 +178,6 @@ struct PyGeneratorParams {
 
   std::unique_ptr<OgaGeneratorParams> params_;
 
-  void SetModelInput(const std::string& name, pybind11::array& value) {
-    params_->SetModelInput(name.c_str(), *ToOgaTensor(value, false));
-    refs_.emplace_back(value);
-  }
-
-  void SetInputs(OgaNamedTensors& named_tensors) {
-    params_->SetInputs(named_tensors);
-  }
-
   void SetSearchOptions(const pybind11::kwargs& dict) {
     for (auto& entry : dict) {
       auto name = entry.first.cast<std::string>();
@@ -231,6 +222,14 @@ struct PyGenerator {
   
   pybind11::array GetOutput(const std::string& name) {
     return ToNumpy(*generator_->GetOutput(name.c_str()));
+  }
+
+  void SetModelInput(const std::string& name, pybind11::array& value) {
+    generator_->SetModelInput(name.c_str(), *ToOgaTensor(value, false));
+  }
+
+  void SetInputs(OgaNamedTensors& named_tensors) {
+    generator_->SetInputs(named_tensors);
   }
 
   void AppendTokens(OgaTensor& tokens) {
@@ -303,8 +302,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
-      .def("set_inputs", &PyGeneratorParams::SetInputs)
-      .def("set_model_input", &PyGeneratorParams::SetModelInput)
       .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
       .def("set_guidance", &PyGeneratorParams::SetGuidance);
@@ -390,6 +387,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("is_done", &PyGenerator::IsDone)
       .def("get_input", &PyGenerator::GetInput)
       .def("get_output", &PyGenerator::GetOutput)
+      .def("set_inputs", &PyGenerator::SetInputs)
+      .def("set_model_input", &PyGenerator::SetModelInput)
       .def("append_tokens", pybind11::overload_cast<pybind11::array_t<int32_t>&>(&PyGenerator::AppendTokens))
       .def("append_tokens", pybind11::overload_cast<OgaTensor&>(&PyGenerator::AppendTokens))
       .def("get_logits", &PyGenerator::GetLogits)

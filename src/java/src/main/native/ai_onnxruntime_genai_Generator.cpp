@@ -28,6 +28,25 @@ Java_ai_onnxruntime_genai_Generator_destroyGenerator(JNIEnv* env, jobject thiz, 
 }
 
 JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_Generator_setModelInput(JNIEnv* env, jobject thiz, jlong native_handle,
+                                                  jstring input_name, jlong tensor) {
+  OgaGenerator* generator = reinterpret_cast<OgaGenerator*>(native_handle);
+  CString name{env, input_name};
+  OgaTensor* input_tensor = reinterpret_cast<OgaTensor*>(tensor);
+
+  ThrowIfError(env, OgaGenerator_SetModelInput(generator_params, name, input_tensor));
+}
+
+JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_Generator_setInputs(JNIEnv* env, jobject thiz, jlong native_handle,
+                                                    jlong namedTensors) {
+  OgaGenerator* generator = reinterpret_cast<OgaGenerator*>(native_handle);
+  OgaNamedTensors* input_tensor = reinterpret_cast<OgaNamedTensors*>(namedTensors);
+
+  ThrowIfError(env, OgaGenerator_SetInputs(generator_params, input_tensor));
+}
+
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Generator_appendTokenSequences(JNIEnv* env, jobject thiz, jlong native_handle,
                                                          jlong sequences_handle) {
   OgaGenerator* generator = reinterpret_cast<OgaGenerator*>(native_handle);

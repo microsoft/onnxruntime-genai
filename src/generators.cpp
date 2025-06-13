@@ -259,33 +259,6 @@ GeneratorParams::GeneratorParams(const Model& model)
   }
 }
 
-void GeneratorParams::SetInputIds(const Tensor* tensor) {
-  aux_input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
-                                    tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
-  if (aux_input_ids.size() / search.batch_size > search.max_length) {
-    throw std::runtime_error("input_ids size (" + std::to_string(aux_input_ids.size()) + ") exceeds max length (" + std::to_string(search.max_length) + ")");
-  } else if (aux_input_ids.size() == 0) {
-    throw std::runtime_error("input_ids is empty");
-  }
-}
-
-void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
-  if (ModelType::IsLLM(config.model.type) || ModelType::IsPipe(config.model.type)) {
-    throw std::runtime_error("Please use generator.AppendTokens for " + config.model.type + ". SetInputs is not supported for this model type.");
-  }
-
-  for (const auto& [name, tensor] : named_tensors) {
-    if (name == Config::Defaults::InputIdsName) {
-      SetInputIds(tensor.get());
-    } else {
-      // If the nominal name is found in the map, use the graph name.
-      // Else, use the nominal name as the graph name.
-      [[maybe_unused]] const auto [graph_name, found] = config.GetGraphName(name);
-      extra_inputs.push_back({graph_name, tensor});
-    }
-  }
-}
-
 void GeneratorParams::SetGuidance(std::string_view type, std::string_view data) {
   guidance_type = type;
   guidance_data = data;
@@ -313,12 +286,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
 
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);  // Search sequence lengths set when creating state
-
   guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
-  // Temporary solution for multimodal and whisper models
-  if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
-    AuxAppendTokens(params.aux_input_ids);
-  }
 }
 
 DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids) {
@@ -344,20 +312,6 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
   return input_ids_device;
 }
 
-// TODO(aciddelgado): Remove this function once SetInputs is moved to generator
-void Generator::AuxAppendTokens(cpu_span<const int32_t> input_ids) {
-  ThrowErrorIfSessionTerminated(state_->session_terminated_);
-  if (input_ids.size() == 0)
-    throw std::runtime_error("input_ids is empty");
-  if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
-    throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
-
-  auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
-  search_->AppendTokens(input_ids_device);
-  computed_logits_ = false;
-  ComputeLogits(input_ids_device);
-}
-
 void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
@@ -365,7 +319,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
     throw std::runtime_error("input_ids size (" + std::to_string(input_ids.size()) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
   if (!ModelType::IsLLM(model_->config_->model.type) && !ModelType::IsALM(model_->config_->model.type) && !ModelType::IsPipe(model_->config_->model.type))
-    throw std::runtime_error("Please use params.SetInputs for " + model_->config_->model.type + ". AppendTokens is not supported for this model type.");
+    throw std::runtime_error("Please use params.SetInputs for " + model_->config_->model.type + ". AppendTokens is not supported directly for this model type.");
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
@@ -377,19 +331,39 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
-  std::cout << "Size of input_ids in AppendTokens = " << input_ids.size() << std::endl;
-
   if (last_action_ == Action::generated) {
     ComputeLogits(search_->GetNextTokens());
   }
 
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->AppendTokens(input_ids_device);
-  std::cout << "Appended tokens to search" << std::endl;
   computed_logits_ = false;
-  std::cout << "Try to compute logits" << std::endl;
   ComputeLogits(input_ids_device);
-  std::cout << "Computed logits" << std::endl;
+}
+
+void Generator::SetInputs(const NamedTensors& named_tensors) {
+  if (ModelType::IsLLM(config.model.type) || ModelType::IsPipe(config.model.type)) {
+    throw std::runtime_error("Please use generator.AppendTokens for " + config.model.type + ". SetInputs is not supported for this model type.");
+  }
+
+  cpu_span<int32_t> input_ids;
+  for (const auto& [name, tensor] : named_tensors) {
+    if (name == Config::Defaults::InputIdsName) {
+      input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
+                                    tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
+    } else {
+      // If the nominal name is found in the map, use the graph name.
+      // Else, use the nominal name as the graph name.
+      [[maybe_unused]] const auto [graph_name, found] = config.GetGraphName(name);
+      extra_inputs.push_back({graph_name, tensor});
+    }
+  }
+
+  // Append tokens and run ComputeLogits after setting all other possible inputs
+  state_->SetExtraInputs(extra_inputs);
+  if (input_ids.size() > 0) {
+    AppendTokens(input_ids);
+  }
 }
 
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {

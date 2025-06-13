@@ -77,19 +77,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
 
-  cpu_span<int32_t> aux_input_ids{};  // Intermediate solution to be used with SetInputs function for multimodal and whisper models
-
-  struct Input {
-    std::string name;
-    std::shared_ptr<Tensor> tensor;
-  };
-
-  // A list of extra model inputs that will be matched at runtime based on name
-  std::vector<Input> extra_inputs;
-
-  void SetInputIds(const Tensor* tensor);
-  void SetInputs(const NamedTensors& inputs);
-
   std::string guidance_type;  // e.g. json_schema or regex
   std::string guidance_data;  // e.g. rules data in json_schema or regex
   void SetGuidance(std::string_view type, std::string_view data);
@@ -109,6 +96,14 @@ struct Generator : LeakChecked<Generator> {
 
   DeviceSpan<int32_t> GetSequence(size_t index) const;
 
+  // A list of extra model inputs that will be matched at runtime based on name
+  struct Input {
+    std::string name;
+    std::shared_ptr<Tensor> tensor;
+  };
+  std::vector<Input> extra_inputs;
+  void SetInputs(const NamedTensors& inputs);
+
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
@@ -117,7 +112,6 @@ struct Generator : LeakChecked<Generator> {
 
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
-  void AuxAppendTokens(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   enum Action { standard,   // Default, set in any other case
                 generated,  // Set after GenerateNextToken

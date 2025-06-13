@@ -61,6 +61,43 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
     return isDone(nativeHandle);
   }
 
+    /**
+   * Add a Tensor as a model input.
+   *
+   * @param name Name of the model input the tensor will provide.
+   * @param tensor Tensor to add.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void setModelInput(String name, Tensor tensor) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    if (tensor.nativeHandle() == 0) {
+      throw new IllegalArgumentException("tensor has been freed and is invalid");
+    }
+
+    setModelInput(nativeHandle, name, tensor.nativeHandle());
+  }
+
+  /**
+   * Add a NamedTensors as a model input.
+   *
+   * @param namedTensors NamedTensors to add.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public void setInputs(NamedTensors namedTensors) throws GenAIException {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    if (namedTensors.nativeHandle() == 0) {
+      throw new IllegalArgumentException("tensor has been freed and is invalid");
+    }
+
+    setInputs(nativeHandle, namedTensors.nativeHandle());
+  }
+
   /**
    * Appends tokens to the generator.
    *
@@ -220,6 +257,11 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   private native void destroyGenerator(long nativeHandle);
 
   private native boolean isDone(long nativeHandle);
+
+  private native void setModelInput(long nativeHandle, String inputName, long tensorHandle)
+      throws GenAIException;
+
+  private native void setInputs(long nativeHandle, long namedTensorsHandle) throws GenAIException;
 
   private native void appendTokens(long nativeHandle, int[] tokens) throws GenAIException;
 

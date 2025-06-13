@@ -326,17 +326,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGenerato
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* generator_params, const OgaNamedTensors* named_tensors);
-
-/**
- * \brief For additional model inputs that genai does not handle, this lets the user set their values. For example LoRA models handle
- * fine tuning through model inputs. This lets the user supply the fine tuning inputs, while genai handles the standard inputs.
- * \param[in] generator_params The generator params to set the input on
- * \param[in] name Name of the model input (this must match the model's input name)
- * \param[in] tensor The OgaTensor of the input data
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* generator_params, const char* name, OgaTensor* tensor);
-
 /**
  * \brief Sets the guidance type and data for the Generator params
  * \param[in] generator_params The generator params to set the guidance on
@@ -368,6 +357,17 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
  */
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator);
+
+/**
+ * \brief For additional model inputs that genai does not handle, this lets the user set their values. For example LoRA models handle
+ * fine tuning through model inputs. This lets the user supply the fine tuning inputs, while genai handles the standard inputs.
+  * \param[in] oga_generator The generator to add the inputs to.
+ * \param[in] name Name of the model input (this must match the model's input name)
+ * \param[in] tensor The OgaTensor of the input data
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* oga_generator, const char* name, OgaTensor* tensor);
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetInputs(OgaGenerator* oga_generator, const OgaNamedTensors* named_tensors);
 
 /**
  * \brief Adds the input ids to the generator. The input ids are used to seed the generation.

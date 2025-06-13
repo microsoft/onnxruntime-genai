@@ -313,7 +313,10 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   auto params = OgaGeneratorParams::Create(*model);
-  params->SetModelInput("test_input", *tensor);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  generator->SetModelInput("test_input", *tensor);
 }
 
 TEST(CAPITests, Logging) {

@@ -322,22 +322,6 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* params, 
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* params, const char* name, OgaTensor* tensor) {
-  // OGA_TRY
-  // const char* input_ids = "input_ids";
-  // if (strcmp(name, input_ids) == 0) {
-  //   params->SetInputIds(tensor);
-  // } else {
-  //   params->extra_inputs.push_back({std::string{name}, tensor->shared_from_this()});
-  // }
-  // return nullptr;
-  // OGA_CATCH
-  OGA_TRY
-  params->extra_inputs.push_back({std::string{name}, tensor->shared_from_this()});
-  return nullptr;
-  OGA_CATCH
-}
-
 OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* oga_params, const char* type, const char* data) {
   OGA_TRY
   oga_params->SetGuidance(type, data);
@@ -358,6 +342,13 @@ bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator) {
 
 bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator) {
   return generator->IsSessionTerminated();
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* generator, const char* name, OgaTensor* tensor) {
+  OGA_TRY
+  generator->extra_inputs.push_back({std::string{name}, tensor->shared_from_this()});
+  return nullptr;
+  OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* generator, const OgaSequences* sequences) {
