@@ -330,10 +330,7 @@ class Model:
             inputs=(),
             outputs=(),
             nodes=(),
-            opset_imports={
-                "": 21 if self.quant_attrs["use_qdq"] else 14,
-                "com.microsoft": 1,
-            },
+            opset_imports={"": 21, "com.microsoft": 1},
             name="main_graph",
         )
         self.model = ir.Model(graph, ir_version=10, producer_name="onnxruntime-genai")
@@ -722,17 +719,10 @@ class Model:
         self.make_node("ReduceMax", inputs=inputs, outputs=[output], name=name, keepdims=False)
         self.make_value(output, dtype, shape=shape)
 
-    def make_reduce_mean(self, name, inputs, dtype, shape, axes=[-1], keepdims=False):
+    def make_reduce_mean(self, name, inputs, dtype, shape, keepdims=False):
         output = f"{name}/output_0"
-        if self.quant_attrs["use_qdq"]:
-            # Opset 18 uses axes as input[1]
-            inputs.append(f"/model/constants/INT64/1D/{','.join(map(str, axes))}")
-            self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
-            self.make_value(output, dtype, shape=shape)
-        else:
-            # Opset 17 uses axes as attribute
-            self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, axes=axes, keepdims=keepdims)
-            self.make_value(output, dtype, shape=shape)
+        self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
+        self.make_value(output, dtype, shape=shape)
 
     def make_sqrt(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
@@ -1056,7 +1046,7 @@ class Model:
         self.layernorm_attrs["root_input"] = layernorm_attrs_value
         self.layernorm_attrs["skip_input"] = layernorm_attrs_value
 
-    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
+    def make_layernorm(self, layer_id: int, layernorm, skip: bool, simple: bool, location: str):
         if self.ep == "NvTensorRtRtx" and (skip or simple):
             # NvTensorRtRtx EP doesn't support Skip/SimplifiedLayerNormalization and SkipLayerNormalization, so we fallback to primitive ops
             self._make_layernorm_op(layer_id, layernorm, skip, simple, location)
@@ -1506,8 +1496,8 @@ class Model:
         self.make_value(f"{make_pow_name}/output_0", ir.DataType.FLOAT, shape=shape)
 
         make_reducemean_name = f"{basename}/ReduceMean"
-        make_reducemean_inputs = [f"{make_pow_name}/output_0"]
-        self.make_reduce_mean(make_reducemean_name, make_reducemean_inputs, ir.DataType.FLOAT, keepdims=True, axes=[-1], shape=shape)
+        make_reducemean_inputs = [f"{make_pow_name}/output_0", "/model/constants/INT64/1D/-1"]
+        self.make_reduce_mean(make_reducemean_name, make_reducemean_inputs, ir.DataType.FLOAT, keepdims=True, shape=shape)
 
         make_add_name = f"{basename}/Add"
         make_add_inputs = [f"{make_reducemean_name}/output_0", f"/model/constants/FLOAT/0D/{self.layernorm_attrs['epsilon']}"]
@@ -2288,7 +2278,7 @@ class Model:
                 _, processed_q_weight, torch_weight_scales = (
                     torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(weights.T, type)
                 )
-            except:
+            except ImportError:
                 raise RuntimeError("tensorrt_llm is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix()")
 
             return torch_weight_scales.to(torch.float16), processed_q_weight
@@ -2371,13 +2361,6 @@ class Model:
         return mul_act_name
 
     def make_gelu(self, layer_id, root_input, activation):
-        # NvTensorRtRtx (Opset 21) uses standard "Gelu" replacing "Gelu" & "FastGelu" contrib ops, otherwise fallback to contrib ops
-        if self.ep == "NvTensorRtRtx" and activation in ["Gelu", "FastGelu"]:
-            return self._make_gelu_op(layer_id, root_input, activation)
-        else:
-            return self.make_gelu_op(layer_id, root_input, activation)
-
-    def make_gelu_op(self, layer_id, root_input, activation):
         # Make nodes for this activation subgraph
         #
         #       root_input (Add)
@@ -2386,28 +2369,12 @@ class Model:
         gelu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         output = f"{gelu_name}/output_0"
 
-        self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
-        self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
-
-        return gelu_name
-
-    # This expansion of contrib-op can be updated / deprecated in future.
-    def _make_gelu_op(self, layer_id, root_input, activation):
-        # Make nodes for this activation subgraph
-        #
-        #       root_input (Add)
-        #           |
-        #        GeluAct
-        gelu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
-        output = f"{gelu_name}/output_0"
-
-        # NvTensorRtRtx (Opset 21) uses standard "Gelu" replacing "Gelu" & "FastGelu" contrib ops, otherwise fallback to contrib ops
         if activation == "Gelu":
             self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="none")
         elif activation == "FastGelu":
             self.make_node("Gelu", inputs=[root_input], outputs=[output], name=gelu_name, approximate="tanh")
         else:
-            raise NotImplementedError(f"The {activation} activation function is not currently supported.")
+            self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
 
         self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
 
@@ -2536,7 +2503,7 @@ class Model:
             # Load GGUF model
             try:
                 from gguf_model import GGUFModel
-            except:
+            except ImportError:
                 from onnxruntime_genai.models.gguf_model import GGUFModel
             model = GGUFModel.from_pretrained(self.model_type, input_path, self.head_size, self.hidden_size, self.intermediate_size, self.num_attn_heads, self.num_kv_heads, self.vocab_size)
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
@@ -2545,7 +2512,7 @@ class Model:
             # Load quantized PyTorch model
             try:
                 from quantized_model import QuantModel
-            except:
+            except ImportError:
                 from onnxruntime_genai.models.quantized_model import QuantModel
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
@@ -3661,7 +3628,7 @@ def check_extra_options(kv_pairs):
     if "exclude_lm_head" in kv_pairs and "include_hidden_states" in kv_pairs:
         # 'exclude_lm_head' is for when 'hidden_states' are outputted and 'logits' are not outputted
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
-        raise ValueError(f"Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
+        raise ValueError("Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
     # NvTensorRtRtx EP requires Opset 21, so force use_qdq which controls it.
     if args.execution_provider == "NvTensorRtRtx":
