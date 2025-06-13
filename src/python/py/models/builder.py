@@ -2322,18 +2322,18 @@ class Model:
         moe_expert_scales_2_name = f"model.layers.{layer_id}.moe.scales_2"
         moe_expert_scales_3_name = f"model.layers.{layer_id}.moe.scales_3"
 
-        def make_moe_external_tensor(w_list, moe_expert_name, dtype):
+        def make_moe_initializer(w_list, moe_expert_name, dtype):
             moe_experts_weight = torch.stack(w_list, dim=0)
             self.make_initializer(moe_experts_weight.to(dtype), moe_expert_name)
 
-        make_moe_external_tensor(w1_list, moe_expert_weight_1_name, torch.uint8)
-        make_moe_external_tensor(w2_list, moe_expert_weight_2_name, torch.uint8)
-        make_moe_external_tensor(w3_list, moe_expert_weight_3_name, torch.uint8)
+        make_moe_initializer(w1_list, moe_expert_weight_1_name, torch.uint8)
+        make_moe_initializer(w2_list, moe_expert_weight_2_name, torch.uint8)
+        make_moe_initializer(w3_list, moe_expert_weight_3_name, torch.uint8)
 
         # Currently we don't expect QMoE to be used with distributed inference
-        make_moe_external_tensor(w1_scale_list, moe_expert_scales_1_name, self.to_torch_dtype[self.io_dtype])
-        make_moe_external_tensor(w2_scale_list, moe_expert_scales_2_name, self.to_torch_dtype[self.io_dtype])
-        make_moe_external_tensor(w3_scale_list, moe_expert_scales_3_name, self.to_torch_dtype[self.io_dtype])
+        make_moe_initializer(w1_scale_list, moe_expert_scales_1_name, self.to_torch_dtype[self.io_dtype])
+        make_moe_initializer(w2_scale_list, moe_expert_scales_2_name, self.to_torch_dtype[self.io_dtype])
+        make_moe_initializer(w3_scale_list, moe_expert_scales_3_name, self.to_torch_dtype[self.io_dtype])
 
         bias_ph = "" # Placeholder for bias
         inputs = [root_input, f"{gate_reshape_name}/output_0", \
