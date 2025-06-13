@@ -445,6 +445,9 @@ class Model:
             },
         }
 
+        if self.window_size is not None and self.window_size > 0:
+            genai_config["model"]["decoder"]["sliding_window"] = {"window_size": self.window_size, "slide_key_value_cache": False, "slide_inputs": False}
+
         if self.ep != "cpu":
             ep_options = { self.ep : self.ep_attrs[self.ep] }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)

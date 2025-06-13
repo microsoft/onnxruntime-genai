@@ -226,7 +226,7 @@ void WindowedInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
 }
 
 std::unique_ptr<InputIDs> CreateInputIDs(State& state) {
-  if (state.model_.config_->model.decoder.sliding_window.has_value()) {
+  if (state.model_.config_->model.decoder.sliding_window.has_value() && state.model_.config_->model.decoder.sliding_window->slide_inputs) {
     return std::make_unique<WindowedInputIDs>(state);
   } else {
     return std::make_unique<DefaultInputIDs>(state);
