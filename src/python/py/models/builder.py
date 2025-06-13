@@ -603,25 +603,36 @@ class Model:
                 self.make_constant(input_name)
 
         # Resolve values from names
-        input_values = [self.make_value(name) for name in inputs]
+        input_values = [self.make_value(name, create=False) for name in inputs]
         output_values = [self.make_value(name) for name in outputs]
         node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
         self.model.graph.append(node)
         self.node_names.add(name)
 
-    def make_value(self, name, dtype: ir.DataType | int| None = None, shape: Sequence[int | str] | ir.Shape | None = None) -> ir.Value:
+    def make_value(
+        self,
+        name,
+        dtype: ir.DataType | int | None = None,
+        shape: Sequence[int | str] | ir.Shape | None = None,
+        *,
+        create: bool = True,
+    ) -> ir.Value:
         """Obtain or create an IR value by value name.
 
-        If the value does not exist a new one is created.
+        If the value does not exist a new one is created when :param:`create` is True.
         If dtype or shape is provided, it will be set on the value.
 
         Args:
             name: The name of the value.
-            output: Whether the value is an output value.
+            dtype: The data type of the value, can be an ir.DataType or an int.
+            shape: The shape of the value, can be a sequence of integers or an ir.Shape.
+            create: If True, a new value will be created if it does not exist.
         """
         if name == "":
             # None value
             return ir.Value(name="")
+        if name not in self.values and not create:
+            raise ValueError(f"Value with name '{name}' does not exist. Please ensure that the value is created before accessing it.")
         value = self.values.setdefault(name, ir.Value(name=name))
         if dtype is not None:
             value.dtype = ir.DataType(dtype)
@@ -629,7 +640,7 @@ class Model:
             value.shape = ir.Shape(shape)
         return value
 
-    def make_inputs_and_outputs(self):
+    def make_inputs(self):
         # Add model-specific inputs to list of model inputs
         inputs = self.model.graph.inputs
         for name in self.input_names:
@@ -637,26 +648,58 @@ class Model:
             shape = self.input_shapes[name]
             inputs.append(self.make_value(name, dtype=dtype, shape=shape))
 
-        # Add model-specific outputs to list of model outputs
-        outputs = self.model.graph.outputs
-        for name in self.output_names:
-            dtype = self.output_types[name]
-            shape = self.output_shapes[name]
-            outputs.append(self.make_value(name, dtype=dtype, shape=shape))
-
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
+            inputs.append(
+                self.make_value(
+                    key_name,
+                    dtype=self.input_types["past_key_values.key"],
+                    shape=self.input_shapes["past_key_values.key"],
+                )
+            )
             value_name = f"past_key_values.{i}.value"
-            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
+            inputs.append(
+                self.make_value(
+                    value_name,
+                    dtype=self.input_types["past_key_values.value"],
+                    shape=self.input_shapes["past_key_values.value"],
+                )
+            )
 
+    def make_outputs(self):
+        # Add model-specific outputs to list of model outputs
+        # At this point all outputs should be created and exist in self.values
+        outputs = self.model.graph.outputs
+        for name in self.output_names:
+            dtype = self.output_types[name]
+            shape = self.output_shapes[name]
+            outputs.append(
+                self.make_value(name, dtype=dtype, shape=shape, create=False)
+            )
+
+        # Add KV cache to inputs and outputs
+        for i in range(self.num_layers):
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"]))
+            outputs.append(
+                self.make_value(
+                    key_name,
+                    dtype=self.output_types["present.key"],
+                    shape=self.output_shapes["present.key"],
+                    create=False,
+                )
+            )
             value_name = f"present.{i}.value"
-            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"]))
+            outputs.append(
+                self.make_value(
+                    value_name,
+                    dtype=self.output_types["present.value"],
+                    shape=self.output_shapes["present.value"],
+                    create=False,
+                )
+            )
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
@@ -2545,7 +2588,7 @@ class Model:
 
     def make_model(self, input_path):
         # Make inputs and outputs to ONNX model
-        self.make_inputs_and_outputs()
+        self.make_inputs()
 
         # Make pre-processing nodes
         self.make_preprocessing_nodes()
@@ -2610,6 +2653,8 @@ class Model:
                     # Language modeling head (SkipLayerNorm --> logits)
                     print("Reading LM head")
                     self.make_lm_head(module)
+
+        self.make_outputs()
 
         del model
 
