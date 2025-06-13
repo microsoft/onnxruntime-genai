@@ -387,7 +387,7 @@ class Model:
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         try:
             config = GenerationConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
-        except Exception:
+        except:
             config = AutoConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
 
         inputs = dict(zip(self.input_names, self.input_names))
