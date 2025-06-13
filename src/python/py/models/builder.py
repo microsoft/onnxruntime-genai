@@ -604,7 +604,7 @@ class Model:
 
         # Resolve values from names
         input_values = [self.make_value(name, create=False) for name in inputs]
-        output_values = [self.make_value(name) for name in outputs]
+        output_values = [self.make_value(name, create=True) for name in outputs]
         node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
         self.model.graph.append(node)
         self.node_names.add(name)
@@ -615,7 +615,7 @@ class Model:
         dtype: ir.DataType | int | None = None,
         shape: Sequence[int | str] | ir.Shape | None = None,
         *,
-        create: bool = True,
+        create: bool = False,
     ) -> ir.Value:
         """Obtain or create an IR value by value name.
 
@@ -646,7 +646,7 @@ class Model:
         for name in self.input_names:
             dtype = self.input_types[name]
             shape = self.input_shapes[name]
-            inputs.append(self.make_value(name, dtype=dtype, shape=shape))
+            inputs.append(self.make_value(name, dtype=dtype, shape=shape, create=True))
 
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
@@ -657,6 +657,7 @@ class Model:
                     key_name,
                     dtype=self.input_types["past_key_values.key"],
                     shape=self.input_shapes["past_key_values.key"],
+                    create=True,
                 )
             )
             value_name = f"past_key_values.{i}.value"
@@ -665,6 +666,7 @@ class Model:
                     value_name,
                     dtype=self.input_types["past_key_values.value"],
                     shape=self.input_shapes["past_key_values.value"],
+                    create=True,
                 )
             )
 
