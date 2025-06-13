@@ -1056,7 +1056,7 @@ class Model:
         self.layernorm_attrs["root_input"] = layernorm_attrs_value
         self.layernorm_attrs["skip_input"] = layernorm_attrs_value
 
-    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
+    def make_layernorm(self, layer_id: int, layernorm, skip: bool, simple: bool, location: str):
         if self.ep == "NvTensorRtRtx" and (skip or simple):
             # NvTensorRtRtx EP doesn't support Skip/SimplifiedLayerNormalization and SkipLayerNormalization, so we fallback to primitive ops
             self._make_layernorm_op(layer_id, layernorm, skip, simple, location)
