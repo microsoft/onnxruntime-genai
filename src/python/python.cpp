@@ -225,6 +225,10 @@ struct PyGenerator {
     return ToPython(generator_->GetSequence(index));
   }
 
+  pybind11::array GetInput(const std::string& name) {
+    return ToNumpy(*generator_->GetInput(name.c_str()));
+  }
+  
   pybind11::array GetOutput(const std::string& name) {
     return ToNumpy(*generator_->GetOutput(name.c_str()));
   }
@@ -313,11 +317,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
-#if 0
-      // TODO(baijumeswani): Rename/redesign the whisper_input_features to be more generic
-      .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
-      .def_readwrite("alignment_heads", &PyGeneratorParams::py_alignment_heads_)
-#endif
       .def("set_inputs", &PyGeneratorParams::SetInputs)
       .def("set_model_input", &PyGeneratorParams::SetModelInput)
       .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
@@ -403,6 +402,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<const OgaModel&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
+      .def("get_input", &PyGenerator::GetInput)
       .def("get_output", &PyGenerator::GetOutput)
       .def("append_tokens", pybind11::overload_cast<pybind11::array_t<int32_t>&>(&PyGenerator::AppendTokens))
       .def("append_tokens", pybind11::overload_cast<OgaTensor&>(&PyGenerator::AppendTokens))

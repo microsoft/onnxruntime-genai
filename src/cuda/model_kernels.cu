@@ -262,13 +262,14 @@ void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache,
 
 template <typename T>
 __global__ void CopyCrossQKSingleDecodeStepKernel(T* target,  // shape [batch_beam_size, num_alignment_heads, max_length, frames]
-                                                  T** qk_layer_pointers,
+                                                  void** qk_layer_pointers,
                                                   int token_index,
                                                   int num_layers,
                                                   int num_heads,
                                                   const int* alignment_heads,
                                                   int frames,
-                                                  int max_length) {
+                                                  int max_length,
+                                                  int sequence_length) {
   const int pair = blockIdx.x;
   const int num_alignment_heads = gridDim.x;
   const int bbm = blockIdx.y;
@@ -277,17 +278,20 @@ __global__ void CopyCrossQKSingleDecodeStepKernel(T* target,  // shape [batch_be
   const int head = *(alignment_heads + 1);
 
   target += ((int64_t)bbm * num_alignment_heads + pair) * max_length * frames + ((int64_t)token_index * frames);
-  T* src = qk_layer_pointers[layer] + ((int64_t)bbm * num_heads + head) * frames;
+  T* src = reinterpret_cast<T*>(qk_layer_pointers[layer]) + ((int64_t)bbm * num_heads + head) * sequence_length * frames;
 
   for (int tid = threadIdx.x; tid < frames; tid += blockDim.x) {
     target[tid] = src[tid];  // use vectorized read write in future if needed
+    for (int i = 1; i < sequence_length; i++) {
+      target[i * frames + tid] = src[i * frames + tid];
+    }
   }
 }
 
 template <typename T>
 void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream,
                                        T* cross_qk_buffer_data,
-                                       T** qk_layer_pointers,
+                                       void** qk_layer_pointers,
                                        int token_index,
                                        int batch_beam_size,
                                        int num_layers,
@@ -295,23 +299,37 @@ void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream,
                                        int num_alignment_heads,
                                        const int* alignment_heads,
                                        int frames,
-                                       int max_length) {
+                                       int max_length,
+                                       int sequence_length) {
   dim3 block(512);
   dim3 grid(num_alignment_heads, batch_beam_size);
 
-  CopyCrossQKSingleDecodeStepKernel<<<grid, block, 0, stream>>>(cross_qk_buffer_data,
-                                                                qk_layer_pointers,
-                                                                token_index,
-                                                                num_layers,
-                                                                num_heads,
-                                                                alignment_heads,
-                                                                frames,
-                                                                max_length);
+  if (std::is_same<T, uint16_t>::value) {
+    CopyCrossQKSingleDecodeStepKernel<<<grid, block, 0, stream>>>(reinterpret_cast<half*>(cross_qk_buffer_data),
+                                                                  qk_layer_pointers,
+                                                                  token_index,
+                                                                  num_layers,
+                                                                  num_heads,
+                                                                  alignment_heads,
+                                                                  frames,
+                                                                  max_length,
+                                                                  sequence_length);
+  } else {
+    CopyCrossQKSingleDecodeStepKernel<<<grid, block, 0, stream>>>(cross_qk_buffer_data,
+                                                                  qk_layer_pointers,
+                                                                  token_index,
+                                                                  num_layers,
+                                                                  num_heads,
+                                                                  alignment_heads,
+                                                                  frames,
+                                                                  max_length,
+                                                                  sequence_length);
+  }
 }
 
 template void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream,
                                                 float* cross_qk_buffer_data,
-                                                float** qk_layer_pointers,
+                                                void** qk_layer_pointers,
                                                 int token_index,
                                                 int batch_beam_size,
                                                 int num_layers,
@@ -319,7 +337,21 @@ template void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream,
                                                 int num_alignment_heads,
                                                 const int* alignment_heads,
                                                 int frames,
-                                                int max_length);
+                                                int max_length,
+                                                int sequence_length);
+
+template void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream,
+                                                uint16_t* cross_qk_buffer_data,
+                                                void** qk_layer_pointers,
+                                                int token_index,
+                                                int batch_beam_size,
+                                                int num_layers,
+                                                int num_heads,
+                                                int num_alignment_heads,
+                                                const int* alignment_heads,
+                                                int frames,
+                                                int max_length,
+                                                int sequence_length);
 
 template <typename T>
 __global__ void CopyDecoderCrossQKAllStepsKernel(int context_decoding_len,
@@ -338,7 +370,7 @@ __global__ void CopyDecoderCrossQKAllStepsKernel(int context_decoding_len,
   const int batch = br / num_return_sequences;
   const int ret_seq_id = br % num_return_sequences;
 
-  const int64_t offset_in_cache = ((int64_t)batch * num_return_sequences + ret_seq_id) * max_length + token_decoding_index + context_decoding_len;
+  const int64_t offset_in_cache = ((int64_t)batch * num_return_sequences + ret_seq_id) * max_length + token_decoding_index;
   int bi_src = batch * num_beams + cache_indir_data[offset_in_cache];
 
   T* target = cross_qk_output + (((int64_t)br * num_alignment_heads + (int64_t)pair) * total_decoding_length + token_decoding_index) * frames_of_k;
@@ -352,7 +384,7 @@ template <typename T>
 void LaunchFinalizeCrossQK(cudaStream_t stream,
                            int iteration_number,
                            int context_decoding_len,
-                           int batch_size,
+                           int batch_beam_size,
                            int num_beams,
                            int max_length,
                            int num_alignment_heads,
@@ -361,33 +393,57 @@ void LaunchFinalizeCrossQK(cudaStream_t stream,
                            T* cross_qk_output,
                            int num_return_sequences,
                            const int* cache_indir_data) {
-  int64_t br = (int64_t)batch_size * num_return_sequences;
+  int64_t br = (int64_t)batch_beam_size;
   assert(br < 65536L && num_alignment_heads < 65536);
 
-  const int total_decoding_length = iteration_number - 1;
+  const int total_decoding_length = iteration_number;
   dim3 block(512);
   dim3 grid(total_decoding_length, num_alignment_heads, (unsigned)br);
 
-  CopyDecoderCrossQKAllStepsKernel<<<grid, block, 0, stream>>>(context_decoding_len,
-                                                               num_beams,
-                                                               num_return_sequences,
-                                                               max_length,
-                                                               frames_of_k,
-                                                               cross_qk_buffer_data,
-                                                               cross_qk_output,
-                                                               cache_indir_data);
+  if (std::is_same<T, uint16_t>::value) {
+    CopyDecoderCrossQKAllStepsKernel<<<grid, block, 0, stream>>>(context_decoding_len,
+                                                                 num_beams,
+                                                                 num_return_sequences,
+                                                                 max_length,
+                                                                 frames_of_k,
+                                                                 reinterpret_cast<const half*>(cross_qk_buffer_data),
+                                                                 reinterpret_cast<half*>(cross_qk_output),
+                                                                 cache_indir_data);
+  } else {
+    CopyDecoderCrossQKAllStepsKernel<<<grid, block, 0, stream>>>(context_decoding_len,
+                                                                 num_beams,
+                                                                 num_return_sequences,
+                                                                 max_length,
+                                                                 frames_of_k,
+                                                                 cross_qk_buffer_data,
+                                                                 cross_qk_output,
+                                                                 cache_indir_data);
+  }
 }
 
 template void LaunchFinalizeCrossQK(cudaStream_t stream,
                                     int iteration_number,
                                     int context_decoding_len,
-                                    int batch_size,
+                                    int batch_beam_size,
                                     int num_beams,
                                     int max_length,
                                     int num_alignment_heads,
                                     int frames_of_k,
                                     const float* cross_qk_buffer_data,
                                     float* cross_qk_output,
+                                    int num_return_sequences,
+                                    const int* cache_indir_data);
+
+template void LaunchFinalizeCrossQK(cudaStream_t stream,
+                                    int iteration_number,
+                                    int context_decoding_len,
+                                    int batch_beam_size,
+                                    int num_beams,
+                                    int max_length,
+                                    int num_alignment_heads,
+                                    int frames_of_k,
+                                    const uint16_t* cross_qk_buffer_data,
+                                    uint16_t* cross_qk_output,
                                     int num_return_sequences,
                                     const int* cache_indir_data);
 
