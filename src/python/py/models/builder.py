@@ -527,26 +527,16 @@ class Model:
             size_threshold_bytes=0,
         )
 
-        # TODO(justinchuby): This makes the model not savable again when the weight
-        # files are deleted.
-        # Delete external data files on disk before re-saving
-        for path in os.listdir(self.cache_dir):
-            if path.endswith(".bin"):
-                try:
-                    os.remove(os.path.join(self.cache_dir, path))
-                except OSError:
-                    print("Error deleting temporary file:", path)
-
         # Delete temporary cache dir if empty
         if not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
 
-    def make_external_tensor(self, tensor: torch.Tensor | np.ndarray | ir.TensorProtocol, name: str):
+    def make_initializer(self, tensor: torch.Tensor | np.ndarray | ir.TensorProtocol, name: str):
         if isinstance(tensor, torch.nn.parameter.Parameter):
             ir_tensor = tensor_adapters.TorchTensor(tensor, name=name)
         else:
             ir_tensor = ir.tensor(tensor, name=name)
-        value = self.make_value_info(name, ir_tensor.dtype, ir_tensor.shape)
+        value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape)
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
 
@@ -570,13 +560,13 @@ class Model:
                 self.make_constant(input_name)
 
         # Resolve values from names
-        input_values = [self.make_value_info(name) for name in inputs]
-        output_values = [self.make_value_info(name) for name in outputs]
+        input_values = [self.make_value(name) for name in inputs]
+        output_values = [self.make_value(name) for name in outputs]
         node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
         self.model.graph.append(node)
         self.node_names.add(name)
 
-    def make_value_info(self, name, dtype: ir.DataType | int| None = None, shape: Sequence[int | str] | ir.Shape | None = None) -> ir.Value:
+    def make_value(self, name, dtype: ir.DataType | int| None = None, shape: Sequence[int | str] | ir.Shape | None = None) -> ir.Value:
         """Obtain or create an IR value by value name.
 
         If the value does not exist a new one is created.
@@ -602,28 +592,28 @@ class Model:
         for name in self.input_names:
             dtype = self.input_types[name]
             shape = self.input_shapes[name]
-            inputs.append(self.make_value_info(name, dtype=dtype, shape=shape))
+            inputs.append(self.make_value(name, dtype=dtype, shape=shape))
 
         # Add model-specific outputs to list of model outputs
         outputs = self.model.graph.outputs
         for name in self.output_names:
             dtype = self.output_types[name]
             shape = self.output_shapes[name]
-            outputs.append(self.make_value_info(name, dtype=dtype, shape=shape))
+            outputs.append(self.make_value(name, dtype=dtype, shape=shape))
 
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(self.make_value_info(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
+            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
             value_name = f"past_key_values.{i}.value"
-            inputs.append(self.make_value_info(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
+            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(self.make_value_info(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"]))
+            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"]))
             value_name = f"present.{i}.value"
-            outputs.append(self.make_value_info(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"]))
+            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"]))
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
@@ -642,152 +632,152 @@ class Model:
 
         node_name = name.replace("constants", "constant_nodes")
         self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=tensor)
-        self.make_value_info(name, onnx_dtype, shape=[])
+        self.make_value(name, onnx_dtype, shape=[])
 
     def make_gather(self, name, inputs, axis):
         output = f"{name}/output_0"
         self.make_node("Gather", inputs=inputs, outputs=[output], name=name, axis=axis)
-        self.make_value_info(output, ir.DataType.INT64, shape=[])
+        self.make_value(output, ir.DataType.INT64, shape=[])
 
     def make_reshape(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Reshape", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_shape(self, name, root_input, shape):
         output = f"{name}/output_0"
         self.make_node("Shape", inputs=[root_input], outputs=[output], name=name)
-        self.make_value_info(output, ir.DataType.INT64, shape=shape)
+        self.make_value(output, ir.DataType.INT64, shape=shape)
 
     def make_constant_of_shape(self, name, root_input, value, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("ConstantOfShape", inputs=[root_input], outputs=[output], name=name, value=value)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_unsqueeze(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Unsqueeze", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_squeeze(self, name, inputs):
         output = f"{name}/output_0"
         self.make_node("Squeeze", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, ir.DataType.INT64, shape=[])
+        self.make_value(output, ir.DataType.INT64, shape=[])
 
     def make_concat(self, name, inputs, dtype, shape, axis=0):
         output = f"{name}/output_0"
         self.make_node("Concat", inputs=inputs, outputs=[output], name=name, axis=axis)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_tile(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Tile", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_equal(self, name, inputs, shape):
         output = f"{name}/output_0"
         self.make_node("Equal", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, ir.DataType.BOOL, shape=shape)
+        self.make_value(output, ir.DataType.BOOL, shape=shape)
 
     def make_greater(self, name, inputs, shape):
         output = f"{name}/output_0"
         self.make_node("Greater", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, ir.DataType.BOOL, shape=shape)
+        self.make_value(output, ir.DataType.BOOL, shape=shape)
 
     def make_greater_or_equal(self, name, inputs, shape):
         output = f"{name}/output_0"
         self.make_node("GreaterOrEqual", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, ir.DataType.BOOL, shape=shape)
+        self.make_value(output, ir.DataType.BOOL, shape=shape)
 
     def make_isinf(self, name, root_input, shape):
         output = f"{name}/output_0"
         self.make_node("IsInf", inputs=[root_input], outputs=[output], name=name)
-        self.make_value_info(output, ir.DataType.BOOL, shape=shape)
+        self.make_value(output, ir.DataType.BOOL, shape=shape)
 
     def make_clip(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Clip", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_where(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Where", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_expand(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Expand", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_reduce_sum(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("ReduceSum", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_reduce_max(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("ReduceMax", inputs=inputs, outputs=[output], name=name, keepdims=False)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_reduce_mean(self, name, inputs, dtype, shape, keepdims=False):
         output = f"{name}/output_0"
         self.make_node("ReduceMean", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_sqrt(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Sqrt", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_cast(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Cast", inputs=[root_input], outputs=[output], name=name, to=dtype)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_add(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Add", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_sub(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Sub", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_less(self, name, inputs):
         output = f"{name}/output_0"
         self.make_node("Less", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, ir.DataType.BOOL, shape=None)
+        self.make_value(output, ir.DataType.BOOL, shape=None)
 
     def make_range(self, name, inputs):
         output = f"{name}/output_0"
         self.make_node("Range", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, ir.DataType.INT64, shape=["unk"])
+        self.make_value(output, ir.DataType.INT64, shape=["unk"])
 
     def make_slice(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Slice", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_mul(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Mul", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_transpose(self, name, root_input, dtype, shape, perm):
         output = f"{name}/output_0"
         self.make_node("Transpose", inputs=[root_input], outputs=[output], name=name, perm=perm)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_div(self, name, inputs, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Div", inputs=inputs, outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_tanh(self, name, root_input, dtype, shape):
         output = f"{name}/output_0"
         self.make_node("Tanh", inputs=[root_input], outputs=[output], name=name)
-        self.make_value_info(output, dtype, shape=shape)
+        self.make_value(output, dtype, shape=shape)
 
     def make_matmul(self, matmul, basename, root_input, **kwargs):
         if hasattr(matmul, "base_layer"):
@@ -810,12 +800,12 @@ class Model:
 
     def make_matmul_float(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
-        self.make_external_tensor(matmul.weight.T.to(self.to_torch_dtype[self.io_dtype]), weight)
+        self.make_initializer(matmul.weight.T.to(self.to_torch_dtype[self.io_dtype]), weight)
 
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
         self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', last_dim])
+        self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', last_dim])
 
         return name
 
@@ -830,20 +820,20 @@ class Model:
 
         # Input weights are quantized, save quantized MatMul weights for onnx model
         weight = name[1:].replace("/", ".") + ".qweight"
-        self.make_external_tensor(matmul.qweight, weight)
+        self.make_initializer(matmul.qweight, weight)
         scales = name[1:].replace("/", ".") + ".scales"
-        self.make_external_tensor(matmul.scales.to(self.to_torch_dtype[self.io_dtype]), scales)
+        self.make_initializer(matmul.scales.to(self.to_torch_dtype[self.io_dtype]), scales)
 
         inputs = [root_input, weight, scales]
 
         if hasattr(matmul, "qzeros") and matmul.qzeros is not None:
             zeros = name[1:].replace("/", ".") + ".qzeros"
-            self.make_external_tensor(matmul.qzeros, zeros)
+            self.make_initializer(matmul.qzeros, zeros)
             inputs.append(zeros)
 
         if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
             g_idx = name[1:].replace("/", ".") + ".g_idx"
-            self.make_external_tensor(matmul.g_idx.to(torch.int32), g_idx)
+            self.make_initializer(matmul.g_idx.to(torch.int32), g_idx)
             inputs.append(g_idx)
 
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
@@ -852,7 +842,7 @@ class Model:
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
             bits=matmul.bits, block_size=matmul.group_size, K=matmul.in_features, N=matmul.out_features,
         )
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
+        self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
 
         return name
 
@@ -877,12 +867,12 @@ class Model:
         qweight_npy = quantized_op.qweight.numpy(force=True)
         qweight_npy = qweight_npy.reshape(*qweight_npy.shape[:-2], qweight_npy.shape[-2] * qweight_npy.shape[-1])
         qweight_npy = unpack_4bit(qweight_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2])
-        self.make_external_tensor(qweight_npy, qweight)
+        self.make_initializer(qweight_npy, qweight)
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
         scales_pt = quantized_op.scales.to(self.to_torch_dtype[self.io_dtype]).numpy(force=True)
         scales_pt = scales_pt.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size)
-        self.make_external_tensor(scales_pt, scales)
+        self.make_initializer(scales_pt, scales)
 
         dequantize_inputs = [qweight, scales]
 
@@ -890,12 +880,12 @@ class Model:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
             zeros_npy = quantized_op.qzeros.numpy(force=True)
             zeros_npy = unpack_4bit(zeros_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size])
-            self.make_external_tensor(zeros_npy, zeros)
+            self.make_initializer(zeros_npy, zeros)
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
         self.make_node("DequantizeLinear", inputs=dequantize_inputs, outputs=[dequantize_output], name=dequantize_name, block_size=quantized_op.group_size, axis=-1)
-        self.make_value_info(dequantize_output, self.io_dtype, shape=[*scales_pt.shape[:-1], scales_pt.shape[-1] * quantized_op.group_size])
+        self.make_value(dequantize_output, self.io_dtype, shape=[*scales_pt.shape[:-1], scales_pt.shape[-1] * quantized_op.group_size])
 
         return dequantize_output
 
@@ -919,7 +909,7 @@ class Model:
 
         matmul_output = "logits" if kwargs.get("logits", False) else f"{matmul_name}/output_0"
         self.make_node("MatMul", inputs=[root_input, f"{transpose_name}/output_0"], outputs=[matmul_output], name=matmul_name)
-        self.make_value_info(matmul_output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
+        self.make_value(matmul_output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
 
         return matmul_name
 
@@ -1014,7 +1004,7 @@ class Model:
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
-        self.make_external_tensor(add.to(self.to_torch_dtype[self.io_dtype]), bias)
+        self.make_initializer(add.to(self.to_torch_dtype[self.io_dtype]), bias)
 
         add_bias_inputs = [root_input, bias]
         shape = ['batch_size', 'sequence_length', add.shape[0]]
@@ -1022,7 +1012,7 @@ class Model:
         if kwargs.get("logits", False):
             output = "logits"
             self.make_node("Add", inputs=add_bias_inputs, outputs=[output], name=name)
-            self.make_value_info(output, dtype=self.io_dtype, shape=shape)
+            self.make_value(output, dtype=self.io_dtype, shape=shape)
         else:
             self.make_add(name, add_bias_inputs, dtype=self.io_dtype, shape=shape)
 
@@ -1033,13 +1023,13 @@ class Model:
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
-        self.make_external_tensor(embedding.to(self.to_torch_dtype[self.io_dtype]), weight)
+        self.make_initializer(embedding.to(self.to_torch_dtype[self.io_dtype]), weight)
 
         basename = "/model/embed_tokens"
         gather_name = f"{basename}/Gather"
         gather_output = f"{gather_name}/output_0"
         self.make_node('Gather', inputs=[weight, 'input_ids'], outputs=[gather_output], name=gather_name)
-        self.make_value_info(gather_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        self.make_value(gather_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
         if self.embed_attrs["scale"] != 1:
             # Scale the embeddings
@@ -1047,7 +1037,7 @@ class Model:
             mul_inputs = [gather_output, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.embed_attrs['scale']}"]
             mul_output = f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self.make_value(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
             layernorm_attrs_value = mul_output
         else:
@@ -1076,10 +1066,10 @@ class Model:
 
         # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor(layernorm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"], weight)
+        self.make_initializer(layernorm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"], weight)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
-            self.make_external_tensor(layernorm.bias.to(new_torch_dtype), bias)
+            self.make_initializer(layernorm.bias.to(new_torch_dtype), bias)
 
         # Create input names for op
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
@@ -1105,9 +1095,9 @@ class Model:
 
         # Make op and its shape
         self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
-        self.make_value_info(outputs[0], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        self.make_value(outputs[0], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.make_value_info(outputs[3], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self.make_value(outputs[3], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
         # Update LayerNorm attributes
         self.layernorm_attrs["output_0"] = output_0
@@ -1130,10 +1120,10 @@ class Model:
 
         # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_external_tensor((layernorm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"]), weight)
+        self.make_initializer((layernorm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"]), weight)
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
-            self.make_external_tensor(layernorm.bias.to(new_torch_dtype), bias)
+            self.make_initializer(layernorm.bias.to(new_torch_dtype), bias)
 
          # Create input names for op
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
@@ -1169,7 +1159,7 @@ class Model:
             raise ValueError(f"Invalid op_type: {op_type}")
 
         if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.make_value_info(outputs[3], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self.make_value(outputs[3], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
         # Update LayerNorm attributes
         self.layernorm_attrs["output_0"] = output_0
@@ -1198,7 +1188,7 @@ class Model:
             root_input_cast_name = f"{name}/root_input/Cast"
             root_input_cast_output = f"{root_input_cast_name}/output_0"
             self.make_node("Cast", inputs=[root_input], outputs=[root_input_cast_output], name=root_input_cast_name, to=new_dtype)
-            self.make_value_info(root_input_cast_output, new_dtype, shape=root_input_shape)
+            self.make_value(root_input_cast_output, new_dtype, shape=root_input_shape)
             inputs[0] = root_input_cast_output
 
         if skip and self.layernorm_attrs["cast"]["skip_input"]:
@@ -1207,7 +1197,7 @@ class Model:
             skip_input_cast_name = f"{name}/skip_input/Cast"
             skip_input_cast_output = f"{skip_input_cast_name}/output_0"
             self.make_node("Cast", inputs=[skip_input], outputs=[skip_input_cast_output], name=skip_input_cast_name, to=new_dtype)
-            self.make_value_info(skip_input_cast_output, new_dtype, shape=self.values[skip_input].shape)
+            self.make_value(skip_input_cast_output, new_dtype, shape=self.values[skip_input].shape)
             inputs[1] = skip_input_cast_output
 
         if self.layernorm_attrs["cast"]["output_0"]:
@@ -1215,7 +1205,7 @@ class Model:
             output_0_cast_name = f"{name}/output_0/Cast"
             output_0_cast_output = f"{output_0_cast_name}/output_0"
             self.make_node("Cast", inputs=[output_0_cast_output], outputs=[output_0], name=output_0_cast_name, to=old_dtype)
-            self.make_value_info(output_0, old_dtype, shape=root_input_shape)
+            self.make_value(output_0, old_dtype, shape=root_input_shape)
             outputs[0] = output_0_cast_output
 
         if skip and not self.layernorm_attrs["last_layernorm"] and self.layernorm_attrs["cast"]["output_3"]:
@@ -1224,7 +1214,7 @@ class Model:
             output_3_cast_name = f"{name}/output_3/Cast"
             output_3_cast_output = f"{output_3_cast_name}/output_3"
             self.make_node("Cast", inputs=[output_3_cast_output], outputs=[output_3], name=output_3_cast_name, to=old_dtype)
-            self.make_value_info(output_3, old_dtype, shape=root_input_shape)
+            self.make_value(output_3, old_dtype, shape=root_input_shape)
             outputs[3] = output_3_cast_output
 
         return inputs, outputs
@@ -1306,8 +1296,8 @@ class Model:
 
             if self.rotemb_attrs["save_caches"]:
                 # Save cos/sin caches to disk
-                self.make_external_tensor(cos_cache, cos_cache_name)
-                self.make_external_tensor(sin_cache, sin_cache_name)
+                self.make_initializer(cos_cache, cos_cache_name)
+                self.make_initializer(sin_cache, sin_cache_name)
             else:
                 # Return cos/sin caches since they will be custom-saved
                 return cos_cache, sin_cache
@@ -1325,7 +1315,7 @@ class Model:
             interleaved=self.rotemb_attrs["interleaved"], num_heads=(0 if self.rotemb_attrs["partial_rotary_factor"] == 1.0 else num_heads),  # default is 0 in RotaryEmbedding kernel
             rotary_embedding_dim=self.rotemb_attrs["rotary_embedding_dim"],
         )
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * num_heads])
+        self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * num_heads])
 
     def make_rotary_embedding_multi_cache(self, **kwargs):
         cos_cache_name = kwargs.get("cos_cache_name", "cos_cache")
@@ -1357,8 +1347,8 @@ class Model:
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
             sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
             # Save cos/sin caches to disk
-            self.make_external_tensor(cos_cache, cos_cache_name)
-            self.make_external_tensor(sin_cache, sin_cache_name)
+            self.make_initializer(cos_cache, cos_cache_name)
+            self.make_initializer(sin_cache, sin_cache_name)
             # Do NOT make the subgraph with the If node for DML EP.
             return
 
@@ -1428,8 +1418,8 @@ class Model:
                 name="small_rotemb_caches_graph",
             ),
         )
-        self.make_value_info(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
-        self.make_value_info(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+        self.make_value(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+        self.make_value(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
     # This expansion of contrib-op can be updated / deprecated in future.
     def _make_skip_simplified_layer_norm(self, basename, root_input, skip_input, weight_name, output_0, output_3, io_dtype, shape):
@@ -1443,7 +1433,7 @@ class Model:
         make_add_name = f"{basename}/Add"
         output_3 = f"{basename}/Add/output_0" if output_3 is None else output_3
         self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
-        self.make_value_info(output_3, io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        self.make_value(output_3, io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
         make_simplified_layer_norm_name = f"{basename}/skip_simplified_layer_norm"
         self._make_simplified_layer_norm(make_simplified_layer_norm_name, output_3, weight_name, output_0, io_dtype, shape=shape)
@@ -1460,7 +1450,7 @@ class Model:
         output_3 = f"{basename}/Add/output_0" if output_3 is None else output_3
         make_add_name = f"{basename}/Add"
         self.make_node("Add", inputs=[root_input, skip_input], outputs=[output_3], name=make_add_name)
-        self.make_value_info(output_3, io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        self.make_value(output_3, io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
         make_layer_norm_name = f"{basename}/LayerNormalization"
         inputs = [output_3, weight_name, bias_name]
@@ -1469,7 +1459,7 @@ class Model:
         kwargs.update({"axis": -1, "stash_type": 1})
 
         self.make_node("LayerNormalization", inputs=inputs, outputs=[output_0], name=make_layer_norm_name, **kwargs)
-        self.make_value_info(output_0, io_dtype, shape=shape)
+        self.make_value(output_0, io_dtype, shape=shape)
 
     # This expansion contrib-op can be updated / depricated in future.
     def _make_simplified_layer_norm(self, basename, root_input, weight_name, output_0, io_dtype, shape):
@@ -1503,7 +1493,7 @@ class Model:
         make_pow_inputs = [f"{make_cast_name}/output_0", "/model/constants/FLOAT/0D/2"]
 
         self.make_node("Pow", inputs=make_pow_inputs, outputs=[f"{make_pow_name}/output_0"], name=make_pow_name, domain="")
-        self.make_value_info(f"{make_pow_name}/output_0", ir.DataType.FLOAT, shape=shape)
+        self.make_value(f"{make_pow_name}/output_0", ir.DataType.FLOAT, shape=shape)
 
         make_reducemean_name = f"{basename}/ReduceMean"
         make_reducemean_inputs = [f"{make_pow_name}/output_0", "/model/constants/INT64/1D/-1"]
@@ -1532,7 +1522,7 @@ class Model:
         make_mul_1_inputs = [f"{make_cast_1_name}/output_0", weight_name]
 
         self.make_node("Mul", inputs=make_mul_1_inputs, outputs=[output_0], name=make_mul_1_name)
-        self.make_value_info(output_0, dtype=io_dtype, shape=shape)
+        self.make_value(output_0, dtype=io_dtype, shape=shape)
 
 
     def make_qk_norm(self, layer_id, attention):
@@ -1564,7 +1554,7 @@ class Model:
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
         q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
         q_layernorm_output = f"{q_layernorm_name}/output_0"
-        self.make_external_tensor((attention.q_norm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"]), q_weight_name)
+        self.make_initializer((attention.q_norm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"]), q_weight_name)
 
         # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
         q_layernorm_inputs = [q_reshape_1_output, q_weight_name]
@@ -1573,7 +1563,7 @@ class Model:
             q_layernorm_inputs, q_layernorm_outputs = self.make_layernorm_casts(q_layernorm_name, q_layernorm_inputs, q_layernorm_outputs, old_io_dtype, new_io_dtype)
 
         self.make_node("SimplifiedLayerNormalization", inputs=q_layernorm_inputs, outputs=q_layernorm_outputs, name=q_layernorm_name, **layernorm_kwargs)
-        self.make_value_info(q_layernorm_outputs[0], dtype=new_io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
+        self.make_value(q_layernorm_outputs[0], dtype=new_io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
 
         # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD
         q_reshape_2_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
@@ -1590,7 +1580,7 @@ class Model:
         k_layernorm_name = f"/model/layers.{layer_id}/attn/k_norm/SimplifiedLayerNormalization"
         k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
         k_layernorm_output = f"{k_layernorm_name}/output_0"
-        self.make_external_tensor((attention.k_norm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"]), k_weight_name)
+        self.make_initializer((attention.k_norm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"]), k_weight_name)
 
         # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
         k_layernorm_inputs = [k_reshape_1_output, k_weight_name]
@@ -1599,7 +1589,7 @@ class Model:
             k_layernorm_inputs, k_layernorm_outputs = self.make_layernorm_casts(k_layernorm_name, k_layernorm_inputs, k_layernorm_outputs, old_io_dtype, new_io_dtype)
 
         self.make_node("SimplifiedLayerNormalization", inputs=k_layernorm_inputs, outputs=k_layernorm_outputs, name=k_layernorm_name, **layernorm_kwargs)
-        self.make_value_info(k_layernorm_outputs[0], dtype=new_io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
+        self.make_value(k_layernorm_outputs[0], dtype=new_io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
         # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD
         k_reshape_2_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_2"
@@ -1812,7 +1802,7 @@ class Model:
             "MultiHeadAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
             num_heads=self.num_attn_heads, scale=self.attention_attrs["scale"],
         )
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
+        self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
 
     def make_group_query_attention(self, name, **kwargs):
         inputs = [
@@ -1828,7 +1818,7 @@ class Model:
             num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], local_window_size=self.window_size,
             softcap=self.attention_attrs["softcap"], do_rotary=self.attention_attrs["use_rope_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
         )
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
+        self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
 
     def make_sparse_attention(self, name, **kwargs):
         inputs = [
@@ -2322,18 +2312,18 @@ class Model:
         moe_expert_scales_2_name = f"model.layers.{layer_id}.moe.scales_2"
         moe_expert_scales_3_name = f"model.layers.{layer_id}.moe.scales_3"
 
-        def make_moe_external_tensor(w_list, moe_expert_name, dtype):
+        def make_moe_initializer(w_list, moe_expert_name, dtype):
             moe_experts_weight = torch.stack(w_list, dim=0)
-            self.make_external_tensor(moe_experts_weight.to(dtype), moe_expert_name)
+            self.make_initializer(moe_experts_weight.to(dtype), moe_expert_name)
 
-        make_moe_external_tensor(w1_list, moe_expert_weight_1_name, torch.uint8)
-        make_moe_external_tensor(w2_list, moe_expert_weight_2_name, torch.uint8)
-        make_moe_external_tensor(w3_list, moe_expert_weight_3_name, torch.uint8)
+        make_moe_initializer(w1_list, moe_expert_weight_1_name, torch.uint8)
+        make_moe_initializer(w2_list, moe_expert_weight_2_name, torch.uint8)
+        make_moe_initializer(w3_list, moe_expert_weight_3_name, torch.uint8)
 
         # Currently we don't expect QMoE to be used with distributed inference
-        make_moe_external_tensor(w1_scale_list, moe_expert_scales_1_name, self.to_torch_dtype[self.io_dtype])
-        make_moe_external_tensor(w2_scale_list, moe_expert_scales_2_name, self.to_torch_dtype[self.io_dtype])
-        make_moe_external_tensor(w3_scale_list, moe_expert_scales_3_name, self.to_torch_dtype[self.io_dtype])
+        make_moe_initializer(w1_scale_list, moe_expert_scales_1_name, self.to_torch_dtype[self.io_dtype])
+        make_moe_initializer(w2_scale_list, moe_expert_scales_2_name, self.to_torch_dtype[self.io_dtype])
+        make_moe_initializer(w3_scale_list, moe_expert_scales_3_name, self.to_torch_dtype[self.io_dtype])
 
         bias_ph = "" # Placeholder for bias
         inputs = [root_input, f"{gate_reshape_name}/output_0", \
@@ -2346,7 +2336,7 @@ class Model:
         self.make_node(op_type, inputs=inputs, outputs=[output], name=moe_name, domain="com.microsoft",
                        k=top_k, activation_type=activation_type, normalize_routing_weights=normalize_routing_weights,
                        use_sparse_mixer=use_sparse_mixer, expert_weight_bits=(4 if use_int4 else 8))
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
         # Assign output 0 of previous MoE as root input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = output
@@ -2362,7 +2352,7 @@ class Model:
         act_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         act_output = f"{act_name}/output_0"
         self.make_node(activation, inputs=[root_input], outputs=[act_output], name=act_name, domain=domain)
-        self.make_value_info(act_output, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_value(act_output, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         mul_act_name = f"/model/layers.{layer_id}/mlp/act_fn/Mul"
         mul_act_inputs = [root_input, act_output]
@@ -2386,7 +2376,7 @@ class Model:
         else:
             self.make_node(activation, inputs=[root_input], outputs=[output], name=gelu_name, domain="com.microsoft")
 
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
+        self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
 
         return gelu_name
 
@@ -2394,7 +2384,7 @@ class Model:
         relu_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         output = f"{relu_name}/output_0"
         self.make_node(activation, inputs=[root_input], outputs=[output], name=relu_name, domain="")
-        self.make_value_info(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
+        self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
         return relu_name
 
     def make_relu_squared(self, layer_id, root_input, activation):
@@ -2403,7 +2393,7 @@ class Model:
         pow_name = f"{basename}/pow"
         pow_inputs = [f"{relu_name}/output_0", "/model/constants/INT32/1D/2"]
         self.make_node("Pow", inputs=pow_inputs, outputs=[f"{pow_name}/output_0"], name=pow_name, domain="")
-        self.make_value_info(f"{pow_name}/output_0", self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
+        self.make_value(f"{pow_name}/output_0", self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
         return pow_name
 
     def make_activation(self, layer_id, root_input):
@@ -2450,19 +2440,19 @@ class Model:
             mul_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.lm_head_attrs['scale']}"]
             mul_output = "logits" if not any(exists_checks[2:]) else f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
+            self.make_value(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
             lm_name = mul_name
 
         if mask_exists:
             # Save logits mask as initializer
             logits_mask_name = "logits_mask"
-            self.make_external_tensor(self.lm_head_attrs["mask"], logits_mask_name)
+            self.make_initializer(self.lm_head_attrs["mask"], logits_mask_name)
 
             where_name = "/lm_head/Where"
             where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{torch.finfo(self.to_torch_dtype[self.io_dtype]).min}", f"{lm_name}/output_0"]
             where_output = "logits" if not any(exists_checks[3:]) else f"{where_name}/output_0"
             self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
-            self.make_value_info(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
+            self.make_value(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
             lm_name = where_name
 
         if softcap_exists:
@@ -2478,7 +2468,7 @@ class Model:
             mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.lm_head_attrs['softcap']}"]
             mul_output = "logits" if not any(exists_checks[4:]) else f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value_info(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
+            self.make_value(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
             lm_name = mul_name
 
         if cast_exists:
@@ -2486,7 +2476,7 @@ class Model:
             cast_name = "/lm_head/Cast"
             cast_output = "logits"
             self.make_node('Cast', inputs=[f"{lm_name}/output_0"], outputs=[cast_output], name=cast_name, to=self.output_types['logits'])
-            self.make_value_info(cast_output, self.output_types['logits'], shape=['batch_size', 'sequence_length', self.vocab_size])
+            self.make_value(cast_output, self.output_types['logits'], shape=['batch_size', 'sequence_length', self.vocab_size])
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
@@ -3292,11 +3282,11 @@ class Phi3SmallModel(Model):
 
         # Create tensors for row indices and col indices
         crows_name = "block_row_indices"
-        self.make_external_tensor(crows.to(torch.int32), crows_name)
+        self.make_initializer(crows.to(torch.int32), crows_name)
         self.mask_attrs["block_row_indices"] = crows_name
 
         cols_name = "block_col_indices"
-        self.make_external_tensor(cols.to(torch.int32), cols_name)
+        self.make_initializer(cols.to(torch.int32), cols_name)
         self.mask_attrs["block_col_indices"] = cols_name
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
