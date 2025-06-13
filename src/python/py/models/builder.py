@@ -525,9 +525,6 @@ class Model:
         else:
             model = self.model
 
-        # Make sure all nodes are topologically sorted
-        model.graph.sort()
-
         # Save ONNX model with only one external data file and delete any existing duplicate copies
         out_path = os.path.join(out_dir, self.filename)
         data_path = os.path.join(out_dir, os.path.basename(out_path) + ".data")
