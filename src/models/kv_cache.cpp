@@ -175,8 +175,10 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   // Set the size after empty_past_ has been created with 0 for this field
-  if (state.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx && model_.config_->model.decoder.sliding_window_size > 0)
-    shape_[2] = std::min(state_.params_->search.max_length, model_.config_->model.decoder.sliding_window_size);
+  if (state.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx &&
+      model_.config_->model.decoder.sliding_window.has_value() &&
+      model_.config_->model.decoder.sliding_window->window_size > 0)
+    shape_[2] = std::min(state_.params_->search.max_length, model_.config_->model.decoder.sliding_window->window_size);
   else if (past_present_share_buffer_)
     shape_[2] = state_.params_->search.max_length;
 
@@ -424,7 +426,8 @@ std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
     return nullptr;
   }
 
-  if (state.model_.config_->model.decoder.sliding_window &&
+  if (state.model_.p_device_->GetType() != DeviceType::NvTensorRtRtx && 
+      state.model_.config_->model.decoder.sliding_window && 
       state.model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
     return std::make_unique<WindowedKeyValueCache>(state);
   }

@@ -174,13 +174,13 @@ struct Config {
       int num_key_value_heads{};
       int num_hidden_layers{};
       int head_size{};
-      int sliding_window_size{-1};
 
       struct SlidingWindow {               // Sliding window parameters for models that process input prompt in chunks
         int window_size{};                 // The size of the window to slide over the input prompt
         int pad_value{};                   // The key-value cache padding value to use for the sliding window for inactive tokens
         std::string alignment{"right"};    // The alignment of the window, either "left" or "right"
         bool slide_key_value_cache{true};  // Whether to slide the key-value cache along with the input prompt
+        bool slide_inputs{true};           // Whether to slide the input prompt along with the key-value cache
       };
       std::optional<SlidingWindow> sliding_window;
 
