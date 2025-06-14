@@ -3849,11 +3849,12 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
-        # Make ONNX model
-        onnx_model.make_model(input_path)
+        with torch.no_grad():
+            # Make ONNX model
+            onnx_model.make_model(input_path)
 
-        # Save ONNX model
-        onnx_model.save_model(output_dir)
+            # Save ONNX model
+            onnx_model.save_model(output_dir)
     else:
         onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
 
