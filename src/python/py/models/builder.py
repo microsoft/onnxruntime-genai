@@ -546,9 +546,17 @@ class Model:
         if callable(func_or_tensor):
             assert shape is not None
             assert dtype is not None
+
             def tensor_func():
-                return ir.tensor(func_or_tensor())
-            ir_tensor = ir.LazyTensor(tensor_func, dtype=dtype, shape=ir.Shape(shape), name=name)
+                tensor = func_or_tensor()
+                if isinstance(tensor, torch.nn.parameter.Parameter):
+                    return tensor_adapters.TorchTensor(tensor, name=name)
+                return ir.tensor(tensor, name=name)
+
+            ir_tensor = ir.LazyTensor(
+                tensor_func, dtype=dtype, shape=ir.Shape(shape), name=name
+            )
+
         elif isinstance(func_or_tensor, torch.nn.parameter.Parameter):
             ir_tensor = tensor_adapters.TorchTensor(func_or_tensor, name=name)
         else:
