@@ -14,7 +14,7 @@ import ast
 import json
 import os
 import textwrap
-from typing import Any, Literal, Sequence
+from typing import Any, Callable, Literal, Sequence
 
 import numpy as np
 import onnx_ir as ir
@@ -36,6 +36,10 @@ from transformers import (
 # NOTE: Avoid importing from onnx helper and numpy_helper. Instead, leverage
 # ONNX IR methods like ir.tensor, ir.DataType.numpy() and other methods for constructing
 # the ONNX graph efficiently.
+
+
+def transpose_shape(shape: Sequence[int]) -> Sequence[int]:
+    return [*shape[:-2], shape[-1], shape[-2]]
 
 
 class Model:
@@ -531,11 +535,32 @@ class Model:
         if not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
 
-    def make_initializer(self, tensor: torch.Tensor | np.ndarray | ir.TensorProtocol, name: str):
-        if isinstance(tensor, torch.nn.parameter.Parameter):
-            ir_tensor = tensor_adapters.TorchTensor(tensor, name=name)
+    def make_initializer(
+        self,
+        func_or_tensor: Callable[[], torch.Tensor] | ir.ArrayCompatible | np.ndarray | ir.TensorProtocol,
+        /,
+        name: str,
+        dtype: ir.DataType | None = None,
+        shape: Sequence[int | str] | ir.Shape | None = None,
+    ):
+        if callable(func_or_tensor):
+            assert shape is not None
+            assert dtype is not None
+
+            def tensor_func():
+                tensor = func_or_tensor()
+                if isinstance(tensor, torch.nn.parameter.Parameter):
+                    return tensor_adapters.TorchTensor(tensor, name=name)
+                return ir.tensor(tensor, name=name)
+
+            ir_tensor = ir.LazyTensor(
+                tensor_func, dtype=dtype, shape=ir.Shape(shape), name=name
+            )
+
+        elif isinstance(func_or_tensor, torch.nn.parameter.Parameter):
+            ir_tensor = tensor_adapters.TorchTensor(func_or_tensor, name=name)
         else:
-            ir_tensor = ir.tensor(tensor, name=name)
+            ir_tensor = ir.tensor(func_or_tensor, name=name)
         value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape)
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
@@ -800,7 +825,12 @@ class Model:
 
     def make_matmul_float(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
-        self.make_initializer(matmul.weight.T.to(self.to_torch_dtype[self.io_dtype]), weight)
+        self.make_initializer(
+            lambda: matmul.weight.T.to(self.to_torch_dtype[self.io_dtype]),
+            weight,
+            dtype=self.io_dtype,
+            shape=transpose_shape(matmul.weight.shape),
+        )
 
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
@@ -1004,7 +1034,12 @@ class Model:
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
-        self.make_initializer(add.to(self.to_torch_dtype[self.io_dtype]), bias)
+        self.make_initializer(
+            lambda: add.to(self.to_torch_dtype[self.io_dtype]),
+            bias,
+            dtype=self.io_dtype,
+            shape=add.shape,
+        )
 
         add_bias_inputs = [root_input, bias]
         shape = ['batch_size', 'sequence_length', add.shape[0]]
@@ -1023,7 +1058,12 @@ class Model:
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
-        self.make_initializer(embedding.to(self.to_torch_dtype[self.io_dtype]), weight)
+        self.make_initializer(
+            lambda: embedding.to(self.to_torch_dtype[self.io_dtype]),
+            weight,
+            dtype=self.io_dtype,
+            shape=embedding.shape,
+        )
 
         basename = "/model/embed_tokens"
         gather_name = f"{basename}/Gather"
@@ -1066,10 +1106,20 @@ class Model:
 
         # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_initializer(layernorm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"], weight)
+        self.make_initializer(
+            lambda: layernorm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"],
+            weight,
+            dtype=new_io_dtype,
+            shape=layernorm.weight.shape,
+        )
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
-            self.make_initializer(layernorm.bias.to(new_torch_dtype), bias)
+            self.make_initializer(
+                lambda: layernorm.bias.to(new_torch_dtype),
+                bias,
+                dtype=new_io_dtype,
+                shape=layernorm.bias.shape,
+            )
 
         # Create input names for op
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
@@ -1120,11 +1170,20 @@ class Model:
 
         # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_initializer((layernorm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"]), weight)
+        self.make_initializer(
+            lambda: layernorm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"],
+            weight,
+            dtype=new_io_dtype,
+            shape=layernorm.weight.shape,
+        )
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
-            self.make_initializer(layernorm.bias.to(new_torch_dtype), bias)
-
+            self.make_initializer(
+                lambda: layernorm.bias.to(new_torch_dtype),
+                bias,
+                dtype=new_io_dtype,
+                shape=layernorm.bias.shape,
+            )
          # Create input names for op
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
         if not simple:
@@ -1554,7 +1613,12 @@ class Model:
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
         q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
         q_layernorm_output = f"{q_layernorm_name}/output_0"
-        self.make_initializer((attention.q_norm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"]), q_weight_name)
+        self.make_initializer(
+            lambda: attention.q_norm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"],
+            q_weight_name,
+            dtype=new_io_dtype,
+            shape=attention.q_norm.weight.shape,
+        )
 
         # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
         q_layernorm_inputs = [q_reshape_1_output, q_weight_name]
@@ -1580,7 +1644,12 @@ class Model:
         k_layernorm_name = f"/model/layers.{layer_id}/attn/k_norm/SimplifiedLayerNormalization"
         k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
         k_layernorm_output = f"{k_layernorm_name}/output_0"
-        self.make_initializer((attention.k_norm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"]), k_weight_name)
+        self.make_initializer(
+            lambda: attention.k_norm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"],
+            k_weight_name,
+            dtype=new_io_dtype,
+            shape=attention.k_norm.weight.shape,
+        )
 
         # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
         k_layernorm_inputs = [k_reshape_1_output, k_weight_name]
@@ -2314,7 +2383,12 @@ class Model:
 
         def make_moe_initializer(w_list, moe_expert_name, dtype):
             moe_experts_weight = torch.stack(w_list, dim=0)
-            self.make_initializer(moe_experts_weight.to(dtype), moe_expert_name)
+            self.make_initializer(
+                lambda: moe_experts_weight.to(dtype),
+                moe_expert_name,
+                dtype=self.to_onnx_dtype[dtype],
+                shape=moe_experts_weight.shape,
+            )
 
         make_moe_initializer(w1_list, moe_expert_weight_1_name, torch.uint8)
         make_moe_initializer(w2_list, moe_expert_weight_2_name, torch.uint8)
@@ -2521,7 +2595,7 @@ class Model:
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
-            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=True, torch_dtype="auto", **extra_kwargs)
 
         if "adapter_path" in self.extra_options:
             from peft import PeftModel
@@ -3783,11 +3857,12 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
-        # Make ONNX model
-        onnx_model.make_model(input_path)
+        with torch.no_grad():
+            # Make ONNX model
+            onnx_model.make_model(input_path)
 
-        # Save ONNX model
-        onnx_model.save_model(output_dir)
+            # Save ONNX model
+            onnx_model.save_model(output_dir)
     else:
         onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
 
