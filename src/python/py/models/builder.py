@@ -1391,7 +1391,7 @@ class Model:
             ],
             name="/small/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_small)))
         self.make_node(
-            "If", inputs=[f"{greater_name}/output_0"], outputs=[if_cos_cache_output, if_sin_cache_output], name=if_name,
+            "If", inputs=[f"{greater_name}/output_0"], outputs=[cos_cache_name, sin_cache_name], name=if_name,
             then_branch=ir.Graph(
                 inputs=[],
                 outputs=[
