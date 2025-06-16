@@ -536,19 +536,13 @@ class Model:
             os.rmdir(self.cache_dir)
 
     def make_initializer(
-        self,
-        func_or_tensor: Callable[[], torch.Tensor] | ir.ArrayCompatible | np.ndarray | ir.TensorProtocol,
-        /,
-        name: str,
-        dtype: ir.DataType | None = None,
-        shape: Sequence[int | str] | ir.Shape | None = None,
+        self, tensor: ir.ArrayCompatible | np.ndarray | ir.TensorProtocol, /, name: str, to: ir.DataType | None = None
     ):
-        if callable(func_or_tensor):
-            assert shape is not None
-            assert dtype is not None
+        if to is None:
+            to = self.io_dtype
+        elif
 
             def tensor_func():
-                tensor = func_or_tensor()
                 if isinstance(tensor, torch.nn.parameter.Parameter):
                     return tensor_adapters.TorchTensor(tensor, name=name)
                 return ir.tensor(tensor, name=name)
@@ -557,7 +551,7 @@ class Model:
                 tensor_func, dtype=dtype, shape=ir.Shape(shape), name=name
             )
 
-        elif isinstance(func_or_tensor, torch.nn.parameter.Parameter):
+        elif isinstance(tensor, torch.nn.parameter.Parameter):
             ir_tensor = tensor_adapters.TorchTensor(func_or_tensor, name=name)
         else:
             ir_tensor = ir.tensor(func_or_tensor, name=name)
