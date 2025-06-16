@@ -38,10 +38,6 @@ from transformers import (
 # the ONNX graph efficiently.
 
 
-def transpose_shape(shape: Sequence[int]) -> Sequence[int]:
-    return [*shape[:-2], shape[-1], shape[-2]]
-
-
 class Model:
     def __init__(
         self,
