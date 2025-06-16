@@ -2519,7 +2519,6 @@ class Model:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
 
-    @torch.no_grad
     def make_model(self, input_path):
         # Make inputs and outputs to ONNX model
         self.make_inputs_and_outputs()
@@ -3722,7 +3721,7 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     }[precision]
 
 
-
+@torch.no_grad
 def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
