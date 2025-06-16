@@ -16,6 +16,7 @@ import os
 import textwrap
 from typing import Any, Literal, Sequence
 
+from tqdm import tqdm
 import numpy as np
 import onnx_ir as ir
 from onnx_ir import tensor_adapters
@@ -520,12 +521,26 @@ class Model:
         if os.path.exists(data_path):
             print(f"Overwriting {data_path}")
             os.remove(data_path)
-        ir.save(
-            model,
-            out_path,
-            external_data=os.path.basename(data_path),
-            size_threshold_bytes=0,
-        )
+
+        with tqdm() as pbar:
+            total_set = False
+
+            def callback(tensor: ir.TensorProtocol, metadata: dict):
+                nonlocal total_set
+                if not total_set:
+                    pbar.total = metadata["total"]
+                    total_set = True
+
+                pbar.update(1)
+                pbar.set_description(f"Saving {tensor.name} ({tensor.dtype}, size={metadata.get('size_bytes', "unknown")})")
+
+            ir.save(
+                model,
+                out_path,
+                external_data=os.path.basename(data_path),
+                size_threshold_bytes=0,
+                callback=callback,
+            )
 
         # Delete temporary cache dir if empty
         if not os.listdir(self.cache_dir):
