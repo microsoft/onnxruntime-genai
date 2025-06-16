@@ -14,7 +14,7 @@ import ast
 import json
 import os
 import textwrap
-from typing import Any, Callable, Literal, Sequence
+from typing import Any, Literal, Sequence
 
 import numpy as np
 import onnx_ir as ir
@@ -2519,6 +2519,7 @@ class Model:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
 
+    @torch.no_grad
     def make_model(self, input_path):
         # Make inputs and outputs to ONNX model
         self.make_inputs_and_outputs()
@@ -3811,12 +3812,11 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
-        with torch.no_grad():
-            # Make ONNX model
-            onnx_model.make_model(input_path)
+        # Make ONNX model
+        onnx_model.make_model(input_path)
 
-            # Save ONNX model
-            onnx_model.save_model(output_dir)
+        # Save ONNX model
+        onnx_model.save_model(output_dir)
     else:
         onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
 
