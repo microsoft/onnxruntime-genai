@@ -528,11 +528,11 @@ class Model:
             def callback(tensor: ir.TensorProtocol, metadata: dict):
                 nonlocal total_set
                 if not total_set:
-                    pbar.total = metadata["total"]
+                    pbar.total = metadata.total
                     total_set = True
 
                 pbar.update()
-                pbar.set_description(f"Saving {tensor.name} ({tensor.dtype}, shape={tensor.shape})")
+                pbar.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
 
             ir.save(
                 model,
