@@ -144,13 +144,25 @@ class Model:
 
         # Map ONNX dtypes to PyTorch dtypes
         self.to_torch_dtype = {
-            ir.DataType.INT8: torch.int8,
-            ir.DataType.UINT8: torch.uint8,
+            ir.DataType.BFLOAT16: torch.bfloat16,
+            ir.DataType.BOOL: torch.bool,
+            ir.DataType.COMPLEX128: torch.complex128,
+            ir.DataType.COMPLEX64: torch.complex64,
+            ir.DataType.DOUBLE: torch.float64,
+            ir.DataType.FLOAT: torch.float32,
+            ir.DataType.FLOAT16: torch.float16,
+            ir.DataType.FLOAT8E4M3FN: torch.float8_e4m3fn,
+            ir.DataType.FLOAT8E4M3FNUZ: torch.float8_e4m3fnuz,
+            ir.DataType.FLOAT8E5M2: torch.float8_e5m2,
+            ir.DataType.FLOAT8E5M2FNUZ: torch.float8_e5m2fnuz,
+            ir.DataType.INT16: torch.int16,
             ir.DataType.INT32: torch.int32,
             ir.DataType.INT64: torch.int64,
-            ir.DataType.BFLOAT16: torch.bfloat16,
-            ir.DataType.FLOAT16: torch.float16,
-            ir.DataType.FLOAT: torch.float32,
+            ir.DataType.INT8: torch.int8,
+            ir.DataType.UINT16: torch.uint16,
+            ir.DataType.UINT32: torch.uint32,
+            ir.DataType.UINT64: torch.uint64,
+            ir.DataType.UINT8: torch.uint8,
         }
 
         # Map PyTorch dtypes to ONNX dtypes
