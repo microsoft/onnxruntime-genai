@@ -531,7 +531,7 @@ class Model:
                     pbar.total = metadata["total"]
                     total_set = True
 
-                pbar.update(1)
+                pbar.update()
                 pbar.set_description(f"Saving {tensor.name} ({tensor.dtype}, size={metadata.get('size_bytes', "unknown")})")
 
             ir.save(
