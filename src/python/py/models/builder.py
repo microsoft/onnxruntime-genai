@@ -1375,26 +1375,26 @@ class Model:
 
         cos_cache_large_node = ir.node(
             "Constant", [], outputs=[
-                ir.Value(name=cos_cache_large_name, type=ir.TensorType(self.io_dtype), shape=cos_cache_large.shape)
+                ir.Value(name=cos_cache_large_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(cos_cache_large.shape))
             ],
             name="/large/cos_cache/Constant", attributes=dict(value=ir.tensor(cos_cache_large)))
         sin_cache_large_node = ir.node(
             "Constant", [], outputs=[
-                ir.Value(name=sin_cache_large_name, type=ir.TensorType(self.io_dtype), shape=sin_cache_large.shape)
+                ir.Value(name=sin_cache_large_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(sin_cache_large.shape))
             ],
             name="/large/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_large)))
         cos_cache_small_node = ir.node(
             "Constant", [], outputs=[
-                ir.Value(name=cos_cache_small_name, type=ir.TensorType(self.io_dtype), shape=cos_cache_small.shape)
+                ir.Value(name=cos_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(cos_cache_small.shape))
             ],
             name="/small/cos_cache/Constant", attributes=dict(value=ir.tensor(cos_cache_small)))
         sin_cache_small_node = ir.node(
             "Constant", [], outputs=[
-                ir.Value(name=sin_cache_small_name, type=ir.TensorType(self.io_dtype), shape=sin_cache_small.shape)
+                ir.Value(name=sin_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(sin_cache_small.shape))
             ],
             name="/small/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_small)))
         self.make_node(
-            "If", inputs=[f"{greater_name}/output_0"], outputs=[if_cos_cache_output, if_sin_cache_output], name=if_name,
+            "If", inputs=[f"{greater_name}/output_0"], outputs=[cos_cache_name, sin_cache_name], name=if_name,
             then_branch=ir.Graph(
                 inputs=[],
                 outputs=[
