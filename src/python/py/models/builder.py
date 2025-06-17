@@ -93,11 +93,17 @@ class Model:
             self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
         
         if self.use_paged_attention:
-            self.attention_attrs["op_type"] = "PagedAttention"
             self.input_shapes["input_ids"] = ["token_count"]
             self.input_names.remove("attention_mask")
-            self.input_shapes["past_key_values.key"] = ["num_blocks", "num_heads", "head_size_x", "block_size", "x"]
-            self.input_shapes["past_key_values.value"] = ["num_blocks", "num_heads", "head_size", "block_size"]
+            self.input_shapes["past_key_values.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.input_names += ["block_table", "cumulative_sequence_length", "past_seqlens"]
+            self.input_types["block_table"] = TensorProto.INT32
+            self.input_types["cumulative_sequence_length"] = TensorProto.INT32
+            self.input_types["past_seqlens"] = TensorProto.INT32
+            self.input_shapes["block_table"] = ["batch_size", "max_num_blocks"]
+            self.input_shapes["cumulative_sequence_length"] = ["batch_size + 1"]
+            self.input_shapes["past_seqlens"] = ["batch_size"]
             # self.input_shapes["position_ids"] = ["token_count"] # TODO: If we do this, we need support rotary embeddings with packed input
 
 
@@ -121,6 +127,9 @@ class Model:
             self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
         elif self.include_hidden_states:
             self.output_names = ["hidden_states"] + self.output_names
+        if self.use_paged_attention:
+            self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
 
         # Store names of nodes already created
         self.node_names = set()
@@ -152,7 +161,7 @@ class Model:
             "block_row_indices": "",            # Row indices of CSR format of block mask (used as input to SparseAttention)
             "block_col_indices": "",            # Col indices of CSR format of block mask (used as input to SparseAttention)
             "key_total_seq_lens": "",           # Sum of each row in attention mask (used as input to SparseAttention)
-            "cumulative_sequence_length": "",   # Cumulative sequence length of each row in attention mask (used as input to SparseAttention)
+            "cumulative_sequence_length": "",   # Cumulative sequence length of each row in attention mask (used as input to SparseAttention and PagedAttention)
             "past_seqlens": "",                 # Past sequence lengths (used as input to PagedAttention)
             "block_table": "",                  # Block table for paged KV-cache (used as input to PagedAttention)
         }
@@ -255,29 +264,41 @@ class Model:
                 "homo_head": homo_head,                      # Use homo head pattern for sparse attention
             }
         }
-        valid_gqa_configurations = [
-            ("cpu", TensorProto.FLOAT),
-            ("cuda", TensorProto.FLOAT16),
-            ("rocm", TensorProto.FLOAT16),
-            ("dml", TensorProto.FLOAT16),
-            ("webgpu", TensorProto.FLOAT16),
-            ("webgpu", TensorProto.FLOAT),
-        ]
-        if (self.ep, self.io_dtype) in valid_gqa_configurations:
-            # Change model settings for GroupQueryAttention
-            self.attention_attrs["op_type"] = "GroupQueryAttention"
-            print("GroupQueryAttention (GQA) is used in this model.")
-
-            # DML doesn't support packed Q/K/V for GQA yet
-            # Packed MatMul with LoRA/QLoRA is not currently supported
-            self.attention_attrs["use_packed_matmul"] = self.ep not in ["dml", "webgpu"] and not self.matmul_attrs["use_lora"]
-
-            # GQA + Rot.Emb. does not require `position ids` as input
-            if self.ep not in ["dml", "webgpu"]:
+        
+        if self.use_paged_attention:
+            valid_paged_configurations = [
+                ("cuda", TensorProto.FLOAT16)
+            ]
+            if (self.ep, self.io_dtype) in valid_paged_configurations:
+                self.attention_attrs["op_type"] = "PagedAttention"
+                print("PagedAttention is used in this model.")
+                # No other EP's at the moment
                 self.attention_attrs["use_rotemb_in_attn"] = True
                 self.input_names.remove("position_ids")
+        else:
+            valid_gqa_configurations = [
+                ("cpu", TensorProto.FLOAT),
+                ("cuda", TensorProto.FLOAT16),
+                ("rocm", TensorProto.FLOAT16),
+                ("dml", TensorProto.FLOAT16),
+                ("webgpu", TensorProto.FLOAT16),
+                ("webgpu", TensorProto.FLOAT),
+            ]
+            if (self.ep, self.io_dtype) in valid_gqa_configurations:
+                # Change model settings for GroupQueryAttention
+                self.attention_attrs["op_type"] = "GroupQueryAttention"
+                print("GroupQueryAttention (GQA) is used in this model.")
 
-        self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
+                # DML doesn't support packed Q/K/V for GQA yet
+                # Packed MatMul with LoRA/QLoRA is not currently supported
+                self.attention_attrs["use_packed_matmul"] = self.ep not in ["dml", "webgpu"] and not self.matmul_attrs["use_lora"]
+
+                # GQA + Rot.Emb. does not require `position ids` as input
+                if self.ep not in ["dml", "webgpu"]:
+                    self.attention_attrs["use_rotemb_in_attn"] = True
+                    self.input_names.remove("position_ids")
+
+        self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention" or self.attention_attrs["op_type"] == "PagedAttention"
 
         # MLP-specific variables
         self.mlp_attrs = {
@@ -1420,7 +1441,8 @@ class Model:
         elif op_type == "SparseAttention":
             self.make_sparse_attention(name, block_row_indices=self.mask_attrs['block_row_indices'], block_col_indices=self.mask_attrs['block_col_indices'], key_total_seq_lens=f"{self.mask_attrs['key_total_seq_lens']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
         elif op_type == "PagedAttention":
-            self.make_paged_attention(name, past_seqlens=self.mask_attrs["past_seqlens"], **kwargs) 
+            # TODO(aciddelgado): is this syntax and the output_0 correct?
+            self.make_paged_attention(name, past_seqlens="past_seqlens", cumulative_sequence_length="cumulative_sequence_length", block_table="block_table", **kwargs) 
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
 
@@ -1474,9 +1496,8 @@ class Model:
         inputs = [
             kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
             kwargs["past_k"], kwargs["past_v"],
-            kwargs["cumulative_sequence_length"], kwargs["seqlens"],
-            kwargs["max_query_len"], kwargs["max_seq_len"],
-            kwargs["block_table"], kwargs["slot_mappings"],
+            kwargs["cumulative_sequence_length"], 
+            kwargs["past_seqlens"], kwargs["block_table"],
             kwargs.get("cos_cache", ""), kwargs.get("sin_cache", ""),
         ]
         output = f"{name}/output_0"
@@ -1528,19 +1549,19 @@ class Model:
         #
         #               root_input
         #              /     |     \
-        #       Q_MatMul  K_MatMul  V_MatMul  cumulative_sequence_length  seqlens  key_cache  value_cache  max_query_len  max_seq_len  block_table  slot_mappings
-        #           |        |         |                   |                 |         |           |             |             |            |             |
-        #         Q_Add    K_Add     V_Add                 +-----------------+---------+-----------+-------------+-------------+------------+-------------+
+        #       Q_MatMul  K_MatMul  V_MatMul  cumulative_sequence_length  past_seqlens  key_cache  value_cache  block_table
+        #           |        |         |                   |                   |            |           |            |
+        #         Q_Add    K_Add     V_Add                 +-----------------+--------------+-----------+------------+
         #           |        |         |                                     |
         #       Q_Rotary  K_Rotary     |                                     |
         #           \        |        /                                      |
-        #            GroupQueryAttention-------------------------------------+
+        #              PagedAttention----------------------------------------+
         #                    |
         #                O_MatMul
         #                    |
         #                  O_Add
 
-        # Unpack attention weights if needed
+        # Unpack attention weights if needed TODO(aciddelgado): check if this is needed for paged attention
         self.make_attention_unpacked(layer_id, attention, root_input, **kwargs)
 
         # Make MatMul nodes
@@ -2237,6 +2258,8 @@ class Model:
             #                   |
             #         4D causal attention mask
             self.make_attention_mask_reformatting_for_mha()
+
+        # TODO(aciddelgado): no reformatting for PagedAttention?
 
         if self.attention_attrs["block_sparse"]["sparse_block_size"] != 0:
             self.make_attention_mask_reformatting_for_sparse_attn()
