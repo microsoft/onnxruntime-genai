@@ -654,7 +654,7 @@ class Model:
         scalar_or_array = ast.literal_eval(path[-1])
         assert dims in {"0D", "1D"}, f"Unexpected dimension {dims} in constant name"
         if dims == "1D" and isinstance(scalar_or_array, (float, int)):
-            # Convert to 1D tensor
+            # Convert to 1D array if it is a scalar
             scalar_or_array = [scalar_or_array]
         tensor = ir.tensor(scalar_or_array, dtype=onnx_dtype, name=name)
 
