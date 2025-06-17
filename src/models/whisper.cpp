@@ -201,7 +201,7 @@ void WhisperState::TransposeKCaches(std::vector<std::unique_ptr<OrtValue>>& kv_c
   }
 
   auto kv_cache_dims = kv_cache_info->GetShape();
-  auto kv_cache_element_size = SizeOf(kv_cache_type);
+  auto kv_cache_element_size = Ort::SizeOf(kv_cache_type);
   auto temp_span = ByteWrapTensor(*model_.p_device_inputs_, *transpose_k_cache_buffer_);
 
   /* Use pre-allocated temporary buffer since we need to reformat the `K` caches for
