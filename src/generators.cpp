@@ -322,7 +322,10 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
     // If the model has a sliding window, pad the input_ids to the next multiple of the window size
     // so that the input_ids can be divided into window size chunks.
     const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
-    padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
+
+    if (model_->config_->model.decoder.sliding_window->slide_inputs) {
+      padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
+    }
   }
 
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);

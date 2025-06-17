@@ -180,6 +180,7 @@ struct Config {
         int pad_value{};                   // The key-value cache padding value to use for the sliding window for inactive tokens
         std::string alignment{"right"};    // The alignment of the window, either "left" or "right"
         bool slide_key_value_cache{true};  // Whether to slide the key-value cache along with the input prompt
+        bool slide_inputs{true};           // Whether to slide the input prompt along with the key-value cache
       };
       std::optional<SlidingWindow> sliding_window;
 

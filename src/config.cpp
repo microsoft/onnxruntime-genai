@@ -367,6 +367,8 @@ struct SlidingWindow_Element : JSON::Element {
       v_->alignment = JSON::Get<std::string_view>(value);
     } else if (name == "slide_key_value_cache") {
       v_->slide_key_value_cache = JSON::Get<bool>(value);
+    } else if (name == "slide_inputs") {
+      v_->slide_inputs = JSON::Get<bool>(value);
     } else
       throw JSON::unknown_value_error{};
   }

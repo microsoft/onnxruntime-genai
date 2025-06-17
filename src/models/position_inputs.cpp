@@ -438,7 +438,7 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
 }
 
 std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name_) {
-  if (state.model_.config_->model.decoder.sliding_window.has_value()) {
+  if (state.model_.config_->model.decoder.sliding_window.has_value() && state.model_.config_->model.decoder.sliding_window->slide_inputs) {
     return std::make_unique<WindowedPositionInputs>(state);
   } else {
     return std::make_unique<DefaultPositionInputs>(state.model_, state, sequence_lengths, attention_mask_name_);
