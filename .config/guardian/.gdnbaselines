@@ -1,0 +1,90 @@
+{
+  "properties": {
+    "helpUri": "https://eng.ms/docs/microsoft-security/security/azure-security/cloudai-security-fundamentals-engineering/security-integration/guardian-wiki/microsoft-guardian/general/baselines"
+  },
+  "version": "1.0.0",
+  "baselines": {
+    "default": {
+      "name": "default",
+      "createdDate": "2025-06-13 11:18:19Z",
+      "lastUpdatedDate": "2025-06-13 11:18:19Z"
+    }
+  },
+  "results": {
+    "eb80af0edc997d9c920b3a301b6eff72271cc9c0e58a62b60f32f9abaa345e9c": {
+      "signature": "eb80af0edc997d9c920b3a301b6eff72271cc9c0e58a62b60f32f9abaa345e9c",
+      "alternativeSignatures": [
+        "9f39c455bcfaae752faa274bccfb46f3975e3ba979ac49cf4b7f418344110058"
+      ],
+      "target": "build/cpu/win-x64/Release/onnxruntime-genai.dll",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2014",
+      "createdDate": "2025-06-13 11:18:19Z",
+      "expirationDate": "2025-11-30 12:02:07Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-13 12:02:07Z"
+    },
+    "1e30eb2578506689332089fdc4372ebb878706293ab97adc0f4be2de60a89d3c": {
+      "signature": "1e30eb2578506689332089fdc4372ebb878706293ab97adc0f4be2de60a89d3c",
+      "alternativeSignatures": [
+        "e7bbaf60fa19db853814f2455d0fc05ac0192c332c1a71e32453c91ccaed2265"
+      ],
+      "target": "build/directml/win-arm64/Release/onnxruntime-genai.dll",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2014",
+      "createdDate": "2025-06-13 11:38:22Z",
+      "expirationDate": "2025-11-30 12:02:07Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-13 12:02:07Z"
+    },
+    "28bb42aa7b80870bf8c4d8061efc519c71b04483d17b9c757a1436db04561d5a": {
+      "signature": "28bb42aa7b80870bf8c4d8061efc519c71b04483d17b9c757a1436db04561d5a",
+      "alternativeSignatures": [
+        "222e5d7b3d5039c3b43ea7d1b469dd2570170894905e5efadf68a7d59adb696a"
+      ],
+      "target": "build/cuda/win-x64/Release/onnxruntime-genai.dll",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2014",
+      "createdDate": "2025-06-13 11:19:22Z",
+      "expirationDate": "2025-11-30 12:02:07Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-13 12:02:07Z"
+    },
+    "c2188b1e33b544049a8437ffda6288442c2d6b53ea1cfdd26ef4911ca35e36a8": {
+      "signature": "c2188b1e33b544049a8437ffda6288442c2d6b53ea1cfdd26ef4911ca35e36a8",
+      "alternativeSignatures": [
+        "a369986b90eaecae23aea882ee9eb532768e143ff2257b40f288ad97e44c702a"
+      ],
+      "target": "build/cpu/win-arm64/Release/onnxruntime-genai.dll",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2014",
+      "createdDate": "2025-06-13 11:36:32Z",
+      "expirationDate": "2025-11-30 12:02:07Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-13 12:02:07Z"
+    },
+    "04e2e8f77f99529d217a99a61ebd7825fae39026be96745d12f67fd46722cd7b": {
+      "signature": "04e2e8f77f99529d217a99a61ebd7825fae39026be96745d12f67fd46722cd7b",
+      "alternativeSignatures": [
+        "67028635ea756dc952b2e11f53bbfb1237a78e46f034b9420afdd9a5dfed8f8c"
+      ],
+      "target": "build/directml/win-x64/Release/onnxruntime-genai.dll",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2014",
+      "createdDate": "2025-06-13 11:20:31Z",
+      "expirationDate": "2025-11-30 12:02:07Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-13 12:02:07Z"
+    }
+  }
+}

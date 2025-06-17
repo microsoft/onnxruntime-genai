@@ -7,39 +7,39 @@ namespace Generators {
 
 DeviceSpan<uint8_t> ByteWrapTensor(DeviceInterface& device, OrtValue& value) {
   auto info = value.GetTensorTypeAndShapeInfo();
-  return device.WrapMemory(std::span<uint8_t>{value.GetTensorMutableData<uint8_t>(), info->GetElementCount() * SizeOf(info->GetElementType())});
+  return device.WrapMemory(std::span<uint8_t>{value.GetTensorMutableData<uint8_t>(), info->GetElementCount() * Ort::SizeOf(info->GetElementType())});
 }
 
-size_t SizeOf(ONNXTensorElementDataType type) {
+const char* TypeToString(ONNXTensorElementDataType type) {
   switch (type) {
     case Ort::TypeToTensorType<uint8_t>:
-      return sizeof(uint8_t);
+      return "uint8";
     case Ort::TypeToTensorType<int8_t>:
-      return sizeof(int8_t);
+      return "int8";
     case Ort::TypeToTensorType<uint16_t>:
-      return sizeof(uint16_t);
+      return "uint16";
     case Ort::TypeToTensorType<int16_t>:
-      return sizeof(int16_t);
+      return "int16";
     case Ort::TypeToTensorType<uint32_t>:
-      return sizeof(uint32_t);
+      return "uint32";
     case Ort::TypeToTensorType<int32_t>:
-      return sizeof(int32_t);
+      return "int32";
     case Ort::TypeToTensorType<uint64_t>:
-      return sizeof(int64_t);
+      return "uint64";
     case Ort::TypeToTensorType<int64_t>:
-      return sizeof(int64_t);
+      return "int64";
     case Ort::TypeToTensorType<bool>:
-      return sizeof(bool);
+      return "bool";
     case Ort::TypeToTensorType<float>:
-      return sizeof(float);
+      return "float32";
     case Ort::TypeToTensorType<double>:
-      return sizeof(double);
+      return "float64";
     case Ort::TypeToTensorType<Ort::Float16_t>:
-      return sizeof(Ort::Float16_t);
+      return "float16";
     case Ort::TypeToTensorType<Ort::BFloat16_t>:
-      return sizeof(Ort::BFloat16_t);
+      return "bfloat16";
     default:
-      throw std::runtime_error("Unsupported ONNXTensorElementDataType in GetTypeSize");
+      return "(unsupported type, please add)";
   }
 }
 

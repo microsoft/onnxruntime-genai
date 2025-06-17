@@ -97,11 +97,25 @@ OGA_EXPORT void OGA_API_CALL OgaShutdown();
 OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(const OgaResult* result);
 
 /**
+ * \brief Control the logging behavior of the library.
+ *        If OgaSetLogString is called with name "filename", and value is a valid file path,
+ *        the library will log to that file. This will override any previously set logging destination.
+ *        If OgaSetLogString is called with name "filename" and the value provided is an empty string,
+ *        the library will log to the default destination (i.e. std::cerr) thereafter.
  * \param[in] name logging option name, see logging.h 'struct LogItems' for the list of available options
  * \param[in] value logging option value.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogBool(const char* name, bool value);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogString(const char* name, const char* value);
+
+/**
+ * \brief Register a callback function to receive log messages from the library. If invoked, the callback will override
+ *        the previously set logging destination (e.g. a file or std::cerr).
+ * \param[in] callback function pointer to the logging callback function (use nullptr to disable callback and revert to
+ *                     the default logging destination - std::cerr).
+ * \return OgaResult containing the error message when the callback could not be set, else nullptr.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogCallback(void (*callback)(const char* string, size_t length));
 
 /**
  * \param[in] result OgaResult to be destroyed.

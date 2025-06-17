@@ -11,6 +11,7 @@
 
 #include "../generators.h"
 #include "../search.h"
+#include "../tracing.h"
 #include "model.h"
 #include "gpt.h"
 #include "decoder_only.h"
@@ -37,6 +38,8 @@ State::State(const GeneratorParams& params, const Model& model)
 }
 
 void State::Run(OrtSession& session, bool graph_capture_this_run) {
+  DurationTrace trace{"State::Run"};
+
   if (params_->use_graph_capture) {
     if (graph_capture_this_run)
       run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
@@ -876,7 +879,7 @@ std::unique_ptr<OrtValue> Model::ExpandInputs(std::unique_ptr<OrtValue>& input, 
   auto element_type = input_type_info->GetElementType();
   auto input_shape = input_type_info->GetShape();
   const int64_t batch_size = input_shape[0];
-  const int64_t data_size_bytes = input_type_info->GetElementCount() * SizeOf(element_type) / batch_size;
+  const int64_t data_size_bytes = input_type_info->GetElementCount() * Ort::SizeOf(element_type) / batch_size;
 
   input_shape[0] *= num_beams;
 

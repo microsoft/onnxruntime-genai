@@ -8,6 +8,7 @@
 #include "models/decoder_only.h"
 #include "constrained_logits_processor.h"
 #include "search.h"
+#include "tracing.h"
 #include "cpu/interface.h"
 #include "cuda/interface.h"
 #include "dml/interface.h"
@@ -47,7 +48,7 @@ static bool _ = (Ort::InitApi(), false);
 
 static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
   bool ort_verbose_logging = false;
-  GetEnvironmentVariable("ORTGENAI_ORT_VERBOSE_LOGGING", ort_verbose_logging);
+  GetEnv("ORTGENAI_ORT_VERBOSE_LOGGING", ort_verbose_logging);
   return ort_verbose_logging ? OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE : OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR;
 }
 
@@ -295,7 +296,10 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
     // If the model has a sliding window, pad the input_ids to the next multiple of the window size
     // so that the input_ids can be divided into window size chunks.
     const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
-    padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
+
+    if (model_->config_->model.decoder.sliding_window->slide_inputs) {
+      padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
+    }
   }
 
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
@@ -313,6 +317,8 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
 }
 
 void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
+  DurationTrace trace{"Generator::AppendTokens"};
+
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
@@ -425,6 +431,8 @@ void Generator::SetLogits(DeviceSpan<float> logits) {
 }
 
 void Generator::GenerateNextToken() {
+  DurationTrace trace{"Generator::GenerateNextToken"};
+
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");

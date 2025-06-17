@@ -280,6 +280,20 @@ void SetLogOptions(const pybind11::kwargs& dict) {
   }
 }
 
+void SetLogCallback(std::optional<const pybind11::function> callback) {
+  static std::optional<pybind11::function> log_callback;
+  log_callback = callback;
+
+  if (log_callback.has_value()) {
+    Oga::SetLogCallback([](const char* message, size_t length) {
+      pybind11::gil_scoped_acquire gil;
+      (*log_callback)(std::string_view(message, length));
+    });
+  } else {
+    Oga::SetLogCallback(nullptr);
+  }
+}
+
 PYBIND11_MODULE(onnxruntime_genai, m) {
   m.doc() = R"pbdoc(
         Ort Generators library
@@ -354,7 +368,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def("to_token_id", &OgaTokenizer::ToTokenId)
       .def("decode", [](const OgaTokenizer& t, pybind11::array_t<int32_t> tokens) -> std::string { return t.Decode(ToSpan(tokens)).p_; })
-      .def("apply_chat_template", [](const OgaTokenizer& t, const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) -> std::string { return t.ApplyChatTemplate(template_str, messages, tools, add_generation_prompt).p_; }, pybind11::arg("template_str") = nullptr, pybind11::arg("messages"), pybind11::arg("tools") = nullptr, pybind11::arg("add_generation_prompt"))
+      .def("apply_chat_template", [](const OgaTokenizer& t, const char* messages, const char* template_str, const char* tools, bool add_generation_prompt) -> std::string { return t.ApplyChatTemplate(template_str, messages, tools, add_generation_prompt).p_; }, pybind11::arg("messages"), pybind11::kw_only(), pybind11::arg("template_str") = nullptr, pybind11::arg("tools") = nullptr, pybind11::arg("add_generation_prompt") = true)
       .def("encode_batch", [](const OgaTokenizer& t, std::vector<std::string> strings) {
         std::vector<const char*> c_strings;
         for (const auto& s : strings)
@@ -481,6 +495,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("load", &OgaAdapters::LoadAdapter);
 
   m.def("set_log_options", &SetLogOptions);
+  m.def("set_log_callback", &SetLogCallback);
 
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });

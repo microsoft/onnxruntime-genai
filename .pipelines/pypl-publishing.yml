@@ -64,11 +64,6 @@ resources:
     type: git
     name: 1ESPipelineTemplates/1ESPipelineTemplates
     ref: refs/tags/release
-  - repository: manylinux
-    type: Github
-    endpoint: Microsoft
-    name: pypa/manylinux
-    ref: 5eda9aded5462201e6310105728d33016e637ea7
 
 trigger: none
 extends:
@@ -82,9 +77,6 @@ extends:
       name: 'onnxruntime-Win-CPU-2022'  # Name of your hosted pool
       os: windows  # OS of the image. This value cannot be a variable. Allowed values: windows, linux, macOS
     sdl:
-      sourceRepositoriesToScan:
-        include:
-        - repository: manylinux
       policheck:
         enabled: true
         break: true # always break the build on policheck issues. You can disable it by setting to 'false'
