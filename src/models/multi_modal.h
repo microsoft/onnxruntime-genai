@@ -101,9 +101,9 @@ struct DecoderState : State {
   const MultiModalLanguageModel& model_;
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
-  DefaultPositionInputs position_inputs_;  // Model input
-  DefaultKeyValueCache kv_cache_{*this};   // Model input
-  Logits logits_{*this};                   // Model output
+  DefaultPositionInputs position_inputs_;                    // Model input
+  DefaultKeyValueCache kv_cache_{*this};                     // Model input
+  Logits logits_{*this};                                     // Model output
 };
 
 struct MultiModalPipelineState : State {
