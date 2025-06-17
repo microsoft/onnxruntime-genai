@@ -20,13 +20,16 @@ std::unique_ptr<State> WhisperModel::CreateState(DeviceSpan<int32_t> sequence_le
 
 AudioEncoderState::AudioEncoderState(const WhisperModel& model, const GeneratorParams& params)
     : State{params, model},
-      model_{model} {
+      model_{model} {}
+
+void AudioEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   // Add audio features
-  audio_features_.Add();
+  audio_features_ = std::make_unique<AudioFeatures>(*this, model_.config_->model.encoder.inputs.audio_features, extra_inputs);
+  audio_features_->Add();
 
   // Add encoder hidden states
-  auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), audio_features_.GetShape()[2] / 2, model_.config_->model.encoder.hidden_size};
-  hidden_states_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), hidden_states_shape, audio_features_.GetType());
+  auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), audio_features_->GetShape()[2] / 2, model_.config_->model.encoder.hidden_size};
+  hidden_states_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), hidden_states_shape, audio_features_->GetType());
   outputs_.push_back(hidden_states_.get());
   output_names_.push_back(model_.config_->model.encoder.outputs.hidden_states.c_str());
 }
@@ -150,10 +153,15 @@ WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& par
   decoder_state_->AddCrossCache(cross_cache_);
 
   transpose_k_cache_buffer_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cross_cache_->GetShape(), cross_cache_->GetType());
+}
+
+void WhisperState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  encoder_state_->SetExtraInputs(extra_inputs);
+  decoder_state_->SetExtraInputs(extra_inputs);
 
   // Check if alignment heads input exists
   void* alignment_heads_input = nullptr;
-  for (const auto& [name, value] : params.extra_inputs) {
+  for (const auto& [name, value] : extra_inputs) {
     if (name == Generators::Config::Defaults::AlignmentHeadsName) {
       alignment_heads_input = value.get();
     }

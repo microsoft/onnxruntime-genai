@@ -42,6 +42,11 @@ struct State;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
+struct ExtraInput {  // Extra inputs provided via SetInputs()
+  std::string name;
+  std::shared_ptr<Tensor> tensor;
+};
+
 
 template <typename T, typename V>
 bool contains(const T& t, V&& v) {
@@ -97,11 +102,7 @@ struct Generator : LeakChecked<Generator> {
   DeviceSpan<int32_t> GetSequence(size_t index) const;
 
   // A list of extra model inputs that will be matched at runtime based on name
-  struct Input {
-    std::string name;
-    std::shared_ptr<Tensor> tensor;
-  };
-  std::vector<Input> extra_inputs;
+  std::vector<ExtraInput> extra_inputs;
   void SetInputs(const NamedTensors& inputs);
 
   std::shared_ptr<const Model> model_;

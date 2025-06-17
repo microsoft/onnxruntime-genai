@@ -294,44 +294,37 @@ OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSettings* settings
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* params, const char* name, double value) {
   OGA_TRY
-  Generators::SetSearchNumber(generator_params->search, name, value);
+  Generators::SetSearchNumber(params->search, name, value);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* params, const char* name, bool value) {
   OGA_TRY
-  Generators::SetSearchBool(generator_params->search, name, value);
+  Generators::SetSearchBool(params->search, name, value);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* params, int32_t max_batch_size) {
   OGA_TRY
   printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* params, const OgaNamedTensors* p_named_tensors) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data) {
   OGA_TRY
-  params->SetInputs(*p_named_tensors);
+  params->SetGuidance(type, data);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* oga_params, const char* type, const char* data) {
+OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out) {
   OGA_TRY
-  oga_params->SetGuidance(type, data);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaGenerator** out) {
-  OGA_TRY
-  *out = ReturnUnique<OgaGenerator>(CreateGenerator(*model, *generator_params));
+  *out = ReturnUnique<OgaGenerator>(CreateGenerator(*model, *params));
   return nullptr;
   OGA_CATCH
 }
@@ -347,6 +340,13 @@ bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator
 OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* generator, const char* name, OgaTensor* tensor) {
   OGA_TRY
   generator->extra_inputs.push_back({std::string{name}, tensor->shared_from_this()});
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_SetInputs(OgaGenerator* generator, const OgaNamedTensors* p_named_tensors) {
+  OGA_TRY
+  generator->SetInputs(*p_named_tensors);
   return nullptr;
   OGA_CATCH
 }

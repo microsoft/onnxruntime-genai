@@ -143,6 +143,10 @@ void State::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name
   adapter_names_.push_back(adapter_name);
 }
 
+void State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  throw std::runtime_error("SetExtraInputs is not implemented");
+}
+
 State::~State() {
   if (adapters_) {
     for (const auto& adapter_name : adapter_names_) {
@@ -809,16 +813,14 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
-  if (config->model.type == "whisper")
+  if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
-  if (config->model.type == "phi3v")
+  if (ModelType::IsVLM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
-  if (config->model.type == "decoder-pipeline")
+  if (ModelType::IsPipe(config->model.type))
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
-  if (config->model.type == "phi4mm")
+  if (ModelType::IsMMM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
-  if (config->model.type == "gemma3")
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (config->model.type == "marian-ssru")
     return std::make_shared<MarianModel>(std::move(config), ort_env);
 

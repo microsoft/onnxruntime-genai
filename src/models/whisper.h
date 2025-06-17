@@ -24,16 +24,17 @@ struct AudioEncoderState : State {
   AudioEncoderState& operator=(const AudioEncoderState&) = delete;
 
   void AddCrossCache(std::unique_ptr<CrossCache>& cross_cache) { cross_cache->AddOutputs(*this); }
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
-  int GetNumFrames() { return static_cast<int>(audio_features_.GetShape()[2]); }
+  int GetNumFrames() { return static_cast<int>(audio_features_->GetShape()[2]); }
 
  private:
   friend struct WhisperState;
 
   const WhisperModel& model_;
 
-  AudioFeatures audio_features_{*this, model_.config_->model.encoder.inputs.audio_features};  // { batch_size, num_mels, num_frames }
-  std::unique_ptr<OrtValue> hidden_states_;                                                   // { batch_size, num_frames / 2, hidden_size }
+  std::unique_ptr<AudioFeatures> audio_features_;  // { batch_size, num_mels, num_frames }
+  std::unique_ptr<OrtValue> hidden_states_;        // { batch_size, num_frames / 2, hidden_size }
 };
 
 struct WhisperDecoderState : State {
@@ -42,6 +43,7 @@ struct WhisperDecoderState : State {
   WhisperDecoderState& operator=(const WhisperDecoderState&) = delete;
   
   void AddCrossCache(std::unique_ptr<CrossCache>& cross_cache) { cross_cache->AddInputs(*this); }
+  // void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
 
  private:
@@ -77,6 +79,7 @@ struct WhisperState : State {
   WhisperState(const WhisperState&) = delete;
   WhisperState& operator=(const WhisperState&) = delete;
 
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   OrtValue* GetInput(const char* name) override;
   OrtValue* GetOutput(const char* name) override;
@@ -92,7 +95,7 @@ private:
   int prompt_length_{};
 
   std::unique_ptr<AudioEncoderState> encoder_state_;
-  std::unique_ptr<CrossCache> cross_cache_;            // Model output for encoder, constant input for decoder
+  std::unique_ptr<CrossCache> cross_cache_;             // Model output for encoder, constant input for decoder
   std::unique_ptr<WhisperDecoderState> decoder_state_;
 
   // Temporary buffer for transpoing self attention K caches and cross attention K caches

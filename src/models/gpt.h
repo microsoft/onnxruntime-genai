@@ -4,7 +4,6 @@
 #include "logits.h"
 #include "kv_cache.h"
 #include "position_inputs.h"
-#include "extra_inputs.h"
 
 namespace Generators {
 
@@ -31,6 +30,5 @@ struct Gpt_State : State {
   Logits logits_{*this};
   CombinedKeyValueCache kv_cache_{*this};
   DefaultPositionInputs position_inputs_;
-  ExtraInputs extra_inputs_{*this};
 };
 }  // namespace Generators

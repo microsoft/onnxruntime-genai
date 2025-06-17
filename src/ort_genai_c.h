@@ -318,22 +318,22 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* mode
 
 /**
  * \brief Destroys the given generator params.
- * \param[in] generator_params The generator params to be destroyed.
+ * \param[in] params The generator params to be destroyed.
  */
-OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* generator_params);
+OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* params);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* params, const char* name, double value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* params, const char* name, bool value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* params, int32_t max_batch_size);
 
 /**
  * \brief Sets the guidance type and data for the Generator params
- * \param[in] generator_params The generator params to set the guidance on
+ * \param[in] params The generator params to set the guidance on
  * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar
  * \param[in] data The input string, which is the guidance data. Examples are present in test/test_models/grammars folder
  * \return OgaResult containing the error message if the setting of the guidance failed
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* generator_params, const char* type, const char* data);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data);
 
 /**
  * \brief Creates a generator from the given model and generator params.
@@ -361,30 +361,36 @@ OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator
 /**
  * \brief For additional model inputs that genai does not handle, this lets the user set their values. For example LoRA models handle
  * fine tuning through model inputs. This lets the user supply the fine tuning inputs, while genai handles the standard inputs.
-  * \param[in] oga_generator The generator to add the inputs to.
+ * \param[in] generator The generator to add the inputs to.
  * \param[in] name Name of the model input (this must match the model's input name)
  * \param[in] tensor The OgaTensor of the input data
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* oga_generator, const char* name, OgaTensor* tensor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* generator, const char* name, OgaTensor* tensor);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetInputs(OgaGenerator* oga_generator, const OgaNamedTensors* named_tensors);
+/**
+ * \brief For additional model inputs that genai does not handle, this lets the user set their values.
+ * \param[in] generator The generator to add the inputs to.
+ * \param[in] name Name of the model input (this must match the model's input name)
+ * \param[in] tensor The OgaTensor of the input data
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetInputs(OgaGenerator* generator, const OgaNamedTensors* named_tensors);
 
 /**
  * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
- * \param[in] oga_generator The generator to add the input ids to.
+ * \param[in] generator The generator to add the input ids to.
  * \param[in] p_sequences The input id sequences.
  * \return OgaResult containing the error message if the setting of the input ids failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* oga_generator, const OgaSequences* p_sequences);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* generator, const OgaSequences* p_sequences);
 
 /**
  * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
- * \param[in] oga_generator The generator to add the input ids to.
+ * \param[in] generator The generator to add the input ids to.
  * \param[in] input_ids The input ids to add.
  * \param[in] input_ids_count The number of input ids to add (batch_size * sequence_length).
  * \return OgaResult containing the error message if the setting of the input ids failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* oga_generator, const int32_t* input_ids, size_t input_ids_count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* generator, const int32_t* input_ids, size_t input_ids_count);
 
 /**
  * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored in the generator.
@@ -432,6 +438,17 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator
  * \return OgaResult containing the error message if the computation failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* generator, const char* name, OgaTensor** out);
+
+/**
+ * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
+ *       and will be released when the OgaTensor is destroyed
+ * \param[in] oga_generator The generator to run the GetInput or GetOutput method on the name provided and the out pointer to store the output.
+ * \param[in] name The name of the tensor.
+ * \param[in] is_input Whether the tensor name is for an input or not.
+ * \param[out] out The returned OgaTensor.
+ * \return OgaResult containing the error message if the computation failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetInputOutput(const OgaGenerator* oga_generator, const char* name, bool is_input, OgaTensor** out);
 
 /**
  * \brief Returns a copy of the logits from the model as an OgaTensor on CPU. The buffer is owned by returned OgaTensor

@@ -21,7 +21,6 @@ Gpt_State::Gpt_State(const Gpt_Model& model, DeviceSpan<int32_t> sequence_length
   position_inputs_.Add();
   logits_.Add();
   kv_cache_.Add();
-  extra_inputs_.Add();
 }
 
 DeviceSpan<float> Gpt_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
