@@ -653,7 +653,7 @@ class Model:
         # NOTE: Use ast.literal_eval instead of eval as eval allows arbitrary code execution
         num = ast.literal_eval(path[-1])
         assert dims in {"0D", "1D"}, f"Unexpected dimension {dims} in constant name"
-        if not(dims == "0D"):
+        if dims == "1D" and isinstance(num, (int, float)):
             # Convert to 1D tensor
             num = [num]
         tensor = ir.tensor(num, dtype=onnx_dtype, name=name)
