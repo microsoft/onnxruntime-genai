@@ -46,27 +46,27 @@ parameters:
 - name: enable_apple_framework
   displayName: 'Whether Apple framework for iOS & MacCatalyst is built.'
   type: boolean
-  default: false
+  default: true
 
 - name: enable_win_qnn
   displayName: 'Whether QNN nuget package should be built.'
   type: boolean
-  default: false
+  default: true
 
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
-  default: '1.20.1'
+  default: '1.22.0'
 
 - name: ort_cuda_version
   displayName: 'OnnxRuntime GPU version'
   type: string
-  default: '1.20.1'
+  default: '1.22.0'
 
 - name: ort_dml_version
   displayName: 'OnnxRuntime DML version'
   type: string
-  default: '1.20.1'
+  default: '1.22.0'
 
 - name: cuda_version
   displayName: 'CUDA version'
@@ -74,7 +74,7 @@ parameters:
   values:
   - '11.8'
   - '12.2'
-  default: '11.8'
+  default: '12.2'
 
 - name: build_config
   displayName: 'Build Configuration'
@@ -94,9 +94,9 @@ parameters:
   - stable
 
 - name: custom_ort_package_versioned_name
-  displayName: 'Versioned name of ort nuget package. Must follow Microsoft.ML.OnnxRuntime.*.version.nupkg.'
+  displayName: 'Versioned name of ort nuget package. Must follow Microsoft.ML.OnnxRuntime.*.version.nupkg. Keep None to disable building'
   type: string
-  default: ''
+  default: 'Microsoft.ML.OnnxRuntime.Foundry.1.23.0-dev-20250516-0447-261c2b7a80.nupkg'
 
 resources:
   repositories:
@@ -104,11 +104,6 @@ resources:
     type: git
     name: 1ESPipelineTemplates/1ESPipelineTemplates
     ref: refs/tags/release
-  - repository: manylinux
-    type: Github
-    endpoint: Microsoft
-    name: pypa/manylinux
-    ref: 5eda9aded5462201e6310105728d33016e637ea7
 
 trigger: none
 extends:
@@ -122,9 +117,13 @@ extends:
       name: 'onnxruntime-Win-CPU-2022'  # Name of your hosted pool
       os: windows  # OS of the image. This value cannot be a variable. Allowed values: windows, linux, macOS
     sdl:
-      sourceRepositoriesToScan:
-        include:
-        - repository: manylinux
+      policheck:
+        enabled: true
+        break: true # always break the build on policheck issues. You can disable it by setting to 'false'
+        exclusionsFile: '$(Build.SourcesDirectory)\.pipelines\policheck_exclusions.xml'
+      tsa:
+        enabled: true
+        configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
     stages:
     - template: stages/capi-packaging-stage.yml
       parameters:
@@ -177,7 +176,7 @@ extends:
           cuda_version: ${{ parameters.cuda_version }}
           SpecificArtifact: false
 
-    - ${{ if and(and(ne(parameters.custom_ort_package_versioned_name, ''), eq(parameters.enable_win_arm64, true)), eq(parameters.enable_win_cuda, true)) }}:
+    - ${{ if and(and(and(ne(parameters.custom_ort_package_versioned_name, 'None'), eq(parameters.enable_win_arm64, true)), eq(parameters.enable_win_cuda, true)), eq(parameters.enable_macos_cpu, true)) }}:
       - template: stages/custom-nuget-packaging-stage.yml
         parameters:
           custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}

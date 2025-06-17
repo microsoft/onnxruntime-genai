@@ -9,7 +9,7 @@
     <TestsSrcRoot>$(ProjectDir)..\..\test</TestsSrcRoot>
     <CsharpTestsSrcRoot>$(TestsSrcRoot)\csharp</CsharpTestsSrcRoot>
 
-    <LangVersion>default</LangVersion>
+    <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
     <Configurations>Debug;RelWithDebInfo;Release</Configurations>
     <RestoreAdditionalProjectSources>https://api.nuget.org/v3/index.json</RestoreAdditionalProjectSources>

@@ -40,3 +40,23 @@ To run the python examples...
 python model-generate.py -m {path to model folder} -e {execution provider} -pr {input prompt}
 python model-qa.py -m {path to model folder} -e {execution provider}
 ```
+
+## Use Constrained Decoding for the model output
+
+Constrained Decoding is useful when using function/tool calling as it helps in ensuring the output is in the correct format.
+
+We have integrated [LLGuidance](https://github.com/guidance-ai/llguidance) for constrained decoding. There are three types of constrained decoding enabled right now:
+1. Lark Grammar (Recommended): This option allows you to have an option for a regular output as well as function/tool output in JSON format.
+2. JSON Schema: Output will be JSON schema and it will be one of the function/tools provided.
+3. Regex: If a particular regular expression is desired.
+
+To ensure that the function/tool call works correctly with constrained decoding, you need to modify your tokenizer.json file. For each model that has its own tool calling token, the tool calling token's `special` attribute needs to be set to true. For example, Phi-4 mini uses the <|tool_call|> token so you should set the `special` attribute for <|tool_call|> as `true` inside `tokenizer.json`.
+
+To run the Python examples with function/tool calling:
+```
+# Using Lark Grammar with 1 function/tool call
+python model-qa.py -m {path to model folder} -e {execution provider} --guidance_type "lark_grammar"  --guidance_info '[{"name": "get_weather", "description": "Get weather of a city.", "parameters": {"city": {"description": "The city for which weather information is requested", "type": "string", "default": "Dallas"}}}]'
+
+# With 2 function/tool calls in chat mode
+python model-chat.py -m {path to model folder} -e {execution provider} --guidance_type "lark_grammar"  --guidance_info '[{"name": "get_weather", "description": "Get weather of a city.", "parameters": {"city": {"description": "The city for which weather information is requested", "type": "string", "default": "Dallas"}}},{"name": "get_population", "description": "Get population of a city.", "parameters": {"city": {"description": "The city for which population information is requested", "type": "string", "default": "Dallas"}}}]'
+```

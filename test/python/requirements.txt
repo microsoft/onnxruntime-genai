@@ -2,9 +2,10 @@ coloredlogs
 flatbuffers
 numpy<2
 packaging
-protobuf==5.27
+protobuf==5.29.5
 sympy
 pytest
 onnx
+onnx_ir>=0.1.1
 transformers
 huggingface_hub[cli]

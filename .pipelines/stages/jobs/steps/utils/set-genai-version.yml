@@ -34,3 +34,5 @@ steps:
 
       Write-Host "Setting variable: genai_version = ${version}"
       Write-Host "##vso[task.setvariable variable=genai_version]${version}"
+      Write-Host "Setting variable: genai_version_raw = ${version_info}"
+      Write-Host "##vso[task.setvariable variable=genai_version_raw]${version_info}"

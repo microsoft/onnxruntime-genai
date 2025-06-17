@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #pragma once
 
 #include "model.h"
@@ -15,15 +18,15 @@ struct KeyValueCache {
 
   virtual void RewindTo(size_t index) = 0;
 
-  // Note: PartialTokenGenerationUpdate() is mainly for supporting DecoderOnlyPipelineState usage where we update
+  // Note: PartialUpdate() is mainly for supporting DecoderOnlyPipelineState usage where we update
   // part of the KV cache after running part of the pipeline.
   // An alternative may be to have a dedicated KV cache per IntermediatePipelineState.
 
-  virtual bool IsPartialTokenGenerationUpdateSupported() const { return false; }
+  virtual bool IsPartialUpdateSupported() const { return false; }
 
-  virtual void PartialTokenGenerationUpdate(DeviceSpan<int32_t> beam_indices, int total_length,
-                                            std::span<const size_t> layer_indices_to_update) {
-    throw std::runtime_error("PartialTokenGenerationUpdate is not supported.");
+  virtual void PartialUpdate(DeviceSpan<int32_t> beam_indices, int total_length,
+                             std::span<const size_t> layer_indices_to_update) {
+    throw std::runtime_error("PartialUpdate is not supported.");
   }
 };
 
@@ -121,6 +124,21 @@ struct CrossCache {
 
   std::vector<std::unique_ptr<OrtValue>> values_;
   std::vector<std::string> input_name_strings_, output_name_strings_;
+};
+
+// A (mostly) NO-OP KeyValueCache variant that is used for stateful models
+// i.e. Models that manage KV Cache internally to the session.
+struct ModelManagedKeyValueCache : KeyValueCache {
+  ModelManagedKeyValueCache(State& state);
+
+  virtual void Add() override;
+  virtual void AddEncoder() override;
+  virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
+  virtual void RewindTo(size_t index) override;
+
+ private:
+  State& state_;
+  const Model& model_{state_.model_};
 };
 
 std::string ComposeKeyValueName(const std::string& template_string, int index);

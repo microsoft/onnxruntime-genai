@@ -6,12 +6,15 @@
 #include "models/env_utils.h"
 #include "models/model.h"
 #include "models/decoder_only.h"
+#include "constrained_logits_processor.h"
 #include "search.h"
+#include "tracing.h"
 #include "cpu/interface.h"
 #include "cuda/interface.h"
 #include "dml/interface.h"
 #include "qnn/interface.h"
 #include "webgpu/interface.h"
+#include "openvino/interface.h"
 
 #if defined(_WIN32)
 EXTERN_C IMAGE_DOS_HEADER __ImageBase;
@@ -45,7 +48,7 @@ static bool _ = (Ort::InitApi(), false);
 
 static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
   bool ort_verbose_logging = false;
-  GetEnvironmentVariable("ORTGENAI_ORT_VERBOSE_LOGGING", ort_verbose_logging);
+  GetEnv("ORTGENAI_ORT_VERBOSE_LOGGING", ort_verbose_logging);
   return ort_verbose_logging ? OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE : OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR;
 }
 
@@ -176,7 +179,8 @@ struct LibraryHandle {
 };
 #endif
 
-DeviceInterface* GetCudaInterface() {
+DeviceInterface* GetCudaInterface(DeviceType type) {
+  assert(type == DeviceType::NvTensorRtRtx || type == DeviceType::CUDA);
   try {
 #if defined(_WIN32)
     static LibraryHandle library{"onnxruntime-genai-cuda.dll"};
@@ -188,8 +192,10 @@ DeviceInterface* GetCudaInterface() {
     if (!library)
       throw std::runtime_error("Shared library load failure (see first error)");
 
-    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai);
-    static DeviceInterface* cuda_interface = reinterpret_cast<decltype(&GetInterface)>(library.GetSymbol("GetInterface"))(&g_genai);
+    Generators::DeviceInterface* GetInterface(GenaiInterface * p_genai, const char* deviceType);
+    static DeviceInterface* cuda_interface =
+        reinterpret_cast<decltype(&GetInterface)>(
+            library.GetSymbol("GetInterface"))(&g_genai, to_string(type).c_str());
 
     return cuda_interface;
   } catch (const std::exception& e) {
@@ -206,9 +212,13 @@ std::string to_string(DeviceType device_type) {
     case DeviceType::DML:
       return "DirectML";
     case DeviceType::WEBGPU:
-      return "WebGpu";
+      return "WebGPU";
     case DeviceType::QNN:
       return "QnnWithSharedMemory";
+    case DeviceType::OpenVINO:
+      return "OpenVINO";
+    case DeviceType::NvTensorRtRtx:
+      return "NvTensorRtRtx";
     default:
       throw std::runtime_error("Unknown device type");
   }
@@ -220,7 +230,8 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
     case DeviceType::CPU:
       return GetCpuInterface();
     case DeviceType::CUDA:
-      return GetCudaInterface();
+    case DeviceType::NvTensorRtRtx:
+      return GetCudaInterface(type);
 #if USE_DML
     case DeviceType::DML:
       return GetDmlInterface();
@@ -229,6 +240,8 @@ DeviceInterface* GetDeviceInterface(DeviceType type) {
       return GetWebGPUInterface();
     case DeviceType::QNN:
       return GetQNNInterface();
+    case DeviceType::OpenVINO:
+      return GetOpenVINOInterface();
   }
 }
 
@@ -240,6 +253,7 @@ GeneratorParams::GeneratorParams(const Config& config)
 GeneratorParams::GeneratorParams(const Model& model)
     : config{*model.config_.get()},
       use_graph_capture{IsGraphCaptureEnabled(model.config_->model.decoder.session_options)},
+      use_multi_profile{IsMultiProfileEnabled(model.config_->model.decoder.session_options)},
       p_device{model.p_device_inputs_} {
   if (use_graph_capture) {
     max_batch_size = 1;  // set it to 1 by default
@@ -267,6 +281,11 @@ void GeneratorParams::SetInputs(const NamedTensors& named_tensors) {
   }
 }
 
+void GeneratorParams::SetGuidance(std::string_view type, std::string_view data) {
+  guidance_type = type;
+  guidance_data = data;
+}
+
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }
@@ -290,6 +309,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
   search_ = CreateSearch(params);
   state_ = model.CreateState(search_->GetSequenceLengths(), params);  // Search sequence lengths set when creating state
 
+  guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
   // Temporary solution for multimodal and whisper models
   if (!params.aux_input_ids.empty() && params.aux_input_ids.data() != nullptr) {
     AuxAppendTokens(params.aux_input_ids);
@@ -302,7 +322,10 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
     // If the model has a sliding window, pad the input_ids to the next multiple of the window size
     // so that the input_ids can be divided into window size chunks.
     const auto window_size = model_->config_->model.decoder.sliding_window->window_size;
-    padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
+
+    if (model_->config_->model.decoder.sliding_window->slide_inputs) {
+      padded_input_ids_size = ((input_ids.size() + window_size - 1) / window_size) * window_size;
+    }
   }
 
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
@@ -334,6 +357,8 @@ void Generator::AuxAppendTokens(cpu_span<const int32_t> input_ids) {
 }
 
 void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
+  DurationTrace trace{"Generator::AppendTokens"};
+
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
@@ -344,11 +369,12 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
-  constexpr std::array<DeviceType, 3> devices_supporting_continuous_decoding{DeviceType::CPU, DeviceType::CUDA, DeviceType::WEBGPU};
+  constexpr std::array<DeviceType, 4> devices_supporting_continuous_decoding{DeviceType::CPU, DeviceType::CUDA, DeviceType::WEBGPU, DeviceType::OpenVINO};
   if (search_->GetSequenceLength() != 0 &&
       std::none_of(devices_supporting_continuous_decoding.begin(), devices_supporting_continuous_decoding.end(),
-                   [this](DeviceType device_type) { return device_type == state_->params_->p_device->GetType(); }))
-    throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->params_->p_device->GetType()) +
+                   [this](DeviceType device_type) { return device_type == state_->model_.p_device_kvcache_->GetType(); }))
+    // Support for continuous decoding should be based on the type of device used for KV cache
+    throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
   if (last_action_ == Action::generated) {
@@ -364,7 +390,10 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
-
+  if (last_action_ == Action::generated && guidance_logits_processor_) {
+    auto next_tokens_span = next_tokens.CopyDeviceToCpu();
+    guidance_logits_processor_->CommitTokens(next_tokens_span);
+  }
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
@@ -417,6 +446,8 @@ void Generator::SetLogits(DeviceSpan<float> logits) {
 }
 
 void Generator::GenerateNextToken() {
+  DurationTrace trace{"Generator::GenerateNextToken"};
+
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");
@@ -439,6 +470,10 @@ void Generator::GenerateNextToken() {
     if (last_action_ == Action::rewound)
       search_->AppendTokens(next_tokens);
     ComputeLogits(next_tokens);
+  }
+  if (guidance_logits_processor_) {
+    auto logits = GetLogits();
+    guidance_logits_processor_->ProcessLogits(logits);
   }
   computed_logits_ = false;
   auto& search = search_->params_->search;
@@ -493,6 +528,9 @@ void Generator::RewindToLength(size_t new_length) {
     throw std::runtime_error("RewindToLength must be called with new_length=0 when batch_size > 1");
   search_->RewindTo(new_length);
   state_->RewindTo(new_length);
+  if (guidance_logits_processor_) {
+    guidance_logits_processor_->Reset();
+  }
   computed_logits_ = false;
   last_action_ = Action::rewound;
 }

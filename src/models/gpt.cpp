@@ -6,7 +6,7 @@ namespace Generators {
 Gpt_Model::Gpt_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
-  InitDeviceAllocator(*session_decoder_);
+  session_info_.Add(*session_decoder_);
 }
 
 std::unique_ptr<State> Gpt_Model::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
@@ -16,7 +16,7 @@ std::unique_ptr<State> Gpt_Model::CreateState(DeviceSpan<int32_t> sequence_lengt
 Gpt_State::Gpt_State(const Gpt_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      position_inputs_{model, *this, sequence_lengths_unk} {
+      position_inputs_{model, *this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask} {
   input_ids_.Add();
   position_inputs_.Add();
   logits_.Add();

@@ -4,7 +4,13 @@
 #pragma once
 
 #include <stdint.h>
+
+#ifdef __cplusplus
 #include <cstddef>
+#else
+#include <stddef.h>
+#include <stdbool.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -91,11 +97,25 @@ OGA_EXPORT void OGA_API_CALL OgaShutdown();
 OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(const OgaResult* result);
 
 /**
+ * \brief Control the logging behavior of the library.
+ *        If OgaSetLogString is called with name "filename", and value is a valid file path,
+ *        the library will log to that file. This will override any previously set logging destination.
+ *        If OgaSetLogString is called with name "filename" and the value provided is an empty string,
+ *        the library will log to the default destination (i.e. std::cerr) thereafter.
  * \param[in] name logging option name, see logging.h 'struct LogItems' for the list of available options
  * \param[in] value logging option value.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogBool(const char* name, bool value);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogString(const char* name, const char* value);
+
+/**
+ * \brief Register a callback function to receive log messages from the library. If invoked, the callback will override
+ *        the previously set logging destination (e.g. a file or std::cerr).
+ * \param[in] callback function pointer to the logging callback function (use nullptr to disable callback and revert to
+ *                     the default logging destination - std::cerr).
+ * \return OgaResult containing the error message when the callback could not be set, else nullptr.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogCallback(void (*callback)(const char* string, size_t length));
 
 /**
  * \param[in] result OgaResult to be destroyed.
@@ -331,7 +351,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParam
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* generator_params, const char* name, OgaTensor* tensor);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams*, OgaTensor* tensor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams* generator_params, OgaTensor* tensor);
+
+/**
+ * \brief Sets the guidance type and data for the Generator params
+ * \param[in] generator_params The generator params to set the guidance on
+ * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar
+ * \param[in] data The input string, which is the guidance data. Examples are present in test/test_models/grammars folder
+ * \return OgaResult containing the error message if the setting of the guidance failed
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* generator_params, const char* type, const char* data);
 
 /**
  * \brief Creates a generator from the given model and generator params.
@@ -491,6 +520,23 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaM
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor*, const int32_t* tokens, size_t token_count, const char** out_string);
+
+/**
+ * @brief Applies a chat template to input messages
+ *
+ * This function processes the specified template with the provided input using the
+ * tokenizer, and outputs the resulting string. Optionally, it can include a
+ * generation prompt in the output.
+ *
+ * \param[in] tokenizer OgaTokenizer used for template processing.
+ * \param[in] template_str Null-terminated string representing the chat template. Use nullptr to fall back to the default chat template from the tokenizer config.
+ * \param[in] messages Null-terminated string containing the input messages to be processed.
+ * \param[in] tools Null-terminated string containing the chat function calls if any. Use nullptr if none.
+ * \param[in] add_generation_prompt Indicates whether to add a generation prompt to the output.
+ * \param[out] out_string Pointer to where the output will be stored. The returned pointer must be freed with OgaDestroyString
+ * \return OgaResult* containing the error message if the function fails
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer*, const char* template_str, const char* messages, const char* tools, bool add_generation_prompt, const char** out_string);
 
 /** OgaTokenizerStream is to decoded token strings incrementally, one token at a time.
  */

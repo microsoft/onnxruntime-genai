@@ -34,23 +34,92 @@ using json = nlohmann::json;
 namespace microsoft {
 namespace slm_engine {
 
-std::unique_ptr<SLMEngine> SLMEngine::CreateEngine(
-    const char* model_path, bool verbose) {
-  // Convert the model name to the SupportedModelType
-  auto model_type = StringToModelType(GetModelFamily(model_path));
-  if (model_type == SupportedModelType::UNKNOWN) {
-    cout << RED << "Error! Cannot detect the model type for model: " << model_path << CLEAR
-         << endl;
-    return nullptr;
+SLMEngine::SupportedModelType SLMEngine::StringToModelType(const std::string& model_type) {
+  if (strncasecmp(model_type.c_str(), "phi", 3) == 0) {
+    return SLMEngine::SupportedModelType::PHI;
+  } else if (strncasecmp(model_type.c_str(), "llama", 5) == 0) {
+    return SLMEngine::SupportedModelType::Llama;
+  } else if (strncasecmp(model_type.c_str(), "custom", 6) == 0) {
+    return SLMEngine::SupportedModelType::CUSTOM;
   }
+  return SLMEngine::SupportedModelType::UNKNOWN;
+}
 
+std::string SLMEngine::ModelTypeToString(SLMEngine::SupportedModelType model_type) {
+  switch (model_type) {
+    case SLMEngine::SupportedModelType::PHI:
+      return "phi";
+    case SLMEngine::SupportedModelType::Llama:
+      return "llama";
+    case SLMEngine::SupportedModelType::CUSTOM:
+      return "custom";
+    case SLMEngine::SupportedModelType::UNKNOWN:
+    default:
+      return "unknown";
+  }
+}
+
+std::unique_ptr<SLMEngine> SLMEngine::Create(
+    const char* model_path, bool verbose) {
   auto new_obj = std::unique_ptr<SLMEngine>(new SLMEngine(verbose));
-  if (!new_obj->load_model(model_path, model_type)) {
+  if (!new_obj->load_model(model_path)) {
     cout << RED << "Error creating the SLM Engine" << CLEAR << endl;
     return nullptr;
   }
+  return std::move(new_obj);
+}
+
+std::unique_ptr<SLMEngine> SLMEngine::Create(
+    const char* model_path,
+    const std::vector<LoRAAdapter> adapters,
+    bool verbose, Status& status_msg) {
+  // Load the model
+  auto new_obj = std::unique_ptr<SLMEngine>(new SLMEngine(verbose));
+  if (!new_obj->load_model(model_path)) {
+    cout << RED << "Error creating the SLM Engine" << CLEAR << endl;
+    status_msg.code = false;
+    status_msg.message = "Failed to load model: " + std::string(model_path);
+    return nullptr;
+  }
+
+  new_obj->m_adapters = OgaAdapters::Create(*new_obj->m_onnx_model.get());
+  if (!new_obj->m_adapters) {
+    status_msg.code = false;
+    status_msg.message = "Failed to create adapters";
+    return nullptr;
+  }
+
+  // Create the adapters
+  for (const auto& adapter : adapters) {
+    if (adapter.name.empty() || adapter.adapter_path.empty()) {
+      status_msg.code = false;
+      status_msg.message = "Adapter name or path is empty";
+      return nullptr;
+    }
+
+    // Check if the adapter path exists
+    if (!std::filesystem::exists(adapter.adapter_path)) {
+      status_msg.code = false;
+      status_msg.message = "Adapter path does not exist: " + adapter.adapter_path;
+      return nullptr;
+    }
+
+    // Load the adapter
+    new_obj->m_adapters->LoadAdapter(adapter.adapter_path.c_str(),
+                                     adapter.name.c_str());
+  }
+
+  new_obj->m_adapters_list = adapters;
 
   return std::move(new_obj);
+}
+
+std::vector<SLMEngine::LoRAAdapter> SLMEngine::get_adapter_list() {
+  std::vector<SLMEngine::LoRAAdapter> adapter_list;
+  for (const auto& adapter : m_adapters_list) {
+    adapter_list.emplace_back(adapter.name, adapter.adapter_path);
+  }
+  return adapter_list;
 }
 
 void SLMEngine::GetVersion(std::string& slm_version, std::string& ortga_version,
@@ -84,6 +153,21 @@ std::string SLMEngine::GetModelFamily(const std::string& model_path) {
   return model_type;
 }
 
+std::string SLMEngine::format_prompt(
+    const std::string& system_prompt,
+    const std::string& user_prompt) {
+  std::stringstream ss_output;
+  ss_output << m_prompt_format.prompt_format.at(InputDecoder::InputParams::Role::SYSTEM).prefix
+            << system_prompt
+            << m_prompt_format.prompt_format.at(InputDecoder::InputParams::Role::SYSTEM).suffix;
+  ss_output << m_prompt_format.prompt_format.at(InputDecoder::InputParams::Role::USER).prefix
+            << user_prompt
+            << m_prompt_format.prompt_format.at(InputDecoder::InputParams::Role::USER).suffix;
+  ss_output << m_prompt_format.prompt_format.at(InputDecoder::InputParams::Role::ASSISTANT).prefix;
+
+  return ss_output.str();
+}
+
 SLMEngine::~SLMEngine() {
   m_onnx_model.reset();
   m_tokenizer.reset();
@@ -91,38 +175,143 @@ SLMEngine::~SLMEngine() {
   m_input_decoder.reset();
 }
 
-void SLMEngine::generate(
+std::unique_ptr<OgaGenerator> SLMEngine::create_generator(
+    const std::string& formatted_prompt,
+    const GenerationOptions& generation_options,
+    uint32_t& time_to_prefill) {
+  auto generator_params = OgaGeneratorParams::Create(*m_onnx_model);
+  if (!generator_params) {
+    return nullptr;
+  }
+
+  generator_params->SetSearchOption("max_length", generation_options.MaxGeneratedTokens);
+  generator_params->SetSearchOption("temperature", generation_options.Temperature);
+  generator_params->SetSearchOption("top_k", generation_options.TopK);
+  generator_params->SetSearchOption("top_p", generation_options.TopP);
+
+  auto mem_before = GetMemoryUsage();
+
+  // Create the generator
+  auto generator = OgaGenerator::Create(*m_onnx_model, *generator_params);
+  if (!generator) {
+    return nullptr;
+  }
+
+  auto sequences = OgaSequences::Create();
+
+  auto start = std::chrono::steady_clock::now();
+  m_tokenizer->Encode(formatted_prompt.c_str(), *sequences);
+  auto time_to_encode =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count();
+
+  start = std::chrono::steady_clock::now();
+
+  generator->AppendTokenSequences(*sequences);
+  time_to_prefill =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count();
+
+  auto mem_after = GetMemoryUsage();
+
+  if (m_verbose) {
+    cout << BLUE << "Time to encode: " << time_to_encode
+         << " ms Initial Tokens: " << generator->GetSequenceCount(0)
+         << " Time to append: " << time_to_prefill << " ms" << CLEAR << endl;
+
+    cout << BLUE << "Memory used: " << mem_after - mem_before << " bytes" << CLEAR << endl;
+  }
+
+  return std::move(generator);
+}
+
+SLMEngine::Status SLMEngine::generate(
+    const std::string& adapter_name,
     const std::string& formatted_prompt,
     const GenerationOptions& generation_options,
     std::string& response_str,
     RuntimePerf& kpi) {
-  // Use a scoped mutex to ensure only one thread can call complete at a time
-  std::lock_guard<std::mutex> lock(m_mutex);
-
+  // Verify that the adapter is a valid one
+  if (!m_adapters) {
+    return Status{false, "Adapter not found: " + adapter_name};
+  }
   auto api_start = std::chrono::steady_clock::now();
 
-  auto sequences = OgaSequences::Create();
-  m_tokenizer->Encode(formatted_prompt.c_str(), *sequences);
+  uint32_t time_to_prefill;
+  auto generator = create_generator(
+      formatted_prompt, generation_options, time_to_prefill);
+
+  if (!generator) {
+    return Status{false, "Failed to create generator"};
+  }
+
+  // Set the adapter
+  generator->SetActiveAdapter(*(m_adapters.get()), adapter_name.c_str());
+
+  // Add the time_to_prefill to the KPI
+  kpi.TimeToFirstToken = time_to_prefill;
+
+  // Delegate to generate
+  auto status = generate(generator.get(), nullptr, response_str, kpi);
+  kpi.TotalTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - api_start)
+                      .count();
+  return status;
+}
+
+SLMEngine::Status SLMEngine::generate(
+    const std::string& formatted_prompt,
+    const GenerationOptions& generation_options,
+    std::string& response_str,
+    RuntimePerf& kpi) {
+  auto api_start = std::chrono::steady_clock::now();
+
+  uint32_t time_to_prefill;
+  auto generator = create_generator(
+      formatted_prompt, generation_options, time_to_prefill);
+
+  if (!generator) {
+    cout << RED << "Error creating the generator" << CLEAR << endl;
+    return Status{false, "Error creating the generator"};
+  }
+
+  kpi.TimeToFirstToken = time_to_prefill;
+  generate(generator.get(), nullptr, response_str, kpi);
+  kpi.TotalTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - api_start)
+                      .count();
+  return Status{true, "Generation successful"};
+}
+
+SLMEngine ::Status SLMEngine::generate(
+    OgaGenerator* generator,
+    std::function<bool(const std::string&, OgaTensor* logits)> generation_callback,
+    std::string& response_str,
+    RuntimePerf& kpi) {
+  std::lock_guard<std::mutex> lock(m_mutex);
 
   auto start = std::chrono::steady_clock::now();
-
-  auto params = OgaGeneratorParams::Create(*m_onnx_model);
-  params->SetSearchOption("max_length", generation_options.MaxGeneratedTokens);
-  params->SetSearchOption("temperature", generation_options.Temperature);
-  params->SetSearchOption("top_k", generation_options.TopK);
-  params->SetSearchOption("top_p", generation_options.TopP);
-
-  auto generator = OgaGenerator::Create(*m_onnx_model, *params);
-  generator->AppendTokenSequences(*sequences);
   bool is_first_token = true;
   auto time_count = 0;
 
   auto initial_prompt_token_count = generator->GetSequenceCount(0);
 
+  int count = 0;
+  uint32_t total_generation_time = 0;
   std::ostringstream response;
-  bool stop_token_found = false;
   while (!generator->IsDone()) {
+    auto gen_start = std::chrono::steady_clock::now();
     generator->GenerateNextToken();
+    auto gen_end = std::chrono::steady_clock::now();
+    auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(gen_end - gen_start)
+            .count();
+    total_generation_time += elapsed;
+    count++;
+    // cout << BLUE << "Generation time: " << elapsed << " us" << CLEAR
+    //      << endl;
 
     const auto num_tokens = generator->GetSequenceCount(0);
     const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
@@ -134,7 +323,7 @@ void SLMEngine::generate(
                                                                 start)
               .count();
       kpi.PromptTokenCount = initial_prompt_token_count;
-      kpi.TimeToFirstToken = elapsed;
+      kpi.TimeToFirstToken += elapsed;
     } else {
       time_count += std::chrono::duration_cast<std::chrono::milliseconds>(
                         end - start)
@@ -146,6 +335,8 @@ void SLMEngine::generate(
     if (strncmp(next_string_piece, "</s>", 10) != 0) {
       // We received end of the text - so will exclude
       response << next_string_piece;
+    } else {
+      cout << RED << "Got </s>!!!" << CLEAR << endl;
     }
 
     // Print next output string if the generation continues
@@ -153,8 +344,27 @@ void SLMEngine::generate(
       cout << next_string_piece;
       flush(cout);
     }
+
+    // Call the generation callback if provided
+    if (generation_callback) {
+      auto logits = generator->GetLogits();
+      if (logits) {
+        if (!generation_callback(next_string_piece, logits.get())) {
+          cout << RED << "Sopping generation due to callback request." << endl;
+          break;
+        }
+      }
+    }
+
+    // Reset the start time for the next token
     start = std::chrono::steady_clock::now();
   }
+
+  // Find out the generation time
+  uint32_t avg_generation_time =
+      static_cast<float>(total_generation_time) / static_cast<float>(count);
+  kpi.GenerationTimePerToken = avg_generation_time;
+
   if (m_verbose) {
     cout << CLEAR << endl;
   }
@@ -166,19 +376,12 @@ void SLMEngine::generate(
       generator->GetSequenceCount(0) - initial_prompt_token_count;
   kpi.TokenRate = kpi.GeneratedTokenCount / (time_count / 1000.0f);
 
-  kpi.TotalTime = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::steady_clock::now() - api_start)
-                      .count();
-
   // // Get the current memory
   kpi.CurrentMemoryUsed = GetMemoryUsage();
+  return Status({true, "Generation successful"});
 }
 
 std::string SLMEngine::complete(const char* user_prompt) {
-  // Use a scoped mutex to ensure only one thread can call complete at a time
-
-  auto api_start = std::chrono::steady_clock::now();
-
   InputDecoder::InputParams input_parameters;
   // Decode the user prompt
   if (!m_input_decoder->decode(user_prompt, input_parameters)) {
@@ -213,7 +416,19 @@ std::string SLMEngine::complete(const char* user_prompt) {
   generator_options.TopK = input_parameters.TopK;
   generator_options.TopP = input_parameters.TopP;
 
-  generate(formatted_prompt, generator_options, response, kpi);
+  SLMEngine::Status status;
+  auto api_start = std::chrono::steady_clock::now();
+  if (input_parameters.LoRAAdapterName.empty()) {
+    status = generate(formatted_prompt, generator_options, response, kpi);
+  } else {
+    status = generate(input_parameters.LoRAAdapterName, formatted_prompt,
+                      generator_options, response, kpi);
+  }
+
+  // generate(formatted_prompt, generator_options, response, kpi);
+  kpi.TotalTime = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - api_start)
+                      .count();
 
   m_llm_output_dbg_stream << response << endl;
   // We need to remove the stop token from the response
@@ -243,6 +458,12 @@ std::string SLMEngine::complete(const char* user_prompt) {
   choices[0]["message"]["content"] = response;
 
   json output_json;
+  if (!status.code) {
+    output_json["status"] = "error";
+    output_json["message"] = status.message;
+    return output_json.dump();
+  }
+
   output_json["status"] = "success";
   output_json["question"] = input_parameters.UserPrompt;
   output_json["choices"] = choices;
@@ -324,16 +545,28 @@ bool SLMEngine::parse_prompt_format_dict(
   return false;
 }
 
-bool SLMEngine::load_model(const char* model_path,
-                           SupportedModelType model_type) {
+bool SLMEngine::load_model(const char* model_path) {
   if (m_verbose) {
     cout << RED << "Memory Usage Before Model Load: " << GetMemoryUsage() << " MB"
          << CLEAR << endl;
   }
 
+  m_model_path = model_path;
+  m_model_type = GetModelFamily(m_model_path);
+
+  // Convert the model name to the SupportedModelType
+  auto model_type = StringToModelType(m_model_type);
+  if (model_type == SupportedModelType::UNKNOWN) {
+    cout << RED << "Error! Cannot detect the model type for model: " << model_path << CLEAR
+         << endl;
+    return false;
+  }
+
   m_onnx_model = OgaModel::Create(model_path);
   m_tokenizer = OgaTokenizer::Create(*m_onnx_model);
   m_tokenizer_stream = OgaTokenizerStream::Create(*m_tokenizer);
+  // m_generator_params = OgaGeneratorParams::Create(*m_onnx_model);
+  // m_sequences = OgaSequences::Create();
 
   m_input_decoder = InputDecoder::CreateDecoder("openai");
   if (m_input_decoder == nullptr) {
