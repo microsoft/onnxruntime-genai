@@ -651,12 +651,12 @@ class Model:
         onnx_dtype = ir.DataType[path[-3]]
         dims = path[-2]
         # NOTE: Use ast.literal_eval instead of eval as eval allows arbitrary code execution
-        num = ast.literal_eval(path[-1])
+        scalar_or_array = ast.literal_eval(path[-1])
         assert dims in {"0D", "1D"}, f"Unexpected dimension {dims} in constant name"
-        if dims == "1D" and isinstance(num, (int, float)):
+        if dims == "1D" and isinstance(scalar_or_array, (int, float)):
             # Convert to 1D tensor
-            num = [num]
-        tensor = ir.tensor(num, dtype=onnx_dtype, name=name)
+            scalar_or_array = [scalar_or_array]
+        tensor = ir.tensor(scalar_or_array, dtype=onnx_dtype, name=name)
 
         node_name = name.replace("constants", "constant_nodes")
         self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=tensor)
