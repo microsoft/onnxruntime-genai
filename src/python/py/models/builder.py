@@ -534,8 +534,20 @@ class Model:
         if not os.listdir(self.cache_dir):
             os.rmdir(self.cache_dir)
 
-    def make_initializer(self, tensor: torch.Tensor | np.ndarray | ir.TensorProtocol, name: str):
-        if isinstance(tensor, torch.nn.parameter.Parameter):
+    def make_initializer(
+        self, tensor: torch.Tensor | np.ndarray | ir.TensorProtocol, /, name: str, to: ir.DataType | None = None
+    ):
+        if to is not None:
+            # Cast the tensor lazily if `to` is provided
+            def tensor_func():
+                nonlocal tensor
+                tensor = tensor.to(self.to_torch_dtype[to])
+                return tensor_adapters.TorchTensor(tensor, name=name)
+
+            ir_tensor = ir.LazyTensor(
+                tensor_func, dtype=to, shape=ir.Shape(tensor.shape), name=name
+            )
+        elif isinstance(tensor, torch.nn.parameter.Parameter):
             ir_tensor = tensor_adapters.TorchTensor(tensor, name=name)
         else:
             ir_tensor = ir.tensor(tensor, name=name)
@@ -803,7 +815,7 @@ class Model:
 
     def make_matmul_float(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
-        self.make_initializer(matmul.weight.T.to(self.to_torch_dtype[self.io_dtype]), weight)
+        self.make_initializer(matmul.weight.T, weight, to=self.io_dtype)
 
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
@@ -825,7 +837,7 @@ class Model:
         weight = name[1:].replace("/", ".") + ".qweight"
         self.make_initializer(matmul.qweight, weight)
         scales = name[1:].replace("/", ".") + ".scales"
-        self.make_initializer(matmul.scales.to(self.to_torch_dtype[self.io_dtype]), scales)
+        self.make_initializer(matmul.scales, scales, to=self.io_dtype)
 
         inputs = [root_input, weight, scales]
 
@@ -836,7 +848,7 @@ class Model:
 
         if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
             g_idx = name[1:].replace("/", ".") + ".g_idx"
-            self.make_initializer(matmul.g_idx.to(torch.int32), g_idx)
+            self.make_initializer(matmul.g_idx, g_idx, to=ir.DataType.INT32)
             inputs.append(g_idx)
 
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
@@ -1007,7 +1019,7 @@ class Model:
 
     def make_add_bias(self, add, name, root_input, **kwargs):
         bias = name[1:].replace("/", ".") + ".bias"
-        self.make_initializer(add.to(self.to_torch_dtype[self.io_dtype]), bias)
+        self.make_initializer(add, bias, to=self.io_dtype)
 
         add_bias_inputs = [root_input, bias]
         shape = ['batch_size', 'sequence_length', add.shape[0]]
@@ -1026,7 +1038,7 @@ class Model:
 
     def make_embedding(self, embedding):
         weight = "model.embed_tokens.weight"
-        self.make_initializer(embedding.to(self.to_torch_dtype[self.io_dtype]), weight)
+        self.make_initializer(embedding, weight, to=self.io_dtype)
 
         basename = "/model/embed_tokens"
         gather_name = f"{basename}/Gather"
@@ -1061,18 +1073,20 @@ class Model:
         skip_input = self.layernorm_attrs["skip_input"]
 
         # Get precision types to use
-        old_torch_dtype = self.to_torch_dtype[self.io_dtype]
         old_io_dtype = self.io_dtype
-        new_torch_dtype = torch.float32 if self.layernorm_attrs["cast"]["use_fp32"] else self.to_torch_dtype[self.io_dtype]
-        new_io_dtype = self.to_onnx_dtype[new_torch_dtype]
-        cast = old_torch_dtype != new_torch_dtype
+        new_io_dtype = ir.DataType.FLOAT if self.layernorm_attrs["cast"]["use_fp32"] else self.io_dtype
+        cast = old_io_dtype != new_io_dtype
 
         # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_initializer(layernorm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"], weight)
+        self.make_initializer(
+            layernorm.weight + self.layernorm_attrs["add_offset"],
+            weight,
+            to=new_io_dtype
+        )
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
-            self.make_initializer(layernorm.bias.to(new_torch_dtype), bias)
+            self.make_initializer(layernorm.bias, bias, to=new_io_dtype)
 
         # Create input names for op
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
@@ -1115,18 +1129,20 @@ class Model:
         skip_input = self.layernorm_attrs["skip_input"]
 
         # Get precision types to use
-        old_torch_dtype = self.to_torch_dtype[self.io_dtype]
         old_io_dtype = self.io_dtype
-        new_torch_dtype = torch.float32 if self.layernorm_attrs["cast"]["use_fp32"] else self.to_torch_dtype[self.io_dtype]
-        new_io_dtype = self.to_onnx_dtype[new_torch_dtype]
-        cast = old_torch_dtype != new_torch_dtype
+        new_io_dtype = ir.DataType.FLOAT if self.layernorm_attrs["cast"]["use_fp32"] else self.io_dtype
+        cast = old_io_dtype != new_io_dtype
 
         # Create weight and bias tensors
         weight = f"model.layers.{layer_id}.{location}_layernorm.weight"
-        self.make_initializer((layernorm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"]), weight)
+        self.make_initializer(
+            layernorm.weight + self.layernorm_attrs["add_offset"],
+            weight,
+            to=new_io_dtype
+        )
         bias = f"model.layers.{layer_id}.{location}_layernorm.bias"
         if not simple:
-            self.make_initializer(layernorm.bias.to(new_torch_dtype), bias)
+            self.make_initializer(layernorm.bias, bias, to=new_io_dtype)
 
          # Create input names for op
         inputs = [root_input, skip_input, weight] if skip else [root_input, weight]
@@ -1557,7 +1573,11 @@ class Model:
         q_layernorm_name = f"/model/layers.{layer_id}/attn/q_norm/SimplifiedLayerNormalization"
         q_weight_name = f"model.layers.{layer_id}.attn.q_norm.layernorm.weight"
         q_layernorm_output = f"{q_layernorm_name}/output_0"
-        self.make_initializer((attention.q_norm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"]), q_weight_name)
+        self.make_initializer(
+            attention.q_norm.weight + self.layernorm_attrs["add_offset"],
+            q_weight_name,
+            to=new_io_dtype
+        )
 
         # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
         q_layernorm_inputs = [q_reshape_1_output, q_weight_name]
@@ -1583,7 +1603,11 @@ class Model:
         k_layernorm_name = f"/model/layers.{layer_id}/attn/k_norm/SimplifiedLayerNormalization"
         k_weight_name = f"model.layers.{layer_id}.attn.k_norm.layernorm.weight"
         k_layernorm_output = f"{k_layernorm_name}/output_0"
-        self.make_initializer((attention.k_norm.weight.to(new_torch_dtype) + self.layernorm_attrs["add_offset"]), k_weight_name)
+        self.make_initializer(
+            attention.k_norm.weight + self.layernorm_attrs["add_offset"],
+            k_weight_name,
+            to=new_io_dtype
+        )
 
         # Create Cast nodes for inputs and outputs if old_dtype != new_dtype
         k_layernorm_inputs = [k_reshape_1_output, k_weight_name]
@@ -2317,16 +2341,20 @@ class Model:
 
         def make_moe_initializer(w_list, moe_expert_name, dtype):
             moe_experts_weight = torch.stack(w_list, dim=0)
-            self.make_initializer(moe_experts_weight.to(dtype), moe_expert_name)
+            self.make_initializer(
+                moe_experts_weight,
+                moe_expert_name,
+                to=dtype
+            )
 
-        make_moe_initializer(w1_list, moe_expert_weight_1_name, torch.uint8)
-        make_moe_initializer(w2_list, moe_expert_weight_2_name, torch.uint8)
-        make_moe_initializer(w3_list, moe_expert_weight_3_name, torch.uint8)
+        make_moe_initializer(w1_list, moe_expert_weight_1_name, ir.DataType.UINT8)
+        make_moe_initializer(w2_list, moe_expert_weight_2_name, ir.DataType.UINT8)
+        make_moe_initializer(w3_list, moe_expert_weight_3_name, ir.DataType.UINT8)
 
         # Currently we don't expect QMoE to be used with distributed inference
-        make_moe_initializer(w1_scale_list, moe_expert_scales_1_name, self.to_torch_dtype[self.io_dtype])
-        make_moe_initializer(w2_scale_list, moe_expert_scales_2_name, self.to_torch_dtype[self.io_dtype])
-        make_moe_initializer(w3_scale_list, moe_expert_scales_3_name, self.to_torch_dtype[self.io_dtype])
+        make_moe_initializer(w1_scale_list, moe_expert_scales_1_name, self.io_dtype)
+        make_moe_initializer(w2_scale_list, moe_expert_scales_2_name, self.io_dtype)
+        make_moe_initializer(w3_scale_list, moe_expert_scales_3_name, self.io_dtype)
 
         bias_ph = "" # Placeholder for bias
         inputs = [root_input, f"{gate_reshape_name}/output_0", \
@@ -3285,11 +3313,11 @@ class Phi3SmallModel(Model):
 
         # Create tensors for row indices and col indices
         crows_name = "block_row_indices"
-        self.make_initializer(crows.to(torch.int32), crows_name)
+        self.make_initializer(crows, crows_name, to=ir.DataType.INT32)
         self.mask_attrs["block_row_indices"] = crows_name
 
         cols_name = "block_col_indices"
-        self.make_initializer(cols.to(torch.int32), cols_name)
+        self.make_initializer(cols, cols_name, to=ir.DataType.INT32)
         self.mask_attrs["block_col_indices"] = cols_name
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
@@ -3696,7 +3724,7 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
     }[precision]
 
 
-
+@torch.no_grad
 def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
