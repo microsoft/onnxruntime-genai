@@ -357,7 +357,7 @@ class Model:
         self.model = ir.Model(graph, ir_version=10, producer_name="onnxruntime-genai")
         self.values: dict[str, ir.Value] = {}
 
-        self.debug = extra_options["debug"]
+        self.debug = extra_options.get("debug", False)
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
@@ -3975,12 +3975,6 @@ def get_args():
     )
 
     parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug mode. This will print additional information and help debug graph structure errors.",
-    )
-
-    parser.add_argument(
         "--extra_options",
         required=False,
         metavar="KEY=VALUE",
@@ -4037,6 +4031,7 @@ def get_args():
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
+                debug = Enable debug mode. This will print additional information and include stacktrace in the resulting model to help debug graph structure errors.
             """),
     )
 
@@ -4054,6 +4049,5 @@ if __name__ == '__main__':
         args.precision,
         args.execution_provider,
         args.cache_dir,
-        debug=args.debug,
         **extra_options,
     )
