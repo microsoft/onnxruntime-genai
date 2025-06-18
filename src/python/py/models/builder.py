@@ -351,7 +351,7 @@ class Model:
         self.model = ir.Model(graph, ir_version=10, producer_name="onnxruntime-genai")
         self.values: dict[str, ir.Value] = {}
 
-        self.debug = extra_options.debug
+        self.debug = extra_options["debug"]
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
@@ -636,9 +636,9 @@ class Model:
             stack = traceback.extract_stack()
             stack_str = "".join(traceback.format_list(stack[:-1]))
             if name not in self.values and not create:
-                print(f"Warning: Value with name '{name}' does not exist. Please ensure that the value is created before accessing it.\nStack trace:\n{stack_str}")
+                print(f"DEBUG: Value with name '{name}' does not exist. Please ensure that the value is created before accessing it.\nStack trace:\n{stack_str}")
             if name in self.values and create:
-                print(f"Value {name} is recreated at \n{stack_str}")
+                print(f"DEBUG: Value '{name}' is recreated at \n{stack_str}")
         else:
             if name not in self.values and not create:
                 raise ValueError(
