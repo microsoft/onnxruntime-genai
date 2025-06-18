@@ -146,10 +146,6 @@ void State::SetActiveAdapter(Adapters* adapters, const std::string& adapter_name
   adapter_names_.push_back(adapter_name);
 }
 
-void State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  throw std::runtime_error("SetExtraInputs is not implemented");
-}
-
 State::~State() {
   if (adapters_) {
     for (const auto& adapter_name : adapter_names_) {

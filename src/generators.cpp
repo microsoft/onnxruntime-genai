@@ -337,6 +337,12 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     throw std::runtime_error("Continuous decoding is not supported on the selected device type (" + to_string(state_->model_.p_device_kvcache_->GetType()) +
                              "). Please recreate the generator instance to avoid using continuous decoding.");
 
+  // Set any extra inputs (those define in extra_inputs and those defined in the PresetExtraInputs registry)
+  if (set_extra_inputs_) {
+    state_->SetExtraInputs(extra_inputs);
+    set_extra_inputs_ = false;
+  }
+
   if (last_action_ == Action::generated) {
     ComputeLogits(search_->GetNextTokens());
   }
@@ -365,8 +371,13 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
     }
   }
 
+  // Set any extra inputs (those define in extra_inputs and those defined in the PresetExtraInputs registry)
+  if (set_extra_inputs_) {
+    state_->SetExtraInputs(extra_inputs);
+    set_extra_inputs_ = false;
+  }
+
   // Append tokens and run ComputeLogits after setting all other possible inputs
-  state_->SetExtraInputs(extra_inputs);
   if (input_ids.size() > 0) {
     AppendTokens(input_ids);
   }
