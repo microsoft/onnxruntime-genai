@@ -30,7 +30,7 @@ public class TensorTest {
         // is aware of the issue
         Model model = genAI.getModel();
         Generator generator = new Generator(model, params);
-        generator.setInputs("unknown_value", tensor);
+        generator.setModelInput("unknown_value", tensor);
       }
     }
   }
