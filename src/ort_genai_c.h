@@ -542,7 +542,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* tok
  * \return OgaResult containing the named tensors for the processed inputs.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, OgaNamedTensors** input_tensors);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char** prompts, const OgaImages* images, OgaNamedTensors** input_tensors);
+// OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char** prompts, const OgaImages* images, OgaNamedTensors** input_tensors);
 
 /**
  * \brief Process audios with input prompt
@@ -552,7 +552,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModal
  * \return OgaResult containing the named tensors for the processed inputs.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaAudios* audios, OgaNamedTensors** input_tensors);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const char** prompts, const OgaAudios* audios, OgaNamedTensors** input_tensors);
+// OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const char** prompts, const OgaAudios* audios, OgaNamedTensors** input_tensors);
 
 /**
  * \brief Process images and/or audios with input prompts
@@ -563,7 +563,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModal
  * \return OgaResult containing the named tensors for the processed inputs.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, const OgaAudios* audios, OgaNamedTensors** input_tensors);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor*, const char** prompts, const OgaImages* images, const OgaAudios* audios, OgaNamedTensors** input_tensors);
+// OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor*, const char** prompts, const OgaImages* images, const OgaAudios* audios, OgaNamedTensors** input_tensors);
 
 /** Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
