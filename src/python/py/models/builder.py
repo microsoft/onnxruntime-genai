@@ -351,7 +351,7 @@ class Model:
         self.model = ir.Model(graph, ir_version=10, producer_name="onnxruntime-genai")
         self.values: dict[str, ir.Value] = {}
 
-        self.debug = config.debug
+        self.debug = extra_options.debug
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
@@ -3806,7 +3806,7 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
 
 
 @torch.no_grad
-def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
+def create_model(model_name: str, input_path: str, output_dir: str, precision: str, execution_provider: str, cache_dir: str, **extra_options):
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
@@ -3968,7 +3968,7 @@ def get_args():
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug mode. This will print additional information during the model conversion process.",
+        help="Enable debug mode. This will print additional information and help debug graph structure errors.",
     )
 
     parser.add_argument(
@@ -4038,4 +4038,13 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
     extra_options = parse_extra_options(args.extra_options)
-    create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
+    create_model(
+        args.model_name,
+        args.input,
+        args.output,
+        args.precision,
+        args.execution_provider,
+        args.cache_dir,
+        debug=args.debug,
+        **extra_options,
+    )
