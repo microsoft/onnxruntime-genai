@@ -2851,7 +2851,7 @@ class Model:
         shape_2_name = f"{basename}/Shape_2"
         self.make_shape(shape_2_name, root_input, shape=[3] if self.exclude_embeds else [2])
         gather_2_name = f"{basename}/Gather_2"
-        gather_2_inputs = [f"{shape_2_name}/output_0", "/model/constants/INT64/0D/1"]
+        gather_2_inputs = [f"{shape_2_name}/output_0", "/model/constants/INT64/1"]
         self.make_gather(gather_2_name, gather_2_inputs, axis=0)
 
         shared_add_name = f"{basename}/Add_1"
@@ -3825,7 +3825,7 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
 
 
 @torch.no_grad
-def create_model(model_name: str, input_path: str, output_dir: str, precision: str, execution_provider: str, cache_dir: str, **extra_options):
+def create_model(model_name: str, input_path: str, output_dir: str, precision: str, execution_provider: str, cache_dir: str, **extra_options: Any):
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
@@ -4052,12 +4052,4 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
     extra_options = parse_extra_options(args.extra_options)
-    create_model(
-        args.model_name,
-        args.input,
-        args.output,
-        args.precision,
-        args.execution_provider,
-        args.cache_dir,
-        **extra_options,
-    )
+    create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
