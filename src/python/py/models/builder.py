@@ -40,6 +40,12 @@ from transformers import (
 # the ONNX graph efficiently.
 
 
+def get_stacktrace() -> str:
+    """Get the stack trace of the current execution context."""
+    stack = traceback.extract_stack()
+    return "".join(traceback.format_list(stack[:-2]))
+
+
 class Model:
     def __init__(
         self,
@@ -142,7 +148,7 @@ class Model:
         self.make_outputs_init()
 
         # Store names of nodes already created
-        self.node_names: set[str] = set()
+        self.node_names: dict[str, ir.Node] = {}
 
         # Map ONNX dtypes to PyTorch dtypes
         self.to_torch_dtype = {
@@ -595,6 +601,11 @@ class Model:
             # This means that the nodes can be created in those functions regardless of their actual
             # status in the graph. This checks can then decide whether the proposed node actually
             # needs to be added into the graph or not.
+            if self.debug:
+                self.node_names[name].metadata_props["pkg.onnxruntime_genai.builder.stack_trace"] += (
+                    f"\n\nNode reused at:\n{get_stacktrace()}"
+                )
+
             return
 
         # Save any constants as nodes
@@ -606,8 +617,9 @@ class Model:
         input_values = [self.make_value(name, create=False) for name in inputs]
         output_values = [self.make_value(name, create=True) for name in outputs]
         node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
+        node.metadata_props["pkg.onnxruntime_genai.builder.stack_trace"] = get_stacktrace()
         self.model.graph.append(node)
-        self.node_names.add(name)
+        self.node_names[name] = node
 
     def make_value(
         self,
@@ -632,19 +644,16 @@ class Model:
             # None value
             return ir.Value(name="")
 
-        if self.debug:
-            stack = traceback.extract_stack()
-            stack_str = "".join(traceback.format_list(stack[:-1]))
-            if name not in self.values and not create:
-                print(f"DEBUG: Value with name '{name}' does not exist. Please ensure that the value is created before accessing it.\nStack trace:\n{stack_str}")
-            if name in self.values and create:
-                print(f"DEBUG: Value '{name}' is recreated at \n{stack_str}")
-        else:
-            if name not in self.values and not create:
+        if name not in self.values and not create:
+            if self.debug:
+                print(f"DEBUG: Value with name '{name}' does not exist. Please ensure that the value is created before accessing it.\nStack trace:\n{get_stacktrace()}")
+            else:
                 raise ValueError(
                     f"Value with name '{name}' does not exist. "
                     "Please ensure that the value is created before accessing it. Use the --debug flag to see the stack trace."
                 )
+        if self.debug and name in self.values and create:
+            print(f"DEBUG: Value '{name}' is recreated at \n{get_stacktrace()}")
 
         value = self.values.setdefault(name, ir.Value(name=name))
         if dtype is not None:
