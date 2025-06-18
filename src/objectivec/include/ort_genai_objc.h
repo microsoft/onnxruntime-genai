@@ -337,6 +337,14 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 @end
 
+@interface OGAAudios : NSObject
+
+- (instancetype)init NS_UNAVAILABLE;
+- (nullable instancetype)initWithPath:(NSArray<NSString*>*)paths
+                                error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+
+@end
+
 @interface OGAMultiModalProcessor : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
