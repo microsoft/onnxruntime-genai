@@ -395,7 +395,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         if (pybind11::isinstance<pybind11::bytes>(obj)) {
           const auto model_bytes = obj.cast<pybind11::bytes>();
           char* model_buffer;
-          ssize_t model_length;
+          Py_ssize_t model_length;
           if (PyBytes_AsStringAndSize(model_bytes.ptr(), &model_buffer, &model_length) != 0) {
             throw std::runtime_error("Failed to extract bytes from the object");
           }

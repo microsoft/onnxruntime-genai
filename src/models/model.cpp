@@ -24,7 +24,7 @@
 #if defined(_WIN32)
 #include <direct.h>
 #define GETCWD _getcwd
-#define CHDIR _chdir
+#define CHDIR _wchdir
 #include <windows.h>
 #else
 #include <unistd.h>
