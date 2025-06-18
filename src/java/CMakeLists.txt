@@ -220,7 +220,7 @@ if (ENABLE_TESTS)
                -DGRADLE_EXECUTABLE=${GRADLE_EXECUTABLE}
                -DBIN_DIR=${JAVA_OUTPUT_DIR}
                -DJAVA_SRC_ROOT=${JAVA_SRC_ROOT}
-               -DJAVA_PACKAGE_LIB_DIR=${JAVA_PACKAGE_LIB_DIR}
+               -DJAVA_NATIVE_LIB_DIR=${JAVA_NATIVE_LIB_DIR}
                -P ${JAVA_SRC_ROOT}/windows-unittests.cmake)
   else()
     add_test(NAME onnxruntime-genai4j_test

@@ -106,8 +106,8 @@ sourceSets.main.java {
 // expects
 sourceSets.test {
 	if (cmakeNativeLibDir != null) {
-		// add compiled native libs
-		resources.srcDirs += [cmakeNativeLibDir]
+		def libDirs = cmakeNativeLibDir.split(File.pathSeparator)
+		resources.srcDirs += libDirs
 	}
 }
 
