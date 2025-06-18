@@ -194,7 +194,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 Assert.NotNull(config);
                 var modelData = File.ReadAllBytes(Path.Combine(modelPath, "past.onnx"));
                 Assert.NotNull(modelData);
-                config.RegisterModelData("tiny-random-gpt2.onnx", modelData);
+                config.RegisterModelData("past.onnx", modelData);
                 using (var model = new Model(config))
                 {
                     Assert.NotNull(model);
