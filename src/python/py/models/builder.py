@@ -604,6 +604,7 @@ class Model:
             # status in the graph. This checks can then decide whether the proposed node actually
             # needs to be added into the graph or not.
             if self.debug:
+                self.node_names[name].metadata_props.setdefault("pkg.onnxruntime_genai.builder.stack_trace", "")
                 self.node_names[name].metadata_props["pkg.onnxruntime_genai.builder.stack_trace"] += (
                     f"\n\nNode reused at:\n{get_stacktrace()}"
                 )
