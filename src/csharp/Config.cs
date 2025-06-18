@@ -30,6 +30,17 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaConfigSetProviderOption(_configHandle, StringUtils.ToUtf8(provider), StringUtils.ToUtf8(option), StringUtils.ToUtf8(value)));
         }
 
+        public void RegisterModelData(string modelFilename, byte[] modelData)
+        {
+            unsafe
+            {
+                fixed (byte* modelDataBytes = modelData)
+                {
+                    Result.VerifySuccess(NativeMethods.OgaConfigRegisterModelData(_configHandle, StringUtils.ToUtf8(modelFilename), modelDataBytes, (UIntPtr)modelData.Length));
+                }
+            }
+        }
+
         ~Config()
         {
             Dispose(false);

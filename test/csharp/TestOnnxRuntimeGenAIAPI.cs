@@ -178,6 +178,56 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
             }
         }
 
+        [Fact(DisplayName = "TestLoadModelFromMemory")]
+        public void TestLoadModelFromMemory()
+        {
+            ulong maxLength = 10;
+            int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
+            var inputIDsShape = new ulong[] { 2, 4 };
+            ulong batchSize = inputIDsShape[0];
+            var expectedOutput = new int[] { 0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
+                                             0, 0, 195, 731, 731, 114, 114, 114, 114, 114 };
+
+            string modelPath = _tinyRandomGpt2ModelPath;
+            using (var config = new Config(modelPath))
+            {
+                Assert.NotNull(config);
+                var modelData = File.ReadAllBytes(Path.Combine(modelPath, "past.onnx"));
+                Assert.NotNull(modelData);
+                config.RegisterModelData("tiny-random-gpt2.onnx", modelData);
+                using (var model = new Model(config))
+                {
+                    Assert.NotNull(model);
+                    using(var generatorParams = new GeneratorParams(model))
+                    {
+                        Assert.NotNull(generatorParams);
+
+                        generatorParams.SetSearchOption("max_length", maxLength);
+                        generatorParams.SetSearchOption("batch_size", batchSize);
+
+                        using (var generator = new Generator(model, generatorParams))
+                        {
+                            Assert.NotNull(generatorParams);
+
+                            generator.AppendTokens(inputIDs);
+                            Assert.False(generator.IsDone());
+                            while (!generator.IsDone())
+                            {
+                                generator.GenerateNextToken();
+                            }
+
+                            for (ulong i = 0; i < batchSize; i++)
+                            {
+                                var sequence = generator.GetSequence(i).ToArray();
+                                var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
+                                Assert.Equal(expectedSequence, sequence);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         [IgnoreOnModelAbsenceFact(DisplayName = "TestTopKSearch")]
         public void TestTopKSearch()
         {

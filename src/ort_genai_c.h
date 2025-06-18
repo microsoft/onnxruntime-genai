@@ -265,7 +265,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config,
  * \brief Register the model data to load the model from memory.
  * \param[in] config The config to register the model data on.
  * \param[in] model_filename The name of the model file as defined in the config.
- * \param[in] model_data The model data to register.
+ * \param[in] model_data The model data to register. The data is expected to be valid at least until the model is created.
  * \param[in] model_data_length The length of the model data.
  * \return OgaResult containing the error message if the registration of the model data failed.
  */

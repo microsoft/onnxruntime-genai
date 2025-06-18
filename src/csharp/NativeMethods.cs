@@ -55,6 +55,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                 byte[] /* const char* */ option_name, byte[] /* const char* */ option_value);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern unsafe IntPtr /* OgaResult* */ OgaConfigRegisterModelData(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ model_filename,
+                                                                                       byte* /* const char* */ model_data, UIntPtr /* size_t */ model_data_length);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateModel(byte[] /* const char* */ configPath,
                                                                     out IntPtr /* OgaModel** */ model);
 
