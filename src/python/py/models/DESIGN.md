@@ -4,21 +4,19 @@ This document explains how the model builder is designed and how new contributio
 
 ## Contents
 
-- [Design of ONNX Runtime GenAI Model Builder](#design-of-onnx-runtime-genai-model-builder)
-  - [Contents](#contents)
-  - [Design Principles](#design-principles)
-    - [Simplicity](#simplicity)
-    - [Efficiency](#efficiency)
-    - [Modularity](#modularity)
-    - [Compatibility](#compatibility)
-  - [Implementation Details](#implementation-details)
-    - [`Model`](#model)
-    - [Architecture Classes](#architecture-classes)
-    - [`Attrs` Dictionaries](#attrs-dictionaries)
-    - [`Make` Functions](#make-functions)
-    - [Namespaces](#namespaces)
-    - [Constants](#constants)
-  - [Contributing](#contributing)
+- [Design Principles](#design-principles)
+  - [Simplicity](#simplicity)
+  - [Efficiency](#efficiency)
+  - [Modularity](#modularity)
+  - [Compatibility](#compatibility)
+- [Implementation Details](#implementation-details)
+  - [`Model`](#model)
+  - [Architecture Classes](#architecture-classes)
+  - [`Attrs` Dictionaries](#attrs-dictionaries)
+  - [`Make` Functions](#make-functions)
+  - [Namespaces](#namespaces)
+  - [Constants](#constants)
+- [Contributing](#contributing)
 
 ## Design Principles
 
