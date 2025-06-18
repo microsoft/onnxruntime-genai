@@ -347,6 +347,15 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                                     images:(OGAImages*)images
                                      error:(NSError**)error;
 
+- (nullable OGANamedTensors*)processAudios:(NSString*)prompt
+                                    audios:(OGAAudios*)audios
+                                     error:(NSError**)error;
+
+- (nullable OGANamedTensors*)processImagesAndAudios:(NSString*)prompt
+                                             images:(OGAImages*)images
+                                             audios:(OGAAudios*)audios
+                                              error:(NSError**)error;
+
 - (nullable NSString*)decode:(const int32_t*)tokensData
                       length:(size_t)tokensLength
                        error:(NSError**)error;

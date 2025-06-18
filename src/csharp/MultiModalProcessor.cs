@@ -25,6 +25,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return new NamedTensors(namedTensorsHandle);
         }
 
+        public NamedTensors ProcessAudios(string prompt, Audios audios)
+        {
+            IntPtr audiosHandle = audios == null ? IntPtr.Zero : audios.Handle;
+            Result.VerifySuccess(NativeMethods.OgaProcessorProcessAudios(_processorHandle, StringUtils.ToUtf8(prompt),
+                                                                         audiosHandle, out IntPtr namedTensorsHandle));
+            return new NamedTensors(namedTensorsHandle);
+        }
+
         /// <summary>
         /// Processes a string, image and audio into a NamedTensor.
         /// </summary>

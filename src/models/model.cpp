@@ -916,4 +916,10 @@ std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& pr
   Payload payload{prompt, images, audios};
   return processor_->Process(*tokenizer_, payload);
 }
+
+std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const char** prompts, const Images* images, const Audios* audios) const {
+  Payload payload{prompts, images, audios};
+  return processor_->Process(*tokenizer_, payload);
+}
+
 }  // namespace Generators

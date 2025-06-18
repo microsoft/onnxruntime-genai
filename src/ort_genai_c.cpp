@@ -701,12 +701,32 @@ OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* processor, const char** prompts, const OgaImages* images, OgaNamedTensors** input_tensors) {
+  OGA_TRY
+  if (!processor->processor_)
+    throw std::runtime_error("Image processor is not available for this model.");
+
+  *input_tensors = ReturnUnique<OgaNamedTensors>(processor->Process(prompts, images, nullptr));
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor* processor, const char* prompt, const OgaAudios* audios, OgaNamedTensors** input_tensors) {
   OGA_TRY
   if (!processor->processor_)
     throw std::runtime_error("Audio processor is not available for this model.");
 
   *input_tensors = ReturnUnique<OgaNamedTensors>(processor->Process(prompt, nullptr, audios));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor* processor, const char** prompts, const OgaAudios* audios, OgaNamedTensors** input_tensors) {
+  OGA_TRY
+  if (!processor->processor_)
+    throw std::runtime_error("Audio processor is not available for this model.");
+
+  *input_tensors = ReturnUnique<OgaNamedTensors>(processor->Process(prompts, nullptr, audios));
   return nullptr;
   OGA_CATCH
 }
@@ -718,6 +738,17 @@ OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalPr
     throw std::runtime_error("Processor is not available for this model.");
 
   *input_tensors = ReturnUnique<OgaNamedTensors>(processor->Process(prompt, images, audios));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor* processor, const char** prompts, const OgaImages* images,
+                                                           const OgaAudios* audios, OgaNamedTensors** input_tensors) {
+  OGA_TRY
+  if (!processor->processor_)
+    throw std::runtime_error("Processor is not available for this model.");
+
+  *input_tensors = ReturnUnique<OgaNamedTensors>(processor->Process(prompts, images, audios));
   return nullptr;
   OGA_CATCH
 }

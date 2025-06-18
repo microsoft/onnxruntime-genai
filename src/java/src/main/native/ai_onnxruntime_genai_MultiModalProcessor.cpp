@@ -43,6 +43,39 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImages(JNIEnv* env
   return reinterpret_cast<jlong>(named_tensors);
 }
 
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudios(JNIEnv* env, jobject thiz, jlong processor_handle,
+                                                                     jstring prompt, jlong audios_handle) {
+  const OgaMultiModalProcessor* processor = reinterpret_cast<const OgaMultiModalProcessor*>(processor_handle);
+
+  const char* prompt_str = env->GetStringUTFChars(prompt, nullptr);
+  OgaAudios* audios = reinterpret_cast<OgaAudios*>(audios_handle);
+
+  OgaNamedTensors* named_tensors = nullptr;
+  if (ThrowIfError(env, OgaProcessorProcessAudios(processor, prompt_str, audios, &named_tensors))) {
+    return 0;
+  }
+
+  return reinterpret_cast<jlong>(named_tensors);
+}
+
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudios(JNIEnv* env, jobject thiz, jlong processor_handle,
+                                                                              jstring prompt, jlong images_handle, jlong audios_handle) {
+  const OgaMultiModalProcessor* processor = reinterpret_cast<const OgaMultiModalProcessor*>(processor_handle);
+
+  const char* prompt_str = env->GetStringUTFChars(prompt, nullptr);
+  OgaImages* images = reinterpret_cast<OgaImages*>(images_handle);
+  OgaAudios* audios = reinterpret_cast<OgaAudios*>(audios_handle);
+
+  OgaNamedTensors* named_tensors = nullptr;
+  if (ThrowIfError(env, OgaProcessorProcessImagesAndAudios(processor, prompt_str, images, audios, &named_tensors))) {
+    return 0;
+  }
+
+  return reinterpret_cast<jlong>(named_tensors);
+}
+
 JNIEXPORT jstring JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_processorDecode(JNIEnv* env, jobject thiz, jlong processor_handle,
                                                               jintArray sequence) {

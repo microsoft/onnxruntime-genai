@@ -33,6 +33,32 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
 }
 
+- (nullable OGANamedTensors*)processAudios:(NSString*)prompt
+                                    audios:(OGAAudios*)audios
+                                     error:(NSError**)error {
+  try {
+    OGANamedTensors* result = [[OGANamedTensors alloc]
+        initWithCXXPointer:_processor->ProcessAudios([prompt UTF8String],
+                                                     &[audios CXXAPIOgaAudios])];
+    return result;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+}
+
+- (nullable OGANamedTensors*)processImagesAndAudios:(NSString*)prompt
+                                             images:(OGAImages*)images
+                                             audios:(OGAAudios*)audios
+                                              error:(NSError**)error {
+  try {
+    OGANamedTensors* result = [[OGANamedTensors alloc]
+        initWithCXXPointer:_processor->ProcessImagesAndAudiosAudios([prompt UTF8String],
+                                                                    &[images CXXAPIOgaImages],
+                                                                    &[audios CXXAPIOgaAudios])];
+    return result;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_NULLABLE(error)
+}
+
 - (nullable NSString*)decode:(const int32_t*)tokensData
                       length:(size_t)tokensLength
                        error:(NSError**)error {

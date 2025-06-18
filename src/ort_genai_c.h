@@ -536,32 +536,34 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* tok
 
 /**
  * \brief Process images with input prompt
- * \param[in] processor The processor to use to process the images and prompt.
- * \param[in] prompt The prompt to use with the images.
+ * \param[in] processor The processor to use to process the images and prompts.
+ * \param[in] prompts The prompts to use with the images.
  * \param[in] images The images to process.
  * \return OgaResult containing the named tensors for the processed inputs.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, OgaNamedTensors** input_tensors);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char** prompts, const OgaImages* images, OgaNamedTensors** input_tensors);
 
 /**
  * \brief Process audios with input prompt
- * \param[in] processor The processor to use to process the audios and prompt.
- * \param[in] prompt The prompt to use with the audios.
+ * \param[in] processor The processor to use to process the audios and prompts.
+ * \param[in] prompts The prompts to use with the audios.
  * \param[in] audios The audios to process.
  * \return OgaResult containing the named tensors for the processed inputs.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaAudios* audios, OgaNamedTensors** input_tensors);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const char** prompts, const OgaAudios* audios, OgaNamedTensors** input_tensors);
 
 /**
- * \brief Process images and/or audios with input prompt
- * \param[in] processor The processor to use to process the images, audios, and/or prompt.
- * \param[in] prompt The prompt to use with the images and/or audios.
+ * \brief Process images and/or audios with input prompts
+ * \param[in] processor The processor to use to process the images, audios, and/or prompts.
+ * \param[in] prompts The prompts to use with the images and/or audios.
  * \param[in] images The images to process.
  * \param[in] audios The audios to process.
  * \return OgaResult containing the named tensors for the processed inputs.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images,
-                                                                      const OgaAudios* audios, OgaNamedTensors** input_tensors);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, const OgaAudios* audios, OgaNamedTensors** input_tensors);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor*, const char** prompts, const OgaImages* images, const OgaAudios* audios, OgaNamedTensors** input_tensors);
 
 /** Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
