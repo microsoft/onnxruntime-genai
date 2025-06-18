@@ -645,14 +645,14 @@ class Model:
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
-        # Format of name is "/model/constants/{dtype}/{scalar_or_array}"
+        # Format of name is "/model/constants/{dtype}/{num}"
 
         path = name.split("/")
         onnx_dtype = ir.DataType[path[-2]]
         # NOTE: Use ast.literal_eval instead of eval as eval allows arbitrary code execution
-        scalar_or_array = ast.literal_eval(path[-1])
-        assert isinstance(scalar_or_array, (int, float, list, tuple)), f"Invalid constant value: {scalar_or_array}"
-        tensor = ir.tensor(scalar_or_array, dtype=onnx_dtype, name=name)
+        num = ast.literal_eval(path[-1])
+        assert isinstance(num, (int, float, list, tuple)), f"Invalid constant value: {num}"
+        tensor = ir.tensor(num, dtype=onnx_dtype, name=name)
 
         node_name = name.replace("constants", "constant_nodes")
         self.make_node("Constant", inputs=[], outputs=[name], name=node_name, value=tensor)

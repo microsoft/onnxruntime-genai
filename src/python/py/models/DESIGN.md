@@ -133,11 +133,11 @@ In the traditional export process, a unique constant is created each time a node
 To automate the creation process, the names of the constants are stored in the following namespace format.
 
 ```
-"/model/constants/{onnx_dtype}/{scalar_or_array}"
+"/model/constants/{onnx_dtype}/{num}"
 ```
 
 - The `onnx_dtype` is the string representation of the TensorProto enum name used in ONNX to represent the constant's dtype (e.g. `INT64`). It is created using `self.to_str_dtype`.
-- The `scalar_or_array` is the numerical constant. E.g. `0` or `[1,2,3]`
+- The `num` is the numerical constant. It can be a scalar or an array (e.g. `0` or `[1,2,3]`).
 
 When a node is added to the ONNX model, its inputs are parsed to identify names in this format. If recognized, the input name (which is the name of a constant) is looked up in `self.constants`. If found, then the constant does not need to be added to the ONNX model again. If not found, the input name is parsed to obtain the necessary info to create the ONNX constant.
 
