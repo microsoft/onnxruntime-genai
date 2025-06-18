@@ -45,7 +45,7 @@ struct WhisperDecoderState : State {
   WhisperDecoderState& operator=(const WhisperDecoderState&) = delete;
   
   void AddCrossCache(std::unique_ptr<CrossCache>& cross_cache) { cross_cache->AddInputs(*this); }
-  void SetExtraInputs();
+  // void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
 
  private:

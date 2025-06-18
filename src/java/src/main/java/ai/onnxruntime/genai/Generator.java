@@ -61,7 +61,7 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
     return isDone(nativeHandle);
   }
 
-    /**
+  /**
    * Add a Tensor as a model input.
    *
    * @param name Name of the model input the tensor will provide.

@@ -61,10 +61,12 @@ public class MultiModalProcessor implements AutoCloseable {
    * @return NamedTensors object.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
-  public NamedTensors processImagesAndAudios(String prompt, Images images, Audios audios) throws GenAIException {
+  public NamedTensors processImagesAndAudios(String prompt, Images images, Audios audios)
+      throws GenAIException {
     long imagesHandle = (images == null) ? 0 : images.nativeHandle();
     long audiosHandle = (audios == null) ? 0 : audios.nativeHandle();
-    long namedTensorsHandle = processorProcessImagesAndAudios(nativeHandle, prompt, imagesHandle, audiosHandle);
+    long namedTensorsHandle =
+        processorProcessImagesAndAudios(nativeHandle, prompt, imagesHandle, audiosHandle);
 
     return new NamedTensors(namedTensorsHandle);
   }
@@ -124,7 +126,8 @@ public class MultiModalProcessor implements AutoCloseable {
   private native long processorProcessAudios(long processorHandle, String prompt, long audiosHandle)
       throws GenAIException;
 
-  private native long processorProcessImagesAndAudios(long processorHandle, String prompt, long imagesHandle, long audiosHandle)
+  private native long processorProcessImagesAndAudios(
+      long processorHandle, String prompt, long imagesHandle, long audiosHandle)
       throws GenAIException;
 
   private native String processorDecode(long processorHandle, int[] sequence) throws GenAIException;

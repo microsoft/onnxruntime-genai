@@ -8,7 +8,7 @@ import java.nio.ByteBuffer;
 
 /**
  * Represents the parameters used for generating sequences with a model. Set the prompt using
- * setInput, and any other search options using setSearchOption.
+ * setInputs, and any other search options using setSearchOption.
  */
 public final class GeneratorParams implements AutoCloseable {
   private long nativeHandle = 0;
