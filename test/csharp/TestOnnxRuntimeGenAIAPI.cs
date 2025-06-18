@@ -157,7 +157,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                         using (var generator = new Generator(model, generatorParams))
                         {
-                            Assert.NotNull(generatorParams);
+                            Assert.NotNull(generator);
 
                             generator.AppendTokens(inputIDs);
                             Assert.False(generator.IsDone());
@@ -207,7 +207,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                         using (var generator = new Generator(model, generatorParams))
                         {
-                            Assert.NotNull(generatorParams);
+                            Assert.NotNull(generator);
 
                             generator.AppendTokens(inputIDs);
                             Assert.False(generator.IsDone());
