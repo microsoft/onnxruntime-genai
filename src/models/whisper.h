@@ -26,7 +26,8 @@ struct AudioEncoderState : State {
   void AddCrossCache(std::unique_ptr<CrossCache>& cross_cache) { cross_cache->AddOutputs(*this); }
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
-  int GetNumFrames() { return static_cast<int>(audio_features_->GetShape()[2]); }
+
+  int GetNumFrames() { return num_frames_; }
 
  private:
   friend struct WhisperState;
@@ -35,6 +36,7 @@ struct AudioEncoderState : State {
 
   std::unique_ptr<AudioFeatures> audio_features_;  // { batch_size, num_mels, num_frames }
   std::unique_ptr<OrtValue> hidden_states_;        // { batch_size, num_frames / 2, hidden_size }
+  int num_frames_{3000};                           // Whisper uses a default value of 3000
 };
 
 struct WhisperDecoderState : State {
@@ -43,7 +45,7 @@ struct WhisperDecoderState : State {
   WhisperDecoderState& operator=(const WhisperDecoderState&) = delete;
   
   void AddCrossCache(std::unique_ptr<CrossCache>& cross_cache) { cross_cache->AddInputs(*this); }
-  // void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
+  void SetExtraInputs();
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
 
  private:

@@ -27,8 +27,14 @@ void AudioEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
   audio_features_ = std::make_unique<AudioFeatures>(*this, model_.config_->model.encoder.inputs.audio_features, extra_inputs);
   audio_features_->Add();
 
+  // Verify that the frame size is expected
+  const int num_frames = static_cast<int>(audio_features_->GetShape()[2]);
+  if (num_frames != GetNumFrames()) {
+    throw new std::runtime_error("Whisper uses num_frames = 3000. The provided inputs have num_frames = " + std::to_string(num_frames));
+  }
+
   // Add encoder hidden states
-  auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), audio_features_->GetShape()[2] / 2, model_.config_->model.encoder.hidden_size};
+  auto hidden_states_shape = std::array<int64_t, 3>{params_->BatchBeamSize(), GetNumFrames() / 2, model_.config_->model.encoder.hidden_size};
   hidden_states_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), hidden_states_shape, audio_features_->GetType());
   outputs_.push_back(hidden_states_.get());
   output_names_.push_back(model_.config_->model.encoder.outputs.hidden_states.c_str());
@@ -157,7 +163,7 @@ WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& par
 
 void WhisperState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   encoder_state_->SetExtraInputs(extra_inputs);
-  decoder_state_->SetExtraInputs(extra_inputs);
+  // decoder_state_->SetExtraInputs(extra_inputs);
 
   // Check if alignment heads input exists
   void* alignment_heads_input = nullptr;
