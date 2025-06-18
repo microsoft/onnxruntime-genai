@@ -890,40 +890,37 @@ class Model:
         return name
 
     def make_dequantize_linear(self, dequantize_name, quantized_op):
-        def unpack_4bit(data: np.ndarray, dims: Sequence[int]) -> np.ndarray:
-            """Convert a packed (u)int4 array to unpacked (u)int4 array"""
-            data = data.view(np.uint8).flatten()
-            result = np.empty([data.size * 2], dtype=data.dtype)
-            array_low = data & np.uint8(0x0F)
-            array_high = data & np.uint8(0xF0)
-            array_high >>= np.uint8(4)
-            result[0::2] = array_low
-            result[1::2] = array_high
-            if result.size == np.prod(dims) + 1:
-                # handle single-element padding due to odd number of elements
-                result = result[:-1]
-            result.resize(dims, refcheck=False)
-            return result.view(self.onnx_dtype.numpy())
-
         # Input weights are quantized, save quantized MatMul weights for onnx model
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
-        qweight_npy = quantized_op.qweight.numpy(force=True)
-        qweight_npy = qweight_npy.reshape(*qweight_npy.shape[:-2], qweight_npy.shape[-2] * qweight_npy.shape[-1])
-        qweight_npy = unpack_4bit(qweight_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2])
-        self.make_initializer(qweight_npy, qweight)
+        qweight_shape = quantized_op.qweight.shape
+        self.make_initializer(
+            ir.PackedTensor(
+                quantized_op.qweight,
+                self.onnx_dtype,
+                shape=[*qweight_shape[:-2], qweight_shape[-2] * qweight_shape[-1] * 2],
+            ),
+            qweight,
+        )
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
-        scales_pt = quantized_op.scales.to(self.to_torch_dtype[self.io_dtype]).numpy(force=True)
-        scales_pt = scales_pt.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size)
+        scales_target_shape = [
+            *qweight_shape[:-2],
+            qweight_shape[-2] * qweight_shape[-1] * 2 // quantized_op.group_size,
+        ]
+        scales_pt = quantized_op.scales.to(self.to_torch_dtype[self.io_dtype])
+        scales_pt = scales_pt.reshape(scales_target_shape)
         self.make_initializer(scales_pt, scales)
 
         dequantize_inputs = [qweight, scales]
 
         if hasattr(quantized_op, "qzeros") and quantized_op.qzeros is not None:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
-            zeros_npy = quantized_op.qzeros.numpy(force=True)
-            zeros_npy = unpack_4bit(zeros_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size])
-            self.make_initializer(zeros_npy, zeros)
+            self.make_initializer(
+                ir.PackedTensor(
+                    quantized_op.qzeros, self.onnx_dtype, shape=scales_target_shape
+                ),
+                zeros,
+            )
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
