@@ -2837,7 +2837,7 @@ class Model:
         return gather_name
 
     def make_input_ids_subgraph(self, basename, past_key_gather_name):
-        root_input="input_ids" if not self.exclude_embeds else "inputs_embeds"
+        root_input = "input_ids" if not self.exclude_embeds else "inputs_embeds"
 
         # Make shared nodes between past_key_values.0.key (Gather with idx=2) and input_ids (Gather with idx=1) subgraphs
         #
