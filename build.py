@@ -87,7 +87,7 @@ def _parse_args():
     # Default to not building the language bindings
     parser.add_argument("--build_csharp", action="store_true", help="Build the C# API.")
     parser.add_argument("--build_java", action="store_true", help="Build Java bindings.")
-    parser.add_argument("--publish_java_maven", action="store_true", help="Publish Java bindings to local Maven repository after tests.")
+    parser.add_argument("--publish_java_maven_local", action="store_true", help="Publish Java bindings to local Maven repository after tests.")
 
     parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
 
@@ -503,7 +503,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
         f"-DUSE_GUIDANCE={'ON' if args.use_guidance else 'OFF'}",
-        f"-DPUBLISH_JAVA_MAVEN={'ON' if args.publish_java_maven else 'OFF'}",
+        f"-DPUBLISH_JAVA_MAVEN_LOCAL={'ON' if args.publish_java_maven_local else 'OFF'}",
     ]
 
     if args.ort_home:
