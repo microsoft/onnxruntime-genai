@@ -262,6 +262,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAppendProvider(OgaConfig* config, co
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config, const char* provider, const char* key, const char* value);
 
 /**
+ * \brief Register the model data to load the model from memory.
+ * \param[in] config The config to register the model data on.
+ * \param[in] model_filename The name of the model file as defined in the config.
+ * \param[in] model_data The model data to register.
+ * \param[in] model_data_length The length of the model data.
+ * \return OgaResult containing the error message if the registration of the model data failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigRegisterModelData(OgaConfig* config, const char* model_filename, const uint8_t* model_data, size_t model_data_length);
+
+/**
  * \brief Overlay JSON on top of config file
  * \param[in] config The config to overlay the JSON on.
  * \param[in] json The JSON to overlay on the config.
