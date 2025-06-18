@@ -14,6 +14,7 @@ import ast
 import json
 import os
 import textwrap
+import traceback
 from typing import Any, Literal, Sequence
 
 from tqdm import tqdm
@@ -350,6 +351,8 @@ class Model:
         self.model = ir.Model(graph, ir_version=10, producer_name="onnxruntime-genai")
         self.values: dict[str, ir.Value] = {}
 
+        self.debug = config.debug
+
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
 
@@ -576,7 +579,7 @@ class Model:
             ir_tensor = tensor_adapters.TorchTensor(tensor, name=name)
         else:
             ir_tensor = ir.tensor(tensor, name=name)
-        value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape)
+        value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape, create=True)
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
 
@@ -628,8 +631,21 @@ class Model:
         if name == "":
             # None value
             return ir.Value(name="")
-        if name not in self.values and not create:
-            raise ValueError(f"Value with name '{name}' does not exist. Please ensure that the value is created before accessing it.")
+
+        if self.debug:
+            stack = traceback.extract_stack()
+            stack_str = "".join(traceback.format_list(stack[:-1]))
+            if name not in self.values and not create:
+                print(f"Warning: Value with name '{name}' does not exist. Please ensure that the value is created before accessing it.\nStack trace:\n{stack_str}")
+            if name in self.values and create:
+                print(f"Value {name} is recreated at \n{stack_str}")
+        else:
+            if name not in self.values and not create:
+                raise ValueError(
+                    f"Value with name '{name}' does not exist. "
+                    "Please ensure that the value is created before accessing it. Use the --debug flag to see the stack trace."
+                )
+
         value = self.values.setdefault(name, ir.Value(name=name))
         if dtype is not None:
             value.dtype = ir.DataType(dtype)
@@ -3947,6 +3963,12 @@ def get_args():
         type=str,
         default=os.path.join('.', 'cache_dir'),
         help="Cache directory for Hugging Face files and temporary ONNX external data files",
+    )
+
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode. This will print additional information during the model conversion process.",
     )
 
     parser.add_argument(
