@@ -358,6 +358,8 @@ class Model:
         self.values: dict[str, ir.Value] = {}
 
         self.debug = extra_options.get("debug", False)
+        if self.debug:
+            print("Debug mode is enabled. Stack trace will be added in model")
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
@@ -2834,6 +2836,8 @@ class Model:
         return gather_name
 
     def make_input_ids_subgraph(self, basename, past_key_gather_name):
+        root_input="input_ids" if not self.exclude_embeds else "inputs_embeds"
+
         # Make shared nodes between past_key_values.0.key (Gather with idx=2) and input_ids (Gather with idx=1) subgraphs
         #
         #       Gather          Gather
@@ -2844,6 +2848,12 @@ class Model:
         #                 Add
         #                  |
         #              Unsqueeze
+        shape_2_name = f"{basename}/Shape_2"
+        self.make_shape(shape_2_name, root_input, shape=[3] if self.exclude_embeds else [2])
+        gather_2_name = f"{basename}/Gather_2"
+        gather_2_inputs = [f"{shape_2_name}/output_0", "/model/constants/INT64/0D/1"]
+        self.make_gather(gather_2_name, gather_2_inputs, axis=0)
+
         shared_add_name = f"{basename}/Add_1"
         shared_add_inputs = [f"{basename}/Gather_2/output_0", f"{past_key_gather_name}/output_0"]
         self.make_add(shared_add_name, shared_add_inputs, dtype=ir.DataType.INT64, shape=[])
@@ -2922,7 +2932,7 @@ class Model:
         unsqueeze_9_inputs = [f"{unsqueeze_8_name}/output_0", "/model/constants/INT64/[1]"]
         self.make_unsqueeze(unsqueeze_9_name, unsqueeze_9_inputs, dtype=self.io_dtype, shape=None)
 
-        expand_name = self.make_common_mask_reformat_subgraph(basename, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", unsqueeze_for_concat=unsqueeze_3_name, unsqueeze_for_expand=unsqueeze_9_name, input_ids_subgraph=True)
+        expand_name = self.make_common_mask_reformat_subgraph(basename, root_input=root_input, unsqueeze_for_concat=unsqueeze_3_name, unsqueeze_for_expand=unsqueeze_9_name, input_ids_subgraph=True)
         return unsqueeze_6_name, expand_name
 
     def make_attention_mask_subgraph(self, basename, unsqueeze_for_concat):
