@@ -651,7 +651,7 @@ class Model:
         onnx_dtype = ir.DataType[path[-2]]
         # NOTE: Use ast.literal_eval instead of eval as eval allows arbitrary code execution
         scalar_or_array = ast.literal_eval(path[-1])
-        assert isinstance(scalar_or_array, (int, float, Sequence)), f"Invalid constant value: {scalar_or_array}"
+        assert isinstance(scalar_or_array, (int, float, list, tuple)), f"Invalid constant value: {scalar_or_array}"
         tensor = ir.tensor(scalar_or_array, dtype=onnx_dtype, name=name)
 
         node_name = name.replace("constants", "constant_nodes")
