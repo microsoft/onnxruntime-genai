@@ -17,7 +17,7 @@ parameters:
   type: boolean
 - name: cuda_versions
   type: string
-  default: '11.8,12.2'
+  default: '12.2'
 - name: build_config
   type: string
   default: 'release'

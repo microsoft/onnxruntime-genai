@@ -96,7 +96,7 @@ parameters:
 - name: custom_ort_package_versioned_name
   displayName: 'Versioned name of ort nuget package. Must follow Microsoft.ML.OnnxRuntime.*.version.nupkg. Keep None to disable building'
   type: string
-  default: 'Microsoft.ML.OnnxRuntime.Foundry.1.23.0-dev-20250516-0447-261c2b7a80.nupkg'
+  default: 'Microsoft.ML.OnnxRuntime.Foundry.1.23.0-dev-20250617-0934-76952334d2.nupkg'
 
 resources:
   repositories:
