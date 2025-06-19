@@ -306,7 +306,7 @@ TEST(CAPITests, LoadModelFromMemory) {
   ASSERT_TRUE(model_file.is_open()) << "Failed to open model file: " << model_path;
   std::streamsize size = model_file.tellg();
   model_file.seekg(0, std::ios::beg);
-  std::vector<uint8_t> model_data(size);
+  std::vector<std::byte> model_data(size);
   model_file.read(reinterpret_cast<char*>(model_data.data()), size);
 
   auto config = OgaConfig::Create(PHI2_PATH);
