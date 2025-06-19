@@ -834,8 +834,8 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
 }
 
 std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
-  if (auto model_data_it = config_->model_datas_.find(model_filename);
-      model_data_it != config_->model_datas_.end()) {
+  if (auto model_data_it = config_->model_datas_spans_.find(model_filename);
+      model_data_it != config_->model_datas_spans_.end()) {
     // If model data was provided, load the model from memory
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);
@@ -846,7 +846,7 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
 
     // Remove the model data from the map after creating the session
     // The application must free up the memory used for the model data as it deems fit
-    config_->model_datas_.erase(model_data_it);
+    config_->model_datas_spans_.erase(model_data_it);
 
     return session;
   }

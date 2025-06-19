@@ -269,7 +269,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config,
  * \param[in] model_data_length The length of the model data.
  * \return OgaResult containing the error message if the registration of the model data failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigRegisterModelData(OgaConfig* config, const char* model_filename, const uint8_t* model_data, size_t model_data_length);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigRegisterModelData(OgaConfig* config, const char* model_filename, const void* model_data, size_t model_data_length);
 
 /**
  * \brief Overlay JSON on top of config file

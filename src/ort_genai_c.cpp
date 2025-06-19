@@ -259,13 +259,13 @@ OgaResult* OGA_API_CALL OgaConfigOverlay(OgaConfig* config, const char* json) {
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaConfigRegisterModelData(OgaConfig* config, const char* model_filename, const uint8_t* model_data, size_t model_data_length) {
+OgaResult* OGA_API_CALL OgaConfigRegisterModelData(OgaConfig* config, const char* model_filename, const void* model_data, size_t model_data_length) {
   OGA_TRY
   if (model_data == nullptr || model_data_length == 0) {
     throw std::runtime_error("Expected a valid model data pointer and length. Received nullptr or zero length.");
   }
 
-  config->model_datas_.emplace(model_filename, std::span<const uint8_t>(model_data, model_data_length));
+  config->model_datas_spans_.emplace(model_filename, std::span<const std::byte>(static_cast<const std::byte*>(model_data), model_data_length));
 
   return nullptr;
   OGA_CATCH

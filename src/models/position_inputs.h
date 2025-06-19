@@ -10,7 +10,7 @@ struct PositionInputs {
 };
 
 struct DefaultPositionInputs : PositionInputs {
-  DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name_);
+  DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name);
 
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
@@ -103,6 +103,6 @@ struct WindowedPositionInputs : PositionInputs {
   size_t window_index_{};
 };
 
-std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name_);
+std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name);
 
 }  // namespace Generators
