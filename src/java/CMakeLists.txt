@@ -241,21 +241,11 @@ if (ENABLE_TESTS)
 
   # Copy ORT native libs for Java tests
   foreach(LIB_FILE ${ort_native_libs})
-    if(LIB_FILE MATCHES ".*onnxruntime[^/]*$")
-        # Copy onnxruntime library to the ORT-specific directory
-        add_custom_command(
-                TARGET onnxruntime-genai-jni POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy
-                        ${LIB_FILE}
-                        ${ORT_PACKAGE_LIB_DIR}/)
-    else()
-        # Copy other libraries to the GenAI directory
-        add_custom_command(
-                TARGET onnxruntime-genai-jni POST_BUILD
-                COMMAND ${CMAKE_COMMAND} -E copy
-                        ${LIB_FILE}
-                        ${JAVA_PACKAGE_LIB_DIR}/)
-    endif()
+    add_custom_command(
+            TARGET onnxruntime-genai-jni POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy
+                    ${LIB_FILE}
+                    ${ORT_PACKAGE_LIB_DIR}/)
   endforeach()
 
   set_property(TEST onnxruntime-genai4j_test APPEND PROPERTY DEPENDS onnxruntime-genai-jni)
