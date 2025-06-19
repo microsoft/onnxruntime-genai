@@ -391,7 +391,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("append_provider", &OgaConfig::AppendProvider)
       .def("set_provider_option", &OgaConfig::SetProviderOption)
       .def("clear_providers", &OgaConfig::ClearProviders)
-      .def("register_model_data", [](OgaConfig& config, const std::string& model_filename, pybind11::object obj) {
+      .def("add_model_data", [](OgaConfig& config, const std::string& model_filename, pybind11::object obj) {
         if (pybind11::isinstance<pybind11::bytes>(obj)) {
           const auto model_bytes = obj.cast<pybind11::bytes>();
           char* model_data;
@@ -400,17 +400,20 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
             throw std::runtime_error("Failed to extract bytes from the object");
           }
 
-          config.RegisterModelData(model_filename, model_data, static_cast<size_t>(model_length));
+          config.AddModelData(model_filename, model_data, static_cast<size_t>(model_length));
         } else if (pybind11::isinstance<pybind11::buffer>(obj)) {
           pybind11::buffer_info info = obj.cast<pybind11::buffer>().request();
           if (info.format != pybind11::format_descriptor<uint8_t>::format() || info.ndim != 1) {
             throw std::runtime_error("Expected a 1D buffer of uint8_t");
           }
           const std::byte* model_data = static_cast<std::byte*>(info.ptr);
-          config.RegisterModelData(model_filename, model_data, info.size);
+          config.AddModelData(model_filename, model_data, info.size);
         } else {
           throw std::runtime_error("Unsupported input type. Expected bytes or buffer.");
         }
+      })
+      .def("remove_model_data", [](OgaConfig& config, const std::string& model_filename) {
+        config.RemoveModelData(model_filename.c_str());
       });
 
   pybind11::class_<OgaModel>(m, "Model")

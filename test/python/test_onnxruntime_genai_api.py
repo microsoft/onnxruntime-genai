@@ -442,8 +442,9 @@ def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
     with open(os.path.join(model_path, "model.onnx"), 'rb') as model_file:
         model_data = wrapper_bytes_function(model_file.read())
 
-    config.register_model_data("model.onnx", model_data)
+    config.add_model_data("model.onnx", model_data)
     model = og.Model(config)
+    config.remove_model_data("model.onnx")
     tokenizer = og.Tokenizer(model)
 
     prompts = [

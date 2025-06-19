@@ -310,8 +310,9 @@ TEST(CAPITests, LoadModelFromMemory) {
   model_file.read(reinterpret_cast<char*>(model_data.data()), size);
 
   auto config = OgaConfig::Create(PHI2_PATH);
-  config->RegisterModelData("model.onnx", model_data);
+  config->AddModelData("model.onnx", model_data);
   auto model = OgaModel::Create(*config);
+  config->RemoveModelData("model.onnx");
   auto tokenizer = OgaTokenizer::Create(*model);
 
   const char* input_string = "This is a test.";

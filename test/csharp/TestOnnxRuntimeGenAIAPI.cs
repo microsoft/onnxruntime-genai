@@ -194,9 +194,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 Assert.NotNull(config);
                 var modelData = File.ReadAllBytes(Path.Combine(modelPath, "past.onnx"));
                 Assert.NotNull(modelData);
-                config.RegisterModelData("past.onnx", modelData);
+                config.AddModelData("past.onnx", modelData);
                 using (var model = new Model(config))
                 {
+                    config.RemoveModelData("past.onnx");
                     Assert.NotNull(model);
                     using(var generatorParams = new GeneratorParams(model))
                     {

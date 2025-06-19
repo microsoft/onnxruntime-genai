@@ -854,10 +854,6 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     dir_guard.ChangeTo(config_->config_path);
     auto session = OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
 
-    // Remove the model data from the map after creating the session
-    // The application must free up the memory used for the model data as it deems fit
-    config_->model_data_spans_.erase(model_data_it);
-
     return session;
   }
 

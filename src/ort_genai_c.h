@@ -262,14 +262,23 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAppendProvider(OgaConfig* config, co
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config, const char* provider, const char* key, const char* value);
 
 /**
- * \brief Register the model data to load the model from memory.
- * \param[in] config The config to register the model data on.
+ * \brief Add the model data to load the model from memory. Applications must call OgaConfigRemoveModelData to remove the model data
+ *        when it is no longer needed.
+ * \param[in] config The config to add the model data to.
  * \param[in] model_filename The name of the model file as defined in the config.
- * \param[in] model_data The model data to register. The data is expected to be valid at least until the model is created.
+ * \param[in] model_data The model data to add. The data is expected to be valid at least until the model is created.
  * \param[in] model_data_length The length of the model data.
- * \return OgaResult containing the error message if the registration of the model data failed.
+ * \return OgaResult containing the error message if the addition of the model data failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigRegisterModelData(OgaConfig* config, const char* model_filename, const void* model_data, size_t model_data_length);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAddModelData(OgaConfig* config, const char* model_filename, const void* model_data, size_t model_data_length);
+
+/**
+ * \brief Cleanup model data previously added to the config.
+ * \param[in] config The config to remove the model data from.
+ * \param[in] model_filename The name of the model file as defined in the config.
+ * \return OgaResult containing the error message if the removal of the model data failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigRemoveModelData(OgaConfig* config, const char* model_filename);
 
 /**
  * \brief Overlay JSON on top of config file
