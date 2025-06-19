@@ -50,10 +50,12 @@ ExtraInputs::ExtraInputs(State& state)
 void ExtraInputs::Add(const std::vector<ExtraInput>& extra_inputs, const std::vector<std::string>& required_input_names) {
   std::unordered_set<std::string> required_input_names_set(required_input_names.begin(), required_input_names.end());
   // Add extra user inputs
-  for (int i = 0; i < extra_inputs.size(); ++i) {
+  for (int i = 0; i < extra_inputs.size(); i++) {
+    std::cout << "Index " << i << " in ExtraInputs::Add" << std::endl;
+    std::cout << "Length of input names = " << state_.input_names_.size() << std::endl;
     if (required_input_names_set.empty() || required_input_names_set.count(extra_inputs[i].name)) {
       state_.input_names_.push_back(extra_inputs[i].name.c_str());
-      state_.inputs_.push_back(extra_inputs_[i]);
+      state_.inputs_.push_back(extra_inputs[i].tensor->ort_tensor_.get());
     }
   }
 

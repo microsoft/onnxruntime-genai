@@ -616,11 +616,11 @@ struct OgaMultiModalProcessor : OgaAbstract {
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
-  // std::unique_ptr<OgaNamedTensors> ProcessImages(const char** prompts, const OgaImages* images = nullptr) const {
-  //   OgaNamedTensors* p;
-  //   OgaCheckResult(OgaProcessorProcessImages(this, prompts, images, &p));
-  //   return std::unique_ptr<OgaNamedTensors>(p);
-  // }
+  std::unique_ptr<OgaNamedTensors> ProcessImages(const char** prompts, size_t count, const OgaImages* images = nullptr) const {
+    OgaNamedTensors* p;
+    OgaCheckResult(OgaProcessorProcessImagesAndPrompts(this, prompts, count, images, &p));
+    return std::unique_ptr<OgaNamedTensors>(p);
+  }
 
   std::unique_ptr<OgaNamedTensors> ProcessAudios(const char* prompt, const OgaAudios* audios = nullptr) const {
     OgaNamedTensors* p;
@@ -628,11 +628,11 @@ struct OgaMultiModalProcessor : OgaAbstract {
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
-  // std::unique_ptr<OgaNamedTensors> ProcessAudios(const char** prompts, const OgaAudios* audios = nullptr) const {
-  //   OgaNamedTensors* p;
-  //   OgaCheckResult(OgaProcessorProcessAudios(this, prompts, audios, &p));
-  //   return std::unique_ptr<OgaNamedTensors>(p);
-  // }
+  std::unique_ptr<OgaNamedTensors> ProcessAudios(const char** prompts, size_t count, const OgaAudios* audios = nullptr) const {
+    OgaNamedTensors* p;
+    OgaCheckResult(OgaProcessorProcessAudiosAndPrompts(this, prompts, count, audios, &p));
+    return std::unique_ptr<OgaNamedTensors>(p);
+  }
 
   std::unique_ptr<OgaNamedTensors> ProcessImagesAndAudios(const char* prompt, const OgaImages* images = nullptr, const OgaAudios* audios = nullptr) const {
     OgaNamedTensors* p;
@@ -640,11 +640,11 @@ struct OgaMultiModalProcessor : OgaAbstract {
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
-  // std::unique_ptr<OgaNamedTensors> ProcessImagesAndAudios(const char** prompts, const OgaImages* images = nullptr, const OgaAudios* audios = nullptr) const {
-  //   OgaNamedTensors* p;
-  //   OgaCheckResult(OgaProcessorProcessImagesAndAudios(this, prompts, images, audios, &p));
-  //   return std::unique_ptr<OgaNamedTensors>(p);
-  // }
+  std::unique_ptr<OgaNamedTensors> ProcessImagesAndAudios(const char** prompts, size_t count, const OgaImages* images = nullptr, const OgaAudios* audios = nullptr) const {
+    OgaNamedTensors* p;
+    OgaCheckResult(OgaProcessorProcessImagesAndAudiosAndPrompts(this, prompts, count, images, audios, &p));
+    return std::unique_ptr<OgaNamedTensors>(p);
+  }
 
   OgaString Decode(const int32_t* tokens_data, size_t tokens_length) const {
     const char* p;

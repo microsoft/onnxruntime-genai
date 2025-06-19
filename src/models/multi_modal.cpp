@@ -225,8 +225,12 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
   num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
   num_images_ = GetImageFeatureBatchSize(extra_inputs);
 
-  vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);
-  speech_state_->SetExtraInputs(extra_inputs, num_audio_tokens_);
+  if (model_.vision_session_) {
+    vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);
+  }
+  if (model_.speech_session_) {
+    speech_state_->SetExtraInputs(extra_inputs, num_audio_tokens_);
+  }
   embedding_state_->SetExtraInputs(num_images_, num_image_tokens_, num_audio_tokens_);
 }
 

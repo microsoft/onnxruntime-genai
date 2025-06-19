@@ -913,13 +913,13 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
 }
 
 std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& prompt, const Images* images, const Audios* audios) const {
-  Payload payload{prompt, images, audios};
+  Payload payload{prompt, {}, images, audios};
   return processor_->Process(*tokenizer_, payload);
 }
 
-// std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const char** prompts, const Images* images, const Audios* audios) const {
-//   Payload payload{prompts, images, audios};
-//   return processor_->Process(*tokenizer_, payload);
-// }
+std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const char** prompts, size_t count, const Images* images, const Audios* audios) const {
+  Payload payload{"", std::span<const char*>(prompts, count), images, audios};
+  return processor_->Process(*tokenizer_, payload);
+}
 
 }  // namespace Generators

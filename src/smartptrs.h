@@ -69,8 +69,8 @@ struct DeviceSpan {
   // Zero out the device memory
   void Zero() { p_device_memory_->Zero(); }
 
-  void CopyFrom(const DeviceSpan<const T>& source) {
-    assert(source.size() == size());  // Spans must be the same size to copy
+  void CopyFrom(const DeviceSpan<const T>& source, bool same_size = true) {
+    if (same_size) assert(source.size() == size());  // Spans must be the same size to copy
     p_device_memory_->CopyFrom(begin_ * sizeof(T), *source.p_device_memory_, source.begin_ * sizeof(T), length_ * sizeof(T));
   }
 

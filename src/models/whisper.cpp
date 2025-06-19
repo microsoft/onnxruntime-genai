@@ -106,7 +106,12 @@ void WhisperDecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, 
   size_t new_length = next_tokens.size() / batch_size;
   input_ids_.Update(next_tokens);
   kv_cache_.Update(beam_indices, current_length);
-  logits_.Update(next_tokens, new_length);
+  logits_.Update(next_tokens, first_run_ ? current_length : new_length);
+
+  // Return early if this method is just initializing the above OrtValue objects and not updating them
+  if (first_run_) {
+    return;
+  }
 
   if (past_sequence_length_) {
     auto data = past_sequence_length_->GetTensorMutableData<int32_t>();
@@ -114,6 +119,7 @@ void WhisperDecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, 
   }
 
   if (cache_indirection_ && params_->search.num_beams > 1 && !first_update) {
+    // TODO: this is not working again...
     auto beam_indices_span = beam_indices.Span();
     if (beam_indices_span.empty()) {
       auto beam_indices_cpu = beam_indices.CpuSpan();
@@ -233,7 +239,7 @@ void WhisperState::TransposeKCaches(std::vector<std::unique_ptr<OrtValue>>& kv_c
 
     // Copy the original 'K' caches to a temporary buffer in order to
     // use the destination buffer to store the transposed 'K' caches
-    temp_span.CopyFrom(dest_span);
+    temp_span.CopyFrom(dest_span, false);
 
     // Transpose each 'K' cache
     model_.p_device_inputs_->ReorderPastStates(kv_caches[i]->GetTensorMutableRawData(),
@@ -297,6 +303,9 @@ DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t>& nex
   if (encoder_state_->first_run_) {
     // Run encoder
     encoder_state_->Run(current_length, next_tokens, next_indices);
+
+    // Initialize inputs and outputs for decoder
+    decoder_state_->UpdateInputsOutputs(next_tokens, next_indices, current_length, first_run_);
 
     // Run decoder-init
     auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
