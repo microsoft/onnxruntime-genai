@@ -7,7 +7,7 @@ import os
 import readline
 
 import onnxruntime_genai as og
-
+og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
 
 def _complete(text, state):
     return (glob.glob(text + "*") + [None])[state]
@@ -39,25 +39,25 @@ def run(args: argparse.Namespace):
         audios = og.Audios.open(*audio_paths)
 
         print("Processing audio...")
-        mel = processor(audios=audios)
         decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
+        inputs = processor(audios=audios)
 
         params = og.GeneratorParams(model)
         params.set_search_options(
             do_sample=False,
             num_beams=args.num_beams,
             num_return_sequences=args.num_beams,
-            max_length=256,
+            max_length=448,
         )
 
         batch_size = len(audio_paths)
-        params.set_inputs(mel)
-        params.input_ids = [[tokenizer.to_token_id(token) for token in decoder_prompt_tokens]] * batch_size
+        input_ids = [[tokenizer.to_token_id(token) for token in decoder_prompt_tokens]] * batch_size
 
         generator = og.Generator(model, params)
+        generator.set_inputs(inputs)
+        generator.append_tokens(input_ids)
 
         while not generator.is_done():
-            generator.compute_logits()
             generator.generate_next_token()
 
         print()
