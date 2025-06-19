@@ -257,8 +257,8 @@ struct Config {
   // otherwise returns the nominal name and false
   std::pair<std::string, bool> GetGraphName(const std::string& nominal_name) const;
 
-  std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;      // Mapping of nominal input/output names to graph input/output names
-  std::unordered_map<std::string, std::span<const std::byte>> model_datas_spans_;  // Model bytes to support loading a model from memory
+  std::unordered_map<std::string, std::string> nominal_names_to_graph_names_;     // Mapping of nominal input/output names to graph input/output names
+  std::unordered_map<std::string, std::span<const std::byte>> model_data_spans_;  // Model bytes to support loading a model from memory
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value);

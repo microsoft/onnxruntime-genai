@@ -834,19 +834,29 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
 }
 
 std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
-  if (auto model_data_it = config_->model_datas_spans_.find(model_filename);
-      model_data_it != config_->model_datas_spans_.end()) {
+  if (auto model_data_it = config_->model_data_spans_.find(model_filename);
+      model_data_it != config_->model_data_spans_.end()) {
     // If model data was provided, load the model from memory
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);
     }
+    // TODO (baijumeswani): Loading ONNX models from memory that hold references to data stored in external files
+    // is not supported at the moment. This limitation stems from the fact that ONNX models typically
+    // reference these external files using relative paths to the model file. When loading a model from memory,
+    // the relative paths may not resolve correctly, leading to issues in locating the referenced data.
+    // To work around this, we change the current working directory to the model's config path
+    // before creating the session. This allows the model to resolve relative paths correctly.
+    // Note that this is not a problem for models that do not reference external files.
+    // This is a temporary solution and can be potentially addressed by exposing means to set a working directory
+    // for the OrtSession through the ONNX Runtime API.
+    // This solution is not ideal since it modifies the global state of the process, and is hence not thread-safe.
     DirGuard dir_guard;
     dir_guard.ChangeTo(config_->config_path);
     auto session = OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
 
     // Remove the model data from the map after creating the session
     // The application must free up the memory used for the model data as it deems fit
-    config_->model_datas_spans_.erase(model_data_it);
+    config_->model_data_spans_.erase(model_data_it);
 
     return session;
   }

@@ -265,7 +265,7 @@ OgaResult* OGA_API_CALL OgaConfigRegisterModelData(OgaConfig* config, const char
     throw std::runtime_error("Expected a valid model data pointer and length. Received nullptr or zero length.");
   }
 
-  config->model_datas_spans_.emplace(model_filename, std::span<const std::byte>(static_cast<const std::byte*>(model_data), model_data_length));
+  config->model_data_spans_.emplace(model_filename, std::span<const std::byte>(static_cast<const std::byte*>(model_data), model_data_length));
 
   return nullptr;
   OGA_CATCH
