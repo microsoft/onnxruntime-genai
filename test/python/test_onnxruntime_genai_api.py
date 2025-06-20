@@ -939,10 +939,11 @@ def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio
 
     audio_paths = [os.fspath(Path(test_data_path) / relative_audio_path)]
     audios = og.Audios.open(*audio_paths)
-    _ = processor(audios=audios)
 
+    batch_size = len(audio_paths)
     decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
-    _ = [[tokenizer.to_token_id(token) for token in decoder_prompt_tokens]]
+    input_ids = ["".join(decoder_prompt_tokens)] * batch_size
+    inputs = processor(input_ids, count=batch_size, audios=audios)
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
@@ -962,7 +963,8 @@ def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path
         for relative_audio_path in relative_audio_paths
     ]
     audios = og.Audios.open(*audio_paths)
-    _ = processor(audios=audios)
 
+    batch_size = len(audio_paths)
     decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
-    _ = [[tokenizer.to_token_id(token) for token in decoder_prompt_tokens]]
+    input_ids = ["".join(decoder_prompt_tokens)] * batch_size
+    inputs = processor(input_ids, count=batch_size, audios=audios)
