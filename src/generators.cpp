@@ -370,9 +370,6 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
       // Else, use the nominal name as the graph name.
       [[maybe_unused]] const auto [graph_name, found] = model_->config_->GetGraphName(name);
       extra_inputs.push_back({graph_name, tensor});
-
-      std::cout << "Graph name = " << graph_name << std::endl;
-      std::cout << "Tensor name = " << name << std::endl;
     }
   }
 

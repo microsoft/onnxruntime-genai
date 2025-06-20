@@ -44,35 +44,9 @@ void CXX_API(const char* model_path, int32_t num_beams) {
 
     std::cout << "Processing inputs..." << std::endl;
     const size_t batch_size = audio_paths.size();
-
     const char* prompt_tokens = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>";
     const std::vector<const char*> prompts(batch_size, prompt_tokens);
-
-    // // Convert "vector of vector of const char*" to "span of span of const char*"
-    // const std::vector<std::vector<const char*>> prompts_vec_vec(batch_size, prompt_tokens);
-    // const std::vector<std::span<const char*>> prompts_vec_span;
-    // for (const auto& row : prompts_vec_vec) {
-    //   prompts_vec_span.emplace_back(row.data(), row.size());
-    // }
-    // const std::span<std::span<const char*>> prompts(prompts_vec_span);
-
     auto inputs = processor->ProcessAudios(const_cast<const char**>(prompts.data()), prompts.size(), audios.get());
-
-    // auto mel_data = reinterpret_cast<uint16_t*>(inputs->Get("audio_features")->Data());
-    // std::cout << "Mel: " << std::endl;
-    // for (int i = 0; i < 5; i++) {
-    //   std::cout << *(mel_data + i) << std::endl;
-    // }
-
-    // auto input_ids_span = input_ids->Get(0);
-    // for (auto ii : input_ids_span) {
-    //   std::cout << ii << ", ";
-    // }
-    // std::cout << std::endl;
-
-    Oga::SetLogBool("enabled", true);
-    Oga::SetLogBool("model_input_values", true);
-    Oga::SetLogBool("model_output_values", true);
 
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
@@ -83,12 +57,8 @@ void CXX_API(const char* model_path, int32_t num_beams) {
     params->SetSearchOption("num_return_sequences", num_beams);
 
     auto generator = OgaGenerator::Create(*model, *params);
-    std::cout << "Setting inputs..." << std::endl;
     generator->SetInputs(*inputs);
-    // std::cout << "Appending tokens..." << std::endl;
-    // generator->AppendTokenSequences(*input_ids);
 
-    std::cout << "Starting generation loop..." << std::endl;
     while (!generator->IsDone()) {
       generator->GenerateNextToken();
     }
@@ -156,34 +126,24 @@ void C_API(const char* model_path, int32_t num_beams) {
     }
 
     std::cout << "Processing audio..." << std::endl;
-    OgaNamedTensors* mel;
-    CheckResult(OgaProcessorProcessAudios(processor, "", audios, &mel));
-    const std::vector<const char*> prompt_tokens = {"<|startoftranscript|>", "<|en|>", "<|transcribe|>",
-                                                    "<|notimestamps|>"};
-    OgaSequences* input_ids;
-    CheckResult(OgaCreateSequences(&input_ids));
+    OgaNamedTensors* inputs;
     const size_t batch_size = audio_paths.size();
-    for (size_t i = 0; i < batch_size; ++i) {
-      for (const auto& token : prompt_tokens) {
-        int32_t token_id;
-        CheckResult(OgaTokenizerToTokenId(tokenizer, token, &token_id));
-        CheckResult(OgaAppendTokenToSequence(token_id, input_ids, i));
-      }
-    }
+    const char* prompt_tokens = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>";
+    const std::vector<const char*> prompts(batch_size, prompt_tokens);
+    CheckResult(OgaProcessorProcessAudiosAndPrompts(processor, const_cast<const char**>(prompts.data()), batch_size, audios, &inputs));
 
     std::cout << "Generating response..." << std::endl;
     OgaGeneratorParams* params;
     CheckResult(OgaCreateGeneratorParams(model, &params));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "batch_size", static_cast<double>(batch_size)));
-    CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 256));
+    CheckResult(OgaGeneratorParamsSetSearchNumber(params, "max_length", 448));
     CheckResult(OgaGeneratorParamsSetSearchBool(params, "do_sample", false));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "num_beams", num_beams));
     CheckResult(OgaGeneratorParamsSetSearchNumber(params, "num_return_sequences", num_beams));
 
     OgaGenerator* generator;
     CheckResult(OgaCreateGenerator(model, params, &generator));
-    CheckResult(OgaGenerator_SetInputs(generator, mel));
-    CheckResult(OgaGenerator_AppendTokenSequences(generator, input_ids));
+    CheckResult(OgaGenerator_SetInputs(generator, inputs));
 
     while (!OgaGenerator_IsDone(generator)) {
       CheckResult(OgaGenerator_GenerateNextToken(generator));
@@ -205,8 +165,7 @@ void C_API(const char* model_path, int32_t num_beams) {
 
     OgaDestroyGenerator(generator);
     OgaDestroyGeneratorParams(params);
-    OgaDestroySequences(input_ids);
-    OgaDestroyNamedTensors(mel);
+    OgaDestroyNamedTensors(inputs);
     OgaDestroyAudios(audios);
   }
 
@@ -225,6 +184,11 @@ int main(int argc, char** argv) {
     print_usage_whisper(argc, argv);
     return -1;
   }
+
+  // Uncomment for debugging purposes
+  // Oga::SetLogBool("enabled", true);
+  // Oga::SetLogBool("model_input_values", true);
+  // Oga::SetLogBool("model_output_values", true);
 
   std::cout << "---------------" << std::endl;
   std::cout << "Hello, Whisper!" << std::endl;
