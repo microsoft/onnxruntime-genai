@@ -47,7 +47,6 @@ struct ExtraInput {  // Extra inputs provided via SetInputs()
   std::shared_ptr<Tensor> tensor;
 };
 
-
 template <typename T, typename V>
 bool contains(const T& t, V&& v) {
   return std::find(t.begin(), t.end(), v) != t.end();
