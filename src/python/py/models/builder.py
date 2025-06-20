@@ -14,6 +14,7 @@ import ast
 import json
 import os
 import textwrap
+import traceback
 from typing import Any, Literal, Sequence
 
 from tqdm import tqdm
@@ -37,6 +38,12 @@ from transformers import (
 # NOTE: Avoid importing from onnx helper and numpy_helper. Instead, leverage
 # ONNX IR methods like ir.tensor, ir.DataType.numpy() and other methods for constructing
 # the ONNX graph efficiently.
+
+
+def get_stacktrace() -> str:
+    """Get the stack trace of the current execution context."""
+    stack = traceback.extract_stack()
+    return "".join(traceback.format_list(stack[:-2]))
 
 
 class Model:
@@ -141,7 +148,7 @@ class Model:
         self.make_outputs_init()
 
         # Store names of nodes already created
-        self.node_names: set[str] = set()
+        self.node_names: dict[str, ir.Node] = {}
 
         # Map ONNX dtypes to PyTorch dtypes
         self.to_torch_dtype = {
@@ -350,6 +357,10 @@ class Model:
         self.model = ir.Model(graph, ir_version=10, producer_name="onnxruntime-genai")
         self.values: dict[str, ir.Value] = {}
 
+        self.debug = extra_options.get("debug", False)
+        if self.debug:
+            print("Debug mode is enabled. Stack trace will be added in model")
+
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
 
@@ -525,9 +536,6 @@ class Model:
         else:
             model = self.model
 
-        # Make sure all nodes are topologically sorted
-        model.graph.sort()
-
         # Save ONNX model with only one external data file and delete any existing duplicate copies
         out_path = os.path.join(out_dir, self.filename)
         data_path = os.path.join(out_dir, os.path.basename(out_path) + ".data")
@@ -579,7 +587,7 @@ class Model:
             ir_tensor = tensor_adapters.TorchTensor(tensor, name=name)
         else:
             ir_tensor = ir.tensor(tensor, name=name)
-        value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape)
+        value = self.make_value(name, ir_tensor.dtype, ir_tensor.shape, create=True)
         value.const_value = ir_tensor
         self.model.graph.register_initializer(value)
 
@@ -595,6 +603,12 @@ class Model:
             # This means that the nodes can be created in those functions regardless of their actual
             # status in the graph. This checks can then decide whether the proposed node actually
             # needs to be added into the graph or not.
+            if self.debug:
+                self.node_names[name].metadata_props.setdefault("pkg.onnxruntime_genai.builder.stack_trace", "")
+                self.node_names[name].metadata_props["pkg.onnxruntime_genai.builder.stack_trace"] += (
+                    f"\n\nNode reused at:\n{get_stacktrace()}"
+                )
+
             return
 
         # Save any constants as nodes
@@ -603,25 +617,47 @@ class Model:
                 self.make_constant(input_name)
 
         # Resolve values from names
-        input_values = [self.make_value(name) for name in inputs]
-        output_values = [self.make_value(name) for name in outputs]
+        input_values = [self.make_value(name, create=False) for name in inputs]
+        output_values = [self.make_value(name, create=True) for name in outputs]
         node = ir.node(op_type, inputs=input_values, attributes=kwargs, domain=domain, outputs=output_values, name=name)
+        node.metadata_props["pkg.onnxruntime_genai.builder.stack_trace"] = get_stacktrace()
         self.model.graph.append(node)
-        self.node_names.add(name)
+        self.node_names[name] = node
 
-    def make_value(self, name, dtype: ir.DataType | int| None = None, shape: Sequence[int | str] | ir.Shape | None = None) -> ir.Value:
+    def make_value(
+        self,
+        name,
+        dtype: ir.DataType | int | None = None,
+        shape: Sequence[int | str] | ir.Shape | None = None,
+        *,
+        create: bool = False,
+    ) -> ir.Value:
         """Obtain or create an IR value by value name.
 
-        If the value does not exist a new one is created.
+        If the value does not exist a new one is created when :param:`create` is True.
         If dtype or shape is provided, it will be set on the value.
 
         Args:
             name: The name of the value.
-            output: Whether the value is an output value.
+            dtype: The data type of the value, can be an ir.DataType or an int.
+            shape: The shape of the value, can be a sequence of integers or an ir.Shape.
+            create: If True, a new value will be created if it does not exist.
         """
         if name == "":
             # None value
             return ir.Value(name="")
+
+        if name not in self.values and not create:
+            if self.debug:
+                print(f"DEBUG: Value with name '{name}' does not exist. Please ensure that the value is created before accessing it.\nStack trace:\n{get_stacktrace()}")
+            else:
+                raise ValueError(
+                    f"Value with name '{name}' does not exist. "
+                    "Please ensure that the value is created before accessing it. Use the --debug flag to see the stack trace."
+                )
+        if self.debug and name in self.values and create:
+            print(f"DEBUG: Value '{name}' is recreated at \n{get_stacktrace()}")
+
         value = self.values.setdefault(name, ir.Value(name=name))
         if dtype is not None:
             value.dtype = ir.DataType(dtype)
@@ -629,34 +665,68 @@ class Model:
             value.shape = ir.Shape(shape)
         return value
 
-    def make_inputs_and_outputs(self):
+    def make_inputs(self):
         # Add model-specific inputs to list of model inputs
         inputs = self.model.graph.inputs
         for name in self.input_names:
             dtype = self.input_types[name]
             shape = self.input_shapes[name]
-            inputs.append(self.make_value(name, dtype=dtype, shape=shape))
-
-        # Add model-specific outputs to list of model outputs
-        outputs = self.model.graph.outputs
-        for name in self.output_names:
-            dtype = self.output_types[name]
-            shape = self.output_shapes[name]
-            outputs.append(self.make_value(name, dtype=dtype, shape=shape))
+            inputs.append(self.make_value(name, dtype=dtype, shape=shape, create=True))
 
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
+            inputs.append(
+                self.make_value(
+                    key_name,
+                    dtype=self.input_types["past_key_values.key"],
+                    shape=self.input_shapes["past_key_values.key"],
+                    create=True,
+                )
+            )
             value_name = f"past_key_values.{i}.value"
-            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
+            inputs.append(
+                self.make_value(
+                    value_name,
+                    dtype=self.input_types["past_key_values.value"],
+                    shape=self.input_shapes["past_key_values.value"],
+                    create=True,
+                )
+            )
 
+    def make_outputs(self):
+        # Add model-specific outputs to list of model outputs
+        # At this point all outputs should be created and exist in self.values
+        outputs = self.model.graph.outputs
+        for name in self.output_names:
+            dtype = self.output_types[name]
+            shape = self.output_shapes[name]
+            outputs.append(
+                self.make_value(name, dtype=dtype, shape=shape, create=False)
+            )
+
+        # Add KV cache to inputs and outputs
+        for i in range(self.num_layers):
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"]))
+            outputs.append(
+                self.make_value(
+                    key_name,
+                    dtype=self.output_types["present.key"],
+                    shape=self.output_shapes["present.key"],
+                    create=False,
+                )
+            )
             value_name = f"present.{i}.value"
-            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"]))
+            outputs.append(
+                self.make_value(
+                    value_name,
+                    dtype=self.output_types["present.value"],
+                    shape=self.output_shapes["present.value"],
+                    create=False,
+                )
+            )
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
@@ -2545,7 +2615,7 @@ class Model:
 
     def make_model(self, input_path):
         # Make inputs and outputs to ONNX model
-        self.make_inputs_and_outputs()
+        self.make_inputs()
 
         # Make pre-processing nodes
         self.make_preprocessing_nodes()
@@ -2610,6 +2680,8 @@ class Model:
                     # Language modeling head (SkipLayerNorm --> logits)
                     print("Reading LM head")
                     self.make_lm_head(module)
+
+        self.make_outputs()
 
         del model
 
@@ -2765,6 +2837,8 @@ class Model:
         return gather_name
 
     def make_input_ids_subgraph(self, basename, past_key_gather_name):
+        root_input = "input_ids" if not self.exclude_embeds else "inputs_embeds"
+
         # Make shared nodes between past_key_values.0.key (Gather with idx=2) and input_ids (Gather with idx=1) subgraphs
         #
         #       Gather          Gather
@@ -2775,6 +2849,12 @@ class Model:
         #                 Add
         #                  |
         #              Unsqueeze
+        shape_2_name = f"{basename}/Shape_2"
+        self.make_shape(shape_2_name, root_input, shape=[3] if self.exclude_embeds else [2])
+        gather_2_name = f"{basename}/Gather_2"
+        gather_2_inputs = [f"{shape_2_name}/output_0", "/model/constants/INT64/1"]
+        self.make_gather(gather_2_name, gather_2_inputs, axis=0)
+
         shared_add_name = f"{basename}/Add_1"
         shared_add_inputs = [f"{basename}/Gather_2/output_0", f"{past_key_gather_name}/output_0"]
         self.make_add(shared_add_name, shared_add_inputs, dtype=ir.DataType.INT64, shape=[])
@@ -2853,7 +2933,7 @@ class Model:
         unsqueeze_9_inputs = [f"{unsqueeze_8_name}/output_0", "/model/constants/INT64/[1]"]
         self.make_unsqueeze(unsqueeze_9_name, unsqueeze_9_inputs, dtype=self.io_dtype, shape=None)
 
-        expand_name = self.make_common_mask_reformat_subgraph(basename, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", unsqueeze_for_concat=unsqueeze_3_name, unsqueeze_for_expand=unsqueeze_9_name, input_ids_subgraph=True)
+        expand_name = self.make_common_mask_reformat_subgraph(basename, root_input=root_input, unsqueeze_for_concat=unsqueeze_3_name, unsqueeze_for_expand=unsqueeze_9_name, input_ids_subgraph=True)
         return unsqueeze_6_name, expand_name
 
     def make_attention_mask_subgraph(self, basename, unsqueeze_for_concat):
@@ -3746,7 +3826,7 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
 
 
 @torch.no_grad
-def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
+def create_model(model_name: str, input_path: str, output_dir: str, precision: str, execution_provider: str, cache_dir: str, **extra_options: Any):
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
@@ -3962,6 +4042,7 @@ def get_args():
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
+                debug = Enable debug mode. This will print additional information and include stacktrace in the resulting model to help debug graph structure errors.
             """),
     )
 
