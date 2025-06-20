@@ -51,6 +51,10 @@ class DirGuard {
     }
   }
 
+  DirGuard(const DirGuard&) = delete;
+  DirGuard& operator=(const DirGuard&) = delete;
+  DirGuard(DirGuard&&) = delete;
+
   void ChangeTo(const fs::path& new_dir) {
     if (CHDIR(new_dir.c_str()) != 0) {
       throw std::runtime_error("Failed to change directory to: " + new_dir.string());
