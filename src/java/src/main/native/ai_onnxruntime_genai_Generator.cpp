@@ -39,7 +39,7 @@ Java_ai_onnxruntime_genai_Generator_setModelInput(JNIEnv* env, jobject thiz, jlo
 
 JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Generator_setInputs(JNIEnv* env, jobject thiz, jlong native_handle,
-                                                    jlong namedTensors) {
+                                              jlong namedTensors) {
   OgaGenerator* generator = reinterpret_cast<OgaGenerator*>(native_handle);
   OgaNamedTensors* input_tensor = reinterpret_cast<OgaNamedTensors*>(namedTensors);
 

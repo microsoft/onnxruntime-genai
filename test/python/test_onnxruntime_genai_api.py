@@ -935,7 +935,6 @@ def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
-    tokenizer = og.Tokenizer(model)
 
     audio_paths = [os.fspath(Path(test_data_path) / relative_audio_path)]
     audios = og.Audios.open(*audio_paths)
@@ -943,7 +942,7 @@ def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio
     batch_size = len(audio_paths)
     decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
     input_ids = ["".join(decoder_prompt_tokens)] * batch_size
-    inputs = processor(input_ids, count=batch_size, audios=audios)
+    _ = processor(input_ids, count=batch_size, audios=audios)
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
@@ -956,7 +955,6 @@ def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
-    tokenizer = og.Tokenizer(model)
 
     audio_paths = [
         os.fspath(Path(test_data_path) / relative_audio_path)
@@ -967,4 +965,4 @@ def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path
     batch_size = len(audio_paths)
     decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
     input_ids = ["".join(decoder_prompt_tokens)] * batch_size
-    inputs = processor(input_ids, count=batch_size, audios=audios)
+    _ = processor(input_ids, count=batch_size, audios=audios)

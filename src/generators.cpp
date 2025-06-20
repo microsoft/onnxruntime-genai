@@ -286,7 +286,7 @@ Generator::Generator(const Model& model, const GeneratorParams& params) : model_
     throw std::runtime_error("vocab_size must be 1 or greater, is " + std::to_string(params.config.model.vocab_size));
 
   search_ = CreateSearch(params);
-  state_ = model.CreateState(search_->GetSequenceLengths(), params);  // Search sequence lengths set when creating state
+  state_ = model.CreateState(search_->GetSequenceLengths(), params);    // Search sequence lengths set when creating state
   guidance_logits_processor_ = CreateGuidanceLogitsProcessor(*state_);  // Could be nullptr if use_guidance (constrained decoding) is not used
 }
 

@@ -243,6 +243,7 @@ struct Config {
 
   } model;
 
+  // clang-format off
   struct Search {
     bool do_sample{};                  // True to do randomized sampling through top_k and top_p, if false, the top logit score is chosen
     int min_length{};
@@ -261,6 +262,7 @@ struct Config {
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
   } search;
+  // clang-format on
 
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping

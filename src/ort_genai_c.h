@@ -441,7 +441,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator
  * \param[out] out The returned OgaTensor.
  * \return OgaResult containing the error message if the computation failed.
  */
- OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetInput(const OgaGenerator* generator, const char* name, OgaTensor** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetInput(const OgaGenerator* generator, const char* name, OgaTensor** out);
 
 /**
  * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor

@@ -105,7 +105,7 @@ VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorPa
 void VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_images, const int64_t num_image_tokens) {
   num_image_tokens_ = num_image_tokens;
   num_images_ = num_images;
- 
+
   image_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,  // Optional model input
                                                          model_.config_->model.vision.outputs.image_features,
                                                          num_images_, num_image_tokens_);

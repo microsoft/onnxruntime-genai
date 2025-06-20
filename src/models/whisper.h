@@ -43,12 +43,13 @@ struct WhisperDecoderState : State {
   WhisperDecoderState(const WhisperModel& model, const GeneratorParams& params, const int num_frames);
   WhisperDecoderState(const WhisperDecoderState&) = delete;
   WhisperDecoderState& operator=(const WhisperDecoderState&) = delete;
-  
+
   void AddCrossCache(std::unique_ptr<CrossCache>& cross_cache) { cross_cache->AddInputs(*this); }
   // void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
 
  private:
+  // clang-format off
   friend struct WhisperState;
 
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length, bool first_update);
@@ -74,6 +75,7 @@ struct WhisperDecoderState : State {
   const int num_frames_{};
   size_t cache_indirection_index_{~0U};
   size_t output_cross_qk_index_{~0U};
+  // clang-format on
 };
 
 struct WhisperState : State {
@@ -86,7 +88,8 @@ struct WhisperState : State {
   OrtValue* GetInput(const char* name) override;
   OrtValue* GetOutput(const char* name) override;
 
-private:
+ private:
+  // clang-format off
   void TransposeKCaches(std::vector<std::unique_ptr<OrtValue>>& kv_caches);
   template <typename T> void UpdateCrossQKSearchBuffer(int current_length);
   template <typename T> void FinalizeCrossQK(int current_length);
@@ -109,5 +112,6 @@ private:
   std::unique_ptr<OrtValue> alignment_heads_;           // { num_alignment_heads, 2 }
   std::unique_ptr<OrtValue> cross_qk_search_buffer_;    // { batch_size, num_alignment_heads, max_sequence_length, num_frames / 2 }
   std::unique_ptr<OrtValue> cross_qk_final_;            // { batch_size, num_return_sequences, num_alignment_heads, decoded_length, num_frames / 2 }
+  // clang-format on
 };
 }  // namespace Generators

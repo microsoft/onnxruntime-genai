@@ -219,7 +219,7 @@ struct PyGenerator {
   pybind11::array GetInput(const std::string& name) {
     return ToNumpy(*generator_->GetInput(name.c_str()));
   }
-  
+
   pybind11::array GetOutput(const std::string& name) {
     return ToNumpy(*generator_->GetOutput(name.c_str()));
   }
@@ -482,28 +482,27 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
             return processor.ProcessImagesAndAudios(prompt.value_or("").c_str(), images, audios);
           },
           pybind11::arg("prompt") = pybind11::none())
-      .def(
-          "__call__", [](OgaMultiModalProcessor& processor, const std::vector<std::string>& prompts, const pybind11::kwargs& kwargs) {
-            size_t count;
-            if (kwargs.contains("count"))
-              count = kwargs["count"].cast<size_t>();
-            else
-              throw std::runtime_error("Number of prompts must be provided. Use `processor(prompts, count=num_prompts)` to provide it.");
+      .def("__call__", [](OgaMultiModalProcessor& processor, const std::vector<std::string>& prompts, const pybind11::kwargs& kwargs) {
+        size_t count;
+        if (kwargs.contains("count"))
+          count = kwargs["count"].cast<size_t>();
+        else
+          throw std::runtime_error("Number of prompts must be provided. Use `processor(prompts, count=num_prompts)` to provide it.");
 
-            OgaImages* images{};
-            OgaAudios* audios{};
-            if (kwargs.contains("images"))
-              images = kwargs["images"].cast<OgaImages*>();
-            if (kwargs.contains("audios"))
-              audios = kwargs["audios"].cast<OgaAudios*>();
+        OgaImages* images{};
+        OgaAudios* audios{};
+        if (kwargs.contains("images"))
+          images = kwargs["images"].cast<OgaImages*>();
+        if (kwargs.contains("audios"))
+          audios = kwargs["audios"].cast<OgaAudios*>();
 
-            std::vector<const char*> c_prompts;
-            c_prompts.reserve(prompts.size());
-            for (const auto& p : prompts) {
-              c_prompts.push_back(p.c_str());
-            }
-            return processor.ProcessImagesAndAudios(c_prompts.data(), count, images, audios);
-          })
+        std::vector<const char*> c_prompts;
+        c_prompts.reserve(prompts.size());
+        for (const auto& p : prompts) {
+          c_prompts.push_back(p.c_str());
+        }
+        return processor.ProcessImagesAndAudios(c_prompts.data(), count, images, audios);
+      })
       .def("create_stream", [](OgaMultiModalProcessor& processor) { return OgaTokenizerStream::Create(processor); })
       .def("decode", [](OgaMultiModalProcessor& processor, pybind11::array_t<int32_t> tokens) -> std::string {
         return processor.Decode(ToSpan(tokens)).p_;
