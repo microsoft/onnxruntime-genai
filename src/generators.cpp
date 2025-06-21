@@ -350,9 +350,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
-  std::cout << "Compute logits..." << std::endl;
   ComputeLogits(input_ids_device);
-  std::cout << "Logits computed!" << std::endl;
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {

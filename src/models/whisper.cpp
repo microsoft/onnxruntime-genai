@@ -119,7 +119,7 @@ void WhisperDecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, 
   }
 
   if (cache_indirection_ && params_->search.num_beams > 1 && !first_update) {
-    // TODO: this is not working again...
+    // Only update after having run one pass through the decoder with past KV caches
     auto beam_indices_span = beam_indices.Span();
     if (beam_indices_span.empty()) {
       auto beam_indices_cpu = beam_indices.CpuSpan();
@@ -136,9 +136,9 @@ void WhisperDecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, 
                                                     beam_indices_span.data(),
                                                     params_->search.batch_size,
                                                     params_->search.num_beams,
-                                                    0,
-                                                    params_->search.max_length,
-                                                    current_length);
+                                                    new_length,                  // sequence length in input ids & logits during each forward pass
+                                                    params_->search.max_length,  // max sequence length
+                                                    current_length);             // total sequence length after N iterations (prompt's sequence length + number of generated tokens)
 
     cache_indirection_ = std::move(new_cache_indirection);
     inputs_[cache_indirection_index_] = cache_indirection_.get();
@@ -327,7 +327,6 @@ DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t>& nex
       // Otherwise the GetOutput(present_key_{self/cross}_{i}) method returns transposed K caches.
       TransposeKCaches(cross_cache_->GetValues());
       TransposeKCaches(decoder_state_->kv_cache_.GetPresents());
-      first_run_ = false;
     }
 
     // Update inputs and outputs for decoder
@@ -342,6 +341,7 @@ DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t>& nex
       UpdateCrossQKSearchBuffer<float>(current_length);
     }
 
+    first_run_ = false;
     return logits;
   }
   // Not reached
