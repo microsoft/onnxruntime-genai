@@ -4,10 +4,10 @@
 
 namespace Generators {
 
-DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name_)
+DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name)
     : model_{model},
       state_{state},
-      attention_mask_name_{attention_mask_name_} {
+      attention_mask_name_{attention_mask_name} {
   has_mask_input_ = model_.session_info_.HasInput(attention_mask_name_);
   has_posid_input_ = model_.session_info_.HasInput(model_.config_->model.decoder.inputs.position_ids);
 
@@ -437,11 +437,11 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
   window_index_++;
 }
 
-std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name_) {
+std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name) {
   if (state.model_.config_->model.decoder.sliding_window.has_value() && state.model_.config_->model.decoder.sliding_window->slide_inputs) {
     return std::make_unique<WindowedPositionInputs>(state);
   } else {
-    return std::make_unique<DefaultPositionInputs>(state.model_, state, sequence_lengths, attention_mask_name_);
+    return std::make_unique<DefaultPositionInputs>(state.model_, state, sequence_lengths, attention_mask_name);
   }
 }
 

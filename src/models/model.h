@@ -142,6 +142,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
 
+  std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
+
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
 
