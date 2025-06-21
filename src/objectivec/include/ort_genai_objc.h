@@ -191,24 +191,6 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                                  error:(NSError**)error NS_DESIGNATED_INITIALIZER;
 
 /**
- * Set input with NamedTensors type.
- * @param namedTensors The named tensors.
- * @param error Optional error information set if an error occurs.
- */
-- (BOOL)setInputs:(OGANamedTensors*)namedTensors
-            error:(NSError**)error;
-
-/**
- * Set input with name and corresponding tensor.
- * @param name The input name.
- * @param tensor The tensor.
- * @param error Optional error information set if an error occurs.
- */
-- (BOOL)setModelInput:(NSString*)name
-               tensor:(OGATensor*)tensor
-                error:(NSError**)error;
-
-/**
  * Set double option value.
  * @param key The option key.
  * @param value The option value.
@@ -251,6 +233,24 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @return The result, or false if an error occurs.
  */
 - (BOOL)isDoneWithError:(NSError**)error __attribute__((swift_error(nonnull_error)));
+
+/**
+ * Set input with NamedTensors type.
+ * @param namedTensors The named tensors.
+ * @param error Optional error information set if an error occurs.
+ */
+- (BOOL)setInputs:(OGANamedTensors*)namedTensors
+            error:(NSError**)error;
+
+/**
+ * Set input with name and corresponding tensor.
+ * @param name The input name.
+ * @param tensor The tensor.
+ * @param error Optional error information set if an error occurs.
+ */
+- (BOOL)setModelInput:(NSString*)name
+               tensor:(OGATensor*)tensor
+                error:(NSError**)error;
 
 /**
  * Appends token sequences to the generator.
@@ -337,6 +337,14 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 
 @end
 
+@interface OGAAudios : NSObject
+
+- (instancetype)init NS_UNAVAILABLE;
+- (nullable instancetype)initWithPath:(NSArray<NSString*>*)paths
+                                error:(NSError**)error NS_DESIGNATED_INITIALIZER;
+
+@end
+
 @interface OGAMultiModalProcessor : NSObject
 
 - (instancetype)init NS_UNAVAILABLE;
@@ -346,6 +354,15 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
 - (nullable OGANamedTensors*)processImages:(NSString*)prompt
                                     images:(OGAImages*)images
                                      error:(NSError**)error;
+
+- (nullable OGANamedTensors*)processAudios:(NSString*)prompt
+                                    audios:(OGAAudios*)audios
+                                     error:(NSError**)error;
+
+- (nullable OGANamedTensors*)processImagesAndAudios:(NSString*)prompt
+                                             images:(OGAImages*)images
+                                             audios:(OGAAudios*)audios
+                                              error:(NSError**)error;
 
 - (nullable NSString*)decode:(const int32_t*)tokensData
                       length:(size_t)tokensLength

@@ -119,7 +119,6 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   if (key_value_cache_) {
     key_value_cache_->Add();
   }
-  extra_inputs_.Add();
 
   const auto& config_pipeline = model_.config_->model.decoder.pipeline;
 

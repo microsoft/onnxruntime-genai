@@ -20,6 +20,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return NativeMethods.OgaGenerator_IsDone(_generatorHandle) != 0;
         }
 
+        public void SetModelInput(string name, Tensor value)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_SetModelInput(_generatorHandle, StringUtils.ToUtf8(name), value.Handle));
+        }
+
+        public void SetInputs(NamedTensors namedTensors)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_SetInputs(_generatorHandle, namedTensors.Handle));
+        }
+
         public void AppendTokens(ReadOnlySpan<int> inputIDs)
         {
             unsafe

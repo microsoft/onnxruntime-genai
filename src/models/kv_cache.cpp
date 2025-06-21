@@ -205,21 +205,12 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 }
 
-void DefaultKeyValueCache::AddEncoder() {
-  // We don't set the input_index_ & output_index_ because the encoder step only runs once, there's no update
-
-  for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.outputs_.push_back(presents_[i].get());
-    state_.output_names_.push_back(output_name_strings_[i].c_str());
-  }
-}
-
 void DefaultKeyValueCache::Add() {
   input_index_ = state_.inputs_.size();
   output_index_ = state_.outputs_.size();
 
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(empty_past_.get());  // Set empty past here, AddEncoder() & Update() take care of the rest
+    state_.inputs_.push_back(empty_past_.get());  // Set empty past here, Update() takes care of the rest
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
@@ -335,40 +326,41 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int i
   }
 }
 
-CrossCache::CrossCache(State& state)
-    : state_{state},
-      layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 1500, model_.config_->model.decoder.head_size} {
+CrossCache::CrossCache(State& state, int sequence_length) {
+  const Model& model = state.model_;
+  auto& allocator = state.model_.p_device_kvcache_->GetAllocator();
+  layer_count_ = model.config_->model.decoder.num_hidden_layers;
+  shape_ = std::array<int64_t, 4>{state.params_->BatchBeamSize(), model.config_->model.decoder.num_attention_heads, sequence_length, model.config_->model.decoder.head_size};
   values_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {
-    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.cross_past_key_names, i));
-    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.cross_past_value_names, i));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.encoder.outputs.cross_present_key_names, i));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.encoder.outputs.cross_present_value_names, i));
 
-    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.cross_present_key_names, i));
-    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.cross_present_value_names, i));
+    input_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.inputs.cross_past_key_names, i));
+    input_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.inputs.cross_past_value_names, i));
   }
 
-  // Derive the KV data type from the KV input 0
-  type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
+  // Derive the cross attention KV cache's data type
+  type_ = model.session_info_.GetOutputDataType(output_name_strings_[0]);
 
   for (int i = 0; i < layer_count_; ++i) {
-    values_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
-    values_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
+    values_.push_back(OrtValue::CreateTensor(allocator, shape_, type_));
+    values_.push_back(OrtValue::CreateTensor(allocator, shape_, type_));
   }
 }
 
-void CrossCache::AddOutputs() {
+void CrossCache::AddOutputs(State& state) {
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.outputs_.push_back(values_[i].get());
-    state_.output_names_.push_back(output_name_strings_[i].c_str());
+    state.outputs_.push_back(values_[i].get());
+    state.output_names_.push_back(output_name_strings_[i].c_str());
   }
 }
 
-void CrossCache::AddInputs() {
+void CrossCache::AddInputs(State& state) {
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(values_[i].get());
-    state_.input_names_.push_back(input_name_strings_[i].c_str());
+    state.inputs_.push_back(values_[i].get());
+    state.input_names_.push_back(input_name_strings_[i].c_str());
   }
 }
 
@@ -393,8 +385,6 @@ ModelManagedKeyValueCache::ModelManagedKeyValueCache(State& state)
 }
 
 void ModelManagedKeyValueCache::Add() {}
-
-void ModelManagedKeyValueCache::AddEncoder() {}
 
 void ModelManagedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
   // Eventually we need to set 'beam_idx' tensor here somehow.

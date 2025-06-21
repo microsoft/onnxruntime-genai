@@ -30,6 +30,22 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
+- (BOOL)setInputs:(OGANamedTensors*)namedTensors error:(NSError**)error {
+  try {
+    _generator->SetInputs([namedTensors CXXAPIOgaNamedTensors]);
+    return YES;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
+- (BOOL)setModelInput:(NSString*)name tensor:(OGATensor*)tensor error:(NSError**)error {
+  try {
+    _generator->SetModelInput([name UTF8String], [tensor CXXAPIOgaTensor]);
+    return YES;
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
 - (BOOL)appendTokenSequences:(OGASequences*)sequences error:(NSError**)error {
   try {
     _generator->AppendTokenSequences([sequences CXXAPIOgaSequences]);

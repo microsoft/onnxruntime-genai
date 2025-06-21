@@ -94,9 +94,9 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 7680);
-    params->SetInputs(*input_tensors);
 
     auto generator = OgaGenerator::Create(*model, *params);
+    generator->SetInputs(*input_tensors);
 
     while (!generator->IsDone()) {
       generator->GenerateNextToken();

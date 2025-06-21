@@ -7,7 +7,7 @@ import os
 import readline
 
 import onnxruntime_genai as og
-
+# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
 
 def _complete(text, state):
     return (glob.glob(text + "*") + [None])[state]
@@ -20,7 +20,13 @@ class Format:
 
 def run(args: argparse.Namespace):
     print("Loading model...")
-    model = og.Model(args.model_path)
+    config = og.Config(args.model_path)
+    if args.execution_provider != "follow_config":
+        config.clear_providers()
+        if args.execution_provider != "cpu":
+            if args.verbose: print(f"Setting model to {args.execution_provider}")
+            config.append_provider(args.execution_provider)
+    model = og.Model(config)
     processor = model.create_multimodal_processor()
     tokenizer = og.Tokenizer(model)
 
@@ -28,7 +34,11 @@ def run(args: argparse.Namespace):
         readline.set_completer_delims(" \t\n;")
         readline.parse_and_bind("tab: complete")
         readline.set_completer(_complete)
-        audio_paths = [audio_path.strip() for audio_path in input("Audio Paths (comma separated): ").split(",")]
+
+        if args.ci_test:
+            audio_paths = [args.audio]
+        else:
+            audio_paths = [audio_path.strip() for audio_path in input("Audio Paths (comma separated): ").split(",")]
         if len(audio_paths) == 0:
             raise ValueError("No audio provided.")
 
@@ -39,25 +49,23 @@ def run(args: argparse.Namespace):
         audios = og.Audios.open(*audio_paths)
 
         print("Processing audio...")
-        mel = processor(audios=audios)
+        batch_size = len(audio_paths)
         decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
+        input_ids = ["".join(decoder_prompt_tokens)] * batch_size
+        inputs = processor(input_ids, count=batch_size, audios=audios)
 
         params = og.GeneratorParams(model)
         params.set_search_options(
             do_sample=False,
             num_beams=args.num_beams,
             num_return_sequences=args.num_beams,
-            max_length=256,
+            max_length=448,
         )
 
-        batch_size = len(audio_paths)
-        params.set_inputs(mel)
-        params.input_ids = [[tokenizer.to_token_id(token) for token in decoder_prompt_tokens]] * batch_size
-
         generator = og.Generator(model, params)
+        generator.set_inputs(inputs)
 
         while not generator.is_done():
-            generator.compute_logits()
             generator.generate_next_token()
 
         print()
@@ -73,6 +81,12 @@ def run(args: argparse.Namespace):
         for _ in range(3):
             print()
 
+        if args.ci_test:
+            tokens = generator.get_sequence(0)
+            transcription = processor.decode(tokens)
+            assert transcription.strip() == args.output.strip(), "Model's transcription does not match expected transcription"
+            break
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -80,7 +94,20 @@ if __name__ == "__main__":
         "-m", "--model_path", type=str, required=True, help="Path to the model"
     )
     parser.add_argument(
+        '-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "follow_config"],
+        help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead."
+    )
+    parser.add_argument(
         "-b", "--num_beams", type=int, default=4, help="Number of beams"
+    )
+    parser.add_argument(
+        "-a", "--audio", type=str, default="", help="Path to audio file for CI testing purposes"
+    )
+    parser.add_argument(
+        "-o", "--output", type=str, default="", help="Expected transcribed output for CI testing purposes"
+    )
+    parser.add_argument(
+        "-ci", "--ci_test", default=False, action="store_true", help="Flag for CI testing purposes"
     )
     args = parser.parse_args()
     run(args)
