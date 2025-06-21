@@ -136,9 +136,9 @@ void WhisperDecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, 
                                                     beam_indices_span.data(),
                                                     params_->search.batch_size,
                                                     params_->search.num_beams,
-                                                    new_length,                  // sequence length in input ids & logits during each forward pass
-                                                    params_->search.max_length,  // max sequence length
-                                                    current_length);             // total sequence length after N iterations (prompt's sequence length + number of generated tokens)
+                                                    static_cast<int>(new_length),  // sequence length in input ids & logits during each forward pass
+                                                    params_->search.max_length,    // max sequence length
+                                                    current_length);               // total sequence length after N iterations (prompt's sequence length + number of generated tokens)
 
     cache_indirection_ = std::move(new_cache_indirection);
     inputs_[cache_indirection_index_] = cache_indirection_.get();
