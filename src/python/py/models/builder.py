@@ -553,6 +553,7 @@ class Model:
             ir.save(
                 model,
                 out_path,
+                format=None,
                 external_data=os.path.basename(data_path),
                 size_threshold_bytes=0,
                 callback=callback,
