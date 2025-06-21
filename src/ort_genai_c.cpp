@@ -259,6 +259,34 @@ OgaResult* OGA_API_CALL OgaConfigOverlay(OgaConfig* config, const char* json) {
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaConfigAddModelData(OgaConfig* config, const char* model_filename, const void* model_data, size_t model_data_length) {
+  OGA_TRY
+  if (model_data == nullptr || model_data_length == 0) {
+    throw std::runtime_error("Expected a valid model data pointer and length. Received nullptr or zero length.");
+  }
+
+  const auto emplaced = config->model_data_spans_.emplace(model_filename, std::span<const std::byte>(static_cast<const std::byte*>(model_data), model_data_length));
+  if (!emplaced.second) {
+    throw std::runtime_error("Model data for '" + std::string(model_filename) +
+                             "' was already added previously. "
+                             "If you want to replace it, please remove it first.");
+  }
+
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigRemoveModelData(OgaConfig* config, const char* model_filename) {
+  OGA_TRY
+  auto it = config->model_data_spans_.find(model_filename);
+  if (it == config->model_data_spans_.end()) {
+    throw std::runtime_error("Model data for '" + std::string(model_filename) + "' was not found.");
+  }
+  config->model_data_spans_.erase(it);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
   OGA_TRY
   auto config_copy = std::make_unique<Generators::Config>(*config);

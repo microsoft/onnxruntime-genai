@@ -179,6 +179,24 @@ struct OgaConfig : OgaAbstract {
     OgaCheckResult(OgaConfigOverlay(this, json));
   }
 
+  void AddModelData(const std::string& model_filename, const void* model_data, size_t model_data_length) {
+    OgaCheckResult(OgaConfigAddModelData(this, model_filename.c_str(), model_data, model_data_length));
+  }
+
+  void AddModelData(const std::string& model_filename, const std::vector<std::byte>& model_data) {
+    OgaCheckResult(OgaConfigAddModelData(this, model_filename.c_str(), model_data.data(), model_data.size()));
+  }
+
+#if OGA_USE_SPAN
+  void AddModelData(const std::string& model_filename, std::span<const std::byte> model_data) {
+    OgaCheckResult(OgaConfigAddModelData(this, model_filename.c_str(), model_data.data(), model_data.size()));
+  }
+#endif
+
+  void RemoveModelData(const std::string& model_filename) {
+    OgaCheckResult(OgaConfigRemoveModelData(this, model_filename.c_str()));
+  }
+
   static void operator delete(void* p) { OgaDestroyConfig(reinterpret_cast<OgaConfig*>(p)); }
 };
 
