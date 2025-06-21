@@ -7,8 +7,8 @@ namespace Generators {
 
 WhisperModel::WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  session_encoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.encoder.filename)).c_str(), session_options_.get());
-  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
+  session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename, session_options_.get());
+  session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
 
   session_info_.Add(*session_decoder_);
   session_info_.Add(*session_encoder_);

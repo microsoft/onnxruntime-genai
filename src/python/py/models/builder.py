@@ -16,6 +16,7 @@ import os
 import textwrap
 from typing import Any, Literal, Sequence
 
+from tqdm import tqdm
 import numpy as np
 import onnx_ir as ir
 from onnx_ir import tensor_adapters
@@ -536,12 +537,26 @@ class Model:
         if os.path.exists(data_path):
             print(f"Overwriting {data_path}")
             os.remove(data_path)
-        ir.save(
-            model,
-            out_path,
-            external_data=os.path.basename(data_path),
-            size_threshold_bytes=0,
-        )
+
+        with tqdm() as pbar:
+            total_set = False
+
+            def callback(tensor: ir.TensorProtocol, metadata: dict):
+                nonlocal total_set
+                if not total_set:
+                    pbar.total = metadata.total
+                    total_set = True
+
+                pbar.update()
+                pbar.set_description(f"Saving {tensor.name} ({tensor.dtype.short_name()}, {tensor.shape})")
+
+            ir.save(
+                model,
+                out_path,
+                external_data=os.path.basename(data_path),
+                size_threshold_bytes=0,
+                callback=callback,
+            )
 
         # Delete temporary cache dir if empty
         if not os.listdir(self.cache_dir):
@@ -645,17 +660,13 @@ class Model:
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
-        # Format of name is "/model/constants/{dtype}/{shape}/{num}"
+        # Format of name is "/model/constants/{dtype}/{num}"
 
         path = name.split("/")
-        onnx_dtype = ir.DataType[path[-3]]
-        dims = path[-2]
+        onnx_dtype = ir.DataType[path[-2]]
         # NOTE: Use ast.literal_eval instead of eval as eval allows arbitrary code execution
         num = ast.literal_eval(path[-1])
-        assert dims in {"0D", "1D"}, f"Unexpected dimension {dims} in constant name"
-        if not(dims == "0D"):
-            # Convert to 1D tensor
-            num = [num]
+        assert isinstance(num, (int, float, list, tuple)), f"Invalid constant value: {num}"
         tensor = ir.tensor(num, dtype=onnx_dtype, name=name)
 
         node_name = name.replace("constants", "constant_nodes")
@@ -875,40 +886,37 @@ class Model:
         return name
 
     def make_dequantize_linear(self, dequantize_name, quantized_op):
-        def unpack_4bit(data: np.ndarray, dims: Sequence[int]) -> np.ndarray:
-            """Convert a packed (u)int4 array to unpacked (u)int4 array"""
-            data = data.view(np.uint8).flatten()
-            result = np.empty([data.size * 2], dtype=data.dtype)
-            array_low = data & np.uint8(0x0F)
-            array_high = data & np.uint8(0xF0)
-            array_high >>= np.uint8(4)
-            result[0::2] = array_low
-            result[1::2] = array_high
-            if result.size == np.prod(dims) + 1:
-                # handle single-element padding due to odd number of elements
-                result = result[:-1]
-            result.resize(dims, refcheck=False)
-            return result.view(self.onnx_dtype.numpy())
-
         # Input weights are quantized, save quantized MatMul weights for onnx model
         qweight = dequantize_name[1:].replace("/", ".") + ".qweight"
-        qweight_npy = quantized_op.qweight.numpy(force=True)
-        qweight_npy = qweight_npy.reshape(*qweight_npy.shape[:-2], qweight_npy.shape[-2] * qweight_npy.shape[-1])
-        qweight_npy = unpack_4bit(qweight_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2])
-        self.make_initializer(qweight_npy, qweight)
+        qweight_shape = quantized_op.qweight.shape
+        self.make_initializer(
+            ir.PackedTensor(
+                quantized_op.qweight,
+                self.onnx_dtype,
+                shape=[*qweight_shape[:-2], qweight_shape[-2] * qweight_shape[-1] * 2],
+            ),
+            qweight,
+        )
 
         scales = dequantize_name[1:].replace("/", ".") + ".scales"
-        scales_pt = quantized_op.scales.to(self.to_torch_dtype[self.io_dtype]).numpy(force=True)
-        scales_pt = scales_pt.reshape(*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size)
+        scales_target_shape = [
+            *qweight_shape[:-2],
+            qweight_shape[-2] * qweight_shape[-1] * 2 // quantized_op.group_size,
+        ]
+        scales_pt = quantized_op.scales.to(self.to_torch_dtype[self.io_dtype])
+        scales_pt = scales_pt.reshape(scales_target_shape)
         self.make_initializer(scales_pt, scales)
 
         dequantize_inputs = [qweight, scales]
 
         if hasattr(quantized_op, "qzeros") and quantized_op.qzeros is not None:
             zeros = dequantize_name[1:].replace("/", ".") + ".qzeros"
-            zeros_npy = quantized_op.qzeros.numpy(force=True)
-            zeros_npy = unpack_4bit(zeros_npy, dims=[*qweight_npy.shape[:-1], qweight_npy.shape[-1] * 2 // quantized_op.group_size])
-            self.make_initializer(zeros_npy, zeros)
+            self.make_initializer(
+                ir.PackedTensor(
+                    quantized_op.qzeros, self.onnx_dtype, shape=scales_target_shape
+                ),
+                zeros,
+            )
             dequantize_inputs.append(zeros)
 
         dequantize_output = f"{dequantize_name}/output_0"
@@ -1062,7 +1070,7 @@ class Model:
         if self.embed_attrs["scale"] != 1:
             # Scale the embeddings
             mul_name = f"{basename}/Mul"
-            mul_inputs = [gather_output, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.embed_attrs['scale']}"]
+            mul_inputs = [gather_output, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.embed_attrs['scale']}"]
             mul_output = f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
             self.make_value(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
@@ -1398,7 +1406,7 @@ class Model:
             gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2"
 
         greater_name = f"{basename}/Greater"
-        greater_inputs = [f"{gather_name}/output_0", f"/model/constants/INT64/0D/{self.original_context_length}"]
+        greater_inputs = [f"{gather_name}/output_0", f"/model/constants/INT64/{self.original_context_length}"]
         self.make_greater(greater_name, greater_inputs, shape=[])
         if_name = f"{basename}/If"
 
@@ -1522,17 +1530,17 @@ class Model:
         self.make_cast(make_cast_name, root_input, ir.DataType.FLOAT, shape=shape)
 
         make_pow_name = f"{basename}/Pow"
-        make_pow_inputs = [f"{make_cast_name}/output_0", "/model/constants/FLOAT/0D/2"]
+        make_pow_inputs = [f"{make_cast_name}/output_0", "/model/constants/FLOAT/2"]
 
         self.make_node("Pow", inputs=make_pow_inputs, outputs=[f"{make_pow_name}/output_0"], name=make_pow_name, domain="")
         self.make_value(f"{make_pow_name}/output_0", ir.DataType.FLOAT, shape=shape)
 
         make_reducemean_name = f"{basename}/ReduceMean"
-        make_reducemean_inputs = [f"{make_pow_name}/output_0", "/model/constants/INT64/1D/-1"]
+        make_reducemean_inputs = [f"{make_pow_name}/output_0", "/model/constants/INT64/[-1]"]
         self.make_reduce_mean(make_reducemean_name, make_reducemean_inputs, ir.DataType.FLOAT, keepdims=True, shape=shape)
 
         make_add_name = f"{basename}/Add"
-        make_add_inputs = [f"{make_reducemean_name}/output_0", f"/model/constants/FLOAT/0D/{self.layernorm_attrs['epsilon']}"]
+        make_add_inputs = [f"{make_reducemean_name}/output_0", f"/model/constants/FLOAT/{self.layernorm_attrs['epsilon']}"]
         self.make_add(make_add_name, make_add_inputs, ir.DataType.FLOAT, shape=shape)
 
         make_sqrt_name = f"{basename}/Sqrt"
@@ -1540,7 +1548,7 @@ class Model:
         self.make_sqrt(make_sqrt_name, make_sqrt_inputs, ir.DataType.FLOAT, shape=shape)
 
         make_div_name = f"{basename}/Div"
-        make_div_inputs = ["/model/constants/FLOAT/0D/1", f"{make_sqrt_name}/output_0"]
+        make_div_inputs = ["/model/constants/FLOAT/1", f"{make_sqrt_name}/output_0"]
         self.make_div(make_div_name, make_div_inputs, ir.DataType.FLOAT, shape=shape)
 
         make_mul_name = f"{basename}/Mul"
@@ -1578,7 +1586,7 @@ class Model:
 
         # Reshape Q MatMul from BxSxD to Bx(SxN)xH before LayerNorm
         q_reshape_1_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_1"
-        q_reshape_1_inputs = [self.attention_attrs["q_path"], f"/model/constants/INT64/1D/0, -1, {self.head_size}"]
+        q_reshape_1_inputs = [self.attention_attrs["q_path"], f"/model/constants/INT64/[0, -1, {self.head_size}]"]
         q_reshape_1_output = f"{q_reshape_1_name}/output_0"
         self.make_reshape(q_reshape_1_name, q_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_attention_heads', self.head_size])
 
@@ -1603,12 +1611,12 @@ class Model:
 
         # Reshape Q path after LayerNorm from Bx(SxN)xH to BxSxD
         q_reshape_2_name = f"/model/layers.{layer_id}/attn/q_norm/Reshape_2"
-        q_reshape_2_inputs = [q_layernorm_output, f"/model/constants/INT64/1D/0, -1, {self.num_attn_heads * self.head_size}"]
+        q_reshape_2_inputs = [q_layernorm_output, f"/model/constants/INT64/[0, -1, {self.num_attn_heads * self.head_size}]"]
         self.make_reshape(q_reshape_2_name, q_reshape_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads * self.head_size])
 
         # Reshape K MatMul from BxSxD to Bx(SxN)xH before LayerNorm
         k_reshape_1_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_1"
-        k_reshape_1_inputs = [self.attention_attrs["k_path"], f"/model/constants/INT64/1D/0, -1, {self.head_size}"]
+        k_reshape_1_inputs = [self.attention_attrs["k_path"], f"/model/constants/INT64/[0, -1, {self.head_size}]"]
         k_reshape_1_output = f"{k_reshape_1_name}/output_0"
         self.make_reshape(k_reshape_1_name, k_reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length * num_key_value_heads', self.head_size])
 
@@ -1633,7 +1641,7 @@ class Model:
 
         # Reshape K path after LayerNorm from Bx(SxN)xH to BxSxD
         k_reshape_2_name = f"/model/layers.{layer_id}/attn/k_norm/Reshape_2"
-        k_reshape_2_inputs = [k_layernorm_output, f"/model/constants/INT64/1D/0, -1, {self.num_kv_heads * self.head_size}"]
+        k_reshape_2_inputs = [k_layernorm_output, f"/model/constants/INT64/[0, -1, {self.num_kv_heads * self.head_size}]"]
         self.make_reshape(k_reshape_2_name, k_reshape_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_kv_heads * self.head_size])
 
         # Update q_path and k_path now
@@ -1723,7 +1731,7 @@ class Model:
         #                                            |          |                                  |
         #                                        present_kv     +------> Gather --> Unsqueeze -----+
         reshape_1_name = f"{basename}/Reshape_1"
-        reshape_1_inputs = [root_input, f"/model/constants/INT64/1D/0, 0, {self.num_kv_heads}, -1"]
+        reshape_1_inputs = [root_input, f"/model/constants/INT64/[0, 0, {self.num_kv_heads}, -1]"]
         self.make_reshape(reshape_1_name, reshape_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_kv_heads, self.head_size])
         transpose_1_name = f"{basename}/Transpose_1"
         transpose_1_input = f"{reshape_1_name}/output_0"
@@ -1735,35 +1743,35 @@ class Model:
         shape_1_name = f"{basename}/Shape_1"
         self.make_shape(shape_1_name, present_kv, shape=[4])
         gather_1_name = f"{basename}/Gather_1"
-        gather_1_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0D/0"]
+        gather_1_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0"]
         self.make_gather(gather_1_name, gather_1_inputs, axis=0)
         unsqueeze_1_name = f"{basename}/Unsqueeze_1"
-        unsqueeze_1_inputs = [f"{gather_1_name}/output_0", "/model/constants/INT64/1D/0"]
+        unsqueeze_1_inputs = [f"{gather_1_name}/output_0", "/model/constants/INT64/[0]"]
         self.make_unsqueeze(unsqueeze_1_name, unsqueeze_1_inputs, dtype=ir.DataType.INT64, shape=[1])
         gather_2_name = f"{basename}/Gather_2"
-        gather_2_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0D/1"]
+        gather_2_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/1"]
         self.make_gather(gather_2_name, gather_2_inputs, axis=0)
         unsqueeze_2_name = f"{basename}/Unsqueeze_2"
-        unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/INT64/1D/0"]
+        unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/INT64/[0]"]
         self.make_unsqueeze(unsqueeze_2_name, unsqueeze_2_inputs, dtype=ir.DataType.INT64, shape=[1])
         gather_3_name = f"{basename}/Gather_3"
-        gather_3_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0D/2"]
+        gather_3_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/2"]
         self.make_gather(gather_3_name, gather_3_inputs, axis=0)
         unsqueeze_3_name = f"{basename}/Unsqueeze_3"
-        unsqueeze_3_inputs = [f"{gather_3_name}/output_0", "/model/constants/INT64/1D/0"]
+        unsqueeze_3_inputs = [f"{gather_3_name}/output_0", "/model/constants/INT64/[0]"]
         self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=ir.DataType.INT64, shape=[1])
         gather_4_name = f"{basename}/Gather_4"
-        gather_4_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0D/3"]
+        gather_4_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/3"]
         self.make_gather(gather_4_name, gather_4_inputs, axis=0)
         unsqueeze_4_name = f"{basename}/Unsqueeze_4"
-        unsqueeze_4_inputs = [f"{gather_4_name}/output_0", "/model/constants/INT64/1D/0"]
+        unsqueeze_4_inputs = [f"{gather_4_name}/output_0", "/model/constants/INT64/[0]"]
         self.make_unsqueeze(unsqueeze_4_name, unsqueeze_4_inputs, dtype=ir.DataType.INT64, shape=[1])
         concat_2_name = f"{basename}/Concat_2"
-        concat_2_inputs = [f"{unsqueeze_1_name}/output_0", f"{unsqueeze_2_name}/output_0", f"/model/constants/INT64/1D/{self.num_attn_heads // self.num_kv_heads}", f"{unsqueeze_3_name}/output_0", f"{unsqueeze_4_name}/output_0"]
+        concat_2_inputs = [f"{unsqueeze_1_name}/output_0", f"{unsqueeze_2_name}/output_0", f"/model/constants/INT64/[{self.num_attn_heads // self.num_kv_heads}]", f"{unsqueeze_3_name}/output_0", f"{unsqueeze_4_name}/output_0"]
         self.make_concat(concat_2_name, concat_2_inputs, dtype=ir.DataType.INT64, shape=[5], axis=0)
 
         mul_1_name = f"{basename}/Mul_1"
-        mul_1_inputs = [f"{unsqueeze_2_name}/output_0", f"/model/constants/INT64/0D/{self.num_attn_heads // self.num_kv_heads}"]
+        mul_1_inputs = [f"{unsqueeze_2_name}/output_0", f"/model/constants/INT64/{self.num_attn_heads // self.num_kv_heads}"]
         self.make_mul(mul_1_name, mul_1_inputs, dtype=ir.DataType.INT64, shape=None)
         concat_3_name = f"{basename}/Concat_3"
         concat_3_inputs = [f"{unsqueeze_1_name}/output_0", f"{mul_1_name}/output_0", f"{unsqueeze_3_name}/output_0", f"{unsqueeze_4_name}/output_0"]
@@ -1777,7 +1785,7 @@ class Model:
         #    |                                        |
         #    +----------------------------------------+
         reshape_2_name = f"{basename}/Reshape_2"
-        reshape_2_inputs = [f"{concat_2_name}/output_0", "/model/constants/INT64/1D/-1"]
+        reshape_2_inputs = [f"{concat_2_name}/output_0", "/model/constants/INT64/[-1]"]
         self.make_reshape(reshape_2_name, reshape_2_inputs, dtype=ir.DataType.INT64, shape=None)
         shape_2_name = f"{basename}/Shape_2"
         self.make_shape(shape_2_name, f"{reshape_2_name}/output_0", shape=[1])
@@ -1785,7 +1793,7 @@ class Model:
         constant_shape_value = ir.tensor([1], dtype=ir.DataType.INT64)
         self.make_constant_of_shape(constant_shape_name, f"{shape_2_name}/output_0", value=constant_shape_value, dtype=ir.DataType.INT64, shape=[5])
         mul_2_name = f"{basename}/Mul"
-        mul_2_inputs = [f"{constant_shape_name}/output_0", "/model/constants/INT64/0D/-1"]
+        mul_2_inputs = [f"{constant_shape_name}/output_0", "/model/constants/INT64/-1"]
         self.make_mul(mul_2_name, mul_2_inputs, dtype=ir.DataType.INT64, shape=[5])
         equal_name = f"{basename}/Equal"
         equal_inputs = [f"{reshape_2_name}/output_0", f"{mul_2_name}/output_0"]
@@ -1800,7 +1808,7 @@ class Model:
         #                   \           \
         # Unsqueeze --> Expand --> Reshape --> Transpose --> Reshape
         unsqueeze_5_name = f"{basename}/Unsqueeze_5"
-        unsqueeze_5_inputs = [present_kv, "/model/constants/INT64/1D/2"]
+        unsqueeze_5_inputs = [present_kv, "/model/constants/INT64/[2]"]
         self.make_unsqueeze(unsqueeze_5_name, unsqueeze_5_inputs, dtype=self.io_dtype, shape=['batch_size', self.num_kv_heads, 1, 'sequence_length', self.head_size])
         expand_name = f"{basename}/Expand"
         expand_inputs = [f"{unsqueeze_5_name}/output_0", f"{where_name}/output_0"]
@@ -1812,7 +1820,7 @@ class Model:
         transpose_2_input = f"{reshape_3_name}/output_0"
         self.make_transpose(transpose_2_name, transpose_2_input, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads, self.head_size], perm=[0,2,1,3])
         reshape_4_name = f"{basename}/Reshape_4"
-        reshape_4_inputs = [f"{transpose_2_name}/output_0", f"/model/constants/INT64/1D/0, 0, {self.num_attn_heads * self.head_size}"]
+        reshape_4_inputs = [f"{transpose_2_name}/output_0", f"/model/constants/INT64/[0, 0, {self.num_attn_heads * self.head_size}]"]
         self.make_reshape(reshape_4_name, reshape_4_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.num_attn_heads * self.head_size])
 
         input_to_attention = f"{reshape_4_name}/output_0"
@@ -2300,11 +2308,11 @@ class Model:
         shape_name = f"{gate_ops_base}/Shape"
         self.make_shape(shape_name, f"{gate_name}/output_0", shape=[3])
         gather_name = f"{gate_ops_base}/Gather"
-        self.make_gather(gather_name, [f"{shape_name}/output_0", "/model/constants/INT64/0D/2"], axis=0)
+        self.make_gather(gather_name, [f"{shape_name}/output_0", "/model/constants/INT64/2"], axis=0)
         unsqueeze_name = f"{gate_ops_base}/Unsqueeze"
-        self.make_unsqueeze(unsqueeze_name, [f"{gather_name}/output_0", "/model/constants/INT64/1D/0"], dtype=ir.DataType.INT64, shape=[1])
+        self.make_unsqueeze(unsqueeze_name, [f"{gather_name}/output_0", "/model/constants/INT64/[0]"], dtype=ir.DataType.INT64, shape=[1])
         concat_name = f"{gate_ops_base}/Concat"
-        self.make_concat(concat_name, ["/model/constants/INT64/1D/-1", f"{unsqueeze_name}/output_0"], dtype=ir.DataType.INT64, shape=[2], axis=0)
+        self.make_concat(concat_name, ["/model/constants/INT64/[-1]", f"{unsqueeze_name}/output_0"], dtype=ir.DataType.INT64, shape=[2], axis=0)
         gate_reshape_name = f"{gate_ops_base}/Reshape"
         self.make_reshape(gate_reshape_name, [f"{gate_name}/output_0", f"{concat_name}/output_0"], dtype=self.io_dtype, shape=['num_rows', num_experts])
 
@@ -2435,7 +2443,7 @@ class Model:
         relu_name = self.make_relu(layer_id, root_input, "Relu")
         basename = f"/model/layers.{layer_id}/mlp/square/{activation}"
         pow_name = f"{basename}/pow"
-        pow_inputs = [f"{relu_name}/output_0", "/model/constants/INT32/1D/2"]
+        pow_inputs = [f"{relu_name}/output_0", "/model/constants/INT32/[2]"]
         self.make_node("Pow", inputs=pow_inputs, outputs=[f"{pow_name}/output_0"], name=pow_name, domain="")
         self.make_value(f"{pow_name}/output_0", self.io_dtype, shape=['batch_size', 'sequence_length', self.intermediate_size])
         return pow_name
@@ -2481,7 +2489,7 @@ class Model:
 
         if scale_exists:
             mul_name = "/lm_head/Mul"
-            mul_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.lm_head_attrs['scale']}"]
+            mul_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['scale']}"]
             mul_output = "logits" if not any(exists_checks[2:]) else f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
             self.make_value(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
@@ -2493,7 +2501,7 @@ class Model:
             self.make_initializer(self.lm_head_attrs["mask"], logits_mask_name)
 
             where_name = "/lm_head/Where"
-            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{torch.finfo(self.to_torch_dtype[self.io_dtype]).min}", f"{lm_name}/output_0"]
+            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{torch.finfo(self.to_torch_dtype[self.io_dtype]).min}", f"{lm_name}/output_0"]
             where_output = "logits" if not any(exists_checks[3:]) else f"{where_name}/output_0"
             self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
             self.make_value(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
@@ -2502,14 +2510,14 @@ class Model:
         if softcap_exists:
             # Add final logit softcapping (Div --> Tanh --> Mul)
             div_name = "/lm_head/softcap/Div"
-            div_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.lm_head_attrs['softcap']}"]
+            div_inputs = [f"{lm_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['softcap']}"]
             self.make_div(div_name, div_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
             tanh_name = "/lm_head/softcap/Tanh"
             self.make_tanh(tanh_name, f"{div_name}/output_0", dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
 
             mul_name = "/lm_head/softcap/Mul"
-            mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.lm_head_attrs['softcap']}"]
+            mul_inputs = [f"{tanh_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.lm_head_attrs['softcap']}"]
             mul_output = "logits" if not any(exists_checks[4:]) else f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
             self.make_value(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
@@ -2742,7 +2750,7 @@ class Model:
         self.make_add(end_add_name, end_add_inputs, dtype=self.io_dtype, shape=end_add_shape) # Shape of mask is now (B, 1, S, T)
 
         tile_name = f"{basename}/Tile"
-        tile_inputs = [f"{end_add_name}/output_0", f"/model/constants/INT64/1D/1, {self.num_attn_heads}, 1, 1"]
+        tile_inputs = [f"{end_add_name}/output_0", f"/model/constants/INT64/[1, {self.num_attn_heads}, 1, 1]"]
         tile_shape = ["batch_size", self.num_attn_heads, "source_sequence_length", "target_sequence_length"]
         self.make_tile(tile_name, tile_inputs, dtype=self.io_dtype, shape=tile_shape) # Shape of mask is now (B, N, S, T)
 
@@ -2752,7 +2760,7 @@ class Model:
         shape_name = f"{basename}/Shape"
         self.make_shape(shape_name, "past_key_values.0.key", shape=[4])
         gather_name = f"{basename}/Gather"
-        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/0D/2"]
+        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/2"]
         self.make_gather(gather_name, gather_inputs, axis=0)
         return gather_name
 
@@ -2771,7 +2779,7 @@ class Model:
         shared_add_inputs = [f"{basename}/Gather_2/output_0", f"{past_key_gather_name}/output_0"]
         self.make_add(shared_add_name, shared_add_inputs, dtype=ir.DataType.INT64, shape=[])
         unsqueeze_3_name = f"{basename}/Unsqueeze_3"  # shared unsqueeze for input_ids and past_key_values.0.key
-        unsqueeze_3_inputs = [f"{shared_add_name}/output_0", "/model/constants/INT64/1D/0"]
+        unsqueeze_3_inputs = [f"{shared_add_name}/output_0", "/model/constants/INT64/[0]"]
         self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=ir.DataType.INT64, shape=[1])
 
         # Make the additional subgraph for input_ids
@@ -2781,7 +2789,7 @@ class Model:
         # Gather (idx=1)   --> Concat --> ConstantOfShape                                                      Reshape --> Less --> Where --> Unsqueeze --> Unsqueeze --> Expand
         #      \          /                              \                                                     |
         #       Unsqueeze (unsqueeze_5)                   Shape --> Slice --> Squeeze --> Range --> Add -------+
-        unsqueeze_inputs = [f"{basename}/Gather_2/output_0", "/model/constants/INT64/1D/0"]
+        unsqueeze_inputs = [f"{basename}/Gather_2/output_0", "/model/constants/INT64/[0]"]
         unsqueeze_4_name = f"{basename}/Unsqueeze_4"
         self.make_unsqueeze(unsqueeze_4_name, unsqueeze_inputs, dtype=ir.DataType.INT64, shape=[1])
         unsqueeze_5_name = f"{basename}/Unsqueeze_5"
@@ -2800,32 +2808,32 @@ class Model:
         shape_4_name = f"{basename}/Shape_4"
         self.make_shape(shape_4_name, f"{constant_shape_name}/output_0", shape=[2])
         slice_1_name = f"{basename}/Slice_1"
-        slice_1_inputs = [f"{shape_4_name}/output_0", "/model/constants/INT64/1D/-1", f"/model/constants/INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/INT64/1D/0"]
+        slice_1_inputs = [f"{shape_4_name}/output_0", "/model/constants/INT64/[-1]", f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]", "/model/constants/INT64/[0]"]
         self.make_slice(slice_1_name, slice_1_inputs, dtype=ir.DataType.INT64, shape=[1])
         squeeze_1_name = f"{basename}/Squeeze_1"
-        squeeze_1_inputs = [f"{slice_1_name}/output_0", "/model/constants/INT64/1D/0"]
+        squeeze_1_inputs = [f"{slice_1_name}/output_0", "/model/constants/INT64/[0]"]
         self.make_squeeze(squeeze_1_name, squeeze_1_inputs)
         unsqueeze_7_name = f"{basename}/output_0"
-        unsqueeze_7_inputs = [f"{squeeze_1_name}/output_0", "/model/constants/INT64/1D/0"]
+        unsqueeze_7_inputs = [f"{squeeze_1_name}/output_0", "/model/constants/INT64/[0]"]
         self.make_unsqueeze(unsqueeze_7_name, unsqueeze_7_inputs, dtype=ir.DataType.INT64, shape=[1])
         concat_3_name = f"{basename}/Concat_3"
-        concat_3_inputs = [f"{unsqueeze_7_name}/output_0", "/model/constants/INT64/1D/1"]
+        concat_3_inputs = [f"{unsqueeze_7_name}/output_0", "/model/constants/INT64/[1]"]
         self.make_concat(concat_3_name, concat_3_inputs, dtype=ir.DataType.INT64, shape=[2], axis=0)
 
         # Bottom path
         shape_5_name = f"{basename}/Shape_5"
         self.make_shape(shape_5_name, f"{constant_shape_name}/output_0", shape=[2])
         slice_2_name = f"{basename}/Slice_2"
-        slice_2_inputs = [f"{shape_5_name}/output_0", "/model/constants/INT64/1D/-1", f"/model/constants/INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/INT64/1D/0"]
+        slice_2_inputs = [f"{shape_5_name}/output_0", "/model/constants/INT64/[-1]", f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]", "/model/constants/INT64/[0]"]
         self.make_slice(slice_2_name, slice_2_inputs, dtype=ir.DataType.INT64, shape=[1])
         squeeze_2_name = f"{basename}/Squeeze_2"
-        squeeze_2_inputs = [f"{slice_2_name}/output_0", "/model/constants/INT64/1D/0"]
+        squeeze_2_inputs = [f"{slice_2_name}/output_0", "/model/constants/INT64/[0]"]
         self.make_squeeze(squeeze_2_name, squeeze_2_inputs)
         range_name = f"{basename}/Range"
-        range_inputs = ["/model/constants/INT64/0D/0", f"{squeeze_2_name}/output_0", "/model/constants/INT64/0D/1"]
+        range_inputs = ["/model/constants/INT64/0", f"{squeeze_2_name}/output_0", "/model/constants/INT64/1"]
         self.make_range(range_name, range_inputs)
         add_2_name = f"{basename}/Add_2"
-        add_inputs = [f"{range_name}/output_0", "/model/constants/INT64/0D/1"]
+        add_inputs = [f"{range_name}/output_0", "/model/constants/INT64/1"]
         self.make_add(add_2_name, add_inputs, dtype=ir.DataType.INT64, shape=["unk"])
 
         # Merged path
@@ -2836,13 +2844,13 @@ class Model:
         less_inputs = [f"{range_name}/output_0", f"{reshape_name}/output_0"]
         self.make_less(less_name, less_inputs)
         where_2_name = f"{basename}/Where_2"
-        where_2_inputs = [f"{less_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/0", f"{constant_shape_name}/output_0"]
+        where_2_inputs = [f"{less_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0", f"{constant_shape_name}/output_0"]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=None)
         unsqueeze_8_name = f"{basename}/Unsqueeze_8"
-        unsqueeze_8_inputs = [f"{where_2_name}/output_0", "/model/constants/INT64/1D/0"]
+        unsqueeze_8_inputs = [f"{where_2_name}/output_0", "/model/constants/INT64/[0]"]
         self.make_unsqueeze(unsqueeze_8_name, unsqueeze_8_inputs, dtype=self.io_dtype, shape=None)
         unsqueeze_9_name = f"{basename}/Unsqueeze_9"
-        unsqueeze_9_inputs = [f"{unsqueeze_8_name}/output_0", "/model/constants/INT64/1D/1"]
+        unsqueeze_9_inputs = [f"{unsqueeze_8_name}/output_0", "/model/constants/INT64/[1]"]
         self.make_unsqueeze(unsqueeze_9_name, unsqueeze_9_inputs, dtype=self.io_dtype, shape=None)
 
         expand_name = self.make_common_mask_reformat_subgraph(basename, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", unsqueeze_for_concat=unsqueeze_3_name, unsqueeze_for_expand=unsqueeze_9_name, input_ids_subgraph=True)
@@ -2854,11 +2862,11 @@ class Model:
         attention_mask_shape = self.input_shapes["attention_mask"]
 
         unsqueeze_3_name = f"{basename}/Unsqueeze_3"
-        unsqueeze_3_inputs = ["attention_mask", "/model/constants/INT64/1D/1"]
+        unsqueeze_3_inputs = ["attention_mask", "/model/constants/INT64/[1]"]
         attention_mask_shape.insert(1, 1) # ['batch_size', 'total_sequence_length'] --> ['batch_size', 1, 'total_sequence_length']
         self.make_unsqueeze(unsqueeze_3_name, unsqueeze_3_inputs, dtype=ir.DataType.INT64, shape=attention_mask_shape)
         unsqueeze_4_name = f"{basename}/Unsqueeze_4"
-        unsqueeze_4_inputs = [f"{unsqueeze_3_name}/output_0", "/model/constants/INT64/1D/2"]
+        unsqueeze_4_inputs = [f"{unsqueeze_3_name}/output_0", "/model/constants/INT64/[2]"]
         attention_mask_shape.insert(1, 1) # ['batch_size', 1, 'total_sequence_length'] --> ['batch_size', 1, 1, 'total_sequence_length']
         self.make_unsqueeze(unsqueeze_4_name, unsqueeze_4_inputs, dtype=ir.DataType.INT64, shape=attention_mask_shape)
 
@@ -2872,12 +2880,12 @@ class Model:
         cast_1_name = f"{basename}/Cast_1"
         self.make_cast(cast_1_name, f"{expand_name}/output_0", dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
         sub_name = f"{basename}/Sub"
-        sub_inputs = [f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/1", f"{cast_1_name}/output_0"]
+        sub_inputs = [f"/model/constants/{self.to_str_dtype(self.io_dtype)}/1", f"{cast_1_name}/output_0"]
         self.make_sub(sub_name, sub_inputs, dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
         cast_2_name = f"{basename}/Cast_2"
         self.make_cast(cast_2_name, f"{sub_name}/output_0", dtype=ir.DataType.BOOL, shape=["unk", "unk", "unk", "unk"])
         where_2_name = f"{basename}/Where_2"
-        where_2_inputs = [f"{cast_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{torch.finfo(self.to_torch_dtype[self.io_dtype]).min}", f"{sub_name}/output_0"]
+        where_2_inputs = [f"{cast_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{torch.finfo(self.to_torch_dtype[self.io_dtype]).min}", f"{sub_name}/output_0"]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
 
         return where_2_name
@@ -2924,20 +2932,20 @@ class Model:
         shape_2_name = f"{basename}/Shape_2"
         self.make_shape(shape_2_name, root_input, shape=[3] if self.exclude_embeds and input_ids_subgraph else [2])
         gather_1_name = f"{basename}/Gather_1"
-        gather_1_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0D/0"]
+        gather_1_inputs = [f"{shape_1_name}/output_0", "/model/constants/INT64/0"]
         self.make_gather(gather_1_name, gather_1_inputs, axis=0)
         gather_2_name = f"{basename}/Gather_2"
-        gather_2_inputs = [f"{shape_2_name}/output_0", "/model/constants/INT64/0D/1"]
+        gather_2_inputs = [f"{shape_2_name}/output_0", "/model/constants/INT64/1"]
         self.make_gather(gather_2_name, gather_2_inputs, axis=0)
         unsqueeze_1_name = f"{basename}/Unsqueeze_1"
-        unsqueeze_1_inputs = [f"{gather_1_name}/output_0", "/model/constants/INT64/1D/0"]
+        unsqueeze_1_inputs = [f"{gather_1_name}/output_0", "/model/constants/INT64/[0]"]
         self.make_unsqueeze(unsqueeze_1_name, unsqueeze_1_inputs, dtype=ir.DataType.INT64, shape=[1])
         unsqueeze_2_name = f"{basename}/Unsqueeze_2"
-        unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/INT64/1D/0"]
+        unsqueeze_2_inputs = [f"{gather_2_name}/output_0", "/model/constants/INT64/[0]"]
         self.make_unsqueeze(unsqueeze_2_name, unsqueeze_2_inputs, dtype=ir.DataType.INT64, shape=[1])
 
         concat_name = f"{basename}/Concat" if not input_ids_subgraph else f"{basename}/Concat_1"
-        concat_first_two_inputs = [f"{unsqueeze_1_name}/output_0", "/model/constants/INT64/1D/1"]
+        concat_first_two_inputs = [f"{unsqueeze_1_name}/output_0", "/model/constants/INT64/[1]"]
         concat_last_two_inputs = [f"{unsqueeze_for_concat}/output_0", f"{unsqueeze_2_name}/output_0"] if not input_ids_subgraph else [f"{unsqueeze_2_name}/output_0", f"{unsqueeze_for_concat}/output_0"]
         concat_inputs = concat_first_two_inputs + concat_last_two_inputs
         self.make_concat(concat_name, concat_inputs, dtype=ir.DataType.INT64, shape=[4], axis=0)
@@ -2947,7 +2955,7 @@ class Model:
         constant_shape_value = ir.tensor([1], dtype=ir.DataType.INT64)
         self.make_constant_of_shape(constant_shape_name, f"{shape_3_name}/output_0", value=constant_shape_value, dtype=ir.DataType.INT64, shape=["unk"])
         mul_name = f"{basename}/Mul"
-        mul_inputs = [f"{constant_shape_name}/output_0", "/model/constants/INT64/0D/-1"]
+        mul_inputs = [f"{constant_shape_name}/output_0", "/model/constants/INT64/-1"]
         self.make_mul(mul_name, mul_inputs, dtype=ir.DataType.INT64, shape=["unk"])
         equal_name = f"{basename}/Equal"
         equal_inputs = [f"{concat_name}/output_0", f"{mul_name}/output_0"]
@@ -2983,10 +2991,10 @@ class Model:
 
         # Left path
         reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
-        reduce_sum_inputs = ["attention_mask", "/model/constants/INT64/1D/1"]
+        reduce_sum_inputs = ["attention_mask", "/model/constants/INT64/[1]"]
         self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
         sub_name = f"{attn_mask_basename}/Sub"
-        sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/1D/1"]
+        sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/[1]"]
         self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
         cast_1_name = f"{attn_mask_basename}/Sub/Cast"
         self.make_cast(cast_1_name, f"{sub_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size", 1])
@@ -2995,7 +3003,7 @@ class Model:
         shape_name = f"{attn_mask_basename}/Shape"
         self.make_shape(shape_name, "attention_mask", shape=[2])
         gather_name = f"{attn_mask_basename}/Gather"
-        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/0D/1"]
+        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/1"]
         self.make_gather(gather_name, gather_inputs, axis=0)
         cast_2_name = f"{attn_mask_basename}/Gather/Cast"
         self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=ir.DataType.INT32, shape=None)
@@ -3023,7 +3031,7 @@ class Model:
 
         # Left path
         reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
-        reduce_sum_inputs = ["attention_mask", "/model/constants/INT64/1D/1"]
+        reduce_sum_inputs = ["attention_mask", "/model/constants/INT64/[1]"]
         self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
         cast_1_name = f"{attn_mask_basename}/ReduceSum/Cast"
         self.make_cast(cast_1_name, f"{reduce_sum_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size", 1])
@@ -3032,7 +3040,7 @@ class Model:
         shape_name = f"{attn_mask_basename}/Shape"
         self.make_shape(shape_name, "attention_mask", shape=[2])
         gather_name = f"{attn_mask_basename}/Gather"
-        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/0D/1"]
+        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/1"]
         self.make_gather(gather_name, gather_inputs, axis=0)
         cast_2_name = f"{attn_mask_basename}/Gather/Cast"
         self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=ir.DataType.INT32, shape=None)
@@ -3064,13 +3072,13 @@ class Model:
         shape_name = f"{basename}/Shape"
         self.make_shape(shape_name, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", shape=[2] if not self.exclude_embeds else [3])
         gather_name = f"{basename}/Gather"
-        gather_inputs = [f"{shape_name}/output_0", f"/model/constants/{str_dtype}/0D/1"]
+        gather_inputs = [f"{shape_name}/output_0", f"/model/constants/{str_dtype}/1"]
         self.make_gather(gather_name, gather_inputs, axis=0)
         unsqueeze_name = f"{basename}/Unsqueeze"
-        unsqueeze_inputs = [f"{gather_name}/output_0", f"/model/constants/{str_dtype}/1D/0"]
+        unsqueeze_inputs = [f"{gather_name}/output_0", f"/model/constants/{str_dtype}/[0]"]
         self.make_unsqueeze(unsqueeze_name, unsqueeze_inputs, dtype=proto_dtype, shape=[1])
         concat_name = f"{basename}/Concat"
-        concat_inputs = [f"/model/constants/{str_dtype}/1D/-1", f"{unsqueeze_name}/output_0"]
+        concat_inputs = [f"/model/constants/{str_dtype}/[-1]", f"{unsqueeze_name}/output_0"]
         self.make_concat(concat_name, concat_inputs, dtype=proto_dtype, shape=[2], axis=0)
         reshape_name = f"{basename}/Reshape"
         reshape_inputs = ["position_ids", f"{concat_name}/output_0"]
@@ -3242,12 +3250,12 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         reduce_max_inputs = ["position_ids"]
         self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=proto_dtype, shape=[1])
         greater_or_equal_name = f"{basename}/GreaterOrEqual"
-        greater_or_equal_inputs = [f"{reduce_max_name}/output_0", f"/model/constants/{str_dtype}/0D/{self.original_context_length}"]
+        greater_or_equal_inputs = [f"{reduce_max_name}/output_0", f"/model/constants/{str_dtype}/{self.original_context_length}"]
         self.make_greater_or_equal(greater_or_equal_name, greater_or_equal_inputs, shape=[])
         cast_name = f"{basename}/Cast"
         self.make_cast(cast_name, f"{greater_or_equal_name}/output_0", dtype=proto_dtype, shape=None)
         mul_name = f"{basename}/Mul"
-        mul_inputs = [f"{cast_name}/output_0", f"/model/constants/{str_dtype}/0D/{self.original_context_length}"]
+        mul_inputs = [f"{cast_name}/output_0", f"/model/constants/{str_dtype}/{self.original_context_length}"]
         self.make_mul(mul_name, mul_inputs, dtype=proto_dtype, shape=None)
         add_1_name = f"{basename}/Add_1"
         add_1_inputs = [f"{mul_name}/output_0", "position_ids"]
@@ -3407,14 +3415,14 @@ class Phi3SmallModel(Model):
 
         # Left path
         slice_1_name = f"/model/layers.{layer_id}/mlp/gelu/Slice"
-        slice_1_inputs = [f"{up_add_name}/output_0", "/model/constants/INT64/1D/0", f"/model/constants/INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/INT64/1D/-1", "/model/constants/INT64/1D/2"]
+        slice_1_inputs = [f"{up_add_name}/output_0", "/model/constants/INT64/[0]", f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]", "/model/constants/INT64/[-1]", "/model/constants/INT64/[2]"]
         self.make_slice(slice_1_name, slice_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
         cast_1_name = f"/model/layers.{layer_id}/mlp/gelu/Cast"
         self.make_cast(cast_1_name, f"{slice_1_name}/output_0", dtype=ir.DataType.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
         isinf_1_name = f"/model/layers.{layer_id}/mlp/gelu/IsInf"
         self.make_isinf(isinf_1_name, f"{cast_1_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size])
         clip_1_name = f"/model/layers.{layer_id}/mlp/gelu/Clip"
-        clip_1_inputs = [f"{slice_1_name}/output_0", "", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.clamp_limit}"]
+        clip_1_inputs = [f"{slice_1_name}/output_0", "", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.clamp_limit}"]
         self.make_clip(clip_1_name, clip_1_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
         where_1_name = f"/model/layers.{layer_id}/mlp/gelu/Where"
         where_1_inputs = [f"{isinf_1_name}/output_0", f"{slice_1_name}/output_0", f"{clip_1_name}/output_0"]
@@ -3424,20 +3432,20 @@ class Phi3SmallModel(Model):
 
         # Right path
         slice_2_name = f"/model/layers.{layer_id}/mlp/linear/Slice"
-        slice_2_inputs = [f"{up_add_name}/output_0", "/model/constants/INT64/1D/1", f"/model/constants/INT64/1D/{torch.iinfo(torch.int64).max}", "/model/constants/INT64/1D/-1", "/model/constants/INT64/1D/2"]
+        slice_2_inputs = [f"{up_add_name}/output_0", "/model/constants/INT64/[1]", f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]", "/model/constants/INT64/[-1]", "/model/constants/INT64/[2]"]
         self.make_slice(slice_2_name, slice_2_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
         cast_2_name = f"/model/layers.{layer_id}/mlp/linear/Cast"
         self.make_cast(cast_2_name, f"{slice_2_name}/output_0", dtype=ir.DataType.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
         isinf_2_name = f"/model/layers.{layer_id}/mlp/linear/IsInf"
         self.make_isinf(isinf_2_name, f"{cast_2_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size])
         clip_2_name = f"/model/layers.{layer_id}/mlp/linear/Clip"
-        clip_2_inputs = [f"{slice_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/-{self.clamp_limit}", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.clamp_limit}"]
+        clip_2_inputs = [f"{slice_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/-{self.clamp_limit}", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.clamp_limit}"]
         self.make_clip(clip_2_name, clip_2_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
         where_2_name = f"/model/layers.{layer_id}/mlp/linear/Where"
         where_2_inputs = [f"{isinf_2_name}/output_0", f"{slice_2_name}/output_0", f"{clip_2_name}/output_0"]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
         add_name = f"/model/layers.{layer_id}/mlp/linear/Add"
-        add_inputs = [f"{where_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/1"]
+        add_inputs = [f"{where_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/1"]
         self.make_add(add_name, add_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         # Make Mul node after activation
@@ -3570,7 +3578,7 @@ class GraniteModel(MistralModel):
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
 
         residual_mul_1_name = f"/model/layers.{layer_id}/residual_mul/Mul_1"
-        residual_mul_1_inputs = [self.layernorm_attrs["skip_input"], f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.residual_scale}"]
+        residual_mul_1_inputs = [self.layernorm_attrs["skip_input"], f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.residual_scale}"]
         self.make_mul(residual_mul_1_name, residual_mul_1_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{residual_mul_1_name}/output_0"
@@ -3579,7 +3587,7 @@ class GraniteModel(MistralModel):
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
         residual_mul_2_name = f"/model/layers.{layer_id}/residual_mul/Mul_2"
-        residual_mul_2_inputs = [self.layernorm_attrs["skip_input"], f"/model/constants/{self.to_str_dtype(self.io_dtype)}/0D/{self.residual_scale}"]
+        residual_mul_2_inputs = [self.layernorm_attrs["skip_input"], f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.residual_scale}"]
         self.make_mul(residual_mul_2_name, residual_mul_2_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
         # Assign output 0 of previous output node as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{residual_mul_2_name}/output_0"
