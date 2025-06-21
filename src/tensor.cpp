@@ -16,6 +16,7 @@ Tensor::Tensor(std::unique_ptr<OrtValue> ort_tensor) : ort_tensor_{std::move(ort
 Tensor::~Tensor() {
   if (buffer_ != nullptr) {
     p_device_->GetAllocator().Free(buffer_);
+    buffer_ = nullptr;
   }
 }
 
