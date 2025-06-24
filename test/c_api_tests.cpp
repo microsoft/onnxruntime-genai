@@ -818,7 +818,7 @@ struct Phi2Test {
 
     params_ = OgaGeneratorParams::Create(*model_);
     params_->SetSearchOption("max_length", 40);
-    params_->SetSearchOption("batch_size", batch_size_);
+    params_->SetSearchOption("batch_size", static_cast<int>(batch_size_));
   }
 
   void Run() {
@@ -842,7 +842,7 @@ struct Phi2Test {
   void RunEngine() {
     auto engine = OgaEngine::Create(*model_);
     constexpr size_t per_request_batch_size = 1;
-    params_->SetSearchOption("batch_size", per_request_batch_size);
+    params_->SetSearchOption("batch_size", static_cast<int>(per_request_batch_size));
 
     std::vector<std::unique_ptr<OgaRequest>> requests_;
     std::array<std::vector<int32_t>, 3> generated_tokens;
