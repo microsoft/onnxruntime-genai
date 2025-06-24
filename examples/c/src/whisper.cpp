@@ -15,8 +15,6 @@ void CXX_API(const char* model_path, int32_t num_beams) {
   auto model = OgaModel::Create(model_path);
   std::cout << "Creating multimodal processor..." << std::endl;
   auto processor = OgaMultiModalProcessor::Create(*model);
-  // std::cout << "Creating tokenizer..." << std::endl;
-  // auto tokenizer = OgaTokenizer::Create(*model);
 
   while (true) {
     std::string audio_paths_str;

@@ -169,7 +169,6 @@ WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& par
 
 void WhisperState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   encoder_state_->SetExtraInputs(extra_inputs);
-  // decoder_state_->SetExtraInputs(extra_inputs);
 
   // Check if alignment heads input exists
   void* alignment_heads_input = nullptr;

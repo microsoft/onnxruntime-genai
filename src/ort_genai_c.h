@@ -409,8 +409,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* gene
 /**
  * \brief For additional model inputs that genai does not handle, this lets the user set their values.
  * \param[in] generator The generator to add the inputs to.
- * \param[in] name Name of the model input (this must match the model's input name)
- * \param[in] tensor The OgaTensor of the input data
+ * \param[in] named_tensors The named tensors to set the inputs as.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetInputs(OgaGenerator* generator, const OgaNamedTensors* named_tensors);
 
