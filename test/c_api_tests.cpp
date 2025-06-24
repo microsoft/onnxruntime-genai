@@ -214,10 +214,8 @@ TEST(CAPITests, MaxLength) {
 #endif
 }
 
+#if ENABLE_ENGINE_TESTS
 TEST(CAPIEngineTests, MaxLength) {
-  if (!ENABLE_ENGINE_TESTS)
-    GTEST_SKIP() << "Engine tests are disabled.";
-
   std::vector<int32_t> input_ids{1, 2, 3, 5, 8, 2, 1, 4, 5, 7};
 
   auto model = OgaModel::Create(PHI2_PATH);
@@ -227,13 +225,14 @@ TEST(CAPIEngineTests, MaxLength) {
   sequence->Append(input_ids.data(), input_ids.size());
 
   auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", input_ids.size() - 1);  // Set max_length to one less than input size
+  params->SetSearchOption("max_length", static_cast<int>(input_ids.size()) - 1);  // Set max_length to one less than input size
   EXPECT_THROW(OgaRequest::Create(*sequence, *params), std::runtime_error);
 
-  params->SetSearchOption("max_length", input_ids.size() + 1);  // Set max_length to one more than input size
+  params->SetSearchOption("max_length", static_cast<int>(input_ids.size()) + 1);  // Set max_length to one more than input size
   auto request = OgaRequest::Create(*sequence, *params);
   ASSERT_TRUE(request != nullptr);
 }
+#endif
 
 // DML doesn't support batch_size > 1
 TEST(CAPITests, EndToEndPhiBatch) {
@@ -286,9 +285,8 @@ TEST(CAPITests, EndToEndPhiBatch) {
 #endif
 }
 
+#if ENABLE_ENGINE_TESTS
 TEST(CAPIEngineTests, EndToEndPhiBatch) {
-  if (!ENABLE_ENGINE_TESTS)
-    GTEST_SKIP() << "Engine tests are disabled.";
   auto model = OgaModel::Create(PHI2_PATH);
   auto engine = OgaEngine::Create(*model);
   auto tokenizer = OgaTokenizer::Create(*model);
@@ -347,10 +345,10 @@ TEST(CAPIEngineTests, EndToEndPhiBatch) {
     EXPECT_EQ(expected_output[i], generated_tokens[i]);
   }
 }
+#endif
 
+#if ENABLE_ENGINE_TESTS
 TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
-  if (!ENABLE_ENGINE_TESTS)
-    GTEST_SKIP() << "Engine tests are disabled.";
   auto model = OgaModel::Create(PHI2_PATH);
   auto engine = OgaEngine::Create(*model);
   auto tokenizer = OgaTokenizer::Create(*model);
@@ -418,6 +416,7 @@ TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
     EXPECT_EQ(expected_output[i], generated_tokens[i]);
   }
 }
+#endif
 
 TEST(CAPITests, EndToEndPhi) {
 #if TEST_PHI2
@@ -458,10 +457,8 @@ TEST(CAPITests, EndToEndPhi) {
 #endif
 }
 
+#if ENABLE_ENGINE_TESTS
 TEST(CAPIEngineTests, EndToEndPhi) {
-  if (!ENABLE_ENGINE_TESTS)
-    GTEST_SKIP() << "Engine tests are disabled.";
-
   auto model = OgaModel::Create(PHI2_PATH);
   auto engine = OgaEngine::Create(*model);
   auto tokenizer = OgaTokenizer::Create(*model);
@@ -479,9 +476,9 @@ TEST(CAPIEngineTests, EndToEndPhi) {
   std::string out_string;
   std::vector<int32_t> generated_tokens(input_sequence->SequenceData(0), input_sequence->SequenceData(0) + input_sequence->SequenceCount(0));
 
-  while (auto request = engine->ProcessRequests()) {
-    while (request->HasUnseenTokens()) {
-      generated_tokens.push_back(request->GetUnseenToken());
+  while (auto ready_request = engine->ProcessRequests()) {
+    while (ready_request->HasUnseenTokens()) {
+      generated_tokens.push_back(ready_request->GetUnseenToken());
       out_string += streaming_tokenizer->Decode(generated_tokens.back());
     }
   }
@@ -500,6 +497,7 @@ TEST(CAPIEngineTests, EndToEndPhi) {
 
   EXPECT_EQ(expected_output, generated_tokens);
 }
+#endif
 
 TEST(CAPITests, LoadModelFromMemory) {
 #if TEST_PHI2
@@ -842,9 +840,6 @@ struct Phi2Test {
   }
 
   void RunEngine() {
-    if (!ENABLE_ENGINE_TESTS)
-      GTEST_SKIP() << "Engine tests are disabled.";
-
     auto engine = OgaEngine::Create(*model_);
     constexpr size_t per_request_batch_size = 1;
     params_->SetSearchOption("batch_size", per_request_batch_size);

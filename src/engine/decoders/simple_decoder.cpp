@@ -36,9 +36,9 @@ void StaticBatchDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> mo
             return a->UnprocessedTokens().size() < b->UnprocessedTokens().size();
           });
 
-  const int64_t max_sequence_length = (*request_with_max_sequence_length)->UnprocessedTokens().size();
-  const int64_t batch_size = scheduled_requests.size();
-  const std::vector<int64_t> input_ids_shape = {batch_size, max_sequence_length};
+  const size_t max_sequence_length = (*request_with_max_sequence_length)->UnprocessedTokens().size();
+  const size_t batch_size = scheduled_requests.size();
+  const std::vector<int64_t> input_ids_shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(max_sequence_length)};
   auto input_ids_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
   input_ids_tensor->CreateTensor(input_ids_shape);
   auto device_span = input_ids_tensor->GetDeviceSpan<int64_t>();
@@ -67,9 +67,9 @@ void StaticBatchDecoderIO::PrepareAttentionMask(std::shared_ptr<DecoderOnly_Mode
             return a->CurrentSequenceLength() < b->CurrentSequenceLength();
           });
 
-  const int64_t max_sequence_length = (*request_with_max_sequence_length)->CurrentSequenceLength();
-  const int64_t batch_size = scheduled_requests.size();
-  const std::vector<int64_t> attention_mask_shape = {batch_size, max_sequence_length};
+  const size_t max_sequence_length = (*request_with_max_sequence_length)->CurrentSequenceLength();
+  const size_t batch_size = scheduled_requests.size();
+  const std::vector<int64_t> attention_mask_shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(max_sequence_length)};
   auto attention_mask_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
   attention_mask_tensor->CreateTensor(attention_mask_shape);
   auto device_span = attention_mask_tensor->GetDeviceSpan<int64_t>();
@@ -77,7 +77,7 @@ void StaticBatchDecoderIO::PrepareAttentionMask(std::shared_ptr<DecoderOnly_Mode
 
   for (size_t i = 0; i < batch_size; ++i) {
     auto request = scheduled_requests[i];
-    const int64_t current_sequence_length = request->CurrentSequenceLength();
+    const size_t current_sequence_length = static_cast<size_t>(request->CurrentSequenceLength());
 
     for (size_t j = 0; j < max_sequence_length; ++j) {
       cpu_span[i * max_sequence_length + j] = (j < current_sequence_length) ? 1 : 0;
@@ -103,9 +103,9 @@ void StaticBatchDecoderIO::PreparePositionIds(std::shared_ptr<DecoderOnly_Model>
             return a->UnprocessedTokens().size() < b->UnprocessedTokens().size();
           });
 
-  const int64_t max_sequence_length = (*request_with_max_sequence_length)->UnprocessedTokens().size();
-  const int64_t batch_size = scheduled_requests.size();
-  const std::vector<int64_t> position_ids_shape = {batch_size, max_sequence_length};
+  const size_t max_sequence_length = (*request_with_max_sequence_length)->UnprocessedTokens().size();
+  const size_t batch_size = scheduled_requests.size();
+  const std::vector<int64_t> position_ids_shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(max_sequence_length)};
   auto position_ids_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
   position_ids_tensor->CreateTensor(position_ids_shape);
   auto device_span = position_ids_tensor->GetDeviceSpan<int64_t>();
