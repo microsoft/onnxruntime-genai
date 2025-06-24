@@ -26,7 +26,7 @@ std::unique_ptr<NamedTensors> WhisperProcessor::Process(const Tokenizer& tokeniz
 
   // TODO: this is not working again...
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;
-  CheckResult(OrtxSpeechLogMel(processor_.get(), audios->audios_.get(), result.ToBeAssigned()));
+  CheckResult(OrtxFeatureExtraction(processor_.get(), audios->audios_.get(), result.ToBeAssigned()));
 
   ort_extensions::OrtxObjectPtr<OrtxTensor> mel;
   CheckResult(OrtxTensorResultGetAt(result.get(), 0, mel.ToBeAssigned()));
