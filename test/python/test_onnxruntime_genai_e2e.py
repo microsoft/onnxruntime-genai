@@ -43,7 +43,7 @@ def run_model(model_path: str | bytes | os.PathLike):
 def run_whisper(model_path: str | os.PathLike):
     log.debug("Running Whisper Python E2E Test")
 
-    ci_data_path = get_ci_path()
+    ci_data_path = get_ci_data_path()
     if not os.path.exists(ci_data_path):
         return
 
@@ -65,7 +65,7 @@ def run_whisper(model_path: str | os.PathLike):
         audio_path,
         "-o",
         expected_transcription,
-        "-ci",
+        "--non_interactive",
     ]
     run_subprocess(command, cwd=cwd, log=log).check_returncode()
 

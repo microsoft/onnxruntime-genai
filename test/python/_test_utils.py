@@ -52,7 +52,7 @@ def run_subprocess(
     return completed_process
 
 
-def get_ci_path():
+def get_ci_data_path():
     if is_windows():
         ci_data_path = os.path.join(R"C:\\", "data", "models", "ortgenai")
     else:
@@ -72,7 +72,7 @@ def get_model_paths():
         # "granite-3.0": "ibm-granite/granite-3.0-2b-instruct",
     }
 
-    ci_data_path = os.path.join(get_ci_path(), "pytorch")
+    ci_data_path = os.path.join(get_ci_data_path(), "pytorch")
     if not os.path.exists(ci_data_path):
         return {}, hf_paths
 

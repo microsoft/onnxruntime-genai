@@ -35,7 +35,7 @@ def run(args: argparse.Namespace):
         readline.parse_and_bind("tab: complete")
         readline.set_completer(_complete)
 
-        if args.ci_test:
+        if args.non_interactive:
             audio_paths = [args.audio]
         else:
             audio_paths = [audio_path.strip() for audio_path in input("Audio Paths (comma separated): ").split(",")]
@@ -81,7 +81,7 @@ def run(args: argparse.Namespace):
         for _ in range(3):
             print()
 
-        if args.ci_test:
+        if args.non_interactive:
             tokens = generator.get_sequence(0)
             transcription = processor.decode(tokens)
             assert transcription.strip() == args.output.strip(), "Model's transcription does not match expected transcription"
@@ -107,7 +107,7 @@ if __name__ == "__main__":
         "-o", "--output", type=str, default="", help="Expected transcribed output for CI testing purposes"
     )
     parser.add_argument(
-        "-ci", "--ci_test", default=False, action="store_true", help="Flag for CI testing purposes"
+        "-ni", "--non_interactive", default=False, action="store_true", help="Non-interactive mode for CI testing purposes"
     )
     args = parser.parse_args()
     run(args)
