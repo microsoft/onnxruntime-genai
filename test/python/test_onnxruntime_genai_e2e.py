@@ -8,7 +8,7 @@ import os
 import logging
 
 import onnxruntime_genai as og
-from _test_utils import get_ci_path
+from _test_utils import get_ci_data_path
 
 logging.basicConfig(
     format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG
