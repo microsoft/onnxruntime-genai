@@ -53,7 +53,7 @@ class InputDecoder {
     float Temperature;
     float TopP;
     uint32_t TopK;
-    
+
     // Function calling support
     std::string ToolsJson;  // Raw tools JSON string from input
     bool HasTools;

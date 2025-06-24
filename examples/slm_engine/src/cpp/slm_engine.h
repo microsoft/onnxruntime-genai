@@ -83,10 +83,10 @@ class SLM_ENGINE_EXPORT SLMEngine {
     std::string description;
     std::string type;
     std::string default_value;
-    
+
     FunctionParameter() : type("string") {}
-    FunctionParameter(const std::string& desc, const std::string& param_type = "string", 
-                     const std::string& default_val = "")
+    FunctionParameter(const std::string& desc, const std::string& param_type = "string",
+                      const std::string& default_val = "")
         : description(desc), type(param_type), default_value(default_val) {}
   };
 
@@ -95,7 +95,7 @@ class SLM_ENGINE_EXPORT SLMEngine {
     std::string name;
     std::string description;
     std::map<std::string, FunctionParameter> parameters;
-    
+
     FunctionTool() = default;
     FunctionTool(const std::string& tool_name, const std::string& tool_desc)
         : name(tool_name), description(tool_desc) {}
@@ -105,7 +105,7 @@ class SLM_ENGINE_EXPORT SLMEngine {
   struct SLM_ENGINE_EXPORT FunctionCallOptions {
     std::vector<FunctionTool> tools;
     bool force_function_call;
-    
+
     FunctionCallOptions() : force_function_call(false) {}
   };
 
@@ -113,9 +113,9 @@ class SLM_ENGINE_EXPORT SLMEngine {
   struct SLM_ENGINE_EXPORT FunctionCall {
     std::string function_name;
     std::string parameters_json;
-    
+
     FunctionCall() = default;
-    FunctionCall(const std::string& name, const std::string& params) 
+    FunctionCall(const std::string& name, const std::string& params)
         : function_name(name), parameters_json(params) {}
   };
 
@@ -124,14 +124,14 @@ class SLM_ENGINE_EXPORT SLMEngine {
     std::vector<FunctionCall> function_calls;
     bool is_function_call;
     std::string text_response;
-    
+
     FunctionCallResult() : is_function_call(false) {}
-    
+
     // Legacy compatibility methods
     std::string function_name() const {
       return function_calls.empty() ? "" : function_calls[0].function_name;
     }
-    
+
     std::string parameters_json() const {
       return function_calls.empty() ? "" : function_calls[0].parameters_json;
     }
@@ -248,8 +248,6 @@ class SLM_ENGINE_EXPORT SLMEngine {
   /// maintained by the caller and submitted just like how the OpenAI API
   /// works
   std::string complete(const char* prompt);
-
-
 
   /// @brief Struct to hold the runtime performance metrics of the SLM Engine
   /// @param PromptTokenCount Number of tokens in the prompt
@@ -459,8 +457,8 @@ class SLM_ENGINE_EXPORT SLMEngine {
   /// @param grammar_input Output parameter for grammar input
   /// @return True if successful
   bool create_lark_grammar(const std::vector<FunctionTool>& tools,
-                          std::string& prompt_tool_input,
-                          std::string& grammar_input);
+                           std::string& prompt_tool_input,
+                           std::string& grammar_input);
 
   /// @brief Convert tool to grammar input format
   /// @param tool Function tool to convert
@@ -477,7 +475,7 @@ class SLM_ENGINE_EXPORT SLMEngine {
   /// @param function_result Output function call result
   /// @return True if function call was found and parsed
   bool parse_function_call(const std::string& generated_text,
-                          FunctionCallResult& function_result);
+                           FunctionCallResult& function_result);
 
   /// @brief Create generator with function calling support
   /// @param formatted_prompt Formatted prompt

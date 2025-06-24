@@ -146,19 +146,19 @@ std::vector<SLMEngine::LoRAAdapter> SLMEngine::get_adapter_list() {
 
 void SLMEngine::GetVersion(std::string& slm_version, std::string& ortga_version,
                            std::string& ort_version) {
-  // SW_VERSION_NUMBER is defined in the CMakeLists.txt file
-  #ifdef SW_VERSION_NUMBER
+// SW_VERSION_NUMBER is defined in the CMakeLists.txt file
+#ifdef SW_VERSION_NUMBER
   slm_version = std::string(SW_VERSION_NUMBER);
-  #else
+#else
   slm_version = "unknown";
-  #endif
-  
-  #ifdef ORT_GENAI_VERSION
+#endif
+
+#ifdef ORT_GENAI_VERSION
   ortga_version = std::string(ORT_GENAI_VERSION);
-  #else
+#else
   ortga_version = "unknown";
-  #endif
-  
+#endif
+
   ort_version = Ort::GetVersionString();
 }
 
@@ -433,7 +433,7 @@ std::string SLMEngine::complete(const char* user_prompt) {
   }
 
   cout << "Input Parameters has tools: " << input_parameters.HasTools << endl;
-  
+
   // Format prompt with tools if function calling is enabled
   std::string formatted_prompt;
   if (use_function_calling) {
@@ -441,7 +441,7 @@ std::string SLMEngine::complete(const char* user_prompt) {
   } else {
     formatted_prompt = format_input(input_parameters);
   }
-  
+
   m_llm_input_dbg_stream << formatted_prompt << endl;
 
   if (m_verbose) {
@@ -463,13 +463,13 @@ std::string SLMEngine::complete(const char* user_prompt) {
 
   SLMEngine::Status status;
   auto api_start = std::chrono::steady_clock::now();
-  
+
   if (use_function_calling) {
     cout << BLUE << "🔧 Function calling mode enabled" << CLEAR << endl;
     // Setup function calling options
     FunctionCallOptions function_options;
     function_options.tools = parse_tools_from_json(input_parameters.ToolsJson);
-    
+
     if (m_verbose) {
       cout << BLUE << "   Tools available: " << function_options.tools.size() << CLEAR << endl;
       for (const auto& tool : function_options.tools) {
@@ -477,20 +477,17 @@ std::string SLMEngine::complete(const char* user_prompt) {
       }
     }
 
-
     if (m_verbose) {
-      cout << RED << "Function result status: " <<  "FUNCTION_CALL" 
-          << ", calls: " << function_options.tools.size()  << CLEAR << endl;
+      cout << RED << "Function result status: " << "FUNCTION_CALL"
+           << ", calls: " << function_options.tools.size() << CLEAR << endl;
     }
 
-    
-    
     if (input_parameters.LoRAAdapterName.empty()) {
-      status = generate_with_functions(formatted_prompt, generator_options, 
-                                     function_options, response, function_result, kpi);
+      status = generate_with_functions(formatted_prompt, generator_options,
+                                       function_options, response, function_result, kpi);
     } else {
       status = generate_with_functions(input_parameters.LoRAAdapterName, formatted_prompt,
-                                     generator_options, function_options, response, function_result, kpi);
+                                       generator_options, function_options, response, function_result, kpi);
     }
   } else {
     // Regular generation without function calling
@@ -498,7 +495,7 @@ std::string SLMEngine::complete(const char* user_prompt) {
       status = generate(formatted_prompt, generator_options, response, kpi);
     } else {
       status = generate(input_parameters.LoRAAdapterName, formatted_prompt,
-                       generator_options, response, kpi);
+                        generator_options, response, kpi);
     }
   }
 
@@ -507,7 +504,7 @@ std::string SLMEngine::complete(const char* user_prompt) {
                       .count();
 
   m_llm_output_dbg_stream << response << endl;
-  
+
   // Remove stop tokens from response
   for (const auto& stop_token : input_parameters.StopTokens) {
     auto stop_token_pos = response.find(stop_token);
@@ -528,7 +525,6 @@ std::string SLMEngine::complete(const char* user_prompt) {
   output_json["question"] = input_parameters.UserPrompt;
   output_json["llm_input"] = formatted_prompt;
 
-
   // Handle function calling response
   if (use_function_calling && function_result.is_function_call) {
     // Function call(s) detected - format answer as JSON array string like in your examples
@@ -536,7 +532,7 @@ std::string SLMEngine::complete(const char* user_prompt) {
     for (const auto& call : function_result.function_calls) {
       json call_json;
       call_json["name"] = call.function_name;
-      
+
       // Parse the parameters_json string into a JSON object for arguments
       try {
         call_json["arguments"] = json::parse(call.parameters_json);
@@ -544,44 +540,43 @@ std::string SLMEngine::complete(const char* user_prompt) {
         // If parsing fails, store as raw string
         call_json["arguments"] = call.parameters_json;
       }
-      
+
       function_calls_json.push_back(call_json);
     }
-    
+
     json response_data = {
-      {"answer", function_calls_json.dump()}  // Store as JSON string like in your examples
+        {"answer", function_calls_json.dump()}  // Store as JSON string like in your examples
     };
 
     cout << GREEN << "Function call detected" << CLEAR << endl;
-    
+
     // Always add the structured function_calls array (unified format)
     json function_calls_array = json::array();
     for (const auto& call : function_result.function_calls) {
       json structured_call;
       structured_call["name"] = call.function_name;
       structured_call["arguments"] = call.parameters_json;  // Keep as string format as requested
-      
+
       function_calls_array.push_back(structured_call);
     }
     response_data["function_calls"] = function_calls_array;
-    
+
     output_json["response"] = response_data;
-    
+
     if (m_verbose) {
       if (function_result.function_calls.size() == 1) {
         cout << GREEN << "📞 Function call response: " << function_result.function_calls[0].function_name << CLEAR << endl;
       } else {
         cout << GREEN << "📞 Multiple function calls response (" << function_result.function_calls.size() << " calls):" << CLEAR << endl;
         for (size_t i = 0; i < function_result.function_calls.size(); ++i) {
-          cout << GREEN << "   " << (i+1) << ". " << function_result.function_calls[i].function_name << CLEAR << endl;
+          cout << GREEN << "   " << (i + 1) << ". " << function_result.function_calls[i].function_name << CLEAR << endl;
         }
       }
     }
   } else {
     // Regular text response
     json response_data = {
-      {"answer", use_function_calling ? function_result.text_response : response}
-    };
+        {"answer", use_function_calling ? function_result.text_response : response}};
     output_json["response"] = response_data;
 
     if (m_verbose && use_function_calling) {
@@ -602,10 +597,6 @@ std::string SLMEngine::complete(const char* user_prompt) {
   // Return the output_json directly (not wrapped in "response")
   return output_json.dump();
 }
-
-
-
-
 
 // Use a Dictionary to store various types of prompt formatting
 // LLama3.2 and Phi3 have different prompt formats
@@ -774,38 +765,38 @@ std::string SLMEngine::format_input_with_tools(
     const InputDecoder::InputParams& input_params) {
   ostringstream ss_output;
   bool no_assistant_messages = true;
-  
+
   for (const auto& msg : input_params.Messages) {
     switch (msg.first) {
       case InputDecoder::InputParams::Role::SYSTEM:
         ss_output << m_prompt_format.prompt_format.at(msg.first).prefix
                   << msg.second;
-        
+
         // Add function calling instructions and tools information to system message if available
         if (input_params.HasTools && !input_params.ToolsJson.empty()) {
           // Add function calling instructions
           ss_output << function_calling_instructions;
-          
+
           // Add the actual tools JSON spec
           ss_output << input_params.ToolsJson;
         }
-        
+
         ss_output << m_prompt_format.prompt_format.at(msg.first).suffix;
         break;
-        
+
       case InputDecoder::InputParams::Role::USER:
         ss_output << m_prompt_format.prompt_format.at(msg.first).prefix
                   << msg.second
                   << m_prompt_format.prompt_format.at(msg.first).suffix;
         no_assistant_messages = true;
         break;
-        
+
       case InputDecoder::InputParams::Role::TOOL:
         ss_output << m_prompt_format.prompt_format.at(msg.first).prefix
                   << msg.second
                   << m_prompt_format.prompt_format.at(msg.first).suffix;
         break;
-        
+
       case InputDecoder::InputParams::Role::ASSISTANT:
         ss_output << m_prompt_format.prompt_format.at(msg.first).prefix
                   << msg.second;
@@ -877,13 +868,15 @@ bool SLMEngine::create_lark_grammar(const std::vector<FunctionTool>& tools,
   }
 
   prompt_tool_input = create_prompt_tool_input(tools);
-  
+
   if (tools.size() == 1) {
     // Single tool case
     std::string tool_schema = convert_tool_to_grammar_input(tools[0]);
-    grammar_input = "start: TEXT | fun_call\n"
-                   "TEXT: /[^{](.|\\n)*/\n"
-                   " fun_call: <|tool_call|> %json " + tool_schema;
+    grammar_input =
+        "start: TEXT | fun_call\n"
+        "TEXT: /[^{](.|\\n)*/\n"
+        " fun_call: <|tool_call|> %json " +
+        tool_schema;
   } else {
     // Multiple tools case
     std::string anyof_schema = "{\"anyOf\": [";
@@ -892,102 +885,92 @@ bool SLMEngine::create_lark_grammar(const std::vector<FunctionTool>& tools,
       anyof_schema += convert_tool_to_grammar_input(tools[i]);
     }
     anyof_schema += "]}";
-    
-    grammar_input = "start: TEXT | fun_call\n"
-                   "TEXT: /[^{](.|\\n)*/\n"
-                   " fun_call: <|tool_call|> %json " + anyof_schema;
+
+    grammar_input =
+        "start: TEXT | fun_call\n"
+        "TEXT: /[^{](.|\\n)*/\n"
+        " fun_call: <|tool_call|> %json " +
+        anyof_schema;
   }
-  
+
   return true;
 }
 
 std::string SLMEngine::convert_tool_to_grammar_input(const FunctionTool& tool) {
   json param_props = json::object();
   json required_params = json::array();
-  
+
   for (const auto& [param_name, param_info] : tool.parameters) {
     param_props[param_name] = {
-      {"type", param_info.type},
-      {"description", param_info.description}
-    };
+        {"type", param_info.type},
+        {"description", param_info.description}};
     required_params.push_back(param_name);
   }
-  
+
   json output_schema = {
-    {"description", tool.description},
-    {"type", "object"},
-    {"required", {"name", "parameters"}},
-    {"additionalProperties", false},
-    {"properties", {
-      {"name", {{"const", tool.name}}},
-      {"parameters", {
-        {"type", "object"},
-        {"properties", param_props},
-        {"required", required_params},
-        {"additionalProperties", false}
-      }}
-    }}
-  };
-  
+      {"description", tool.description},
+      {"type", "object"},
+      {"required", {"name", "parameters"}},
+      {"additionalProperties", false},
+      {"properties", {{"name", {{"const", tool.name}}}, {"parameters", {{"type", "object"}, {"properties", param_props}, {"required", required_params}, {"additionalProperties", false}}}}}};
+
   if (param_props.empty()) {
     output_schema["required"] = json::array({"name"});
   }
-  
+
   return output_schema.dump();
 }
 
 std::string SLMEngine::create_prompt_tool_input(const std::vector<FunctionTool>& tools) {
   json tools_json = json::array();
-  
+
   for (const auto& tool : tools) {
     json tool_json = {
-      {"name", tool.name},
-      {"description", tool.description},
-      {"parameters", json::object()}
-    };
-    
+        {"name", tool.name},
+        {"description", tool.description},
+        {"parameters", json::object()}};
+
     for (const auto& [param_name, param_info] : tool.parameters) {
       tool_json["parameters"][param_name] = {
-        {"description", param_info.description},
-        {"type", param_info.type}
-      };
+          {"description", param_info.description},
+          {"type", param_info.type}};
       if (!param_info.default_value.empty()) {
         tool_json["parameters"][param_name]["default"] = param_info.default_value;
       }
     }
-    
+
     tools_json.push_back(tool_json);
   }
-  
+
   return tools_json.dump();
 }
 
 bool SLMEngine::parse_function_call(const std::string& generated_text,
-                                   FunctionCallResult& function_result) {
+                                    FunctionCallResult& function_result) {
   // Look for multiple function call patterns: <|tool_call|>{...}
   std::regex function_call_regex(R"(<\|tool_call\|>\s*(\{.*?\}))");
   std::sregex_iterator iter(generated_text.begin(), generated_text.end(), function_call_regex);
   std::sregex_iterator end;
-  
+
   std::vector<FunctionCall> detected_calls;
   size_t first_call_pos = std::string::npos;
-  
+
   for (auto it = iter; it != end; ++it) {
     std::smatch match = *it;
     try {
       std::string json_str = match[1].str();
       json function_call = json::parse(json_str);
-      
+
       if (function_call.contains("name") && function_call.contains("parameters")) {
         std::string name = function_call["name"];
         std::string params = function_call["parameters"].dump();
         detected_calls.emplace_back(name, params);
-        
+
         // Record position of first function call for text extraction
         if (first_call_pos == std::string::npos) {
           first_call_pos = match.position();
         }
-        
+
         if (m_verbose) {
           cout << GREEN << "📞 Detected function call: " << name << CLEAR << endl;
         }
@@ -998,26 +981,26 @@ bool SLMEngine::parse_function_call(const std::string& generated_text,
       }
     }
   }
-  
+
   if (!detected_calls.empty()) {
     function_result.is_function_call = true;
     function_result.function_calls = std::move(detected_calls);
-    
+
     // Extract text before first function call as text response
     if (first_call_pos > 0) {
       function_result.text_response = generated_text.substr(0, first_call_pos);
       // Trim whitespace
       function_result.text_response.erase(
-        function_result.text_response.find_last_not_of(" \n\r\t") + 1);
+          function_result.text_response.find_last_not_of(" \n\r\t") + 1);
     }
-    
+
     if (m_verbose) {
       cout << GREEN << "🔧 Total function calls detected: " << detected_calls.size() << CLEAR << endl;
     }
-    
+
     return true;
   }
-  
+
   // No function call found, treat as regular text
   function_result.is_function_call = false;
   function_result.text_response = generated_text;
@@ -1029,7 +1012,6 @@ std::unique_ptr<OgaGenerator> SLMEngine::create_function_generator(
     const GenerationOptions& generation_options,
     const FunctionCallOptions& function_options,
     uint32_t& time_to_prefill) {
-  
   auto generator_params = OgaGeneratorParams::Create(*m_onnx_model);
   if (!generator_params) {
     return nullptr;
@@ -1085,7 +1067,6 @@ SLMEngine::Status SLMEngine::generate_with_functions(
     std::string& response_str,
     FunctionCallResult& function_result,
     RuntimePerf& kpi) {
-  
   auto api_start = std::chrono::steady_clock::now();
 
   uint32_t time_to_prefill;
@@ -1098,20 +1079,20 @@ SLMEngine::Status SLMEngine::generate_with_functions(
   }
 
   kpi.TimeToFirstToken = time_to_prefill;
-  
+
   // Generate response
   auto status = generate(generator.get(), nullptr, response_str, kpi);
-  
+
   if (status.code) {
     // Parse function call from response
     parse_function_call(response_str, function_result);
-    
+
     if (m_verbose && function_result.is_function_call) {
-      cout << MAGENTA << "Function Call Detected: " << function_result.function_name() 
+      cout << MAGENTA << "Function Call Detected: " << function_result.function_name()
            << " with parameters: " << function_result.parameters_json() << CLEAR << endl;
     }
   }
-  
+
   kpi.TotalTime = std::chrono::duration_cast<std::chrono::milliseconds>(
                       std::chrono::steady_clock::now() - api_start)
                       .count();
@@ -1126,12 +1107,11 @@ SLMEngine::Status SLMEngine::generate_with_functions(
     std::string& response_str,
     FunctionCallResult& function_result,
     RuntimePerf& kpi) {
-  
   // Verify that the adapter is a valid one
   if (!m_adapters) {
     return Status{false, "Adapter not found: " + adapter_name};
   }
-  
+
   auto api_start = std::chrono::steady_clock::now();
 
   uint32_t time_to_prefill;
@@ -1150,17 +1130,17 @@ SLMEngine::Status SLMEngine::generate_with_functions(
 
   // Generate response
   auto status = generate(generator.get(), nullptr, response_str, kpi);
-  
+
   if (status.code) {
     // Parse function call from response
     parse_function_call(response_str, function_result);
-    
+
     if (m_verbose && function_result.is_function_call) {
-      cout << MAGENTA << "Function Call Detected: " << function_result.function_name() 
+      cout << MAGENTA << "Function Call Detected: " << function_result.function_name()
            << " with parameters: " << function_result.parameters_json() << CLEAR << endl;
     }
   }
-  
+
   kpi.TotalTime = std::chrono::duration_cast<std::chrono::milliseconds>(
                       std::chrono::steady_clock::now() - api_start)
                       .count();
@@ -1169,20 +1149,20 @@ SLMEngine::Status SLMEngine::generate_with_functions(
 
 std::vector<SLMEngine::FunctionTool> SLMEngine::parse_tools_from_json(const std::string& tools_json) {
   std::vector<FunctionTool> tools;
-  
+
   try {
     json tools_array = json::parse(tools_json);
-    
+
     for (const auto& tool_json : tools_array) {
       if (tool_json.contains("name") && tool_json.contains("description")) {
         FunctionTool tool(tool_json["name"], tool_json["description"]);
-        
+
         if (tool_json.contains("parameters")) {
           const auto& params = tool_json["parameters"];
           for (auto it = params.begin(); it != params.end(); ++it) {
             std::string param_name = it.key();
             const auto& param_info = it.value();
-            
+
             FunctionParameter param;
             if (param_info.contains("description")) {
               param.description = param_info["description"];
@@ -1193,11 +1173,11 @@ std::vector<SLMEngine::FunctionTool> SLMEngine::parse_tools_from_json(const std:
             if (param_info.contains("default")) {
               param.default_value = param_info["default"];
             }
-            
+
             tool.parameters[param_name] = param;
           }
         }
-        
+
         tools.push_back(tool);
       }
     }
@@ -1206,7 +1186,7 @@ std::vector<SLMEngine::FunctionTool> SLMEngine::parse_tools_from_json(const std:
       cout << RED << "Error parsing tools JSON: " << e.what() << CLEAR << endl;
     }
   }
-  
+
   return tools;
 }
 

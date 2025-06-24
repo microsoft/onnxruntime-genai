@@ -64,33 +64,33 @@ int run_server(const string& model_path,
       // Parse the request body to check for function calling
       json request_json = json::parse(req.body);
       bool has_tools = request_json.contains("tools") && !request_json["tools"].empty();
-      
+
       json response_json;
-      
+
       if (has_tools) {
         // Handle function calling request
         cout << GREEN_BOLD << "Processing function calling request..." << CLEAR << endl;
-        
+
         // Use the enhanced complete method that handles function calling internally
         auto response = slm_engine->complete(req.body.c_str());
         json output_json = json::parse(response);
 
-        cout << RED_BOLD << "Response from SLM Engine: " 
+        cout << RED_BOLD << "Response from SLM Engine: "
              << output_json.dump(2) << CLEAR << endl;
-        
+
         // Check if this is a function call response
         // Function calls are detected by checking if the answer starts with '[' and contains JSON
         bool is_function_call = false;
         json function_calls_array;
-        
-        if (output_json.contains("response") && 
+
+        if (output_json.contains("response") &&
             output_json["response"].contains("answer")) {
           std::string answer = output_json["response"]["answer"];
-          
+
           // Trim whitespace
           answer.erase(0, answer.find_first_not_of(" \t\n\r"));
           answer.erase(answer.find_last_not_of(" \t\n\r") + 1);
-          
+
           // Check if answer starts with '[' and ends with ']' (JSON array format)
           if (answer.length() > 0 && answer[0] == '[' && answer.back() == ']') {
             try {
@@ -114,31 +114,29 @@ int run_server(const string& model_path,
             }
           }
         }
-        
+
         if (is_function_call) {
           // Function call(s) detected - always use function_calls array format
-          cout << BLUE_BOLD << "Function call" << (function_calls_array.size() > 1 ? "s" : "") 
-               << " detected (" << function_calls_array.size() << " call" 
+          cout << BLUE_BOLD << "Function call" << (function_calls_array.size() > 1 ? "s" : "")
+               << " detected (" << function_calls_array.size() << " call"
                << (function_calls_array.size() > 1 ? "s" : "") << "):" << CLEAR << endl;
-          
+
           for (size_t i = 0; i < function_calls_array.size(); ++i) {
-            cout << BLUE_BOLD << "  " << (i+1) << ". " 
+            cout << BLUE_BOLD << "  " << (i + 1) << ". "
                  << function_calls_array[i]["name"] << CLEAR << endl;
           }
-          
+
           // Ensure the response has the unified function_calls array format
           if (!output_json["response"].contains("function_calls")) {
             // Convert function_calls_array to the proper format with string arguments
             json unified_function_calls = json::array();
             for (const auto& call : function_calls_array) {
-              unified_function_calls.push_back({
-                {"name", call["name"]},
-                {"arguments", call["arguments"].dump()}
-              });
+              unified_function_calls.push_back({{"name", call["name"]},
+                                                {"arguments", call["arguments"].dump()}});
             }
             output_json["response"]["function_calls"] = unified_function_calls;
           }
-          
+
           // Print KPIs for function calling
           if (output_json.contains("kpi")) {
             cout << "Prompt Tokens: " << output_json["kpi"]["prompt_toks"] << " "
@@ -156,7 +154,7 @@ int run_server(const string& model_path,
         } else {
           // Regular text response with tools available
           cout << "Text response generated (no function call)" << endl;
-          
+
           // Print KPIs for regular generation
           if (output_json.contains("kpi")) {
             cout << "Prompt Tokens: " << output_json["kpi"]["prompt_toks"] << " "
@@ -171,15 +169,15 @@ int run_server(const string& model_path,
                  << output_json["kpi"]["memory_usage"] << CLEAR << " MB" << endl;
           }
         }
-        
+
         res.status = 200;
         res.set_content(output_json.dump(), "application/json");
-        
+
       } else {
         // Handle regular completion request (no tools)
         auto response = slm_engine->complete(req.body.c_str());
         json output_json = json::parse(response);
-        
+
         // Print KPIs for regular completion
         cout << "Prompt Tokens: "
              << output_json["kpi"]["prompt_toks"] << " "
@@ -197,20 +195,20 @@ int run_server(const string& model_path,
         res.status = 200;
         res.set_content(response, "application/json");
       }
-      
+
     } catch (const std::exception& e) {
       // Handle JSON parsing errors or other exceptions
       json error_response;
       error_response["status"] = "error";
       error_response["message"] = std::string("Request processing error: ") + e.what();
-      
+
       cout << RED_BOLD << "Error processing request: " << e.what() << CLEAR << endl;
-      
+
       res.status = 400;
       res.set_content(error_response.dump(), "application/json");
     }
   });
-  
+
   cout << MAGENTA_BOLD << "Starting server on port: " << port_number << CLEAR << endl;
   svr.listen("0.0.0.0", port_number);
   return 0;
