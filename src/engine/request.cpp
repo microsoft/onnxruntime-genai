@@ -84,7 +84,7 @@ int64_t Request::CurrentSequenceLength() const {
 
 int32_t Request::UnseenToken() {
   auto sequence = search_->GetSequence(0).CopyDeviceToCpu();
-  if (seen_sequence_length_ >= sequence.size())
+  if (static_cast<size_t>(seen_sequence_length_) >= sequence.size())
     throw std::runtime_error("All tokens have been seen.");
 
   return sequence[seen_sequence_length_++];

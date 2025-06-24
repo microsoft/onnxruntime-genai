@@ -13,10 +13,9 @@ namespace {
 std::unique_ptr<Decoder> CreateDecoder(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager) {
   if (auto decoder_only_model = std::dynamic_pointer_cast<DecoderOnly_Model>(model)) {
     return std::make_unique<SimpleDecoder>(decoder_only_model, cache_manager);
-  } else {
-    throw std::runtime_error("The model type is not supported for decoding. Expected a decoder-only model.");
   }
-  return nullptr;
+
+  throw std::runtime_error("The model type is not supported for decoding. Expected a decoder-only model.");
 }
 
 }  // namespace
