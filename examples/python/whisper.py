@@ -24,7 +24,7 @@ def run(args: argparse.Namespace):
     if args.execution_provider != "follow_config":
         config.clear_providers()
         if args.execution_provider != "cpu":
-            if args.verbose: print(f"Setting model to {args.execution_provider}")
+            print(f"Setting model to {args.execution_provider}")
             config.append_provider(args.execution_provider)
     model = og.Model(config)
     processor = model.create_multimodal_processor()
