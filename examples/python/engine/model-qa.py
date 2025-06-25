@@ -6,7 +6,6 @@ import json
 
 import onnxruntime_genai as og
 
-# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True, model_output_shapes=True)
 
 def run(args: argparse.Namespace):
     config = og.Config(args.model_path)
@@ -18,13 +17,13 @@ def run(args: argparse.Namespace):
     tokenizer = og.Tokenizer(model)
     engine = og.Engine(model)
 
-    while prompt:= input("🫵  : "):
+    while prompt := input("🫵  : "):
         if prompt == "/exit":
             break
 
         messages = [
             {"role": "system", "content": ""},
-            {"role": "user", "content": f"{prompt}"}
+            {"role": "user", "content": f"{prompt}"},
         ]
         messages = json.dumps(messages)
 
@@ -34,7 +33,14 @@ def run(args: argparse.Namespace):
             max_length=1024,
         )
 
-        request = og.Request(tokenizer.encode(tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)), params)
+        request = og.Request(
+            tokenizer.encode(
+                tokenizer.apply_chat_template(
+                    messages=messages, add_generation_prompt=True
+                )
+            ),
+            params,
+        )
         streaming_tokenizer = tokenizer.create_stream()
 
         engine.add_request(request)
@@ -43,14 +49,18 @@ def run(args: argparse.Namespace):
 
         while ready_request := engine.step():
             while ready_request.has_unseen_tokens():
-                print(streaming_tokenizer.decode(ready_request.get_unseen_token()), end="", flush=True)
+                print(
+                    streaming_tokenizer.decode(ready_request.get_unseen_token()),
+                    end="",
+                    flush=True,
+                )
 
         print()
         engine.remove_request(request)
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        argument_default=argparse.SUPPRESS,
         description="End-to-end AI Question/Answer example for gen-ai",
     )
     parser.add_argument(
@@ -68,5 +78,15 @@ if __name__ == "__main__":
         choices=["cpu", "cuda", "dml", "webgpu"],
         help="Execution provider to run ONNX model with",
     )
+    parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+
     args = parser.parse_args()
+    if args.debug:
+        og.set_log_options(
+            enabled=True,
+            model_input_values=True,
+            model_output_values=True,
+            model_output_shapes=True,
+        )
+
     run(args)

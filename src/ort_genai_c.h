@@ -832,8 +832,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
  *                     If the engine has no ready requests, this will be set to a nullptr.
  * \return OgaResult containing the error message if the operation failed, or nullptr on success.
  */
-// OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineStep(OgaEngine* engine);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineProcessRequests(OgaEngine* engine, OgaRequest** request);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineStep(OgaEngine* engine, OgaRequest** request);
 
 /**
  * \brief Checks if the engine has any pending requests to process.
@@ -849,7 +848,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine
 /**
  * \brief Adds a request to the OgaEngine for processing.
  *
- * This function submits a new request to the engine, which will then be processed in subsequent calls to OgaEngineProcessRequests.
+ * This function submits a new request to the engine, which will then be processed in subsequent calls to OgaEngineStep.
  * The request must be created using OgaCreateRequest and should contain the necessary parameters for model inference.
  *
  * \param[in] engine The engine instance to which the request is being added.
@@ -874,7 +873,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRemoveRequest(OgaEngine* engine, Oga
  * \brief Creates a new request for the OgaEngine.
  *
  * This function initializes a new request object that can be used to submit input sequences and parameters for model inference.
- * Once added to the engine, the request will be processed by the engine in subsequent calls to OgaEngineProcessRequests.
+ * Once added to the engine, the request will be processed by the engine in subsequent calls to OgaEngineStep.
  *
  * \param[in] tokens The input sequences to be processed by the model.
  * \param[in] params The parameters for the generator, such as temperature, top-k, etc.

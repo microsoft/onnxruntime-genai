@@ -317,7 +317,7 @@ TEST(CAPIEngineTests, EndToEndPhiBatch) {
     engine->Add(*requests.back());
   }
 
-  while (auto request = engine->ProcessRequests()) {
+  while (auto request = engine->Step()) {
     while (request->HasUnseenTokens()) {
       auto* tokens = reinterpret_cast<std::vector<int32_t>*>(request->GetOpaqueData());
       tokens->push_back(request->GetUnseenToken());
@@ -381,7 +381,7 @@ TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
   engine->Add(*requests[0]);
 
   size_t num_steps = 0;
-  while (auto request = engine->ProcessRequests()) {
+  while (auto request = engine->Step()) {
     num_steps++;
     while (request->HasUnseenTokens()) {
       auto* tokens = reinterpret_cast<std::vector<int32_t>*>(request->GetOpaqueData());
@@ -476,7 +476,7 @@ TEST(CAPIEngineTests, EndToEndPhi) {
   std::string out_string;
   std::vector<int32_t> generated_tokens(input_sequence->SequenceData(0), input_sequence->SequenceData(0) + input_sequence->SequenceCount(0));
 
-  while (auto ready_request = engine->ProcessRequests()) {
+  while (auto ready_request = engine->Step()) {
     while (ready_request->HasUnseenTokens()) {
       generated_tokens.push_back(ready_request->GetUnseenToken());
       out_string += streaming_tokenizer->Decode(generated_tokens.back());
@@ -864,7 +864,7 @@ struct Phi2Test {
       engine->Add(*requests_.back());
     }
 
-    while (auto request = engine->ProcessRequests()) {
+    while (auto request = engine->Step()) {
       while (request->HasUnseenTokens()) {
         auto* tokens = reinterpret_cast<std::vector<int32_t>*>(request->GetOpaqueData());
         tokens->push_back(request->GetUnseenToken());

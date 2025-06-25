@@ -765,9 +765,9 @@ struct OgaEngine : OgaAbstract {
     OgaCheckResult(OgaEngineRemoveRequest(this, &request));
   }
 
-  std::unique_ptr<OgaRequest> ProcessRequests() {
+  std::unique_ptr<OgaRequest> Step() {
     OgaRequest* request;
-    OgaCheckResult(OgaEngineProcessRequests(this, &request));
+    OgaCheckResult(OgaEngineStep(this, &request));
     return request ? std::unique_ptr<OgaRequest>(request) : nullptr;
   }
 

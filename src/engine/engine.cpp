@@ -36,7 +36,9 @@ std::shared_ptr<Request> Engine::Step() {
     scheduled_requests.GenerateNextTokens();
 
     for (auto& request : scheduled_requests) {
-      ready_requests_.push(request);
+      if (request->HasUnseenTokens()) {
+        ready_requests_.push(request);
+      }
     }
   }
 
@@ -44,11 +46,13 @@ std::shared_ptr<Request> Engine::Step() {
     throw std::runtime_error("Expected at least one request to be ready, but none were found.");
   }
 
-  return ready_requests_.front();
+  auto request = ready_requests_.front();
+  ready_requests_.pop();
+  return request;
 }
 
 bool Engine::HasPendingRequests() const {
-  return !ready_requests_.empty() || scheduler_->HasPendingRequests();
+  return scheduler_->HasPendingRequests();
 }
 
 }  // namespace Generators

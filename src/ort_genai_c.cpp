@@ -881,7 +881,7 @@ OgaResult* OgaCreateEngine(OgaModel* model, OgaEngine** out) {
   OGA_CATCH
 }
 
-OgaResult* OgaEngineProcessRequests(OgaEngine* engine, OgaRequest** request) {
+OgaResult* OgaEngineStep(OgaEngine* engine, OgaRequest** request) {
   OGA_TRY
   auto ready_request = engine->Step();
   *request = ready_request ? ReturnShared<OgaRequest>(ready_request) : nullptr;

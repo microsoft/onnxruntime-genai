@@ -550,12 +550,21 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           }))
       .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
       .def("is_done", &OgaRequest::IsDone)
-      .def("get_unseen_token", &OgaRequest::GetUnseenToken);
+      .def("get_unseen_token", &OgaRequest::GetUnseenToken)
+      .def("set_opaque_data", [](OgaRequest& request, pybind11::object opaque_data) {
+        request.SetOpaqueData(opaque_data.ptr());
+      })
+      .def("get_opaque_data", [](OgaRequest& request) -> pybind11::object {
+        auto opaque_data = request.GetOpaqueData();
+        if (!opaque_data)
+          return pybind11::none();
+        return pybind11::reinterpret_borrow<pybind11::object>(static_cast<PyObject*>(opaque_data));
+      });
 
   pybind11::class_<OgaEngine>(m, "Engine")
       .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
       .def("add_request", &OgaEngine::Add)
-      .def("step", &OgaEngine::ProcessRequests)
+      .def("step", &OgaEngine::Step)
       .def("remove_request", &OgaEngine::Remove)
       .def("has_pending_requests", &OgaEngine::HasPendingRequests);
 
