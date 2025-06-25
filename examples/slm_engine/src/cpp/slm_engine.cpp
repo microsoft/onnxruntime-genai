@@ -219,6 +219,7 @@ std::unique_ptr<OgaGenerator> SLMEngine::create_generator(
   generator_params->SetSearchOption("max_length", generation_options.MaxGeneratedTokens);
   generator_params->SetSearchOption("temperature", generation_options.Temperature);
   generator_params->SetSearchOption("top_p", generation_options.TopP);
+  generator_params->SetSearchOption("top_k", generation_options.TopK);
 
   auto mem_before = GetMemoryUsage();
 
