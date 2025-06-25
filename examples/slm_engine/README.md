@@ -396,7 +396,6 @@ curl -X POST http://localhost:8000/completions -H "Content-Type: application/jso
 
 The model will analyze the user's request and generate appropriate function calls with the correct parameters, enabling seamless integration with external APIs and services.
 
-*Note:* suggest to use Phi-4-mini-onnx 
 
 ### C++ Application using the SLMEngine
 
