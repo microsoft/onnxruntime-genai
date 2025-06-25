@@ -54,7 +54,7 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
   kv_cache_.Add();
 
   // Add past sequence length
-  if (model_.session_info_.HasInput(model_.config_->model.decoder.inputs.past_sequence_length)) {
+  if (HasPastSequenceLengthInput()) {
     auto past_sequence_length_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.past_sequence_length);
     auto past_sequence_length_shape = std::array<int64_t, 1>{1};
     past_sequence_length_ = OrtValue::CreateTensor(GetDeviceInterface(DeviceType::CPU)->GetAllocator(), past_sequence_length_shape, past_sequence_length_type);
@@ -66,7 +66,7 @@ WhisperDecoderState::WhisperDecoderState(const WhisperModel& model, const Genera
   }
 
   // Add cache indirection
-  if (model_.session_info_.HasInput(model_.config_->model.decoder.inputs.cache_indirection)) {
+  if (HasCacheIndirectionInput()) {
     auto cache_indirection_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.cache_indirection);
     auto cache_indirection_shape = std::array<int64_t, 3>{params_->search.batch_size, params_->search.num_beams, params_->search.max_length};
     cache_indirection_ = OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), cache_indirection_shape, cache_indirection_type);
@@ -203,11 +203,10 @@ void WhisperState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
 }
 
 void WhisperState::TransposeKCaches(std::vector<std::unique_ptr<OrtValue>>& kv_caches) {
-  // Transpose attention K caches for `DecoderMaskedMultiHeadAttention` kernel
-  // Kernel is invoked for FP16 CUDA only
+  // Transpose attention K caches for `DecoderMaskedMultiHeadAttention` kernel (done on CUDA only)
   auto kv_cache_info = kv_caches[0]->GetTensorTypeAndShapeInfo();
   auto kv_cache_type = kv_cache_info->GetElementType();
-  if (kv_cache_type != Ort::TypeToTensorType<Ort::Float16_t> || model_.p_device_inputs_->GetType() != DeviceType::CUDA) {
+  if (model_.p_device_inputs_->GetType() != DeviceType::CUDA || !(decoder_state_->UsesDecoderMaskedMHA())) {
     return;
   }
 
@@ -321,7 +320,7 @@ DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t>& nex
 
     return logits;
   } else {
-    if (first_run_) {
+    if (first_run_ && decoder_state_->UsesDecoderMaskedMHA()) {
       // Transpose the K caches only when the else branch is run for the first time.
       // Otherwise the GetOutput(present_key_{self/cross}_{i}) method returns transposed K caches.
       TransposeKCaches(cross_cache_->GetValues());

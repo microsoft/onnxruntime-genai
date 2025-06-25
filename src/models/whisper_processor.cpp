@@ -24,7 +24,6 @@ std::unique_ptr<NamedTensors> WhisperProcessor::Process(const Tokenizer& tokeniz
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
 
-  // TODO: this is not working again...
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> result;
   CheckResult(OrtxFeatureExtraction(processor_.get(), audios->audios_.get(), result.ToBeAssigned()));
 
