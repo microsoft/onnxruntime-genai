@@ -370,6 +370,7 @@ class Model:
         valid_gqa_configurations = {
             ("cpu", ir.DataType.FLOAT),
             ("cuda", ir.DataType.FLOAT16),
+            ("cuda", ir.DataType.BFLOAT16),
             ("rocm", ir.DataType.FLOAT16),
             ("dml", ir.DataType.FLOAT16),
             ("webgpu", ir.DataType.FLOAT16),
@@ -395,6 +396,8 @@ class Model:
             if self.attention_attrs["use_rope_in_attn"]:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 self.input_names.remove("position_ids")
+        else:
+            assert False, (self.ep, self.io_dtype, "is not a valid EP and io_dtype combination for GroupQueryAttention. Please use one of the following combinations: ", valid_gqa_configurations)
 
         self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
