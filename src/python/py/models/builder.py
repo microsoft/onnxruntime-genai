@@ -2634,13 +2634,14 @@ class Model:
 
         # Hugging Face names
         hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
+        hf_norm_newer_transformer = hasattr(model, "norm") and module == model.norm
         hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
         hf_transformer_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
 
         # GGUF names
         gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
 
-        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm]
+        hf_names = [hf_norm, hf_norm_newer_transformer, hf_final_layernorm, hf_transformer_final_layernorm]
         gguf_names = [gguf_final_norm]
         return any(hf_names + gguf_names)
 
