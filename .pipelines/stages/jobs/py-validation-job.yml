@@ -76,6 +76,8 @@ jobs:
 
   - name: py_dot_ver
     value: '3.12'
+  - name: py_no_dot_ver
+    value: '312'
 
   - name: pip_package_name
     ${{ if eq(parameters.ep, 'cpu') }}:
@@ -160,7 +162,7 @@ jobs:
   - template: steps/utils/flex-download-pipeline-artifact.yml
     parameters:
       StepName: 'Download Python Wheel Artifacts'
-      ArtifactName: $(ArtifactName)-wheel
+      ArtifactName: $(ArtifactName)-$(py_no_dot_ver)-wheel
       TargetPath: '$(Build.BinariesDirectory)/wheel'
       SpecificArtifact: ${{ parameters.specificArtifact }}
       BuildId: ${{ parameters.BuildId }}
