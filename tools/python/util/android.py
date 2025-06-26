@@ -126,7 +126,7 @@ def start_emulator(
             "-no-audio",
             "-no-boot-anim",
             "-gpu",
-            "guest",
+            "swiftshader_indirect",
             "-delay-adb",
         ]
 
