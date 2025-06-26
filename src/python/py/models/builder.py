@@ -33,10 +33,6 @@ from transformers import (
     GenerationConfig,
 )
 
-# NOTE: Avoid importing from onnx helper and numpy_helper. Instead, leverage
-# ONNX IR methods like ir.tensor, ir.DataType.numpy() and other methods for constructing
-# the ONNX graph efficiently.
-
 
 class Model:
     def __init__(
