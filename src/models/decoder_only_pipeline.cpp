@@ -186,7 +186,7 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
 }
 
 void DecoderOnlyPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  for (auto& session : sessions_) {
+  for (auto& session : model_.sessions_) {
     extra_inputs_.Add(extra_inputs, session->GetInputNames());
   }
 }
