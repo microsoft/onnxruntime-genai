@@ -75,7 +75,6 @@ class Model:
         self.model_name_or_path = config._name_or_path
         self.model_type = config.architectures[0]
         self.io_dtype: ir.DataType = ir.DataType(io_dtype)
-        self.io_dtype_torch: torch.dtype = tensor_adapters.to_torch_dtype(self.io_dtype)
         self.onnx_dtype: ir.DataType = ir.DataType(onnx_dtype)
         self.quant_type = config.quantization_config["quant_method"] if hasattr(config, "quantization_config") else None
         self.adapter_path = extra_options.get("adapter_path", None)
@@ -879,7 +878,7 @@ class Model:
             *qweight_shape[:-2],
             qweight_shape[-2] * qweight_shape[-1] * 2 // quantized_op.group_size,
         ]
-        scales_pt = quantized_op.scales.to(self.io_dtype_torch)
+        scales_pt = quantized_op.scales.to(tensor_adapters.to_torch_dtype(self.io_dtype))
         scales_pt = scales_pt.reshape(scales_target_shape)
         self.make_initializer(scales_pt, scales)
 
@@ -1299,9 +1298,9 @@ class Model:
             # Slice cos/sin caches from (M, H) to (M, H/2)
             hidden_dim = cos_cache.shape[-1]
             cos_cache = cos_cache.squeeze()[:, : (hidden_dim // 2)]
-            cos_cache = cos_cache.to(self.io_dtype_torch)
+            cos_cache = cos_cache.to(tensor_adapters.to_torch_dtype(self.io_dtype))
             sin_cache = sin_cache.squeeze()[:, : (hidden_dim // 2)]
-            sin_cache = sin_cache.to(self.io_dtype_torch)
+            sin_cache = sin_cache.to(tensor_adapters.to_torch_dtype(self.io_dtype))
 
             # Slice cos/sin caches from (M, H/2) to (M, R/2) if partial rotary embeddings are used
             if self.rotemb_attrs["partial_rotary_factor"] != 1.0:
@@ -2475,7 +2474,7 @@ class Model:
             self.make_initializer(self.lm_head_attrs["mask"], logits_mask_name)
 
             where_name = "/lm_head/Where"
-            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{torch.finfo(self.io_dtype_torch).min}", f"{lm_name}/output_0"]
+            where_inputs = [logits_mask_name, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{torch.finfo(tensor_adapters.to_torch_dtype(self.io_dtype)).min}", f"{lm_name}/output_0"]
             where_output = "logits" if not any(exists_checks[3:]) else f"{where_name}/output_0"
             self.make_node('Where', inputs=where_inputs, outputs=[where_output], name=where_name)
             self.make_value(where_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.vocab_size])
@@ -2774,7 +2773,7 @@ class Model:
         concat_inputs = [f"{unsqueeze_4_name}/output_0", f"{unsqueeze_5_name}/output_0"]
         self.make_concat(concat_2_name, concat_inputs, dtype=ir.DataType.INT64, shape=[2], axis=0)
         constant_shape_name = f"{basename}/ConstantOfShape_2"
-        constant_shape_torch_dtype = self.io_dtype_torch
+        constant_shape_torch_dtype = tensor_adapters.to_torch_dtype(self.io_dtype)
         constant_shape_value = ir.tensor(torch.tensor([torch.finfo(constant_shape_torch_dtype).min], dtype=constant_shape_torch_dtype), name="make_input_ids_subgraph_shape")
         self.make_constant_of_shape(constant_shape_name, f"{concat_2_name}/output_0", value=constant_shape_value, dtype=self.io_dtype, shape=['unk', 'unk'])
 
@@ -2859,7 +2858,7 @@ class Model:
         cast_2_name = f"{basename}/Cast_2"
         self.make_cast(cast_2_name, f"{sub_name}/output_0", dtype=ir.DataType.BOOL, shape=["unk", "unk", "unk", "unk"])
         where_2_name = f"{basename}/Where_2"
-        where_2_inputs = [f"{cast_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{torch.finfo(self.io_dtype_torch).min}", f"{sub_name}/output_0"]
+        where_2_inputs = [f"{cast_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{torch.finfo(tensor_adapters.to_torch_dtype(self.io_dtype)).min}", f"{sub_name}/output_0"]
         self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=["unk", "unk", "unk", "unk"])
 
         return where_2_name
