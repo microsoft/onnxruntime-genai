@@ -31,6 +31,7 @@ set(REPO_ROOT ${PROJECT_SOURCE_DIR})
 set(SRC_ROOT ${REPO_ROOT}/src)
 set(GENERATORS_ROOT ${SRC_ROOT})
 set(MODELS_ROOT ${SRC_ROOT}/models)
+set(ENGINE_ROOT ${SRC_ROOT}/engine)
 
 # Define the dependency libraries
 
@@ -79,6 +80,10 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/openvino/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
+  "${ENGINE_ROOT}/*.h"
+  "${ENGINE_ROOT}/*.cpp"
+  "${ENGINE_ROOT}/decoders/*.h"
+  "${ENGINE_ROOT}/decoders/*.cpp"
 )
 
 set(ortgenai_embed_libs "") # shared libs that will be embedded inside the onnxruntime-genai package
