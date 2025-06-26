@@ -160,7 +160,7 @@ jobs:
   - template: steps/utils/flex-download-pipeline-artifact.yml
     parameters:
       StepName: 'Download Python Wheel Artifacts'
-      ArtifactName: $(ArtifactName)-wheel
+      ArtifactName: $(ArtifactName)-$(PyNoDotVer)-wheel
       TargetPath: '$(Build.BinariesDirectory)/wheel'
       SpecificArtifact: ${{ parameters.specificArtifact }}
       BuildId: ${{ parameters.BuildId }}
