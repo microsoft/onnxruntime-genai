@@ -185,6 +185,12 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   }
 }
 
+void DecoderOnlyPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  for (auto& session : sessions_) {
+    extra_inputs_.Add(extra_inputs, session->GetInputNames());
+  }
+}
+
 void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
                                            DeviceSpan<int32_t> next_indices) {
   for (auto& pipeline_state : pipeline_states_) {

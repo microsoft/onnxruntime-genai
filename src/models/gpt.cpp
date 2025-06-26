@@ -13,6 +13,10 @@ std::unique_ptr<State> Gpt_Model::CreateState(DeviceSpan<int32_t> sequence_lengt
   return std::make_unique<Gpt_State>(*this, sequence_lengths, params);
 }
 
+void Gpt_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  extra_inputs_.Add(extra_inputs, model_.session_decoder_->GetInputNames());
+}
+
 Gpt_State::Gpt_State(const Gpt_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params)
     : State{params, model},
       model_{model},

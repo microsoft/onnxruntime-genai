@@ -13,6 +13,7 @@
 #include "kv_cache.h"
 #include "windowed_kv_cache.h"
 #include "position_inputs.h"
+#include "extra_inputs.h"
 
 namespace Generators {
 
@@ -36,6 +37,7 @@ struct IntermediatePipelineState : State {
   IntermediatePipelineState(const IntermediatePipelineState&) = delete;
   IntermediatePipelineState& operator=(const IntermediatePipelineState&) = delete;
 
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
 
@@ -94,6 +96,7 @@ struct DecoderOnlyPipelineState : State {
   std::optional<WorkerThread> key_value_cache_update_worker_thread_{};
 
   std::unique_ptr<PositionInputs> position_inputs_;
+  ExtraInputs extra_inputs_{*this};
 };
 
 }  // namespace Generators
