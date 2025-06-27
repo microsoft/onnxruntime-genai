@@ -5,7 +5,7 @@ parameters:
   default: false
 
 - name: enable_publish_wheels
-  displayName: Whether Wheels should be published to the nightly feed
+  displayName: Whether Wheels are published to nightly feed
   type: boolean
   default: true
 
