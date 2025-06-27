@@ -218,6 +218,17 @@ void InitDmlInterface(LUID* p_device_luid, uint32_t* p_device_index) {
     g_dml_device = std::make_unique<Dml::InterfaceImpl>(p_device_luid, p_device_index);
 }
 
+void CloseDmlInterface() {
+  Dml::dml_device_.Reset();
+  g_dml_device.reset();
+  Dml::dml_pooled_upload_heap_.reset();
+  Dml::dml_execution_context_.reset();
+  Dml::dml_readback_heap_.reset();
+  Dml::smart_directml_dll_.reset();
+  Dml::dml_objects_ = {};
+  Dml::ort_allocator_ = nullptr;
+}
+
 void SetDmlProvider(OrtSessionOptions& session_options) {
   Ort::ThrowOnError(Dml::dml_api_->SessionOptionsAppendExecutionProvider_DML1(&session_options, Dml::dml_device_.Get(), Dml::dml_objects_.command_queue.Get()));
 }
