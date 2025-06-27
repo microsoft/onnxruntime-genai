@@ -6,6 +6,7 @@
 
 #include <jni.h>
 #include <stdlib.h>
+#include <string.h>
 #include "ort_genai_c.h"
 
 #ifdef __cplusplus
