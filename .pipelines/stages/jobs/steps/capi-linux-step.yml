@@ -130,6 +130,7 @@ steps:
       --volume $(Build.Repository.LocalPath):/ort_genai_src \
       -w /ort_genai_src/ \
       -e ONNXRUNTIME_VERSION=$(ONNXRUNTIME_VERSION) \
+      -e NIGHTLY_BUILD=1 \
       ortgenai$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
