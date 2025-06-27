@@ -496,37 +496,40 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<OgaMultiModalProcessor>(m, "MultiModalProcessor")
       .def(
-          "__call__", [](OgaMultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) {
+          "__call__", [](OgaMultiModalProcessor& processor, pybind11::object prompts, const pybind11::kwargs& kwargs) {
             OgaImages* images{};
             OgaAudios* audios{};
-            if (kwargs.contains("images"))
+            if (kwargs.contains("images")) {
               images = kwargs["images"].cast<OgaImages*>();
-            if (kwargs.contains("audios"))
+            }
+            if (kwargs.contains("audios")) {
               audios = kwargs["audios"].cast<OgaAudios*>();
-            return processor.ProcessImagesAndAudios(prompt.value_or("").c_str(), images, audios);
+            }
+
+            std::vector<std::string> prompts_str;
+            std::vector<const char*> c_prompts;
+            if (pybind11::isinstance<pybind11::str>(prompts)) {
+              // One prompt
+              c_prompts.push_back(prompts.cast<std::string>().c_str());
+            }
+            else if (pybind11::isinstance<pybind11::list>(prompts)) {
+              // Multiple prompts
+              for (const auto& prompt : prompts) {
+                if (!pybind11::isinstance<pybind11::str>(prompt)) {
+                  throw std::runtime_error("One or more items in the list of provided prompts is not a string.");
+                }
+                prompts_str.push_back(prompt.cast<std::string>());
+                c_prompts.push_back(prompts_str.back().c_str());
+              }
+            }
+            else if (!prompts.is_none()) {
+              // Unsupported type for prompts
+              throw std::runtime_error("Unsupported type for prompts. Prompts must be a string or a list of strings.");
+            }
+
+            return processor.ProcessImagesAndAudios(c_prompts, images, audios);
           },
           pybind11::arg("prompt") = pybind11::none())
-      .def("__call__", [](OgaMultiModalProcessor& processor, const std::vector<std::string>& prompts, const pybind11::kwargs& kwargs) {
-        size_t count;
-        if (kwargs.contains("count"))
-          count = kwargs["count"].cast<size_t>();
-        else
-          throw std::runtime_error("Number of prompts must be provided. Use `processor(prompts, count=num_prompts)` to provide it.");
-
-        OgaImages* images{};
-        OgaAudios* audios{};
-        if (kwargs.contains("images"))
-          images = kwargs["images"].cast<OgaImages*>();
-        if (kwargs.contains("audios"))
-          audios = kwargs["audios"].cast<OgaAudios*>();
-
-        std::vector<const char*> c_prompts;
-        c_prompts.reserve(prompts.size());
-        for (const auto& p : prompts) {
-          c_prompts.push_back(p.c_str());
-        }
-        return processor.ProcessImagesAndAudios(c_prompts.data(), count, images, audios);
-      })
       .def("create_stream", [](OgaMultiModalProcessor& processor) { return OgaTokenizerStream::Create(processor); })
       .def("decode", [](OgaMultiModalProcessor& processor, pybind11::array_t<int32_t> tokens) -> std::string {
         return processor.Decode(ToSpan(tokens)).p_;

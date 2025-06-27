@@ -38,6 +38,21 @@ public class MultiModalProcessor implements AutoCloseable {
   }
 
   /**
+   * Processes strings and images into a NamedTensor.
+   *
+   * @param prompts Texts to encode as token ids.
+   * @param images image inputs.
+   * @return NamedTensors object.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public NamedTensors processImages(String[] prompts, Images images) throws GenAIException {
+    long imagesHandle = (images == null) ? 0 : images.nativeHandle();
+    long namedTensorsHandle = processorProcessImagesAndPrompts(nativeHandle, prompts, imagesHandle);
+
+    return new NamedTensors(namedTensorsHandle);
+  }
+
+  /**
    * Processes a string and audio into a NamedTensor.
    *
    * @param prompt Text to encode as token ids.
@@ -48,6 +63,21 @@ public class MultiModalProcessor implements AutoCloseable {
   public NamedTensors processAudios(String prompt, Audios audios) throws GenAIException {
     long audiosHandle = (audios == null) ? 0 : audios.nativeHandle();
     long namedTensorsHandle = processorProcessAudios(nativeHandle, prompt, audiosHandle);
+
+    return new NamedTensors(namedTensorsHandle);
+  }
+
+  /**
+   * Processes strings and audios into a NamedTensor.
+   *
+   * @param prompts Texts to encode as token ids.
+   * @param audios audio inputs.
+   * @return NamedTensors object.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public NamedTensors processAudios(String[] prompts, Audios audios) throws GenAIException {
+    long audiosHandle = (audios == null) ? 0 : audios.nativeHandle();
+    long namedTensorsHandle = processorProcessAudiosAndPrompts(nativeHandle, prompts, audiosHandle);
 
     return new NamedTensors(namedTensorsHandle);
   }
@@ -67,6 +97,25 @@ public class MultiModalProcessor implements AutoCloseable {
     long audiosHandle = (audios == null) ? 0 : audios.nativeHandle();
     long namedTensorsHandle =
         processorProcessImagesAndAudios(nativeHandle, prompt, imagesHandle, audiosHandle);
+
+    return new NamedTensors(namedTensorsHandle);
+  }
+
+  /**
+   * Processes strings, images, and audios into a NamedTensor.
+   *
+   * @param prompt Texts to encode as token ids.
+   * @param images image inputs.
+   * @param audios audio inputs.
+   * @return NamedTensors object.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public NamedTensors processImagesAndAudios(String[] prompts, Images images, Audios audios)
+      throws GenAIException {
+    long imagesHandle = (images == null) ? 0 : images.nativeHandle();
+    long audiosHandle = (audios == null) ? 0 : audios.nativeHandle();
+    long namedTensorsHandle =
+        processorProcessImagesAndAudiosAndPrompts(nativeHandle, prompts, imagesHandle, audiosHandle);
 
     return new NamedTensors(namedTensorsHandle);
   }
@@ -123,11 +172,21 @@ public class MultiModalProcessor implements AutoCloseable {
   private native long processorProcessImages(long processorHandle, String prompt, long imagesHandle)
       throws GenAIException;
 
+  private native long processorProcessImagesAndPrompts(long processorHandle, String[] prompts, long imagesHandle)
+      throws GenAIException;
+
   private native long processorProcessAudios(long processorHandle, String prompt, long audiosHandle)
+      throws GenAIException;
+
+  private native long processorProcessAudiosAndPrompts(long processorHandle, String[] prompts, long audiosHandle)
       throws GenAIException;
 
   private native long processorProcessImagesAndAudios(
       long processorHandle, String prompt, long imagesHandle, long audiosHandle)
+      throws GenAIException;
+
+  private native long processorProcessImagesAndAudiosAndPrompts(
+      long processorHandle, String[] prompts, long imagesHandle, long audiosHandle)
       throws GenAIException;
 
   private native String processorDecode(long processorHandle, int[] sequence) throws GenAIException;

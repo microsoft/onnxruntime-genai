@@ -190,6 +190,18 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
+   * Returns a copy of the model input identified by the given name as a Tensor.
+   *
+   * @param name The name of the input needed.
+   * @return The tensor.
+   * @throws GenAIException If the call to the GenAI native API fails.
+   */
+  public Tensor getInput(String name) throws GenAIException {
+    long tensorHandle = getInputNative(nativeHandle, name);
+    return new Tensor(tensorHandle);
+  }
+
+  /**
    * Returns a copy of the model output identified by the given name as a Tensor.
    *
    * @param name The name of the output needed.
@@ -280,6 +292,8 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
   private native void setActiveAdapter(
       long nativeHandle, long adaptersNativeHandle, String adapterName) throws GenAIException;
+
+  private native long getInputNative(long nativeHandle, String outputName) throws GenAIException;
 
   private native long getOutputNative(long nativeHandle, String outputName) throws GenAIException;
 }

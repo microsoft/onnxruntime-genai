@@ -991,8 +991,8 @@ std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& pr
   return processor_->Process(*tokenizer_, payload);
 }
 
-std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const char** prompts, size_t count, const Images* images, const Audios* audios) const {
-  Payload payload{"", std::span<const char*>(prompts, count), images, audios};
+std::unique_ptr<NamedTensors> MultiModalProcessor::Process(std::span<const char*> prompts, const Images* images, const Audios* audios) const {
+  Payload payload{"", prompts, images, audios};
   return processor_->Process(*tokenizer_, payload);
 }
 

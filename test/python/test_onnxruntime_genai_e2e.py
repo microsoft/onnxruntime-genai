@@ -52,13 +52,16 @@ def run_whisper(model_path: str | os.PathLike):
         os.path.join(os.path.abspath(__file__), "..", "test_models", "audios", "1272-141231-0002.mp3"),
         "The cut on his chest still dripping blood. The ache of his overstrain dyes. Even the soaring arena around him with thousands of spectators, retrievalidates not worth thinking about.",
     )
+
+    precision = "fp16" if og.is_cuda_available() else "fp32"
+    execution_provider = "cuda" if og.is_cuda_available() else "cpu"
     command = [
         sys.executable,
         os.path.join(os.path.abspath(__file__), "..", "..", "examples", "python", "whisper.py"),
         "-m",
-        os.path.join(ci_data_path, "onnx", "whisper-tiny-fp16" if og.is_cuda_available() else "whisper-tiny-fp32"),
+        os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}"),
         "-e",
-        "cuda" if og.is_cuda_available() else "cpu",
+        execution_provider,
         "-b",
         str(num_beams),
         "-a",

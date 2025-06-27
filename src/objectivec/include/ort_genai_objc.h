@@ -278,6 +278,15 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
  * @param error Optional error information set if an error occurs.
  */
 - (BOOL)generateNextTokenWithError:(NSError**)error;
+
+/**
+ * Get the input tensor.
+ * @param name The input name.
+ * @param error Optional error information set if an error occurs.
+ * @return The result, or nil if an error occurs.
+ */
+- (nullable OGATensor*)getInput:(NSString*)name error:(NSError**)error;
+
 /**
  * Get the output tensor.
  * @param name The output name.
@@ -355,11 +364,24 @@ typedef NS_ENUM(NSInteger, OGAElementType) {
                                     images:(OGAImages*)images
                                      error:(NSError**)error;
 
+- (nullable OGANamedTensors*)processImages:(NSArray<NSString*>*)prompts
+                                    images:(OGAImages*)images
+                                     error:(NSError**)error;
+
 - (nullable OGANamedTensors*)processAudios:(NSString*)prompt
                                     audios:(OGAAudios*)audios
                                      error:(NSError**)error;
 
+- (nullable OGANamedTensors*)processAudios:(NSArray<NSString*>*)prompts
+                                    audios:(OGAAudios*)audios
+                                     error:(NSError**)error;
+
 - (nullable OGANamedTensors*)processImagesAndAudios:(NSString*)prompt
+                                             images:(OGAImages*)images
+                                             audios:(OGAAudios*)audios
+                                              error:(NSError**)error;
+
+- (nullable OGANamedTensors*)processImagesAndAudios:(NSArray<NSString*>*)prompts
                                              images:(OGAImages*)images
                                              audios:(OGAAudios*)audios
                                               error:(NSError**)error;

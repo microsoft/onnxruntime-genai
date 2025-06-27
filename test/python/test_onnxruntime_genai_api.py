@@ -964,8 +964,8 @@ def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio
 
     batch_size = len(audio_paths)
     decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
-    input_ids = ["".join(decoder_prompt_tokens)] * batch_size
-    _ = processor(input_ids, count=batch_size, audios=audios)
+    prompts = ["".join(decoder_prompt_tokens)] * batch_size
+    _ = processor(prompts, audios=audios)
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
@@ -987,5 +987,5 @@ def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path
 
     batch_size = len(audio_paths)
     decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
-    input_ids = ["".join(decoder_prompt_tokens)] * batch_size
-    _ = processor(input_ids, count=batch_size, audios=audios)
+    prompts = ["".join(decoder_prompt_tokens)] * batch_size
+    _ = processor(prompts, audios=audios)

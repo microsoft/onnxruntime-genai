@@ -51,8 +51,8 @@ def run(args: argparse.Namespace):
         print("Processing audio...")
         batch_size = len(audio_paths)
         decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
-        input_ids = ["".join(decoder_prompt_tokens)] * batch_size
-        inputs = processor(input_ids, count=batch_size, audios=audios)
+        prompts = ["".join(decoder_prompt_tokens)] * batch_size
+        inputs = processor(prompts, audios=audios)
 
         params = og.GeneratorParams(model)
         params.set_search_options(
@@ -84,7 +84,8 @@ def run(args: argparse.Namespace):
         if args.non_interactive:
             tokens = generator.get_sequence(0)
             transcription = processor.decode(tokens)
-            assert transcription.strip() == args.output.strip(), "Model's transcription does not match expected transcription"
+            transcription, args.output = transcription.strip(), args.output.strip()
+            assert transcription == args.output, f"Model's transcription ({transcription}) does not match expected transcription ({args.output})."
             break
 
 

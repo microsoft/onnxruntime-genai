@@ -634,9 +634,11 @@ struct OgaMultiModalProcessor : OgaAbstract {
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
-  std::unique_ptr<OgaNamedTensors> ProcessImages(const char** prompts, size_t count, const OgaImages* images = nullptr) const {
+  std::unique_ptr<OgaNamedTensors> ProcessImages(const std::vector<const char*>& prompts, const OgaImages* images = nullptr) const {
     OgaNamedTensors* p;
-    OgaCheckResult(OgaProcessorProcessImagesAndPrompts(this, prompts, count, images, &p));
+    OgaStringArray* strs;
+    OgaCheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &strs));
+    OgaCheckResult(OgaProcessorProcessImagesAndPrompts(this, strs, images, &p));
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
@@ -646,9 +648,11 @@ struct OgaMultiModalProcessor : OgaAbstract {
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
-  std::unique_ptr<OgaNamedTensors> ProcessAudios(const char** prompts, size_t count, const OgaAudios* audios = nullptr) const {
+  std::unique_ptr<OgaNamedTensors> ProcessAudios(const std::vector<const char*>& prompts, const OgaAudios* audios = nullptr) const {
     OgaNamedTensors* p;
-    OgaCheckResult(OgaProcessorProcessAudiosAndPrompts(this, prompts, count, audios, &p));
+    OgaStringArray* strs;
+    OgaCheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &strs));
+    OgaCheckResult(OgaProcessorProcessAudiosAndPrompts(this, strs, audios, &p));
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
@@ -658,9 +662,11 @@ struct OgaMultiModalProcessor : OgaAbstract {
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 
-  std::unique_ptr<OgaNamedTensors> ProcessImagesAndAudios(const char** prompts, size_t count, const OgaImages* images = nullptr, const OgaAudios* audios = nullptr) const {
+  std::unique_ptr<OgaNamedTensors> ProcessImagesAndAudios(const std::vector<const char*>& prompts, const OgaImages* images = nullptr, const OgaAudios* audios = nullptr) const {
     OgaNamedTensors* p;
-    OgaCheckResult(OgaProcessorProcessImagesAndAudiosAndPrompts(this, prompts, count, images, audios, &p));
+    OgaStringArray* strs;
+    OgaCheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &strs));
+    OgaCheckResult(OgaProcessorProcessImagesAndAudiosAndPrompts(this, strs, images, audios, &p));
     return std::unique_ptr<OgaNamedTensors>(p);
   }
 

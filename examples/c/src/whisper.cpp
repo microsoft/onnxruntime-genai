@@ -44,7 +44,7 @@ void CXX_API(const char* model_path, int32_t num_beams) {
     const size_t batch_size = audio_paths.size();
     const char* prompt_tokens = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>";
     const std::vector<const char*> prompts(batch_size, prompt_tokens);
-    auto inputs = processor->ProcessAudios(const_cast<const char**>(prompts.data()), prompts.size(), audios.get());
+    auto inputs = processor->ProcessAudios(prompts, audios.get());
 
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
@@ -127,8 +127,11 @@ void C_API(const char* model_path, int32_t num_beams) {
     OgaNamedTensors* inputs;
     const size_t batch_size = audio_paths.size();
     const char* prompt_tokens = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>";
-    const std::vector<const char*> prompts(batch_size, prompt_tokens);
-    CheckResult(OgaProcessorProcessAudiosAndPrompts(processor, const_cast<const char**>(prompts.data()), batch_size, audios, &inputs));
+    std::vector<const char*> prompts(batch_size, prompt_tokens);
+    OgaStringArray* prompts_string_array;
+    CheckResult(OgaCreateStringArrayFromStrings(prompts.data(), prompts.size(), &prompts_string_array));
+    CheckResult(OgaProcessorProcessAudiosAndPrompts(processor, prompts_string_array, audios, &inputs));
+    OgaDestroyStringArray(prompts_string_array);
 
     std::cout << "Generating response..." << std::endl;
     OgaGeneratorParams* params;
