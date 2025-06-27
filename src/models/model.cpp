@@ -705,6 +705,10 @@ Model::~Model() {
     allocator.session_.reset();
     allocator.allocator_.reset();
     session_options_.reset();
+    // DML objects are globally scoped and launch background threads that retain hardware resources.
+    // These threads persist beyond the lifetime of a Model, preventing proper cleanup and potentially causing deadlocks.
+    // To avoid blocking driver threads, we explicitly destroy DML objects when the Model is destroyed.
+    // They will be recreated as needed when a new Model is initialized.
     CloseDmlInterface();
   }
 #endif
