@@ -104,7 +104,7 @@ public class MultiModalProcessor implements AutoCloseable {
   /**
    * Processes strings, images, and audios into a NamedTensor.
    *
-   * @param prompt Texts to encode as token ids.
+   * @param prompts Texts to encode as token ids.
    * @param images image inputs.
    * @param audios audio inputs.
    * @return NamedTensors object.
