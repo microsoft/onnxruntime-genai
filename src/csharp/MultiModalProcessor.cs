@@ -55,8 +55,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                 Result.VerifySuccess(NativeMethods.OgaStringArrayAddString(stringArray, StringUtils.ToUtf8(prompt)));
             }
             IntPtr imagesHandle = images == null ? IntPtr.Zero : images.Handle;
-            Result.VerifySuccess(NativeMethods.OgaProcessorProcessImages(_processorHandle, stringArray,
-                                                                         imagesHandle, out IntPtr namedTensorsHandle));
+            Result.VerifySuccess(NativeMethods.OgaProcessorProcessImagesAndPrompts(_processorHandle, stringArray,
+                                                                                   imagesHandle, out IntPtr namedTensorsHandle));
             NativeMethods.OgaDestroyStringArray(stringArray);
             return new NamedTensors(namedTensorsHandle);
         }
