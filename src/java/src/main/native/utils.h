@@ -9,7 +9,7 @@
 #include <string.h>
 #include "ort_genai_c.h"
 
-#ifndef _MSC_VER
+#ifdef _WIN32
 #define strdup _strdup
 #endif
 

@@ -55,7 +55,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndPrompts(J
   for (jsize i = 0; i < length_jsize; i++) {
     jstring prompt_jstring = reinterpret_cast<jstring>(env->GetObjectArrayElement(prompts, i));
     const char* prompt_c_str = env->GetStringUTFChars(prompt_jstring, nullptr);
-    prompts_[i] = _strdup(prompt_c_str);
+    prompts_[i] = strdup(prompt_c_str);
     env->ReleaseStringUTFChars(prompt_jstring, prompt_c_str);
     env->DeleteLocalRef(prompt_jstring);
   }
@@ -128,7 +128,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudiosAndPrompts(J
   for (jsize i = 0; i < length_jsize; i++) {
     jstring prompt_jstring = reinterpret_cast<jstring>(env->GetObjectArrayElement(prompts, i));
     const char* prompt_c_str = env->GetStringUTFChars(prompt_jstring, nullptr);
-    prompts_[i] = _strdup(prompt_c_str);
+    prompts_[i] = strdup(prompt_c_str);
     env->ReleaseStringUTFChars(prompt_jstring, prompt_c_str);
     env->DeleteLocalRef(prompt_jstring);
   }
@@ -203,7 +203,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudiosAnd
   for (jsize i = 0; i < length_jsize; i++) {
     jstring prompt_jstring = reinterpret_cast<jstring>(env->GetObjectArrayElement(prompts, i));
     const char* prompt_c_str = env->GetStringUTFChars(prompt_jstring, nullptr);
-    prompts_[i] = _strdup(prompt_c_str);
+    prompts_[i] = strdup(prompt_c_str);
     env->ReleaseStringUTFChars(prompt_jstring, prompt_c_str);
     env->DeleteLocalRef(prompt_jstring);
   }
