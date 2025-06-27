@@ -164,6 +164,9 @@ jobs:
       SpecificArtifact: false
       BuildId: ${{ parameters.BuildId }}
 
+  - script: 'pip install twine==6.0.1'
+    displayName: 'Install Twine'
+
   - task: TwineAuthenticate@1
     displayName: 'Twine Authenticate '
     inputs:
