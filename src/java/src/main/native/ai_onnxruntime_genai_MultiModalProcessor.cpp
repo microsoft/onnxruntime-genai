@@ -63,7 +63,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndPrompts(J
 
   OgaNamedTensors* named_tensors = nullptr;
   OgaStringArray* strs;
-  OgaCheckResult(OgaCreateStringArrayFromStrings(prompts_, length_int, &strs));
+  OgaCreateStringArrayFromStrings(prompts_, length_int, &strs);
   bool error = ThrowIfError(env, OgaProcessorProcessImagesAndPrompts(processor, strs, images, &named_tensors));
 
   for (jsize i = 0; i < length_jsize; i++) {
@@ -139,7 +139,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudiosAndPrompts(J
 
   OgaNamedTensors* named_tensors = nullptr;
   OgaStringArray* strs;
-  OgaCheckResult(OgaCreateStringArrayFromStrings(prompts_, length_int, &strs));
+  OgaCreateStringArrayFromStrings(prompts_, length_int, &strs);
   bool error = ThrowIfError(env, OgaProcessorProcessAudiosAndPrompts(processor, strs, audios, &named_tensors));
 
   for (jsize i = 0; i < length_jsize; i++) {
@@ -216,7 +216,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudiosAnd
 
   OgaNamedTensors* named_tensors = nullptr;
   OgaStringArray* strs;
-  OgaCheckResult(OgaCreateStringArrayFromStrings(prompts_, length_int, &strs));
+  OgaCreateStringArrayFromStrings(prompts_, length_int, &strs);
   bool error = ThrowIfError(env, OgaProcessorProcessImagesAndAudiosAndPrompts(processor, strs, images, audios, &named_tensors));
 
   for (jsize i = 0; i < length_jsize; i++) {
