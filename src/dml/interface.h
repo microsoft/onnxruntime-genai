@@ -13,6 +13,8 @@ namespace Generators {
 void InitDmlInterface(LUID* p_device_luid);
 void SetDmlProvider(OrtSessionOptions& options);
 
+void CloseDmlInterface();
+
 DeviceInterface* GetDmlInterface();
 
 }  // namespace Generators

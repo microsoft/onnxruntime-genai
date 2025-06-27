@@ -642,7 +642,21 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   p_device_kvcache_ = p_device_;
 }
 
-Model::~Model() = default;
+Model::~Model() {
+#if USE_DML
+  if (p_device_->GetType() == DeviceType::DML) {
+    auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::DML)];
+    allocator.session_.reset();
+    allocator.allocator_.reset();
+    session_options_.reset();
+    // DML objects are globally scoped and launch background threads that retain hardware resources.
+    // These threads persist beyond the lifetime of a Model, preventing proper cleanup and potentially causing deadlocks.
+    // To avoid blocking driver threads, we explicitly destroy DML objects when the Model is destroyed.
+    // They will be recreated as needed when a new Model is initialized.
+    CloseDmlInterface();
+  }
+#endif
+}
 
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                            OrtSessionOptions& session_options,
