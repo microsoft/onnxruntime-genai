@@ -1,0 +1,127 @@
+parameters:
+- name: SpecificArtifact
+  displayName: Use Specific Artifact
+  type: boolean
+  default: false
+- name: BuildId
+  displayName: Specific Artifact's BuildId
+  type: string
+  default: '0'
+- name: enable_win_cpu
+  type: boolean
+- name: enable_win_cuda
+  type: boolean
+- name: enable_win_dml
+  type: boolean
+- name: enable_win_arm64_cpu
+  type: boolean
+- name: enable_linux_cpu
+  type: boolean
+- name: enable_linux_cuda
+  type: boolean
+- name: enable_linux_rocm
+  type: boolean
+- name: enable_macos_cpu
+  type: boolean
+- name: cuda_versions
+  type: string
+  default: '12.2'
+- name: build_config
+  type: string
+  default: 'release'
+
+stages:
+- stage: python_publishing
+  jobs:
+  - ${{ if eq(parameters.enable_win_cpu, true) }}:
+    - template: jobs/py-publishing-job.yml
+      parameters:
+        arch: 'x64'
+        ep: 'cpu'
+        os: 'win'
+        SpecificArtifact: ${{ parameters.SpecificArtifact }}
+        build_config: ${{ parameters.build_config }}
+
+  - ${{ if eq(parameters.enable_win_arm64_cpu, true) }}:
+    - template: jobs/py-publishing-job.yml
+      parameters:
+        arch: 'arm64'
+        ep: 'cpu'
+        os: 'win'
+        build_config: ${{ parameters.build_config }}
+
+  - ${{ if eq(parameters.enable_win_dml, true) }}:
+    - template: jobs/py-publishing-job.yml
+      parameters:
+        arch: 'x64'
+        ep: 'directml'
+        os: 'win'
+        build_config: ${{ parameters.build_config }}
+
+  - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '11.8')) }}:
+    - template: jobs/py-publishing-job.yml
+      parameters:
+        arch: 'x64'
+        cuda_version: '11.8'
+        cuda_display_version: '118'
+        ep: 'cuda'
+        os: 'win'
+        build_config: ${{ parameters.build_config }}
+
+  - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '12.2')) }}:
+    - template: jobs/py-publishing-job.yml
+      parameters:
+        arch: 'x64'
+        cuda_version: '12.2'
+        cuda_display_version: '122'
+        ep: 'cuda'
+        os: 'win'
+        build_config: ${{ parameters.build_config }}
+
+  - ${{ if eq(parameters.enable_linux_cpu, true) }}:
+    - template: jobs/py-publishing-job.yml
+      parameters:
+        arch: 'x64'
+        ep: 'cpu'
+        os: 'linux'
+        build_config: ${{ parameters.build_config }}
+
+  - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '11.8')) }}:
+    - template: jobs/py-publishing-job.yml
+      parameters:
+        arch: 'x64'
+        cuda_version: '11.8'
+        cuda_display_version: '118'
+        ep: 'cuda'
+        os: 'linux'
+
+  - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '12.2')) }}:
+    - template: jobs/py-publishing-job.yml
+      parameters:
+        arch: 'x64'
+        cuda_version: '12.2'
+        cuda_display_version: '122'
+        ep: 'cuda'
+        os: 'linux'
+        build_config: ${{ parameters.build_config }}
+
+  - ${{ if eq(parameters.enable_linux_rocm, true) }}:
+    - template: jobs/py-publishing-job.yml
+      parameters:
+        arch: 'x64'
+        ep: 'rocm'
+        os: 'linux'
+        build_config: ${{ parameters.build_config }}
+  - ${{ if eq(parameters.enable_macos_cpu, true) }}:
+    - template: jobs/py-publishing-job.yml
+      parameters:
+        arch: 'x64'
+        ep: 'cpu'
+        os: 'osx'
+        build_config: ${{ parameters.build_config }}
+    - template: jobs/py-publishing-job.yml
+      parameters:
+        arch: 'arm64'
+        ep: 'cpu'
+        os: 'osx'
+        build_config: ${{ parameters.build_config }}

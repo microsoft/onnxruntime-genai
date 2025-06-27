@@ -4,6 +4,11 @@ parameters:
   type: boolean
   default: false
 
+- name: enable_nightly_publish
+  displayName: Whether Wheels should be published to nightly feed
+  type: boolean
+  default: false
+
 - name: enable_win_cpu
   displayName: 'Whether Windows CPU package is built.'
   type: boolean
@@ -102,6 +107,19 @@ extends:
         parameters:
           enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
           enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+          enable_win_cpu: ${{ parameters.enable_win_cpu }}
+          enable_win_cuda: ${{ parameters.enable_win_cuda }}
+          enable_win_dml: ${{ parameters.enable_win_dml }}
+          enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
+          enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+          cuda_versions: ${{ parameters.cuda_versions }}
+          SpecificArtifact: false
+    - ${{ if eq(parameters.enable_nightly_publish, true) }}:
+      - template: stages/py-publishing-stage.yml
+        parameters:
+          enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+          enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+          enable_linux_rocm: ${{ parameters.enable_linux_rocm }}
           enable_win_cpu: ${{ parameters.enable_win_cpu }}
           enable_win_cuda: ${{ parameters.enable_win_cuda }}
           enable_win_dml: ${{ parameters.enable_win_dml }}
