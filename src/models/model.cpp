@@ -698,7 +698,15 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   p_device_kvcache_ = p_device_;
 }
 
-Model::~Model() = default;
+Model::~Model() {
+  if (p_device_->GetType() == DeviceType::DML) {
+    auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::DML)];
+    allocator.session_.reset();
+    allocator.allocator_.reset();
+    session_options_.reset();
+    CloseDmlInterface();
+  }
+}
 
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                            OrtSessionOptions& session_options,
