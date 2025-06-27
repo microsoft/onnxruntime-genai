@@ -23,6 +23,9 @@ parameters:
   - 'linux'
   - 'win'
   - 'osx'
+- name: artifact_feed
+  type: string
+  default: 'ORT-Nightly'
 
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_packaging
@@ -114,7 +117,7 @@ jobs:
       DIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
       DIR "C:\Python"
     displayName: Copy python 3.12.3 version to agent tools directory
-    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['py_dot_ver'], '3.12'))
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.12'))
 
   - script: |
       MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
@@ -125,7 +128,7 @@ jobs:
       DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
       DIR "C:\Python"
     displayName: Copy python 3.11.0 version to agent tools directory
-    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['py_dot_ver'], '3.11'))
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.11'))
 
   - task: UsePythonVersion@0
     inputs:
@@ -150,5 +153,14 @@ jobs:
       TargetPath: '$(Build.BinariesDirectory)/wheel'
       SpecificArtifact: false
       BuildId: ${{ parameters.BuildId }}
+
+  - task: TwineAuthenticate@1
+    displayName: 'Twine Authenticate '
+    inputs:
+      artifactFeed: PublicPackages/${{ parameters.artifact_feed }}
+
+  - script: 'python -m twine upload -r ${{ parameters.artifact_feed }} --config-file $(PYPIRC_PATH) --non-interactive *.whl'
+    workingDirectory: '$(Build.BinariesDirectory)/wheel'
+    displayName: 'Uploading wheels to ${{ parameters.artifact_feed }} feed'
 
   - template: steps/compliant-and-cleanup-step.yml
