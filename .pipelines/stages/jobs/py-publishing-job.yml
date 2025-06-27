@@ -129,14 +129,24 @@ jobs:
 
   - task: UsePythonVersion@0
     inputs:
-      versionSpec: $(py_dot_ver)
+      versionSpec: $(PyDotVer)
       addToPath: true
       architecture: $(arch)
+
+  - task: PythonScript@0
+    inputs:
+      scriptSource: inline
+      script: |
+        import sys
+        import subprocess
+        subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'build', 'packaging', 'twine'])
+      workingDirectory: '$(Build.BinariesDirectory)'
+    displayName: 'Install python modules'
 
   - template: steps/utils/flex-download-pipeline-artifact.yml
     parameters:
       StepName: 'Download Python Wheel Artifacts'
-      ArtifactName: $(ArtifactName)-wheel
+      ArtifactName: $(ArtifactName)-$(PyNoDotVer)-wheel
       TargetPath: '$(Build.BinariesDirectory)/wheel'
       SpecificArtifact: false
       BuildId: ${{ parameters.BuildId }}
