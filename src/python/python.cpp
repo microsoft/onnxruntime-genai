@@ -510,7 +510,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
             std::vector<const char*> c_prompts;
             if (pybind11::isinstance<pybind11::str>(prompts)) {
               // One prompt
-              return processor.ProcessImagesAndAudios(prompt.value_or("").c_str(), images, audios); 
+              return processor.ProcessImagesAndAudios(prompts.cast<std::string>().c_str(), images, audios); 
             }
             else if (pybind11::isinstance<pybind11::list>(prompts)) {
               // Multiple prompts

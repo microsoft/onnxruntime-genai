@@ -52,7 +52,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndPrompts(J
 
   jsize length_jsize = env->GetArrayLength(prompts);
   int length_int = reinterpret_cast<int>(length_jsize);
-  size_t length_sizet = reinterpret_cast<size_t>(length_jsize);
   const char** prompts_ = new const char*[length_int];
   for (jsize i = 0; i < length_jsize; i++) {
     jstring prompt_jstring = reinterpret_cast<jstring>(env->GetObjectArrayElement(prompts, i));
@@ -64,7 +63,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndPrompts(J
 
   OgaNamedTensors* named_tensors = nullptr;
   OgaStringArray* strs;
-  OgaCheckResult(OgaCreateStringArrayFromStrings(prompts_, length_sizet, &strs));
+  OgaCheckResult(OgaCreateStringArrayFromStrings(prompts_, length_int, &strs));
   bool error = ThrowIfError(env, OgaProcessorProcessImagesAndPrompts(processor, strs, images, &named_tensors));
 
   for (jsize i = 0; i < length_jsize; i++) {
@@ -129,7 +128,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudiosAndPrompts(J
 
   jsize length_jsize = env->GetArrayLength(prompts);
   int length_int = reinterpret_cast<int>(length_jsize);
-  size_t length_sizet = reinterpret_cast<size_t>(length_jsize);
   const char** prompts_ = new const char*[length_int];
   for (jsize i = 0; i < length_jsize; i++) {
     jstring prompt_jstring = reinterpret_cast<jstring>(env->GetObjectArrayElement(prompts, i));
@@ -141,7 +139,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudiosAndPrompts(J
 
   OgaNamedTensors* named_tensors = nullptr;
   OgaStringArray* strs;
-  OgaCheckResult(OgaCreateStringArrayFromStrings(prompts_, length_sizet, &strs));
+  OgaCheckResult(OgaCreateStringArrayFromStrings(prompts_, length_int, &strs));
   bool error = ThrowIfError(env, OgaProcessorProcessAudiosAndPrompts(processor, strs, audios, &named_tensors));
 
   for (jsize i = 0; i < length_jsize; i++) {
@@ -207,7 +205,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudiosAnd
 
   jsize length_jsize = env->GetArrayLength(prompts);
   int length_int = reinterpret_cast<int>(length_jsize);
-  size_t length_sizet = reinterpret_cast<size_t>(length_jsize);
   const char** prompts_ = new const char*[length_int];
   for (jsize i = 0; i < length_jsize; i++) {
     jstring prompt_jstring = reinterpret_cast<jstring>(env->GetObjectArrayElement(prompts, i));
@@ -219,7 +216,7 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudiosAnd
 
   OgaNamedTensors* named_tensors = nullptr;
   OgaStringArray* strs;
-  OgaCheckResult(OgaCreateStringArrayFromStrings(prompts_, length_sizet, &strs));
+  OgaCheckResult(OgaCreateStringArrayFromStrings(prompts_, length_int, &strs));
   bool error = ThrowIfError(env, OgaProcessorProcessImagesAndAudiosAndPrompts(processor, strs, images, audios, &named_tensors));
 
   for (jsize i = 0; i < length_jsize; i++) {
