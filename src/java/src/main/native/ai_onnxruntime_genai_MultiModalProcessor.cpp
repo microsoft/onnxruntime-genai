@@ -42,7 +42,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImages(JNIEnv* env
   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
 }
 
-
 JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndPrompts(JNIEnv* env, jobject thiz, jlong processor_handle,
                                                                                jobjectArray prompts, jlong images_handle) {
@@ -51,12 +50,12 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndPrompts(J
   OgaImages* images = reinterpret_cast<OgaImages*>(images_handle);
 
   jsize length_jsize = env->GetArrayLength(prompts);
-  int length_int = reinterpret_cast<int>(length_jsize);
+  int length_int = static_cast<int>(length_jsize);
   const char** prompts_ = new const char*[length_int];
   for (jsize i = 0; i < length_jsize; i++) {
     jstring prompt_jstring = reinterpret_cast<jstring>(env->GetObjectArrayElement(prompts, i));
     const char* prompt_c_str = env->GetStringUTFChars(prompt_jstring, nullptr);
-    prompts_[i] = strdup(prompt_c_str);
+    prompts_[i] = _strdup(prompt_c_str);
     env->ReleaseStringUTFChars(prompt_jstring, prompt_c_str);
     env->DeleteLocalRef(prompt_jstring);
   }
@@ -72,7 +71,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndPrompts(J
   OgaDestroyStringArray(strs);
   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
 }
-
 
 // JNIEXPORT jlong JNICALL
 // Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndPrompts(JNIEnv* env, jobject thiz, jlong processor_handle,
@@ -102,7 +100,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndPrompts(J
 //   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
 // }
 
-
 JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudios(JNIEnv* env, jobject thiz, jlong processor_handle,
                                                                      jstring prompt, jlong audios_handle) {
@@ -118,7 +115,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudios(JNIEnv* env
   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
 }
 
-
 JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudiosAndPrompts(JNIEnv* env, jobject thiz, jlong processor_handle,
                                                                                jobjectArray prompts, jlong audios_handle) {
@@ -127,12 +123,12 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudiosAndPrompts(J
   OgaAudios* audios = reinterpret_cast<OgaAudios*>(audios_handle);
 
   jsize length_jsize = env->GetArrayLength(prompts);
-  int length_int = reinterpret_cast<int>(length_jsize);
+  int length_int = static_cast<int>(length_jsize);
   const char** prompts_ = new const char*[length_int];
   for (jsize i = 0; i < length_jsize; i++) {
     jstring prompt_jstring = reinterpret_cast<jstring>(env->GetObjectArrayElement(prompts, i));
     const char* prompt_c_str = env->GetStringUTFChars(prompt_jstring, nullptr);
-    prompts_[i] = strdup(prompt_c_str);
+    prompts_[i] = _strdup(prompt_c_str);
     env->ReleaseStringUTFChars(prompt_jstring, prompt_c_str);
     env->DeleteLocalRef(prompt_jstring);
   }
@@ -148,7 +144,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudiosAndPrompts(J
   OgaDestroyStringArray(strs);
   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
 }
-
 
 // JNIEXPORT jlong JNICALL
 // Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudiosAndPrompts(JNIEnv* env, jobject thiz, jlong processor_handle,
@@ -194,7 +189,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudios(JN
   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
 }
 
-
 JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudiosAndPrompts(JNIEnv* env, jobject thiz, jlong processor_handle,
                                                                                         jobjectArray prompts, jlong images_handle, jlong audios_handle) {
@@ -204,12 +198,12 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudiosAnd
   OgaAudios* audios = reinterpret_cast<OgaAudios*>(audios_handle);
 
   jsize length_jsize = env->GetArrayLength(prompts);
-  int length_int = reinterpret_cast<int>(length_jsize);
+  int length_int = static_cast<int>(length_jsize);
   const char** prompts_ = new const char*[length_int];
   for (jsize i = 0; i < length_jsize; i++) {
     jstring prompt_jstring = reinterpret_cast<jstring>(env->GetObjectArrayElement(prompts, i));
     const char* prompt_c_str = env->GetStringUTFChars(prompt_jstring, nullptr);
-    prompts_[i] = strdup(prompt_c_str);
+    prompts_[i] = _strdup(prompt_c_str);
     env->ReleaseStringUTFChars(prompt_jstring, prompt_c_str);
     env->DeleteLocalRef(prompt_jstring);
   }
@@ -225,7 +219,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudiosAnd
   OgaDestroyStringArray(strs);
   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
 }
-
 
 // JNIEXPORT jlong JNICALL
 // Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudiosAndPrompts(JNIEnv* env, jobject thiz, jlong processor_handle,
@@ -255,7 +248,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudiosAnd
 //   OgaDestroyStringArray(strs);
 //   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
 // }
-
 
 JNIEXPORT jstring JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_processorDecode(JNIEnv* env, jobject thiz, jlong processor_handle,

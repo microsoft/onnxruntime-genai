@@ -9,6 +9,10 @@
 #include <string.h>
 #include "ort_genai_c.h"
 
+#ifndef _MSC_VER
+#define strdup _strdup
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

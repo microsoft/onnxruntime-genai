@@ -115,7 +115,8 @@ public class MultiModalProcessor implements AutoCloseable {
     long imagesHandle = (images == null) ? 0 : images.nativeHandle();
     long audiosHandle = (audios == null) ? 0 : audios.nativeHandle();
     long namedTensorsHandle =
-        processorProcessImagesAndAudiosAndPrompts(nativeHandle, prompts, imagesHandle, audiosHandle);
+        processorProcessImagesAndAudiosAndPrompts(
+            nativeHandle, prompts, imagesHandle, audiosHandle);
 
     return new NamedTensors(namedTensorsHandle);
   }
@@ -172,14 +173,14 @@ public class MultiModalProcessor implements AutoCloseable {
   private native long processorProcessImages(long processorHandle, String prompt, long imagesHandle)
       throws GenAIException;
 
-  private native long processorProcessImagesAndPrompts(long processorHandle, String[] prompts, long imagesHandle)
-      throws GenAIException;
+  private native long processorProcessImagesAndPrompts(
+      long processorHandle, String[] prompts, long imagesHandle) throws GenAIException;
 
   private native long processorProcessAudios(long processorHandle, String prompt, long audiosHandle)
       throws GenAIException;
 
-  private native long processorProcessAudiosAndPrompts(long processorHandle, String[] prompts, long audiosHandle)
-      throws GenAIException;
+  private native long processorProcessAudiosAndPrompts(
+      long processorHandle, String[] prompts, long audiosHandle) throws GenAIException;
 
   private native long processorProcessImagesAndAudios(
       long processorHandle, String prompt, long imagesHandle, long audiosHandle)

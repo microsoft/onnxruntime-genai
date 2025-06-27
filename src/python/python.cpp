@@ -510,9 +510,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
             std::vector<const char*> c_prompts;
             if (pybind11::isinstance<pybind11::str>(prompts)) {
               // One prompt
-              return processor.ProcessImagesAndAudios(prompts.cast<std::string>().c_str(), images, audios); 
-            }
-            else if (pybind11::isinstance<pybind11::list>(prompts)) {
+              return processor.ProcessImagesAndAudios(prompts.cast<std::string>().c_str(), images, audios);
+            } else if (pybind11::isinstance<pybind11::list>(prompts)) {
               // Multiple prompts
               for (const auto& prompt : prompts) {
                 if (!pybind11::isinstance<pybind11::str>(prompt)) {
@@ -521,8 +520,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
                 prompts_str.push_back(prompt.cast<std::string>());
                 c_prompts.push_back(prompts_str.back().c_str());
               }
-            }
-            else if (!prompts.is_none()) {
+            } else if (!prompts.is_none()) {
               // Unsupported type for prompts
               throw std::runtime_error("Unsupported type for prompts. Prompts must be a string or a list of strings.");
             }
