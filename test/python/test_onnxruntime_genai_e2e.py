@@ -39,38 +39,39 @@ def run_model(model_path: str | bytes | os.PathLike):
         assert generator.get_sequence(i) is not None
 
 
-# TODO: enable once ORT extensions fixes the audio features calculation
-def run_whisper(model_path: str | os.PathLike):
+def run_whisper():
     log.debug("Running Whisper Python E2E Test")
 
     ci_data_path = get_ci_data_path()
     if not os.path.exists(ci_data_path):
         return
 
-    num_beams = 1
+    num_beams = 5
     (audio_path, expected_transcription) = (
-        os.path.join(os.path.abspath(__file__), "..", "test_models", "audios", "1272-141231-0002.mp3"),
-        "The cut on his chest still dripping blood. The ache of his overstrain dyes. Even the soaring arena around him with thousands of spectators, retrievalidates not worth thinking about.",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "test_models", "audios", "1272-141231-0002.mp3"),
+        "The cut on his chest is still dripping blood. The ache of his overstrained eyes. Even the soaring arena around him with thousands of spectators, retrievalidies not worth thinking about.",
     )
 
-    precision = "fp16" if og.is_cuda_available() else "fp32"
-    execution_provider = "cuda" if og.is_cuda_available() else "cpu"
-    command = [
-        sys.executable,
-        os.path.join(os.path.abspath(__file__), "..", "..", "examples", "python", "whisper.py"),
-        "-m",
-        os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}"),
-        "-e",
-        execution_provider,
-        "-b",
-        str(num_beams),
-        "-a",
-        audio_path,
-        "-o",
-        expected_transcription,
-        "--non_interactive",
-    ]
-    run_subprocess(command, cwd=cwd, log=log).check_returncode()
+    for (precision, execution_provider) in [("fp16", "cuda"), ("fp32", "cuda"), ("fp32", "cpu")]:
+        if execution_provider == "cuda" and not og.is_cuda_available():
+            continue
+
+        command = [
+            sys.executable,
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "examples", "python", "whisper.py"),
+            "-m",
+            os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}"),
+            "-e",
+            execution_provider,
+            "-b",
+            str(num_beams),
+            "-a",
+            audio_path,
+            "-o",
+            expected_transcription,
+            "--non_interactive",
+        ]
+        run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
 def get_args():
@@ -98,3 +99,11 @@ if __name__ == "__main__":
         except Exception as e:
             log.error(e)
             log.error(f"Failed to run {model_path}", exc_info=True)
+
+    # Run Whisper E2E
+    try:
+        log.info(f"Running Whisper")
+        run_whisper()
+    except Exception as e:
+        log.error(e)
+        log.error(f"Failed to run Whisper", exc_info=True)

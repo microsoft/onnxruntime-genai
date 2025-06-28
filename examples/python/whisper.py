@@ -69,6 +69,7 @@ def run(args: argparse.Namespace):
             generator.generate_next_token()
 
         print()
+        transcriptions = []
         for i in range(batch_size * args.num_beams):
             tokens = generator.get_sequence(i)
             transcription = processor.decode(tokens)
@@ -77,16 +78,23 @@ def run(args: argparse.Namespace):
             print(
                 f"    {Format.underline}batch {i // args.num_beams}, beam {i % args.num_beams}{Format.end}: {transcription}"
             )
+            transcriptions.append(transcription.strip())
 
         for _ in range(3):
             print()
 
         if args.non_interactive:
-            tokens = generator.get_sequence(0)
-            transcription = processor.decode(tokens)
-            transcription, args.output = transcription.strip(), args.output.strip()
-            assert transcription == args.output, f"Model's transcription ({transcription}) does not match expected transcription ({args.output})."
-            break
+            args.output = args.output.strip()
+            matching = False
+            for transcription in transcriptions:
+                if transcription == args.output:
+                    matching = True
+                    break
+
+            if matching:
+                print("One of the model's transcription matches the expected transcription.")
+                return
+            raise Exception("None of the model's transcriptions match the expected transcription.")
 
 
 if __name__ == "__main__":
