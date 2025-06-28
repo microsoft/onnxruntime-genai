@@ -243,26 +243,24 @@ struct Config {
 
   } model;
 
-  // clang-format off
   struct Search {
     bool do_sample{};                  // True to do randomized sampling through top_k and top_p, if false, the top logit score is chosen
-    int min_length{};
+    int min_length{};                  // Minimum length for final sequence length
     int max_length{};                  // If omitted or 0 in json file, will be set to model.context_length on load
-    int batch_size{1};
+    int batch_size{1};                 // Batch size of inputs. Default is 1.
     int num_beams{1};                  // 1 means no beam search.
-    int num_return_sequences{1};
+    int num_return_sequences{1};       // Number of sequences to return after search. Default is 1.
     float repetition_penalty{1.0f};    // 1.0 means no penalty.
     int top_k{};                       // Number of highest probability vocabulary tokens to keep for top-k-filtering that will be used by default in the generate method of the model.
     float top_p{};                     // If set to float >0 and <1, only the most probable tokens with probabilities that add up to top_p or higher are kept for generation.
-    float temperature{1.0f};
+    float temperature{1.0f};           // Temperature to control during generation. Default is 1.0.
     bool early_stopping{true};         //  Whether to stop the beam search when at least num_beams sentences are finished per batch or not.
-    int no_repeat_ngram_size{};
-    float diversity_penalty{};
+    int no_repeat_ngram_size{};        // Unused param
+    float diversity_penalty{};         // Unused param
     float length_penalty{1.0f};        // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
   } search;
-  // clang-format on
 
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping

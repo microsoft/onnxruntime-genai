@@ -478,17 +478,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetInput(const OgaGenerator* gen
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* generator, const char* name, OgaTensor** out);
 
 /**
- * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
- *       and will be released when the OgaTensor is destroyed
- * \param[in] oga_generator The generator to run the GetInput or GetOutput method on the name provided and the out pointer to store the output.
- * \param[in] name The name of the tensor.
- * \param[in] is_input Whether the tensor name is for an input or not.
- * \param[out] out The returned OgaTensor.
- * \return OgaResult containing the error message if the computation failed.
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetInputOutput(const OgaGenerator* oga_generator, const char* name, bool is_input, OgaTensor** out);
-
-/**
  * \brief Returns a copy of the logits from the model as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
  *        and will be released when the OgaTensor is destroyed
  * \param[in] generator The generator get the logits from

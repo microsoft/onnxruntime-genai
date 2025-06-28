@@ -237,7 +237,7 @@ void WhisperState::TransposeKCaches(std::vector<std::unique_ptr<OrtValue>>& kv_c
 
     // Copy the original 'K' caches to a temporary buffer in order to
     // use the destination buffer to store the transposed 'K' caches
-    temp_span.CopyFrom(dest_span, false);
+    temp_span.subspan(0, dest_span.size()).CopyFrom(dest_span);
 
     // Transpose each 'K' cache
     model_.p_device_inputs_->ReorderPastStates(kv_caches[i]->GetTensorMutableRawData(),

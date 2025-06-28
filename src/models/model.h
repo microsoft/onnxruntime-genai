@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
+#include "model_type.h"
 #include "ortx_tokenizer.h"
 #include "../generators.h"
 #include "utils.h"
@@ -165,43 +166,6 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
                                       bool disable_graph_capture);
 
   std::map<std::string, std::unique_ptr<OrtSessionOptions>> pipeline_session_options_;
-};
-
-struct ModelType {
-  // Large-language model (LLM)
-  inline static std::unordered_set<std::string> LLM = {"chatglm", "decoder", "gemma", "gemma2", "gemma3_text", "gpt2", "granite", "llama", "mistral", "nemotron", "olmo", "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen3"};
-
-  // Vision-language model (VLM)
-  inline static std::unordered_set<std::string> VLM = {"gemma3", "phi3v"};
-
-  // Audio-language model (ALM)
-  inline static std::unordered_set<std::string> ALM = {"whisper"};
-
-  // Multi-modal model (MMM)
-  inline static std::unordered_set<std::string> MMM = {"phi4mm"};
-
-  // Pipeline (Pipe)
-  inline static std::unordered_set<std::string> Pipe = {"decoder-pipeline"};
-
-  inline static bool IsLLM(const std::string& model_type) {
-    return LLM.find(model_type) != LLM.end();
-  }
-
-  inline static bool IsVLM(const std::string& model_type) {
-    return VLM.find(model_type) != VLM.end();
-  }
-
-  inline static bool IsALM(const std::string& model_type) {
-    return ALM.find(model_type) != ALM.end();
-  }
-
-  inline static bool IsMMM(const std::string& model_type) {
-    return MMM.find(model_type) != MMM.end();
-  }
-
-  inline static bool IsPipe(const std::string& model_type) {
-    return Pipe.find(model_type) != Pipe.end();
-  }
 };
 
 }  // namespace Generators

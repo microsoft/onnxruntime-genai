@@ -72,34 +72,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndPrompts(J
   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
 }
 
-// JNIEXPORT jlong JNICALL
-// Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndPrompts(JNIEnv* env, jobject thiz, jlong processor_handle,
-//                                                                                jobjectArray prompts, jlong images_handle) {
-//   const OgaMultiModalProcessor* processor = reinterpret_cast<const OgaMultiModalProcessor*>(processor_handle);
-
-//   OgaImages* images = reinterpret_cast<OgaImages*>(images_handle);
-
-//   std::vector<jstring> prompts_jstring;
-//   std::vector<const char*> prompts_;
-//   for (jsize i = 0; i < env->GetArrayLength(prompts); i++) {
-//     jstring prompt = reinterpret_cast<jstring>(env->GetObjectArrayElement(prompts, i));
-//     const char* prompt_str = env->GetStringUTFChars(prompt, nullptr);
-//     prompts_jstring.push_back(prompt);
-//     prompts_.push_back(prompt_str);
-//   }
-
-//   OgaNamedTensors* named_tensors = nullptr;
-//   OgaStringArray* strs;
-//   OgaCheckResult(OgaCreateStringArrayFromStrings(prompts_.data(), prompts_.size(), &strs));
-//   bool error = ThrowIfError(env, OgaProcessorProcessImagesAndPrompts(processor, strs, images, &named_tensors));
-
-//   for (jsize i = 0; i < env->GetArrayLength(prompts); i++) {
-//     env->ReleaseStringUTFChars(prompts_jstring[i], prompts_[i]);
-//   }
-//   OgaDestroyStringArray(strs);
-//   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
-// }
-
 JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudios(JNIEnv* env, jobject thiz, jlong processor_handle,
                                                                      jstring prompt, jlong audios_handle) {
@@ -144,34 +116,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudiosAndPrompts(J
   OgaDestroyStringArray(strs);
   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
 }
-
-// JNIEXPORT jlong JNICALL
-// Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessAudiosAndPrompts(JNIEnv* env, jobject thiz, jlong processor_handle,
-//                                                                                jobjectArray prompts, jlong audios_handle) {
-//   const OgaMultiModalProcessor* processor = reinterpret_cast<const OgaMultiModalProcessor*>(processor_handle);
-
-//   OgaAudios* audios = reinterpret_cast<OgaAudios*>(audios_handle);
-
-//   std::vector<jstring> prompts_jstring;
-//   std::vector<const char*> prompts_;
-//   for (jsize i = 0; i < env->GetArrayLength(prompts); i++) {
-//     jstring prompt = reinterpret_cast<jstring>(env->GetObjectArrayElement(prompts, i));
-//     const char* prompt_str = env->GetStringUTFChars(prompt, nullptr);
-//     prompts_jstring.push_back(prompt);
-//     prompts_.push_back(prompt_str);
-//   }
-
-//   OgaNamedTensors* named_tensors = nullptr;
-//   OgaStringArray* strs;
-//   OgaCheckResult(OgaCreateStringArrayFromStrings(prompts_.data(), prompts_.size(), &strs));
-//   bool error = ThrowIfError(env, OgaProcessorProcessAudiosAndPrompts(processor, strs, audios, &named_tensors));
-
-//   for (jsize i = 0; i < env->GetArrayLength(prompts); i++) {
-//     env->ReleaseStringUTFChars(prompts_jstring[i], prompts_[i]);
-//   }
-//   OgaDestroyStringArray(strs);
-//   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
-// }
 
 JNIEXPORT jlong JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudios(JNIEnv* env, jobject thiz, jlong processor_handle,
@@ -219,35 +163,6 @@ Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudiosAnd
   OgaDestroyStringArray(strs);
   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
 }
-
-// JNIEXPORT jlong JNICALL
-// Java_ai_onnxruntime_genai_MultiModalProcessor_processorProcessImagesAndAudiosAndPrompts(JNIEnv* env, jobject thiz, jlong processor_handle,
-//                                                                                         jobjectArray prompts, jlong images_handle, jlong audios_handle) {
-//   const OgaMultiModalProcessor* processor = reinterpret_cast<const OgaMultiModalProcessor*>(processor_handle);
-
-//   OgaImages* images = reinterpret_cast<OgaImages*>(images_handle);
-//   OgaAudios* audios = reinterpret_cast<OgaAudios*>(audios_handle);
-
-//   std::vector<jstring> prompts_jstring;
-//   std::vector<const char*> prompts_;
-//   for (jsize i = 0; i < env->GetArrayLength(prompts); i++) {
-//     jstring prompt = reinterpret_cast<jstring>(env->GetObjectArrayElement(prompts, i));
-//     const char* prompt_str = env->GetStringUTFChars(prompt, nullptr);
-//     prompts_jstring.push_back(prompt);
-//     prompts_.push_back(prompt_str);
-//   }
-
-//   OgaNamedTensors* named_tensors = nullptr;
-//   OgaStringArray* strs;
-//   OgaCheckResult(OgaCreateStringArrayFromStrings(prompts_.data(), prompts_.size(), &strs));
-//   bool error = ThrowIfError(env, OgaProcessorProcessImagesAndAudiosAndPrompts(processor, strs, images, audios, &named_tensors));
-
-//   for (jsize i = 0; i < env->GetArrayLength(prompts); i++) {
-//     env->ReleaseStringUTFChars(prompts_jstring[i], prompts_[i]);
-//   }
-//   OgaDestroyStringArray(strs);
-//   return error ? 0 : reinterpret_cast<jlong>(named_tensors);
-// }
 
 JNIEXPORT jstring JNICALL
 Java_ai_onnxruntime_genai_MultiModalProcessor_processorDecode(JNIEnv* env, jobject thiz, jlong processor_handle,

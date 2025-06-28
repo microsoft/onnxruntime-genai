@@ -324,8 +324,6 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     throw std::runtime_error("input_ids is empty");
   if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
     throw std::runtime_error("input_ids size (" + std::to_string(input_ids.size()) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
-  if (!ModelType::IsLLM(model_->config_->model.type) && !ModelType::IsALM(model_->config_->model.type) && !ModelType::IsPipe(model_->config_->model.type))
-    throw std::runtime_error("Please use generator.SetInputs for " + model_->config_->model.type + ". AppendTokens is not supported directly for this model type.");
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
     throw std::runtime_error("AppendTokens can only be called once for batch_size > 1. To call AppendTokens again, use RewindToLength(0)");
 
