@@ -415,6 +415,7 @@ class SLM_ENGINE_EXPORT SLMEngine {
   /// @brief Enum to define the supported model types
   enum class SupportedModelType { PHI,
                                   Llama,
+                                  Qwen,
                                   CUSTOM,
                                   UNKNOWN };
 

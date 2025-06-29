@@ -59,6 +59,8 @@ SLMEngine::SupportedModelType SLMEngine::StringToModelType(const std::string& mo
     return SLMEngine::SupportedModelType::PHI;
   } else if (strncasecmp(model_type.c_str(), "llama", 5) == 0) {
     return SLMEngine::SupportedModelType::Llama;
+  } else if (strncasecmp(model_type.c_str(), "qwen", 4) == 0) {
+    return SLMEngine::SupportedModelType::Qwen;
   } else if (strncasecmp(model_type.c_str(), "custom", 6) == 0) {
     return SLMEngine::SupportedModelType::CUSTOM;
   }
@@ -71,6 +73,8 @@ std::string SLMEngine::ModelTypeToString(SLMEngine::SupportedModelType model_typ
       return "phi";
     case SLMEngine::SupportedModelType::Llama:
       return "llama";
+    case SLMEngine::SupportedModelType::Qwen:
+      return "qwen";
     case SLMEngine::SupportedModelType::CUSTOM:
       return "custom";
     case SLMEngine::SupportedModelType::UNKNOWN:
@@ -623,6 +627,15 @@ const auto PromptFormatTable = R"(
          "system": { "prefix": "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n", "suffix": "<|eot_id|>" },
          "user": { "prefix": "<|start_header_id|>user<|end_header_id|>\n\n", "suffix": "<|eot_id|>" },
          "assistant": { "prefix": "<|start_header_id|>assistant<|end_header_id|>\n\n", "suffix": "<|eot_id|>" },
+         "tool": { "prefix": "<|tool|>", "suffix": "<|/tool|>" }
+      }
+   },
+   {     
+      "llm_type": "qwen",
+      "prompt_format": {
+         "system": { "prefix": "<|im_start|>system\n", "suffix": "<|im_end|>" },
+         "user": { "prefix": "<|im_start|>user\n/no_think ", "suffix": "<|im_end|>" },
+         "assistant": { "prefix": "<|im_start|>assistant\n", "suffix": "<|im_end|>" },
          "tool": { "prefix": "<|tool|>", "suffix": "<|/tool|>" }
       }
    },

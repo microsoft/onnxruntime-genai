@@ -28,6 +28,21 @@ using json = nlohmann::json;
 
 using namespace std;
 
+// Function to clean qwen model response formatting
+std::string cleanQwenResponse(const std::string& input) {
+  std::string result = input;
+  
+  // Remove <think>\n\n</think>\n\n pattern
+  std::regex think_pattern(R"(<think>[\s\S]*?</think>\s*\n*)");
+  result = std::regex_replace(result, think_pattern, "");
+  
+  // Replace markdown json code blocks ```json ``` with just the content
+  std::regex json_pattern(R"(```json\s*\n([\s\S]*?)\n\s*```)");
+  result = std::regex_replace(result, json_pattern, "$1");
+  
+  return result;
+}
+
 int run_server(const string& model_path,
                int port_number, bool verbose) {
   // Create the SLM
@@ -87,9 +102,15 @@ int run_server(const string& model_path,
             output_json["response"].contains("answer")) {
           std::string answer = output_json["response"]["answer"];
 
+          // Clean qwen model specific formatting
+          answer = cleanQwenResponse(answer);
+
           // Trim whitespace
           answer.erase(0, answer.find_first_not_of(" \t\n\r"));
           answer.erase(answer.find_last_not_of(" \t\n\r") + 1);
+
+          // Update the cleaned answer back to the response
+          output_json["response"]["answer"] = answer;
 
           // Check if answer starts with '[' and ends with ']' (JSON array format)
           if (answer.length() > 0 && answer[0] == '[' && answer.back() == ']') {
@@ -178,6 +199,14 @@ int run_server(const string& model_path,
         auto response = slm_engine->complete(req.body.c_str());
         json output_json = json::parse(response);
 
+        // Clean qwen model specific formatting for regular responses too
+        if (output_json.contains("response") && 
+            output_json["response"].contains("answer")) {
+          std::string answer = output_json["response"]["answer"];
+          answer = cleanQwenResponse(answer);
+          output_json["response"]["answer"] = answer;
+        }
+
         // Print KPIs for regular completion
         cout << "Prompt Tokens: "
              << output_json["kpi"]["prompt_toks"] << " "
@@ -193,7 +222,7 @@ int run_server(const string& model_path,
         flush(cout);
 
         res.status = 200;
-        res.set_content(response, "application/json");
+        res.set_content(output_json.dump(), "application/json");
       }
 
     } catch (const std::exception& e) {
