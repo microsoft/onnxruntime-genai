@@ -85,6 +85,636 @@
       "createdDate": "2025-06-13 11:20:31Z",
       "expirationDate": "2025-11-30 12:02:07Z",
       "justification": "This error is baselined with an expiration date of 180 days from 2025-06-13 12:02:07Z"
+    },
+    "2e45b976337b27e81b8aa06611db1beab407a4735bfaf81d571843ac0117b423": {
+      "signature": "2e45b976337b27e81b8aa06611db1beab407a4735bfaf81d571843ac0117b423",
+      "alternativeSignatures": [
+        "61f6acecfad162c896c9560fb210edf9a896b91e1cf49a940ab1950abb545afd"
+      ],
+      "target": "build/cuda/win-x64/wheel/onnxruntime_genai/onnxruntime_genai.cp311-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:05:06Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "f01baadb60794ae9ccdd959188900db5ed18b3512020f4c1a92fd6e876931563": {
+      "signature": "f01baadb60794ae9ccdd959188900db5ed18b3512020f4c1a92fd6e876931563",
+      "alternativeSignatures": [
+        "8facd3e4c892ec36799d87c29a71ebe2eb41f4c5c155eb1495c7806c415b68b8"
+      ],
+      "target": "build/cuda/win-x64/src/python/Release/onnxruntime_genai.cp311-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:05:06Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "84e0017fc471ebf357016ca5f4daad44a62285e3212f89417aa34bee59b2f9e4": {
+      "signature": "84e0017fc471ebf357016ca5f4daad44a62285e3212f89417aa34bee59b2f9e4",
+      "alternativeSignatures": [
+        "e165e6fbecfd5a8a3da8395ef574e2cf80f65d232dbaa5278f7e71e2e57b9838"
+      ],
+      "target": "build/cuda/win-x64/wheel/build/lib.win-amd64-cpython-311/onnxruntime_genai/onnxruntime_genai.cp311-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:05:06Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "3e7985cdeaf26600a2b31873ee00c03670102103f445f75146da45315e983514": {
+      "signature": "3e7985cdeaf26600a2b31873ee00c03670102103f445f75146da45315e983514",
+      "alternativeSignatures": [
+        "a3617229cf91a09db6683da6d140ef49aeebd1df4bd5fd1248c87a8a4e4e9c4b"
+      ],
+      "target": "build/directml/win-x64/wheel/onnxruntime_genai/onnxruntime_genai.cp312-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:06:45Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "eb8812ed8a4c27181a6388d2ed419875f2bfbc0ed6f5f466d7b4ddbff99d7760": {
+      "signature": "eb8812ed8a4c27181a6388d2ed419875f2bfbc0ed6f5f466d7b4ddbff99d7760",
+      "alternativeSignatures": [
+        "0218942873503b9f900fd7c14e1ea05c625889b4928d83db85a04400865275b8"
+      ],
+      "target": "build/directml/win-x64/src/python/Release/onnxruntime_genai.cp312-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:06:45Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "c1ad5b1de012556410be535da8d8205980c1edde638472662fddcf786d34a3e2": {
+      "signature": "c1ad5b1de012556410be535da8d8205980c1edde638472662fddcf786d34a3e2",
+      "alternativeSignatures": [
+        "cdc731e5a454ec8eec7bc26dfa01f48548b55b9a6105e0f17cbdd7dde6caa74d"
+      ],
+      "target": "build/directml/win-x64/wheel/build/lib.win-amd64-cpython-312/onnxruntime_genai/onnxruntime_genai.cp312-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:06:45Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "2c49d04161e2a3bdaa493ca2e6fcfca4138da7742de1da9145cd3ca064fb372d": {
+      "signature": "2c49d04161e2a3bdaa493ca2e6fcfca4138da7742de1da9145cd3ca064fb372d",
+      "alternativeSignatures": [
+        "b21dad2e669dd0804f16ac063164260a55f7a304faa5e7661ae3dbef49fd2cc4"
+      ],
+      "target": "build/directml/win-x64/wheel/onnxruntime_genai/onnxruntime_genai.cp313-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:06:09Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "b2d35e490afff13c15b3f46fcfdde1139b13780d31399c3aba4ef96250a1b25b": {
+      "signature": "b2d35e490afff13c15b3f46fcfdde1139b13780d31399c3aba4ef96250a1b25b",
+      "alternativeSignatures": [
+        "a3c7310934cf7b86799201cf9f872ccb2da9307c06c209202ba4584f14df9d95"
+      ],
+      "target": "build/directml/win-x64/src/python/Release/onnxruntime_genai.cp313-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:06:09Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "b1751b46c4887f093a802e7f9000b43bc115c7aaface4b821298a8ef4136421f": {
+      "signature": "b1751b46c4887f093a802e7f9000b43bc115c7aaface4b821298a8ef4136421f",
+      "alternativeSignatures": [
+        "cdf335ced16503677511f0175732c6223d667f9c3989807a6c809601615a69b2"
+      ],
+      "target": "build/directml/win-x64/wheel/build/lib.win-amd64-cpython-313/onnxruntime_genai/onnxruntime_genai.cp313-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:06:09Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "cf3f912dcaed8faa0a696b2f70c45265e44aac9fdbaa11e6362b1aa0315bde43": {
+      "signature": "cf3f912dcaed8faa0a696b2f70c45265e44aac9fdbaa11e6362b1aa0315bde43",
+      "alternativeSignatures": [
+        "dd7eb3acc3c6f85c749cf114cb011f9c555f0aac47f224430ea0b7505eb80e37"
+      ],
+      "target": "build/cuda/win-x64/wheel/onnxruntime_genai/onnxruntime_genai.cp310-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:25:55Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "a4a9d41f81b55c16bfe4631736c7501ffcf6ca27f2ad2d9eee320349e83ab35d": {
+      "signature": "a4a9d41f81b55c16bfe4631736c7501ffcf6ca27f2ad2d9eee320349e83ab35d",
+      "alternativeSignatures": [
+        "31d010f850a7bc96b319026537d5d9a0e3c81b5c06a86ba8029b78240922110d"
+      ],
+      "target": "build/cuda/win-x64/src/python/Release/onnxruntime_genai.cp310-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:25:55Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "4b4103a401c60b29bf8f7579d7853d220fc47691d682c7d59a038aa3e8ae6e95": {
+      "signature": "4b4103a401c60b29bf8f7579d7853d220fc47691d682c7d59a038aa3e8ae6e95",
+      "alternativeSignatures": [
+        "3fc049a0dcc21c8ab09cb041efc14b550bbc21482cfd8ba4b92aa9d0badf5c72"
+      ],
+      "target": "build/cuda/win-x64/wheel/build/lib.win-amd64-cpython-310/onnxruntime_genai/onnxruntime_genai.cp310-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:25:55Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "e58ac93225719a3a6876f4f0fc56c545b7c363b399bf7152f034cbb65762f826": {
+      "signature": "e58ac93225719a3a6876f4f0fc56c545b7c363b399bf7152f034cbb65762f826",
+      "alternativeSignatures": [
+        "57e19d02f6818992a490b3f6b6e7be528a12a398026264cb5e403d3f58bc4052"
+      ],
+      "target": "build/cpu/win-x64/wheel/onnxruntime_genai/onnxruntime_genai.cp310-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:22:21Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "fc4c132283f2b2823253b07a916598791def1f262cdc74db6d162039252bc929": {
+      "signature": "fc4c132283f2b2823253b07a916598791def1f262cdc74db6d162039252bc929",
+      "alternativeSignatures": [
+        "5881b3c760b9481d5cad784cdec7bff9b546c4785ac833c0ca759a0e17d31a89"
+      ],
+      "target": "build/cpu/win-x64/src/python/Release/onnxruntime_genai.cp310-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:22:21Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "d3f78d44fbb08fb1df0602fcefa6ce88bdb20357bfa250a7edda22e38090f634": {
+      "signature": "d3f78d44fbb08fb1df0602fcefa6ce88bdb20357bfa250a7edda22e38090f634",
+      "alternativeSignatures": [
+        "d4cd644fb2c41e271e8836c4e15821ddf658d07415745b50fe3d1979de1667ce"
+      ],
+      "target": "build/cpu/win-x64/wheel/build/lib.win-amd64-cpython-310/onnxruntime_genai/onnxruntime_genai.cp310-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:22:21Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "34a065d7e4f24b4d557b9a45dd787aa2ceeb703c79a4c470ffc7469756193ddd": {
+      "signature": "34a065d7e4f24b4d557b9a45dd787aa2ceeb703c79a4c470ffc7469756193ddd",
+      "alternativeSignatures": [
+        "698c6bb799a4fcba4e071c09be7fe9cf72c6fcf18f213eda4e2af553b59807d0"
+      ],
+      "target": "build/cpu/win-x64/wheel/onnxruntime_genai/onnxruntime_genai.cp311-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:05:26Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "bc7b1f0d8e948289518d584bdbe24c618c1a9aaf8b0208b908667571dedd82c2": {
+      "signature": "bc7b1f0d8e948289518d584bdbe24c618c1a9aaf8b0208b908667571dedd82c2",
+      "alternativeSignatures": [
+        "41678105073aa77df79614e3992adc7f1306151d3245b45158fa9b31a836e6be"
+      ],
+      "target": "build/cpu/win-x64/src/python/Release/onnxruntime_genai.cp311-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:05:26Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "4468011344661fde22061d4f4da1c90df98221a5ce12a6dc809e7b1f12e370fa": {
+      "signature": "4468011344661fde22061d4f4da1c90df98221a5ce12a6dc809e7b1f12e370fa",
+      "alternativeSignatures": [
+        "788acc23bba27be401b0844bb78b211514b5a777e867ccc7412323fb24363bdd"
+      ],
+      "target": "build/cpu/win-x64/wheel/build/lib.win-amd64-cpython-311/onnxruntime_genai/onnxruntime_genai.cp311-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:05:26Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "609e7c7a470270136cd5c6c6244b5e896e854cbbdcb2619003ee7f91d91fe60b": {
+      "signature": "609e7c7a470270136cd5c6c6244b5e896e854cbbdcb2619003ee7f91d91fe60b",
+      "alternativeSignatures": [
+        "7746a519a284134068466ad0d8c18669f5577b4def9187bd3d8dc64059ddcb9f"
+      ],
+      "target": "build/cpu/win-x64/wheel/onnxruntime_genai/onnxruntime_genai.cp313-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:05:55Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "627a57c4f210c5637024a6a3a56478882208a24aae96272cf18e1bc03c57b1f0": {
+      "signature": "627a57c4f210c5637024a6a3a56478882208a24aae96272cf18e1bc03c57b1f0",
+      "alternativeSignatures": [
+        "a8231eea95cae1ff39e16b7341278a3982857ff9d5fc63715c220c5a6f9129c5"
+      ],
+      "target": "build/cpu/win-x64/src/python/Release/onnxruntime_genai.cp313-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:05:55Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "e7edad9790d5b96fbe6c04fe74bf202ed620e44b2549e367c2018829ae58eb9c": {
+      "signature": "e7edad9790d5b96fbe6c04fe74bf202ed620e44b2549e367c2018829ae58eb9c",
+      "alternativeSignatures": [
+        "d53eca2487ef7368f115f0b499c650914801d4129642ecfa23c6719bb252a08a"
+      ],
+      "target": "build/cpu/win-x64/wheel/build/lib.win-amd64-cpython-313/onnxruntime_genai/onnxruntime_genai.cp313-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:05:55Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "c3dc4999c20ad137c6317945d53bf252d8e1f3617b3330dcaafccceecf4bda3d": {
+      "signature": "c3dc4999c20ad137c6317945d53bf252d8e1f3617b3330dcaafccceecf4bda3d",
+      "alternativeSignatures": [
+        "b30f6ff94b080a34976011ef9b1208b6db3cddf7cd6e419f087ce81ded7f9cd3"
+      ],
+      "target": "build/cpu/win-arm64/wheel/onnxruntime_genai/onnxruntime_genai.cp312-win_arm64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:19:24Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "087adc7ed1e9a4882e1e7c12f45476ba9d32e213153ed04e077e2bf964c393a3": {
+      "signature": "087adc7ed1e9a4882e1e7c12f45476ba9d32e213153ed04e077e2bf964c393a3",
+      "alternativeSignatures": [
+        "37651b6eda760c99c14dcc5cdeb834ecd3a8668e1625f7ee24f54ea5cad7af79"
+      ],
+      "target": "build/cpu/win-arm64/src/python/Release/onnxruntime_genai.cp312-win_arm64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:19:24Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "e13cb4deacfbe633cc7e1d90556aad8b652eb363fb880a0e20b6f576042e2538": {
+      "signature": "e13cb4deacfbe633cc7e1d90556aad8b652eb363fb880a0e20b6f576042e2538",
+      "alternativeSignatures": [
+        "3f037ab5395b126b3d1a9a6ede7829c274e61dad37ad4ddaf6eb03133a9c3fee"
+      ],
+      "target": "build/cpu/win-arm64/wheel/build/lib.win-arm64-cpython-312/onnxruntime_genai/onnxruntime_genai.cp312-win_arm64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:19:24Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "21a88bd737b4bef35557a68a5cda4b77529624f4b2a5ca2d3207abc2c342356e": {
+      "signature": "21a88bd737b4bef35557a68a5cda4b77529624f4b2a5ca2d3207abc2c342356e",
+      "alternativeSignatures": [
+        "5a5a63b9c9ef385b0fcdb76043130d7e8b9daf967467c90a7ec001d0ef8cd1eb"
+      ],
+      "target": "build/cpu/win-arm64/wheel/onnxruntime_genai/onnxruntime_genai.cp311-win_arm64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:19:20Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "5402e7c95effec80b095ec1ee6a25746273c8bb5a386ef0ffa0804d94e62a8bc": {
+      "signature": "5402e7c95effec80b095ec1ee6a25746273c8bb5a386ef0ffa0804d94e62a8bc",
+      "alternativeSignatures": [
+        "6e7604438fdb080e991566d7ff1ba0b86b58a6827b0f662ed35d16f86ea67a2d"
+      ],
+      "target": "build/cpu/win-arm64/src/python/Release/onnxruntime_genai.cp311-win_arm64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:19:20Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "e1cd3a0c85fb8cf2fe9ae967edd9114e2601a49847ad89552322e4f77196fee9": {
+      "signature": "e1cd3a0c85fb8cf2fe9ae967edd9114e2601a49847ad89552322e4f77196fee9",
+      "alternativeSignatures": [
+        "dc6e48e44d3163fedbe62d05da1c49b9c0efb535d196466980639512ca25f139"
+      ],
+      "target": "build/cpu/win-arm64/wheel/build/lib.win-arm64-cpython-311/onnxruntime_genai/onnxruntime_genai.cp311-win_arm64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:19:20Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "961615b2f42f8af51c1fb43813626ba2effe9e0d0df89e821554b04cd6768462": {
+      "signature": "961615b2f42f8af51c1fb43813626ba2effe9e0d0df89e821554b04cd6768462",
+      "alternativeSignatures": [
+        "c84e5c9d72b5c470ed4639ba9a56b581d8b8f8bbffb0d22e64d02cf12df5a7b9"
+      ],
+      "target": "build/cuda/win-x64/wheel/onnxruntime_genai/onnxruntime_genai.cp312-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:06:10Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "262a38afb57b2c024b74c94c8584b5433d9ed0aac6f0e3a431c4504385c523fa": {
+      "signature": "262a38afb57b2c024b74c94c8584b5433d9ed0aac6f0e3a431c4504385c523fa",
+      "alternativeSignatures": [
+        "ee673e3351842cf93f3d5dd92fd4a0e0cabb09a4d239a5b027807146f230a9c0"
+      ],
+      "target": "build/cuda/win-x64/src/python/Release/onnxruntime_genai.cp312-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:06:10Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "624e5d29b5bff39a7e3fcad605154156a7909b8a435e5ed2ee58be2d8fed1b26": {
+      "signature": "624e5d29b5bff39a7e3fcad605154156a7909b8a435e5ed2ee58be2d8fed1b26",
+      "alternativeSignatures": [
+        "791cc2e1dc1745874b2bb2029601a3588259706bded69a2f14e10326dae353e8"
+      ],
+      "target": "build/cuda/win-x64/wheel/build/lib.win-amd64-cpython-312/onnxruntime_genai/onnxruntime_genai.cp312-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:06:10Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "0d20d0f4959959426cb9f8ae5145e6a36611c2ccd0f49fdd872dbc3ee98bef3d": {
+      "signature": "0d20d0f4959959426cb9f8ae5145e6a36611c2ccd0f49fdd872dbc3ee98bef3d",
+      "alternativeSignatures": [
+        "df10b606dde5678dda66993b06940ebf54408ab1857badede49c6d1f0fd057fa"
+      ],
+      "target": "build/cuda/win-x64/wheel/onnxruntime_genai/onnxruntime_genai.cp313-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:06:36Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "b275ad5971d883a69ab3451b8977e2cd9cac339e9df5740697fb8fb510611c25": {
+      "signature": "b275ad5971d883a69ab3451b8977e2cd9cac339e9df5740697fb8fb510611c25",
+      "alternativeSignatures": [
+        "6bf45b9947a7c28d36a78535503893f2ce2312ee1eae0fe995cc27b9df103e09"
+      ],
+      "target": "build/cuda/win-x64/src/python/Release/onnxruntime_genai.cp313-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:06:36Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "04443875fc5369899d8b9d51989391ff98cc1cebb38c7a8bc34380d5642aaa85": {
+      "signature": "04443875fc5369899d8b9d51989391ff98cc1cebb38c7a8bc34380d5642aaa85",
+      "alternativeSignatures": [
+        "094b5d5183cb3d9335e8e257911a36df1427a02626bc34d534f1a419c19501bb"
+      ],
+      "target": "build/cuda/win-x64/wheel/build/lib.win-amd64-cpython-313/onnxruntime_genai/onnxruntime_genai.cp313-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:06:36Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "f6c64b43395287e6bb4ba01bb60c3b2fe557c2b3c76956df9b08e7fe7d02d1b3": {
+      "signature": "f6c64b43395287e6bb4ba01bb60c3b2fe557c2b3c76956df9b08e7fe7d02d1b3",
+      "alternativeSignatures": [
+        "e4e8df649a62233d1c8b91ace7ad29055157ef831751064744738aa55b19f58b"
+      ],
+      "target": "build/directml/win-x64/wheel/onnxruntime_genai/onnxruntime_genai.cp310-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:26:10Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "df3e361077701a4f1ba2ce0cd7112505ae11910aa77c893675809b8c3cc228ef": {
+      "signature": "df3e361077701a4f1ba2ce0cd7112505ae11910aa77c893675809b8c3cc228ef",
+      "alternativeSignatures": [
+        "2a3db670d0a4f67cde05140c5f7e4c3c67da55937d2448a0f8c9f06bb43c5193"
+      ],
+      "target": "build/directml/win-x64/src/python/Release/onnxruntime_genai.cp310-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:26:10Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "3661a1ccde6d19942cb98f1b7808849db8f3087f10d46d2210c65cdfd7d3abed": {
+      "signature": "3661a1ccde6d19942cb98f1b7808849db8f3087f10d46d2210c65cdfd7d3abed",
+      "alternativeSignatures": [
+        "587cd6ed4eb4f88750cd9b185b0687ba07678854a584eeb8ae7c0a6007d7bec7"
+      ],
+      "target": "build/directml/win-x64/wheel/build/lib.win-amd64-cpython-310/onnxruntime_genai/onnxruntime_genai.cp310-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:26:10Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "5a4ea5a8298aeaf928c4fbfd500793e68fb9ac62d09842664978093da0637256": {
+      "signature": "5a4ea5a8298aeaf928c4fbfd500793e68fb9ac62d09842664978093da0637256",
+      "alternativeSignatures": [
+        "4cd84f847c7995f56870e62f9057470ed78959b11e8a8f777e6df9f2020bdbc5"
+      ],
+      "target": "build/cpu/win-x64/wheel/onnxruntime_genai/onnxruntime_genai.cp312-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:05:48Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "967aeba21d0a4e7689972822b522d9a55f4485d88697986ecb5d927a4c6835d1": {
+      "signature": "967aeba21d0a4e7689972822b522d9a55f4485d88697986ecb5d927a4c6835d1",
+      "alternativeSignatures": [
+        "58d377c0c5acfc271b5c9df58e5969307c61dc5dd1f6c0cbc961f7deb7db35b8"
+      ],
+      "target": "build/cpu/win-x64/src/python/Release/onnxruntime_genai.cp312-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:05:48Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "f7ee3c03d227000242ee2d5070008255161f7ea9d5ba9cd903bfaf3158f0cf72": {
+      "signature": "f7ee3c03d227000242ee2d5070008255161f7ea9d5ba9cd903bfaf3158f0cf72",
+      "alternativeSignatures": [
+        "9e6ad934068a5998a11544c2527232e8f270340d6e4835178b2b944eb6e5f944"
+      ],
+      "target": "build/cpu/win-x64/wheel/build/lib.win-amd64-cpython-312/onnxruntime_genai/onnxruntime_genai.cp312-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:05:48Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "fff38c79311ef39f6b0fdacf336dc17c842c7250e364f150089ddf5b40265179": {
+      "signature": "fff38c79311ef39f6b0fdacf336dc17c842c7250e364f150089ddf5b40265179",
+      "alternativeSignatures": [
+        "0fb9bcd3394add93ffab9baf4f18bebedadc3906661344165d5ad39831e400ec"
+      ],
+      "target": "build/directml/win-x64/wheel/onnxruntime_genai/onnxruntime_genai.cp311-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:08:56Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "bcbe0c43283630baec5e2ccabf8bda939aebc7521ecadc15e5f484e52cda8cd5": {
+      "signature": "bcbe0c43283630baec5e2ccabf8bda939aebc7521ecadc15e5f484e52cda8cd5",
+      "alternativeSignatures": [
+        "a9b119c7db35a3f39807a9a4372b91fd9825721d9ab31906f16f1457e3b3972e"
+      ],
+      "target": "build/directml/win-x64/src/python/Release/onnxruntime_genai.cp311-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:08:56Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
+    },
+    "76f5cfdd0238efc0f34802e6480c8423b28c740878f030d021ce8689e062426d": {
+      "signature": "76f5cfdd0238efc0f34802e6480c8423b28c740878f030d021ce8689e062426d",
+      "alternativeSignatures": [
+        "d17e1268e7db7f5ff5f8ea770ce4b5ac1fd939be39fa76f1d41ddc54ac4ee839"
+      ],
+      "target": "build/directml/win-x64/wheel/build/lib.win-amd64-cpython-311/onnxruntime_genai/onnxruntime_genai.cp311-win_amd64.pyd",
+      "memberOf": [
+        "default"
+      ],
+      "tool": "binskim",
+      "ruleId": "BA2008",
+      "createdDate": "2025-06-19 22:08:56Z",
+      "expirationDate": "2025-12-06 22:32:16Z",
+      "justification": "This error is baselined with an expiration date of 180 days from 2025-06-19 22:32:16Z"
     }
   }
 }
