@@ -48,14 +48,6 @@ def run_whisper():
     if not os.path.exists(ci_data_path):
         return
 
-    # Debug data dir on Windows
-    if sys.platform.startswith("win"):
-        os.system("dir")
-        os.system("dir C:\\data\\")
-        os.system("dir C:\\data\\models\\")
-        os.system("dir C:\\data\\models\\ortgenai")
-        os.system("dir C:\\data\\models\\ortgenai\\onnx\\")
-
     num_beams = 5
     (audio_path, expected_transcription) = (
         os.path.join(cwd, "..", "test_models", "audios", "1272-141231-0002.mp3"),
@@ -66,11 +58,15 @@ def run_whisper():
         if execution_provider == "cuda" and not og.is_cuda_available():
             continue
 
+        model = os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}")
+        if not os.path.exists(model):
+            continue
+
         command = [
             sys.executable,
             os.path.join(cwd, "..", "..", "examples", "python", "whisper.py"),
             "-m",
-            os.path.join(ci_data_path, "onnx", f"whisper-tiny-{precision}-{execution_provider}"),
+            model,
             "-e",
             execution_provider,
             "-b",
