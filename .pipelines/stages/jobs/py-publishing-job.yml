@@ -113,27 +113,27 @@ jobs:
     path: onnxruntime-genai
     submodules: recursive
 
-  - script: |
-      MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
-      XCOPY /s /y /h /e /c /q "C:\Python\Python312\*.*" $(Agent.ToolsDirectory)\Python\3.12.3\arm64\
-      COPY NUL $(Agent.ToolsDirectory)\Python\3.12.3\arm64.complete
-      DIR $(Agent.ToolsDirectory)\Python
-      DIR $(Agent.ToolsDirectory)\Python\3.12.3
-      DIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
-      DIR "C:\Python"
-    displayName: Copy python 3.12.3 version to agent tools directory
-    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.12'))
+  # - script: |
+  #     MKDIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
+  #     XCOPY /s /y /h /e /c /q "C:\Python\Python312\*.*" $(Agent.ToolsDirectory)\Python\3.12.3\arm64\
+  #     COPY NUL $(Agent.ToolsDirectory)\Python\3.12.3\arm64.complete
+  #     DIR $(Agent.ToolsDirectory)\Python
+  #     DIR $(Agent.ToolsDirectory)\Python\3.12.3
+  #     DIR $(Agent.ToolsDirectory)\Python\3.12.3\arm64
+  #     DIR "C:\Python"
+  #   displayName: Copy python 3.12.3 version to agent tools directory
+  #   condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.12'))
 
-  - script: |
-      MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
-      XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
-      COPY NUL $(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete
-      DIR $(Agent.ToolsDirectory)\Python
-      DIR $(Agent.ToolsDirectory)\Python\3.11.0
-      DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
-      DIR "C:\Python"
-    displayName: Copy python 3.11.0 version to agent tools directory
-    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.11'))
+  # - script: |
+  #     MKDIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+  #     XCOPY /s /y /h /e /c /q "C:\Python\Python311\*.*" $(Agent.ToolsDirectory)\Python\3.11.0\arm64\
+  #     COPY NUL $(Agent.ToolsDirectory)\Python\3.11.0\arm64.complete
+  #     DIR $(Agent.ToolsDirectory)\Python
+  #     DIR $(Agent.ToolsDirectory)\Python\3.11.0
+  #     DIR $(Agent.ToolsDirectory)\Python\3.11.0\arm64
+  #     DIR "C:\Python"
+  #   displayName: Copy python 3.11.0 version to agent tools directory
+  #   condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'), eq(variables['PyDotVer'], '3.11'))
 
   - task: UsePythonVersion@0
     inputs:
