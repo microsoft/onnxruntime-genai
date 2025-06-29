@@ -106,10 +106,5 @@ if __name__ == "__main__":
             log.error(e)
             log.error(f"Failed to run {model_path}", exc_info=True)
 
-    # Run Whisper E2E
-    try:
-        log.info(f"Running Whisper")
-        run_whisper()
-    except Exception as e:
-        log.error(e)
-        log.error(f"Failed to run Whisper", exc_info=True)
+    # Run Whisper E2E tests
+    run_whisper()
