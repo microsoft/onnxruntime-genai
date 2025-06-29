@@ -139,7 +139,16 @@ jobs:
     inputs:
       versionSpec: $(PyDotVer)
       addToPath: true
+      architecture: 'x64'
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'))
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: $(PyDotVer)
+      addToPath: true
       architecture: $(arch)
+    condition: or(ne(variables['arch'], 'arm64'), ne(variables['os'], 'win'))
+
 
   - task: PythonScript@0
     inputs:
