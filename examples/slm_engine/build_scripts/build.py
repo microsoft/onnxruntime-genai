@@ -70,7 +70,7 @@ def main():
         cmake_generator,
         TOPLEVEL_DIR,
         f"-DARTIFACTS_DIR={artifacts_dir}",
-        f"-DCMAKE_BUILD_TYPE={args.build_type}",
+        f"-DCMAKE_BUILD_TYPE={args.build_type}"
     ]
 
     # We keep the build directory prefix as same as that's returned by the

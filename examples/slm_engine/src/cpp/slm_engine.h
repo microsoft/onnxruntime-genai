@@ -78,6 +78,65 @@ class SLM_ENGINE_EXPORT SLMEngine {
     std::string message;
   };
 
+  /// @brief Struct to represent a function tool parameter
+  struct SLM_ENGINE_EXPORT FunctionParameter {
+    std::string description;
+    std::string type;
+    std::string default_value;
+
+    FunctionParameter() : type("string") {}
+    FunctionParameter(const std::string& desc, const std::string& param_type = "string",
+                      const std::string& default_val = "")
+        : description(desc), type(param_type), default_value(default_val) {}
+  };
+
+  /// @brief Struct to represent a function tool
+  struct SLM_ENGINE_EXPORT FunctionTool {
+    std::string name;
+    std::string description;
+    std::map<std::string, FunctionParameter> parameters;
+
+    FunctionTool() = default;
+    FunctionTool(const std::string& tool_name, const std::string& tool_desc)
+        : name(tool_name), description(tool_desc) {}
+  };
+
+  /// @brief Function calling generation options
+  struct SLM_ENGINE_EXPORT FunctionCallOptions {
+    std::vector<FunctionTool> tools;
+    bool force_function_call;
+
+    FunctionCallOptions() : force_function_call(false) {}
+  };
+
+  /// @brief Single function call information
+  struct SLM_ENGINE_EXPORT FunctionCall {
+    std::string function_name;
+    std::string parameters_json;
+
+    FunctionCall() = default;
+    FunctionCall(const std::string& name, const std::string& params)
+        : function_name(name), parameters_json(params) {}
+  };
+
+  /// @brief Function call result structure supporting multiple calls
+  struct SLM_ENGINE_EXPORT FunctionCallResult {
+    std::vector<FunctionCall> function_calls;
+    bool is_function_call;
+    std::string text_response;
+
+    FunctionCallResult() : is_function_call(false) {}
+
+    // Legacy compatibility methods
+    std::string function_name() const {
+      return function_calls.empty() ? "" : function_calls[0].function_name;
+    }
+
+    std::string parameters_json() const {
+      return function_calls.empty() ? "" : function_calls[0].parameters_json;
+    }
+  };
+
   /// @brief Get the version of the SLM Engine
   /// @param slm_version SLM Engine version
   /// @param ortga_version ORT GenAI version
@@ -269,6 +328,40 @@ class SLM_ENGINE_EXPORT SLMEngine {
       std::string& response_str,
       RuntimePerf& kpi);
 
+  /// @brief Generate response with function calling support
+  /// @param formatted_prompt Formatted prompt
+  /// @param generation_options Generation options
+  /// @param function_options Function calling options
+  /// @param response_str Generated response
+  /// @param function_result Function call result if any
+  /// @param kpi Runtime performance metrics
+  /// @return Status of the operation
+  Status generate_with_functions(
+      const std::string& formatted_prompt,
+      const GenerationOptions& generation_options,
+      const FunctionCallOptions& function_options,
+      std::string& response_str,
+      FunctionCallResult& function_result,
+      RuntimePerf& kpi);
+
+  /// @brief Generate response with function calling using adapter
+  /// @param adapter_name Name of the LoRA adapter
+  /// @param formatted_prompt Formatted prompt
+  /// @param generation_options Generation options
+  /// @param function_options Function calling options
+  /// @param response_str Generated response
+  /// @param function_result Function call result if any
+  /// @param kpi Runtime performance metrics
+  /// @return Status of the operation
+  Status generate_with_functions(
+      const std::string& adapter_name,
+      const std::string& formatted_prompt,
+      const GenerationOptions& generation_options,
+      const FunctionCallOptions& function_options,
+      std::string& response_str,
+      FunctionCallResult& function_result,
+      RuntimePerf& kpi);
+
   /// @brief Given a system and an user prompt, formats the prompt by adding the
   /// necessary control strings for the current LLM Model
   /// @param system_prompt
@@ -277,6 +370,11 @@ class SLM_ENGINE_EXPORT SLMEngine {
   std::string format_prompt(
       const std::string& system_prompt,
       const std::string& user_prompt);
+
+  /// @brief Parse tools from JSON string
+  /// @param tools_json JSON string containing tools definition
+  /// @return Vector of FunctionTool objects
+  std::vector<FunctionTool> parse_tools_from_json(const std::string& tools_json);
 
   SLMEngine(const SLMEngine&) = delete;
   SLMEngine& operator=(const SLMEngine&) = delete;
@@ -298,6 +396,11 @@ class SLM_ENGINE_EXPORT SLMEngine {
   /// @return Complete prompt to be fed to the LLM
   std::string format_input(const InputDecoder::InputParams& input_params);
 
+  /// @brief Format input with tools for function calling
+  /// @param input_params Input parameters with tools
+  /// @return Complete prompt with tools information
+  std::string format_input_with_tools(const InputDecoder::InputParams& input_params);
+
   // Define the Model related prompts
   struct PromptFormat {
     std::string prefix;
@@ -312,6 +415,7 @@ class SLM_ENGINE_EXPORT SLMEngine {
   /// @brief Enum to define the supported model types
   enum class SupportedModelType { PHI,
                                   Llama,
+                                  Qwen,
                                   CUSTOM,
                                   UNKNOWN };
 
@@ -347,6 +451,44 @@ class SLM_ENGINE_EXPORT SLMEngine {
       std::function<bool(const std::string&, OgaTensor* logits)> generation_callback,
       std::string& response_str,
       RuntimePerf& kpi);
+
+  /// @brief Create Lark grammar for function calling
+  /// @param tools List of function tools
+  /// @param prompt_tool_input Output parameter for tool input prompt
+  /// @param grammar_input Output parameter for grammar input
+  /// @return True if successful
+  bool create_lark_grammar(const std::vector<FunctionTool>& tools,
+                           std::string& prompt_tool_input,
+                           std::string& grammar_input);
+
+  /// @brief Convert tool to grammar input format
+  /// @param tool Function tool to convert
+  /// @return JSON schema for the tool
+  std::string convert_tool_to_grammar_input(const FunctionTool& tool);
+
+  /// @brief Create tool input prompt
+  /// @param tools List of function tools
+  /// @return Tool input prompt string
+  std::string create_prompt_tool_input(const std::vector<FunctionTool>& tools);
+
+  /// @brief Parse function call from generated text
+  /// @param generated_text Generated text to parse
+  /// @param function_result Output function call result
+  /// @return True if function call was found and parsed
+  bool parse_function_call(const std::string& generated_text,
+                           FunctionCallResult& function_result);
+
+  /// @brief Create generator with function calling support
+  /// @param formatted_prompt Formatted prompt
+  /// @param generation_options Generation options
+  /// @param function_options Function calling options
+  /// @param time_to_prefill Output time to prefill
+  /// @return Generator object
+  std::unique_ptr<OgaGenerator> create_function_generator(
+      const std::string& formatted_prompt,
+      const GenerationOptions& generation_options,
+      const FunctionCallOptions& function_options,
+      uint32_t& time_to_prefill);
 
   std::unique_ptr<OgaModel> m_onnx_model;
   std::unique_ptr<OgaAdapters> m_adapters;
