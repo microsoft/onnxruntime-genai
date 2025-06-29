@@ -48,6 +48,14 @@ def run_whisper():
     if not os.path.exists(ci_data_path):
         return
 
+    # Debug data dir on Windows
+    if sys.platform.startswith("win"):
+        os.system("dir")
+        os.system("dir C:\\data\\")
+        os.system("dir C:\\data\\models\\")
+        os.system("dir C:\\data\\models\\ortgenai")
+        os.system("dir C:\\data\\models\\ortgenai\\onnx\\")
+
     num_beams = 5
     (audio_path, expected_transcription) = (
         os.path.join(cwd, "..", "test_models", "audios", "1272-141231-0002.mp3"),
