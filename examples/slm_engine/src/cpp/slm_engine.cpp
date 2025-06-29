@@ -1,9 +1,16 @@
 #include "slm_engine.h"
 
-#include "onnxruntime_cxx_api.h"
-
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <memory>
+#include <regex>
+#include <sstream>
+#include <string>
 #include <stdio.h>
 #include <string.h>
+
 #if !defined(_WIN32)
 #include <sys/resource.h>
 #include <sys/time.h>
@@ -13,15 +20,9 @@
 #include <psapi.h>
 #endif
 
-#include <chrono>
-#include <fstream>
-#include <iostream>
-#include <memory>
 #include <nlohmann/json.hpp>
-#include <sstream>
-#include <string>
-#include <regex>
-#include <filesystem>
+
+#include "onnxruntime_cxx_api.h"
 
 using namespace std;
 using json = nlohmann::json;

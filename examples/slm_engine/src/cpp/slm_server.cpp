@@ -31,15 +31,15 @@ using namespace std;
 // Function to clean qwen model response formatting
 std::string cleanQwenResponse(const std::string& input) {
   std::string result = input;
-  
+
   // Remove <think>\n\n</think>\n\n pattern
   std::regex think_pattern(R"(<think>[\s\S]*?</think>\s*\n*)");
   result = std::regex_replace(result, think_pattern, "");
-  
+
   // Replace markdown json code blocks ```json ``` with just the content
   std::regex json_pattern(R"(```json\s*\n([\s\S]*?)\n\s*```)");
   result = std::regex_replace(result, json_pattern, "$1");
-  
+
   return result;
 }
 
@@ -200,7 +200,7 @@ int run_server(const string& model_path,
         json output_json = json::parse(response);
 
         // Clean qwen model specific formatting for regular responses too
-        if (output_json.contains("response") && 
+        if (output_json.contains("response") &&
             output_json["response"].contains("answer")) {
           std::string answer = output_json["response"]["answer"];
           answer = cleanQwenResponse(answer);
