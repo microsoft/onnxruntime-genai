@@ -8,5 +8,5 @@ dnf install -y \
   glibc-langpack-\* glibc-locale-source which redhat-lsb-core \
   perl-IPC-Cmd openssl-devel wget \
   expat-devel tar unzip zlib-devel make bzip2 bzip2-devel \
-  libreadline-dev
+  readline-devel
 locale
