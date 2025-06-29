@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import logging
+import sys
 
 import onnxruntime_genai as og
 from _test_utils import get_ci_data_path

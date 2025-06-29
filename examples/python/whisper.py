@@ -92,7 +92,7 @@ def run(args: argparse.Namespace):
                     break
 
             if matching:
-                print("One of the model's transcription matches the expected transcription.")
+                print("One of the model's transcriptions matches the expected transcription.")
                 return
             raise Exception("None of the model's transcriptions match the expected transcription.")
 
