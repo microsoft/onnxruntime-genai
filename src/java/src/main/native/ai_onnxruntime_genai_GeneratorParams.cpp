@@ -43,22 +43,3 @@ Java_ai_onnxruntime_genai_GeneratorParams_setSearchOptionBool(JNIEnv* env, jobje
 
   ThrowIfError(env, OgaGeneratorParamsSetSearchBool(generator_params, name, value));
 }
-
-JNIEXPORT void JNICALL
-Java_ai_onnxruntime_genai_GeneratorParams_setModelInput(JNIEnv* env, jobject thiz, jlong native_handle,
-                                                        jstring input_name, jlong tensor) {
-  OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
-  CString name{env, input_name};
-  OgaTensor* input_tensor = reinterpret_cast<OgaTensor*>(tensor);
-
-  ThrowIfError(env, OgaGeneratorParamsSetModelInput(generator_params, name, input_tensor));
-}
-
-JNIEXPORT void JNICALL
-Java_ai_onnxruntime_genai_GeneratorParams_setInputs(JNIEnv* env, jobject thiz, jlong native_handle,
-                                                    jlong namedTensors) {
-  OgaGeneratorParams* generator_params = reinterpret_cast<OgaGeneratorParams*>(native_handle);
-  OgaNamedTensors* input_tensor = reinterpret_cast<OgaNamedTensors*>(namedTensors);
-
-  ThrowIfError(env, OgaGeneratorParamsSetInputs(generator_params, input_tensor));
-}

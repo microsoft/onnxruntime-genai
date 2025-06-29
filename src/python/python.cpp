@@ -178,15 +178,6 @@ struct PyGeneratorParams {
 
   std::unique_ptr<OgaGeneratorParams> params_;
 
-  void SetModelInput(const std::string& name, pybind11::array& value) {
-    params_->SetModelInput(name.c_str(), *ToOgaTensor(value, false));
-    refs_.emplace_back(value);
-  }
-
-  void SetInputs(OgaNamedTensors& named_tensors) {
-    params_->SetInputs(named_tensors);
-  }
-
   void SetSearchOptions(const pybind11::kwargs& dict) {
     for (auto& entry : dict) {
       auto name = entry.first.cast<std::string>();
@@ -225,8 +216,20 @@ struct PyGenerator {
     return ToPython(generator_->GetSequence(index));
   }
 
+  pybind11::array GetInput(const std::string& name) {
+    return ToNumpy(*generator_->GetInput(name.c_str()));
+  }
+
   pybind11::array GetOutput(const std::string& name) {
     return ToNumpy(*generator_->GetOutput(name.c_str()));
+  }
+
+  void SetModelInput(const std::string& name, pybind11::array& value) {
+    generator_->SetModelInput(name.c_str(), *ToOgaTensor(value, false));
+  }
+
+  void SetInputs(OgaNamedTensors& named_tensors) {
+    generator_->SetInputs(named_tensors);
   }
 
   void AppendTokens(OgaTensor& tokens) {
@@ -313,13 +316,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
-#if 0
-      // TODO(baijumeswani): Rename/redesign the whisper_input_features to be more generic
-      .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
-      .def_readwrite("alignment_heads", &PyGeneratorParams::py_alignment_heads_)
-#endif
-      .def("set_inputs", &PyGeneratorParams::SetInputs)
-      .def("set_model_input", &PyGeneratorParams::SetModelInput)
       .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
       .def("set_guidance", &PyGeneratorParams::SetGuidance);
@@ -427,7 +423,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<const OgaModel&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
+      .def("get_input", &PyGenerator::GetInput)
       .def("get_output", &PyGenerator::GetOutput)
+      .def("set_inputs", &PyGenerator::SetInputs)
+      .def("set_model_input", &PyGenerator::SetModelInput)
       .def("append_tokens", pybind11::overload_cast<pybind11::array_t<int32_t>&>(&PyGenerator::AppendTokens))
       .def("append_tokens", pybind11::overload_cast<OgaTensor&>(&PyGenerator::AppendTokens))
       .def("get_logits", &PyGenerator::GetLogits)
@@ -497,14 +496,36 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<OgaMultiModalProcessor>(m, "MultiModalProcessor")
       .def(
-          "__call__", [](OgaMultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) {
+          "__call__", [](OgaMultiModalProcessor& processor, pybind11::object prompts, const pybind11::kwargs& kwargs) {
             OgaImages* images{};
             OgaAudios* audios{};
-            if (kwargs.contains("images"))
+            if (kwargs.contains("images")) {
               images = kwargs["images"].cast<OgaImages*>();
-            if (kwargs.contains("audios"))
+            }
+            if (kwargs.contains("audios")) {
               audios = kwargs["audios"].cast<OgaAudios*>();
-            return processor.ProcessImagesAndAudios(prompt.value_or("").c_str(), images, audios);
+            }
+
+            std::vector<std::string> prompts_str;
+            std::vector<const char*> c_prompts;
+            if (pybind11::isinstance<pybind11::str>(prompts)) {
+              // One prompt
+              return processor.ProcessImagesAndAudios(prompts.cast<std::string>().c_str(), images, audios);
+            } else if (pybind11::isinstance<pybind11::list>(prompts)) {
+              // Multiple prompts
+              for (const auto& prompt : prompts) {
+                if (!pybind11::isinstance<pybind11::str>(prompt)) {
+                  throw std::runtime_error("One or more items in the list of provided prompts is not a string.");
+                }
+                prompts_str.push_back(prompt.cast<std::string>());
+                c_prompts.push_back(prompts_str.back().c_str());
+              }
+            } else if (!prompts.is_none()) {
+              // Unsupported type for prompts
+              throw std::runtime_error("Unsupported type for prompts. Prompts must be a string or a list of strings.");
+            }
+
+            return processor.ProcessImagesAndAudios(c_prompts, images, audios);
           },
           pybind11::arg("prompt") = pybind11::none())
       .def("create_stream", [](OgaMultiModalProcessor& processor) { return OgaTokenizerStream::Create(processor); })

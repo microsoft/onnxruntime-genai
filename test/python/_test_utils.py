@@ -52,6 +52,14 @@ def run_subprocess(
     return completed_process
 
 
+def get_ci_data_path():
+    if is_windows():
+        ci_data_path = os.path.join(R"C:\\", "data", "models", "ortgenai")
+    else:
+        ci_data_path = os.path.join(os.path.abspath(os.sep), "data", "ortgenai")
+    return ci_data_path
+
+
 def get_model_paths():
     # TODO: Uncomment the following models as needed in the CI pipeline.
 
@@ -64,12 +72,7 @@ def get_model_paths():
         # "granite-3.0": "ibm-granite/granite-3.0-2b-instruct",
     }
 
-    ci_data_path = None
-    if is_windows():
-        ci_data_path = os.path.join(R"C:\\", "data", "models", "ortgenai", "pytorch")
-    else:
-        ci_data_path = os.path.join(os.path.abspath(os.sep), "data", "ortgenai", "pytorch")
-
+    ci_data_path = os.path.join(get_ci_data_path(), "pytorch")
     if not os.path.exists(ci_data_path):
         return {}, hf_paths
 

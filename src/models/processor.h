@@ -40,6 +40,7 @@ std::unique_ptr<Audios> LoadAudiosFromBuffers(std::span<const void*> audio_data,
 
 struct Payload {
   const std::string& prompt;
+  std::span<const char*> prompts;
   const Images* images;
   const Audios* audios;
 };

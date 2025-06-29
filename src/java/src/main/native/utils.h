@@ -6,7 +6,12 @@
 
 #include <jni.h>
 #include <stdlib.h>
+#include <string.h>
 #include "ort_genai_c.h"
+
+#ifdef _WIN32
+#define strdup _strdup
+#endif
 
 #ifdef __cplusplus
 extern "C" {

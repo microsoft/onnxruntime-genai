@@ -17,6 +17,17 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         internal IntPtr Handle { get { return _processorHandle; } }
 
+        /// <summary>
+        /// Processes a string and images into a NamedTensor.
+        /// </summary>
+        /// <param name="prompt">The text to encode as token ids.</param>
+        /// <param name="images">The image inputs.</param>
+        /// <returns>
+        /// The NamedTensors object.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
         public NamedTensors ProcessImages(string prompt, Images images)
         {
             IntPtr imagesHandle = images == null ? IntPtr.Zero : images.Handle;
@@ -26,11 +37,80 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         }
 
         /// <summary>
+        /// Processes a batch of strings and images into a NamedTensor.
+        /// </summary>
+        /// <param name="prompts">The texts to encode as token ids.</param>
+        /// <param name="images">The image inputs.</param>
+        /// <returns>
+        /// The NamedTensors object.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
+        public NamedTensors ProcessImages(string[] prompts, Images images)
+        {
+            Result.VerifySuccess(NativeMethods.OgaCreateStringArray(out IntPtr stringArray));
+            foreach (string prompt in prompts)
+            {
+                Result.VerifySuccess(NativeMethods.OgaStringArrayAddString(stringArray, StringUtils.ToUtf8(prompt)));
+            }
+            IntPtr imagesHandle = images == null ? IntPtr.Zero : images.Handle;
+            Result.VerifySuccess(NativeMethods.OgaProcessorProcessImagesAndPrompts(_processorHandle, stringArray,
+                                                                                   imagesHandle, out IntPtr namedTensorsHandle));
+            NativeMethods.OgaDestroyStringArray(stringArray);
+            return new NamedTensors(namedTensorsHandle);
+        }
+
+        /// <summary>
+        /// Processes a string and audios into a NamedTensor.
+        /// </summary>
+        /// <param name="prompt">The text to encode as token ids.</param>
+        /// <param name="audios">The audio inputs.</param>
+        /// <returns>
+        /// The NamedTensors object.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
+        public NamedTensors ProcessAudios(string prompt, Audios audios)
+        {
+            IntPtr audiosHandle = audios == null ? IntPtr.Zero : audios.Handle;
+            Result.VerifySuccess(NativeMethods.OgaProcessorProcessAudios(_processorHandle, StringUtils.ToUtf8(prompt),
+                                                                         audiosHandle, out IntPtr namedTensorsHandle));
+            return new NamedTensors(namedTensorsHandle);
+        }
+
+        /// <summary>
+        /// Processes a batch of strings and audios into a NamedTensor.
+        /// </summary>
+        /// <param name="prompts">The texts to encode as token ids.</param>
+        /// <param name="audios">The audios inputs.</param>
+        /// <returns>
+        /// The NamedTensors object.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
+        public NamedTensors ProcessAudios(string[] prompts, Audios audios)
+        {
+            Result.VerifySuccess(NativeMethods.OgaCreateStringArray(out IntPtr stringArray));
+            foreach (string prompt in prompts)
+            {
+                Result.VerifySuccess(NativeMethods.OgaStringArrayAddString(stringArray, StringUtils.ToUtf8(prompt)));
+            }
+            IntPtr audiosHandle = audios == null ? IntPtr.Zero : audios.Handle;
+            Result.VerifySuccess(NativeMethods.OgaProcessorProcessAudiosAndPrompts(_processorHandle, stringArray,
+                                                                                   audiosHandle, out IntPtr namedTensorsHandle));
+            NativeMethods.OgaDestroyStringArray(stringArray);
+            return new NamedTensors(namedTensorsHandle);
+        }
+
+        /// <summary>
         /// Processes a string, image and audio into a NamedTensor.
         /// </summary>
         /// <param name="prompt">The text to encode as token ids.</param>
-        /// <param name="images">The image input.</param>
-        /// <param name="audios">The audio input.</param>
+        /// <param name="images">The image inputs.</param>
+        /// <param name="audios">The audio inputs.</param>
         /// <returns>
         /// The NamedTensors object.
         /// </returns>
@@ -42,7 +122,34 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             IntPtr imagesHandle = images == null ? IntPtr.Zero : images.Handle;
             IntPtr audiosHandle = audios == null ? IntPtr.Zero : audios.Handle;
             Result.VerifySuccess(NativeMethods.OgaProcessorProcessImagesAndAudios(_processorHandle, StringUtils.ToUtf8(prompt),
-                                                                         imagesHandle, audiosHandle, out IntPtr namedTensorsHandle));
+                                                                                  imagesHandle, audiosHandle, out IntPtr namedTensorsHandle));
+            return new NamedTensors(namedTensorsHandle);
+        }
+
+        /// <summary>
+        /// Processes a batch of strings, images, and audios into a NamedTensor.
+        /// </summary>
+        /// <param name="prompts">The texts to encode as token ids.</param>
+        /// <param name="images">The image inputs.</param>
+        /// <param name="audios">The audio inputs.</param>
+        /// <returns>
+        /// The NamedTensors object.
+        /// </returns>
+        /// <exception cref="OnnxRuntimeGenAIException">
+        /// Thrown when the call to the GenAI native API fails.
+        /// </exception>
+        public NamedTensors ProcessImagesAndAudios(string[] prompts, Images images, Audios audios)
+        {
+            Result.VerifySuccess(NativeMethods.OgaCreateStringArray(out IntPtr stringArray));
+            foreach (string prompt in prompts)
+            {
+                Result.VerifySuccess(NativeMethods.OgaStringArrayAddString(stringArray, StringUtils.ToUtf8(prompt)));
+            }
+            IntPtr imagesHandle = images == null ? IntPtr.Zero : images.Handle;
+            IntPtr audiosHandle = audios == null ? IntPtr.Zero : audios.Handle;
+            Result.VerifySuccess(NativeMethods.OgaProcessorProcessImagesAndAudiosAndPrompts(_processorHandle, stringArray,
+                                                                                            imagesHandle, audiosHandle, out IntPtr namedTensorsHandle));
+            NativeMethods.OgaDestroyStringArray(stringArray);
             return new NamedTensors(namedTensorsHandle);
         }
 

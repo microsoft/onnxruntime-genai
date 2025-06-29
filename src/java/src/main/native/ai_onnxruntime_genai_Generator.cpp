@@ -28,6 +28,25 @@ Java_ai_onnxruntime_genai_Generator_destroyGenerator(JNIEnv* env, jobject thiz, 
 }
 
 JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_Generator_setModelInput(JNIEnv* env, jobject thiz, jlong native_handle,
+                                                  jstring input_name, jlong tensor) {
+  OgaGenerator* generator = reinterpret_cast<OgaGenerator*>(native_handle);
+  CString name{env, input_name};
+  OgaTensor* input_tensor = reinterpret_cast<OgaTensor*>(tensor);
+
+  ThrowIfError(env, OgaGenerator_SetModelInput(generator, name, input_tensor));
+}
+
+JNIEXPORT void JNICALL
+Java_ai_onnxruntime_genai_Generator_setInputs(JNIEnv* env, jobject thiz, jlong native_handle,
+                                              jlong namedTensors) {
+  OgaGenerator* generator = reinterpret_cast<OgaGenerator*>(native_handle);
+  OgaNamedTensors* input_tensor = reinterpret_cast<OgaNamedTensors*>(namedTensors);
+
+  ThrowIfError(env, OgaGenerator_SetInputs(generator, input_tensor));
+}
+
+JNIEXPORT void JNICALL
 Java_ai_onnxruntime_genai_Generator_appendTokenSequences(JNIEnv* env, jobject thiz, jlong native_handle,
                                                          jlong sequences_handle) {
   OgaGenerator* generator = reinterpret_cast<OgaGenerator*>(native_handle);
@@ -107,6 +126,17 @@ Java_ai_onnxruntime_genai_Generator_setActiveAdapter(JNIEnv* env, jobject thiz, 
   ThrowIfError(env, OgaSetActiveAdapter(reinterpret_cast<OgaGenerator*>(native_handle),
                                         reinterpret_cast<OgaAdapters*>(adapters_native_handle),
                                         name));
+}
+
+JNIEXPORT jlong JNICALL
+Java_ai_onnxruntime_genai_Generator_getInputNative(JNIEnv* env, jobject thiz, jlong native_handle,
+                                                   jstring input_name) {
+  OgaTensor* tensor = nullptr;
+  CString name{env, input_name};
+  if (ThrowIfError(env, OgaGenerator_GetInput(reinterpret_cast<OgaGenerator*>(native_handle), name, &tensor))) {
+    return 0;
+  }
+  return reinterpret_cast<jlong>(tensor);
 }
 
 JNIEXPORT jlong JNICALL
