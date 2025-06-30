@@ -784,7 +784,7 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
   JSON::Parse(element, json.str());
 }
 
-bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
+bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
   for (const auto& provider : session_options.providers) {
     const auto provider_options = std::find_if(session_options.provider_options.begin(),
                                                session_options.provider_options.end(),
@@ -802,7 +802,12 @@ bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
       } else if (provider_options->name == "DML") {
         return true;
       } else if (provider_options->name == "NvTensorRtRtx") {
-        return true;
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enable_cuda_graph" && value.second == "1") {
+            return true;
+          }
+        }
+        return false;
       }
     }
   }

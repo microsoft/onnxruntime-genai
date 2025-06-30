@@ -141,7 +141,9 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
 }
 
 void DefaultPositionInputs::CreateNextAttentionMaskTensor(int total_length) {
-  if (state_.params_->use_graph_capture)
+  if (state_.params_->use_graph_capture ||
+    (state_.params_->search.past_present_share_buffer &&
+    model_.p_device_->GetType() == DeviceType::NvTensorRtRtx))
     return;
   attention_mask_shape_[1] = total_length;
   attention_mask_next_->CreateTensor(attention_mask_shape_);
@@ -154,26 +156,26 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
   CreateNextAttentionMaskTensor(total_length);
 
   // Update the attention mask on the device. If it fails, copy to CPU, update there, and copy back to device.
-  if (!model_.p_device_inputs_->UpdateAttentionMask(state_.params_->use_graph_capture ? nullptr : attention_mask_next_->GetMutableRawData(),
+  if (!model_.p_device_inputs_->UpdateAttentionMask((state_.params_->use_graph_capture || (state_.params_->search.past_present_share_buffer && model_.p_device_->GetType() == DeviceType::NvTensorRtRtx)) ? nullptr : attention_mask_next_->GetMutableRawData(),
                                                     attention_mask_->GetMutableRawData(),
                                                     static_cast<int>(attention_mask_shape_[0]),
                                                     new_kv_length,
                                                     total_length,
                                                     state_.params_->search.max_length,
-                                                    state_.params_->use_graph_capture,
+                                                    state_.params_->use_graph_capture || (state_.params_->search.past_present_share_buffer && model_.p_device_->GetType() == DeviceType::NvTensorRtRtx),
                                                     type_)) {
     // auto* attention_mask_next_span = state_.params_->use_graph_capture ? &attention_mask_next_->GetByteSpan() : nullptr;
     DeviceSpan<uint8_t> attention_mask_next_span;
     if (!state_.params_->use_graph_capture)
       attention_mask_next_span = attention_mask_next_->GetByteSpan();
     auto attention_mask_span = attention_mask_->GetByteSpan();
-    GetDeviceInterface(DeviceType::CPU)->UpdateAttentionMask(state_.params_->use_graph_capture ? nullptr : attention_mask_next_span.CopyDeviceToCpu().data(), attention_mask_span.CopyDeviceToCpu().data(), static_cast<int>(attention_mask_shape_[0]), new_kv_length, total_length, state_.params_->search.max_length, state_.params_->use_graph_capture, type_);
+    GetDeviceInterface(DeviceType::CPU)->UpdateAttentionMask(state_.params_->use_graph_capture || (state_.params_->search.past_present_share_buffer && model_.p_device_->GetType() == DeviceType::NvTensorRtRtx) ? nullptr : attention_mask_next_span.CopyDeviceToCpu().data(), attention_mask_span.CopyDeviceToCpu().data(), static_cast<int>(attention_mask_shape_[0]), new_kv_length, total_length, state_.params_->search.max_length, state_.params_->use_graph_capture || (state_.params_->search.past_present_share_buffer && model_.p_device_->GetType() == DeviceType::NvTensorRtRtx), type_);
     if (!state_.params_->use_graph_capture)
       attention_mask_next_span.CopyCpuToDevice();
     attention_mask_span.CopyCpuToDevice();
   }
 
-  if (!state_.params_->use_graph_capture) {
+  if (!state_.params_->use_graph_capture && !(state_.params_->search.past_present_share_buffer && model_.p_device_->GetType() == DeviceType::NvTensorRtRtx)) {
     attention_mask_->ort_tensor_ = std::move(attention_mask_next_->ort_tensor_);
     state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
   }
@@ -256,7 +258,9 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     }
   }
 
-  if (state_.params_->use_graph_capture) {
+  if (state_.params_->use_graph_capture ||
+      (state_.params_->search.past_present_share_buffer &&
+      model_.p_device_->GetType() == DeviceType::NvTensorRtRtx)) {
     InitializeStaticMask<T>(*attention_mask);
   } else {
     attention_mask = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
