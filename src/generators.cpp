@@ -337,7 +337,7 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
 
   // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
   if (set_extra_inputs_) {
-    state_->SetExtraInputs(extra_inputs);
+    state_->SetExtraInputs(extra_inputs_);
     set_extra_inputs_ = false;
   }
 
@@ -365,13 +365,13 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
       // If the nominal name is found in the map, use the graph name.
       // Else, use the nominal name as the graph name.
       [[maybe_unused]] const auto [graph_name, found] = model_->config_->GetGraphName(name);
-      extra_inputs.push_back({graph_name, tensor});
+      extra_inputs_.push_back({graph_name, tensor});
     }
   }
 
   // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
   if (set_extra_inputs_) {
-    state_->SetExtraInputs(extra_inputs);
+    state_->SetExtraInputs(extra_inputs_);
     set_extra_inputs_ = false;
   }
 

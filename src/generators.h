@@ -101,7 +101,7 @@ struct Generator : LeakChecked<Generator> {
   DeviceSpan<int32_t> GetSequence(size_t index) const;
 
   // A list of extra model inputs that will be matched at runtime based on name
-  std::vector<ExtraInput> extra_inputs;
+  std::vector<ExtraInput> extra_inputs_;
   void SetInputs(const NamedTensors& inputs);
 
   std::shared_ptr<const Model> model_;

@@ -7,8 +7,6 @@
 
 namespace Generators {
 
-std::string ComposeKeyValueName(const std::string& template_string, int index);
-
 struct KeyValueCache {
   virtual ~KeyValueCache() = default;
 
