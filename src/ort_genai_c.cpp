@@ -374,7 +374,7 @@ bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator
 
 OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* generator, const char* name, OgaTensor* tensor) {
   OGA_TRY
-  generator->extra_inputs.push_back({std::string{name}, tensor->shared_from_this()});
+  generator->extra_inputs_.push_back({std::string{name}, tensor->shared_from_this()});
   return nullptr;
   OGA_CATCH
 }
