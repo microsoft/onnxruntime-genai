@@ -142,8 +142,8 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
 
 void DefaultPositionInputs::CreateNextAttentionMaskTensor(int total_length) {
   if (state_.params_->use_graph_capture ||
-    (state_.params_->search.past_present_share_buffer &&
-    model_.p_device_->GetType() == DeviceType::NvTensorRtRtx))
+      (state_.params_->search.past_present_share_buffer &&
+       model_.p_device_->GetType() == DeviceType::NvTensorRtRtx))
     return;
   attention_mask_shape_[1] = total_length;
   attention_mask_next_->CreateTensor(attention_mask_shape_);
@@ -260,7 +260,7 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
 
   if (state_.params_->use_graph_capture ||
       (state_.params_->search.past_present_share_buffer &&
-      model_.p_device_->GetType() == DeviceType::NvTensorRtRtx)) {
+       model_.p_device_->GetType() == DeviceType::NvTensorRtRtx)) {
     InitializeStaticMask<T>(*attention_mask);
   } else {
     attention_mask = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
