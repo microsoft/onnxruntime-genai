@@ -6,8 +6,6 @@ import argparse
 import time
 import json
 
-# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True, model_output_shapes=True)
-
 def get_tools_list(input_tools):
     # input_tools format: '[{"name": "fn1", "description": "fn details", "parameters": {"p1": {"description": "details", "type": "string"}}},
     # {"fn2": 2},{"fn3": 3}]'
@@ -157,7 +155,6 @@ def main(args):
         else:
             prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
         input_tokens = tokenizer.encode(prompt)
-        print(input_tokens)
         generator.append_tokens(input_tokens)
 
         if args.verbose: print("Running generation loop ...")
@@ -168,7 +165,6 @@ def main(args):
         print()
         print("Output: ", end='', flush=True)
 
-        i = 0
         try:
             while not generator.is_done():
                 generator.generate_next_token()
@@ -178,12 +174,7 @@ def main(args):
                         first = False
 
                 new_token = generator.get_next_tokens()[0]
-                print(new_token, end=' ', flush=True)
                 print(tokenizer_stream.decode(new_token), end='', flush=True)
-
-                i += 1
-                if i == 10:
-                    exit()
                 if args.timings: new_tokens.append(new_token)
         except KeyboardInterrupt:
             print("  --control+c pressed, aborting generation--")

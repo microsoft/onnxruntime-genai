@@ -8,7 +8,6 @@
 #include "search_cuda.h"
 #include "kernels.h"
 #include <cstdarg>
-#include <iostream>
 
 #if defined(_WIN32) || defined(_WIN64)
 #define strcasecmp _stricmp
@@ -55,8 +54,6 @@ struct GpuMemory final : DeviceBuffer {
   }
 
   void CopyCpuToDevice() override {
-    if (!p_cpu_)
-      throw std::runtime_error("CopyCpuToDevice called without allocating CPU memory");
     assert(p_cpu_);
     ::cudaMemcpyAsync(p_device_, p_cpu_, size_in_bytes_, ::cudaMemcpyHostToDevice, GetStream());
   }
