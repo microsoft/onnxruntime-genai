@@ -6,7 +6,7 @@
 namespace Generators {
 
 struct AudioFeatures {
-  AudioFeatures(State& state, const std::string& name, const std::vector<ExtraInput> extra_inputs);
+  AudioFeatures(State& state, const std::string& name, const std::vector<ExtraInput>& extra_inputs);
   AudioFeatures(const AudioFeatures&) = delete;
   AudioFeatures& operator=(const AudioFeatures&) = delete;
 

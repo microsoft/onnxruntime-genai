@@ -6,7 +6,7 @@
 
 namespace Generators {
 
-AudioFeatures::AudioFeatures(State& state, const std::string& name, const std::vector<ExtraInput> extra_inputs)
+AudioFeatures::AudioFeatures(State& state, const std::string& name, const std::vector<ExtraInput>& extra_inputs)
     : state_{state},
       model_{state.model_},
       name_{name} {
