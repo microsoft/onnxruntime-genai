@@ -60,7 +60,7 @@ else()
   elseif(USE_CUDA)
     set(ORT_HEADER_DIR ${ortlib_SOURCE_DIR}/buildTransitive/native/include)
   else()
-    set(ORT_HEADER_DIR ${ortlib_SOURCE_DIR}/buildTransitive/native/include)
+    set(ORT_HEADER_DIR ${ortlib_SOURCE_DIR}/build/native/include)
   endif()
 
   if(ANDROID)
