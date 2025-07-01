@@ -119,7 +119,6 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   if (key_value_cache_) {
     key_value_cache_->Add();
   }
-  extra_inputs_.Add();
 
   const auto& config_pipeline = model_.config_->model.decoder.pipeline;
 
@@ -183,6 +182,12 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
     if (!partial_kv_cache_update_records_.empty()) {
       key_value_cache_update_worker_thread_.emplace();
     }
+  }
+}
+
+void DecoderOnlyPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  for (auto& session : model_.sessions_) {
+    extra_inputs_.Add(extra_inputs, session->GetInputNames());
   }
 }
 

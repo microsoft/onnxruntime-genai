@@ -124,10 +124,10 @@ def run(args: argparse.Namespace):
 
         print("Generating response...")
         params = og.GeneratorParams(model)
-        params.set_inputs(inputs)
         params.set_search_options(max_length=7680)
 
         generator = og.Generator(model, params)
+        generator.set_inputs(inputs)
         start_time = time.time()
 
         while not generator.is_done():

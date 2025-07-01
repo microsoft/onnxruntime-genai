@@ -21,7 +21,10 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
   position_inputs_.Add();
   logits_.Add();
   kv_cache_->Add();
-  extra_inputs_.Add();
+}
+
+void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  extra_inputs_.Add(extra_inputs, model_.session_decoder_->GetInputNames());
 }
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {

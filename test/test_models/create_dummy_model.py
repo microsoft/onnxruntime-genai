@@ -41,6 +41,16 @@ Phi multi-modal:
     --inputs "inputs_embeds; TensorProto.FLOAT; ['batch_size', 'sequence_length', 3072]" "attention_mask; TensorProto.INT64; ['batch_size', 'total_sequence_length']" "past_key_values.0.key; TensorProto.FLOAT; ['batch_size', 8, 'past_sequence_length', 128]" "past_key_values.0.value; TensorProto.FLOAT; ['batch_size', 8, 'past_sequence_length', 128]" \
     --outputs "logits; TensorProto.FLOAT; ['batch_size', 'sequence_length', 200064]" "present.0.key; TensorProto.FLOAT; ['batch_size', 8, 'total_sequence_length', 128]" "present.0.value; TensorProto.FLOAT; ['batch_size', 8, 'total_sequence_length', 128]" \
     --filename "dummy_text.onnx"
+
+Whisper:
+8) python create_dummy_model.py \
+    --inputs "audio_features; TensorProto.FLOAT; ['batch_size', 80, 3000]" \
+    --outputs "encoder_hidden_states; TensorProto.FLOAT; ['batch_size', 1500, 1280]" "present_key_cross_0; TensorProto.FLOAT; ['batch_size', 6, 1500, 64]" \
+    --filename "dummy_encoder.onnx"
+9) python create_dummy_model.py \
+    --inputs "input_ids; TensorProto.INT32; ['batch_size', 'sequence_length']" "past_key_self_0; TensorProto.FLOAT; ['batch_size', 6, 'past_sequence_length', 64]" "past_value_self_0; TensorProto.FLOAT; ['batch_size', 6, 'past_sequence_length', 64]" "past_key_cross_0; TensorProto.FLOAT; ['batch_size', 6, 1500, 64]" "past_value_cross_0; TensorProto.FLOAT; ['batch_size', 6, 1500, 64]" \
+    --outputs "logits; TensorProto.FLOAT; ['batch_size', 'sequence_length', 51865]" "present_key_self_0; TensorProto.FLOAT; ['batch_size', 6, 'total_sequence_length', 64]" "present_value_self_0; TensorProto.FLOAT; ['batch_size', 6, 'total_sequence_length', 64]" "output_cross_qk_0; TensorProto.FLOAT; ['batch_size', 6, 'sequence_length', 1500]" \
+    --filename "dummy_decoder.onnx"
 """
 
 import argparse

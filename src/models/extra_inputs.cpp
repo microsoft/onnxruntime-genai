@@ -45,22 +45,15 @@ void PresetExtraInputs::Add() {
 }
 
 ExtraInputs::ExtraInputs(State& state)
-    : state_{state} {
-  extra_inputs_.reserve(state_.params_->extra_inputs.size());
+    : state_{state} {}
 
-  // We don't use graph capture, so simply use the existing pointers
-  for (auto& extra_input : state_.params_->extra_inputs) {
-    extra_inputs_.push_back(extra_input.tensor->ort_tensor_.get());
-  }
-}
-
-void ExtraInputs::Add(const std::vector<std::string>& required_input_names) {
+void ExtraInputs::Add(const std::vector<ExtraInput>& extra_inputs, const std::vector<std::string>& required_input_names) {
   std::unordered_set<std::string> required_input_names_set(required_input_names.begin(), required_input_names.end());
   // Add extra user inputs
-  for (int i = 0; i < state_.params_->extra_inputs.size(); ++i) {
-    if (required_input_names_set.empty() || required_input_names_set.count(state_.params_->extra_inputs[i].name)) {
-      state_.input_names_.push_back(state_.params_->extra_inputs[i].name.c_str());
-      state_.inputs_.push_back(extra_inputs_[i]);
+  for (int i = 0; i < extra_inputs.size(); i++) {
+    if (required_input_names_set.empty() || required_input_names_set.count(extra_inputs[i].name)) {
+      state_.input_names_.push_back(extra_inputs[i].name.c_str());
+      state_.inputs_.push_back(extra_inputs[i].tensor->ort_tensor_.get());
     }
   }
 
