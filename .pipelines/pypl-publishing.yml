@@ -119,7 +119,6 @@ extends:
         parameters:
           enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
           enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
-          enable_linux_rocm: ${{ parameters.enable_linux_rocm }}
           enable_win_cpu: ${{ parameters.enable_win_cpu }}
           enable_win_cuda: ${{ parameters.enable_win_cuda }}
           enable_win_dml: ${{ parameters.enable_win_dml }}

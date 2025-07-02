@@ -102,13 +102,6 @@ stages:
         os: 'linux'
         BuildId: ${{ parameters.BuildId }}
 
-  - ${{ if eq(parameters.enable_linux_rocm, true) }}:
-    - template: jobs/py-publishing-job.yml
-      parameters:
-        arch: 'x64'
-        ep: 'rocm'
-        os: 'linux'
-        BuildId: ${{ parameters.BuildId }}
   - ${{ if eq(parameters.enable_macos_cpu, true) }}:
     - template: jobs/py-publishing-job.yml
       parameters:
