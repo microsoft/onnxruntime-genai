@@ -52,7 +52,7 @@ std::shared_ptr<Request> Engine::Step() {
 }
 
 bool Engine::HasPendingRequests() const {
-  return scheduler_->HasPendingRequests();
+  return !ready_requests_.empty() || scheduler_->HasPendingRequests();
 }
 
 }  // namespace Generators
