@@ -85,6 +85,8 @@ struct DefaultKeyValueCache : KeyValueCache {
   template <typename T>
   void RewindPastTensorsTo(size_t index);
 
+  void CopyPastToPresentForNvTensorRtRtx(int layer_index);
+
   DeviceInterface& Device() { return *model_.p_device_kvcache_; }
   Ort::Allocator& Allocator() { return model_.p_device_kvcache_->GetAllocator(); }
 

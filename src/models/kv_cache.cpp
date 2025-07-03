@@ -1,4 +1,4 @@
-// Copyright (c) Microsoft Corporation. All rights reserved.
+﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
 #include "../generators.h"
@@ -234,7 +234,7 @@ void DefaultKeyValueCache::Add() {
 }
 
 void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
-  // If we're sharing past & present buffers there is nothing to do here, so early exit
+// If we're sharing past & present buffers there is nothing to do here, so early exit
   if (past_present_share_buffer_)
     return;
 
@@ -249,9 +249,16 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
     }
   }
 
+  // Update the shape to include the new token
   shape_[2] = total_length;
   for (int i = 0; i < layer_count_ * 2; i++) {
     presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
+
+    // Copy past to present for NvTensorRtRtx execution provider as NvTensorRtRtx engine read and write to the present buffer only
+    if (state_.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx) {
+      CopyPastToPresentForNvTensorRtRtx(i);
+    }
+
     state_.outputs_[output_index_ + i] = presents_[i].get();
   }
 
@@ -332,6 +339,35 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int i
     PickPastState<float>(beam_indices, index);
   } else {
     PickPastState<Ort::Float16_t>(beam_indices, index);
+  }
+}
+
+void DefaultKeyValueCache::CopyPastToPresentForNvTensorRtRtx(int layer_index) {
+  if (state_.model_.p_device_->GetType() != DeviceType::NvTensorRtRtx) {
+    assert(false);
+  }
+
+  if (!is_first_update_ && pasts_[layer_index]) {
+    auto past_info = pasts_[layer_index]->GetTensorTypeAndShapeInfo();
+    auto past_shape = past_info->GetShape();
+
+    int64_t num_heads = past_shape[1];
+    int64_t past_seq_len = past_shape[2];
+    int64_t head_dim = past_shape[3];
+
+    size_t element_size = (type_ == Ort::TypeToTensorType<float>) ? sizeof(float) : sizeof(Ort::Float16_t);
+
+    auto past_span = ByteWrapTensor(Device(), *pasts_[layer_index]);
+    auto present_span = ByteWrapTensor(Device(), *presents_[layer_index]);
+
+    for (int64_t head = 0; head < num_heads; head++) {
+      size_t past_head_offset = head * past_seq_len * head_dim * element_size;
+      size_t present_head_offset = head * (past_seq_len + 1) * head_dim * element_size;
+      size_t head_data_size = past_seq_len * head_dim * element_size;
+
+      present_span.subspan(present_head_offset, head_data_size)
+                  .CopyFrom(past_span.subspan(past_head_offset, head_data_size));
+    }
   }
 }
 
