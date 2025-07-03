@@ -38,6 +38,12 @@ struct DefaultPositionInputs : PositionInputs {
 
   void RewindMask(size_t index);
 
+  // This returns true when either:
+  // 1. Graph capture is enabled, OR
+  // 2. Past-present buffer sharing is enabled AND the device is NvTensorRtRtx
+  // Both scenarios require static mask allocation and special shape handling for optimization
+  bool ShouldUseStaticMaskHandling() const;
+
   const Model& model_;
   State& state_;
   std::string attention_mask_name_;
