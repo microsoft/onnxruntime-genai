@@ -6,7 +6,6 @@ This script tests the booking_flight_tickets and booking_hotels tools
 
 import requests
 import json
-import sys
 
 def test_tool_calling():
     """Test tool calling functionality with flight and hotel booking"""
