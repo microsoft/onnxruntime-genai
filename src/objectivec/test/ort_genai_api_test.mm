@@ -49,7 +49,11 @@ NS_ASSUME_NONNULL_BEGIN
     OGATensor* tensor = [[OGATensor alloc] initWithDataPointer:data.data() shape:shape type:OGAElementTypeFloat32 error:&error];
     ORTAssertNullableResultSuccessful(tensor, error);
 
-    ret = [params setModelInput:@"test_input" tensor:tensor error:&error];
+    OGAGenerator* generator = [[OGAGenerator alloc] initWithModel:model
+                                                           params:params
+                                                            error:&error];
+
+    ret = [generator setModelInput:@"test_input" tensor:tensor error:&error];
     ORTAssertBoolResultSuccessful(ret, error);
 }
 

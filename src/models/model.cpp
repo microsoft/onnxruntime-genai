@@ -541,6 +541,9 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         if (IsMultiProfileEnabled(config.model.decoder.session_options)) {
           ConfigureMultiProfile(config, session_options);
         }
+        if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
+          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_cuda_graph_enable", "1");
+        }
         p_device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
       }
 
@@ -896,23 +899,18 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
-  const std::set<std::string> llm_types = {"chatglm", "decoder", "gemma", "gemma2", "gemma3_text",
-                                           "granite", "llama", "mistral", "nemotron", "olmo",
-                                           "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen3"};
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (llm_types.find(config->model.type) != llm_types.end())
+  if (ModelType::IsLLM(config->model.type))
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
-  if (config->model.type == "whisper")
-    return std::make_shared<Whisper_Model>(std::move(config), ort_env);
-  if (config->model.type == "phi3v")
+  if (ModelType::IsALM(config->model.type))
+    return std::make_shared<WhisperModel>(std::move(config), ort_env);
+  if (ModelType::IsVLM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
-  if (config->model.type == "decoder-pipeline")
+  if (ModelType::IsPipe(config->model.type))
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
-  if (config->model.type == "phi4mm")
+  if (ModelType::IsMMM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
-  if (config->model.type == "gemma3")
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (config->model.type == "marian-ssru")
     return std::make_shared<MarianModel>(std::move(config), ort_env);
 
@@ -1006,7 +1004,13 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
 }
 
 std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& prompt, const Images* images, const Audios* audios) const {
-  Payload payload{prompt, images, audios};
+  Payload payload{prompt, {}, images, audios};
   return processor_->Process(*tokenizer_, payload);
 }
+
+std::unique_ptr<NamedTensors> MultiModalProcessor::Process(std::span<const char*> prompts, const Images* images, const Audios* audios) const {
+  Payload payload{"", prompts, images, audios};
+  return processor_->Process(*tokenizer_, payload);
+}
+
 }  // namespace Generators

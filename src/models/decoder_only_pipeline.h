@@ -59,6 +59,7 @@ struct DecoderOnlyPipelineState : State {
   DecoderOnlyPipelineState(const DecoderOnlyPipelineState&) = delete;
   DecoderOnlyPipelineState& operator=(const DecoderOnlyPipelineState&) = delete;
 
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
 

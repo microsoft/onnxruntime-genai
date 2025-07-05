@@ -42,6 +42,10 @@ struct State;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
+struct ExtraInput {  // Extra inputs provided via SetInputs()
+  std::string name;
+  std::shared_ptr<Tensor> tensor;
+};
 
 template <typename T, typename V>
 bool contains(const T& t, V&& v) {
@@ -77,25 +81,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
 
-  cpu_span<int32_t> aux_input_ids{};  // Intermediate solution to be used with SetInputs function for multimodal and whisper models
-
-  struct Whisper {
-    std::shared_ptr<Tensor> input_features;   // float32 [batch_size, number_of_mels, number_of_frames]
-    std::shared_ptr<Tensor> alignment_heads;  // int32 [num_alignment_heads, 2]
-  };
-
-  std::variant<Whisper> inputs;
-
-  struct Input {
-    std::string name;
-    std::shared_ptr<Tensor> tensor;
-  };
-
-  // A list of extra model inputs that will be matched at runtime based on name
-  std::vector<Input> extra_inputs;
-
-  void SetInputs(const NamedTensors& inputs);
-
   std::string guidance_type;  // e.g. json_schema or regex
   std::string guidance_data;  // e.g. rules data in json_schema or regex
   void SetGuidance(std::string_view type, std::string_view data);
@@ -115,15 +100,20 @@ struct Generator : LeakChecked<Generator> {
 
   DeviceSpan<int32_t> GetSequence(size_t index) const;
 
+  // A list of extra model inputs that will be matched at runtime based on name
+  std::vector<ExtraInput> extra_inputs_;
+  void SetInputs(const NamedTensors& inputs);
+
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
-  bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
+
+  bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
+  bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
 
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
-  void AuxAppendTokens(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   enum Action { standard,   // Default, set in any other case
                 generated,  // Set after GenerateNextToken

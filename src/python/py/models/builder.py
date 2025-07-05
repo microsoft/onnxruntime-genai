@@ -3754,6 +3754,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model.model_type = "gemma3_text"
         elif config.architectures[0] == "Gemma3ForConditionalGeneration":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+            extra_options["exclude_embeds"] = True
             text_config = config.text_config
             for key in text_config:
                 if not hasattr(config, key):

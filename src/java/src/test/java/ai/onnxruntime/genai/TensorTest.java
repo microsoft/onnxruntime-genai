@@ -16,8 +16,8 @@ public class TensorTest {
   @Test
   public void testAddTensorInput() throws GenAIException {
     // test setting an invalid search option throws a GenAIException
-    try (SimpleGenAI generator = new SimpleGenAI(TestUtils.tinyGpt2ModelPath());
-        GeneratorParams params = generator.createGeneratorParams(); ) {
+    try (SimpleGenAI genAI = new SimpleGenAI(TestUtils.tinyGpt2ModelPath());
+        GeneratorParams params = genAI.createGeneratorParams(); ) {
       long[] shape = {2, 2};
       Tensor.ElementType elementType = Tensor.ElementType.float32;
       ByteBuffer data = ByteBuffer.allocateDirect(4 * Float.BYTES).order(ByteOrder.nativeOrder());
@@ -28,7 +28,9 @@ public class TensorTest {
         // no error on setting.
         // assuming there's an error on execution if an invalid input has been provided so the user
         // is aware of the issue
-        params.setInput("unknown_value", tensor);
+        Model model = genAI.getModel();
+        Generator generator = new Generator(model, params);
+        generator.setModelInput("unknown_value", tensor);
       }
     }
   }

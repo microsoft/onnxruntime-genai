@@ -12,8 +12,6 @@ struct KeyValueCache {
 
   virtual void Add() = 0;
 
-  virtual void AddEncoder() = 0;
-
   virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) = 0;
 
   virtual void RewindTo(size_t index) = 0;
@@ -34,9 +32,6 @@ struct CombinedKeyValueCache : KeyValueCache {
   CombinedKeyValueCache(State& state);
 
   void Add() override;  // Add to state inputs/outputs
-  void AddEncoder() override {
-    throw std::runtime_error("CombinedKeyValueCache does not support AddEncoder.");
-  };
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   void RewindTo(size_t index) override;
 
@@ -69,10 +64,13 @@ struct CombinedKeyValueCache : KeyValueCache {
 struct DefaultKeyValueCache : KeyValueCache {
   DefaultKeyValueCache(State& state);
 
-  void AddEncoder() override;  // If model has an initial encoder step, this is used
-  // Register input_ids as ORT session input.
-  // Called only once during initialization of state.
+  static bool IsCacheNeeded(const Model& model);
+
   void Add() override;
+  auto& GetShape() const { return shape_; }
+  auto& GetType() const { return type_; }
+  auto& GetPresents() { return presents_; }
+
   // Move present to past. Prepare present output for next generation iteration.
   void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   void RewindTo(size_t index) override;
@@ -106,17 +104,15 @@ struct DefaultKeyValueCache : KeyValueCache {
 
 // Very similar to the DefaultKeyValueCache, but is only created once at the encoder step, then used without modification for every decoder step
 struct CrossCache {
-  CrossCache(State& state);
+  CrossCache(State& state, int sequence_length);
 
-  void AddOutputs();
-  void AddInputs();
+  void AddOutputs(State& state);
+  void AddInputs(State& state);
+  auto& GetShape() const { return shape_; }
+  auto& GetType() const { return type_; }
+  auto& GetValues() { return values_; }
 
  private:
-  DeviceInterface& Device() { return *model_.p_device_kvcache_; }
-  Ort::Allocator& Allocator() { return model_.p_device_kvcache_->GetAllocator(); }
-
-  State& state_;
-  const Model& model_{state_.model_};
   int layer_count_;
 
   std::array<int64_t, 4> shape_;
@@ -132,7 +128,6 @@ struct ModelManagedKeyValueCache : KeyValueCache {
   ModelManagedKeyValueCache(State& state);
 
   virtual void Add() override;
-  virtual void AddEncoder() override;
   virtual void Update(DeviceSpan<int32_t> beam_indices, int total_length) override;
   virtual void RewindTo(size_t index) override;
 
