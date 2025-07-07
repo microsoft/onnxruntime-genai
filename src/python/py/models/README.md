@@ -40,6 +40,7 @@ The tool currently supports the following model architectures.
 - Phi
 - Qwen
 - AMD OLMo
+- ERNIE 4.5
 
 It is intended for supporting the latest, popular state-of-the-art models.
 
