@@ -3590,20 +3590,6 @@ class Phi4MMModel(Phi3VModel):
         super().make_layer(layer_id, layer)
 
 
-class ErnieModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-        # Ernie uses interleaved rotary position embeddings.
-        self.rotemb_attrs["interleaved"] = 1
-
-        # Ernie uses a `compression_ratio` for its RoPE scaling.
-        # The original RoPE logic in ernie is: position_ids / compression_ratio,
-        # which is equivalent to scaling the frequencies (inv_freq) by 1 / compression_ratio.
-        if hasattr(config, "compression_ratio") and config.compression_ratio != 1.0:
-            self.rotemb_attrs["rescale_factors"] = 1.0 / config.compression_ratio
-
-
 class Gemma3Model(Gemma2Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
@@ -3631,6 +3617,20 @@ class Gemma3Model(Gemma2Model):
         cos_cache_name = kwargs.get("cos_cache_name", self.cos_cache_global_name if self.window_size == -1 else self.cos_cache_local_name)
         sin_cache_name = kwargs.get("sin_cache_name", self.sin_cache_global_name if self.window_size == -1 else self.sin_cache_local_name)
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)
+
+
+class ErnieModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # Ernie uses interleaved rotary position embeddings.
+        self.rotemb_attrs["interleaved"] = 1
+
+        # Ernie uses a `compression_ratio` for its RoPE scaling.
+        # The original RoPE logic in ernie is: position_ids / compression_ratio,
+        # which is equivalent to scaling the frequencies (inv_freq) by 1 / compression_ratio.
+        if hasattr(config, "compression_ratio") and config.compression_ratio != 1.0:
+            self.rotemb_attrs["rescale_factors"] = 1.0 / config.compression_ratio
 
 
 def check_extra_options(kv_pairs):
