@@ -3619,6 +3619,35 @@ class Gemma3Model(Gemma2Model):
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)
 
 
+class SmolLM3Model(LlamaModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.layer_types = config.layer_types
+        self.no_rope_layers = config.no_rope_layers
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        # SmolLM3 uses per-layer conditional RoPE and Sliding Window Attention.
+        # So, we temporarily modify the model's attributes before calling the
+        # base `make_attention` method, then restore them immediately after.
+        original_use_rope = self.attention_attrs["use_rope_in_attn"]
+        original_window_size = self.window_size
+
+        # Enable/disable RoPE for the current layer.
+        self.attention_attrs["use_rope_in_attn"] = bool(self.no_rope_layers[layer_id])
+
+        # Set the sliding window size for the current layer.
+        assert self.layer_types[layer_id] in {"sliding_attention", "full_attention"}
+        if self.layer_types[layer_id] == "full_attention":
+            self.window_size = -1
+
+        # Call the original `make_attention` with the temporarily-modified settings.
+        super().make_attention(layer_id, attention, root_input, **kwargs)
+
+        # Restore original values
+        self.attention_attrs["use_rope_in_attn"] = original_use_rope
+        self.window_size = original_window_size
+
+
 def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
@@ -3801,6 +3830,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen3ForCausalLM":
             onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "SmolLM3ForCausalLM":
+          onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
