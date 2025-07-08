@@ -229,7 +229,7 @@ Build with CUDA:
 ```bash
 mkdir build
 cd build
-cmake ../ -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=80 -DUSE_CUDA=ON -DPHI3=ON
+cmake ../ -DPHI3=ON
 cmake --build . --config Release
 ```
 

@@ -41,14 +41,14 @@ class TerminateSession {
   std::mutex mtx;
   bool stopFlag = false;
 
-  void signalHandler(int signum);
+  void SignalHandler(int signum);
   void Generator_SetTerminate_Call(OgaGenerator* generator);
   void Generator_SetTerminate_Call_C(OgaGenerator* generator);
 };
 
 bool FileExists(const char* path);
 
-std::string trim(const std::string& str);
+std::string Trim(const std::string& str);
 
 // Returns true if model_path & ep were able to be set from user cmd-line args.
 // Returns false if insufficient cmd-line arguments were passed.

@@ -39,7 +39,7 @@ void Timing::Log(const int prompt_tokens_length, const int new_tokens_length) {
   std::cout << "-------------" << std::endl;
 }
 
-void TerminateSession::signalHandler(int signum) {
+void TerminateSession::SignalHandler(int signum) {
   std::cout << "Interrupt signal received. Terminating current session...\n";
   std::unique_lock<std::mutex> lock(mtx);
   stopFlag = true;
@@ -78,7 +78,7 @@ bool FileExists(const char* path) {
   return static_cast<bool>(std::ifstream(path));
 }
 
-std::string trim(const std::string& str) {
+std::string Trim(const std::string& str) {
   const size_t first = str.find_first_not_of(' ');
   if (std::string::npos == first) {
     return str;

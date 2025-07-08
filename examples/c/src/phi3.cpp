@@ -15,8 +15,8 @@
 
 static TerminateSession catch_terminate;
 
-void signalHandlerWrapper(int signum) {
-  catch_terminate.signalHandler(signum);
+void SignalHandlerWrapper(int signum) {
+  catch_terminate.SignalHandler(signum);
 }
 
 void CXX_API(const char* model_path, const char* execution_provider) {
@@ -40,11 +40,10 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call, &catch_terminate, generator.get()));
 
   // Define System Prompt
-  const std::string system_prompt = std::string("<|system|>\n") + "You are a helpful AI and give elaborative answers" + "<|end|>";
-  bool include_system_prompt = true;
+  std::string system_prompt = "You are a helpful AI assistant.";
 
   while (true) {
-    signal(SIGINT, signalHandlerWrapper);
+    signal(SIGINT, SignalHandlerWrapper);
     std::string text;
     std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
     // Clear Any cin error flags because of SIGINT
@@ -55,20 +54,34 @@ void CXX_API(const char* model_path, const char* execution_provider) {
       break;  // Exit the loop
     }
 
-    const std::string prompt = tokenizer->ApplyChatTemplate("", text.c_str(), "", true);
+    const std::string messages = R"(
+      [
+        {
+          "role": "system",
+          "content": ")" + system_prompt +
+                                 R"("
+        },
+        {
+          "role": "user",
+          "content": ")" + text + R"("
+        }
+      ]
+    )";
+    system_prompt.clear();  // Clear the system prompt to avoid reusing it in the next iteration
+    std::string prompt;
+    try {
+      prompt = std::string(tokenizer->ApplyChatTemplate("", messages.c_str(), "", true));
+    } catch (const std::exception& e) {
+      std::cerr << "Error applying chat template: " << e.what() << std::endl;
+      break;  // Exit the loop on error
+    }
 
     bool is_first_token = true;
     Timing timing;
     timing.RecordStartTimestamp();
 
     auto sequences = OgaSequences::Create();
-    if (include_system_prompt) {
-      std::string combined = system_prompt + prompt;
-      tokenizer->Encode(combined.c_str(), *sequences);
-      include_system_prompt = false;
-    } else {
-      tokenizer->Encode(prompt.c_str(), *sequences);
-    }
+    tokenizer->Encode(prompt.c_str(), *sequences);
 
     std::cout << "Generating response..." << std::endl;
     generator->AppendTokenSequences(*sequences);
@@ -87,7 +100,8 @@ void CXX_API(const char* model_path, const char* execution_provider) {
         std::cout << tokenizer_stream->Decode(new_token) << std::flush;
       }
     } catch (const std::exception& e) {
-      std::cout << "Session Terminated: " << e.what() << std::endl;
+      std::cout << "Generation terminated: " << e.what() << std::endl;
+      break;  // Exit the loop on error
     }
 
     timing.RecordEndTimestamp();
@@ -95,12 +109,15 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     const int new_tokens_length = generator->GetSequenceCount(0) - prompt_tokens_length;
     timing.Log(prompt_tokens_length, new_tokens_length);
 
-    if (th.joinable()) {
-      th.join();  // Join the thread if it's still running
-    }
-
     for (int i = 0; i < 3; ++i)
       std::cout << std::endl;
+  }
+
+  if (th.joinable()) {
+    if (!generator->IsDone()) {
+      catch_terminate.SignalHandler(1);  // Signal the thread to terminate
+    }
+    th.join();  // Join the thread if it's still running
   }
 }
 
@@ -113,12 +130,16 @@ int main(int argc, char** argv) {
   // Responsible for cleaning up the library during shutdown
   OgaHandle handle;
 
-  std::cout << "-------------" << std::endl;
-  std::cout << "Hello, Phi-3!" << std::endl;
-  std::cout << "-------------" << std::endl;
+  std::cout << "----------------" << std::endl;
+  std::cout << "Hello, OrtGenAI!" << std::endl;
+  std::cout << "----------------" << std::endl;
 
-  std::cout << "C++ API" << std::endl;
-  CXX_API(model_path.c_str(), ep.c_str());
+  try {
+    CXX_API(model_path.c_str(), ep.c_str());
+  } catch (const std::exception& e) {
+    std::cerr << "Error: " << e.what() << std::endl;
+    return -1;
+  }
 
   return 0;
 }

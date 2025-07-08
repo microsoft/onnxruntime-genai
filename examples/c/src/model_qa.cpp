@@ -15,8 +15,8 @@
 
 static TerminateSession catch_terminate;
 
-void signalHandlerWrapper(int signum) {
-  catch_terminate.signalHandler(signum);
+void SignalHandlerWrapper(int signum) {
+  catch_terminate.SignalHandler(signum);
 }
 
 void CXX_API(const char* model_path, const char* execution_provider) {
@@ -34,7 +34,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
 
   while (true) {
-    signal(SIGINT, signalHandlerWrapper);
+    signal(SIGINT, SignalHandlerWrapper);
     std::string text;
     std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
     // Clear Any cin error flags because of SIGINT
@@ -45,7 +45,19 @@ void CXX_API(const char* model_path, const char* execution_provider) {
       break;  // Exit the loop
     }
 
-    const std::string prompt = tokenizer->ApplyChatTemplate("", text.c_str(), "", true);
+    const std::string messages = R"(
+      [
+        {
+          "role": "system",
+          "content": "You are a helpful AI assistant."
+        },
+        {
+          "role": "user",
+          "content": ")" + text + R"("
+        }
+      ]
+    )";
+    const std::string prompt = std::string(tokenizer->ApplyChatTemplate("", messages.c_str(), "", true));
 
     bool is_first_token = true;
     Timing timing;
@@ -102,9 +114,9 @@ int main(int argc, char** argv) {
   // Responsible for cleaning up the library during shutdown
   OgaHandle handle;
 
-  std::cout << "-------------" << std::endl;
-  std::cout << "Hello, Phi-3!" << std::endl;
-  std::cout << "-------------" << std::endl;
+  std::cout << "-------------------------" << std::endl;
+  std::cout << "Hello, OrtGenAI Model-QA!" << std::endl;
+  std::cout << "-------------------------" << std::endl;
 
   std::cout << "C++ API" << std::endl;
   CXX_API(model_path.c_str(), ep.c_str());

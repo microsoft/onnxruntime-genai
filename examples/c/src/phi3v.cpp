@@ -31,7 +31,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     std::vector<std::string> image_paths;
     for (size_t start = 0, end = 0; end < image_paths_str.size(); start = end + 1) {
       end = image_paths_str.find(',', start);
-      image_paths.push_back(trim(image_paths_str.substr(start, end - start)));
+      image_paths.push_back(Trim(image_paths_str.substr(start, end - start)));
     }
     if (image_paths.empty()) {
       std::cout << "No image provided" << std::endl;
