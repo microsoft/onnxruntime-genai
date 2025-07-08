@@ -104,8 +104,8 @@ class Model:
             "attention_mask": ir.DataType.INT64,                                                                 # For standard models
             "position_ids": ir.DataType.INT64,                                                                   # For standard models
             "inputs_embeds": self.io_dtype,                                                                      # For standard models where you want to remove the embedding layer from the model (note that `inputs_embeds` is written this way to match Hugging Face format)
-            "past_key_values.key": self.io_dtype,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
-            "past_key_values.value": self.io_dtype,                                                              # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
+            "past_key_values.key": self.io_dtype if self.io_dtype != ir.DataType.FLOAT else ir.DataType.FLOAT16,                                                                # For standard models (note that `past_key_values.key` is written this way to match Hugging Face format)
+            "past_key_values.value": self.io_dtype if self.io_dtype != ir.DataType.FLOAT else ir.DataType.FLOAT16,                                                             # For standard models (note that `past_key_values.value` is written this way to match Hugging Face format)
         }
         self.input_shapes = {
             "input_ids": ["batch_size", "sequence_length"],                                                      # For standard models
@@ -124,8 +124,8 @@ class Model:
         self.output_types = {
             "hidden_states": self.io_dtype,                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
             "logits": self.io_dtype,                                                                             # For standard models
-            "present.key": self.io_dtype,                                                                        # For standard models (note that `present.key` is written this way to match Hugging Face format)
-            "present.value": self.io_dtype,                                                                      # For standard models (note that `present.value` is written this way to match Hugging Face format)
+            "present.key": self.io_dtype if self.io_dtype != ir.DataType.FLOAT else ir.DataType.FLOAT16,                                                                       # For standard models (note that `present.key` is written this way to match Hugging Face format)
+            "present.value": self.io_dtype if self.io_dtype != ir.DataType.FLOAT else ir.DataType.FLOAT16,                                                                      # For standard models (note that `present.value` is written this way to match Hugging Face format)
         }
         self.output_shapes = {
             "hidden_states": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
@@ -338,6 +338,7 @@ class Model:
     def make_attention_init(self):
         valid_gqa_configurations = {
             ("cpu", ir.DataType.FLOAT),
+            ("cuda", ir.DataType.FLOAT),
             ("cuda", ir.DataType.FLOAT16),
             ("cuda", ir.DataType.BFLOAT16),
             ("rocm", ir.DataType.FLOAT16),
@@ -464,6 +465,10 @@ class Model:
                 for i in layers_to_exclude:
                     customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
                     customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
+                    #
+                    # customized_weight_config["/model/layers." + str(i) + "/attn/o_proj/MatMul"] = {"bits": 8}
+                    # customized_weight_config["/model/layers." + str(i) + "/mlp/gate_proj//MatMul"] = {"bits": 8}
+                    # customized_weight_config["/model/layers." + str(i) + "/mlp/up_proj/MatMul"] = {"bits": 8}
                     # Gemma model
                     customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
                 customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
@@ -1122,6 +1127,7 @@ class Model:
         # Get precision types to use
         old_io_dtype = self.io_dtype
         new_io_dtype = ir.DataType.FLOAT if self.layernorm_attrs["cast"]["use_fp32"] else self.io_dtype
+        print(f"new_io_dtype: {new_io_dtype}, old_io_dtype: {old_io_dtype}")
         cast = old_io_dtype != new_io_dtype
 
         # Create weight and bias tensors
@@ -1821,20 +1827,65 @@ class Model:
         self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
 
     def make_group_query_attention(self, name, **kwargs):
+        '''
         inputs = [
             kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
             kwargs.get("past_k", ""), kwargs.get("past_v", ""),
             kwargs.get("seqlens_k", ""), kwargs.get("total_seq_len", ""),
             kwargs.get("cos_cache", ""), kwargs.get("sin_cache", ""),
         ]
+        '''
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
+        q_path_name = kwargs["q_path"]
+        q_path_cast_name = f"{q_path_name}/Cast"
+        self.make_cast(q_path_cast_name, q_path_name, dtype=ir.DataType.FLOAT16, shape=["batch_size", 'sequence_length', self.window_size / self.num_kv_heads])
+        '''
+        past_k_name = kwargs.get("past_k", "")
+        if past_k_name:
+            past_k_cast_name = f"{past_k_name}/Cast"
+            self.make_cast(past_k_cast_name, past_k_name, dtype=ir.DataType.FLOAT16, shape=["batch_size", 2,  'past_sequence_length', 128])
+            kwargs["k_path"] = past_k_cast_name
+        
+        past_v_name = kwargs.get("past_v", "")
+        if past_v_name:
+            past_v_cast_name = f"{past_v_name}/Cast"
+            self.make_cast(past_v_cast_name, past_v_name, dtype=ir.DataType.FLOAT16, shape=["batch_size", 2,  'past_sequence_length', 128])
+            kwargs["v_path"] = past_v_cast_name
+        '''
+        cos_cache_name = kwargs.get("cos_cache", "")
+        if cos_cache_name:
+            cos_cache_cast_name = f"{cos_cache_name}/Cast"
+            self.make_cast(cos_cache_cast_name, cos_cache_name, dtype=ir.DataType.FLOAT16, shape=[2048 * 64, 64])
+            kwargs["cos_cache"] = cos_cache_cast_name
+        
+        sin_cache_name = kwargs.get("sin_cache", "")
+        if sin_cache_name:
+            sin_cache_cast_name = f"{sin_cache_name}/Cast"
+            self.make_cast(sin_cache_cast_name, sin_cache_name, dtype=ir.DataType.FLOAT16, shape=[2048 * 64, 64])
+            kwargs["sin_cache"] = sin_cache_cast_name
+
+        inputs = [
+            f"{q_path_cast_name}/output_0", kwargs["k_path"], kwargs["v_path"],
+            kwargs.get("past_k", ""), kwargs.get("past_v", ""),
+            kwargs.get("seqlens_k", ""), kwargs.get("total_seq_len", ""),
+            f"{cos_cache_cast_name}/output_0", f"{sin_cache_cast_name}/output_0",
+        ]
+
+        self.make_cast(sin_cache_cast_name, sin_cache_name, dtype=ir.DataType.FLOAT16, shape=[2048 * 64, 64])
+
+        gqa_output = f"{name}/gqa_output"
+        outputs_node = [gqa_output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
+
         self.make_node(
-            "GroupQueryAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
+            "GroupQueryAttention", inputs=inputs, outputs=outputs_node, name=name, domain="com.microsoft",
             num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], local_window_size=self.window_size,
             softcap=self.attention_attrs["softcap"], do_rotary=self.attention_attrs["use_rope_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
         )
-        self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
+        self.make_value(gqa_output, ir.DataType.FLOAT16, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
+        print(f"name={name}, gqa_output={gqa_output}")
+        self.make_node("Cast", inputs=[gqa_output], outputs=[output], name=output, to=ir.DataType.FLOAT)
+        self.make_value(output, ir.DataType.FLOAT, shape=['batch_size', 'sequence_length', self.head_size * self.num_attn_heads])
 
     def make_sparse_attention(self, name, **kwargs):
         inputs = [
@@ -3619,20 +3670,6 @@ class Gemma3Model(Gemma2Model):
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)
 
 
-class ErnieModel(MistralModel):
-    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-
-        # Ernie uses interleaved rotary position embeddings.
-        self.rotemb_attrs["interleaved"] = 1
-
-        # Ernie uses a `compression_ratio` for its RoPE scaling.
-        # The original RoPE logic in ernie is: position_ids / compression_ratio,
-        # which is equivalent to scaling the frequencies (inv_freq) by 1 / compression_ratio.
-        if hasattr(config, "compression_ratio") and config.compression_ratio != 1.0:
-            self.rotemb_attrs["rescale_factors"] = 1.0 / config.compression_ratio
-
-
 def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
@@ -3753,8 +3790,6 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
             config.hidden_act = "swiglu"
             onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Ernie4_5_ForCausalLM":
-            onnx_model = ErnieModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GemmaForCausalLM":
             onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
