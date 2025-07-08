@@ -36,4 +36,6 @@
    .\model_qa.exe <path\to\model\from\above>
    ```
 3. Enter a prompt: `What is the square root of 16?`
-4. See NPU usage in the `Task Manager`
+4. See NPU usage in the `Task Manager
+   
+   ![See NPU usage in the `Task Manager`](npu.png)
