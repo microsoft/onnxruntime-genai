@@ -18,36 +18,36 @@ set(ORT_GENAI_LIB_DIR ${CMAKE_SOURCE_DIR}/lib)
 
 if(WIN32)
   set(ONNXRUNTIME_GENAI_LIB "onnxruntime-genai.dll")
-  set(ONNXRUNTIME_GENAI_DEPENDENCY "*")
 elseif(APPLE)
   set(ONNXRUNTIME_GENAI_LIB "libonnxruntime-genai.dylib")
-  set(ONNXRUNTIME_GENAI_DEPENDENCY "*")
 elseif(CMAKE_SYSTEM_NAME MATCHES "AIX")
   set(ONNXRUNTIME_GENAI_LIB "libonnxruntime-genai.a")
-  set(ONNXRUNTIME_GENAI_DEPENDENCY "*")
 else()
   set(ONNXRUNTIME_GENAI_LIB "libonnxruntime-genai.so")
-  set(ONNXRUNTIME_GENAI_DEPENDENCY "*")
 endif()
 
-file(GLOB ort_genai_libs "${CMAKE_SOURCE_DIR}/lib/${ONNXRUNTIME_GENAI_DEPENDENCY}")
+if (ORT_GENAI_LIB_DIR)
+  file (GLOB ort_genai_libs "${ORT_GENAI_LIB_DIR}/*")
+else()
+  file(GLOB ort_genai_libs "${CMAKE_SOURCE_DIR}/lib/*")
+endif()
 
 function(prepare_executable executable)
   target_link_directories(${executable} PRIVATE ${ORT_GENAI_LIB_DIR})
   target_link_libraries(${executable} PRIVATE ${ONNXRUNTIME_GENAI_LIB})
-  target_include_directories(${executable} PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
-  if(USE_CUDA)
-    set_target_properties(${executable} PROPERTIES LINKER_LANGUAGE CUDA)
-    target_link_libraries(${executable} PRIVATE cublas curand cudart)
+  if (ORT_GENAI_INCLUDE_DIR)
+    target_include_directories(${executable} PRIVATE ${ORT_GENAI_INCLUDE_DIR})
+  else()
+    target_include_directories(${executable} PRIVATE ${CMAKE_SOURCE_DIR}/include)
   endif()
 
   target_link_libraries(${executable} PUBLIC onnxruntime-genai)
 
-  foreach(DLL_FILE ${ort_genai_libs})
+  foreach(DEPENDENCY_FILE ${ort_genai_libs})
     add_custom_command(
       TARGET ${executable} POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DLL_FILE} $<TARGET_FILE_DIR:${executable}>
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DEPENDENCY_FILE} $<TARGET_FILE_DIR:${executable}>
     )
   endforeach()
 endfunction()

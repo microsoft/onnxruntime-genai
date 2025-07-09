@@ -11,17 +11,13 @@ git clone https://github.com/microsoft/onnxruntime-genai.git
 cd onnxruntime-genai/examples/c
 ```
 
-## Phi-3.5 mini
+## Download the NPU model
 
-### Download model
-
-This example uses the [Phi-3.5 mini model](https://huggingface.co/microsoft/Phi-3.5-mini-instruct).
-
-You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the Hugging Face CLI.
-
-```bash
-huggingface-cli download microsoft/Phi-3.5-mini-instruct-onnx --include cpu_and_mobile/cpu-int4-awq-block-128-acc-level-4/* --local-dir .
-```
+1. Download and install [foundry-local](https://github.com/microsoft/Foundry-Local/releases)
+2. List available models: `foundry model list`
+3. Download a model you would like to run. For example: `foundry model download Phi-4-generic-cpu`
+4. Find out where the model is saved on disk: `foundry cache location`
+5. Identify the path to the model on disk. For example: `C:\Users\<user>\.foundry\Microsoft\Phi-4-generic-cpu\cpu-int4-rtn-block-32-acc-level-4`
 
 ### Chat vs Question Answering
 

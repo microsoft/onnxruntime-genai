@@ -201,6 +201,12 @@ def _parse_args():
         "CMake setup. Delete CMakeCache.txt if needed",
     )
 
+    parser.add_argument(
+        "--skip_examples",
+        action="store_true",
+        help="Skip building the sample executables. Builds only on Linux and Windows otherwise.",
+    )
+
     return parser.parse_args()
 
 
@@ -622,6 +628,10 @@ def build(args: argparse.Namespace, env: dict[str, str]):
     util.run(make_command, env=env)
 
     lib_dir = args.build_dir
+    if util.is_windows():
+        # On Windows, the library files are in a subdirectory named after the configuration (e.g. Debug, Release, etc.)
+        lib_dir = lib_dir / args.config
+
     if not args.ort_home:
         _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
     else:
@@ -651,7 +661,7 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     """
     Run the tests.
     """
-    lib_dir = args.build_dir / "test"
+    lib_dir = args.build_dir
     if util.is_windows():
         # On Windows, the unit test executable is found inside a directory named after the configuration
         # (e.g. Debug, Release, etc.) within the test directory.
@@ -688,6 +698,41 @@ def clean(args: argparse.Namespace, env: dict[str, str]):
     util.run(cmd_args, env=env)
 
 
+def build_examples(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Build the examples.
+    """
+    examples_dir = REPO_ROOT / "examples" / "c"
+    build_dir = examples_dir / "build"
+    build_dir.mkdir(exist_ok=True)
+
+    samples_to_build = [
+        "-DMODEL_QA=ON",
+        "-DMODEL_CHAT=ON",
+        "-DPHI3V=ON",
+        "-DPHI4-MM=ON",
+        "-DWHISPER=ON",
+    ]
+
+    include_dir = REPO_ROOT / "src"
+    lib_dir = args.build_dir
+    if util.is_windows():
+        # On Windows, the library files are in a subdirectory named after the configuration (e.g. Debug, Release, etc.)
+        lib_dir = lib_dir / args.config
+
+    cmake_command = [
+        str(args.cmake_path),
+        "-S", str(examples_dir),
+        "-B", str(build_dir),
+    ] + samples_to_build + [
+        "-DORT_GENAI_INCLUDE_DIR=" + str(include_dir),
+        "-DORT_GENAI_LIB_DIR=" + str(lib_dir),
+    ]
+
+    util.run(cmake_command, env=env)
+    util.run([str(args.cmake_path), "--build", str(build_dir), "--config", args.config], env=env)
+
+
 if __name__ == "__main__":
     if not (util.is_windows() or util.is_linux() or util.is_mac() or util.is_aix()):
         raise OSError(f"Unsupported platform {sys.platform}.")
@@ -711,3 +756,6 @@ if __name__ == "__main__":
 
     if arguments.test and not arguments.skip_tests:
         test(arguments, environment)
+
+    if not arguments.skip_examples and (util.is_windows() or util.is_linux()):
+        build_examples(arguments, environment)
