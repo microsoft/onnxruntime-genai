@@ -353,6 +353,25 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
   std::string_view past_key_pattern = config.model.decoder.inputs.past_key_names;
   std::string_view past_value_pattern = config.model.decoder.inputs.past_value_names;
 
+  // Helper function to add KV cache with sequence length
+  const auto add_key_value_cache_shapes = [](std::ostringstream& shapes,
+                                              int batch_size,
+                                              std::string_view key_pattern,
+                                              std::string_view value_pattern,
+                                              int seq_len,
+                                              int num_layers,
+                                              int num_kv_heads,
+                                              int head_dim) {
+    for (int i = 0; i < num_layers; i++) {
+      // Use the existing function to format the key/value names
+      const std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
+      const std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
+
+      shapes << "," << key_name << ":" << batch_size << "x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
+      shapes << "," << value_name << ":" << batch_size << "x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
+    }
+  };
+
   if (is_multi_profile_enabled) {
     // Multi-profile mode: existing logic for context and generation phases
     const int opt_context_len = config.model.context_length / 2;
@@ -389,25 +408,6 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
       }
     };
 
-    // Helper function to add KV cache with sequence length
-    const auto add_key_value_cache_shapes = [](std::ostringstream& shapes,
-                                               int batch_size,
-                                               std::string_view key_pattern,
-                                               std::string_view value_pattern,
-                                               int seq_len,
-                                               int num_layers,
-                                               int num_kv_heads,
-                                               int head_dim) {
-      for (int i = 0; i < num_layers; i++) {
-        // Use the existing function to format the key/value names
-        const std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
-        const std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
-
-        shapes << "," << key_name << ":" << batch_size << "x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
-        shapes << "," << value_name << ":" << batch_size << "x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
-      }
-    };
-
     std::ostringstream min_shapes, opt_shapes, max_shapes;
 
     // MIN SHAPES (context phase and first token generation)
@@ -436,38 +436,20 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
     // Single profile mode: simple shapes with batch_dim=[0,1,1] and seq_dim=[0,1,max_context_len]
     std::ostringstream min_shapes, opt_shapes, max_shapes;
 
-    // Helper function to add single profile KV cache shapes
-    const auto add_single_profile_kv_shapes = [](std::ostringstream& shapes,
-                                                  int batch_size,
-                                                  std::string_view key_pattern,
-                                                  std::string_view value_pattern,
-                                                  int seq_len,
-                                                  int num_layers,
-                                                  int num_kv_heads,
-                                                  int head_dim) {
-      for (int i = 0; i < num_layers; i++) {
-        const std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);
-        const std::string value_name = ComposeKeyValueName(std::string(value_pattern), i);
-
-        shapes << "," << key_name << ":" << batch_size << "x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
-        shapes << "," << value_name << ":" << batch_size << "x" << num_kv_heads << "x" << seq_len << "x" << head_dim;
-      }
-    };
-
     // MIN SHAPES: batch_dim=0, seq_dim=0
     min_shapes << Config::Defaults::InputIdsName << ":0x0,"
                << Config::Defaults::AttentionMaskName << ":0x0";
-    add_single_profile_kv_shapes(min_shapes, 0, past_key_pattern, past_value_pattern, 0, num_layers, num_kv_heads, head_dim);
+    add_key_value_cache_shapes(min_shapes, 0, past_key_pattern, past_value_pattern, 0, num_layers, num_kv_heads, head_dim);
 
     // OPT SHAPES: batch_dim=1, seq_dim=1
     opt_shapes << Config::Defaults::InputIdsName << ":1x1,"
                << Config::Defaults::AttentionMaskName << ":1x1";
-    add_single_profile_kv_shapes(opt_shapes, 1, past_key_pattern, past_value_pattern, 1, num_layers, num_kv_heads, head_dim);
+    add_key_value_cache_shapes(opt_shapes, 1, past_key_pattern, past_value_pattern, 1, num_layers, num_kv_heads, head_dim);
 
     // MAX SHAPES: batch_dim=1, seq_dim=max_context_len
     max_shapes << Config::Defaults::InputIdsName << ":" << batch_size << "x" << max_context_len << ","
                << Config::Defaults::AttentionMaskName << ":" << batch_size << "x" << max_context_len;
-    add_single_profile_kv_shapes(max_shapes, batch_size, past_key_pattern, past_value_pattern, max_context_len, num_layers, num_kv_heads, head_dim);
+    add_key_value_cache_shapes(max_shapes, batch_size, past_key_pattern, past_value_pattern, max_context_len, num_layers, num_kv_heads, head_dim);
 
     // Add the constructed profiles to session options
     session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_min_shapes", min_shapes.str().c_str());
