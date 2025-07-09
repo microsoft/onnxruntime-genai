@@ -14,8 +14,6 @@ if(USE_CXX)
   add_compile_definitions(USE_CXX)
 endif()
 
-set(ORT_GENAI_LIB_DIR ${CMAKE_SOURCE_DIR}/lib)
-
 if(WIN32)
   set(ONNXRUNTIME_GENAI_LIB "onnxruntime-genai.dll")
 elseif(APPLE)
@@ -32,6 +30,8 @@ else()
   file(GLOB ort_genai_libs "${CMAKE_SOURCE_DIR}/lib/*")
 endif()
 
+message(STATUS "ORT_GENAI_LIB_DIR: ${ORT_GENAI_LIB_DIR}")
+
 function(prepare_executable executable)
   target_link_directories(${executable} PRIVATE ${ORT_GENAI_LIB_DIR})
   target_link_libraries(${executable} PRIVATE ${ONNXRUNTIME_GENAI_LIB})
@@ -45,10 +45,12 @@ function(prepare_executable executable)
   target_link_libraries(${executable} PUBLIC onnxruntime-genai)
 
   foreach(DEPENDENCY_FILE ${ort_genai_libs})
-    add_custom_command(
-      TARGET ${executable} POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DEPENDENCY_FILE} $<TARGET_FILE_DIR:${executable}>
-    )
+    if (NOT IS_DIRECTORY ${DEPENDENCY_FILE})
+      add_custom_command(
+        TARGET ${executable} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DEPENDENCY_FILE} $<TARGET_FILE_DIR:${executable}>
+      )
+    endif()
   endforeach()
 endfunction()
 
