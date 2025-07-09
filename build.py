@@ -704,7 +704,12 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
     """
     examples_dir = REPO_ROOT / "examples" / "c"
     build_dir = examples_dir / "build"
-    build_dir.mkdir(exist_ok=True)
+
+    if build_dir.exists():
+        log.info(f"Removing existing build directory: {build_dir}")
+        shutil.rmtree(build_dir)
+
+    build_dir.mkdir()
 
     samples_to_build = [
         "-DMODEL_QA=ON",
@@ -724,10 +729,14 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         str(args.cmake_path),
         "-S", str(examples_dir),
         "-B", str(build_dir),
+        "-G", args.cmake_generator,
     ] + samples_to_build + [
         "-DORT_GENAI_INCLUDE_DIR=" + str(include_dir),
         "-DORT_GENAI_LIB_DIR=" + str(lib_dir),
     ]
+
+    if util.is_windows_arm():
+        cmake_command += ["-A", "ARM64"]
 
     util.run(cmake_command, env=env)
     util.run([str(args.cmake_path), "--build", str(build_dir), "--config", args.config], env=env)

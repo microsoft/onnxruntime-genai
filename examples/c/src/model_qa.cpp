@@ -8,7 +8,10 @@
 #include "ort_genai.h"
 #include "common.h"
 
-// C++ API Example
+// C++ API Example for Model Question-Answering
+// This example demonstrates how to use the C++ API of the ONNX Runtime GenAI library
+// to perform model question-answering tasks. It includes functionalities to create a model,
+// tokenizer, and generator, and to handle user input for generating responses based on prompts.
 
 OgaGenerator* g_generator = nullptr;
 
