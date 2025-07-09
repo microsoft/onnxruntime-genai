@@ -533,13 +533,23 @@ class Model:
             os.rmdir(self.cache_dir)
 
     def make_initializer(
-        self, tensor: torch.Tensor | np.ndarray | ir.TensorProtocol, /, name: str, to: ir.DataType | None = None
+        self,
+        tensor: torch.Tensor | np.ndarray | ir.TensorProtocol,
+        /,
+        name: str,
+        to: ir.DataType | None = None,
+        transpose: bool = False,
     ):
-        if to is not None:
+        if to is not None or transpose:
             # Cast the tensor lazily if `to` is provided
             def tensor_func():
                 nonlocal tensor
-                tensor = tensor.to(tensor_adapters.to_torch_dtype(to))
+
+                tensor = tensor.cpu()
+                if transpose:
+                    tensor = tensor.T
+                if to is not None:
+                    tensor = tensor.to(tensor_adapters.to_torch_dtype(to))
                 return tensor_adapters.TorchTensor(tensor, name=name)
 
             ir_tensor = ir.LazyTensor(
@@ -809,7 +819,7 @@ class Model:
 
     def make_matmul_float(self, matmul, name, root_input, **kwargs):
         weight = name[1:].replace("/", ".") + ".weight"
-        self.make_initializer(matmul.weight.T, weight, to=self.io_dtype)
+        self.make_initializer(matmul.weight, weight, to=self.io_dtype, transpose=True)
 
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
@@ -3325,16 +3335,16 @@ class Phi3SmallModel(Model):
         qkv_bias = attention.query_key_value.bias.view(self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
 
         attention.q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
-        attention.q_proj.weight = torch.nn.Parameter(qkv_weight[:, :, :-2].reshape(q_size, q_size).T, requires_grad=False)
-        attention.q_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, :-2].flatten(), requires_grad=False)
+        attention.q_proj.weight = torch.nn.Parameter(qkv_weight[:, :, :-2].cpu().reshape(q_size, q_size).T, requires_grad=False)
+        attention.q_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, :-2].cpu().flatten(), requires_grad=False)
 
         attention.k_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
-        attention.k_proj.weight = torch.nn.Parameter(qkv_weight[:, :, [-2]].reshape(q_size, kv_size).T, requires_grad=False)
-        attention.k_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, [-2]].flatten(), requires_grad=False)
+        attention.k_proj.weight = torch.nn.Parameter(qkv_weight[:, :, [-2]].cpu().reshape(q_size, kv_size).T, requires_grad=False)
+        attention.k_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, [-2]].cpu().flatten(), requires_grad=False)
 
         attention.v_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
-        attention.v_proj.weight = torch.nn.Parameter(qkv_weight[:, :, [-1]].reshape(q_size, kv_size).T, requires_grad=False)
-        attention.v_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, [-1]].flatten(), requires_grad=False)
+        attention.v_proj.weight = torch.nn.Parameter(qkv_weight[:, :, [-1]].cpu().reshape(q_size, kv_size).T, requires_grad=False)
+        attention.v_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, [-1]].cpu().flatten(), requires_grad=False)
 
         del qkv_weight
         del qkv_bias
