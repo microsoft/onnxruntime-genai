@@ -4,7 +4,7 @@ project(ortgenaiapp)
 set(CMAKE_CXX_STANDARD 20)
 
 option(USE_CXX "Invoke the C++ example" ON)
-option(PHI3 "Build the Phi example" OFF)
+option(MODEL_CHAT "Build the Phi example" OFF)
 option(MODEL_QA "Build the model Q&A example without multi-turn prompting" OFF)
 option(PHI3V "Build the Phi-3 vision example" OFF)
 option(PHI4-MM "Build the Phi-4 mm example" OFF)
