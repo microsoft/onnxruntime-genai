@@ -766,5 +766,5 @@ if __name__ == "__main__":
     if arguments.test and not arguments.skip_tests:
         test(arguments, environment)
 
-    if not arguments.skip_examples and (util.is_windows() or util.is_linux()):
+    if not (arguments.skip_examples or arguments.android or arguments.ios) and (util.is_windows() or util.is_linux()):
         build_examples(arguments, environment)
