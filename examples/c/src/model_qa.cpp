@@ -3,20 +3,20 @@
 
 #include <iomanip>
 #include <string>
-#include <cstring>
-#include "ort_genai.h"
-#include <thread>
 #include <csignal>
-#include <atomic>
-#include <functional>
+
+#include "ort_genai.h"
 #include "common.h"
 
 // C++ API Example
 
-static TerminateSession catch_terminate;
+OgaGenerator* g_generator = nullptr;
 
-void SignalHandlerWrapper(int signum) {
-  catch_terminate.SignalHandler(signum);
+void TerminateGeneration(int signum) {
+  if (g_generator == nullptr) {
+    return;
+  }
+  g_generator->SetRuntimeOption("terminate_session", "1");
 }
 
 void CXX_API(const char* model_path, const char* execution_provider) {
@@ -34,16 +34,20 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
 
   while (true) {
-    signal(SIGINT, SignalHandlerWrapper);
     std::string text;
     std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
     // Clear Any cin error flags because of SIGINT
     std::cin.clear();
     std::getline(std::cin, text);
 
-    if (text == "quit()") {
+    if (text.empty()) {
+      std::cout << "Empty input. Please enter a valid prompt." << std::endl;
+      continue;  // Skip to the next iteration if input is empty
+    } else if (text == "quit()") {
       break;  // Exit the loop
     }
+
+    signal(SIGINT, TerminateGeneration);
 
     const std::string messages = R"(
       [
@@ -71,7 +75,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 1024);
     auto generator = OgaGenerator::Create(*model, *params);
-    std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call, &catch_terminate, generator.get()));
+    g_generator = generator.get();  // Store the current generator for termination
     generator->AppendTokenSequences(*sequences);
 
     try {
@@ -88,7 +92,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
         std::cout << tokenizer_stream->Decode(new_token) << std::flush;
       }
     } catch (const std::exception& e) {
-      std::cout << "Session Terminated: " << e.what() << std::endl;
+      std::cout << "\n\033[31mTerminating generation: " << e.what() << "\033[0m" << std::endl;
     }
 
     timing.RecordEndTimestamp();
@@ -96,12 +100,10 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     const int new_tokens_length = generator->GetSequenceCount(0) - prompt_tokens_length;
     timing.Log(prompt_tokens_length, new_tokens_length);
 
-    if (th.joinable()) {
-      th.join();  // Join the thread if it's still running
-    }
-
     for (int i = 0; i < 3; ++i)
       std::cout << std::endl;
+
+    g_generator = nullptr;  // Clear the generator after use
   }
 }
 
@@ -119,7 +121,12 @@ int main(int argc, char** argv) {
   std::cout << "-------------------------" << std::endl;
 
   std::cout << "C++ API" << std::endl;
-  CXX_API(model_path.c_str(), ep.c_str());
+  try {
+    CXX_API(model_path.c_str(), ep.c_str());
+  } catch (const std::exception& e) {
+    std::cerr << "Error: " << e.what() << std::endl;
+    return -1;
+  }
 
   return 0;
 }

@@ -3,20 +3,21 @@
 
 #include <iomanip>
 #include <string>
-#include <cstring>
-#include "ort_genai.h"
-#include <thread>
 #include <csignal>
-#include <atomic>
-#include <functional>
+
+#include "ort_genai.h"
 #include "common.h"
 
 // C++ API Example
 
-static TerminateSession catch_terminate;
+OgaGenerator* g_generator = nullptr;
 
-void SignalHandlerWrapper(int signum) {
-  catch_terminate.SignalHandler(signum);
+void TerminateGeneration(int signum) {
+  if (g_generator == nullptr) {
+    return;
+  }
+
+  g_generator->SetRuntimeOption("terminate_session", "1");
 }
 
 void CXX_API(const char* model_path, const char* execution_provider) {
@@ -37,20 +38,23 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   params->SetSearchOption("max_length", 1024);
 
   auto generator = OgaGenerator::Create(*model, *params);
-  std::thread th(std::bind(&TerminateSession::Generator_SetTerminate_Call, &catch_terminate, generator.get()));
+  g_generator = generator.get();  // Store the current generator for termination
 
   // Define System Prompt
   std::string system_prompt = "You are a helpful AI assistant.";
 
   while (true) {
-    signal(SIGINT, SignalHandlerWrapper);
+    signal(SIGINT, TerminateGeneration);
     std::string text;
     std::cout << "Prompt: (Use quit() to exit) Or (To terminate current output generation, press Ctrl+C)" << std::endl;
     // Clear Any cin error flags because of SIGINT
     std::cin.clear();
     std::getline(std::cin, text);
 
-    if (text == "quit()") {
+    if (text.empty()) {
+      std::cout << "Empty input. Please enter a valid prompt." << std::endl;
+      continue;  // Skip to the next iteration if input is empty
+    } else if (text == "quit()") {
       break;  // Exit the loop
     }
 
@@ -68,13 +72,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
       ]
     )";
     system_prompt.clear();  // Clear the system prompt to avoid reusing it in the next iteration
-    std::string prompt;
-    try {
-      prompt = std::string(tokenizer->ApplyChatTemplate("", messages.c_str(), "", true));
-    } catch (const std::exception& e) {
-      std::cerr << "Error applying chat template: " << e.what() << std::endl;
-      break;  // Exit the loop on error
-    }
+    std::string prompt = std::string(tokenizer->ApplyChatTemplate("", messages.c_str(), "", true));
 
     bool is_first_token = true;
     Timing timing;
@@ -84,7 +82,9 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     tokenizer->Encode(prompt.c_str(), *sequences);
 
     std::cout << "Generating response..." << std::endl;
+    generator->SetRuntimeOption("terminate_session", "0");
     generator->AppendTokenSequences(*sequences);
+    const auto current_token_count = generator->GetSequenceCount(0);
 
     try {
       while (!generator->IsDone()) {
@@ -100,8 +100,8 @@ void CXX_API(const char* model_path, const char* execution_provider) {
         std::cout << tokenizer_stream->Decode(new_token) << std::flush;
       }
     } catch (const std::exception& e) {
-      std::cout << "Generation terminated: " << e.what() << std::endl;
-      break;  // Exit the loop on error
+      std::cout << "\n\033[31mTerminating generation: " << e.what() << "\033[0m" << std::endl;
+      generator->RewindTo(current_token_count);  // Rewind to the last valid state
     }
 
     timing.RecordEndTimestamp();
@@ -111,13 +111,6 @@ void CXX_API(const char* model_path, const char* execution_provider) {
 
     for (int i = 0; i < 3; ++i)
       std::cout << std::endl;
-  }
-
-  if (th.joinable()) {
-    if (!generator->IsDone()) {
-      catch_terminate.SignalHandler(1);  // Signal the thread to terminate
-    }
-    th.join();  // Join the thread if it's still running
   }
 }
 
@@ -130,14 +123,14 @@ int main(int argc, char** argv) {
   // Responsible for cleaning up the library during shutdown
   OgaHandle handle;
 
-  std::cout << "----------------" << std::endl;
-  std::cout << "Hello, OrtGenAI!" << std::endl;
-  std::cout << "----------------" << std::endl;
+  std::cout << "---------------------------" << std::endl;
+  std::cout << "Hello, OrtGenAI Model Chat!" << std::endl;
+  std::cout << "---------------------------" << std::endl;
 
   try {
     CXX_API(model_path.c_str(), ep.c_str());
   } catch (const std::exception& e) {
-    std::cerr << "Error: " << e.what() << std::endl;
+    std::cerr << "\033[31mError: " << e.what() << "\033[0m" << std::endl;
     return -1;
   }
 

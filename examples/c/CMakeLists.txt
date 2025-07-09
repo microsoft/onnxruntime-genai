@@ -54,9 +54,9 @@ endfunction()
 
 set(EXAMPLES_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src)
 
-if(PHI3)
-  add_executable(phi3 ${EXAMPLES_SOURCE_DIR}/phi3.cpp  ${EXAMPLES_SOURCE_DIR}/common.cpp)
-  prepare_executable(phi3)
+if(MODEL_CHAT)
+  add_executable(model_chat ${EXAMPLES_SOURCE_DIR}/model_chat.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
+  prepare_executable(model_chat)
 endif()
 
 if(MODEL_QA)

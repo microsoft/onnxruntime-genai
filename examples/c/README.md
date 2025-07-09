@@ -224,16 +224,7 @@ Change into the onnxruntime-genai directory.
 
 #### Build this sample
 
-Build with CUDA:
-
-```bash
-mkdir build
-cd build
-cmake ../ -DPHI3=ON
-cmake --build . --config Release
-```
-
-Build for CPU:
+Build the sample:
 
 ```bash
 mkdir build

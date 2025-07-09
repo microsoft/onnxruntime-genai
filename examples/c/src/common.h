@@ -35,17 +35,6 @@ class Timing {
   TimePoint end_timestamp_;
 };
 
-class TerminateSession {
- public:
-  std::condition_variable cv;
-  std::mutex mtx;
-  bool stopFlag = false;
-
-  void SignalHandler(int signum);
-  void Generator_SetTerminate_Call(OgaGenerator* generator);
-  void Generator_SetTerminate_Call_C(OgaGenerator* generator);
-};
-
 bool FileExists(const char* path);
 
 std::string Trim(const std::string& str);
