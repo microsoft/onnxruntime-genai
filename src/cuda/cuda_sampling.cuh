@@ -12,8 +12,10 @@ struct SamplingData {
   SamplingData(unsigned long long random_seed, int batch_size, int vocab_size, cudaStream_t stream);
   cuda_unique_ptr<int> indices_sorted;
   cuda_unique_ptr<float> scores_sorted;
-  cuda_unique_ptr<float> scores_buffer; // Temporary buffer for sorting/softmaxing scores before sampling
+  cuda_unique_ptr<float> scores_buffer;
+  cuda_unique_ptr<float> scores_adjusted;
   cuda_unique_ptr<float> prefix_sums;
+  cuda_unique_ptr<float> prefix_sums_adjusted;
   cuda_unique_ptr<float> thresholds;
   cuda_unique_ptr<int> indices_in;
   cuda_unique_ptr<int> offsets;
