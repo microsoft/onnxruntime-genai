@@ -342,8 +342,6 @@ DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t>& nex
     first_run_ = false;
     return logits;
   }
-  // Not reached
-  return {};
 }
 
 void WhisperState::Finalize(int current_length) {
