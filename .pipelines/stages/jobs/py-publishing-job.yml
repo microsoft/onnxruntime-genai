@@ -1,0 +1,161 @@
+parameters:
+- name: SpecificArtifact
+  displayName: Use Specific Artifact
+  type: boolean
+  default: false
+- name: BuildId
+  displayName: Specific Artifact's BuildId
+  type: string
+  default: '0'
+- name: arch
+  type: string
+- name: ep
+  type: string
+- name: cuda_version
+  type: string
+  default: ''
+- name: cuda_display_version
+  type: string
+  default: ''
+- name: os
+  type: string
+  values:
+  - 'linux'
+  - 'win'
+  - 'osx'
+- name: artifact_feed
+  type: string
+  default: 'ORT-Nightly'
+
+jobs:
+- job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_publishing
+  ${{ if eq(parameters.os, 'linux') }}:
+    pool:
+      ${{ if eq(parameters.arch, 'x64') }}:
+        name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+      ${{ elseif eq(parameters.arch, 'arm64') }}:
+        name: 'onnxruntime-genai-Ubuntu2004-ARM-CPU'
+      ${{ else }}:
+        name: 'onnxruntime-Ubuntu2204-AMD-CPU'
+      os: linux
+  ${{ if eq(parameters.os, 'win') }}:
+    pool:
+      name: 'onnxruntime-Win-CPU-2022'
+      os: windows
+  ${{ if eq(parameters.os, 'osx') }}:
+    pool:
+      name: 'Azure Pipelines'
+      image: 'macOS-latest'
+      os: 'macOS'
+
+  strategy:
+    ${{ if and(eq(parameters.os, 'win'), eq(parameters.arch, 'arm64')) }}: # Older Python versions don't have official win-arm64 build.
+      matrix:
+        Python311:
+          PyDotVer: '3.11'
+          PyNoDotVer: '311'
+        Python312:
+          PyDotVer: '3.12'
+          PyNoDotVer: '312'
+    ${{ else }}:
+      matrix:
+        Python310:
+          PyDotVer: '3.10'
+          PyNoDotVer: '310'
+        Python311:
+          PyDotVer: '3.11'
+          PyNoDotVer: '311'
+        Python312:
+          PyDotVer: '3.12'
+          PyNoDotVer: '312'
+        Python313:
+          PyDotVer: '3.13'
+          PyNoDotVer: '313'
+
+  timeoutInMinutes: 240
+  workspace:
+    clean: all
+  #  set variables here to be used in the template and steps
+  variables:
+  - name: skipComponentGovernanceDetection
+    ${{ if eq(parameters.os, 'linux') }}:
+      value: true
+    ${{ if eq(parameters.os, 'win') }}:
+      value: false
+  - name: arch
+    value: ${{ parameters.arch }}
+  - name: artifactName
+    value: 'onnxruntime-genai-${{ parameters.os }}-${{ parameters.ep }}-${{ parameters.arch }}'
+  - name: buildConfig
+    value: 'Release'
+  - name: buildDir
+    value: 'build/${{ parameters.ep }}'
+  - name: cuda_version
+    value: ${{ parameters.cuda_version }}
+  - name: ep
+    value: ${{ parameters.ep }}
+  - name: os
+    value: ${{ parameters.os }}
+
+  - name: pip_package_name
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'onnxruntime_genai'
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
+      value: 'onnxruntime_genai_cuda'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: 'onnxruntime_genai_directml'
+    ${{ else }}:
+      value: 'onnxruntime_genai'
+
+  steps:
+  - checkout: self
+    clean: true
+    path: onnxruntime-genai
+    submodules: recursive
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: $(PyDotVer)
+      addToPath: true
+      architecture: 'x64'
+    condition: and(eq(variables['arch'], 'arm64'), eq(variables['os'], 'win'))
+
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: $(PyDotVer)
+      addToPath: true
+      architecture: $(arch)
+    condition: or(ne(variables['arch'], 'arm64'), ne(variables['os'], 'win'))
+
+
+  - task: PythonScript@0
+    inputs:
+      scriptSource: inline
+      script: |
+        import sys
+        import subprocess
+        subprocess.call(['pip', 'install', '-q', 'setuptools', 'wheel', 'build', 'packaging', 'twine'])
+      workingDirectory: '$(Build.BinariesDirectory)'
+    displayName: 'Install python modules'
+
+  - template: steps/utils/flex-download-pipeline-artifact.yml
+    parameters:
+      StepName: 'Download Python Wheel Artifacts'
+      ArtifactName: $(ArtifactName)-$(PyNoDotVer)-wheel
+      TargetPath: '$(Build.BinariesDirectory)/wheel'
+      SpecificArtifact: false
+      BuildId: ${{ parameters.BuildId }}
+
+  - script: 'pip install twine==6.0.1'
+    displayName: 'Install Twine'
+
+  - task: TwineAuthenticate@1
+    displayName: 'Twine Authenticate '
+    inputs:
+      artifactFeed: PublicPackages/${{ parameters.artifact_feed }}
+
+  - script: 'python -m twine upload -r ${{ parameters.artifact_feed }} --config-file $(PYPIRC_PATH) --non-interactive *.whl'
+    workingDirectory: '$(Build.BinariesDirectory)/wheel'
+    displayName: 'Uploading wheels to ${{ parameters.artifact_feed }} feed'
+
+  - template: steps/compliant-and-cleanup-step.yml

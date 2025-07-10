@@ -29,7 +29,7 @@ jobs:
       ${{ elseif eq(parameters.arch, 'arm64') }}:
         name: 'onnxruntime-genai-Ubuntu2004-ARM-CPU'
       ${{ else }}:
-        name: 'nnxruntime-Ubuntu2204-AMD-CPU'
+        name: 'onnxruntime-Ubuntu2204-AMD-CPU'
       os: linux
   ${{ if eq(parameters.os, 'win') }}:
     pool:
