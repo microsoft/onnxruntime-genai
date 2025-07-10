@@ -339,7 +339,7 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
  * If multi-profile is disabled, it creates a single profile with simple shapes.
  *
  */
- void ConfigureNvTensorRtRTxProfile(const Config& config, OrtSessionOptions& session_options, bool is_multi_profile_enabled) {
+void ConfigureNvTensorRtRTxProfile(const Config& config, OrtSessionOptions& session_options, bool is_multi_profile_enabled) {
   // Get model parameters from decoder config
   const int num_layers = config.model.decoder.num_hidden_layers;
   const int num_kv_heads = config.model.decoder.num_key_value_heads;
@@ -355,13 +355,13 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
 
   // Helper function to add KV cache with sequence length
   const auto add_key_value_cache_shapes = [](std::ostringstream& shapes,
-                                              int batch_size,
-                                              std::string_view key_pattern,
-                                              std::string_view value_pattern,
-                                              int seq_len,
-                                              int num_layers,
-                                              int num_kv_heads,
-                                              int head_dim) {
+                                             int batch_size,
+                                             std::string_view key_pattern,
+                                             std::string_view value_pattern,
+                                             int seq_len,
+                                             int num_layers,
+                                             int num_kv_heads,
+                                             int head_dim) {
     for (int i = 0; i < num_layers; i++) {
       // Use the existing function to format the key/value names
       const std::string key_name = ComposeKeyValueName(std::string(key_pattern), i);

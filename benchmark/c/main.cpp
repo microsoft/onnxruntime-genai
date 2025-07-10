@@ -137,7 +137,7 @@ std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, cons
 void RunBenchmark(const benchmark::Options& opts) {
   std::unique_ptr<OgaModel> model;
 
-  if (opts.batch_size > 1 && opts.execution_provider == "NvTensorRtRtx")  {
+  if (opts.batch_size > 1 && opts.execution_provider == "NvTensorRtRtx") {
     // Note: For NvTensorRtRtx with batch_size > 1, we need to use runtime settings
     auto settings = OgaRuntimeSettings::Create();
     size_t batch_size = opts.batch_size;
