@@ -1,7 +1,7 @@
 # ONNX Runtime GenAI C Example
 
 > 📝 **Note:** The examples from the main branch of this repository are compatible with the binaries build from the same commit. Therefore, if using the example from `main`, ONNX Runtime GenAI needs to be built from source. If this is your scenario, just build the library and the examples will be auto built along with the library.
-If this is not your scenario, please use prebuilt binaries from the release you're interested in and use the exmaples from the same version tag and follow the steps below.
+If this is not your scenario, please use prebuilt binaries from the release you're interested in and use the examples from the same version tag and follow the steps below.
 
 ## Download the model
 
@@ -11,7 +11,7 @@ If this is not your scenario, please use prebuilt binaries from the release you'
 4. Find out where the model is saved on disk: `foundry cache location`
 5. Identify the path to the model on disk. For example: `C:\Users\<user>\.foundry\Microsoft\Phi-4-generic-cpu\cpu-int4-rtn-block-32-acc-level-4`
 
-> 📝 **Note:** FoundryLocal cli is not available on Linux at the moment. Please download the model from a Windows machine and copy it over to your Linux machine if you would like to run on Linux.
+> 📝 **Note:** Foundry Local CLI is not available on Linux at the moment. Please download the model from a Windows machine and copy it over to your Linux machine if you would like to run on Linux.
 
 ## Build the C++ Example
 
@@ -21,8 +21,8 @@ If this is not your scenario, please use prebuilt binaries from the release you'
 3. Download the ONNX Runtime libraries.
    - Depending on the execution provider of interest, download one of the following:
       - [CPU execution provider](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime)
-      - [Cuda execution provider on Windows](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.Gpu.Windows)
-      - [Cuda execution provider on Linux](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.Gpu.Linux)
+      - [CUDA execution provider on Windows](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.Gpu.Windows)
+      - [CUDA execution provider on Linux](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.Gpu.Linux)
       - [QNN execution provider](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.QNN)
       - [DirectML execution provider](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.DirectML)
    - Rename extension from `*.nupkg` to `*.zip`.
@@ -30,7 +30,7 @@ If this is not your scenario, please use prebuilt binaries from the release you'
 4. Download the [ONNX Runtime GenAI libraries](https://github.com/microsoft/onnxruntime-genai/releases).
    - Depending on the execution provider of interest, download one of the following:
       - CPU / QNN execution provider: `onnxruntime-genai-<version>-<platform>.zip/tar.gz`
-      - Cuda execution provider: `onnxruntime-genai-<version>-<platform>-cuda.zip/tar.gz`
+      - CUDA execution provider: `onnxruntime-genai-<version>-<platform>-CUDA.zip/tar.gz`
       - DirectML execution provider: `onnxruntime-genai-<version>-<platform>-dml.zip/tar.gz`
    - Extract the zip and copy over all the files from `<package>\lib` to `examples\c\lib`
    - Copy over the header files from `<package>\include` to `examples\c\include`

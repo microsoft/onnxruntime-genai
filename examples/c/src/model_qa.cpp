@@ -120,7 +120,7 @@ int main(int argc, char** argv) {
   OgaHandle handle;
 
   std::cout << "-------------------------" << std::endl;
-  std::cout << "Hello, OrtGenAI Model-QA!" << std::endl;
+  std::cout << "Hello, ORT GenAI Model-QA!" << std::endl;
   std::cout << "-------------------------" << std::endl;
 
   std::cout << "C++ API" << std::endl;

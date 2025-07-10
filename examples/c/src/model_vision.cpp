@@ -50,12 +50,18 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     std::string text;
     std::cout << "Prompt: " << std::endl;
     std::getline(std::cin, text);
-    std::string prompt = "<|user|>\n";
-    if (images) {
+    std::string prompt;
+    if (model->GetType() == "phi3v") {
+      prompt = "<|user|>\n";
       for (size_t i = 0; i < image_paths.size(); ++i)
         prompt += "<|image_" + std::to_string(i + 1) + "|>\n";
+      prompt += text + "<|end|>\n<|assistant|>\n";
+    } else if (model->GetType() == "gemma3") {
+      prompt += "<start_of_turn>user\n";
+      for (size_t i = 0; i < image_paths.size(); ++i)
+        prompt += "<start_of_image>";
+      prompt += text + "<end_of_turn>\n<start_of_turn>model\n";
     }
-    prompt += text + "<|end|>\n<|assistant|>\n";
 
     std::cout << "Processing images and prompt..." << std::endl;
     auto input_tensors = processor->ProcessImages(prompt.c_str(), images.get());
@@ -86,9 +92,9 @@ int main(int argc, char** argv) {
     return -1;
   }
 
-  std::cout << "--------------------" << std::endl;
-  std::cout << "Hello, Phi-3-Vision!" << std::endl;
-  std::cout << "--------------------" << std::endl;
+  std::cout << "-----------------------------" << std::endl;
+  std::cout << "Hello, ORT GenAI Model-Vision" << std::endl;
+  std::cout << "-----------------------------" << std::endl;
 
   std::cout << "C++ API" << std::endl;
   CXX_API(model_path.c_str(), ep.c_str());

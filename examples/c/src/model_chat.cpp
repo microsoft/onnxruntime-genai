@@ -128,7 +128,7 @@ int main(int argc, char** argv) {
   OgaHandle handle;
 
   std::cout << "---------------------------" << std::endl;
-  std::cout << "Hello, OrtGenAI Model Chat!" << std::endl;
+  std::cout << "Hello, ORT GenAI Model Chat!" << std::endl;
   std::cout << "---------------------------" << std::endl;
 
   try {
