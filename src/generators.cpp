@@ -439,6 +439,23 @@ void Generator::SetLogits(DeviceSpan<float> logits) {
   computed_logits_ = true;
 }
 
+#include <vector>
+#include <iostream>
+
+// Print contents of DeviceSpan<float>
+void printDeviceSpan(DeviceSpan<float> span) {
+    size_t n = span.size();
+    auto host_values = span.CopyDeviceToCpu();
+    std::vector<float> sorted_copy(host_values.begin(), host_values.end());  // copy the data
+    std::sort(sorted_copy.begin(), sorted_copy.end(), std::greater<>());
+    
+    // Print values
+    for (size_t i = 0; i < 200; ++i) {
+        std::cout << sorted_copy[i] << ",";
+    }
+    std::cout << std::endl;
+}
+
 void Generator::GenerateNextToken() {
   DurationTrace trace{"Generator::GenerateNextToken"};
 
@@ -469,6 +486,8 @@ void Generator::GenerateNextToken() {
     auto logits = GetLogits();
     guidance_logits_processor_->ProcessLogits(logits);
   }
+  auto logits = GetLogits();
+  printDeviceSpan(logits);
   computed_logits_ = false;
   auto& search = search_->params_->search;
   search_->ApplyMinLength(search.min_length);
