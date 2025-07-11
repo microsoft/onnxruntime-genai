@@ -16,6 +16,8 @@ struct WhisperModel : Model {
 
   std::unique_ptr<OrtSession> session_encoder_;  // audio_features -> encoder_hidden_states, cross_kv_cache
   std::unique_ptr<OrtSession> session_decoder_;  // input_ids, self_kv_cache, cross_kv_cache -> logits, self_kv_cache
+
+  std::unique_ptr<OrtSessionOptions> encoder_session_options_;
 };
 
 struct AudioEncoderState : State {
