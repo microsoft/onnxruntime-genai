@@ -13,6 +13,8 @@ struct SamplingData {
   cuda_unique_ptr<int> indices_sorted;
   cuda_unique_ptr<float> scores_sorted;
   cuda_unique_ptr<float> scores_buffer; // Temporary buffer for sorting/softmaxing scores before sampling
+  cuda_unique_ptr<float> scores_after_removed; // Temporary buffer for sorting/softmaxing scores before sampling, after removing values below threshold.
+  cuda_unique_ptr<float> prefix_sums_after; // Temporary buffer for prefix sums after removing values below threshold.
   cuda_unique_ptr<float> prefix_sums;
   cuda_unique_ptr<float> thresholds;
   cuda_unique_ptr<int> indices_in;
