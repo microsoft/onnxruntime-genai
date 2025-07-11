@@ -139,7 +139,7 @@ void StaticBatchDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> mode
   const int64_t max_sequence_length = (*request_with_max_sequence_length)->UnprocessedTokens().size();
   const int64_t batch_size = scheduled_requests.size();
   const std::vector<int64_t> logits_shape = {batch_size, max_sequence_length, model->config_->model.vocab_size};
-  logits_ = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<Ort::Float16_t>);
+  logits_ = std::make_unique<Tensor>(model->p_device_inputs_, model->session_info_.GetOutputDataType(model->config_->model.decoder.outputs.logits));
   logits_->CreateTensor(logits_shape);
 
   output_names_.push_back(model->config_->model.decoder.outputs.logits.c_str());
@@ -173,15 +173,25 @@ std::vector<DeviceSpan<float>> StaticBatchDecoderIO::ProcessLogits() {
 
   std::vector<DeviceSpan<float>> logits_vector;
   const std::vector<int64_t> logits_shape{batch_size, vocab_size};
-  logits_fp32_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<float>);
-  logits_fp32_->CreateTensor(logits_shape);
-  for (size_t i = 0; i < logits_bytes_vector.size(); ++i) {
-    void* src_data = logits_bytes_vector[i].Span().data();
-    auto logits_of_last_token_fp32 = logits_fp32_->GetDeviceSpan<float>().subspan(i * vocab_size, vocab_size);
-    void* dst_data = logits_of_last_token_fp32.Span().data();
-    model_.p_device_inputs_->Cast(src_data, dst_data, logits_->GetType(), Ort::TypeToTensorType<float>, vocab_size);
 
-    logits_vector.push_back(logits_of_last_token_fp32);
+  const bool requires_cast = logits_->GetType() != Ort::TypeToTensorType<float>;
+  if (requires_cast) {
+    logits_fp32_ = std::make_unique<Tensor>(model_.p_device_inputs_, Ort::TypeToTensorType<float>);
+    logits_fp32_->CreateTensor(logits_shape);
+  }
+
+  for (size_t i = 0; i < logits_bytes_vector.size(); ++i) {
+    if (requires_cast) {
+      auto logits_of_last_token_fp32 = logits_fp32_->GetDeviceSpan<float>().subspan(i * vocab_size, vocab_size);
+      void* src_data = logits_bytes_vector[i].Span().data();
+      void* dst_data = logits_of_last_token_fp32.Span().data();
+      model_.p_device_inputs_->Cast(src_data, dst_data, logits_->GetType(), Ort::TypeToTensorType<float>, vocab_size);
+      logits_vector.push_back(logits_of_last_token_fp32);
+    } else {
+      auto logits_of_last_token_fp32 = model_.p_device_inputs_->WrapMemory<float>(
+        std::span(reinterpret_cast<float*>(logits_bytes_vector[i].Span().data()), vocab_size));
+      logits_vector.push_back(logits_of_last_token_fp32);
+    }
   }
 
   return logits_vector;
