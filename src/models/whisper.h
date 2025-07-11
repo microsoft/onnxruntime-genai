@@ -89,7 +89,7 @@ struct WhisperState : State {
   WhisperState& operator=(const WhisperState&) = delete;
 
   void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
-  
+
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   OrtValue* GetInput(const char* name) override;
   OrtValue* GetOutput(const char* name) override;
