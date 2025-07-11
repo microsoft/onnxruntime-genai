@@ -26,7 +26,7 @@ struct AudioEncoderState : State {
   AudioEncoderState& operator=(const AudioEncoderState&) = delete;
 
   void AddCrossCache(std::unique_ptr<CrossCache>& cross_cache) { cross_cache->AddOutputs(*this); }
-  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
 
   int GetNumFrames() { return num_frames_; }
@@ -88,7 +88,8 @@ struct WhisperState : State {
   WhisperState(const WhisperState&) = delete;
   WhisperState& operator=(const WhisperState&) = delete;
 
-  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+  
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   OrtValue* GetInput(const char* name) override;
   OrtValue* GetOutput(const char* name) override;

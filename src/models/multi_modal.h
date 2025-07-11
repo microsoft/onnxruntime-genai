@@ -112,11 +112,14 @@ struct MultiModalPipelineState : State {
   MultiModalPipelineState(const MultiModalPipelineState&) = delete;
   MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
 
-  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
-                        DeviceSpan<int32_t> next_indices);
-  OrtValue* GetInput(const char* name);
-  OrtValue* GetOutput(const char* name);
+                        DeviceSpan<int32_t> next_indices) override;
+
+  OrtValue* GetInput(const char* name) override;
+
+  OrtValue* GetOutput(const char* name) override;
 
  private:
   void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
