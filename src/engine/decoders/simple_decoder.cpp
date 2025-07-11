@@ -189,7 +189,7 @@ std::vector<DeviceSpan<float>> StaticBatchDecoderIO::ProcessLogits() {
       logits_vector.push_back(logits_of_last_token_fp32);
     } else {
       auto logits_of_last_token_fp32 = model_.p_device_inputs_->WrapMemory<float>(
-        std::span(reinterpret_cast<float*>(logits_bytes_vector[i].Span().data()), vocab_size));
+          std::span(reinterpret_cast<float*>(logits_bytes_vector[i].Span().data()), vocab_size));
       logits_vector.push_back(logits_of_last_token_fp32);
     }
   }
