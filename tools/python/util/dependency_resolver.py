@@ -12,21 +12,21 @@ from pathlib import Path
 import requests
 
 from .logger import get_logger
-from .platform_helpers import is_linux, is_windows, is_windows_arm
+from .platform_helpers import is_linux, is_windows
 
 _log = get_logger("util.dependency_resolver")
 
 
 def _download_ort(
-    use_cuda: bool, use_rocm: bool, use_dml: bool, destination_dir: PathLike
+    use_cuda: bool, use_rocm: bool, use_dml: bool, arm64: bool, destination_dir: PathLike
 ):
     def _lib_path():
         plat = "linux" if is_linux() else "win" if is_windows() else "osx"
         mach = None
-        if platform.machine().lower() == "x86_64" or platform.machine().lower() == "amd64":
-            mach = "x64"
-        elif platform.machine().lower() == "aarch64" or platform.machine().lower() == "arm64":
+        if arm64:
             mach = "arm64"
+        elif platform.machine().lower() == "x86_64" or platform.machine().lower() == "amd64":
+            mach = "x64"
         else:
             raise NotImplementedError(
                 f"Unsupported machine architecture: {platform.machine()}"
@@ -48,7 +48,7 @@ def _download_ort(
         package_name = "Microsoft.ML.OnnxRuntime.DirectML"
     else:
         package_name = "Microsoft.ML.OnnxRuntime"
-        if is_windows_arm():
+        if arm64:
             package_name = "Microsoft.ML.OnnxRuntime.QNN"
 
     package_path = destination_dir / f"{package_name}.zip"
@@ -154,13 +154,14 @@ def _download_d3d12(destination_dir: PathLike):
 
 
 def download_dependencies(
-    use_cuda: bool, use_rocm: bool, use_dml: bool, destination_dir: PathLike
+    use_cuda: bool, use_rocm: bool, use_dml: bool,
+    arm64: bool, destination_dir: PathLike
 ):
     dependencies_dir = destination_dir / "dependencies"
     if not dependencies_dir.exists():
         dependencies_dir.mkdir(parents=True)
 
-    ort_lib_dir = _download_ort(use_cuda, use_rocm, use_dml, dependencies_dir)
+    ort_lib_dir = _download_ort(use_cuda, use_rocm, use_dml, arm64, dependencies_dir)
     libs = listdir(ort_lib_dir)
     for file_name in libs:
         if isfile(Path(ort_lib_dir) / file_name):

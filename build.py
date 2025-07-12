@@ -633,7 +633,8 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         lib_dir = lib_dir / args.config
 
     if not args.ort_home:
-        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
+        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml,
+                                       args.arm64 or args.arm64ec, lib_dir)
     else:
         lib_dir = args.ort_home / "lib"
 
@@ -735,8 +736,10 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         "-DORT_GENAI_LIB_DIR=" + str(lib_dir),
     ]
 
-    if util.is_windows_arm():
+    if args.arm64:
         cmake_command += ["-A", "ARM64"]
+    elif args.arm64ec:
+        cmake_command += ["-A", "ARM64EC"]
 
     util.run(cmake_command, env=env)
     util.run([str(args.cmake_path), "--build", str(build_dir), "--config", args.config], env=env)
