@@ -37,6 +37,7 @@ struct State {
   void ClearIO();  // Clear all inputs/outputs
 
   void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
+
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
 
   const Model& model_;

@@ -735,8 +735,10 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         "-DORT_GENAI_LIB_DIR=" + str(lib_dir),
     ]
 
-    if util.is_windows_arm():
+    if args.arm64:
         cmake_command += ["-A", "ARM64"]
+    elif args.arm64ec:
+        cmake_command += ["-A", "ARM64EC"]
 
     util.run(cmake_command, env=env)
     util.run([str(args.cmake_path), "--build", str(build_dir), "--config", args.config], env=env)
@@ -766,5 +768,5 @@ if __name__ == "__main__":
     if arguments.test and not arguments.skip_tests:
         test(arguments, environment)
 
-    if not (arguments.skip_examples or arguments.android or arguments.ios) and (util.is_windows() or util.is_linux()):
+    if not (arguments.skip_examples or arguments.android or arguments.ios):
         build_examples(arguments, environment)

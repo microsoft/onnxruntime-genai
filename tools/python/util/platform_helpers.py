@@ -19,7 +19,3 @@ def is_linux():
 
 def is_aix():
     return sys.platform.startswith("aix")
-
-
-def is_windows_arm():
-    return is_windows() and "arm" in platform.machine().lower()

@@ -11,7 +11,9 @@ If this is not your scenario, please use prebuilt binaries from the release you'
 4. Find out where the model is saved on disk: `foundry cache location`
 5. Identify the path to the model on disk. For example: `C:\Users\<user>\.foundry\Microsoft\Phi-4-generic-cpu\cpu-int4-rtn-block-32-acc-level-4`
 
-> 📝 **Note:** Foundry Local CLI is not available on Linux at the moment. Please download the model from a Windows machine and copy it over to your Linux machine if you would like to run on Linux.
+> 📝 **Note:** Foundry Local CLI is not available on Linux at the moment. Please download the model from a Windows or a macOS machine and copy it over to your Linux machine if you would like to run on Linux.
+
+For other options to download models, read through [our download options](https://github.com/microsoft/onnxruntime-genai/blob/main/documents/DownloadModels.md).
 
 ## Build the C++ Example
 
@@ -30,7 +32,7 @@ If this is not your scenario, please use prebuilt binaries from the release you'
 4. Download the [ONNX Runtime GenAI libraries](https://github.com/microsoft/onnxruntime-genai/releases).
    - Depending on the execution provider of interest, download one of the following:
       - CPU / QNN execution provider: `onnxruntime-genai-<version>-<platform>.zip/tar.gz`
-      - CUDA execution provider: `onnxruntime-genai-<version>-<platform>-CUDA.zip/tar.gz`
+      - CUDA execution provider: `onnxruntime-genai-<version>-<platform>-cuda.zip/tar.gz`
       - DirectML execution provider: `onnxruntime-genai-<version>-<platform>-dml.zip/tar.gz`
    - Extract the zip and copy over all the files from `<package>\lib` to `examples\c\lib`
    - Copy over the header files from `<package>\include` to `examples\c\include`
@@ -47,7 +49,7 @@ If this is not your scenario, please use prebuilt binaries from the release you'
       cmake -G "Visual Studio 17 2022" -S . -B build -DMODEL_QA=ON -DMODEL_CHAT=ON -A ARM64
       cmake --build build --parallel --config Debug
       ```   
-   - Linux x64:
+   - Linux x64 and macOS:
       ```sh
       cd examples/c
       cmake -G "Unix Makefiles" -S . -B build -DMODEL_QA=ON -DMODEL_CHAT=ON
@@ -59,6 +61,6 @@ If this is not your scenario, please use prebuilt binaries from the release you'
 1. On Windows:
    - cd build\Debug
    - .\model_qa.exe <path/to/model/from/above> <execution_provider>
-2. On Linux:
+2. On Linux and macOS:
    - cd build
    - ./model_qa <path/to/model/from/above> <execution_provider>
