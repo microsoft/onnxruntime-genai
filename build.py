@@ -669,7 +669,8 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         # Whereas on as on platforms, the executable is directly under the test directory.
         lib_dir = lib_dir / args.config
     if not args.ort_home:
-        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
+        _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml,
+                                       args.arm64 or args.arm64ec, lib_dir)
     else:
         lib_dir = args.ort_home / "lib"
 
