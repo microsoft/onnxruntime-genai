@@ -152,4 +152,6 @@ void CopyThroughCpu(DeviceBuffer& dest, size_t begin_dest, DeviceBuffer& source,
 
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
 
+std::unique_ptr<Search> CreateSearch(const GeneratorParams& params);
+
 }  // namespace Generators

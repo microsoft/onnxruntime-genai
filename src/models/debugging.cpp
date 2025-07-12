@@ -145,6 +145,7 @@ void DumpTensor(const Model& model, std::ostream& stream, OrtValue* value, bool 
   }
   auto type_info = value->GetTensorTypeAndShapeInfo();
   auto shape = type_info->GetShape();
+  stream << SGR::Fg_Green << "ShapeDims[ " << shape.size() << "]" << SGR::Reset;
   stream << SGR::Fg_Green << "Shape[ " << SGR::Reset;
   for (auto dim : shape) {
     stream << static_cast<int>(dim) << ' ';
