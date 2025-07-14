@@ -30,7 +30,7 @@ namespace {
     << "    -i,--input_folder <path>\n"
     << "      Path to the ONNX model directory to benchmark, compatible with onnxruntime-genai.\n"
     << "    -e,--execution_provider <provider>\n"
-    << "      Execution provider to use. Valid values: cpu, cuda, dml, NvTensorRtRtx. Default: " << defaults.execution_provider << "\n"
+    << "      Execution provider to use. Valid values are: cpu, cuda, dml, NvTensorRtRtx. Default: " << defaults.execution_provider << "\n"
     << "    -b,--batch_size <number>\n"
     << "      Number of sequences to generate in parallel. Default: " << defaults.batch_size << "\n"
     << "    Prompt options:\n"
