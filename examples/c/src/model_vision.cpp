@@ -51,12 +51,12 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     std::cout << "Prompt: " << std::endl;
     std::getline(std::cin, text);
     std::string prompt;
-    if (model->GetType() == "phi3v") {
+    if (std::string(model->GetType()) == "phi3v") {
       prompt = "<|user|>\n";
       for (size_t i = 0; i < image_paths.size(); ++i)
         prompt += "<|image_" + std::to_string(i + 1) + "|>\n";
       prompt += text + "<|end|>\n<|assistant|>\n";
-    } else if (model->GetType() == "gemma3") {
+    } else if (std::string(model->GetType()) == "gemma3") {
       prompt += "<start_of_turn>user\n";
       for (size_t i = 0; i < image_paths.size(); ++i)
         prompt += "<start_of_image>";

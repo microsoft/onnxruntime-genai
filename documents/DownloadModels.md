@@ -14,7 +14,7 @@ Using Hugging Face CLI
 4. Find out where the model is saved on disk: `foundry cache location`
 5. Identify the path to the model on disk. For example: `C:\Users\<user>\.foundry\Microsoft\Phi-4-generic-cpu\cpu-int4-rtn-block-32-acc-level-4`
 
-> 📝 **Note:** Foundry Local CLI is not available on Linux at the moment. Please download the model from a Windows machine and copy it over to your Linux machine if you would like to run on Linux.
+> 📝 **Note:** Foundry Local CLI is not available on Linux at the moment. Please download the model from a Windows or a macOS machine and copy it over to your Linux machine if you would like to run on Linux.
 
 
 ## Download via Hugging Face Hub
