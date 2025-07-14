@@ -138,11 +138,18 @@ void RunBenchmark(const benchmark::Options& opts) {
   std::unique_ptr<OgaModel> model;
 
   if (opts.batch_size > 1 && opts.execution_provider == "NvTensorRtRtx") {
-    // Note: For NvTensorRtRtx with batch_size > 1, we need to use runtime settings
-    auto settings = OgaRuntimeSettings::Create();
-    size_t batch_size = opts.batch_size;
-    settings->SetHandle("batch_size", &batch_size);
-    model = OgaModel::Create(opts.model_path.c_str(), *settings);
+    // Use OgaConfig::Overlay instead of RuntimeSettings for cleaner implementation
+    auto config = OgaConfig::Create(opts.model_path.c_str());
+
+    // Create JSON overlay for batch_size
+    std::string batch_size_overlay = R"({
+  "search": {
+    "batch_size": )" + std::to_string(opts.batch_size) + R"(
+  }
+})";
+
+    config->Overlay(batch_size_overlay.c_str());
+    model = OgaModel::Create(*config);
   } else {
     model = OgaModel::Create(opts.model_path.c_str());
   }
