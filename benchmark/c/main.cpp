@@ -144,7 +144,8 @@ void RunBenchmark(const benchmark::Options& opts) {
     // Create JSON overlay for batch_size
     std::string batch_size_overlay = R"({
   "search": {
-    "batch_size": )" + std::to_string(opts.batch_size) + R"(
+    "batch_size": )" + std::to_string(opts.batch_size) +
+                                     R"(
   }
 })";
 
