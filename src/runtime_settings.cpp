@@ -25,12 +25,11 @@ std::string RuntimeSettings::GenerateConfigOverlay() const {
 }
 )";
 
-  // Handle WebGPU dawnProcTable
-  auto webgpu_it = handles_.find("dawnProcTable");
-  if (webgpu_it != handles_.end()) {
-    void* dawn_proc_table_handle = webgpu_it->second;
+  auto it = handles_.find("dawnProcTable");
+  if (it != handles_.end()) {
+    void* dawn_proc_table_handle = it->second;
     std::string overlay;
-    overlay.reserve(webgpu_overlay_pre.size() + webgpu_overlay_post.size() + 20);
+    overlay.reserve(webgpu_overlay_pre.size() + webgpu_overlay_post.size() + 20);  // Optional small optimization of buffer size
     overlay += webgpu_overlay_pre;
     overlay += std::to_string((size_t)(dawn_proc_table_handle));
     overlay += webgpu_overlay_post;
