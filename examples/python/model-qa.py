@@ -153,11 +153,10 @@ def main(args):
         # Apply Chat Template
         if model.type == "marian-ssru":
             prompt = text
-            input_tokens = tokenizer.encode(prompt)
-            input_tokens = np.append(input_tokens, 0)
         else:
             prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
-            input_tokens = tokenizer.encode(prompt)
+
+        input_tokens = tokenizer.encode(prompt)
         generator.append_tokens(input_tokens)
 
         if args.verbose: print("Running generation loop ...")
