@@ -793,6 +793,22 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUnloadAdapter(OgaAdapters* adapters, const
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters,
                                                        const char* adapter_name);
+
+/**
+ * \brief Registers an execution provider library with ONNXRuntime API.
+ * \param registration_name name for registration.
+ * \param path provider path.
+ *
+ */
+OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const wchar_t* path);
+
+/**
+ * \brief Unregisters an execution provider library with ONNXRuntime API.
+ * \param registration_name name for registration.
+ *
+ */
+OGA_EXPORT void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name);
+
 #ifdef __cplusplus
 }
 #endif

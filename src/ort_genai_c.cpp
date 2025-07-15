@@ -888,4 +888,12 @@ void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) { delete p; }
 void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete p; }
 
+void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const wchar_t* path) {
+  Ort::api->RegisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name, path);
+}
+
+void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name){
+  Ort::api->UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name);
+}
+
 }  // extern "C"
