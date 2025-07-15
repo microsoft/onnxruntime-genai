@@ -3701,7 +3701,7 @@ def parse_hf_token(hf_token):
     return hf_token
 
 
-def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:    
+def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") or extra_options.get("use_webgpu_fp32", False):
         # FP32 precision
         return ir.DataType.FLOAT
