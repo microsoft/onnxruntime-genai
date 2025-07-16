@@ -410,7 +410,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def("remove_model_data", [](OgaConfig& config, const std::string& model_filename) {
         config.RemoveModelData(model_filename.c_str());
-      });
+      })
+      .def("overlay", &OgaConfig::Overlay);
 
   pybind11::class_<OgaModel>(m, "Model")
       .def(pybind11::init([](const OgaConfig& config) { return OgaModel::Create(config); }))
