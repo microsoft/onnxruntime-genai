@@ -23,6 +23,7 @@ extern "C" {
 #define OGA_EXPORT __declspec(dllimport)
 #endif
 #define OGA_API_CALL _stdcall
+#define ORTCHAR_T wchar_t
 #else
 // To make symbols visible on macOS/iOS
 #ifdef __APPLE__
@@ -31,6 +32,7 @@ extern "C" {
 #define OGA_EXPORT
 #endif
 #define OGA_API_CALL
+#define ORTCHAR_T char
 #endif
 
 /** \addtogroup Global
@@ -793,6 +795,22 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUnloadAdapter(OgaAdapters* adapters, const
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters,
                                                        const char* adapter_name);
+
+/**
+ * \brief Registers an execution provider library with ONNXRuntime API.
+ * \param registration_name name for registration.
+ * \param path provider path.
+ *
+ */
+OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const std::basic_string<ORTCHAR_T>& path);
+
+/**
+ * \brief Unregisters an execution provider library with ONNXRuntime API.
+ * \param registration_name name for registration.
+ *
+ */
+OGA_EXPORT void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name);
+
 #ifdef __cplusplus
 }
 #endif
