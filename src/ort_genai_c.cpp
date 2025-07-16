@@ -202,6 +202,16 @@ OgaResult* OGA_API_CALL OgaLoadAudios(const OgaStringArray* audio_paths, OgaAudi
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaLoadAudioBytes(const OgaStringArray* audio_datas, OgaAudios** audios) {
+  OGA_TRY
+  std::vector<std::string> audio_datas_vector_c;
+  for (const auto& audio_data : *audio_datas)
+    audio_datas_vector_c.push_back(audio_data.c_str());
+  *audios = ReturnUnique<OgaAudios>(Generators::LoadAudioBytes(audio_datas_vector_c));
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaLoadAudiosFromBuffers(const void** audio_data, const size_t* audio_data_sizes, size_t count, OgaAudios** audios) {
   OGA_TRY
   *audios = ReturnUnique<OgaAudios>(Generators::LoadAudiosFromBuffers(std::span<const void*>(audio_data, count), std::span<const size_t>(audio_data_sizes, count)));

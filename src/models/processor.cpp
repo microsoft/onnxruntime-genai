@@ -51,6 +51,21 @@ std::unique_ptr<Audios> LoadAudios(const std::span<const char* const>& audio_pat
   return std::make_unique<Audios>(std::move(audios), audio_paths.size());
 }
 
+std::unique_ptr<Audios> LoadAudioBytes(const std::vector<std::string>& audio_datas) {
+  // Prepare vectors for raw data pointers and sizes
+  std::vector<const void*> audio_raw_data(audio_datas.size());
+  std::vector<size_t> audio_sizes(audio_datas.size());
+  for (size_t i = 0; i < audio_datas.size(); ++i) {
+    if (audio_datas[i].empty()) {
+      throw std::runtime_error("Audio data at index " + std::to_string(i) + " is empty.");
+    }
+    audio_raw_data[i] = static_cast<const void*>(audio_datas[i].data());
+    audio_sizes[i] = audio_datas[i].size();
+  }
+
+  return OgaAudios::Load(audio_raw_data.data(), audio_sizes.data(), audio_raw_data.size());
+}
+
 std::unique_ptr<Audios> LoadAudiosFromBuffers(std::span<const void*> audio_data,
                                               std::span<const size_t> audio_data_sizes) {
   if (audio_data.empty() || audio_data_sizes.empty())

@@ -36,6 +36,7 @@ struct Audios {
 };
 
 std::unique_ptr<Audios> LoadAudios(const std::span<const char* const>& audio_paths);
+std::unique_ptr<Audios> LoadAudioBytes(const std::vector<std::string>& audio_datas);
 std::unique_ptr<Audios> LoadAudiosFromBuffers(std::span<const void*> audio_data, std::span<const size_t> audio_data_sizes);
 
 struct Payload {

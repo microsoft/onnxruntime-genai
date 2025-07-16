@@ -194,6 +194,8 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudio(const char* audio_path, OgaAudio
 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudios(const OgaStringArray* audio_paths, OgaAudios** audios);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaLoadAudioBytes(const OgaStringArray* audio_datas, OgaAudios** audios);
+
 /**
  * \brief Load multiple audios from an array of byte buffers
  * \param[in] audio_data Array of byte buffers containing the audio data.
