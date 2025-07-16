@@ -63,7 +63,7 @@ std::unique_ptr<Audios> LoadAudioBytes(const std::vector<std::string>& audio_dat
     audio_sizes[i] = audio_datas[i].size();
   }
 
-  return OgaAudios::Load(audio_raw_data.data(), audio_sizes.data(), audio_raw_data.size());
+  return Audios::Load(audio_raw_data.data(), audio_sizes.data(), audio_raw_data.size());
 }
 
 std::unique_ptr<Audios> LoadAudiosFromBuffers(std::span<const void*> audio_data,
