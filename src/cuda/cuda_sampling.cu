@@ -414,6 +414,7 @@ template <int kBlockSize>
 __global__ void FilterOnTopP(float* scores, float* prefix_sums, float* scores_temp, float* actual_values, int sample_range, int batch_size, float p) {
   int batch = blockIdx.x;
   float prefix_sum = 0.0f;
+  float saferNegative = std::numeric_limits<float>::lowest() / 1000.0f;
 
   typedef cub::BlockScan<float, kBlockSize> BlockScan;
   __shared__ typename BlockScan::TempStorage temp_storage;
@@ -440,7 +441,7 @@ __global__ void FilterOnTopP(float* scores, float* prefix_sums, float* scores_te
       }
       else
       {
-          prefix_sums[global_index] = std::numeric_limits<float>::lowest();
+          prefix_sums[global_index] = saferNegative;
       }
     }
   }
