@@ -357,6 +357,8 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
       input_ids_->Update(next_tokens);
       UpdateKeyValueCache(next_indices, total_length);
       position_inputs_->Update(next_tokens, total_length, static_cast<int>(input_ids_->GetShape()[1]));
+      logits_.Update(WrapTensor<int32_t>(*model_.p_device_inputs_, *input_ids_->Get()),
+                     static_cast<int>(input_ids_->GetShape()[1]));
     }
   }
 
@@ -403,7 +405,8 @@ void DecoderOnlyPipelineState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tok
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
   UpdateKeyValueCache(beam_indices, total_length);
 
-  logits_.Update(next_tokens, new_length);
+  auto next_windowed_tokens = WrapTensor<int32_t>(*model_.p_device_inputs_, *input_ids_->Get());
+  logits_.Update(next_windowed_tokens, new_length);
 }
 
 OrtValue* DecoderOnlyPipelineState::GetOutput(const char* name) {
