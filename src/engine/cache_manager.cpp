@@ -5,7 +5,11 @@
 
 namespace Generators {
 
-std::unique_ptr<CacheManager> CreateCacheManager(std::shared_ptr<Model> model) {
+std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model) {
+  if (model->config_->engine && model->config_->engine->dynamic_batching) {
+    return std::make_unique<PagedCacheManager>(model);
+  }
+
   return std::make_unique<StaticCacheManager>(model);
 }
 
@@ -91,6 +95,31 @@ void StaticCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& reque
 
 std::vector<std::shared_ptr<Request>> StaticCacheManager::AllocatedRequests() const {
   return cache_allocated_requests_;
+}
+
+PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model)
+    : CacheManager(model) {}
+
+bool PagedCacheManager::CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const {
+  return true;
+}
+
+void PagedCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& requests) {
+  // Implement the allocation logic for the paged cache manager.
+}
+
+void PagedCacheManager::Step() {
+  // Implement the step logic for the paged cache manager.
+}
+
+void PagedCacheManager::Deallocate(std::vector<std::shared_ptr<Request>>& requests) {
+  // Implement the deallocation logic for the paged cache manager.
+}
+
+bool PagedCacheManager::SupportsDynamicBatching() const { return true; }
+
+std::vector<std::shared_ptr<Request>> PagedCacheManager::AllocatedRequests() const {
+  return {};
 }
 
 }  // namespace Generators
