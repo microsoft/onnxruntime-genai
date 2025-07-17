@@ -36,6 +36,30 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             GC.SuppressFinalize(this);
         }
 
+        public static Audios OpenBytes(byte[] audioBytesDatas)
+        {
+            if (audioBytesDatas == null || audioBytesDatas.Length == 0)
+            {
+                throw new ArgumentException("Audio byte data cannot be null or empty.");
+            }
+            // Define count variable, currently only supports one audio file
+            uint count = 1;
+            IntPtr[] audioDatas = new IntPtr[count];
+            UIntPtr[] audioDataSizes = new UIntPtr[count];
+            audioDataSizes[0] = new UIntPtr((uint)audioBytesDatas.Length);
+            GCHandle audioDataHandle = GCHandle.Alloc(audioBytesDatas, GCHandleType.Pinned);
+            try
+            {
+                audioDatas[0] = audioDataHandle.AddrOfPinnedObject();
+                Result.VerifySuccess(NativeMethods.OgaLoadAudiosFromBuffers(audioDatas, audioDataSizes, count, out IntPtr audiosHandle));
+                return new Audios(audiosHandle);
+            }
+            finally
+            {
+                audioDataHandle.Free();
+            }
+        }
+
         protected virtual void Dispose(bool disposing)
         {
             if (_disposed)
