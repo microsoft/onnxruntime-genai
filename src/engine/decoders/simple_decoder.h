@@ -32,9 +32,15 @@ struct VarlenDecoderIO : DecoderIO {
                   ScheduledRequests& scheduled_requests,
                   std::shared_ptr<CacheManager> cache_manager);
 
-  std::vector<DeviceSpan<float>> ProcessLogits() override { return {}; };
+  std::vector<DeviceSpan<float>> ProcessLogits() override;
 
  private:
+  void PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+  void PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests);
+
+  std::vector<std::unique_ptr<Tensor>> owned_inputs_;
+  std::unique_ptr<Tensor> logits_;
+  std::unique_ptr<Tensor> logits_fp32_;
 };
 
 struct SimpleDecoder : public Decoder {

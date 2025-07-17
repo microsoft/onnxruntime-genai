@@ -5,14 +5,14 @@
 
 namespace Generators {
 
-Scheduler::Scheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
+StaticBatchScheduler::StaticBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
     : model_{model}, cache_manager_{cache_manager} {}
 
-void Scheduler::AddRequest(std::shared_ptr<Request> request) {
+void StaticBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
   requests_pool_.push_back(request);
 }
 
-void Scheduler::RemoveRequest(std::shared_ptr<Request> request) {
+void StaticBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
   // For statically batched requests, memory is managed as a single block for the entire batch,
   // so individual requests cannot be deallocated until the whole batch is completed.
   // Therefore, deallocation is only performed for dynamically batched requests below.
@@ -21,7 +21,7 @@ void Scheduler::RemoveRequest(std::shared_ptr<Request> request) {
   to_be_removed_requests_.insert(request);
 }
 
-ScheduledRequests Scheduler::Schedule() {
+ScheduledRequests StaticBatchScheduler::Schedule() {
   std::vector<std::shared_ptr<Request>> requests_to_schedule;
   for (auto& request : requests_pool_) {
     if (request->status_ == RequestStatus::Assigned) {
@@ -63,13 +63,68 @@ ScheduledRequests Scheduler::Schedule() {
   return scheduled_requests;
 }
 
-bool Scheduler::HasPendingRequests() const {
+bool StaticBatchScheduler::HasPendingRequests() const {
   for (auto& request : requests_pool_) {
     if (request->status_ != RequestStatus::Completed) {
       return true;
     }
   }
   return false;
+}
+
+DynamicBatchScheduler::DynamicBatchScheduler(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager)
+    : model_{model}, cache_manager_{cache_manager} {}
+
+void DynamicBatchScheduler::AddRequest(std::shared_ptr<Request> request) {
+  requests_pool_.push_back(request);
+}
+
+void DynamicBatchScheduler::RemoveRequest(std::shared_ptr<Request> request) {
+  std::vector<std::shared_ptr<Request>> requests_to_remove{request};
+  cache_manager_->Deallocate(requests_to_remove);
+
+  requests_pool_.erase(std::remove(requests_pool_.begin(), requests_pool_.end(), request), requests_pool_.end());
+}
+
+ScheduledRequests DynamicBatchScheduler::Schedule() {
+  std::vector<std::shared_ptr<Request>> requests_to_schedule;
+  for (auto& request : requests_pool_) {
+    if (request->status_ == RequestStatus::Assigned) {
+      requests_to_schedule.push_back(request);
+    }
+  }
+
+  for (auto& request : requests_to_schedule) {
+    if (cache_manager_->CanAllocate({request})) {
+      cache_manager_->Allocate({request});
+      request->Schedule();
+    }
+  }
+
+  ScheduledRequests scheduled_requests(cache_manager_->AllocatedRequests(), model_);
+
+  if (!scheduled_requests) {
+    throw std::runtime_error("Unable to schedule requests: no requests available or all requests are completed.");
+  }
+
+  return scheduled_requests;
+}
+
+bool DynamicBatchScheduler::HasPendingRequests() const {
+  for (auto& request : requests_pool_) {
+    if (request->status_ != RequestStatus::Completed) {
+      return true;
+    }
+  }
+  return false;
+}
+
+std::unique_ptr<Scheduler> Scheduler::Create(std::shared_ptr<Model> model, std::shared_ptr<CacheManager> cache_manager) {
+  if (cache_manager->SupportsDynamicBatching()) {
+    return std::make_unique<DynamicBatchScheduler>(model, cache_manager);
+  }
+
+  return std::make_unique<StaticBatchScheduler>(model, cache_manager);
 }
 
 }  // namespace Generators
