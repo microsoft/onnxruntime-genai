@@ -58,7 +58,7 @@ struct WindowedInputIDs : public InputIDs {
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens) override;
   std::array<int64_t, 2> GetShape() const override { return shape_; }
-  OrtValue* Get() override { return value_->GetOrtTensor(); }
+  OrtValue* Get() override { return value_.get(); }
 
  private:
   State& state_;
