@@ -268,6 +268,22 @@ struct Config {
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
   } search;
 
+  struct Engine {
+    struct DynamicBatching {
+      int block_size{256};                          // Enable dynamic batching for the engine
+      std::optional<size_t> num_blocks;             // Maximum batch size for dynamic batching
+      std::optional<float> gpu_utilization_factor;  // Maximum sequence length for dynamic batching
+      int max_batch_size{16};                       // Maximum batch size for dynamic batching
+    };
+    std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
+
+    struct StaticBatching {
+      int max_batch_size{4};  // Maximum batch size for static batching
+    };
+    std::optional<StaticBatching> static_batching;  // Static batching settings
+  };
+  std::optional<Engine> engine;  // Engine settings
+
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping
   // otherwise returns the nominal name and false
