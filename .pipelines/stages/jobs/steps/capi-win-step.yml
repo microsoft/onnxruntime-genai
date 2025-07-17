@@ -94,12 +94,12 @@ steps:
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
-- ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
+- ${{ if or(eq(parameters.target, 'onnxruntime-genai'), eq(parameters.target, 'python')) }}:
   - template: compliant/win-esrp-dll-step.yml
     parameters:
       FolderPath: '$(Build.Repository.LocalPath)\$(buildDir)'
       DisplayName: 'ESRP - Sign C++ dlls'
-      Pattern: '*genai.dll'
+      Pattern: '*genai*.dll'
 
   - powershell: |
       python -m pip install wheel
