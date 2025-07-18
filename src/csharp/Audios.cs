@@ -30,12 +30,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return new Audios(audiosHandle);
         }
 
-        public void Dispose()
-        {
-            Dispose(true);
-            GC.SuppressFinalize(this);
-        }
-
         public static Audios OpenBytes(byte[] audioBytesDatas)
         {
             if (audioBytesDatas == null || audioBytesDatas.Length == 0)
@@ -57,6 +51,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                 }
 
             }
+        }
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
         }
 
         protected virtual void Dispose(bool disposing)

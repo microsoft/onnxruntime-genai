@@ -327,6 +327,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                    out IntPtr /* const OgaImages** */ images);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern unsafe IntPtr /* OgaResult* */ OgaLoadImagesFromBuffers(IntPtr[] /* const void** */ image_data,
+                                                                              UIntPtr[] /* const size_t* */ image_data_sizes,
+                                                                              UIntPtr /* size_t */ count,
+                                                                              out IntPtr /* const OgaImages** */ images);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaLoadAudios(IntPtr /* const OgaStringArray* */ audioPaths,
                                                                    out IntPtr /* const OgaAudios** */ audios);
 
