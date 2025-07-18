@@ -141,7 +141,7 @@ steps:
     displayName: 'Install wheel'
 
   - powershell: |
-      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --PyPackageBuild
+      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target PyPackageBuild
     displayName: 'Build Python Wheel'
 
   - powershell: |
