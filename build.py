@@ -596,10 +596,11 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             "-DMAC_CATALYST=1",
         ]
 
-    if args.arm64:
-        command += ["-A", "ARM64"]
-    elif args.arm64ec:
-        command += ["-A", "ARM64EC"]
+    if args.cmake_generator.startswith("Visual Studio"):
+        if args.arm64:
+            command += ["-A", "ARM64"]
+        elif args.arm64ec:
+            command += ["-A", "ARM64EC"]
 
     if args.arm64 or args.arm64ec:
         if args.test:
@@ -735,10 +736,14 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         "-DORT_GENAI_LIB_DIR=" + str(lib_dir),
     ]
 
-    if args.arm64:
-        cmake_command += ["-A", "ARM64"]
-    elif args.arm64ec:
-        cmake_command += ["-A", "ARM64EC"]
+    if args.cmake_generator.startswith("Visual Studio"):
+        if args.arm64:
+            cmake_command += ["-A", "ARM64"]
+        elif args.arm64ec:
+            cmake_command += ["-A", "ARM64EC"]
+
+    if args.cmake_extra_defines != []:
+        cmake_command += args.cmake_extra_defines
 
     util.run(cmake_command, env=env)
     util.run([str(args.cmake_path), "--build", str(build_dir), "--config", args.config], env=env)
