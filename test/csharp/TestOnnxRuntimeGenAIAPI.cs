@@ -234,7 +234,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         {
             byte[] audioBytes = File.ReadAllBytes(Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
                                                             "test_models", "audios", "1272-141231-0002.mp3"));
-            var audios = Audios.OpenBytes(audioBytes);
+            var audios = Audios.Load(audioBytes);
             Assert.NotNull(audios);
         }
 
@@ -243,7 +243,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
         {
             byte[] imageBytes = File.ReadAllBytes(Path.Combine(GetDirectoryInTreeThatContains(Directory.GetCurrentDirectory(), "test"),
                                                             "test_models", "images", "10809054.jpg"));
-            var images = Images.OpenBytes(imageBytes);
+            var images = Images.Load(imageBytes);
             Assert.NotNull(images);
         }
 
