@@ -3706,7 +3706,7 @@ def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
         # FP32 precision
         return ir.DataType.FLOAT
 
-    if precision == "bf16":
+    if precision == "bf16" or (precision == "int4" and execution_provider == "cuda"):
         # BF16 precision
         return ir.DataType.BFLOAT16
 
