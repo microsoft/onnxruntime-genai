@@ -9,81 +9,46 @@ namespace Generators {
 
 namespace {
 
-// std::pair<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>> AllocateLayerCache(
-//     const CacheOptions& options, Ort::Allocator& gpu_allocator) {
-//   const std::vector<int64_t> shape{options.num_blocks_, options.block_size_ * options.num_kv_heads_ * options.head_size_};
-
-//   return {OrtValue::CreateTensor(gpu_allocator, shape, options.dtype_),   // Key cache
-//           OrtValue::CreateTensor(gpu_allocator, shape, options.dtype_)};  // Value cache
-// }
-
 size_t ComputeNumBlocks(std::shared_ptr<Model> model) {
   if (model->config_->engine->dynamic_batching->num_blocks.has_value()) {
     return *model->config_->engine->dynamic_batching->num_blocks;
   }
 
-  return 0;
+  const auto dtype_size = Ort::SizeOf(ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16);
 
-  // size_t dtype_size = 0;
-  // switch (options.dtype_) {
-  //   case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-  //     dtype_size = 4;
-  //     break;
-  //   case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-  //     dtype_size = 2;
-  //     break;
-  //   default:
-  //     throw std::runtime_error("Invalid cache dtype: " + std::to_string(options.dtype_));
-  // }
+  size_t free_bytes, total_bytes;
+  model->p_device_kvcache_->GetAvailableMemory(free_bytes, total_bytes);
 
-  // size_t free_bytes, total_bytes;
-  // CudaCheck() == cudaMemGetInfo(&free_bytes, &total_bytes);
+  constexpr float memory_fragmentation_factor = 0.9f;
+  constexpr size_t num_caches_per_layer = 2;  // 2 for key and value caches
 
-  // constexpr float memory_fragmentation_factor = 0.9f;
-  // constexpr size_t num_caches_per_layer = 2;  // 2 for key and value caches
-
-  // // Use the free memory to compute the number of blocks needed to achieve the given gpu_utilization_factor.
-  // options.num_blocks_ =
-  //     (free_bytes *
-  //      memory_fragmentation_factor *
-  //      options.gpu_utilization_factor_) /
-  //     (options.block_size_ *
-  //      options.num_kv_heads_ *
-  //      options.head_size_ *
-  //      options.num_layers_ *
-  //      dtype_size *
-  //      num_caches_per_layer);
+  // Use the free memory to compute the number of blocks needed to achieve the given gpu_utilization_factor.
+  return (free_bytes *
+          memory_fragmentation_factor *
+          *model->config_->engine->dynamic_batching->gpu_utilization_factor) /
+         (model->config_->engine->dynamic_batching->block_size *
+          model->config_->model.decoder.num_key_value_heads *
+          model->config_->model.decoder.head_size *
+          model->config_->model.decoder.num_hidden_layers *
+          dtype_size *
+          num_caches_per_layer);
 }
 
 }  // namespace
 
-// CacheOptions::CacheOptions(const int32_t num_layers, const std::optional<int32_t>& block_size,
-//                            const int32_t num_kv_heads, const int32_t head_size,
-//                            const ONNXTensorElementDataType dtype,
-//                            const std::optional<int32_t>& num_blocks,
-//                            const std::optional<float>& gpu_utilization_factor)
-//     : num_layers_(num_layers),
-//       block_size_(block_size.value_or(DefaultBlockSize)),
-//       num_kv_heads_(num_kv_heads),
-//       head_size_(head_size),
-//       dtype_(dtype) {
-//   if (num_blocks.has_value() && gpu_utilization_factor.has_value()) {
-//     throw std::runtime_error("Both num_blocks and gpu_utilization_factor cannot be set at the same time.");
-//   } else if (num_blocks.has_value()) {
-//     num_blocks_ = *num_blocks;
-//   } else {
-//     constexpr float default_gpu_utilization_factor = 0.3f;
-//     gpu_utilization_factor_ = gpu_utilization_factor.value_or(default_gpu_utilization_factor);
-//   }
-// }
-
 PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
     : model_(model) {
-  ComputeNumBlocks(model_);
-  // for (int64_t i = 0; i < options_.num_layers_; ++i) {
-  //   cache_.emplace_back(AllocateLayerCache(options_, *gpu_allocator_));
-  // }
-  // block_allocator_ = std::make_unique<BlockAllocator>(options_.block_size_, options_.num_blocks_);
+  const auto num_blocks = ComputeNumBlocks(model_);
+  const std::vector<int64_t> cache_shape_per_layer{static_cast<int64_t>(num_blocks),
+                                                   static_cast<int64_t>(model->config_->engine->dynamic_batching->block_size) *
+                                                       model->config_->model.decoder.num_key_value_heads *
+                                                       model->config_->model.decoder.head_size};
+  const auto dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+  for (size_t i = 0; i < model->config_->model.decoder.num_hidden_layers; ++i) {
+    cache_.emplace_back(OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), cache_shape_per_layer, dtype),   // Key cache
+                        OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), cache_shape_per_layer, dtype));  // Value cache
+  }
+  block_pool_ = std::make_unique<BlockPool>(model->config_->engine->dynamic_batching->block_size, num_blocks);
 }
 
 bool PagedKeyValueCache::CanAdd(std::shared_ptr<Request> request) const {
