@@ -30,20 +30,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return new Audios(audiosHandle);
         }
 
-        public static Audios OpenBytes(byte[] audioBytesDatas)
+        public static Audios Load(byte[] audioBytesData)
         {
-            if (audioBytesDatas == null || audioBytesDatas.Length == 0)
-            {
-                throw new ArgumentException("Audio byte data cannot be null or empty.");
-            }
             // Define count variable, currently only supports one audio file
             const int count = 1;
             IntPtr[] audioDatas = new IntPtr[count];
             UIntPtr[] audioDataSizes = new UIntPtr[count];
-            audioDataSizes[0] = (UIntPtr)audioBytesDatas.Length;
+            audioDataSizes[0] = (UIntPtr)audioBytesData.Length;
             unsafe
             {
-                fixed (byte* audioBytesPtr = audioBytesDatas)
+                fixed (byte* audioBytesPtr = audioBytesData)
                 {
                     audioDatas[0] = (IntPtr)audioBytesPtr;
                     Result.VerifySuccess(NativeMethods.OgaLoadAudiosFromBuffers(audioDatas, audioDataSizes, (UIntPtr)count, out IntPtr audiosHandle));
