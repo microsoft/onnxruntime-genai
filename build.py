@@ -628,6 +628,10 @@ def build(args: argparse.Namespace, env: dict[str, str]):
 
     util.run(make_command, env=env)
 
+    if not args.skip_wheel:
+        make_command += ["--target", "PyPackageBuild"]
+        util.run(make_command, env=env)
+
     lib_dir = args.build_dir
     if util.is_windows():
         # On Windows, the library files are in a subdirectory named after the configuration (e.g. Debug, Release, etc.)
