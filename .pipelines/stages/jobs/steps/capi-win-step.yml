@@ -104,7 +104,7 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 
-- ${{ if or(eq(parameters.target, 'onnxruntime-genai'), eq(parameters.target, 'python')) }}:
+- ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - template: compliant/win-esrp-dll-step.yml
     parameters:
       FolderPath: '$(Build.Repository.LocalPath)\$(buildDir)'
@@ -136,6 +136,12 @@ steps:
       DisplayName: 'ESRP - PYD Sign'
       DoEsrp: true
       Pattern: '*.pyd'
+  
+  - template: compliant/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\wheel\onnxruntime_genai'
+      DisplayName: 'ESRP - Sign C++ dlls'
+      Pattern: '*genai*.dll'
 
   - powershell: |
       Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
