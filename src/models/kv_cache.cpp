@@ -346,29 +346,38 @@ void DefaultKeyValueCache::CopyPastToPresentForNvTensorRtRtx(int layer_index) {
   if (state_.model_.p_device_->GetType() != DeviceType::NvTensorRtRtx) {
     assert(false);
   }
+    int i = layer_index;
+    if (!is_first_update_ && pasts_[i]) {
+        auto past_info = pasts_[i]->GetTensorTypeAndShapeInfo();
+        auto past_shape = past_info->GetShape();
 
-  if (!is_first_update_ && pasts_[layer_index]) {
-    auto past_info = pasts_[layer_index]->GetTensorTypeAndShapeInfo();
-    auto past_shape = past_info->GetShape();
+        int64_t num_heads = past_shape[1];
+        
+        int64_t past_seq_len = past_shape[2];
+        int64_t head_dim = past_shape[3];
 
-    int64_t num_heads = past_shape[1];
-    int64_t past_seq_len = past_shape[2];
-    int64_t head_dim = past_shape[3];
+        size_t element_size = (type_ == Ort::TypeToTensorType<float>) ? sizeof(float) : sizeof(Ort::Float16_t);
 
-    size_t element_size = (type_ == Ort::TypeToTensorType<float>) ? sizeof(float) : sizeof(Ort::Float16_t);
+        auto past_span = ByteWrapTensor(Device(), *pasts_[i]);
+        auto present_span = ByteWrapTensor(Device(), *presents_[i]);
 
-    auto past_span = ByteWrapTensor(Device(), *pasts_[layer_index]);
-    auto present_span = ByteWrapTensor(Device(), *presents_[layer_index]);
+        int64_t batch_size  = past_shape[0];
+        int64_t seq_len_new = past_seq_len + 1;
 
-    for (int64_t head = 0; head < num_heads; head++) {
-      size_t past_head_offset = head * past_seq_len * head_dim * element_size;
-      size_t present_head_offset = head * (past_seq_len + 1) * head_dim * element_size;
-      size_t head_data_size = past_seq_len * head_dim * element_size;
+        size_t bytes_per_old_bh = past_seq_len  * head_dim * element_size;
+        size_t bytes_per_new_bh = seq_len_new   * head_dim * element_size;
 
-      present_span.subspan(present_head_offset, head_data_size)
-                  .CopyFrom(past_span.subspan(past_head_offset, head_data_size));
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t h = 0; h < num_heads; ++h) {
+                size_t bh_index          = static_cast<size_t>(b) * num_heads + h;
+                size_t past_offset       = bh_index * bytes_per_old_bh;
+                size_t present_offset    = bh_index * bytes_per_new_bh;
+
+                present_span.subspan(present_offset, bytes_per_old_bh)
+                            .CopyFrom(past_span.subspan(past_offset, bytes_per_old_bh));
+            }
+        }
     }
-  }
 }
 
 CrossCache::CrossCache(State& state)
