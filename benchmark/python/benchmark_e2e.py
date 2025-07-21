@@ -212,6 +212,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     # Get tokenizer, and model
     if args.verbose: print("Getting config")
     config = og.Config(f'{args.input_folder}')
+    config.overlay(f'{{"search": {{"batch_size": {batch_size}}}}}')
     if args.execution_provider != "follow_config":
         config.clear_providers()
         if args.execution_provider != "cpu":

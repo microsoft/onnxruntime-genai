@@ -85,6 +85,7 @@ jobs:
       - name: Build with CMake
         run: |
           cmake --build --preset windows_arm64_cpu_release --parallel
+          cmake --build --preset windows_arm64_cpu_release --target PyPackageBuild
 
       - name: Install the Python Wheel and Test Dependencies
         run: |

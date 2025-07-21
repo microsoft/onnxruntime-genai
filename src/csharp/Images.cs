@@ -30,6 +30,26 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return new Images(imagesHandle);
         }
 
+        public static Images Load(byte[] imageBytesData)
+        {
+            // Define count variable, currently only supports one image file
+            const int count = 1;
+            IntPtr[] imageDatas = new IntPtr[count];
+            UIntPtr[] imageDataSizes = new UIntPtr[count];
+            imageDataSizes[0] = (UIntPtr)imageBytesData.Length;
+            unsafe
+            {
+                fixed (byte* imageBytesPtr = imageBytesData)
+                {
+                    imageDatas[0] = (IntPtr)imageBytesPtr;
+                    Result.VerifySuccess(NativeMethods.OgaLoadImagesFromBuffers(imageDatas, imageDataSizes, (UIntPtr)count, out IntPtr imagesHandle));
+                    return new Images(imagesHandle);
+                }
+
+            }
+        }
+
+
         public void Dispose()
         {
             Dispose(true);

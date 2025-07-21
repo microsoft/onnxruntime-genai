@@ -7,7 +7,14 @@ namespace Generators {
 
 WhisperModel::WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename, session_options_.get());
+  // If provider options were explicitly added for the encoder, create session options from this config.
+  if (!config_->model.encoder.session_options.provider_options.empty()) {
+    encoder_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(config_->model.encoder.session_options, *encoder_session_options_, true, false);
+  }
+
+  session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename,
+                                   encoder_session_options_ ? encoder_session_options_.get() : session_options_.get());
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
 
   session_info_.Add(*session_decoder_);

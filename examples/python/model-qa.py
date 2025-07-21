@@ -5,6 +5,7 @@ import onnxruntime_genai as og
 import argparse
 import time
 import json
+import numpy as np
 
 def get_tools_list(input_tools):
     # input_tools format: '[{"name": "fn1", "description": "fn details", "parameters": {"p1": {"description": "details", "type": "string"}}},
@@ -154,6 +155,7 @@ def main(args):
             prompt = text
         else:
             prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+
         input_tokens = tokenizer.encode(prompt)
         generator.append_tokens(input_tokens)
 

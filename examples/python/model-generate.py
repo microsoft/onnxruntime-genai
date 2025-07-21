@@ -4,18 +4,6 @@ import time
 
 def main(args):
     if args.verbose: print("Loading model...")
-    config = og.Config(args.model_path)
-    if args.execution_provider != "follow_config":
-        config.clear_providers()
-        if args.execution_provider != "cpu":
-            if args.verbose:
-                print(f"Setting model to {args.execution_provider}...")
-            config.append_provider(args.execution_provider)
-    model = og.Model(config)
-
-    if args.verbose: print("Model loaded")
-    tokenizer = og.Tokenizer(model)
-    if args.verbose: print("Tokenizer created")
 
     if hasattr(args, 'prompts'):
         prompts = args.prompts
@@ -27,6 +15,23 @@ def main(args):
         else:
             text = input("Input: ")
             prompts = [text]
+
+    batch_size = len(prompts)
+
+    config = og.Config(args.model_path)
+    config.overlay(f'{{"search": {{"batch_size": {batch_size}}}}}')
+
+    if args.execution_provider != "follow_config":
+        config.clear_providers()
+        if args.execution_provider != "cpu":
+            if args.verbose:
+                print(f"Setting model to {args.execution_provider}...")
+            config.append_provider(args.execution_provider)
+    model = og.Model(config)
+
+    if args.verbose: print("Model loaded")
+    tokenizer = og.Tokenizer(model)
+    if args.verbose: print("Tokenizer created")
 
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
@@ -40,7 +45,6 @@ def main(args):
     params = og.GeneratorParams(model)
 
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args} 
-    search_options['batch_size'] = len(prompts)
     search_options['num_beams'] = 3
 
     if (args.verbose): print(f'Args: {args}')

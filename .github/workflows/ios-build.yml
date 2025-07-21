@@ -38,4 +38,5 @@ jobs:
               --osx_arch arm64 \
               --apple_deploy_target 15.4 \
               --cmake_generator 'Xcode' \
-              --build_dir build_iphonesimulator
+              --build_dir build_iphonesimulator \
+              --skip_wheel
