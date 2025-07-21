@@ -141,7 +141,7 @@ steps:
           $env:_PYTHON_HOST_PLATFORM = "macosx-12.0-x86_64"
           $env:ARCHFLAGS = "-arch x86_64"
       }
-      cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --PyPackageBuild
+      cmake --build --preset macos_$(arch)_$(ep)_$(build_config) --parallel --target PyPackageBuild
     displayName: 'Build Python Wheel'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
