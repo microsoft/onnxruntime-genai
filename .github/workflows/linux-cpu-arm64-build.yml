@@ -90,7 +90,7 @@ jobs:
         run: |
           docker run --rm \
           --volume $GITHUB_WORKSPACE:/onnxruntime_src \
-          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/cmake --build --preset linux_gcc_cpu_release"
+          -w /onnxruntime_src ort_genai_linux_arm64_gha bash -c "/usr/bin/cmake --build --preset linux_gcc_cpu_release && /usr/bin/cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild"
 
       - name: Docker -- Check test directory
         run: |

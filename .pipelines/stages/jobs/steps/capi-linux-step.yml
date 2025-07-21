@@ -73,7 +73,7 @@ steps:
       -w /ort_genai_src/ ortgenai$(ep)build$(arch) \
       bash -c " \
           /usr/bin/cmake --preset linux_gcc_$(ep)_$(build_config) \
-            -DENABLE_TESTS=OFF && \
+            -DENABLE_TESTS=OFF -DENABLE_PYTHON=OFF && \
           /usr/bin/cmake --build --preset linux_gcc_$(ep)_$(build_config) \
             --target onnxruntime-genai"
     displayName: 'Build GenAi'
