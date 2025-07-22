@@ -1,6 +1,7 @@
 # -------------------------------------------------------------------------
 # Copyright (c) Microsoft Corporation.  All rights reserved.
 # Licensed under the MIT License.  See License.txt in the project root for
+# license information.
 # --------------------------------------------------------------------------
 # Modifications Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved
 """
@@ -538,15 +539,6 @@ class QuantizedModel:
                 module.mlp.down_proj.out_features = module.mlp.down_proj.qweight.shape[1]
                 module.mlp.down_proj.in_features = module.mlp.down_proj.qweight.shape[0] * 32 // module.mlp.down_proj.bits
 
-                # Set g_idx if not already set
-                module.self_attn.q_proj.g_idx = module.self_attn.q_proj.g_idx if module.self_attn.q_proj.g_idx is not None else torch.tensor([i // module.self_attn.q_proj.group_size for i in range(module.self_attn.q_proj.in_features)], dtype=torch.int32)
-                module.self_attn.k_proj.g_idx = module.self_attn.k_proj.g_idx if module.self_attn.k_proj.g_idx is not None else torch.tensor([i // module.self_attn.k_proj.group_size for i in range(module.self_attn.k_proj.in_features)], dtype=torch.int32)
-                module.self_attn.v_proj.g_idx = module.self_attn.v_proj.g_idx if module.self_attn.v_proj.g_idx is not None else torch.tensor([i // module.self_attn.v_proj.group_size for i in range(module.self_attn.v_proj.in_features)], dtype=torch.int32)
-                module.self_attn.o_proj.g_idx = module.self_attn.o_proj.g_idx if module.self_attn.o_proj.g_idx is not None else torch.tensor([i // module.self_attn.o_proj.group_size for i in range(module.self_attn.o_proj.in_features)], dtype=torch.int32)
-                module.mlp.gate_proj.g_idx = module.mlp.gate_proj.g_idx if module.mlp.gate_proj.g_idx is not None else torch.tensor([i // module.mlp.gate_proj.group_size for i in range(module.mlp.gate_proj.in_features)], dtype=torch.int32)
-                module.mlp.up_proj.g_idx = module.mlp.up_proj.g_idx if module.mlp.up_proj.g_idx is not None else torch.tensor([i // module.mlp.up_proj.group_size for i in range(module.mlp.up_proj.in_features)], dtype=torch.int32)
-                module.mlp.down_proj.g_idx = module.mlp.down_proj.g_idx if module.mlp.down_proj.g_idx is not None else torch.tensor([i // module.mlp.down_proj.group_size for i in range(module.mlp.down_proj.in_features)], dtype=torch.int32)
-
             else:
                 raise NotImplementedError(f"The {self.quant_type} quantization method is not recognized.")
 
@@ -652,8 +644,12 @@ class QuantizedModel:
 
         # De-quantize weight to higher precision
         scale_zeros = zeros * scales
-        scale_mat = scales[g_idx]
-        scale_zeros_mat = scale_zeros[g_idx]
+        if g_idx is not None:
+            scale_mat = scales[g_idx]
+            scale_zeros_mat = scale_zeros[g_idx]
+        elif module.group_size != module.in_features:
+            scale_mat = scales.repeat_interleave(module.group_size, 0)
+            scale_zeros_mat = scale_zeros.repeat_interleave(module.group_size, 0)
         qdq_weight_T = intweight * scale_mat - scale_zeros_mat.half()
 
         # Store unpacked result in `qweight`
@@ -669,8 +665,12 @@ class QuantizedModel:
         g_idx = module.g_idx
 
         scale_zeros = zeros * scales
-        scale_mat = scales[g_idx]
-        scale_zeros_mat = scale_zeros[g_idx]
+        if g_idx is not None:
+            scale_mat = scales[g_idx]
+            scale_zeros_mat = scale_zeros[g_idx]
+        elif module.group_size != module.in_features:
+            scale_mat = scales.repeat_interleave(module.group_size, 0)
+            scale_zeros_mat = scale_zeros.repeat_interleave(module.group_size, 0)
         intweight_T = torch.round((weight + scale_zeros_mat) / scale_mat).to(torch.int)
 
         return intweight_T
