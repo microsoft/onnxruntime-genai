@@ -994,6 +994,10 @@ class Model:
         # Create dummy PackedMatMul class
         class PackedMatMul:
             def __init__(self):
+                if q_matmul.bits != k_matmul.bits or q_matmul.bits != v_matmul.bits:
+                    raise ValueError("All MatMuls must have the same bits for packed MatMul.")
+                if q_matmul.group_size != k_matmul.group_size or q_matmul.group_size != v_matmul.group_size:
+                    raise ValueError("All MatMuls must have the same group size for packed MatMul.")
                 self.qweight = torch.cat([q_matmul.qweight, k_matmul.qweight, v_matmul.qweight], dim=0)
                 self.scales = torch.cat([q_matmul.scales, k_matmul.scales, v_matmul.scales], dim=0)
                 self.qzeros = torch.cat([q_matmul.qzeros, k_matmul.qzeros, v_matmul.qzeros], dim=0)
