@@ -901,6 +901,9 @@ class Model:
             # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
             # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
             return self.make_matmul_float(matmul, matmul_name, root_input, **kwargs)
+        
+        if matmul.bits != 4:
+            raise NotImplementedError(f"{matmul.bits} bits precision is not currently supported in QDQ format.")
 
         dequantize_output = self.make_dequantize_linear(f"{matmul_name}/DequantizeLinear", matmul)
 
