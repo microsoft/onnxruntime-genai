@@ -414,7 +414,7 @@ class QuantizedModel:
                             for sub_name in tensor_name.split(".")[:-1]:
                                 submodule = getattr(submodule, sub_name)
                             if isinstance(submodule, QuantizedTensorModule):
-                                for q_attr, q_value in [("bits", local_bits), ("group_size", local_group_size)]:
+                                for q_attr, q_value in [("bits", local_bits), ("_group_size", local_group_size)]:
                                     if getattr(submodule, q_attr) is not None and getattr(submodule, q_attr) != q_value:
                                         raise ValueError(f"Quantization {q_attr} mismatch for {name}: expected {getattr(submodule, q_attr)}, got {q_value}.")
                                     setattr(submodule, q_attr, q_value)
@@ -645,12 +645,12 @@ class QuantizedModel:
         # De-quantize weight to higher precision
         scale_zeros = zeros * scales
         if g_idx is not None:
-            scale_mat = scales[g_idx]
-            scale_zeros_mat = scale_zeros[g_idx]
+            scales = scales[g_idx]
+            scale_zeros = scale_zeros[g_idx]
         elif module.group_size != module.in_features:
-            scale_mat = scales.repeat_interleave(module.group_size, 0)
-            scale_zeros_mat = scale_zeros.repeat_interleave(module.group_size, 0)
-        qdq_weight_T = intweight * scale_mat - scale_zeros_mat.half()
+            scales = scales.repeat_interleave(module.group_size, 0)
+            scale_zeros = scale_zeros.repeat_interleave(module.group_size, 0)
+        qdq_weight_T = intweight * scales - scale_zeros.half()
 
         # Store unpacked result in `qweight`
         module.qweight = qdq_weight_T.T
@@ -666,12 +666,12 @@ class QuantizedModel:
 
         scale_zeros = zeros * scales
         if g_idx is not None:
-            scale_mat = scales[g_idx]
-            scale_zeros_mat = scale_zeros[g_idx]
+            scales = scales[g_idx]
+            scale_zeros = scale_zeros[g_idx]
         elif module.group_size != module.in_features:
-            scale_mat = scales.repeat_interleave(module.group_size, 0)
-            scale_zeros_mat = scale_zeros.repeat_interleave(module.group_size, 0)
-        intweight_T = torch.round((weight + scale_zeros_mat) / scale_mat).to(torch.int)
+            scales = scales.repeat_interleave(module.group_size, 0)
+            scale_zeros = scale_zeros.repeat_interleave(module.group_size, 0)
+        intweight_T = torch.round((weight + scale_zeros) / scales).to(torch.int)
 
         return intweight_T
 
@@ -972,7 +972,7 @@ class QuarkModel(QuantizedModel):
 class OliveModel(GPTQModel):
     def _load_quant_config(self, quant_attrs):
         super()._load_quant_config(quant_attrs)
-        self.overrides = quant_attrs["config"].get("overrides", {})
+        self.overrides = quant_attrs["config"]["overrides"] or {}
 
     def get_layer_bits(self, layer_name):
         name = ".".join(layer_name.split(".")[:-1])
