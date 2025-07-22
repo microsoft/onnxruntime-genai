@@ -584,7 +584,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         bool is_multi_profile_enabled = IsMultiProfileEnabled(config.model.decoder.session_options);
         ConfigureNvTensorRtRTxProfile(config, session_options, is_multi_profile_enabled);
         if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
-          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_cuda_graph_enable", "1");
+          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.enable_cuda_graph", "1");
         }
         p_device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
       }
