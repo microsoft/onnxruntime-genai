@@ -560,7 +560,6 @@ class QuantizedModel:
         """
         Unpack `qzeros` and `qweight` to standard format
         """
-        print(f"Unpacking {module.__class__.__name__} with bits {module.bits} and group size {module.group_size}")
         self.unpack_qzeros(module)
         self.unpack_qweight(module)
         self.dequant_weight(module)
@@ -680,15 +679,16 @@ class QuantizedModel:
         """
         Pack `scales`, `qzeros`, and `qweight` to ORT format
         """
-        if module.bits != 4:
+        if module.bits not in [4, 8]:
             raise NotImplementedError(f"{module.bits}-bit quantization in ORT is not currently supported by this tool.")
 
         intzeros_pt = module.qzeros.T if module.qzeros.dtype == module.scales.dtype else module.qzeros.T.byte()
         intweight_pt = intweight.byte()
+        kpack = 8 // module.bits
         block_size = module.group_size
 
         rows, cols = intweight_pt.shape
-        blob_size = block_size // 2
+        blob_size = (block_size + kpack - 1) // kpack
         k_blocks = (rows + block_size - 1) // block_size
         padded_rows = k_blocks * block_size
         pad_len = padded_rows - rows
@@ -697,11 +697,13 @@ class QuantizedModel:
         intzeros_pt = torch.nn.functional.pad(intzeros_pt, (0, intzeros_pt.shape[-1] & 1, 0, 0), "constant", 0)
 
         if module.qzeros.dtype != module.scales.dtype:
-            intzeros_pt = (intzeros_pt[:, 0::2]) | (intzeros_pt[:, 1::2] << 4)
+            if module.bits == 4:
+                intzeros_pt = (intzeros_pt[:, 0::2]) | (intzeros_pt[:, 1::2] << 4)
             intzeros_pt = intzeros_pt.reshape(-1)
 
         intweight_pt_T = intweight.T
-        intweight_pt_T = (intweight_pt_T[:, 0::2]) | (intweight_pt_T[:, 1::2] << 4)
+        if module.bits == 4:
+            intweight_pt_T = (intweight_pt_T[:, 0::2]) | (intweight_pt_T[:, 1::2] << 4)
         intweight_pt_T = intweight_pt_T.reshape(cols, k_blocks, blob_size)
 
         scales_pt = module.scales.T.reshape(-1)
@@ -834,7 +836,6 @@ class GPTQModel(QuantizedModel):
         """
         Re-pack `qzeros` to handle extra `-1`s
         """
-        # print("handle_qzeros:", module.qzeros.shape, module.bits, module.group_size, module.in_features, module.out_features)
         if module.qzeros is None or module.qzeros.numel() == 0:
             return
 
@@ -975,7 +976,6 @@ class OliveModel(GPTQModel):
 
     def get_layer_bits(self, layer_name):
         name = ".".join(layer_name.split(".")[:-1])
-        # print(name, self.overrides.get(name, {}), self.overrides.get(name, {}).get("bits", self.global_bits))
         return self.overrides.get(name, {}).get("bits", self.global_bits)
 
     def get_layer_group_size(self, layer_name):
