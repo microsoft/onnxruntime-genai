@@ -10,6 +10,8 @@ generator.append_tokens(np.concatenate([system_tokens, input_tokens]))
 
 [![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed/absoluteLatest)
 
+[![Nightly Build](https://github.com/microsoft/onnxruntime-genai/actions/workflows/linux-cpu-x64-nightly-build.yml/badge.svg)](https://github.com/microsoft/onnxruntime-genai/actions/workflows/linux-cpu-x64-nightly-build.yml)
+
 Run generative AI models with ONNX Runtime.
 
 This API gives you an easy, flexible and performant way of running LLMs on device. 
