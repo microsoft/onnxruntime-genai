@@ -236,7 +236,7 @@ void RunBenchmark(const benchmark::Options& opts) {
         {
           Timing token_gen_timing{token_gen_times};
           generator->GenerateNextToken();
-          generator_done = generator->IsDone();
+          generator_done = generator->IsDone(); // Enforce stream synchronize to compute accurate token generation times
         }
       }
     }
