@@ -90,6 +90,12 @@ class OpenAIInputDecoder : public InputDecoder {
                << CLEAR << endl;
         }
       }
+
+      // Handle tools parameter for function calling
+      if (json_msg.contains("tools")) {
+        decoded_params.ToolsJson = json_msg["tools"].dump();
+        decoded_params.HasTools = true;
+      }
     } catch (json::parse_error& err) {
       cout << RED << "Error in JSON At: " << err.what() << CLEAR << endl;
       return false;

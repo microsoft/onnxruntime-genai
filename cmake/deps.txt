@@ -14,7 +14,7 @@ pybind11;https://github.com/pybind/pybind11/archive/refs/tags/v2.13.6.zip;f78029
 googletest;https://github.com/google/googletest/archive/530d5c8c84abd2a46f38583ee817743c9b3a42b4.zip;5e3a61db2aa975cfd0f97ba92c818744e7fa7034
 microsoft_wil;https://github.com/microsoft/wil/archive/refs/tags/v1.0.230629.1.zip;e4a542a323c070376f7c2d1973d0f7ddbc1d2fa5
 directx_headers;https://github.com/microsoft/DirectX-Headers/archive/refs/tags/v1.613.1.zip;47653509a3371eabb156360f42faf582f314bf2e
-onnxruntime_extensions;https://github.com/microsoft/onnxruntime-extensions.git;5ea4b9b0683b83c1d6800eb332f37dcc76bb2e61
+onnxruntime_extensions;https://github.com/microsoft/onnxruntime-extensions.git;a3587650f6cb9015235f910bcdc2f9a4ade11cb4
 
 # These two dependencies are for the optional constrained decoding feature (USE_GUIDANCE)
 llguidance;https://github.com/microsoft/llguidance.git;2d2f1de3c87e3289528affc346f734f7471216d9

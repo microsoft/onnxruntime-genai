@@ -29,6 +29,8 @@ namespace {
     << "  Options:\n"
     << "    -i,--input_folder <path>\n"
     << "      Path to the ONNX model directory to benchmark, compatible with onnxruntime-genai.\n"
+    << "    -e,--execution_provider <provider>\n"
+    << "      Execution provider to use. Valid values are: cpu, cuda, dml, NvTensorRtRtx. Default: " << defaults.execution_provider << "\n"
     << "    -b,--batch_size <number>\n"
     << "      Number of sequences to generate in parallel. Default: " << defaults.batch_size << "\n"
     << "    Prompt options:\n"
@@ -76,10 +78,19 @@ std::string ReadFileContent(std::string_view file_path) {
   return std::string{input_begin, input_end};
 }
 
+void ValidateExecutionProvider(const std::string& provider) {
+  if (provider != "cpu" && provider != "cuda" && provider != "dml" && provider != "NvTensorRtRtx") {
+    throw std::runtime_error("Invalid execution provider: " + provider + ". Valid values are: cpu, cuda, dml, NvTensorRtRtx");
+  }
+}
+
 void VerifyOptions(const Options& opts) {
   if (opts.model_path.empty()) {
     throw std::runtime_error("ONNX model directory path must be provided.");
   }
+
+  // validate execution provider since it has a valid value
+  ValidateExecutionProvider(opts.execution_provider);
 }
 
 }  // namespace
@@ -103,6 +114,8 @@ Options ParseOptionsFromCommandLine(int argc, const char* const* argv) {
 
       if (arg == "-i" || arg == "--input_folder") {
         opts.model_path = next_arg(i);
+      } else if (arg == "-e" || arg == "--execution_provider") {
+        opts.execution_provider = next_arg(i);
       } else if (arg == "-b" || arg == "--batch_size") {
         opts.batch_size = ParseNumber<size_t>(next_arg(i));
       } else if (arg == "-l" || arg == "--prompt_length") {

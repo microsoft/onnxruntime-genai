@@ -5,6 +5,7 @@
 #include "cpu/interface.h"
 #include <queue>
 #include <algorithm>
+#include <limits>
 
 namespace Generators {
 
@@ -204,7 +205,8 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
 }
 
 void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
-  std::uniform_real_distribution<float> dis(0, p);
+  // For numerical stability, we use 0.9999999f not 1.0f to avoid zero probabilities.
+  std::uniform_real_distribution<float> dis(0, 0.999999f);
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id))
       continue;
@@ -214,16 +216,31 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
     std::iota(indices.begin(), indices.end(), 0);
     std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
     std::vector<float> scores_top_k(k, 0.0f);
+    std::vector<float> scores_top_k_old(k, 0.0f);
     for (int i = 0; i < k; i++) {
       scores_top_k[i] = scores[indices[i]];
+      scores_top_k_old[i] = scores[indices[i]];
     }
     SoftmaxWithMax(scores_top_k, temperature, scores_top_k[0]);
+    float saferNegative = std::numeric_limits<float>::lowest() / 1000.0f;
+    std::vector<float> scores_top_k_filtering(k, saferNegative);
+    scores_top_k_filtering[0] = scores_top_k_old[0];
+    float threshold = p;
+    for (int i = 1; i < k; i++) {
+      threshold -= scores_top_k[i - 1];
+      if (threshold > 0) {
+        scores_top_k_filtering[i] = scores_top_k_old[i];
+      } else {
+        break;
+      }
+    }
+    SoftmaxWithMax(scores_top_k_filtering, temperature, scores_top_k_filtering[0]);
     // Sample a probability threshold
-    float threshold = dis(gen_);
+    threshold = dis(gen_);
     int32_t token = indices[k - 1];
     // Find the first token where the cumulative probability exceeds the threshold
     for (int i = 0; i < k - 1; i++) {
-      threshold -= scores_top_k[i];
+      threshold -= scores_top_k_filtering[i];
       if (threshold > 0) {
         continue;
       }

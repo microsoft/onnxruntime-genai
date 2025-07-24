@@ -135,7 +135,7 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
-              /usr/bin/cmake --build --preset linux_gcc_cuda_release"
+              /usr/bin/cmake --build --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release --target PyPackageBuild"
 
       - name: Install the onnxruntime-genai Python wheel and run python test
         run: |
@@ -143,7 +143,7 @@ jobs:
           docker run \
             --gpus all \
             --rm \
-            --volume /data/ortgenai/pytorch:/data/ortgenai/pytorch \
+            --volume /data/ortgenai/:/data/ortgenai/ \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -e HF_TOKEN=$HF_TOKEN \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c " \
@@ -170,6 +170,6 @@ jobs:
           docker run \
             --gpus all \
             --rm \
-            --volume /data/ortgenai/pytorch:/data/ortgenai/pytorch \
+            --volume /data/ortgenai/:/data/ortgenai/ \
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 bash -c "ORTGENAI_LOG_ORT_LIB=1 LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/ort_genai_src/build/cuda/ /ort_genai_src/build/cuda/unit_tests"

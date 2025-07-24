@@ -424,7 +424,7 @@ class Model:
                 "past_present_share_buffer": False if "config_only" in self.extra_options else self.past_present_share_buffer,
                 "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
                 "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
-                "top_k": 1,
+                "top_k": config.top_k if hasattr(config, "top_k") else 50,
                 "top_p": config.top_p if hasattr(config, "top_p") else 1.0,
             },
         }
@@ -3619,6 +3619,20 @@ class Gemma3Model(Gemma2Model):
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)
 
 
+class ErnieModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # Ernie uses interleaved rotary position embeddings.
+        self.rotemb_attrs["interleaved"] = 1
+
+        # Ernie uses a `compression_ratio` for its RoPE scaling.
+        # The original RoPE logic in ernie is: position_ids / compression_ratio,
+        # which is equivalent to scaling the frequencies (inv_freq) by 1 / compression_ratio.
+        if hasattr(config, "compression_ratio") and config.compression_ratio != 1.0:
+            self.rotemb_attrs["rescale_factors"] = 1.0 / config.compression_ratio
+
+
 def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
@@ -3739,6 +3753,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
             config.hidden_act = "swiglu"
             onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Ernie4_5_ForCausalLM":
+            onnx_model = ErnieModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GemmaForCausalLM":
             onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
@@ -3754,6 +3770,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model.model_type = "gemma3_text"
         elif config.architectures[0] == "Gemma3ForConditionalGeneration":
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+            extra_options["exclude_embeds"] = True
             text_config = config.text_config
             for key in text_config:
                 if not hasattr(config, key):

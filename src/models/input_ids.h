@@ -7,6 +7,7 @@ struct InputIDs {
   virtual void Add() = 0;
   virtual std::array<int64_t, 2> GetShape() const = 0;
   virtual void Update(DeviceSpan<int32_t> next_tokens) = 0;
+  virtual OrtValue* Get() = 0;
 };
 
 struct DefaultInputIDs : InputIDs {
@@ -24,7 +25,7 @@ struct DefaultInputIDs : InputIDs {
   std::array<int64_t, 2> GetShape() const override { return shape_; }
   const char* name_;
 
-  OrtValue* Get() { return value_->GetOrtTensor(); }
+  OrtValue* Get() override { return value_->GetOrtTensor(); }
 
  private:
   State& state_;
@@ -57,6 +58,7 @@ struct WindowedInputIDs : public InputIDs {
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens) override;
   std::array<int64_t, 2> GetShape() const override { return shape_; }
+  OrtValue* Get() override { return value_.get(); }
 
  private:
   State& state_;

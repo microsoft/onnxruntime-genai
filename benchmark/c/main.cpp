@@ -112,11 +112,12 @@ void WriteE2EStats(std::string_view label,
             << "\n";
 }
 
-std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, const OgaTokenizer& tokenizer) {
+std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, const OgaTokenizer& tokenizer, size_t batch_size) {
   const char* const base_prompt = "A";
   auto base_prompt_sequences = OgaSequences::Create();
-
-  tokenizer.Encode(base_prompt, *base_prompt_sequences);
+  for (size_t i = 0; i < batch_size; ++i) {
+    tokenizer.Encode(base_prompt, *base_prompt_sequences);
+  }
 
   auto params = OgaGeneratorParams::Create(model);
   params->SetSearchOption("max_length", static_cast<double>(num_prompt_tokens));
@@ -134,12 +135,31 @@ std::string GeneratePrompt(size_t num_prompt_tokens, const OgaModel& model, cons
 }
 
 void RunBenchmark(const benchmark::Options& opts) {
-  auto model = OgaModel::Create(opts.model_path.c_str());
+  std::unique_ptr<OgaModel> model;
+
+  if (opts.batch_size > 1 && opts.execution_provider == "NvTensorRtRtx") {
+    // Use OgaConfig::Overlay instead of RuntimeSettings for cleaner implementation
+    auto config = OgaConfig::Create(opts.model_path.c_str());
+
+    // Create JSON overlay for batch_size
+    std::string batch_size_overlay = R"({
+  "search": {
+    "batch_size": )" + std::to_string(opts.batch_size) +
+                                     R"(
+  }
+})";
+
+    config->Overlay(batch_size_overlay.c_str());
+    model = OgaModel::Create(*config);
+  } else {
+    model = OgaModel::Create(opts.model_path.c_str());
+  }
+
   auto tokenizer = OgaTokenizer::Create(*model);
 
   const auto prompt = [&]() -> std::string {
     if (const size_t* num_prompt_tokens = std::get_if<size_t>(&opts.prompt_num_tokens_or_content)) {
-      return GeneratePrompt(*num_prompt_tokens, *model, *tokenizer);
+      return GeneratePrompt(*num_prompt_tokens, *model, *tokenizer, opts.batch_size);
     }
     return std::get<std::string>(opts.prompt_num_tokens_or_content);
   }();
@@ -204,15 +224,20 @@ void RunBenchmark(const benchmark::Options& opts) {
         generator->AppendTokenSequences(*prompt_sequences);
       }
 
+      bool generator_done = false;
+
       {
         Timing sampling_timing{sampling_times};
         generator->GenerateNextToken();
+        generator_done = generator->IsDone();
       }
 
-      while (!generator->IsDone()) {
+      while (!generator_done) {
         {
           Timing token_gen_timing{token_gen_times};
           generator->GenerateNextToken();
+          // Enforce stream synchronize to compute accurate token generation times
+          generator_done = generator->IsDone();
         }
       }
     }

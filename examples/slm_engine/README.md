@@ -320,6 +320,84 @@ The SLM server supports the following REST APIs (click to expand):
 
 </details>
 
+### Function Calling Support
+
+The SLM Engine enabling the model to intelligently select and invoke predefined functions based on user requests. This feature allows developers to extend the model's capabilities by providing custom tools and functions that the AI can use to perform specific tasks.
+
+#### Key Features:
+- **Tool Definition**: Define custom functions with parameters and descriptions
+- **Intelligent Function Selection**: The model automatically determines which function to call based on user input
+- **Structured Output**: Returns function calls in a standardized JSON format
+
+#### Example Function Calling Request
+
+The following example demonstrates how to use function calling with the SLM Engine for booking flights and hotels:
+
+```bash
+curl -X POST http://localhost:8000/completions -H "Content-Type: application/json" --data '{
+    "messages": [
+        {
+            "role": "system",
+            "content": "You are a helpful assistant with these tools."
+        },
+        {
+            "role": "user",
+            "content": "book flight ticket from Beijing to Paris(using airport code) in 2025-12-04 to 2025-12-10 , then book hotel from 2025-12-04 to 2025-12-10 in Paris"
+        }
+    ],
+    "tools": [
+        {
+            "name": "booking_flight_tickets", 
+            "description": "booking flights", 
+            "parameters": {
+                "origin_airport_code": {
+                    "description": "The name of Departure airport code", 
+                    "type": "string"
+                }, 
+                "destination_airport_code": {
+                    "description": "The name of Destination airport code", 
+                    "type": "string"
+                }, 
+                "departure_date": {
+                    "description": "The date of outbound flight", 
+                    "type": "string"
+                }, 
+                "return_date": {
+                    "description": "The date of return flight", 
+                    "type": "string"
+                }
+            }
+        }, 
+        {
+            "name": "booking_hotels", 
+            "description": "booking hotel", 
+            "parameters": {
+                "destination": {
+                    "description": "The name of the city", 
+                    "type": "string"
+                }, 
+                "check_in_date": {
+                    "description": "The date of check in", 
+                    "type": "string"
+                }, 
+                "checkout_date": {
+                    "description": "The date of check out", 
+                    "type": "string"
+                }
+            }
+        }
+    ],
+    "temperature": 0.00001,
+    "max_tokens": 4096,
+    "top_p": 1.0,
+    "do_sample": false
+}'
+```
+
+The model will analyze the user's request and generate appropriate function calls with the correct parameters, enabling seamless integration with external APIs and services.
+
+***Note*** - This time we just support Phi and Llama,Qwen3 model
+
 ### C++ Application using the SLMEngine
 
 The SLMEngine is designed to be used from another C++ application running on the Edge. Integrating the SLMEngine into another C++ project using cmake is illustrated below.

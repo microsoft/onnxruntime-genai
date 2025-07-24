@@ -6,7 +6,7 @@
 
 # This is an end-to-end benchmarking script for any ONNX model.
 #
-# Prerequisites: 
+# Prerequisites:
 # 0) Install onnxruntime-genai and onnxruntime
 #
 # 1) Use builder.py to build the desired ONNX model
@@ -138,9 +138,9 @@ def save_results(args, results, filename, print_memory_usage=False):
         columns=columns,
     )
     # df = df.transpose()  # This line swaps the rows and columns
-    
+
     genai_package_name, genai_package_version = get_target_pip_package_version(["onnxruntime-genai", "onnxruntime-genai-cuda", "onnxruntime-genai-directml"])
-    
+
     records = []
     for _, row in df.iterrows():
         record = BenchmarkRecord(args.model_name, args.precision, "onnxruntime-genai", args.execution_provider, genai_package_name, genai_package_version )
@@ -155,7 +155,7 @@ def save_results(args, results, filename, print_memory_usage=False):
         record.metrics.customized["token_generation_throughput_tps"] = row["Token Generation Throughput (tps)"]
         record.metrics.customized["token_generation_latency_ms"] = row["Token Generation Latency (ms)"]
         record.metrics.customized["sampling_throughput_tps"] = row["Sampling Throughput (tps)"]
-        record.metrics.customized["sampling_latency_ms"] = row["Sampling Latency (ms)"]   
+        record.metrics.customized["sampling_latency_ms"] = row["Sampling Latency (ms)"]
         record.metrics.customized["wall_clock_throughput_tps"] = row["Wall Clock Throughput (tps)"]
         record.metrics.customized["wall_clock_time_s"] = row["Wall Clock Time (s)"]
 
@@ -164,9 +164,9 @@ def save_results(args, results, filename, print_memory_usage=False):
                 record.metrics.customized["peak_gpu_memory_gb"] = row["peak_gpu_memory (GiB)"]
             else:
                 record.metrics.customized["peak_cpu_memory_gb"] = row["peak_cpu_memory (GiB)"]
-        
+
         records.append(record)
-        
+
     # df.to_csv(filename, header=True, index=False)
     BenchmarkRecord.save_as_json(filename.replace(".csv", ".json"), records)
     print(f"Results saved in {filename}!")
@@ -188,7 +188,7 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
         monitor_thread = threading.Thread(target=monitor_gpu_memory)
     else:
         monitor_thread = threading.Thread(target=monitor_cpu_memory)
-    
+
     monitor_thread.start()
 
     metrics = run_benchmark(args, batch_size, prompt_length, generation_length, max_length)
@@ -200,7 +200,7 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
         metrics.append(peak_gpu_memory)
     else:
         metrics.append(peak_cpu_memory)
-    
+
     return metrics
 
 def run_benchmark(args, batch_size, prompt_length, generation_length, max_length):
@@ -212,6 +212,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     # Get tokenizer, and model
     if args.verbose: print("Getting config")
     config = og.Config(f'{args.input_folder}')
+    config.overlay(f'{{"search": {{"batch_size": {batch_size}}}}}')
     if args.execution_provider != "follow_config":
         config.clear_providers()
         if args.execution_provider != "cpu":
@@ -314,19 +315,21 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
         sampling_start_time = time.perf_counter()
         generator.generate_next_token()
+        generator_done = generator.is_done()
         sampling_end_time = time.perf_counter()
         sampling_times.append(sampling_end_time - sampling_start_time)
 
         # Measure token generation
         i = 1
-        while not generator.is_done() and i < generation_length:
+        while not generator_done and i < generation_length:
             # Run inference
             token_gen_start_time = time.perf_counter()
             generator.generate_next_token()
+            generator_done = generator.is_done()
             token_gen_end_time = time.perf_counter()
             token_gen_times.append(token_gen_end_time - token_gen_start_time)
             i += 1
-        
+
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
         if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
@@ -356,7 +359,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     avg_token_gen_thrpt = batch_size * (1 / avg_token_gen_latency_s)
     print(f"Average Token Generation Latency (per token): {avg_token_gen_latency_ms} ms")
     print(f"Average Token Generation Throughput (per token): {avg_token_gen_thrpt} tps")
-    
+
     # Calculate sampling metrics
     avg_sampling_latency_s = sum(sampling_times) / len(sampling_times)
     avg_sampling_latency_ms = avg_sampling_latency_s * 1000
@@ -377,17 +380,17 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             print(f"Peak CPU Memory Usage: {peak_cpu_memory} GiB ")
 
     metrics = [
-        batch_size, 
+        batch_size,
         prompt_length,
         generation_length,
         max_length,
-        avg_tokenization_thrpt, 
-        avg_tokenization_latency_ms, 
-        avg_per_token_prompt_thrpt, 
-        avg_per_token_prompt_latency_ms, 
-        avg_token_gen_thrpt, 
-        avg_token_gen_latency_ms, 
-        avg_sampling_thrpt, 
+        avg_tokenization_thrpt,
+        avg_tokenization_latency_ms,
+        avg_per_token_prompt_thrpt,
+        avg_per_token_prompt_latency_ms,
+        avg_token_gen_thrpt,
+        avg_token_gen_latency_ms,
+        avg_sampling_thrpt,
         avg_sampling_latency_ms,
         avg_wall_clock_thrpt,
         avg_wall_clock_time,

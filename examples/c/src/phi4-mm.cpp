@@ -34,7 +34,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     std::vector<std::string> image_paths;
     for (size_t start = 0, end = 0; end < image_paths_str.size(); start = end + 1) {
       end = image_paths_str.find(',', start);
-      image_paths.push_back(trim(image_paths_str.substr(start, end - start)));
+      image_paths.push_back(Trim(image_paths_str.substr(start, end - start)));
     }
     if (image_paths.empty()) {
       std::cout << "No image provided" << std::endl;
@@ -58,7 +58,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     std::vector<std::string> audio_paths;
     for (size_t start = 0, end = 0; end < audio_paths_str.size(); start = end + 1) {
       end = audio_paths_str.find(',', start);
-      audio_paths.push_back(trim(audio_paths_str.substr(start, end - start)));
+      audio_paths.push_back(Trim(audio_paths_str.substr(start, end - start)));
     }
     if (audio_paths.empty()) {
       std::cout << "No audio provided" << std::endl;
@@ -94,9 +94,9 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 7680);
-    params->SetInputs(*input_tensors);
 
     auto generator = OgaGenerator::Create(*model, *params);
+    generator->SetInputs(*input_tensors);
 
     while (!generator->IsDone()) {
       generator->GenerateNextToken();

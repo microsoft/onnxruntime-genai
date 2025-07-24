@@ -40,6 +40,16 @@ public class SimpleGenAI implements AutoCloseable {
   }
 
   /**
+   * Get the underlying model object.
+   *
+   * @return The model object.
+   * @throws GenAIException on failure
+   */
+  public Model getModel() throws GenAIException {
+    return model;
+  }
+
+  /**
    * Create the generator parameters and add the prompt text. The user can set other search options
    * via the GeneratorParams object prior to running `generate`.
    *

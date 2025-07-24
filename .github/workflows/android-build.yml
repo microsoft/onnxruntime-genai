@@ -94,12 +94,12 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --update
+          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --update --skip_wheel
 
       - name: Run Android build
         run: |
           set -e -x
-          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --build
+          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --build --skip_wheel
 
       - name: Enable KVM group perms so Android emulator can run
         run: |

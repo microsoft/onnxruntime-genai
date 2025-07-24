@@ -90,15 +90,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                      bool value);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetModelInput(IntPtr /* OgaGeneratorParams* */ generatorParams,
-                                                                                     byte[] /* const char* */ name,
-                                                                                     IntPtr /* const OgaTensor* */ tensor);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetInputs(IntPtr /* OgaGeneratorParams* */ generatorParams,
-                                                                                 IntPtr /* const OgaNamedTensors* */ namedTensors);
-
-        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateGenerator(IntPtr /* const OgaModel* */ model,
                                                                         IntPtr /* const OgaGeneratorParams* */ generatorParams,
                                                                         out IntPtr /* OgaGenerator** */ generator);
@@ -118,6 +109,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         // This function is used to generate the next token in the sequence using the greedy search algorithm.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGenerator_GenerateNextToken(IntPtr /* OgaGenerator* */ generator);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_SetModelInput(IntPtr /* OgaGenerator* */ generator,
+                                                                                byte[] /* const char* */ name,
+                                                                                IntPtr /* const OgaTensor* */ tensor);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_SetInputs(IntPtr /* OgaGenerator* */ generator,
+                                                                            IntPtr /* const OgaNamedTensors* */ namedTensors);
 
         // This function is used to append tokens to the sequence.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -149,8 +149,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                      UIntPtr /* size_t */ index);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaGenerator_GetOutput(IntPtr /* cosnt OgaGenerator* */ generator,
-                                                     byte[] outputName, out IntPtr tensor);
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_GetInput(IntPtr /* const OgaGenerator* */ generator,
+                                                                           byte[] /* const char* */ inputName,
+                                                                           out IntPtr /* OgaTensor** */ tensor);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_GetOutput(IntPtr /* const OgaGenerator* */ generator,
+                                                                            byte[] /* const char* */ outputName,
+                                                                            out IntPtr /* OgaTensor** */ tensor);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaSetActiveAdapter(IntPtr /* OgaGenerator* */ generator,
@@ -280,11 +286,35 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                out IntPtr /* OgaNamedTensors** */ namedTensors);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaProcessorProcessImagesAndPrompts(IntPtr /* const OgaMultiModalProcessor* */ processor,
+                                                                                         IntPtr /* const OgaStringArray* */ prompts,
+                                                                                         IntPtr /* const Images* */ images,
+                                                                                         out IntPtr /* OgaNamedTensors** */ namedTensors);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaProcessorProcessAudios(IntPtr /* const OgaMultiModalProcessor* */ processor,
+                                                                               byte[] /* const char* */ prompt,
+                                                                               IntPtr /* const Audios* */ audios,
+                                                                               out IntPtr /* OgaNamedTensors** */ namedTensors);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaProcessorProcessAudiosAndPrompts(IntPtr /* const OgaMultiModalProcessor* */ processor,
+                                                                                         IntPtr /* const OgaStringArray* */ prompts,
+                                                                                         IntPtr /* const Audios* */ audios,
+                                                                                         out IntPtr /* OgaNamedTensors** */ namedTensors);
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaProcessorProcessImagesAndAudios(IntPtr /* const OgaMultiModalProcessor* */ processor,
-                                                                                 byte[] /* const char* */ prompt,
-                                                                                 IntPtr /* const Images* */ images,
-                                                                                 IntPtr /* const Audios* */ audios,
-                                                                                 out IntPtr /* OgaNamedTensors** */ namedTensors);
+                                                                                        byte[] /* const char* */ prompt,
+                                                                                        IntPtr /* const Images* */ images,
+                                                                                        IntPtr /* const Audios* */ audios,
+                                                                                        out IntPtr /* OgaNamedTensors** */ namedTensors);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaProcessorProcessImagesAndAudiosAndPrompts(IntPtr /* const OgaMultiModalProcessor* */ processor,
+                                                                                                  IntPtr /* const OgaStringArray* */ prompts,
+                                                                                                  IntPtr /* const Images* */ images,
+                                                                                                  IntPtr /* const Audios* */ audios,
+                                                                                                  out IntPtr /* OgaNamedTensors** */ namedTensors);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern unsafe IntPtr /* OgaResult* */ OgaProcessorDecode(IntPtr /* const OgaMultiModalProcessor* */ processor,
@@ -297,8 +327,20 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                    out IntPtr /* const OgaImages** */ images);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern unsafe IntPtr /* OgaResult* */ OgaLoadImagesFromBuffers(IntPtr[] /* const void** */ image_data,
+                                                                              UIntPtr[] /* const size_t* */ image_data_sizes,
+                                                                              UIntPtr /* size_t */ count,
+                                                                              out IntPtr /* const OgaImages** */ images);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaLoadAudios(IntPtr /* const OgaStringArray* */ audioPaths,
                                                                    out IntPtr /* const OgaAudios** */ audios);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern unsafe IntPtr /* OgaResult* */ OgaLoadAudiosFromBuffers(IntPtr[] /* const void** */ audio_data,
+                                                                              UIntPtr[] /* const size_t* */ audio_data_sizes,
+                                                                              UIntPtr /* size_t */ count,
+                                                                              out IntPtr /* const OgaAudios** */ audios);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyImages(IntPtr /* OgaImages* */ images);

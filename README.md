@@ -10,6 +10,8 @@ generator.append_tokens(np.concatenate([system_tokens, input_tokens]))
 
 [![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed/absoluteLatest)
 
+[![Nightly Build](https://github.com/microsoft/onnxruntime-genai/actions/workflows/linux-cpu-x64-nightly-build.yml/badge.svg)](https://github.com/microsoft/onnxruntime-genai/actions/workflows/linux-cpu-x64-nightly-build.yml)
+
 Run generative AI models with ONNX Runtime.
 
 This API gives you an easy, flexible and performant way of running LLMs on device. 
@@ -20,7 +22,7 @@ See documentation at https://onnxruntime.ai/docs/genai.
 
 |Support matrix|Supported now|Under development|On the roadmap|
 | -------------- | ------------- | ----------------- | -------------- |
-| Model architectures | DeepSeek <br/> Gemma <br/> Llama * <br/> Mistral + <br/> Phi (language + vision) <br/> Qwen <br/> Nemotron <br/> Granite <br/> AMD OLMo | Whisper | Stable diffusion |
+| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Gemma <br/> Granite <br/> Llama * <br/> Mistral + <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen | Whisper | Stable diffusion |
 |API| Python <br/>C# <br/>C/C++ <br/> Java ^ |Objective-C||
 |Platform| Linux <br/> Windows <br/>Mac ^ <br/>Android ^  ||iOS |||
 |Architecture|x86 <br/> x64 <br/> Arm64 ~ ||||

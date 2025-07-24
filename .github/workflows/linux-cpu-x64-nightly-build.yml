@@ -1,4 +1,4 @@
-name: "Linux CPU x64 Nightly Build"
+name: "Nightly Build"
 
 # Run at 5:00 AM UTC every day
 # 9:00 PM PST
@@ -51,6 +51,7 @@ jobs:
           rm -rf build
           cmake --preset linux_gcc_cpu_release
           cmake --build --preset linux_gcc_cpu_release
+          cmake --build --preset linux_gcc_cpu_release --target PyPackageBuild
 
       - name: Install the python wheel and test dependencies
         run: |
