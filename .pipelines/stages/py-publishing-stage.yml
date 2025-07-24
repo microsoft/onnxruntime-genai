@@ -19,8 +19,6 @@ parameters:
   type: boolean
 - name: enable_linux_cuda
   type: boolean
-- name: enable_linux_rocm
-  type: boolean
 - name: enable_macos_cpu
   type: boolean
 - name: cuda_versions
