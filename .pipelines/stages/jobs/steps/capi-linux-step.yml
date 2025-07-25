@@ -37,10 +37,11 @@ steps:
   displayName: 'Print Parameters'
 
 - task: Docker@2
-  displayName: 'Login to ACR'
+  displayName: 'Login to Azure container registry'
   inputs:
     containerRegistry: 'onnxruntimebuildcache'
     command: 'login'
+    addPipelineData: false
 
 - bash: |
     set -e -x

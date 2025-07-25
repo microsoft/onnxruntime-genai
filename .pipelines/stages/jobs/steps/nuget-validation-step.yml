@@ -13,7 +13,6 @@ parameters:
 steps:
   - task: Docker@2
     inputs:
-      azureSubscription: AIInfraBuildOnnxRuntimeOSS
       containerRegistry: onnxruntimebuildcache
       command: "login"
       addPipelineData: false
