@@ -58,8 +58,6 @@ steps:
       NUGET_PLUGIN_REQUEST_TIMEOUT_IN_SECONDS: 180
   - bash: |
       set -e -x
-      az login --identity --object-id c90de106-42dc-405a-8bad-2438f4279448
-      az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
       docker pull $(cuda_docker_image)
 
       docker run \
