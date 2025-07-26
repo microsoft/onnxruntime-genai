@@ -1,4 +1,5 @@
 import gc
+import logging
 import os
 import sys
 import onnxruntime_genai as og

@@ -36,10 +36,15 @@ steps:
     echo "build_config=${{ parameters.build_config }}"
   displayName: 'Print Parameters'
 
+- task: Docker@2
+  displayName: 'Login to Azure container registry'
+  inputs:
+    containerRegistry: 'onnxruntimebuildcache'
+    command: 'login'
+    addPipelineData: false
+
 - bash: |
     set -e -x
-    az login --identity --object-id c90de106-42dc-405a-8bad-2438f4279448
-    az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
     python3 -m pip install requests
     python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep)_$(cuda_version) \
       --context tools/ci_build/github/linux/docker/manylinux \
@@ -52,8 +57,6 @@ steps:
 
 - bash: |
     set -e -x
-    az login --identity --object-id c90de106-42dc-405a-8bad-2438f4279448
-    az acr login --name onnxruntimebuildcache --subscription 00c06639-6ee4-454e-8058-8d8b1703bd87
     python3 -m pip install requests
     python3 tools/ci_build/get_docker_image.py --dockerfile tools/ci_build/github/linux/docker/manylinux/Dockerfile.manylinux2_28_$(ep) \
       --context tools/ci_build/github/linux/docker/manylinux \
