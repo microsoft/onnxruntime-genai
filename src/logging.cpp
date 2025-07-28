@@ -38,11 +38,11 @@ struct CallbackStream : std::ostream {
 
 void SetLogStream() {
   if (gp_callback)
-    gp_stream = &gp_callback_stream;
+    GlobalLogStreamPtr() = &gp_callback_stream;
   else if (gp_logfile)
-    gp_stream = gp_logfile.get();
+    GlobalLogStreamPtr() = gp_logfile.get();
   else
-    gp_stream = &std::cerr;
+    GlobalLogStreamPtr() = &std::cerr;
 }
 
 void SetLogBool(std::string_view name, bool value) {
