@@ -872,15 +872,26 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRemoveRequest(OgaEngine* engine, Oga
 /**
  * \brief Creates a new request for the OgaEngine.
  *
- * This function initializes a new request object that can be used to submit input sequences and parameters for model inference.
+ * This function initializes a new request object that can be used to submit input sequences for model inference.
  * Once added to the engine, the request will be processed by the engine in subsequent calls to OgaEngineStep.
  *
- * \param[in] tokens The input sequences to be processed by the model.
  * \param[in] params The parameters for the generator, such as temperature, top-k, etc.
  * \param[out] out Pointer to the created request instance. On success, *out will be set to the new request object.
  * \return OgaResult containing the error message if the request creation failed, or nullptr on success.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRequest(OgaSequences* tokens, OgaGeneratorParams* params, OgaRequest** out);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRequest(OgaGeneratorParams* params, OgaRequest** out);
+
+/**
+ * \brief Adds input sequences to the request.
+ *
+ * This function sets the input sequences for the request. The input sequences are used to seed the generation process.
+ * The request must have been created using OgaCreateRequest before calling this function.
+ *
+ * \param[in] request The request to set the input sequences on.
+ * \param[in] tokens The input sequences to set on the request.
+ * \return OgaResult containing the error message if the setting of the input sequences failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestAddTokens(OgaRequest* request, const OgaSequences* tokens);
 
 /**
  * \brief Destroys the given request.

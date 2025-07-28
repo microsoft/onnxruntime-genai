@@ -23,12 +23,10 @@ struct Config {
     static constexpr std::string_view PresentValueName = "present.%d.value";
     static constexpr std::string_view RnnStatesName = "rnn_states";
     static constexpr std::string_view RnnStatesPrevName = "rnn_states_prev";
-    static constexpr std::string_view CumulativeSequenceLengths = "cumulative_sequence_lengths";
-    static constexpr std::string_view SequenceLengths = "sequence_lengths";
-    static constexpr std::string_view MaxQueryLength = "max_query_length";
-    static constexpr std::string_view MaxSequenceLength = "max_sequence_length";
+    static constexpr std::string_view CumulativeSequenceLengthsName = "cumulative_sequence_lengths";
+    static constexpr std::string_view SequenceLengthsName = "sequence_lengths";
+    static constexpr std::string_view PastSequenceLengthsName = "past_sequence_lengths";
     static constexpr std::string_view BlockTableName = "block_table";
-    static constexpr std::string_view SlotMappingName = "slot_mapping";
 
     // Speech encoder names
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
@@ -215,12 +213,9 @@ struct Config {
         std::string encoder_hidden_states{Defaults::EncoderHiddenStatesName};
         std::string rnn_prev_states{Defaults::RnnStatesPrevName};
         std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
-        std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengths};
-        std::string sequence_lengths{Defaults::SequenceLengths};
-        std::string max_query_length{Defaults::MaxQueryLength};
-        std::string max_sequence_length{Defaults::MaxSequenceLength};
+        std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
+        std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
         std::string block_table{Defaults::BlockTableName};
-        std::string slot_mapping{Defaults::SlotMappingName};
       } inputs;
 
       struct Outputs {

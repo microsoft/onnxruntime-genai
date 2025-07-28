@@ -16,16 +16,9 @@ void Scheduler::RemoveRequest(std::shared_ptr<Request> request) {
   // For statically batched requests, memory is managed as a single block for the entire batch,
   // so individual requests cannot be deallocated until the whole batch is completed.
   // Therefore, deallocation is only performed for dynamically batched requests below.
-  if (cache_manager_->SupportsDynamicBatching()) {
-    std::vector<std::shared_ptr<Request>> requests_to_remove{request};
-    cache_manager_->Deallocate(requests_to_remove);
-
-    requests_pool_.erase(std::remove(requests_pool_.begin(), requests_pool_.end(), request), requests_pool_.end());
-  } else {
-    // For statically batched requests, we simply mark the request to be removed
-    // and it will be deallocated when the entire batch is completed.
-    to_be_removed_requests_.insert(request);
-  }
+  // we simply mark the request to be removed and it will be deallocated when the
+  // entire batch is completed.
+  to_be_removed_requests_.insert(request);
 }
 
 ScheduledRequests Scheduler::Schedule() {
@@ -36,37 +29,28 @@ ScheduledRequests Scheduler::Schedule() {
     }
   }
 
-  if (cache_manager_->SupportsDynamicBatching()) {
-    for (auto& request : requests_to_schedule) {
-      if (cache_manager_->CanAllocate({request})) {
-        cache_manager_->Allocate({request});
+  constexpr size_t static_batch_size = 4;
+  for (size_t batch_size = std::min(static_batch_size, requests_to_schedule.size());
+       batch_size != 0; batch_size /= 2) {
+    std::vector<std::shared_ptr<Request>> batch_requests(requests_to_schedule.begin(),
+                                                         requests_to_schedule.begin() + batch_size);
+    if (cache_manager_->CanAllocate(batch_requests)) {
+      // Before allocating, we need to ensure that the existing requests in the cache manager
+      // are complete and that if they were previously removed from the engine, they are no longer
+      // in the requests pool.
+      for (auto& request : cache_manager_->AllocatedRequests()) {
+        if (request->status_ != RequestStatus::Completed && to_be_removed_requests_.count(request)) {
+          throw std::runtime_error("Encountered a request that was removed from the engine but was not completed.");
+        }
+        requests_pool_.erase(std::remove(requests_pool_.begin(), requests_pool_.end(), request), requests_pool_.end());
+      }
+
+      cache_manager_->Allocate(batch_requests);
+      for (auto& request : batch_requests) {
         request->Schedule();
       }
-    }
-  } else {
-    constexpr size_t static_batch_size = 4;
-    for (size_t batch_size = std::min(static_batch_size, requests_to_schedule.size());
-         batch_size != 0; batch_size /= 2) {
-      std::vector<std::shared_ptr<Request>> batch_requests(requests_to_schedule.begin(),
-                                                           requests_to_schedule.begin() + batch_size);
-      if (cache_manager_->CanAllocate(batch_requests)) {
-        // Before allocating, we need to ensure that the existing requests in the cache manager
-        // are complete and that if they were previously removed from the engine, they are no longer
-        // in the requests pool.
-        for (auto& request : cache_manager_->AllocatedRequests()) {
-          if (request->status_ != RequestStatus::Completed && to_be_removed_requests_.count(request)) {
-            throw std::runtime_error("Encountered a request that was removed from the engine but was not completed.");
-          }
-          requests_pool_.erase(std::remove(requests_pool_.begin(), requests_pool_.end(), request), requests_pool_.end());
-        }
-
-        cache_manager_->Allocate(batch_requests);
-        for (auto& request : batch_requests) {
-          request->Schedule();
-        }
-        requests_to_schedule.erase(requests_to_schedule.begin(), requests_to_schedule.begin() + batch_size);
-        break;
-      }
+      requests_to_schedule.erase(requests_to_schedule.begin(), requests_to_schedule.begin() + batch_size);
+      break;
     }
   }
 

@@ -33,13 +33,13 @@ def run(args: argparse.Namespace):
             max_length=1024,
         )
 
-        request = og.Request(
+        request = og.Request(params)
+        request.add_tokens(
             tokenizer.encode(
                 tokenizer.apply_chat_template(
                     messages=messages, add_generation_prompt=True
                 )
             ),
-            params,
         )
         streaming_tokenizer = tokenizer.create_stream()
 

@@ -44,7 +44,7 @@ void StaticCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& r
   }
 
   if (!key_value_cache_) {
-    auto request_with_max_total_sequence_length =
+    auto request_with_max_max_sequence_length =
         std::max_element(
             requests.begin(), requests.end(),
             [](const std::shared_ptr<Request>& a, const std::shared_ptr<Request>& b) {
@@ -52,7 +52,7 @@ void StaticCacheManager::Allocate(const std::vector<std::shared_ptr<Request>>& r
             });
 
     params_ = std::make_shared<GeneratorParams>(*model_);
-    params_->search.max_length = (*request_with_max_total_sequence_length)->Params()->search.max_length;
+    params_->search.max_length = (*request_with_max_max_sequence_length)->Params()->search.max_length;
     params_->search.batch_size = static_cast<int>(cache_allocated_requests_.size());
 
     key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);

@@ -129,12 +129,20 @@ struct Request : std::enable_shared_from_this<Request>,
   /**
    * @brief Sets the opaque data for user-defined purposes.
    * @param data Pointer to the opaque data.
+   *
+   * This data can be used by the application to store additional information
+   * that may be useful for the application logic when new tokens are generated.
+   * For example, the application could store a pointer to a user-defined structure
+   * that contains the state of the application related to this request.
+   * The data can be retrieved later using GetOpaqueData(). The stored data is not
+   * used by the request or the engine and is solely for the application's use.
+   * It is the application's responsibility to manage the lifetime of this data.
    */
   void SetOpaqueData(void* data);
 
   /**
    * @brief Gets the opaque data set by the user.
-   * @return Pointer to the opaque data.
+   * @return Pointer to the opaque data provided by the application.
    */
   void* GetOpaqueData();
 

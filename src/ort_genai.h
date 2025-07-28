@@ -707,10 +707,14 @@ struct OgaAdapters : OgaAbstract {
 };
 
 struct OgaRequest : OgaAbstract {
-  static std::unique_ptr<OgaRequest> Create(OgaSequences& tokens, OgaGeneratorParams& params) {
+  static std::unique_ptr<OgaRequest> Create(OgaGeneratorParams& params) {
     OgaRequest* p;
-    OgaCheckResult(OgaCreateRequest(&tokens, &params, &p));
+    OgaCheckResult(OgaCreateRequest(&params, &p));
     return std::unique_ptr<OgaRequest>(p);
+  }
+
+  void AddTokens(const OgaSequences& tokens) {
+    OgaCheckResult(OgaRequestAddTokens(this, &tokens));
   }
 
   bool IsDone() const {

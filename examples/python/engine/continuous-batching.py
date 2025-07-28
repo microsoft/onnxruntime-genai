@@ -35,13 +35,13 @@ class ClientRequest:
         ]
         messages = json.dumps(messages)
 
-        self.request = og.Request(
+        self.request = og.Request(self.params)
+        self.request.add_tokens(
             tokenizer.encode(
                 tokenizer.apply_chat_template(
                     messages=messages, add_generation_prompt=True
                 )
-            ),
-            self.params,
+            )
         )
         self.request.set_opaque_data(opaque_data)
         self.streaming_tokenizer = tokenizer.create_stream()
@@ -119,11 +119,13 @@ class Engine:
         self.tokenizer = og.Tokenizer(self.model)
         self.engine = og.Engine(self.model)
         self.debug = debug
+        self.tokens_decoded = 0
 
     def run(self):
         while request := self.engine.step():
             request_pool = request.get_opaque_data()
             request_pool.drain(request)
+            self.tokens_decoded += 1
 
 
 def run(args: argparse.Namespace):
@@ -139,7 +141,12 @@ def run(args: argparse.Namespace):
     producer_thread = threading.Thread(target=request_pool.fill)
     producer_thread.start()
 
+    start = time.time()
     engine.run()
+    end = time.time()
+
+    request_pool.bar.close()
+    print(f"⌛Tokens per second: {engine.tokens_decoded / (end - start):.2f}")
 
 
 if __name__ == "__main__":

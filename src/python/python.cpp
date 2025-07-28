@@ -543,12 +543,15 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<OgaRequest>(m, "Request")
       .def(pybind11::init(
-          [](pybind11::array_t<int32_t> tokens, PyGeneratorParams& params) {
-            auto sequences = OgaSequences::Create();
-            auto tokens_span = ToSpan(tokens);
-            sequences->Append(tokens_span.data(), tokens_span.size());
-            return OgaRequest::Create(*sequences, *params.params_);
+          [](PyGeneratorParams& params) {
+            return OgaRequest::Create(*params.params_);
           }))
+      .def("add_tokens", [](OgaRequest& request, pybind11::array_t<int32_t> tokens) {
+        auto sequences = OgaSequences::Create();
+        auto tokens_span = ToSpan(tokens);
+        sequences->Append(tokens_span.data(), tokens_span.size());
+        request.AddTokens(*sequences);
+      })
       .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
       .def("is_done", &OgaRequest::IsDone)
       .def("get_unseen_token", &OgaRequest::GetUnseenToken)

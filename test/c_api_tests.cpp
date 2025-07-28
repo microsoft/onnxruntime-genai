@@ -226,11 +226,13 @@ TEST(CAPIEngineTests, MaxLength) {
 
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", static_cast<int>(input_ids.size()) - 1);  // Set max_length to one less than input size
-  EXPECT_THROW(OgaRequest::Create(*sequence, *params), std::runtime_error);
+  auto request = OgaRequest::Create(*params);
+  EXPECT_THROW(request->AddTokens(*sequence), std::runtime_error);
 
   params->SetSearchOption("max_length", static_cast<int>(input_ids.size()) + 1);  // Set max_length to one more than input size
-  auto request = OgaRequest::Create(*sequence, *params);
+  request->AddTokens(*sequence);
   ASSERT_TRUE(request != nullptr);
+  ASSERT_FALSE(request->IsDone());
 }
 #endif
 
@@ -310,7 +312,8 @@ TEST(CAPIEngineTests, EndToEndPhiBatch) {
                                                                  input_sequences->SequenceCount(0));
     params.emplace_back(OgaGeneratorParams::Create(*model));
     params.back()->SetSearchOption("max_length", 40);
-    requests.push_back(OgaRequest::Create(*input_sequences, *params.back()));
+    requests.push_back(OgaRequest::Create(*params.back()));
+    requests.back()->AddTokens(*input_sequences);
     requests.back()->SetOpaqueData(&generated_tokens[requests.size() - 1]);
     tokenizer_streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
 
@@ -372,7 +375,8 @@ TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
                                                                  input_sequences->SequenceCount(0));
     params.emplace_back(OgaGeneratorParams::Create(*model));
     params.back()->SetSearchOption("max_length", 40);
-    requests.push_back(OgaRequest::Create(*input_sequences, *params.back()));
+    requests.push_back(OgaRequest::Create(*params.back()));
+    requests.back()->AddTokens(*input_sequences);
     requests.back()->SetOpaqueData(&generated_tokens[requests.size() - 1]);
     tokenizer_streams.emplace_back(OgaTokenizerStream::Create(*tokenizer));
   }
@@ -470,7 +474,8 @@ TEST(CAPIEngineTests, EndToEndPhi) {
 
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 40);
-  auto request = OgaRequest::Create(*input_sequence, *params);
+  auto request = OgaRequest::Create(*params);
+  request->AddTokens(*input_sequence);
 
   engine->Add(*request);
   std::string out_string;
@@ -858,7 +863,8 @@ struct Phi2Test {
       tokenizer_->Encode(input_strings[i], *input_sequence);
       generated_tokens[i] = std::vector<int32_t>(input_sequence->SequenceData(0),
                                                  input_sequence->SequenceData(0) + input_sequence->SequenceCount(0));
-      requests_.emplace_back(OgaRequest::Create(*input_sequence, *params_));
+      requests_.emplace_back(OgaRequest::Create(*params_));
+      requests_.back()->AddTokens(*input_sequence);
       requests_.back()->SetOpaqueData(&generated_tokens[i]);
 
       engine->Add(*requests_.back());

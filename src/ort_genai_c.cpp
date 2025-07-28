@@ -910,16 +910,22 @@ OgaResult* OgaEngineRemoveRequest(OgaEngine* engine, OgaRequest* request) {
   OGA_CATCH
 }
 
-OgaResult* OgaCreateRequest(OgaSequences* tokens, OgaGeneratorParams* params, OgaRequest** out) {
+OgaResult* OgaCreateRequest(OgaGeneratorParams* params, OgaRequest** out) {
   OGA_TRY
   auto request = std::make_shared<Generators::Request>(params->shared_from_this());
+  *out = ReturnShared<OgaRequest>(request);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestAddTokens(OgaRequest* request, const OgaSequences* tokens) {
+  OGA_TRY
   if (tokens->size() > 1) {
     throw std::runtime_error("Request can only be created with a single sequence");
   }
   request->AddTokens((*tokens)[0]);
-  *out = ReturnShared<OgaRequest>(request);
-  OGA_CATCH
   return nullptr;
+  OGA_CATCH
 }
 
 OgaResult* OgaRequestHasUnseenTokens(const OgaRequest* request, bool* out) {

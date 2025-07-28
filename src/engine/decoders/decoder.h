@@ -12,13 +12,17 @@ namespace Generators {
 struct ModelIO : State {
   ModelIO(const GeneratorParams& params, const Model& model) : State(params, model) {}
 
-  DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override {
-    return {};
+  DeviceSpan<float> Run(int, DeviceSpan<int32_t>&, DeviceSpan<int32_t> next_indices = {}) override {
+    throw std::runtime_error("Unexpected call to ModelIO::Run, this function is not implemented for ModelIO.");
   }
 
-  void RewindTo(size_t index) override { (void)index; };
+  void RewindTo(size_t index) override {
+    throw std::runtime_error("Unexpected call to ModelIO::RewindTo, this function is not implemented for ModelIO.");
+  };
 
-  OrtValue* GetOutput(const char* name) override { return nullptr; };
+  OrtValue* GetOutput(const char* name) override {
+    throw std::runtime_error("Unexpected call to ModelIO::GetOutput, this function is not implemented for ModelIO.");
+  };
 };
 
 struct DecoderIO : ModelIO {
