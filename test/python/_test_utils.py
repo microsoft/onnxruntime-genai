@@ -81,7 +81,7 @@ def get_model_paths():
     ci_paths = {
         "llama-2": os.path.join(ci_data_path, "Llama-2-7B-Chat-GPTQ"),
         "llama-3": os.path.join(ci_data_path, "Meta-Llama-3-8B-AWQ"),
-        "mistral-v0.2": os.path.join(ci_data_path, "Mistral-7B-Instruct-v0.2-GPTQ"),
+        # "mistral-v0.2": os.path.join(ci_data_path, "Mistral-7B-Instruct-v0.2-GPTQ"),
         "phi-2": os.path.join(ci_data_path, "phi2"),
         # "gemma-2b": os.path.join(ci_data_path, "gemma-1.1-2b-it"),
         "gemma-7b": os.path.join(ci_data_path, "gemma-7b-it-awq"),
