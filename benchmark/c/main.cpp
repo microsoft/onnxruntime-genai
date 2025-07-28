@@ -224,15 +224,20 @@ void RunBenchmark(const benchmark::Options& opts) {
         generator->AppendTokenSequences(*prompt_sequences);
       }
 
+      bool generator_done = false;
+
       {
         Timing sampling_timing{sampling_times};
         generator->GenerateNextToken();
+        generator_done = generator->IsDone();
       }
 
-      while (!generator->IsDone()) {
+      while (!generator_done) {
         {
           Timing token_gen_timing{token_gen_times};
           generator->GenerateNextToken();
+          // Enforce stream synchronize to compute accurate token generation times
+          generator_done = generator->IsDone();
         }
       }
     }

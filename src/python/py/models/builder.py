@@ -424,7 +424,7 @@ class Model:
                 "past_present_share_buffer": False if "config_only" in self.extra_options else self.past_present_share_buffer,
                 "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
                 "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
-                "top_k": 1,
+                "top_k": config.top_k if hasattr(config, "top_k") else 50,
                 "top_p": config.top_p if hasattr(config, "top_p") else 1.0,
             },
         }

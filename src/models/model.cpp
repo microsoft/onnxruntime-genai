@@ -441,20 +441,25 @@ void ConfigureNvTensorRtRTxProfile(const Config& config, OrtSessionOptions& sess
     session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_opt_shapes", opt_shapes.str().c_str());
     session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_profile_max_shapes", max_shapes.str().c_str());
   } else {
-    // Single profile mode: simple shapes with batch_dim=[0,1,1] and seq_dim=[0,1,max_context_len]
+    // Single profile mode: simple shapes with batch_dim=[1,1,batch_size] and seq_dim=[1,1024,max_context_len]
     std::ostringstream min_shapes, opt_shapes, max_shapes;
 
-    // MIN SHAPES: batch_dim=0, seq_dim=0
-    min_shapes << Config::Defaults::InputIdsName << ":0x0,"
-               << Config::Defaults::AttentionMaskName << ":0x0";
-    add_key_value_cache_shapes(min_shapes, 0, past_key_pattern, past_value_pattern, 0, num_layers, num_kv_heads, head_dim);
+    // MIN SHAPES: batch_dim=1, seq_dim=1
+    constexpr int min_context_len = 1;
+    constexpr int min_batch_size = 1;
+    min_shapes << Config::Defaults::InputIdsName << ":" << min_batch_size << "x" << min_context_len << ","
+               << Config::Defaults::AttentionMaskName << ":" << min_batch_size << "x" << min_context_len;
+    add_key_value_cache_shapes(min_shapes, min_batch_size, past_key_pattern, past_value_pattern, 0, num_layers, num_kv_heads, head_dim);
 
-    // OPT SHAPES: batch_dim=1, seq_dim=1
-    opt_shapes << Config::Defaults::InputIdsName << ":1x1,"
-               << Config::Defaults::AttentionMaskName << ":1x1";
-    add_key_value_cache_shapes(opt_shapes, 1, past_key_pattern, past_value_pattern, 1, num_layers, num_kv_heads, head_dim);
+    // OPT SHAPES: batch_dim=1, seq_dim=1024
+    const int opt_context_len = std::min(max_context_len / 2, 1024);  // Use a reasonable opt context length
+    constexpr int opt_batch_size = 1;                                 // Use a opt batch size of 1
+    // keeping seq length to 1 as optimizing for the gen phase
+    opt_shapes << Config::Defaults::InputIdsName << ":" << opt_batch_size << "x" << 1 << ","
+               << Config::Defaults::AttentionMaskName << ":" << opt_batch_size << "x" << opt_context_len;
+    add_key_value_cache_shapes(opt_shapes, opt_batch_size, past_key_pattern, past_value_pattern, opt_context_len, num_layers, num_kv_heads, head_dim);
 
-    // MAX SHAPES: batch_dim=1, seq_dim=max_context_len
+    // MAX SHAPES: seq_dim=max_context_len
     max_shapes << Config::Defaults::InputIdsName << ":" << batch_size << "x" << max_context_len << ","
                << Config::Defaults::AttentionMaskName << ":" << batch_size << "x" << max_context_len;
     add_key_value_cache_shapes(max_shapes, batch_size, past_key_pattern, past_value_pattern, max_context_len, num_layers, num_kv_heads, head_dim);
@@ -728,8 +733,8 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
   EnsureDeviceOrtInit(*p_device_, *config_);
 
-  // Only CUDA and DML does every input on the device
-  if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML)
+  // Only CUDA, TRT-RTX and DML does every input on the device
+  if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx)
     p_device_inputs_ = p_device_;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
