@@ -602,33 +602,43 @@ class QuantizedModel:
 
     def unpack_on_row(self, tensor, bits, transpose):
         """
-        Unpack tensor by row
+        Unpack tensor by row. Packed datatype is assumed to be int32.
         """
         if bits in {2, 4, 8}:
             return self.unpack_on_row_for_2_4_8_bits(tensor, bits, transpose)
         else:
             raise NotImplementedError(f"Unpacking for {bits}-bit quantization is not currently supported.")
 
-    def pack_on_row_for_2_4_8_bits(self, tensor, bits, transpose):
+    def pack_on_row_for_2_4_8_bits(self, tensor, bits, transpose, packed_dtype=torch.int32):
         """
         Perform general-purpose packing on 2-bit, 4-bit, or 8-bit tensor
         """
+        packed_bitwidth = torch.iinfo(packed_dtype).bits
+        values_per_pack = packed_bitwidth // bits
+
         orig_tensor = tensor.T if transpose else tensor
+
+        original_cols = orig_tensor.shape[1]
+        pad_len = (values_per_pack - (original_cols % values_per_pack)) % values_per_pack
+        if pad_len > 0:
+            orig_tensor = torch.nn.functional.pad(orig_tensor, (0, pad_len), "constant", 0)
+
         wf = torch.arange(0, bits).view(1, 1, -1)
         out = torch.bitwise_right_shift(orig_tensor.unsqueeze(-1), wf)
         out = torch.bitwise_and(out, 1)
-        out = out.reshape(orig_tensor.shape[0], -1, 32)
-        wf1 = torch.arange(0, 32, 1).view(1, 1, -1)
+
+        out = out.reshape(orig_tensor.shape[0], -1, values_per_pack * bits)
+        wf1 = torch.arange(0, values_per_pack * bits, 1).view(1, 1, -1)
         out = torch.bitwise_left_shift(out, wf1)
-        out = out.sum(dim=-1).int()
+        out = out.sum(dim=-1).to(packed_dtype)
         return out.T if transpose else out
 
-    def pack_on_row(self, tensor, bits, transpose):
+    def pack_on_row(self, tensor, bits, transpose, packed_dtype=torch.int32):
         """
         Pack tensor by row
         """
         if bits in {2, 4, 8}:
-            return self.pack_on_row_for_2_4_8_bits(tensor, bits, transpose)
+            return self.pack_on_row_for_2_4_8_bits(tensor, bits, transpose, packed_dtype)
         else:
             raise NotImplementedError(f"Packing for {bits}-bit quantization is not currently supported.")
 
@@ -679,7 +689,7 @@ class QuantizedModel:
         """
         Pack `scales`, `qzeros`, and `qweight` to ORT format
         """
-        if module.bits not in [4, 8]:
+        if module.bits not in [2, 4, 8]:
             raise NotImplementedError(f"{module.bits}-bit quantization in ORT is not currently supported by this tool.")
 
         intzeros_pt = module.qzeros.T if module.qzeros.dtype == module.scales.dtype else module.qzeros.T.byte()
@@ -694,16 +704,13 @@ class QuantizedModel:
         pad_len = padded_rows - rows
         if pad_len > 0:
             intweight_pt = torch.nn.functional.pad(intweight_pt, (0, 0, 0, pad_len), "constant", 0)
-        intzeros_pt = torch.nn.functional.pad(intzeros_pt, (0, intzeros_pt.shape[-1] & 1, 0, 0), "constant", 0)
 
         if module.qzeros.dtype != module.scales.dtype:
-            if module.bits == 4:
-                intzeros_pt = (intzeros_pt[:, 0::2]) | (intzeros_pt[:, 1::2] << 4)
+            intzeros_pt = self.pack_on_row(intzeros_pt, module.bits, transpose=False, packed_dtype=torch.uint8)
             intzeros_pt = intzeros_pt.reshape(-1)
 
         intweight_pt_T = intweight.T
-        if module.bits == 4:
-            intweight_pt_T = (intweight_pt_T[:, 0::2]) | (intweight_pt_T[:, 1::2] << 4)
+        intweight_pt_T = self.pack_on_row(intweight_pt_T, module.bits, transpose=False, packed_dtype=torch.uint8)
         intweight_pt_T = intweight_pt_T.reshape(cols, k_blocks, blob_size)
 
         scales_pt = module.scales.T.reshape(-1)

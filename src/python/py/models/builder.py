@@ -903,6 +903,7 @@ class Model:
             return self.make_matmul_float(matmul, matmul_name, root_input, **kwargs)
         
         if matmul.bits != 4:
+            # code below assume 4 bits with hard coded shapes (* 2)
             raise NotImplementedError(f"{matmul.bits} bits precision is not currently supported in QDQ format.")
 
         dequantize_output = self.make_dequantize_linear(f"{matmul_name}/DequantizeLinear", matmul)
