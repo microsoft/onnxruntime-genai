@@ -437,15 +437,15 @@ void ConfigureNvTensorRtRTxProfile(const Config& config, OrtSessionOptions& sess
     std::ostringstream min_shapes, opt_shapes, max_shapes;
 
     // MIN SHAPES: batch_dim=1, seq_dim=1
-    const int min_context_len = 1;
-    const int min_batch_size = 1;
+    constexpr int min_context_len = 1;
+    constexpr int min_batch_size = 1;
     min_shapes << Config::Defaults::InputIdsName << ":" << min_batch_size << "x" << min_context_len << ","
                << Config::Defaults::AttentionMaskName << ":" << min_batch_size << "x" << min_context_len;
     add_key_value_cache_shapes(min_shapes, min_batch_size, past_key_pattern, past_value_pattern, 0, num_layers, num_kv_heads, head_dim);
 
     // OPT SHAPES: batch_dim=1, seq_dim=1024
     const int opt_context_len = std::min(max_context_len / 2, 1024);  // Use a reasonable opt context length
-    const int opt_batch_size = 1;                                     // Use a opt batch size of 1
+    constexpr int opt_batch_size = 1;                                     // Use a opt batch size of 1
     // keeping seq length to 1 as optimizing for the gen phase
     opt_shapes << Config::Defaults::InputIdsName << ":" << opt_batch_size << "x" << 1 << ","
                << Config::Defaults::AttentionMaskName << ":" << opt_batch_size << "x" << opt_context_len;
