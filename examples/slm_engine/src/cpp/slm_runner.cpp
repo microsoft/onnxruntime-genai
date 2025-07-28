@@ -32,6 +32,7 @@ using namespace std;
 /// @param output_file Path to the JSONL file to save the SLM response and stats
 /// @return 0 if successful, -1 otherwise
 int run_test(const string& model_path,
+             const std::vector<std::string>& adapter_files,
              const string& test_data_file, const string& output_file,
              bool verbose, int wait_between_requests) {
   // Make sure that the files exist
@@ -50,9 +51,38 @@ int run_test(const string& model_path,
   cout << "Model: " << model_path << "\n"
        << "Test File: " << test_data_file << "\n";
 
-  // Create the SLM
-  auto slm_engine = microsoft::slm_engine::SLMEngine::CreateEngine(
-      model_path.c_str(), verbose);
+  std::unique_ptr<microsoft::slm_engine::SLMEngine> slm_engine;
+
+  if (adapter_files.empty()) {
+    slm_engine = microsoft::slm_engine::SLMEngine::Create(
+        model_path.c_str(), verbose);
+  } else {
+    vector<microsoft::slm_engine::SLMEngine::LoRAAdapter> adapters;
+
+    for (const auto& adapter_file : adapter_files) {
+      // Check if the adapter path exists
+      if (!std::filesystem::exists(adapter_file)) {
+        cout << RED << "Adapter path does not exist: " << adapter_file
+             << CLEAR << endl;
+        return -1;
+      }
+
+      // Get the filename from the path
+      std::filesystem::path adapter_name(adapter_file);
+      microsoft::slm_engine::SLMEngine::LoRAAdapter adapter(
+          adapter_name.stem().string(),
+          adapter_file);
+      adapters.push_back(adapter);
+
+      cout << "Adapter: " << adapter_name.stem().string() << "\n";
+      cout << "Adapter Path: " << adapter_file << "\n";
+    }
+
+    microsoft::slm_engine::SLMEngine::Status status;
+    slm_engine = microsoft::slm_engine::SLMEngine::Create(
+        model_path.c_str(), adapters, verbose, status);
+  }
+
   if (!slm_engine) {
     cout << "Cannot create engine!\n";
     return -1;
@@ -114,6 +144,12 @@ int main(int argc, char** argv) {
       .help("Path to the model file")
       .store_into(model_path);
 
+  program.add_argument("-a", "--adapters")
+      .help(
+          "List of LoRA adapter files to process. "
+          "We will use the filename part as the name of the LoRA adpater")
+      .nargs(argparse::nargs_pattern::any);
+
   string test_data_file;
   program.add_argument("-t", "--test_data_file")
       .required()
@@ -156,10 +192,13 @@ int main(int argc, char** argv) {
   if (program["--verbose"] == true) {
     verbose = true;
   }
+
+  std::vector<std::string> adapters =
+      program.get<std::vector<std::string>>("adapters");
   // Responsible for cleaning up the library during shutdown
   // OgaHandle handle;
 
-  run_test(model_path, test_data_file, output_file, verbose,
+  run_test(model_path, adapters, test_data_file, output_file, verbose,
            wait_between_requests);
 
   OgaShutdown();

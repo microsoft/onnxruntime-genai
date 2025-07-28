@@ -200,7 +200,7 @@ inline void InitApi() {
   }
 
   bool ort_lib = false;
-  Generators::GetEnvironmentVariable("ORTGENAI_LOG_ORT_LIB", ort_lib);
+  Generators::GetEnv("ORTGENAI_LOG_ORT_LIB", ort_lib);
   if (ort_lib) {
     Generators::SetLogBool("enabled", true);
     Generators::SetLogBool("ort_lib", true);
@@ -733,6 +733,8 @@ struct OrtSession {
            const char* const* output_names, OrtValue** output_values, size_t output_count);
 
   void Run(_In_opt_ const OrtRunOptions* run_options, const OrtIoBinding&);  ///< Wraps OrtApi::RunWithBinding
+
+  void SetEpDynamicOptions(_In_opt_ const char* const* keys, const char* const* values, size_t kv_len);
 
   static void operator delete(void* p) { Ort::api->ReleaseSession(reinterpret_cast<OrtSession*>(p)); }
   Ort::Abstract make_abstract;

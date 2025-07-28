@@ -40,6 +40,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+@interface OGAAudios ()
+
+- (OgaAudios&)CXXAPIOgaAudios;
+
+@end
+
 @interface OGATensor ()
 
 - (instancetype)initWithCXXPointer:(std::unique_ptr<OgaTensor>)ptr NS_DESIGNATED_INITIALIZER;

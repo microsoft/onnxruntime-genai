@@ -18,6 +18,9 @@ struct DecoderOnly_Model : Model {
 
 struct DecoderOnly_State : State {
   DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params);
+
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
 
   void RewindTo(size_t index) override;
@@ -29,7 +32,7 @@ struct DecoderOnly_State : State {
 
   DefaultInputIDs input_ids_{*this};
   Logits logits_{*this};
-  DefaultKeyValueCache kv_cache_{*this};
+  std::unique_ptr<KeyValueCache> kv_cache_;
   DefaultPositionInputs position_inputs_;
   ExtraInputs extra_inputs_{*this};
 };

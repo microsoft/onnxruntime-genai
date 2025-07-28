@@ -31,8 +31,9 @@ struct Search_Cuda : Search {
 
   DeviceSpan<int32_t> sequence_lengths_;  // shape (beam_size*batch_size)
 
-  gpu_span<bool> eos_meet_;  // shape (beam_size*batch_size)
-  cuda_unique_ptr<bool> eos_meet_buffer_;
+  gpu_span<bool> eos_seen_;  // shape (beam_size*batch_size)
+  cuda_unique_ptr<bool> eos_seen_buffer_;
+  DeviceSpan<int32_t> eos_token_ids_;
 
   gpu_span<int32_t> next_tokens_;        // shape (beam_size*batch_size)
   DeviceSpan<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
@@ -47,7 +48,7 @@ struct GreedySearch_Cuda : Search_Cuda {
   DeviceSpan<int32_t> GetNextIndices() override { return {}; }
 
   void SelectTop() override { SampleTopKTopP(1, 0.0, 1.0); }
-  void SampleTopK(int k, float t) override { SampleTopKTopP(k, 0.0, t); }
+  void SampleTopK(int k, float t) override { SampleTopKTopP(k, 1.0, t); }
   void SampleTopP(float p, float t) override { SampleTopKTopP(-1, p, t); }
   void SampleTopKTopP(int k, float p, float t) override;
   void AppendTokens(DeviceSpan<int32_t>& next_tokens) override;  // shape (batch_size, sequence_length)

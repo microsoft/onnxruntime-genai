@@ -76,6 +76,8 @@ jobs:
 
   - name: py_dot_ver
     value: '3.12'
+  - name: py_no_dot_ver
+    value: '312'
 
   - name: pip_package_name
     ${{ if eq(parameters.ep, 'cpu') }}:
@@ -119,9 +121,9 @@ jobs:
 
   - name: cuda_docker_image
     ${{ if eq(parameters.cuda_version, '11.8') }}:
-      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20250109.1
+      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20250714.2
     ${{ else }}:
-      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_ubi8_gcc12:20250109.1
+      value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda12_x64_almalinux8_gcc12:20250714.2
 
   steps:
   - checkout: self
@@ -160,7 +162,7 @@ jobs:
   - template: steps/utils/flex-download-pipeline-artifact.yml
     parameters:
       StepName: 'Download Python Wheel Artifacts'
-      ArtifactName: $(ArtifactName)-wheel
+      ArtifactName: $(ArtifactName)-$(py_no_dot_ver)-wheel
       TargetPath: '$(Build.BinariesDirectory)/wheel'
       SpecificArtifact: ${{ parameters.specificArtifact }}
       BuildId: ${{ parameters.BuildId }}

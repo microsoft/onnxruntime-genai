@@ -2,7 +2,8 @@
 
 This document explains how the model builder is designed and how new contributions can be made. By following these guidelines, the model builder will remain lightweight, flexible, and useful after future changes.
 
-# Contents
+## Contents
+
 - [Design Principles](#design-principles)
   - [Simplicity](#simplicity)
   - [Efficiency](#efficiency)
@@ -18,7 +19,8 @@ This document explains how the model builder is designed and how new contributio
 - [Contributing](#contributing)
 
 ## Design Principles
-The model builder is designed under four main guiding principles: simplicity, efficiency, modularity, and compatibility. 
+
+The model builder is designed under four main guiding principles: simplicity, efficiency, modularity, and compatibility.
 
 ### Simplicity
 
@@ -44,7 +46,7 @@ The models produced by the model builder should directly work in ONNX Runtime Ge
 
 ### `Model`
 
-The `Model` base class holds all of the information for making models. It auto-determines optimizations and quantizations that can be applied (e.g. replace MultiHeadAttention with GroupQueryAttention). It also holds all important attributes and the many functions that make the final ONNX model. 
+The `Model` base class holds all of the information for making models. It auto-determines optimizations and quantizations that can be applied (e.g. replace MultiHeadAttention with GroupQueryAttention). It also holds all important attributes and the many functions that make the final ONNX model.
 
 After the final ONNX model is created, additional files are saved in the output folder to run with ONNX Runtime GenAI. These include the GenAI config and the pre-processing/post-processing files (e.g. tokenizer).
 
@@ -129,12 +131,11 @@ In the traditional export process, a unique constant is created each time a node
 To automate the creation process, the names of the constants are stored in the following namespace format.
 
 ```
-"/model/constants/{onnx dtype}/{shape}/{num}"
+"/model/constants/{onnx_dtype}/{num}"
 ```
 
-- The `onnx_dtype` is the string representation of the TensorProto enum name used in ONNX to represent the constant's dtype (e.g. `TensorProto.INT64`). It is created using `self.to_str_dtype`.
-- The `shape` is either `0D` (0-dimensional constant) or `1D` (1-dimensional constant).
-- The `num` is the numerical constant.
+- The `onnx_dtype` is the string representation of the TensorProto enum name used in ONNX to represent the constant's dtype (e.g. `INT64`). It is created using `self.to_str_dtype`.
+- The `num` is the numerical constant. It can be a scalar or an array (e.g. `0` or `[1,2,3]`).
 
 When a node is added to the ONNX model, its inputs are parsed to identify names in this format. If recognized, the input name (which is the name of a constant) is looked up in `self.constants`. If found, then the constant does not need to be added to the ONNX model again. If not found, the input name is parsed to obtain the necessary info to create the ONNX constant.
 
@@ -146,17 +147,18 @@ To contribute to the model builder, please ensure the following requirements are
 
 2. For new model architectures added, please verify that ONNX models produced by the model builder are valid. This can be done by loading the ONNX model into an ONNX Runtime inference session.
 
-Python example:
-```
-import onnxruntime as ort
+    Python example:
 
-model_path = "path_to_onnx_model"
-ep = "name_of_desired_execution_provider"
+    ```py
+    import onnxruntime as ort
 
-sess = ort.InferenceSession(model_path, providers=[ep])
-```
+    model_path = "path_to_onnx_model"
+    ep = "name_of_desired_execution_provider"
 
-ONNX Runtime GenAI has additional CI tests to verify valid models when pull requests are opened.
+    sess = ort.InferenceSession(model_path, providers=[ep])
+    ```
+
+    ONNX Runtime GenAI has additional CI tests to verify valid models when pull requests are opened.
 
 3. Please ensure no attributes and no scenario-specific variables are created within a `Make` function or its function signature in `Model`. They should be defined in the `Attrs` dictionaries (preferably) or by overriding the function signature in the model architecture's class.
 

@@ -20,19 +20,33 @@ public final class Tensor implements AutoCloseable {
   // https://github.com/onnx/onnx/blob/159fa47b7c4d40e6d9740fcf14c36fff1d11ccd8/onnx/onnx.proto#L499-L544
   /** Element types that correspond to OnnxRuntime supported element types. */
   public enum ElementType {
+    /** Undefined element type. */
     undefined,
+    /** 32-bit IEEE 754 floating point. */
     float32,
+    /** 8-bit unsigned integer. */
     uint8,
+    /** 8-bit signed integer. */
     int8,
+    /** 16-bit unsigned integer. */
     uint16,
+    /** 16-bit signed integer. */
     int16,
+    /** 32-bit signed integer. */
     int32,
+    /** 64-bit signed integer. */
     int64,
+    /** UTF-8 encoded string. */
     string,
+    /** Boolean value (true or false). */
     bool,
+    /** 16-bit IEEE 754 floating point (half precision). */
     float16,
+    /** 64-bit IEEE 754 floating point (double precision). */
     float64,
+    /** 32-bit unsigned integer. */
     uint32,
+    /** 64-bit unsigned integer. */
     uint64,
   }
 

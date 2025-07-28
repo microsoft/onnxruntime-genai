@@ -4,23 +4,24 @@
 
 namespace Generators {
 
-DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk)
+DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name)
     : model_{model},
-      state_{state} {
-  has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
-  has_posid_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.position_ids);
+      state_{state},
+      attention_mask_name_{attention_mask_name} {
+  has_mask_input_ = model_.session_info_.HasInput(attention_mask_name_);
+  has_posid_input_ = model_.session_info_.HasInput(model_.config_->model.decoder.inputs.position_ids);
 
   type_ = Ort::TypeToTensorType<int32_t>;
   if (has_mask_input_) {
-    type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
+    type_ = model_.session_info_.GetInputDataType(attention_mask_name_);
   }
   if (has_posid_input_) {
     if (has_mask_input_) {
-      if (model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.position_ids) != type_) {
+      if (model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.position_ids) != type_) {
         throw std::runtime_error("position_ids & attention_mask must have the same data type");
       }
     }
-    type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
+    type_ = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
   }
 
   if (type_ != Ort::TypeToTensorType<int32_t> && type_ != Ort::TypeToTensorType<int64_t>)
@@ -101,7 +102,7 @@ void DefaultPositionInputs::AddAttentionMask() {
   mask_input_index_ = state_.inputs_.size();
 
   state_.inputs_.push_back(attention_mask_->GetOrtTensor());
-  state_.input_names_.push_back(model_.config_->model.decoder.inputs.attention_mask.c_str());
+  state_.input_names_.push_back(attention_mask_name_.c_str());
 }
 
 void DefaultPositionInputs::AddPositionIDs() {
@@ -140,7 +141,7 @@ void DefaultPositionInputs::UpdatePositionIDs(int total_length, int new_kv_lengt
 }
 
 void DefaultPositionInputs::CreateNextAttentionMaskTensor(int total_length) {
-  if (state_.params_->use_graph_capture)
+  if (ShouldUseStaticMaskHandling())
     return;
   attention_mask_shape_[1] = total_length;
   attention_mask_next_->CreateTensor(attention_mask_shape_);
@@ -153,26 +154,26 @@ void DefaultPositionInputs::UpdateAttentionMask(int total_length, int new_kv_len
   CreateNextAttentionMaskTensor(total_length);
 
   // Update the attention mask on the device. If it fails, copy to CPU, update there, and copy back to device.
-  if (!model_.p_device_inputs_->UpdateAttentionMask(state_.params_->use_graph_capture ? nullptr : attention_mask_next_->GetMutableRawData(),
+  if (!model_.p_device_inputs_->UpdateAttentionMask(ShouldUseStaticMaskHandling() ? nullptr : attention_mask_next_->GetMutableRawData(),
                                                     attention_mask_->GetMutableRawData(),
                                                     static_cast<int>(attention_mask_shape_[0]),
                                                     new_kv_length,
                                                     total_length,
                                                     state_.params_->search.max_length,
-                                                    state_.params_->use_graph_capture,
+                                                    ShouldUseStaticMaskHandling(),
                                                     type_)) {
     // auto* attention_mask_next_span = state_.params_->use_graph_capture ? &attention_mask_next_->GetByteSpan() : nullptr;
     DeviceSpan<uint8_t> attention_mask_next_span;
-    if (!state_.params_->use_graph_capture)
+    if (!ShouldUseStaticMaskHandling())
       attention_mask_next_span = attention_mask_next_->GetByteSpan();
     auto attention_mask_span = attention_mask_->GetByteSpan();
-    GetDeviceInterface(DeviceType::CPU)->UpdateAttentionMask(state_.params_->use_graph_capture ? nullptr : attention_mask_next_span.CopyDeviceToCpu().data(), attention_mask_span.CopyDeviceToCpu().data(), static_cast<int>(attention_mask_shape_[0]), new_kv_length, total_length, state_.params_->search.max_length, state_.params_->use_graph_capture, type_);
-    if (!state_.params_->use_graph_capture)
+    GetDeviceInterface(DeviceType::CPU)->UpdateAttentionMask(ShouldUseStaticMaskHandling() ? nullptr : attention_mask_next_span.CopyDeviceToCpu().data(), attention_mask_span.CopyDeviceToCpu().data(), static_cast<int>(attention_mask_shape_[0]), new_kv_length, total_length, state_.params_->search.max_length, ShouldUseStaticMaskHandling(), type_);
+    if (!ShouldUseStaticMaskHandling())
       attention_mask_next_span.CopyCpuToDevice();
     attention_mask_span.CopyCpuToDevice();
   }
 
-  if (!state_.params_->use_graph_capture) {
+  if (!ShouldUseStaticMaskHandling()) {
     attention_mask_->ort_tensor_ = std::move(attention_mask_next_->ort_tensor_);
     state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
   }
@@ -224,7 +225,10 @@ void DefaultPositionInputs::InitializeStaticMask(OrtValue& cpu_attention_mask) {
   auto batch_size = input_shape[0];
   auto num_beams = state_.params_->search.num_beams;
   auto new_kv_length = input_shape[1];
-  auto max_length = input_shape[1] * num_beams;
+  // Number of elements per (batch * beam) row in the *output* tensor
+  // equals the full max_length configured for generation, which is
+  // attention_mask_shape_[1] after the assignment above.
+  auto max_length = attention_mask_shape_[1];
   for (int i = 0; i < batch_size; i++) {
     for (int j = 0; j < num_beams; j++) {
       auto output_subspan = output_span.subspan((i * num_beams + j) * max_length, new_kv_length);
@@ -255,7 +259,7 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     }
   }
 
-  if (state_.params_->use_graph_capture) {
+  if (ShouldUseStaticMaskHandling()) {
     InitializeStaticMask<T>(*attention_mask);
   } else {
     attention_mask = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
@@ -290,11 +294,17 @@ void DefaultPositionInputs::RewindMask(size_t index) {
   }
 }
 
+bool DefaultPositionInputs::ShouldUseStaticMaskHandling() const {
+  return state_.params_->use_graph_capture ||
+         (state_.params_->search.past_present_share_buffer &&
+          model_.p_device_->GetType() == DeviceType::NvTensorRtRtx);
+}
+
 // TODO: SlidingWindow does not support graph capture
 WindowedPositionInputs::WindowedPositionInputs(State& state)
     : state_{state} {
-  has_posid_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.position_ids);
-  has_mask_input_ = model_.session_info_->HasInput(model_.config_->model.decoder.inputs.attention_mask);
+  has_posid_input_ = model_.session_info_.HasInput(model_.config_->model.decoder.inputs.position_ids);
+  has_mask_input_ = model_.session_info_.HasInput(model_.config_->model.decoder.inputs.attention_mask);
 
   if (has_posid_input_ || has_mask_input_) {
     if (!model_.config_->model.decoder.sliding_window.has_value()) {
@@ -308,7 +318,7 @@ WindowedPositionInputs::WindowedPositionInputs(State& state)
   }
 
   if (has_posid_input_) {
-    position_ids_type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
+    position_ids_type_ = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
     if (position_ids_type_ != Ort::TypeToTensorType<int32_t>)
       throw std::runtime_error("WindowedPositionInputs only supports int32_t position_ids");
 
@@ -316,7 +326,7 @@ WindowedPositionInputs::WindowedPositionInputs(State& state)
   }
 
   if (has_mask_input_) {
-    attention_mask_type_ = model_.session_info_->GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
+    attention_mask_type_ = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
     if (attention_mask_type_ != Ort::TypeToTensorType<int32_t>)
       throw std::runtime_error("WindowedPositionInputs only supports int32_t attention_mask");
 
@@ -436,11 +446,11 @@ void WindowedPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_l
   window_index_++;
 }
 
-std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths) {
-  if (state.model_.config_->model.decoder.sliding_window.has_value()) {
+std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name) {
+  if (state.model_.config_->model.decoder.sliding_window.has_value() && state.model_.config_->model.decoder.sliding_window->slide_inputs) {
     return std::make_unique<WindowedPositionInputs>(state);
   } else {
-    return std::make_unique<DefaultPositionInputs>(state.model_, state, sequence_lengths);
+    return std::make_unique<DefaultPositionInputs>(state.model_, state, sequence_lengths, attention_mask_name);
   }
 }
 

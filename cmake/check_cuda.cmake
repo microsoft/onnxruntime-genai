@@ -56,7 +56,3 @@ else()
   list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
   add_compile_definitions(USE_CUDA=0)
 endif()
-
-if(USE_CUDA AND NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_CUDA_LIB}")
-  message(FATAL_ERROR "Expected the ONNX Runtime providers cuda library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_PROVIDERS_CUDA_LIB}. Actual: Not found.")
-endif()

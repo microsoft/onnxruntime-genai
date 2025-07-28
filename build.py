@@ -76,6 +76,7 @@ def _parse_args():
     parser.add_argument("--update", action="store_true", help="Update makefiles.")
     parser.add_argument("--build", action="store_true", help="Build.")
     parser.add_argument("--test", action="store_true", help="Run tests.")
+    parser.add_argument("--package", action="store_true", help="Package the build.") # Does not override other phases.
     parser.add_argument(
         "--clean", action="store_true", help="Run 'cmake --build --target clean' for the selected config."
     )
@@ -86,6 +87,7 @@ def _parse_args():
     # Default to not building the language bindings
     parser.add_argument("--build_csharp", action="store_true", help="Build the C# API.")
     parser.add_argument("--build_java", action="store_true", help="Build Java bindings.")
+    parser.add_argument("--publish_java_maven_local", action="store_true", help="Publish Java bindings to local Maven repository after tests.")
 
     parser.add_argument("--parallel", action="store_true", help="Enable parallel build.")
 
@@ -128,6 +130,8 @@ def _parse_args():
 
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
+    parser.add_argument("--use_guidance", action="store_true", help="Whether to add guidance support. Default is False.")
+    
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
     platform_group = parser.add_mutually_exclusive_group()
     platform_group.add_argument("--android", action="store_true", help="Build for Android")
@@ -195,6 +199,12 @@ def _parse_args():
         action="store_true",
         help="[cross-compiling] Create ARM64EC makefiles. Requires --update and no existing cache "
         "CMake setup. Delete CMakeCache.txt if needed",
+    )
+
+    parser.add_argument(
+        "--skip_examples",
+        action="store_true",
+        help="Skip building the sample executables. Builds only on Linux and Windows otherwise.",
     )
 
     return parser.parse_args()
@@ -431,6 +441,30 @@ def _run_android_tests(args: argparse.Namespace):
             raise exception
 
 
+def _get_windows_build_args(args: argparse.Namespace):
+    win_args = [
+        "-DCMAKE_EXE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
+        "-DCMAKE_MODULE_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
+        "-DCMAKE_SHARED_LINKER_FLAGS_INIT=/profile /DYNAMICBASE",
+    ]
+    cmake_c_flags = "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000"
+    if args.config == "Release":
+        cmake_c_flags += " /O2 /Ob2 /DNDEBUG"
+    elif args.config == "RelWithDebInfo":
+        cmake_c_flags += " /O2 /Ob1 /DNDEBUG"
+    elif args.config == "Debug":
+        cmake_c_flags += " /Ob0 /Od /RTC1"
+    win_args += [
+        "-DCMAKE_C_FLAGS_INIT=" + cmake_c_flags,
+        "-DCMAKE_CXX_FLAGS_INIT=" + cmake_c_flags,
+    ]
+    if args.use_cuda:
+        win_args += [
+            "-DCMAKE_CUDA_FLAGS_INIT=/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=\" /MP /guard:cf /Qspectre \" -allow-unsupported-compiler",
+        ]
+    return win_args
+
+
 def update(args: argparse.Namespace, env: dict[str, str]):
     """
     Update the cmake build files.
@@ -474,6 +508,8 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
+        f"-DUSE_GUIDANCE={'ON' if args.use_guidance else 'OFF'}",
+        f"-DPUBLISH_JAVA_MAVEN_LOCAL={'ON' if args.publish_java_maven_local else 'OFF'}",
     ]
 
     if args.ort_home:
@@ -482,6 +518,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     if args.use_cuda:
         cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
         command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}"]
+
+    if args.package and util.is_windows():
+        command += _get_windows_build_args(args)
 
     if args.android:
         command += [
@@ -536,6 +575,8 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             # The following arguments are specific to the OpenCV toolchain file
             f"-DCMAKE_TOOLCHAIN_FILE={_get_opencv_toolchain_file()}",
         ]
+        if args.use_guidance:
+            command += ["-DRust_CARGO_TARGET=aarch64-apple-ios-sim"]
 
     if args.macos == "Catalyst":
         if args.cmake_generator == "Xcode":
@@ -555,10 +596,11 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             "-DMAC_CATALYST=1",
         ]
 
-    if args.arm64:
-        command += ["-A", "ARM64"]
-    elif args.arm64ec:
-        command += ["-A", "ARM64EC"]
+    if args.cmake_generator.startswith("Visual Studio"):
+        if args.arm64:
+            command += ["-A", "ARM64"]
+        elif args.arm64ec:
+            command += ["-A", "ARM64EC"]
 
     if args.arm64 or args.arm64ec:
         if args.test:
@@ -586,7 +628,15 @@ def build(args: argparse.Namespace, env: dict[str, str]):
 
     util.run(make_command, env=env)
 
+    if not args.skip_wheel:
+        make_command += ["--target", "PyPackageBuild"]
+        util.run(make_command, env=env)
+
     lib_dir = args.build_dir
+    if util.is_windows():
+        # On Windows, the library files are in a subdirectory named after the configuration (e.g. Debug, Release, etc.)
+        lib_dir = lib_dir / args.config
+
     if not args.ort_home:
         _ = util.download_dependencies(args.use_cuda, args.use_rocm, args.use_dml, lib_dir)
     else:
@@ -602,11 +652,21 @@ def build(args: argparse.Namespace, env: dict[str, str]):
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
 
+def package(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Package the build output with CMake targets.
+    """
+    make_command = [str(args.cmake_path), "--build", str(args.build_dir), "--config", args.config, "--target", "package"]
+    if args.parallel:
+        make_command.append("--parallel")
+    util.run(make_command, env=env)
+
+
 def test(args: argparse.Namespace, env: dict[str, str]):
     """
     Run the tests.
     """
-    lib_dir = args.build_dir / "test"
+    lib_dir = args.build_dir
     if util.is_windows():
         # On Windows, the unit test executable is found inside a directory named after the configuration
         # (e.g. Debug, Release, etc.) within the test directory.
@@ -618,7 +678,7 @@ def test(args: argparse.Namespace, env: dict[str, str]):
         lib_dir = args.ort_home / "lib"
 
     ctest_cmd = [str(args.ctest_path), "--build-config", args.config, "--verbose", "--timeout", "10800"]
-    util.run(ctest_cmd, cwd=str(args.build_dir / "test"))
+    util.run(ctest_cmd, cwd=str(args.build_dir))
 
     if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
@@ -643,6 +703,56 @@ def clean(args: argparse.Namespace, env: dict[str, str]):
     util.run(cmd_args, env=env)
 
 
+def build_examples(args: argparse.Namespace, env: dict[str, str]):
+    """
+    Build the examples.
+    """
+    examples_dir = REPO_ROOT / "examples" / "c"
+    build_dir = examples_dir / "build"
+
+    if build_dir.exists():
+        log.info(f"Removing existing build directory: {build_dir}")
+        shutil.rmtree(build_dir)
+
+    build_dir.mkdir()
+
+    samples_to_build = [
+        "-DMODEL_QA=ON",
+        "-DMODEL_CHAT=ON",
+        "-DMODEL_VISION=ON",
+        "-DPHI4-MM=ON",
+        "-DWHISPER=ON",
+    ]
+
+    include_dir = REPO_ROOT / "src"
+    lib_dir = args.build_dir
+    if util.is_windows():
+        # On Windows, the library files are in a subdirectory named after the configuration (e.g. Debug, Release, etc.)
+        lib_dir = lib_dir / args.config
+
+    cmake_command = [
+        str(args.cmake_path),
+        "-S", str(examples_dir),
+        "-B", str(build_dir),
+        "-G", args.cmake_generator,
+    ] + samples_to_build + [
+        "-DORT_GENAI_INCLUDE_DIR=" + str(include_dir),
+        "-DORT_GENAI_LIB_DIR=" + str(lib_dir),
+    ]
+
+    if args.cmake_generator.startswith("Visual Studio"):
+        if args.arm64:
+            cmake_command += ["-A", "ARM64"]
+        elif args.arm64ec:
+            cmake_command += ["-A", "ARM64EC"]
+
+    if args.cmake_extra_defines != []:
+        cmake_command += args.cmake_extra_defines
+
+    util.run(cmake_command, env=env)
+    util.run([str(args.cmake_path), "--build", str(build_dir), "--config", args.config], env=env)
+
+
 if __name__ == "__main__":
     if not (util.is_windows() or util.is_linux() or util.is_mac() or util.is_aix()):
         raise OSError(f"Unsupported platform {sys.platform}.")
@@ -660,6 +770,12 @@ if __name__ == "__main__":
 
     if arguments.build:
         build(arguments, environment)
+    
+    if arguments.package:
+        package(arguments, environment)
 
     if arguments.test and not arguments.skip_tests:
         test(arguments, environment)
+
+    if not (arguments.skip_examples or arguments.android or arguments.ios):
+        build_examples(arguments, environment)

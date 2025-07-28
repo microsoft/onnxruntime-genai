@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 import onnxruntime_genai as og
+# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
 
 def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
     curr_path = Path(current_dir).absolute()
@@ -28,10 +29,11 @@ def _complete(text, state):
 def run(args: argparse.Namespace):
     print("Loading model...")
     config = og.Config(args.model_path)
-    config.clear_providers()
-    if args.execution_provider != "cpu":
-        print(f"Setting model to {args.execution_provider}...")
-        config.append_provider(args.execution_provider)
+    if args.execution_provider != "follow_config":
+        config.clear_providers()
+        if args.execution_provider != "cpu":
+            print(f"Setting model to {args.execution_provider}...")
+            config.append_provider(args.execution_provider)
     model = og.Model(config)
     print("Model loaded")
 
@@ -102,10 +104,10 @@ def run(args: argparse.Namespace):
 
         print("Generating response...")
         params = og.GeneratorParams(model)
-        params.set_inputs(inputs)
         params.set_search_options(max_length=7680)
 
         generator = og.Generator(model, params)
+        generator.set_inputs(inputs)
         start_time = time.time()
 
         while not generator.is_done():
@@ -134,7 +136,7 @@ if __name__ == "__main__":
         "-m", "--model_path", type=str, required=True, help="Path to the folder containing the model"
     )
     parser.add_argument(
-        "-e", "--execution_provider", type=str, required=True, choices=["cpu", "cuda", "dml"], help="Execution provider to run model"
+        "-e", "--execution_provider", type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead."
     )
     parser.add_argument(
         "--image_paths", nargs='*', type=str, required=False, help="Path to the images, mainly for CI usage"

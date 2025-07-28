@@ -10,7 +10,7 @@ struct PositionInputs {
 };
 
 struct DefaultPositionInputs : PositionInputs {
-  DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk);
+  DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name);
 
   void Add() override;
   void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
@@ -38,8 +38,15 @@ struct DefaultPositionInputs : PositionInputs {
 
   void RewindMask(size_t index);
 
+  // This returns true when either:
+  // 1. Graph capture is enabled, OR
+  // 2. Past-present buffer sharing is enabled AND the device is NvTensorRtRtx
+  // Both scenarios require static mask allocation and special shape handling for optimization
+  bool ShouldUseStaticMaskHandling() const;
+
   const Model& model_;
   State& state_;
+  std::string attention_mask_name_;
 
   size_t mask_input_index_{~0U};
   size_t posid_input_index_{~0U};
@@ -102,6 +109,6 @@ struct WindowedPositionInputs : PositionInputs {
   size_t window_index_{};
 };
 
-std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths);
+std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name);
 
 }  // namespace Generators

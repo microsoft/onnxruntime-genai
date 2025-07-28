@@ -5,6 +5,7 @@
 #include "model.h"
 #include "kv_cache.h"
 #include "windowed_kv_cache.h"
+#include "../openvino/interface.h"
 
 namespace Generators {
 
@@ -21,7 +22,7 @@ CombinedKeyValueCache::CombinedKeyValueCache(State& state)
   }
 
   // Derive the KV data type from the KV input 0
-  type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
+  type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
 
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
   shape_[3] = 0;
@@ -165,7 +166,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   // Derive the KV data type from the KV input 0
-  type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
+  type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
   empty_past_ = OrtValue::CreateTensor(Allocator(), shape_, type_);
 
   if (state_.params_->use_graph_capture && !past_present_share_buffer_) {
@@ -174,8 +175,14 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   // Set the size after empty_past_ has been created with 0 for this field
-  if (past_present_share_buffer_)
+  if (state.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx &&
+      model_.config_->model.decoder.sliding_window.has_value() &&
+      model_.config_->model.decoder.sliding_window->window_size > 0) {
+    shape_[2] = std::min(state_.params_->search.max_length,
+                         model_.config_->model.decoder.sliding_window->window_size);
+  } else if (past_present_share_buffer_) {
     shape_[2] = state_.params_->search.max_length;
+  }
 
   try {
     for (int i = 0; i < layer_count_ * 2; ++i) {
@@ -198,21 +205,12 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 }
 
-void DefaultKeyValueCache::AddEncoder() {
-  // We don't set the input_index_ & output_index_ because the encoder step only runs once, there's no update
-
-  for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.outputs_.push_back(presents_[i].get());
-    state_.output_names_.push_back(output_name_strings_[i].c_str());
-  }
-}
-
 void DefaultKeyValueCache::Add() {
   input_index_ = state_.inputs_.size();
   output_index_ = state_.outputs_.size();
 
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(empty_past_.get());  // Set empty past here, AddEncoder() & Update() take care of the rest
+    state_.inputs_.push_back(empty_past_.get());  // Set empty past here, Update() takes care of the rest
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
@@ -328,40 +326,41 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int i
   }
 }
 
-CrossCache::CrossCache(State& state)
-    : state_{state},
-      layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 1500, model_.config_->model.decoder.head_size} {
+CrossCache::CrossCache(State& state, int sequence_length) {
+  const Model& model = state.model_;
+  auto& allocator = state.model_.p_device_kvcache_->GetAllocator();
+  layer_count_ = model.config_->model.decoder.num_hidden_layers;
+  shape_ = std::array<int64_t, 4>{state.params_->BatchBeamSize(), model.config_->model.decoder.num_attention_heads, sequence_length, model.config_->model.decoder.head_size};
   values_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {
-    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.cross_past_key_names, i));
-    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.cross_past_value_names, i));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.encoder.outputs.cross_present_key_names, i));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.encoder.outputs.cross_present_value_names, i));
 
-    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.cross_present_key_names, i));
-    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.cross_present_value_names, i));
+    input_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.inputs.cross_past_key_names, i));
+    input_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.inputs.cross_past_value_names, i));
   }
 
-  // Derive the KV data type from the KV input 0
-  type_ = model_.session_info_->GetInputDataType(input_name_strings_[0]);
+  // Derive the cross attention KV cache's data type
+  type_ = model.session_info_.GetOutputDataType(output_name_strings_[0]);
 
   for (int i = 0; i < layer_count_; ++i) {
-    values_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
-    values_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
+    values_.push_back(OrtValue::CreateTensor(allocator, shape_, type_));
+    values_.push_back(OrtValue::CreateTensor(allocator, shape_, type_));
   }
 }
 
-void CrossCache::AddOutputs() {
+void CrossCache::AddOutputs(State& state) {
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.outputs_.push_back(values_[i].get());
-    state_.output_names_.push_back(output_name_strings_[i].c_str());
+    state.outputs_.push_back(values_[i].get());
+    state.output_names_.push_back(output_name_strings_[i].c_str());
   }
 }
 
-void CrossCache::AddInputs() {
+void CrossCache::AddInputs(State& state) {
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(values_[i].get());
-    state_.input_names_.push_back(input_name_strings_[i].c_str());
+    state.inputs_.push_back(values_[i].get());
+    state.input_names_.push_back(input_name_strings_[i].c_str());
   }
 }
 
@@ -376,25 +375,56 @@ std::string ComposeKeyValueName(const std::string& template_string, int index) {
   return std::string(key_value_name);
 }
 
+ModelManagedKeyValueCache::ModelManagedKeyValueCache(State& state)
+    : state_{state} {
+  // A new instance of ModelManagedKeyValueCache is created for each Generator.
+  // In this case, we need to trigger a KVCache reset on the session before the first Session::Run.
+  // This implies that the key-value cache state is coupled with the ONNX Runtime Session and
+  // that only 1 Generator can be active for the Model at any given time.
+  RewindTo(0);
+}
+
+void ModelManagedKeyValueCache::Add() {}
+
+void ModelManagedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
+  // Eventually we need to set 'beam_idx' tensor here somehow.
+}
+
+void ModelManagedKeyValueCache::RewindTo(size_t index) {
+  // Add 'kvcache_rewind' EP dynamic option to get applied before the next Session::Run.
+  // This will trim the internal KVCache states to the desired position.
+  state_.ep_dynamic_options_next_run_.push_back({"kvcache_rewind", std::to_string(index)});
+}
+
 namespace {
 
 bool IsCacheNeeded(const Model& model) {
-  return model.session_info_->HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, 0));
+  return model.session_info_.HasInput(ComposeKeyValueName(model.config_->model.decoder.inputs.past_key_names, 0));
 }
 
 }  // namespace
 
 std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
+  // For OpenVINO Stateful models, they do not contain exposed past/present KV tensors.
+  // In this case, 'IsCacheNeeded' below will return false. But in this case we need to create a
+  // special 'ModelManagedKeyValueCache' object, and so we check this condition first.
+  if (IsOpenVINOStatefulModel(state.model_)) {
+    if (g_log.enabled)
+      Log("info", "CreateKeyValueCache: Creating ModelManagedKeyValueCache");
+    return std::make_unique<ModelManagedKeyValueCache>(state);
+  }
+
   if (!IsCacheNeeded(state.model_)) {
     return nullptr;
   }
 
-  if (state.model_.config_->model.decoder.sliding_window &&
+  if (state.model_.p_device_->GetType() != DeviceType::NvTensorRtRtx &&
+      state.model_.config_->model.decoder.sliding_window &&
       state.model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
     return std::make_unique<WindowedKeyValueCache>(state);
-  } else {
-    return std::make_unique<DefaultKeyValueCache>(state);
   }
+
+  return std::make_unique<DefaultKeyValueCache>(state);
 }
 
 }  // namespace Generators

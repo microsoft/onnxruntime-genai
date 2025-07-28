@@ -5,21 +5,8 @@
 #include <string>
 #include <fstream>
 #include <memory>
-
+#include "common.h"
 #include "ort_genai.h"
-
-bool FileExists(const char* path) {
-  return static_cast<bool>(std::ifstream(path));
-}
-
-std::string trim(const std::string& str) {
-  const size_t first = str.find_first_not_of(' ');
-  if (std::string::npos == first) {
-    return str;
-  }
-  const size_t last = str.find_last_not_of(' ');
-  return str.substr(first, (last - first + 1));
-}
 
 // C++ API Example
 
@@ -27,14 +14,8 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   std::cout << "Creating config..." << std::endl;
   auto config = OgaConfig::Create(model_path);
 
-  config->ClearProviders();
   std::string provider(execution_provider);
-  if (provider.compare("cpu") != 0) {
-    config->AppendProvider(execution_provider);
-    if (provider.compare("cuda") == 0) {
-      config->SetProviderOption(execution_provider, "enable_cuda_graph", "0");
-    }
-  }
+  append_provider(*config, provider);
 
   std::cout << "Creating model..." << std::endl;
   auto model = OgaModel::Create(*config);
@@ -53,7 +34,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     std::vector<std::string> image_paths;
     for (size_t start = 0, end = 0; end < image_paths_str.size(); start = end + 1) {
       end = image_paths_str.find(',', start);
-      image_paths.push_back(trim(image_paths_str.substr(start, end - start)));
+      image_paths.push_back(Trim(image_paths_str.substr(start, end - start)));
     }
     if (image_paths.empty()) {
       std::cout << "No image provided" << std::endl;
@@ -77,7 +58,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     std::vector<std::string> audio_paths;
     for (size_t start = 0, end = 0; end < audio_paths_str.size(); start = end + 1) {
       end = audio_paths_str.find(',', start);
-      audio_paths.push_back(trim(audio_paths_str.substr(start, end - start)));
+      audio_paths.push_back(Trim(audio_paths_str.substr(start, end - start)));
     }
     if (audio_paths.empty()) {
       std::cout << "No audio provided" << std::endl;
@@ -113,9 +94,9 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     std::cout << "Generating response..." << std::endl;
     auto params = OgaGeneratorParams::Create(*model);
     params->SetSearchOption("max_length", 7680);
-    params->SetInputs(*input_tensors);
 
     auto generator = OgaGenerator::Create(*model, *params);
+    generator->SetInputs(*input_tensors);
 
     while (!generator->IsDone()) {
       generator->GenerateNextToken();
@@ -130,22 +111,16 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   }
 }
 
-static void print_usage(int /*argc*/, char** argv) {
-  std::cerr << "usage: " << argv[0] << std::endl;
-  std::cerr << "model_path = " << argv[1] << std::endl;
-  std::cerr << "execution_provider = " << argv[2] << std::endl;
-}
-
 int main(int argc, char** argv) {
-  if (argc != 3) {
-    print_usage(argc, argv);
+  std::string model_path, ep;
+  if (!parse_args(argc, argv, model_path, ep)) {
     return -1;
   }
 
   std::cout << "--------------------" << std::endl;
   std::cout << "Hello, Phi-4-Multimodal!" << std::endl;
   std::cout << "--------------------" << std::endl;
-  CXX_API(argv[1], argv[2]);
+  CXX_API(model_path.c_str(), ep.c_str());
 
   return 0;
 }

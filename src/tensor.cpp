@@ -16,12 +16,13 @@ Tensor::Tensor(std::unique_ptr<OrtValue> ort_tensor) : ort_tensor_{std::move(ort
 Tensor::~Tensor() {
   if (buffer_ != nullptr) {
     p_device_->GetAllocator().Free(buffer_);
+    buffer_ = nullptr;
   }
 }
 
 void Tensor::CreateTensor(std::span<const int64_t> shape, bool make_static) {
   if (make_static) {
-    size_t new_bytes = SizeOf(type_) * ElementCountFromShape(shape);
+    size_t new_bytes = Ort::SizeOf(type_) * ElementCountFromShape(shape);
     if (buffer_ == nullptr) {
       bytes_ = new_bytes;
       buffer_ = p_device_->GetAllocator().Alloc(bytes_);
@@ -40,7 +41,7 @@ void Tensor::MakeStatic() {
   if (ort_tensor_ == nullptr) {
     throw std::runtime_error("Tensor: MakeStatic called before CreateTensor");
   }
-  size_t new_bytes = GetElementCount() * SizeOf(type_);
+  size_t new_bytes = GetElementCount() * Ort::SizeOf(type_);
   if (buffer_ == nullptr) {
     buffer_ = p_device_->GetAllocator().Alloc(new_bytes);
     bytes_ = new_bytes;

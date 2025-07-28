@@ -102,6 +102,10 @@ set(JAVA_NATIVE_LIB_DIR ${JAVA_OUTPUT_DIR}/native-lib)
 set(JAVA_PACKAGE_LIB_DIR ${JAVA_NATIVE_LIB_DIR}/ai/onnxruntime/genai/native/${JAVA_OS_ARCH})
 file(MAKE_DIRECTORY ${JAVA_PACKAGE_LIB_DIR})
 
+# Create directory for ONNX Runtime native libs
+set(ORT_PACKAGE_LIB_DIR ${JAVA_NATIVE_LIB_DIR}/ai/onnxruntime/native/${JAVA_OS_ARCH})
+file(MAKE_DIRECTORY ${ORT_PACKAGE_LIB_DIR})
+
 # Add the native genai library to the native-lib dir
 add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -123,7 +127,11 @@ else()
 endif()
 
 # run the build process
-set(GRADLE_ARGS cmakeBuild -DcmakeBuildDir=${JAVA_OUTPUT_DIR} -DnativeLibDir=${JAVA_PACKAGE_LIB_DIR})
+set(GRADLE_ARGS cmakeBuild)
+if(PUBLISH_JAVA_MAVEN_LOCAL)
+  list(APPEND GRADLE_ARGS publishToMavenLocal)
+endif()
+list(APPEND GRADLE_ARGS -DcmakeBuildDir=${JAVA_OUTPUT_DIR} -DnativeLibDir=${JAVA_NATIVE_LIB_DIR})
 add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                    COMMAND ${POST_BUILD_GRADLE_EXECUTABLE} ${GRADLE_OPTIONS} ${GRADLE_ARGS}
                    WORKING_DIRECTORY ${JAVA_SRC_ROOT})
@@ -212,12 +220,12 @@ if (ENABLE_TESTS)
                -DGRADLE_EXECUTABLE=${GRADLE_EXECUTABLE}
                -DBIN_DIR=${JAVA_OUTPUT_DIR}
                -DJAVA_SRC_ROOT=${JAVA_SRC_ROOT}
-               -DJAVA_PACKAGE_LIB_DIR=${JAVA_PACKAGE_LIB_DIR}
+               -DJAVA_NATIVE_LIB_DIR=${JAVA_NATIVE_LIB_DIR}
                -P ${JAVA_SRC_ROOT}/windows-unittests.cmake)
   else()
     add_test(NAME onnxruntime-genai4j_test
              COMMAND ${GRADLE_EXECUTABLE} cmakeCheck
-               -DcmakeBuildDir=${JAVA_OUTPUT_DIR} -DnativeLibDir=${JAVA_PACKAGE_LIB_DIR}
+               -DcmakeBuildDir=${JAVA_OUTPUT_DIR} -DnativeLibDir=${JAVA_NATIVE_LIB_DIR}
              WORKING_DIRECTORY ${JAVA_SRC_ROOT})
   endif()
 
@@ -237,7 +245,7 @@ if (ENABLE_TESTS)
             TARGET onnxruntime-genai-jni POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy
                     ${LIB_FILE}
-                    ${JAVA_PACKAGE_LIB_DIR}/)
+                    ${ORT_PACKAGE_LIB_DIR}/)
   endforeach()
 
   set_property(TEST onnxruntime-genai4j_test APPEND PROPERTY DEPENDS onnxruntime-genai-jni)
