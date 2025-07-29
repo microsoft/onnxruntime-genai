@@ -99,8 +99,8 @@ std::vector<std::shared_ptr<Request>> StaticCacheManager::AllocatedRequests() co
 
 PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model)
     : CacheManager(model),
-      key_value_cache_(std::make_unique<PagedKeyValueCache>(model)),
-      params_(std::make_shared<GeneratorParams>(*model_)) {
+      params_(std::make_shared<GeneratorParams>(*model_)),
+      key_value_cache_(std::make_unique<PagedKeyValueCache>(model)) {
   key_value_cache_state_ = std::make_unique<KeyValueCacheState>(*params_, *model_);
 }
 

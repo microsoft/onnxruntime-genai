@@ -213,8 +213,8 @@ VarlenDecoderIO::VarlenDecoderIO(std::shared_ptr<DecoderOnly_Model> model,
 }
 
 void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
-  size_t num_tokens = std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), 0,
-                                      [](size_t sum, const std::shared_ptr<Request>& request) {
+  size_t num_tokens = std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), static_cast<size_t>(0),
+                                      [](size_t sum, const std::shared_ptr<Request>& request) -> size_t {
                                         return sum + request->UnprocessedTokens().size();
                                       });
   const std::vector<int64_t> input_ids_shape = {static_cast<int64_t>(num_tokens)};
@@ -272,7 +272,7 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
 }
 
 void VarlenDecoderIO::PrepareLogits(std::shared_ptr<DecoderOnly_Model> model, ScheduledRequests& scheduled_requests) {
-  size_t num_tokens = std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), 0,
+  size_t num_tokens = std::accumulate(scheduled_requests.begin(), scheduled_requests.end(), static_cast<size_t>(0),
                                       [](size_t sum, const std::shared_ptr<Request>& request) {
                                         return sum + request->UnprocessedTokens().size();
                                       });
@@ -293,8 +293,7 @@ std::vector<DeviceSpan<float>> VarlenDecoderIO::ProcessLogits() {
 
   // [num_tokens, vocab_size]
   const auto all_tokens_logits_shape = logits_->GetShape();
-  const int64_t num_tokens = all_tokens_logits_shape[0],
-                vocab_size = all_tokens_logits_shape[1];
+  const int64_t vocab_size = all_tokens_logits_shape[1];
   const int64_t element_size = static_cast<int64_t>(Ort::SizeOf(logits_->GetType()));
 
   auto logits_bytes = logits_->GetByteSpan();

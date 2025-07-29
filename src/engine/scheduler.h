@@ -59,6 +59,8 @@ struct Scheduler {
    * any requests that have not yet been processed.
    */
   virtual bool HasPendingRequests() const = 0;
+
+  virtual ~Scheduler() = default;
 };
 
 struct StaticBatchScheduler : Scheduler {
