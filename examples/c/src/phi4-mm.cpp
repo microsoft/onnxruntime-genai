@@ -24,6 +24,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   auto processor = OgaMultiModalProcessor::Create(*model);
 
   auto tokenizer_stream = OgaTokenizerStream::Create(*processor);
+  auto tokenizer = OgaTokenizer::Create(*model);
 
   while (true) {
     // Get images
@@ -77,16 +78,18 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     std::string text;
     std::cout << "Prompt: " << std::endl;
     std::getline(std::cin, text);
-    std::string prompt = "<|user|>\n";
-    if (images) {
-      for (size_t i = 0; i < image_paths.size(); ++i)
-        prompt += "<|image_" + std::to_string(i + 1) + "|>\n";
-    }
-    if (audios) {
-      for (size_t i = 0; i < audio_paths.size(); ++i)
-        prompt += "<|audio_" + std::to_string(i + 1) + "|>\n";
-    }
-    prompt += text + "<|end|>\n<|assistant|>\n";
+
+    // Construct messages string with special tokens for ApplyChatTemplate
+    std::string content;
+    for (size_t i = 0; i < image_paths.size(); ++i)
+      content += "<|image_" + std::to_string(i + 1) + "|>\\n";
+    for (size_t i = 0; i < audio_paths.size(); ++i)
+      content += "<|audio_" + std::to_string(i + 1) + "|>\\n";
+    content += text;
+
+    const std::string messages = R"([{"role": "user", "content": ")" + content + R"("}])";
+
+    std::string prompt = std::string(tokenizer->ApplyChatTemplate("", messages.c_str(), "", true));
 
     std::cout << "Processing images, audios, and prompt..." << std::endl;
     auto input_tensors = processor->ProcessImagesAndAudios(prompt.c_str(), images.get(), audios.get());

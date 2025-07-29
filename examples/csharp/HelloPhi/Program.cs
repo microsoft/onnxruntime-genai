@@ -116,7 +116,8 @@ if (option == 1 || option == 2)
         {
             break;
         }
-        var sequences = tokenizer.Encode(tokenizer.ApplyChatTemplate("", prompt, "", true));
+        string messages = $@"[{{""role"":""system"",""content"":""You are a helpful AI assistant.""}},{{""role"":""user"",""content"":""{prompt}""}}]";
+        var sequences = tokenizer.Encode(tokenizer.ApplyChatTemplate("", messages, "", true));
 
         if (option == 1) // Complete Output
         {
@@ -183,7 +184,8 @@ if (option == 3) // Streaming Chat
         {
             break;
         }
-        var sequences = tokenizer.Encode(tokenizer.ApplyChatTemplate("", prompt, "", true));
+        string messages = $@"[{{""role"":""system"",""content"":""You are a helpful AI assistant.""}},{{""role"":""user"",""content"":""{prompt}""}}]";
+        var sequences = tokenizer.Encode(tokenizer.ApplyChatTemplate("", messages, "", true));
         var watch = System.Diagnostics.Stopwatch.StartNew();
         generator.AppendTokenSequences(sequences);
         while (!generator.IsDone())

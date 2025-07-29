@@ -113,6 +113,7 @@ if (executionProvider != "cpu") {
 }
 using Model model = new Model(config);
 using MultiModalProcessor processor = new MultiModalProcessor(model);
+using Tokenizer tokenizer = new Tokenizer(model);
 using var tokenizerStream = processor.CreateStream();
 
 do
@@ -147,15 +148,15 @@ do
         text = Console.ReadLine();
     }
 
-    string prompt = "<|user|>\n";
+    string content = "";
     if (images != null)
     {
-        for (int i = 0; i < imagePaths.Count; i++)
-        {
-            prompt += "<|image_" + (i + 1) + "|>\n";
-        }
+        content = string.Join("\\n", imagePaths.Select((_, idx) => $"<|image_{idx + 1}|>")) + "\\n";
     }
-    prompt += text + "<|end|>\n<|assistant|>\n";
+    content += text;
+
+    string messages = $"[{{\"role\":\"user\",\"content\":\"{content}\"}}]";
+    string prompt = tokenizer.ApplyChatTemplate("", messages, "", true);
 
     Console.WriteLine("Processing image and prompt...");
     using var inputTensors = processor.ProcessImages(prompt, images);
