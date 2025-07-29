@@ -270,15 +270,15 @@ struct Config {
 
   struct Engine {
     struct DynamicBatching {
-      int block_size{256};                          // Enable dynamic batching for the engine
+      size_t block_size{256};                          // Enable dynamic batching for the engine
       std::optional<size_t> num_blocks;             // Maximum batch size for dynamic batching
       std::optional<float> gpu_utilization_factor;  // Maximum sequence length for dynamic batching
-      int max_batch_size{16};                       // Maximum batch size for dynamic batching
+      size_t max_batch_size{16};                       // Maximum batch size for dynamic batching
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
     struct StaticBatching {
-      int max_batch_size{4};  // Maximum batch size for static batching
+      size_t max_batch_size{4};  // Maximum batch size for static batching
     };
     std::optional<StaticBatching> static_batching;  // Static batching settings
   };

@@ -57,7 +57,6 @@ std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots) 
         return blocks_[i];
       }
     }
-    throw std::runtime_error("No available blocks in the pool.");
     return std::shared_ptr<Block>();
   };
 
@@ -67,7 +66,11 @@ std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots) 
 
   std::vector<std::shared_ptr<Block>> allocated_blocks;
   for (size_t i = 0; i < num_slots; i += block_size_) {
-    allocated_blocks.push_back(allocate_block(std::min(block_size_, num_slots - i)));
+    auto block = allocate_block(std::min(block_size_, num_slots - i));
+    if (!block) {
+      throw std::runtime_error("Failed to allocate block.");
+    }
+    allocated_blocks.push_back(block);
   }
   return allocated_blocks;
 }
