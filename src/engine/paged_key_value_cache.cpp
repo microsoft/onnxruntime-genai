@@ -23,7 +23,7 @@ size_t ComputeNumBlocks(std::shared_ptr<Model> model) {
   constexpr size_t num_caches_per_layer = 2;  // 2 for key and value caches
 
   // Use the free memory to compute the number of blocks needed to achieve the given gpu_utilization_factor.
-  return (free_bytes *
+  return static_cast<size_t>(free_bytes *
           memory_fragmentation_factor *
           *model->config_->engine->dynamic_batching->gpu_utilization_factor) /
          (model->config_->engine->dynamic_batching->block_size *
@@ -44,11 +44,11 @@ PagedKeyValueCache::PagedKeyValueCache(std::shared_ptr<Model> model)
                                                        model->config_->model.decoder.num_key_value_heads *
                                                        model->config_->model.decoder.head_size};
   const auto dtype = ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
-  for (size_t i = 0; i < model->config_->model.decoder.num_hidden_layers; ++i) {
-    cache_.push_back(LayerCache{OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), cache_shape_per_layer, dtype),  // Key cache
-                                OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), cache_shape_per_layer, dtype),  // Value cache
-                                ComposeKeyValueName(model->config_->model.decoder.inputs.past_key_names, i),                     // Key cache name
-                                ComposeKeyValueName(model->config_->model.decoder.inputs.past_value_names, i)});                 // Value cache name
+    for (size_t i = 0; i < model->config_->model.decoder.num_hidden_layers; ++i) {
+    cache_.push_back(LayerCache{OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), cache_shape_per_layer, dtype),     // Key cache
+                                OrtValue::CreateTensor(model->p_device_kvcache_->GetAllocator(), cache_shape_per_layer, dtype),     // Value cache
+                                ComposeKeyValueName(model->config_->model.decoder.inputs.past_key_names, static_cast<int>(i)),      // Key cache name
+                                ComposeKeyValueName(model->config_->model.decoder.inputs.past_value_names, static_cast<int>(i))});  // Value cache name
   }
   block_pool_ = std::make_unique<BlockPool>(model->config_->engine->dynamic_batching->block_size, num_blocks);
 }
@@ -155,7 +155,7 @@ std::pair<OrtValue*, const char*> PagedKeyValueCache::BlockTables(const std::vec
     }
     size_t index = std::distance(requests.begin(), it);
     for (size_t j = 0; j < block_table.blocks.size(); ++j) {
-      block_table_data[index * max_blocks + j] = block_table.blocks[j]->Id();
+      block_table_data[index * max_blocks + j] = static_cast<int32_t>(block_table.blocks[j]->Id());
     }
     for (size_t j = block_table.blocks.size(); j < max_blocks; ++j) {
       block_table_data[index * max_blocks + j] = block_tables_pad_value;
