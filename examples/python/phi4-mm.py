@@ -5,6 +5,7 @@ import argparse
 import os
 import glob
 import time
+import json
 from pathlib import Path
 
 import onnxruntime_genai as og
@@ -63,6 +64,7 @@ def run(args: argparse.Namespace):
     model = og.Model(config)
     print("Model loaded")
 
+    tokenizer = og.Tokenizer(model)
     processor = model.create_multimodal_processor()
     tokenizer_stream = processor.create_stream()
 
@@ -84,40 +86,44 @@ def run(args: argparse.Namespace):
 
         images = None
         audios = None
-        prompt = "<|user|>\n"
 
-        # Get images
+        # Validate and open image paths
         if len(image_paths) == 0:
             print("No image provided")
         else:
-            for i, image_path in enumerate(image_paths):
+            for image_path in image_paths:
                 if not os.path.exists(image_path):
                     raise FileNotFoundError(f"Image file not found: {image_path}")
                 print(f"Using image: {image_path}")
-                prompt += f"<|image_{i+1}|>\n"
             images = og.Images.open(*image_paths)
 
-        # Get audios
+        # Validate and open audio paths
         if len(audio_paths) == 0:
             print("No audio provided")
         else:
-            for i, audio_path in enumerate(audio_paths):
+            for audio_path in audio_paths:
                 if not os.path.exists(audio_path):
                     raise FileNotFoundError(f"Audio file not found: {audio_path}")
                 print(f"Using audio: {audio_path}")
-                prompt += f"<|audio_{i+1}|>\n"
             audios = og.Audios.open(*audio_paths)
 
-
+        # Get prompt text
         if interactive:
             text = input("Prompt: ")
         else:
-            if args.prompt:
-                text = args.prompt
-            else:
-                text = "Does the audio summarize what is shown in the image? If not, what is different?"
-        prompt += f"{text}<|end|>\n<|assistant|>\n"
-        
+            text = args.prompt or "Does the audio summarize what is shown in the image? If not, what is different?"
+
+        # Build multimodal content list
+        content_list = []
+        content_list.extend([{"type": "image"} for _ in image_paths])
+        content_list.extend([{"type": "audio"} for _ in audio_paths])
+        content_list.append({"type": "text", "text": text})
+
+        # Construct messages and apply template
+        messages = [{"role": "user", "content": content_list}]
+        message_json = json.dumps(messages)
+        prompt = processor.tokenizer.apply_chat_template(message_json, add_generation_prompt=True)
+
         print("Processing inputs...")
         inputs = processor(prompt, images=images, audios=audios)
         print("Processor complete.")

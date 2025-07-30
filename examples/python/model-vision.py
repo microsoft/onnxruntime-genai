@@ -5,6 +5,7 @@ import argparse
 import os
 import glob
 import time
+import json
 from pathlib import Path
 
 import onnxruntime_genai as og
@@ -37,6 +38,7 @@ def run(args: argparse.Namespace):
     model = og.Model(config)
     print("Model loaded")
 
+    tokenizer = og.Tokenizer(model)
     processor = model.create_multimodal_processor()
     tokenizer_stream = processor.create_stream()
 
@@ -79,7 +81,6 @@ def run(args: argparse.Namespace):
             end_tag = "<end_of_turn>\n"
 
         images = None
-        prompt = f"{user_tag}"
         if len(image_paths) == 0:
             print("No image provided")
         else:
@@ -87,7 +88,6 @@ def run(args: argparse.Namespace):
                 if not os.path.exists(image_path):
                     raise FileNotFoundError(f"Image file not found: {image_path}")
                 print(f"Using image: {image_path}")
-                prompt += f"{image_tag.replace('{image_id}', str(i+1))}"
 
             images = og.Images.open(*image_paths)
 
@@ -98,7 +98,24 @@ def run(args: argparse.Namespace):
                 text = args.prompt
             else:
                 text = "What is shown in this image?"
-        prompt += f"{text}{end_tag}{assistant_tag}"
+        
+        # Construct the "messages" argument passed to apply_chat_template
+        messages = []
+        if model.type == "phi3v":
+            # Combine all image tags and text into one user message
+            content = "".join([f"<|image_{i+1}|>\n" for i in range(len(image_paths))]) + text
+            messages.append({"role": "user", "content": content})
+        else:
+            # Gemma3-style multimodal: structured content
+            content_list = [{"type": "image"} for _ in image_paths]
+            content_list.append({"type": "text", "text": text})
+            messages.append({"role": "user", "content": content_list})
+
+        # Apply the chat template using the tokenizer
+        message_json = json.dumps(messages)
+        print(repr(message_json))
+        prompt = tokenizer.apply_chat_template(message_json, add_generation_prompt=True)
+
         print("Processing images and prompt...")
         inputs = processor(prompt, images=images)
 
