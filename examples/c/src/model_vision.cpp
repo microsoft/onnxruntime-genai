@@ -52,9 +52,9 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     std::string text;
     std::cout << "Prompt: " << std::endl;
     std::getline(std::cin, text);
-    
+
     // Construct messages string with special tokens for ApplyChatTemplate.
-    
+
     // Note: The Phi-3 Vision chat template expects content to be string, whereas in
     // Gemma-3-like models, content type is supported, so we handle these differently.
 
