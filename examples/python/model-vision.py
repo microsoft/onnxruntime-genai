@@ -40,7 +40,7 @@ def run(args: argparse.Namespace):
 
     tokenizer = og.Tokenizer(model)
     processor = model.create_multimodal_processor()
-    tokenizer_stream = processor.create_stream()
+    stream = processor.create_stream()
 
     interactive = not args.non_interactive
 
@@ -118,7 +118,7 @@ def run(args: argparse.Namespace):
             generator.generate_next_token()
 
             new_token = generator.get_next_tokens()[0]
-            print(tokenizer_stream.decode(new_token), end="", flush=True)
+            print(stream.decode(new_token), end="", flush=True)
 
         print()
         total_run_time = time.time() - start_time

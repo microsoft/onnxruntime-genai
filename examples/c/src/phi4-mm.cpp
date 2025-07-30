@@ -23,7 +23,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   std::cout << "Creating multimodal processor..." << std::endl;
   auto processor = OgaMultiModalProcessor::Create(*model);
 
-  auto tokenizer_stream = OgaTokenizerStream::Create(*processor);
+  auto stream = OgaTokenizerStream::Create(*processor);
   auto tokenizer = OgaTokenizer::Create(*model);
 
   while (true) {
@@ -106,7 +106,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
 
       const auto num_tokens = generator->GetSequenceCount(0);
       const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
-      std::cout << tokenizer_stream->Decode(new_token) << std::flush;
+      std::cout << stream->Decode(new_token) << std::flush;
     }
 
     for (int i = 0; i < 3; ++i)

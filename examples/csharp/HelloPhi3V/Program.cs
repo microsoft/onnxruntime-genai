@@ -114,7 +114,7 @@ if (executionProvider != "cpu") {
 using Model model = new Model(config);
 using MultiModalProcessor processor = new MultiModalProcessor(model);
 using Tokenizer tokenizer = new Tokenizer(model);
-using var tokenizerStream = processor.CreateStream();
+using var stream = processor.CreateStream();
 
 do
 {
@@ -171,7 +171,7 @@ do
     while (!generator.IsDone())
     {
         generator.GenerateNextToken();
-        Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
+        Console.Write(stream.Decode(generator.GetSequence(0)[^1]));
     }
     watch.Stop();
     var runTimeInSeconds = watch.Elapsed.TotalSeconds;
