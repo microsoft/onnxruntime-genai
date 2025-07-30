@@ -68,18 +68,6 @@ def run(args: argparse.Namespace):
 
         image_paths = [image_path for image_path in image_paths if image_path]
 
-        user_tag = image_tag = assistant_tag = end_tag = ""
-        if model.type == "phi3v":
-            user_tag = "<|user|>\n"
-            image_tag = "<|image_{image_id}|>\n"
-            assistant_tag = "<|assistant|>\n"
-            end_tag = "<|end|>\n"
-        elif model.type == "gemma3":
-            user_tag = "<start_of_turn>user\n"
-            image_tag = "<start_of_image>"
-            assistant_tag = "<start_of_turn>model\n"
-            end_tag = "<end_of_turn>\n"
-
         images = None
         if len(image_paths) == 0:
             print("No image provided")
@@ -113,7 +101,6 @@ def run(args: argparse.Namespace):
 
         # Apply the chat template using the tokenizer
         message_json = json.dumps(messages)
-        print(repr(message_json))
         prompt = tokenizer.apply_chat_template(message_json, add_generation_prompt=True)
 
         print("Processing images and prompt...")
