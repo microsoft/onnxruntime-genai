@@ -122,7 +122,7 @@ def run(args: argparse.Namespace):
         # Construct messages and apply template
         messages = [{"role": "user", "content": content_list}]
         message_json = json.dumps(messages)
-        prompt = processor.tokenizer.apply_chat_template(message_json, add_generation_prompt=True)
+        prompt = tokenizer.apply_chat_template(message_json, add_generation_prompt=True)
 
         print("Processing inputs...")
         inputs = processor(prompt, images=images, audios=audios)
