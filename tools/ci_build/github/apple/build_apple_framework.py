@@ -171,6 +171,7 @@ def _build_package(args):
             + build_settings["build_params"]["base"]
             + build_settings["build_params"][sysroot]
             + ["--config=" + build_config]
+            + ["--skip_examples", "--skip_tests"]
         )
 
         if args.ort_home:

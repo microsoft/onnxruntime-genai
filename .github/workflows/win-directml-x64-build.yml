@@ -103,6 +103,7 @@ jobs:
       - name: Build with CMake
         run: |
           cmake --build --preset windows_x64_directml_release --parallel
+          cmake --build --preset windows_x64_directml_release --target PyPackageBuild
 
       - name: Install the Python Wheel and Test Dependencies
         run: |

@@ -1,6 +1,7 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+using Microsoft.Extensions.AI;
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
@@ -9,7 +10,6 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.AI;
 
 #nullable enable
 
@@ -276,6 +276,15 @@ public sealed partial class OnnxRuntimeGenAIChatClient : IChatClient
         StringBuilder prompt = new();
         string separator = "";
         prompt.Append('[');
+
+        if (options?.Instructions is { } instructions)
+        {
+            m.Role = ChatRole.System.Value;
+            m.Content = instructions;
+            prompt.Append(JsonSerializer.Serialize(m, OnnxJsonContext.Default.SerializableMessage));
+            separator = ",";
+        }
+
         foreach (var message in messages)
         {
             if (message.Text is string text)
@@ -288,6 +297,7 @@ public sealed partial class OnnxRuntimeGenAIChatClient : IChatClient
                 prompt.Append(JsonSerializer.Serialize(m, OnnxJsonContext.Default.SerializableMessage));
             }
         }
+
         prompt.Append(']');
 
         return _tokenizer.ApplyChatTemplate(

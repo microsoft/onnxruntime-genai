@@ -969,6 +969,10 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
   for (const auto& provider_option : model.decoder.session_options.provider_options) {
     model.decoder.session_options.providers.push_back(provider_option.name);
   }
+
+  for (const auto& provider_option : model.encoder.session_options.provider_options) {
+    model.encoder.session_options.providers.push_back(provider_option.name);
+  }
 }
 
 void Config::AddMapping(const std::string& nominal_name, const std::string& graph_name) {

@@ -17,22 +17,23 @@ env:
 
 jobs:
   windows-cpu-arm64-build:
-    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-win11-arm64-cpu"]
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-win11-arm64-cpu2"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
         uses: actions/checkout@v4
         with:
           submodules: true
 
-      - name: Setup Visual Studio 2022
-        uses: microsoft/setup-msbuild@v1.1
-        with:
-          vs-version: '17.4'
-          msbuild-architecture: arm64
-
       - uses: nuget/setup-nuget@v2
         with:
           nuget-version: '5.x'
+
+      - name: Set up Python 3.12 for ARM64
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: 'arm64'
+          cache: 'pip'
 
       - name: Setup Java 21
         uses: actions/setup-java@v4
@@ -85,6 +86,7 @@ jobs:
       - name: Build with CMake
         run: |
           cmake --build --preset windows_arm64_cpu_release --parallel
+          cmake --build --preset windows_arm64_cpu_release --target PyPackageBuild
 
       - name: Install the Python Wheel and Test Dependencies
         run: |

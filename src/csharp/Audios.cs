@@ -30,6 +30,25 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return new Audios(audiosHandle);
         }
 
+        public static Audios Load(byte[] audioBytesData)
+        {
+            // Define count variable, currently only supports one audio file
+            const int count = 1;
+            IntPtr[] audioDatas = new IntPtr[count];
+            UIntPtr[] audioDataSizes = new UIntPtr[count];
+            audioDataSizes[0] = (UIntPtr)audioBytesData.Length;
+            unsafe
+            {
+                fixed (byte* audioBytesPtr = audioBytesData)
+                {
+                    audioDatas[0] = (IntPtr)audioBytesPtr;
+                    Result.VerifySuccess(NativeMethods.OgaLoadAudiosFromBuffers(audioDatas, audioDataSizes, (UIntPtr)count, out IntPtr audiosHandle));
+                    return new Audios(audiosHandle);
+                }
+
+            }
+        }
+
         public void Dispose()
         {
             Dispose(true);

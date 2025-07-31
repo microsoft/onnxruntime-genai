@@ -42,3 +42,5 @@ set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_test
 if (NOT MSVC)
   target_compile_options(unit_tests PRIVATE "-fvisibility=hidden")
 endif()
+
+add_test(NAME UnitTests COMMAND unit_tests)

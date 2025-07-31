@@ -122,8 +122,9 @@ if (executionProvider != "cpu") {
     }
 }
 using Model model = new Model(config);
+using Tokenizer tokenizer = new Tokenizer(model);
 using MultiModalProcessor processor = new MultiModalProcessor(model);
-using var tokenizerStream = processor.CreateStream();
+using var stream = processor.CreateStream();
 
 do
 {
@@ -180,23 +181,29 @@ do
         text = Console.ReadLine();
     }
 
-    // Combine prompt, images, and audios
-    string prompt = "<|user|>\n";
+    // Combine prompt, images, and audios and construct multimodal content
+    string content = "";
     if (images != null)
     {
         for (int i = 0; i < imagePaths.Count; i++)
         {
-            prompt += "<|image_" + (i + 1) + "|>\n";
+            content += $"<|image_{i + 1}|>\n";
         }
     }
     if (audios != null)
     {
         for (int i = 0; i < audioPaths.Count; i++)
         {
-            prompt += "<|audio_" + (i + 1) + "|>\n";
+            content += $"<|audio_{i + 1}|>\n";
         }
     }
-    prompt += text + "<|end|>\n<|assistant|>\n";
+    content += text;
+
+    // Format message string
+    string messages = $"[{{\"role\":\"user\",\"content\":\"{content}\"}}]";
+
+    // Apply chat template to get prompt
+    string prompt = tokenizer.ApplyChatTemplate("", messages, "", true);
 
     Console.WriteLine("Processing inputs...");
     using var inputTensors = processor.ProcessImagesAndAudios(prompt, images, audios);
@@ -211,7 +218,7 @@ do
     while (!generator.IsDone())
     {
         generator.GenerateNextToken();
-        Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
+        Console.Write(stream.Decode(generator.GetSequence(0)[^1]));
     }
     watch.Stop();
     var runTimeInSeconds = watch.Elapsed.TotalSeconds;

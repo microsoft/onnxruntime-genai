@@ -16,6 +16,8 @@ struct WhisperModel : Model {
 
   std::unique_ptr<OrtSession> session_encoder_;  // audio_features -> encoder_hidden_states, cross_kv_cache
   std::unique_ptr<OrtSession> session_decoder_;  // input_ids, self_kv_cache, cross_kv_cache -> logits, self_kv_cache
+
+  std::unique_ptr<OrtSessionOptions> encoder_session_options_;
 };
 
 struct AudioEncoderState : State {
@@ -24,7 +26,7 @@ struct AudioEncoderState : State {
   AudioEncoderState& operator=(const AudioEncoderState&) = delete;
 
   void AddCrossCache(std::unique_ptr<CrossCache>& cross_cache) { cross_cache->AddOutputs(*this); }
-  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
 
   int GetNumFrames() { return num_frames_; }
@@ -86,7 +88,8 @@ struct WhisperState : State {
   WhisperState(const WhisperState&) = delete;
   WhisperState& operator=(const WhisperState&) = delete;
 
-  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs);
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
   OrtValue* GetInput(const char* name) override;
   OrtValue* GetOutput(const char* name) override;

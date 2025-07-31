@@ -24,7 +24,7 @@ void CXX_API(const char* model_path, int32_t num_beams) {
     std::vector<std::string> audio_paths;
     for (size_t start = 0, end = 0; end < audio_paths_str.size(); start = end + 1) {
       end = audio_paths_str.find(',', start);
-      audio_paths.push_back(trim(audio_paths_str.substr(start, end - start)));
+      audio_paths.push_back(Trim(audio_paths_str.substr(start, end - start)));
     }
     if (audio_paths.empty()) {
       throw std::runtime_error("No audio file provided.");
@@ -104,7 +104,7 @@ void C_API(const char* model_path, int32_t num_beams) {
     std::vector<std::string> audio_paths;
     for (size_t start = 0, end = 0; end < audio_paths_str.size(); start = end + 1) {
       end = audio_paths_str.find(',', start);
-      audio_paths.push_back(trim(audio_paths_str.substr(start, end - start)));
+      audio_paths.push_back(Trim(audio_paths_str.substr(start, end - start)));
     }
     if (audio_paths.empty()) {
       throw std::runtime_error("No audio file provided.");
