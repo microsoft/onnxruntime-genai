@@ -204,9 +204,9 @@ do
     Console.WriteLine("Generating response...");
     using GeneratorParams generatorParams = new GeneratorParams(model);
     generatorParams.SetSearchOption("max_length", 7680);
-    generatorParams.SetInputs(inputTensors);
 
     using var generator = new Generator(model, generatorParams);
+    generator.SetInputs(inputTensors);
     var watch = System.Diagnostics.Stopwatch.StartNew();
     while (!generator.IsDone())
     {

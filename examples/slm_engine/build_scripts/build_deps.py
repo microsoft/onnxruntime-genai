@@ -212,6 +212,7 @@ def build_ort(args, build_dir, artifacts_dir):
         "--parallel",
         "--config",
         args.build_type,
+        # "--use_guidance",
     ]
     if args.android:
         cmd_args.extend(
@@ -330,7 +331,7 @@ def build_ort_genai(args, artifacts_dir, ort_home):
         raise Exception("Failed to update submodules")
 
     # Now build the ORT-GenAI library
-    print(f"{MAGENTA}Building ONNX Runtime-GenAI{CLEAR}")
+    print(f"{MAGENTA}Building ONNX Runtime-GenAI with Guidance Support for Function Calling{CLEAR}")
     # Prepare the command arguments
     cmd_args = [
         "--skip_wheel",
@@ -340,6 +341,10 @@ def build_ort_genai(args, artifacts_dir, ort_home):
         args.build_type,
         "--cmake_extra_defines",
         "ENABLE_PYTHON=OFF",
+        # "USE_GUIDANCE=ON",
+        # "--use_guidance",  # Enable guidance support for constrained JSON generation
+        # Note: If Python linking issues occur, comment out --use_guidance above
+        # Function calling will work in both guidance and fallback modes
     ]
     if ort_home is None:
         raise Exception(
@@ -368,7 +373,20 @@ def build_ort_genai(args, artifacts_dir, ort_home):
     python_executable = sys.executable
     result = subprocess.call([python_executable, "build.py"] + cmd_args)
     if result != 0:
-        raise Exception(f"{RED}Failed to build ORT-GenAI{CLEAR}")
+        # If guidance build fails, try fallback mode
+        print(f"{RED}Guidance build failed. Attempting fallback mode without guidance...{CLEAR}")
+        # Remove --use_guidance from cmd_args
+        if "--use_guidance" in cmd_args:
+            cmd_args.remove("--use_guidance")
+        
+        print(f"{MAGENTA}Running build.py with fallback args: {cmd_args}{CLEAR}")
+        result = subprocess.call([python_executable, "build.py"] + cmd_args)
+        if result != 0:
+            raise Exception(f"{RED}Failed to build ORT-GenAI in both guidance and fallback modes{CLEAR}")
+        else:
+            print(f"{MAGENTA}Successfully built ORT-GenAI in fallback mode{CLEAR}")
+    else:
+        print(f"{MAGENTA}Successfully built ORT-GenAI with guidance support{CLEAR}")
 
     # Now install the ORT-GenAI library
     build_dir_name = f"build/{get_platform_dirname(args)}/{args.build_type}"

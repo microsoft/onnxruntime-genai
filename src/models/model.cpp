@@ -21,7 +21,54 @@
 #include "decoder_only_pipeline.h"
 #include "../dml/interface.h"
 
+#if defined(_WIN32)
+#include <direct.h>
+#define GETCWD _getcwd
+#define CHDIR _wchdir
+#include <windows.h>
+#else
+#include <unistd.h>
+#define GETCWD getcwd
+#define CHDIR chdir
+#include <limits.h>
+#endif
+
 namespace Generators {
+
+namespace {
+
+class DirGuard {
+ private:
+  fs::path original_dir_;
+
+ public:
+  DirGuard() {
+    char buffer[PATH_MAX];
+    if (GETCWD(buffer, sizeof(buffer))) {
+      original_dir_ = fs::path(buffer);
+    } else {
+      throw std::runtime_error("Failed to get current working directory");
+    }
+  }
+
+  DirGuard(const DirGuard&) = delete;
+  DirGuard& operator=(const DirGuard&) = delete;
+  DirGuard(DirGuard&&) = delete;
+
+  void ChangeTo(const fs::path& new_dir) {
+    if (CHDIR(new_dir.c_str()) != 0) {
+      throw std::runtime_error("Failed to change directory to: " + new_dir.string());
+    }
+  }
+
+  ~DirGuard() {
+    if (CHDIR(original_dir_.c_str()) != 0) {
+      Log("warning", "Failed to change back to original directory: " + original_dir_.string());
+    }
+  }
+};
+
+}  // namespace
 
 State::State(const GeneratorParams& params, const Model& model)
     : model_{model},
@@ -462,7 +509,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
       if (!disable_graph_capture) {
         session_options.AddConfigEntry("ep.dml.enable_graph_capture", "1");
-        session_options.AddConfigEntry("ep.dml.disable_memory_arena", "1");
       }
 
       SetDmlProvider(session_options);
@@ -494,6 +540,9 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       } else if (provider_options.name == "NvTensorRtRtx") {
         if (IsMultiProfileEnabled(config.model.decoder.session_options)) {
           ConfigureMultiProfile(config, session_options);
+        }
+        if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
+          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.nv_cuda_graph_enable", "1");
         }
         p_device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
       }
@@ -652,7 +701,21 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   p_device_kvcache_ = p_device_;
 }
 
-Model::~Model() = default;
+Model::~Model() {
+#if USE_DML
+  if (p_device_->GetType() == DeviceType::DML) {
+    auto& allocator = GetOrtGlobals()->device_allocators_[static_cast<int>(DeviceType::DML)];
+    allocator.session_.reset();
+    allocator.allocator_.reset();
+    session_options_.reset();
+    // DML objects are globally scoped and launch background threads that retain hardware resources.
+    // These threads persist beyond the lifetime of a Model, preventing proper cleanup and potentially causing deadlocks.
+    // To avoid blocking driver threads, we explicitly destroy DML objects when the Model is destroyed.
+    // They will be recreated as needed when a new Model is initialized.
+    CloseDmlInterface();
+  }
+#endif
+}
 
 void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,
                                            OrtSessionOptions& session_options,
@@ -790,6 +853,34 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
   return session_options_.get();
 }
 
+std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
+  if (auto model_data_it = config_->model_data_spans_.find(model_filename);
+      model_data_it != config_->model_data_spans_.end()) {
+    // If model data was provided, load the model from memory
+    if (model_data_it->second.empty()) {
+      throw std::runtime_error("Failed to load model data from memory for " + model_filename);
+    }
+    // TODO (baijumeswani): Loading ONNX models from memory that hold references to data stored in external files
+    // is not supported at the moment. This limitation stems from the fact that ONNX models typically
+    // reference these external files using relative paths to the model file. When loading a model from memory,
+    // the relative paths may not resolve correctly, leading to issues in locating the referenced data.
+    // To work around this, we change the current working directory to the model's config path
+    // before creating the session. This allows the model to resolve relative paths correctly.
+    // Note that this is not a problem for models that do not reference external files.
+    // This is a temporary solution and can be potentially addressed by exposing means to set a working directory
+    // for the OrtSession through the ONNX Runtime API.
+    // This solution is not ideal since it modifies the global state of the process, and is hence not thread-safe.
+    DirGuard dir_guard;
+    dir_guard.ChangeTo(config_->config_path);
+    auto session = OrtSession::Create(ort_env, model_data_it->second.data(), model_data_it->second.size(), session_options);
+
+    return session;
+  }
+
+  // Otherwise, load the model from the file system
+  return OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
+}
+
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
   return std::make_shared<Tokenizer>(*config_);
 }
@@ -808,23 +899,18 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
-  std::set<std::string> llm_types = {"chatglm", "decoder", "gemma", "gemma2", "gemma3_text",
-                                     "granite", "llama", "mistral", "nemotron", "olmo",
-                                     "phi", "phimoe", "phi3", "phi3small", "qwen2", "qwen3"};
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
-  if (llm_types.find(config->model.type) != llm_types.end())
+  if (ModelType::IsLLM(config->model.type))
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
-  if (config->model.type == "whisper")
-    return std::make_shared<Whisper_Model>(std::move(config), ort_env);
-  if (config->model.type == "phi3v")
+  if (ModelType::IsALM(config->model.type))
+    return std::make_shared<WhisperModel>(std::move(config), ort_env);
+  if (ModelType::IsVLM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
-  if (config->model.type == "decoder-pipeline")
+  if (ModelType::IsPipe(config->model.type))
     return std::make_shared<DecoderOnlyPipelineModel>(std::move(config), ort_env);
-  if (config->model.type == "phi4mm")
+  if (ModelType::IsMMM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, true);
-  if (config->model.type == "gemma3")
-    return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (config->model.type == "marian-ssru")
     return std::make_shared<MarianModel>(std::move(config), ort_env);
 
@@ -918,7 +1004,13 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
 }
 
 std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& prompt, const Images* images, const Audios* audios) const {
-  Payload payload{prompt, images, audios};
+  Payload payload{prompt, {}, images, audios};
   return processor_->Process(*tokenizer_, payload);
 }
+
+std::unique_ptr<NamedTensors> MultiModalProcessor::Process(std::span<const char*> prompts, const Images* images, const Audios* audios) const {
+  Payload payload{"", prompts, images, audios};
+  return processor_->Process(*tokenizer_, payload);
+}
+
 }  // namespace Generators

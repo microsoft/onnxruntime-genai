@@ -280,12 +280,9 @@ def test_rewind(test_data_path, relative_model_path):
 
 # Test Model Loading with No Chat Template
 
-
-# TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
-# requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
 @pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
-    reason="Python 3.8 is required for downloading models.",
+    sysconfig.get_platform().endswith("arm64"),
+    reason="Model is not available on arm64.",
 )
 @pytest.mark.parametrize("device", devices)
 @pytest.mark.parametrize("batch", [True, False])
@@ -314,8 +311,8 @@ def test_tokenizer_encode_decode(device, phi2_for, batch):
 
 # Test Chat Template Supported Model
 @pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
-    reason="Python 3.8 is required for downloading models.",
+    sysconfig.get_platform().endswith("arm64"),
+    reason="Model is not available on arm64.",
 )
 @pytest.mark.parametrize("device", devices)
 def test_phi3_chat_template(device, phi3_for):
@@ -334,8 +331,8 @@ def test_phi3_chat_template(device, phi3_for):
 
 # Test Chat Template Unsupported Model with Template String Override
 @pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
-    reason="Python 3.8 is required for downloading models.",
+    sysconfig.get_platform().endswith("arm64"),
+    reason="Model is not available on arm64.",
 )
 @pytest.mark.parametrize("device", devices)
 def test_phi2_chat_template(device, phi2_for):
@@ -358,8 +355,8 @@ def test_phi2_chat_template(device, phi2_for):
 
 
 @pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
-    reason="Python 3.8 is required for downloading models.",
+    sysconfig.get_platform().endswith("arm64"),
+    reason="Model is not available on arm64.",
 )
 @pytest.mark.parametrize("device", devices)
 def test_tokenizer_stream(device, phi2_for):
@@ -381,12 +378,9 @@ def test_tokenizer_stream(device, phi2_for):
 
         assert decoded_string == prompt
 
-
-# TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
-# requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
 @pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
-    reason="Python 3.8 is required for downloading models.",
+    sysconfig.get_platform().endswith("arm64"),
+    reason="Model is not available on arm64.",
 )
 @pytest.mark.parametrize("device", devices)
 def test_batching(device, phi2_for):
@@ -412,16 +406,45 @@ def test_batching(device, phi2_for):
     for i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
 
-
-# TODO: CUDA pipelines use python3.6 and do not have a way to download models since downloading models
-# requires pytorch and hf transformers. This test should be re-enabled once the pipeline is updated.
 @pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
-    reason="Python 3.8 is required for downloading models.",
+    sysconfig.get_platform().endswith("arm64"),
+    reason="Model is not available on arm64.",
 )
 @pytest.mark.parametrize("device", devices)
 def test_e2e(device, phi2_for):
     model = og.Model(phi2_for(device))
+    tokenizer = og.Tokenizer(model)
+
+    prompts = [
+        "This is a test.",
+    ]
+
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=20, batch_size=len(prompts))  # To run faster
+
+    generator = og.Generator(model, params)
+    generator.append_tokens(tokenizer.encode_batch(prompts))
+    while not generator.is_done():
+        generator.generate_next_token()
+    for i in range(len(prompts)):
+        print(tokenizer.decode(generator.get_sequence(0)))
+
+@pytest.mark.skipif(
+    sysconfig.get_platform().endswith("arm64"),
+    reason="Model is not available on arm64.",
+)
+@pytest.mark.parametrize("device", devices)
+@pytest.mark.parametrize("wrapper_bytes_function", [lambda x: x, bytearray, memoryview])
+def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
+    model_path = phi2_for(device)
+    config = og.Config(model_path)
+    model_data = None
+    with open(os.path.join(model_path, "model.onnx"), 'rb') as model_file:
+        model_data = wrapper_bytes_function(model_file.read())
+
+    config.add_model_data("model.onnx", model_data)
+    model = og.Model(config)
+    config.remove_model_data("model.onnx")
     tokenizer = og.Tokenizer(model)
 
     prompts = [
@@ -524,8 +547,8 @@ def test_get_output(test_data_path, relative_model_path):
 
 
 @pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8,
-    reason="Python 3.8 is required for downloading models.",
+    sysconfig.get_platform().endswith("arm64"),
+    reason="Model is not available on arm64.",
 )
 @pytest.mark.parametrize("device", devices)
 def test_hidden_states(qwen_for, device):
@@ -926,3 +949,43 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
 
         while not generator.is_done():
             generator.generate_next_token()
+
+
+@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize("relative_audio_path", [Path("audios") / "1272-141231-0002.mp3"])
+def test_audio_preprocessing(test_data_path, relative_model_path, relative_audio_path):
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model = og.Model(model_path)
+
+    processor = model.create_multimodal_processor()
+
+    audio_paths = [os.fspath(Path(test_data_path) / relative_audio_path)]
+    audios = og.Audios.open(*audio_paths)
+
+    batch_size = len(audio_paths)
+    decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
+    prompts = ["".join(decoder_prompt_tokens)] * batch_size
+    _ = processor(prompts, audios=audios)
+
+
+@pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
+@pytest.mark.parametrize(
+    "relative_audio_paths",
+    [[Path("audios") / "1272-141231-0002.mp3"], [Path("audios") / "jfk.flac"]],
+)
+def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path, relative_audio_paths):
+    model_path = os.fspath(Path(test_data_path) / relative_model_path)
+    model = og.Model(model_path)
+
+    processor = model.create_multimodal_processor()
+
+    audio_paths = [
+        os.fspath(Path(test_data_path) / relative_audio_path)
+        for relative_audio_path in relative_audio_paths
+    ]
+    audios = og.Audios.open(*audio_paths)
+
+    batch_size = len(audio_paths)
+    decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
+    prompts = ["".join(decoder_prompt_tokens)] * batch_size
+    _ = processor(prompts, audios=audios)

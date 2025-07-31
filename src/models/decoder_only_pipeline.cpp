@@ -12,8 +12,7 @@ namespace Generators {
 DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)}, ort_env_{ort_env} {
   for (const auto& model : config_->model.decoder.pipeline) {
-    sessions_.emplace_back(OrtSession::Create(ort_env, (config_->config_path / fs::path(model.filename)).c_str(),
-                                              GetSessionOptions(model.model_id)));
+    sessions_.emplace_back(CreateSession(ort_env, model.filename, GetSessionOptions(model.model_id)));
   }
 
   for (auto& session : sessions_) {
@@ -120,7 +119,6 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
   if (key_value_cache_) {
     key_value_cache_->Add();
   }
-  extra_inputs_.Add();
 
   const auto& config_pipeline = model_.config_->model.decoder.pipeline;
 
@@ -184,6 +182,12 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
     if (!partial_kv_cache_update_records_.empty()) {
       key_value_cache_update_worker_thread_.emplace();
     }
+  }
+}
+
+void DecoderOnlyPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  for (auto& session : model_.sessions_) {
+    extra_inputs_.Add(extra_inputs, session->GetInputNames());
   }
 }
 

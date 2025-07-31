@@ -259,6 +259,34 @@ OgaResult* OGA_API_CALL OgaConfigOverlay(OgaConfig* config, const char* json) {
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaConfigAddModelData(OgaConfig* config, const char* model_filename, const void* model_data, size_t model_data_length) {
+  OGA_TRY
+  if (model_data == nullptr || model_data_length == 0) {
+    throw std::runtime_error("Expected a valid model data pointer and length. Received nullptr or zero length.");
+  }
+
+  const auto emplaced = config->model_data_spans_.emplace(model_filename, std::span<const std::byte>(static_cast<const std::byte*>(model_data), model_data_length));
+  if (!emplaced.second) {
+    throw std::runtime_error("Model data for '" + std::string(model_filename) +
+                             "' was already added previously. "
+                             "If you want to replace it, please remove it first.");
+  }
+
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigRemoveModelData(OgaConfig* config, const char* model_filename) {
+  OGA_TRY
+  auto it = config->model_data_spans_.find(model_filename);
+  if (it == config->model_data_spans_.end()) {
+    throw std::runtime_error("Model data for '" + std::string(model_filename) + "' was not found.");
+  }
+  config->model_data_spans_.erase(it);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
   OGA_TRY
   auto config_copy = std::make_unique<Generators::Config>(*config);
@@ -301,59 +329,37 @@ OgaResult* OGA_API_CALL OgaRuntimeSettingsSetHandle(OgaRuntimeSettings* settings
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* params, const char* name, double value) {
   OGA_TRY
-  Generators::SetSearchNumber(generator_params->search, name, value);
+  Generators::SetSearchNumber(params->search, name, value);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* params, const char* name, bool value) {
   OGA_TRY
-  Generators::SetSearchBool(generator_params->search, name, value);
+  Generators::SetSearchBool(params->search, name, value);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* params, int32_t max_batch_size) {
   OGA_TRY
   printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* params, const OgaNamedTensors* p_named_tensors) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data) {
   OGA_TRY
-  params->SetInputs(*p_named_tensors);
+  params->SetGuidance(type, data);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* params, const char* name, OgaTensor* tensor) {
+OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* params, OgaGenerator** out) {
   OGA_TRY
-  params->extra_inputs.push_back({std::string{name}, tensor->shared_from_this()});
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams* params, OgaTensor* tensor) {
-  OGA_TRY
-  Generators::GeneratorParams::Whisper& whisper = params->inputs.emplace<Generators::GeneratorParams::Whisper>();
-  whisper.input_features = tensor->shared_from_this();
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* oga_params, const char* type, const char* data) {
-  OGA_TRY
-  oga_params->SetGuidance(type, data);
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* generator_params, OgaGenerator** out) {
-  OGA_TRY
-  *out = ReturnUnique<OgaGenerator>(CreateGenerator(*model, *generator_params));
+  *out = ReturnUnique<OgaGenerator>(CreateGenerator(*model, *params));
   return nullptr;
   OGA_CATCH
 }
@@ -364,6 +370,20 @@ bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator) {
 
 bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator) {
   return generator->IsSessionTerminated();
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* generator, const char* name, OgaTensor* tensor) {
+  OGA_TRY
+  generator->extra_inputs_.push_back({std::string{name}, tensor->shared_from_this()});
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_SetInputs(OgaGenerator* generator, const OgaNamedTensors* p_named_tensors) {
+  OGA_TRY
+  generator->SetInputs(*p_named_tensors);
+  return nullptr;
+  OGA_CATCH
 }
 
 OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* generator, const OgaSequences* sequences) {
@@ -422,22 +442,44 @@ OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* generator, c
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* generator, const char* name, OgaTensor** out) {
+namespace {
+
+/**
+ * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
+ *       and will be released when the OgaTensor is destroyed
+ * \param[in] oga_generator The generator to run the GetInput or GetOutput method on the name provided and the out pointer to store the output.
+ * \param[in] name The name of the tensor.
+ * \param[in] is_input Whether the tensor name is for an input or not.
+ * \param[out] out The returned OgaTensor.
+ * \return OgaResult containing the error message if the computation failed.
+ */
+OgaResult* OGA_API_CALL OgaGenerator_GetInputOutput(const OgaGenerator* oga_generator, const char* name, bool is_input, OgaTensor** out) {
   OGA_TRY
-  auto* ortvalue_output = generator->state_->GetOutput(name);
-  auto type_info = ortvalue_output->GetTensorTypeAndShapeInfo();
-  auto ortvalue_clone = OrtValue::CreateTensor(generator->model_->allocator_cpu_, type_info->GetShape(), type_info->GetElementType());
+  auto& generator = *reinterpret_cast<const Generators::Generator*>(oga_generator);
+  auto* ortvalue = is_input ? generator.state_->GetInput(name) : generator.state_->GetOutput(name);
+  auto type_info = ortvalue->GetTensorTypeAndShapeInfo();
+  auto ortvalue_clone = OrtValue::CreateTensor(generator.model_->allocator_cpu_, type_info->GetShape(), type_info->GetElementType());
 
   // Copy data to ortvalue_clone
-  bool is_cpu = ortvalue_output->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
-  auto output_span = Generators::ByteWrapTensor(is_cpu ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU) : *generator->model_->p_device_, *ortvalue_output);
+  bool is_cpu = ortvalue->GetTensorMemoryInfo().GetDeviceType() == OrtMemoryInfoDeviceType_CPU;
+  auto tensor_span = Generators::ByteWrapTensor(is_cpu ? *Generators::GetDeviceInterface(Generators::DeviceType::CPU) : *generator.model_->p_device_, *ortvalue);
   auto copy_span = Generators::ByteWrapTensor(*Generators::GetDeviceInterface(Generators::DeviceType::CPU), *ortvalue_clone);
-  copy_span.CopyFrom(output_span);
+  copy_span.CopyFrom(tensor_span);
 
   auto tensor = std::make_shared<Generators::Tensor>(std::move(ortvalue_clone));
   *out = ReturnShared<OgaTensor>(tensor);
   return nullptr;
   OGA_CATCH
+}
+
+}  // namespace
+
+OgaResult* OGA_API_CALL OgaGenerator_GetInput(const OgaGenerator* generator, const char* name, OgaTensor** out) {
+  return OgaGenerator_GetInputOutput(generator, name, true, out);
+}
+
+OgaResult* OGA_API_CALL OgaGenerator_GetOutput(const OgaGenerator* generator, const char* name, OgaTensor** out) {
+  return OgaGenerator_GetInputOutput(generator, name, false, out);
 }
 
 OgaResult* OGA_API_CALL OgaGenerator_GetLogits(OgaGenerator* generator, OgaTensor** out) {
@@ -700,12 +742,38 @@ OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor* 
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor* processor, const OgaAudios* audios, OgaNamedTensors** input_tensors) {
+OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndPrompts(const OgaMultiModalProcessor* processor, const OgaStringArray* prompts, const OgaImages* images, OgaNamedTensors** input_tensors) {
   OGA_TRY
   if (!processor->processor_)
-    throw std::runtime_error("Audio processor not available for this model.");
+    throw std::runtime_error("Image processor is not available for this model.");
 
-  *input_tensors = ReturnUnique<OgaNamedTensors>(processor->Process(std::string(), nullptr, audios));
+  std::vector<const char*> prompts_;
+  for (const auto& prompt : *prompts)
+    prompts_.push_back(prompt.c_str());
+  *input_tensors = ReturnUnique<OgaNamedTensors>(processor->Process(prompts_, images, nullptr));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor* processor, const char* prompt, const OgaAudios* audios, OgaNamedTensors** input_tensors) {
+  OGA_TRY
+  if (!processor->processor_)
+    throw std::runtime_error("Audio processor is not available for this model.");
+
+  *input_tensors = ReturnUnique<OgaNamedTensors>(processor->Process(prompt, nullptr, audios));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaProcessorProcessAudiosAndPrompts(const OgaMultiModalProcessor* processor, const OgaStringArray* prompts, const OgaAudios* audios, OgaNamedTensors** input_tensors) {
+  OGA_TRY
+  if (!processor->processor_)
+    throw std::runtime_error("Audio processor is not available for this model.");
+
+  std::vector<const char*> prompts_;
+  for (const auto& prompt : *prompts)
+    prompts_.push_back(prompt.c_str());
+  *input_tensors = ReturnUnique<OgaNamedTensors>(processor->Process(prompts_, nullptr, audios));
   return nullptr;
   OGA_CATCH
 }
@@ -714,9 +782,23 @@ OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalPr
                                                            const OgaAudios* audios, OgaNamedTensors** input_tensors) {
   OGA_TRY
   if (!processor->processor_)
-    throw std::runtime_error("Audio processor not available for this model.");
+    throw std::runtime_error("Processor is not available for this model.");
 
   *input_tensors = ReturnUnique<OgaNamedTensors>(processor->Process(prompt, images, audios));
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudiosAndPrompts(const OgaMultiModalProcessor* processor, const OgaStringArray* prompts,
+                                                                     const OgaImages* images, const OgaAudios* audios, OgaNamedTensors** input_tensors) {
+  OGA_TRY
+  if (!processor->processor_)
+    throw std::runtime_error("Processor is not available for this model.");
+
+  std::vector<const char*> prompts_;
+  for (const auto& prompt : *prompts)
+    prompts_.push_back(prompt.c_str());
+  *input_tensors = ReturnUnique<OgaNamedTensors>(processor->Process(prompts_, images, audios));
   return nullptr;
   OGA_CATCH
 }

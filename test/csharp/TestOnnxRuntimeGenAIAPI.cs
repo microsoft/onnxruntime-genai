@@ -157,7 +157,58 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                         using (var generator = new Generator(model, generatorParams))
                         {
-                            Assert.NotNull(generatorParams);
+                            Assert.NotNull(generator);
+
+                            generator.AppendTokens(inputIDs);
+                            Assert.False(generator.IsDone());
+                            while (!generator.IsDone())
+                            {
+                                generator.GenerateNextToken();
+                            }
+
+                            for (ulong i = 0; i < batchSize; i++)
+                            {
+                                var sequence = generator.GetSequence(i).ToArray();
+                                var expectedSequence = expectedOutput.Skip((int)i * (int)maxLength).Take((int)maxLength);
+                                Assert.Equal(expectedSequence, sequence);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        [Fact(DisplayName = "TestLoadModelFromMemory")]
+        public void TestLoadModelFromMemory()
+        {
+            ulong maxLength = 10;
+            int[] inputIDs = new int[] { 0, 0, 0, 52, 0, 0, 195, 731 };
+            var inputIDsShape = new ulong[] { 2, 4 };
+            ulong batchSize = inputIDsShape[0];
+            var expectedOutput = new int[] { 0, 0, 0, 52, 204, 204, 204, 204, 204, 204,
+                                             0, 0, 195, 731, 731, 114, 114, 114, 114, 114 };
+
+            string modelPath = _tinyRandomGpt2ModelPath;
+            using (var config = new Config(modelPath))
+            {
+                Assert.NotNull(config);
+                var modelData = File.ReadAllBytes(Path.Combine(modelPath, "past.onnx"));
+                Assert.NotNull(modelData);
+                config.AddModelData("past.onnx", modelData);
+                using (var model = new Model(config))
+                {
+                    config.RemoveModelData("past.onnx");
+                    Assert.NotNull(model);
+                    using(var generatorParams = new GeneratorParams(model))
+                    {
+                        Assert.NotNull(generatorParams);
+
+                        generatorParams.SetSearchOption("max_length", maxLength);
+                        generatorParams.SetSearchOption("batch_size", batchSize);
+
+                        using (var generator = new Generator(model, generatorParams))
+                        {
+                            Assert.NotNull(generator);
 
                             generator.AppendTokens(inputIDs);
                             Assert.False(generator.IsDone());
@@ -584,7 +635,9 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 Assert.Equal(shape, tensor.Shape());
                 Assert.Equal(ElementType.float32, tensor.Type());
 
-                generatorParams.SetModelInput("test_input", tensor);
+                using var generator = new Generator(model, generatorParams);
+                Assert.NotNull(generator);
+                generator.SetModelInput("test_input", tensor);
             }
             finally
             {

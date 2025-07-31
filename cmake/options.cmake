@@ -8,6 +8,7 @@ option(USE_GUIDANCE "Build with guidance support" OFF)
 
 # bindings
 option(ENABLE_JAVA "Build the Java API." OFF)
+cmake_dependent_option(PUBLISH_JAVA_MAVEN_LOCAL "Publish Java artifacts to local Maven repo" OFF "ENABLE_JAVA" ON)
 option(ENABLE_PYTHON "Build the Python API." ON)
 cmake_dependent_option(BUILD_WHEEL "Build the python wheel" ON "ENABLE_PYTHON" OFF)
 

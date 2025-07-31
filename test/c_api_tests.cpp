@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include <cstring>  // for memcmp
+#include <fstream>
 #include <numeric>
 #include <iostream>
 #include <thread>
@@ -297,6 +298,57 @@ TEST(CAPITests, EndToEndPhi) {
 #endif
 }
 
+TEST(CAPITests, LoadModelFromMemory) {
+#if TEST_PHI2
+
+  const char* model_path = PHI2_PATH "/model.onnx";
+  std::ifstream model_file(model_path, std::ios::binary | std::ios::ate);
+  ASSERT_TRUE(model_file.is_open()) << "Failed to open model file: " << model_path;
+  std::streamsize size = model_file.tellg();
+  model_file.seekg(0, std::ios::beg);
+  std::vector<std::byte> model_data(size);
+  model_file.read(reinterpret_cast<char*>(model_data.data()), size);
+
+  auto config = OgaConfig::Create(PHI2_PATH);
+  config->AddModelData("model.onnx", model_data);
+  auto model = OgaModel::Create(*config);
+  config->RemoveModelData("model.onnx");
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  const char* input_string = "This is a test.";
+  auto input_sequence = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequence);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 40);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*input_sequence);
+
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Decode The Batch
+  auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
+  std::cout << "Decoded string:" << out_string << std::endl;
+
+  // Verify outputs match expected outputs
+  std::vector<int32_t> expected_output{
+      1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278,
+      6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417,
+      6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974, 82, 1039, 889, 263, 3684};
+
+  const auto sequence_length = generator->GetSequenceCount(0);
+  const auto* sequence_data = generator->GetSequenceData(0);
+
+  ASSERT_LE(sequence_length, 40);
+
+  const auto* expected_output_start = &expected_output[0];
+  EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
+#endif
+}
+
 TEST(CAPITests, Tensor_And_AddExtraInput) {
   // Create a [3 4] shaped tensor
   std::array<float, 12> data{0, 1, 2, 3,
@@ -313,7 +365,10 @@ TEST(CAPITests, Tensor_And_AddExtraInput) {
   auto model = OgaModel::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
 
   auto params = OgaGeneratorParams::Create(*model);
-  params->SetModelInput("test_input", *tensor);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+
+  generator->SetModelInput("test_input", *tensor);
 }
 
 TEST(CAPITests, Logging) {

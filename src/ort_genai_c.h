@@ -262,6 +262,31 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAppendProvider(OgaConfig* config, co
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config, const char* provider, const char* key, const char* value);
 
 /**
+ * \brief Add the model data to load the model from memory. Applications may call OgaConfigRemoveModelData to remove the model data
+ *        when it is no longer needed.
+ *
+ * Note that the model data is expected to be valid at least until the model is created.
+ * If using session options such as `session.use_ort_model_bytes_directly`, the model data must remain valid
+ * until the OgaModel is destroyed, as the model data will be used directly by the Ort::Session.
+ * Please see the relevant ONNX Runtime documentation for more details on this option.
+ *
+ * \param[in] config The config to add the model data to.
+ * \param[in] model_filename The name of the model file as defined in the config.
+ * \param[in] model_data The model data to add. The data is expected to be valid at least until the model is created.
+ * \param[in] model_data_length The length of the model data.
+ * \return OgaResult containing the error message if the addition of the model data failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAddModelData(OgaConfig* config, const char* model_filename, const void* model_data, size_t model_data_length);
+
+/**
+ * \brief Remove model data previously added to the config.
+ * \param[in] config The config to remove the model data from.
+ * \param[in] model_filename The name of the model file as defined in the config.
+ * \return OgaResult containing the error message if the removal of the model data failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigRemoveModelData(OgaConfig* config, const char* model_filename);
+
+/**
  * \brief Overlay JSON on top of config file
  * \param[in] config The config to overlay the JSON on.
  * \param[in] json The JSON to overlay on the config.
@@ -332,35 +357,22 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* mode
 
 /**
  * \brief Destroys the given generator params.
- * \param[in] generator_params The generator params to be destroyed.
+ * \param[in] params The generator params to be destroyed.
  */
-OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* generator_params);
+OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* params);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size);
-
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* generator_params, const OgaNamedTensors* named_tensors);
-
-/**
- * \brief For additional model inputs that genai does not handle, this lets the user set their values. For example LoRA models handle
- * fine tuning through model inputs. This lets the user supply the fine tuning inputs, while genai handles the standard inputs.
- * \param[in] generator_params The generator params to set the input on
- * \param[in] name Name of the model input (this must match the model's input name)
- * \param[in] tensor The OgaTensor of the input data
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* generator_params, const char* name, OgaTensor* tensor);
-
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams* generator_params, OgaTensor* tensor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* params, const char* name, double value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* params, const char* name, bool value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* params, int32_t max_batch_size);
 
 /**
  * \brief Sets the guidance type and data for the Generator params
- * \param[in] generator_params The generator params to set the guidance on
+ * \param[in] params The generator params to set the guidance on
  * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar
  * \param[in] data The input string, which is the guidance data. Examples are present in test/test_models/grammars folder
  * \return OgaResult containing the error message if the setting of the guidance failed
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* generator_params, const char* type, const char* data);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data);
 
 /**
  * \brief Creates a generator from the given model and generator params.
@@ -386,21 +398,37 @@ OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator);
 
 /**
- * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
- * \param[in] oga_generator The generator to add the input ids to.
- * \param[in] p_sequences The input id sequences.
- * \return OgaResult containing the error message if the setting of the input ids failed.
+ * \brief For additional model inputs that genai does not handle, this lets the user set their values. For example LoRA models handle
+ * fine tuning through model inputs. This lets the user supply the fine tuning inputs, while genai handles the standard inputs.
+ * \param[in] generator The generator to add the inputs to.
+ * \param[in] name Name of the model input (this must match the model's input name)
+ * \param[in] tensor The OgaTensor of the input data
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* oga_generator, const OgaSequences* p_sequences);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* generator, const char* name, OgaTensor* tensor);
+
+/**
+ * \brief For additional model inputs that genai does not handle, this lets the user set their values.
+ * \param[in] generator The generator to add the inputs to.
+ * \param[in] named_tensors The named tensors to set the inputs as.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetInputs(OgaGenerator* generator, const OgaNamedTensors* named_tensors);
 
 /**
  * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
- * \param[in] oga_generator The generator to add the input ids to.
+ * \param[in] generator The generator to add the input ids to.
+ * \param[in] p_sequences The input id sequences.
+ * \return OgaResult containing the error message if the setting of the input ids failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* generator, const OgaSequences* p_sequences);
+
+/**
+ * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
+ * \param[in] generator The generator to add the input ids to.
  * \param[in] input_ids The input ids to add.
  * \param[in] input_ids_count The number of input ids to add (batch_size * sequence_length).
  * \return OgaResult containing the error message if the setting of the input ids failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* oga_generator, const int32_t* input_ids, size_t input_ids_count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* generator, const int32_t* input_ids, size_t input_ids_count);
 
 /**
  * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored in the generator.
@@ -428,6 +456,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* g
  * \return OgaResult containing the error message if the rewinding failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t new_length);
+
+/**
+ * \brief Returns a copy of the model input identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
+ *       and will be released when the OgaTensor is destroyed
+ * \param[in] generator The generator to run the GetInput on the name provided and the out pointer to store the input.
+ * \param[in] name The name of the input tensor.
+ * \param[out] out The returned OgaTensor.
+ * \return OgaResult containing the error message if the computation failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetInput(const OgaGenerator* generator, const char* name, OgaTensor** out);
 
 /**
  * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
@@ -509,12 +547,61 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer*, 
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* tokenizer, const char* str, int32_t* token_id);
 
+/**
+ * \brief Process images with input prompt
+ * \param[in] processor The processor to use to process the images and prompt.
+ * \param[in] prompt The prompt to use with the images.
+ * \param[in] images The images to process.
+ * \return OgaResult containing the named tensors for the processed inputs.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, OgaNamedTensors** input_tensors);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const OgaAudios* audios, OgaNamedTensors** input_tensors);
+/**
+ * \brief Process images with input prompts
+ * \param[in] processor The processor to use to process the images and prompts.
+ * \param[in] prompts The prompts to use with the images.
+ * \param[in] images The images to process.
+ * \return OgaResult containing the named tensors for the processed inputs.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndPrompts(const OgaMultiModalProcessor*, const OgaStringArray* prompts, const OgaImages* images, OgaNamedTensors** input_tensors);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images,
-                                                                      const OgaAudios* audios, OgaNamedTensors** input_tensors);
+/**
+ * \brief Process audios with input prompt
+ * \param[in] processor The processor to use to process the audios and prompt.
+ * \param[in] prompt The prompt to use with the audios.
+ * \param[in] audios The audios to process.
+ * \return OgaResult containing the named tensors for the processed inputs.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaAudios* audios, OgaNamedTensors** input_tensors);
+
+/**
+ * \brief Process audios with input prompts
+ * \param[in] processor The processor to use to process the audios and prompts.
+ * \param[in] prompts The prompts to use with the audios.
+ * \param[in] audios The audios to process.
+ * \return OgaResult containing the named tensors for the processed inputs.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudiosAndPrompts(const OgaMultiModalProcessor*, const OgaStringArray* prompts, const OgaAudios* audios, OgaNamedTensors** input_tensors);
+
+/**
+ * \brief Process images and/or audios with input prompt
+ * \param[in] processor The processor to use to process the images, audios, and/or prompt.
+ * \param[in] prompt The prompt to use with the images and/or audios.
+ * \param[in] images The images to process.
+ * \param[in] audios The audios to process.
+ * \return OgaResult containing the named tensors for the processed inputs.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, const OgaAudios* audios, OgaNamedTensors** input_tensors);
+
+/**
+ * \brief Process images and/or audios with input prompts
+ * \param[in] processor The processor to use to process the images, audios, and/or prompts.
+ * \param[in] prompts The prompts to use with the images and/or audios.
+ * \param[in] images The images to process.
+ * \param[in] audios The audios to process.
+ * \return OgaResult containing the named tensors for the processed inputs.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudiosAndPrompts(const OgaMultiModalProcessor*, const OgaStringArray* prompts, const OgaImages* images, const OgaAudios* audios, OgaNamedTensors** input_tensors);
 
 /** Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
