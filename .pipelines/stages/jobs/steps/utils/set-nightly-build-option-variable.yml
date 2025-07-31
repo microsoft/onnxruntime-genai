@@ -13,8 +13,6 @@ steps:
 
       name = "NightlyBuildOption"
       value = "--nightly_build" if os.environ.get("NIGHTLY_BUILD") == "1" else ""
-      if os.environ.get("runID") is not None:
-        print("Found runID: {}".format(os.environ.get("runID")))
 
       # Add date to the version if it is a dev version
       file_path = Path("VERSION_INFO")
@@ -41,8 +39,6 @@ steps:
 
       name = "NightlyBuildOption"
       value = "--nightly_build" if os.environ.get("NIGHTLY_BUILD") == "1" else ""
-      if os.environ.get("runID") is not None:
-        print("Found runID: {}".format(os.environ.get("runID")))
 
       # Add date to the version if it is a dev version
       file_path = Path("VERSION_INFO")
