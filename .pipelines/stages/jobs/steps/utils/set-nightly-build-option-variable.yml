@@ -8,9 +8,21 @@ steps:
     scriptSource: inline
     script: |
       import os
+      from pathlib import Path
+      from datetime import datetime
 
       name = "NightlyBuildOption"
       value = "--nightly_build" if os.environ.get("NIGHTLY_BUILD") == "1" else ""
+
+      # Add date to the version if it is a dev version
+      file_path = Path("VERSION_INFO")
+      with file_path.open("r", encoding="utf-8") as f:
+        curr_version = f.readline().rstrip("\n")
+      if curr_version.endswith("-dev"):
+        today_yyyymmdd = datetime.now().strftime("%Y%m%d")
+        curr_version += str(today_yyyymmdd)
+        with open(file_path, "w", encoding="utf-8") as f:
+          f.write(curr_version)
 
       print("Setting variable: {} = '{}'".format(name, value))
       print("##vso[task.setvariable variable={}]{}".format(name, value))
@@ -22,9 +34,21 @@ steps:
     scriptSource: inline
     script: |
       import os
+      from pathlib import Path
+      from datetime import datetime
 
       name = "NightlyBuildOption"
       value = "--nightly_build" if os.environ.get("NIGHTLY_BUILD") == "1" else ""
+
+      # Add date to the version if it is a dev version
+      file_path = Path("VERSION_INFO")
+      with file_path.open("r", encoding="utf-8") as f:
+        curr_version = f.readline().rstrip("\n")
+      if curr_version.endswith("-dev"):
+        today_yyyymmdd = datetime.now().strftime("%Y%m%d")
+        curr_version += str(today_yyyymmdd)
+        with open(file_path, "w", encoding="utf-8") as f:
+          f.write(curr_version)
 
       print("Setting variable: {} = '{}'".format(name, value))
       print("##vso[task.setvariable variable={}]{}".format(name, value))
