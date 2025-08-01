@@ -802,7 +802,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, 
  * \param path provider path.
  *
  */
-OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const std::basic_string<ORTCHAR_T>& path);
+OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const char* library_path);
 
 /**
  * \brief Unregisters an execution provider library with ONNXRuntime API.

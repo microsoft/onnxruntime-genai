@@ -553,14 +553,13 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });
 
-  m.def("register_execution_provider_library", [](const std::string& provider_name, const std::wstring& path_wstr) {
-    // TODO: input python string to std::wstring conversion performed by pybind11 may not be working properly here: wrong string if including special characters
+  m.def("register_execution_provider_library", [](const std::string& provider_name, const std::string& path_str) {
     // TODO: expose RegisterExecutionProviderLibrary only in Windows (for all languages)
 
     std::cout << "[OgaRegisterExecutionProviderLibrary] provider_name: " << provider_name << std::endl;
-    std::wcout << L"[OgaRegisterExecutionProviderLibrary] wpath: " << path_wstr << std::endl;
+    std::cout << "[OgaRegisterExecutionProviderLibrary] path: " << path_str << std::endl;
   
-    OgaRegisterExecutionProviderLibrary(provider_name.c_str(), path_wstr.c_str());
+    OgaRegisterExecutionProviderLibrary(provider_name.c_str(), path_str.c_str());
   });
 
   m.def("unregister_execution_provider_library", [](const std::string& provider_name) {
