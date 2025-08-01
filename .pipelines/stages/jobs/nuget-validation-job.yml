@@ -54,7 +54,7 @@ jobs:
   - name: arch
     value: ${{ parameters.arch }}
   - name: artifactName
-    value: 'onnxruntime-genai-${{ parameters.ep }}'
+    value: 'onnxruntime-genai-${{ parameters.ep }}-${{ parameters.arch }}'
   - name: buildConfig
     value: 'Release'
   - name: buildDir

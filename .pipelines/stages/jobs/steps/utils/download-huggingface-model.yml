@@ -16,8 +16,8 @@ steps:
   - ${{ if or(eq(parameters.os, 'linux'), eq(parameters.os, 'osx')) }}:
     - bash: |
         python -m pip install "huggingface_hub[cli]"
-        huggingface-cli login --token $HF_TOKEN
-        huggingface-cli download ${{ parameters.HuggingFaceRepo }} --include ${{ parameters.RepoFolder }}/* --local-dir ${{ parameters.LocalFolder }} --local-dir-use-symlinks False
+        hf login --token $HF_TOKEN
+        hf download ${{ parameters.HuggingFaceRepo }} --include ${{ parameters.RepoFolder }}/* --local-dir ${{ parameters.LocalFolder }} --local-dir-use-symlinks False
       displayName: Download ${{ parameters.HuggingFaceRepo }} from HuggingFace
       workingDirectory: ${{ parameters.WorkingDirectory }}
       env:
@@ -27,9 +27,9 @@ steps:
   - ${{ if eq(parameters.os, 'win') }}:
     - powershell: |
         python -m pip install "huggingface_hub[cli]"
-        huggingface-cli login --token $env:HF_TOKEN
+        hf login --token $env:HF_TOKEN
         # Use maximum path length for Windows... otherwises hits the path character limit
-        huggingface-cli download ${{ parameters.HuggingFaceRepo }} --include ${{ parameters.RepoFolder }}/* --local-dir "\\?\${{ parameters.WorkingDirectory }}\\${{ parameters.LocalFolder }}" --local-dir-use-symlinks False
+        hf download ${{ parameters.HuggingFaceRepo }} --include ${{ parameters.RepoFolder }}/* --local-dir "\\?\${{ parameters.WorkingDirectory }}\\${{ parameters.LocalFolder }}" --local-dir-use-symlinks False
       displayName: Download ${{ parameters.HuggingFaceRepo }} from HuggingFace
       workingDirectory: ${{ parameters.WorkingDirectory }}
       env:
