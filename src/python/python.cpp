@@ -558,14 +558,13 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
     std::cout << "[OgaRegisterExecutionProviderLibrary] provider_name: " << provider_name << std::endl;
     std::cout << "[OgaRegisterExecutionProviderLibrary] path: " << path_str << std::endl;
-  
+
     OgaRegisterExecutionProviderLibrary(provider_name.c_str(), path_str.c_str());
   });
 
   m.def("unregister_execution_provider_library", [](const std::string& provider_name) {
-
     std::cout << "[OgaUnregisterExecutionProviderLibrary] provider_name: " << provider_name << std::endl;
-  
+
     OgaUnregisterExecutionProviderLibrary(provider_name.c_str());
   });
 }

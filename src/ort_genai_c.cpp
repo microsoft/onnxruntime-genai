@@ -892,7 +892,7 @@ void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_n
   Ort::api->RegisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name, fs::path(library_path).c_str());
 }
 
-void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name){
+void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name) {
   Ort::api->UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name);
 }
 
