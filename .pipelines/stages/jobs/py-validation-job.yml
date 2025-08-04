@@ -195,7 +195,7 @@ jobs:
   - template: steps/python-validation-step.yml
     parameters:
       PythonScriptFolder: "examples/python"
-      PythonScriptName: "phi3v.py"
+      PythonScriptName: "model-vision.py"
       LocalFolder: 'phi3.5-vision'
       ModelFolder: $(prebuild_phi3_5_vision_model_folder)
 

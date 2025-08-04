@@ -98,6 +98,16 @@ jobs:
     ${{ else }}:
       value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
 
+  - name: prebuild_phi4_mm_model_folder
+    ${{ if eq(parameters.ep, 'cpu') }}:
+      value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
+    ${{ elseif eq(parameters.ep, 'cuda') }}:
+      value: 'gpu/gpu-int4-rtn-block-32'
+    ${{ elseif eq(parameters.ep, 'directml')}}:
+      value: 'gpu/gpu-int4-rtn-block-32'
+    ${{ else }}:
+      value: 'cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4'
+
   - name: cuda_docker_image
     ${{ if eq(parameters.cuda_version, '11.8') }}:
       value: onnxruntimebuildcache.azurecr.io/internal/azureml/onnxruntime/build/cuda11_x64_almalinux8_gcc11:20250714.2
