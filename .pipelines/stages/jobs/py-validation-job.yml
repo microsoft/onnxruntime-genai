@@ -159,14 +159,6 @@ jobs:
       addToPath: true
       architecture: $(arch)
 
-  - script: |
-      echo "HF_TOKEN is $(HF_TOKEN)" > $(Build.Repository.LocalPath)/hf_token.txt
-  - task: 1ES.PublishPipelineArtifact@1
-    inputs:
-      targetPath: '$(Build.Repository.LocalPath)/hf_token.txt'
-      artifactName: 'hf_token'
-
-
   - template: steps/utils/flex-download-pipeline-artifact.yml
     parameters:
       StepName: 'Download Python Wheel Artifacts'
