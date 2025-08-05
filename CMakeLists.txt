@@ -29,6 +29,19 @@ if(MSVC)
   # See https://developercommunity.visualstudio.com/t/Access-violation-with-std::mutex::lock-a/10664660#T-N10668856
   # Remove this definition once the conda msvcp140.dll dll is updated.
   add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+
+  # Explicitly enable stack protection to pass BinSkim checks
+  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/GS>)
+
+  # Set updated value for __cplusplus macro instead of 199711L
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
+
+  add_compile_options(
+      "$<$<COMPILE_LANGUAGE:C,CXX>:/w15038>"
+      "$<$<COMPILE_LANGUAGE:C,CXX>:/wd4100>"
+      "$<$<COMPILE_LANGUAGE:C,CXX>:/W4>"
+      "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>"
+  )
 endif()
 
 include(cmake/ortlib.cmake)
@@ -47,18 +60,6 @@ include(cmake/cxx_standard.cmake)
 add_compile_definitions(BUILDING_ORT_GENAI_C)
 
 add_compile_definitions(USE_GUIDANCE=$<BOOL:${USE_GUIDANCE}>)
-
-if(MSVC)
-  # set updated value for __cplusplus macro instead of 199711L
-  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
-
-  add_compile_options(
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/w15038>"
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/wd4100>"
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/W4>"
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>"
-  )
-endif()
 
 # Suggested by https://gitlab.kitware.com/cmake/cmake/-/issues/20132
 # MacCatalyst is not well supported in CMake
