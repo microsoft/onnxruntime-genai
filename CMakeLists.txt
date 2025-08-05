@@ -30,8 +30,12 @@ if(MSVC)
   # Remove this definition once the conda msvcp140.dll dll is updated.
   add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 
-  # Explicitly enable stack protection to pass BinSkim checks
+  # Explicitly enable (/GS) stack protection to pass BinSkim checks
   add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/GS>)
+
+  # Enable Control Flow Guard on compiler and linker to pass BinSkim checks
+  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/guard:cf>)
+  add_link_options(/guard:cf /DYNAMICBASE)
 
   # Set updated value for __cplusplus macro instead of 199711L
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
