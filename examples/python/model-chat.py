@@ -141,7 +141,7 @@ def main(args):
     tokenizer_input_system_prompt = None
     jinja_path = os.path.join(args.model_path, "chat_template.jinja")
     if os.path.exists(jinja_path):
-        with open("path/to/chat_template.jinja", "r", encoding="utf-8") as f:
+        with open(jinja_path, "r", encoding="utf-8") as f:
             template_str = f.read()
             tokenizer_input_system_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=False, template_str=template_str)
     else:
