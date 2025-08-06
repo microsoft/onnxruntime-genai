@@ -36,30 +36,13 @@ if(MSVC)
   # Enable Control Flow Guard on compiler and linker to pass BinSkim checks
   add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/guard:cf>)
   add_link_options(/guard:cf /DYNAMICBASE)
-endif()
 
-include(cmake/ortlib.cmake)
-include(cmake/external/onnxruntime_external_deps.cmake)
-# All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
-include(cmake/global_variables.cmake)
-# Checking if CUDA is supported
-include(cmake/check_cuda.cmake)
-# Checking if ROCm is supported
-include(cmake/check_rocm.cmake)
-# Checking if DML is supported
-include(cmake/check_dml.cmake)
-
-include(cmake/cxx_standard.cmake)
-
-add_compile_definitions(BUILDING_ORT_GENAI_C)
-
-add_compile_definitions(USE_GUIDANCE=$<BOOL:${USE_GUIDANCE}>)
-
-if(MSVC)
   # Use updated value for __cplusplus macro (e.g. 201703L for C++17) instead of default 199711L
   # Required by some libraries/tools that check __cplusplus for feature support
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
 
+  # We also add traditional compiler options here rather than later to ensure all binaries,
+  # including external ones such those from ORT Extensions, meet our security standards
   add_compile_options(
       # Suppress warning C5038: data member will be initialized after another
       # Common when member initializer list is written out-of-order vs. declaration
@@ -78,6 +61,23 @@ if(MSVC)
       "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>"
   )
 endif()
+
+include(cmake/ortlib.cmake)
+include(cmake/external/onnxruntime_external_deps.cmake)
+# All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
+include(cmake/global_variables.cmake)
+# Checking if CUDA is supported
+include(cmake/check_cuda.cmake)
+# Checking if ROCm is supported
+include(cmake/check_rocm.cmake)
+# Checking if DML is supported
+include(cmake/check_dml.cmake)
+
+include(cmake/cxx_standard.cmake)
+
+add_compile_definitions(BUILDING_ORT_GENAI_C)
+
+add_compile_definitions(USE_GUIDANCE=$<BOOL:${USE_GUIDANCE}>)
 
 # Suggested by https://gitlab.kitware.com/cmake/cmake/-/issues/20132
 # MacCatalyst is not well supported in CMake
