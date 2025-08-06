@@ -554,17 +554,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });
 
   m.def("register_execution_provider_library", [](const std::string& provider_name, const std::string& path_str) {
-    // TODO: expose RegisterExecutionProviderLibrary only in Windows (for all languages)
-
-    std::cout << "[OgaRegisterExecutionProviderLibrary] provider_name: " << provider_name << std::endl;
-    std::cout << "[OgaRegisterExecutionProviderLibrary] path: " << path_str << std::endl;
-
     OgaRegisterExecutionProviderLibrary(provider_name.c_str(), path_str.c_str());
   });
 
   m.def("unregister_execution_provider_library", [](const std::string& provider_name) {
-    std::cout << "[OgaUnregisterExecutionProviderLibrary] provider_name: " << provider_name << std::endl;
-
     OgaUnregisterExecutionProviderLibrary(provider_name.c_str());
   });
 }

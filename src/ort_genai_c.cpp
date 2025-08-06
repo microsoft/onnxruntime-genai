@@ -889,11 +889,11 @@ void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete p; }
 
 void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const char* library_path) {
-  Ort::api->RegisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name, fs::path(library_path).c_str());
+  Ort::RegisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name, fs::path(library_path).c_str());
 }
 
 void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name) {
-  Ort::api->UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name);
+  Ort::UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name);
 }
 
 }  // extern "C"
