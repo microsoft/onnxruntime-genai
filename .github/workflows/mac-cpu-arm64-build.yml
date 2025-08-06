@@ -73,6 +73,7 @@ jobs:
           export MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1,2)
           export RUSTFLAGS='-C link-arg=-Wl,-undefined,dynamic_lookup -C link-arg=-Wl,-no_dead_strip_inits_and_terms'
           cmake --build --preset macos_arm64_cpu_release --parallel
+          cmake --build --preset macos_arm64_cpu_release --target PyPackageBuild
         continue-on-error: false
 
       - name: Install the python wheel and test dependencies

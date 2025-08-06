@@ -225,7 +225,10 @@ void DefaultPositionInputs::InitializeStaticMask(OrtValue& cpu_attention_mask) {
   auto batch_size = input_shape[0];
   auto num_beams = state_.params_->search.num_beams;
   auto new_kv_length = input_shape[1];
-  auto max_length = input_shape[1] * num_beams;
+  // Number of elements per (batch * beam) row in the *output* tensor
+  // equals the full max_length configured for generation, which is
+  // attention_mask_shape_[1] after the assignment above.
+  auto max_length = attention_mask_shape_[1];
   for (int i = 0; i < batch_size; i++) {
     for (int j = 0; j < num_beams; j++) {
       auto output_subspan = output_span.subspan((i * num_beams + j) * max_length, new_kv_length);

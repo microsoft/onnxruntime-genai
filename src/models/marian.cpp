@@ -107,10 +107,19 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     encoder_input_ids_.name_ = model_.config_->model.encoder.inputs.input_ids.c_str();
     encoder_input_ids_.Add();
 
-    // encoder_attention_mask_.attention_mask_name_ = model_.config_->model.encoder.inputs.attention_mask;
     encoder_attention_mask_.Add();
 
-    encoder_input_ids_.Update(next_tokens);
+    // Create a new DeviceSpan with one additional token (0) appended
+    auto original_cpu_span = next_tokens.CpuSpan();
+    auto extended_tokens = model_.p_device_inputs_->Allocate<int32_t>(original_cpu_span.size() + 1);
+    auto extended_cpu_span = extended_tokens.CpuSpan();
+
+    // Copy original tokens and append eos_token_id
+    std::copy(original_cpu_span.begin(), original_cpu_span.end(), extended_cpu_span.begin());
+    extended_cpu_span[original_cpu_span.size()] = model_.config_->model.eos_token_id[0];  // Append eos_token_id
+    extended_tokens.CopyCpuToDevice();
+
+    encoder_input_ids_.Update(extended_tokens);
     const size_t new_length = static_cast<size_t>(encoder_input_ids_.GetShape()[1]);
     encoder_attention_mask_.Update(next_tokens, current_length, static_cast<int>(new_length));
 

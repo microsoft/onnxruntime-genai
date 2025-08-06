@@ -23,6 +23,10 @@ struct Config {
     static constexpr std::string_view PresentValueName = "present.%d.value";
     static constexpr std::string_view RnnStatesName = "rnn_states";
     static constexpr std::string_view RnnStatesPrevName = "rnn_states_prev";
+    static constexpr std::string_view CumulativeSequenceLengthsName = "cumulative_sequence_lengths";
+    static constexpr std::string_view SequenceLengthsName = "sequence_lengths";
+    static constexpr std::string_view PastSequenceLengthsName = "past_sequence_lengths";
+    static constexpr std::string_view BlockTableName = "block_table";
 
     // Speech encoder names
     static constexpr std::string_view AudioAttentionMaskName = "audio_attention_mask";
@@ -201,7 +205,6 @@ struct Config {
         std::string past_value_names{Defaults::PastValueName};
         std::string past_names;  // When key/value pairs are combined
         std::string cross_past_key_names, cross_past_value_names;
-
         std::string past_key_values_length{Defaults::PastKeyValuesLengthName};
         std::string past_sequence_length{Defaults::PastSequenceLengthName};
         std::string current_sequence_length{Defaults::CurrentSequenceLengthName};
@@ -210,6 +213,9 @@ struct Config {
         std::string encoder_hidden_states{Defaults::EncoderHiddenStatesName};
         std::string rnn_prev_states{Defaults::RnnStatesPrevName};
         std::string encoder_attention_mask{Defaults::EncoderAttentionMaskName};
+        std::string cumulative_sequence_lengths{Defaults::CumulativeSequenceLengthsName};
+        std::string past_sequence_lengths{Defaults::PastSequenceLengthsName};
+        std::string block_table{Defaults::BlockTableName};
       } inputs;
 
       struct Outputs {
@@ -251,7 +257,7 @@ struct Config {
     int num_beams{1};                  // 1 means no beam search.
     int num_return_sequences{1};       // Number of sequences to return after search. Default is 1.
     float repetition_penalty{1.0f};    // 1.0 means no penalty.
-    int top_k{};                       // Number of highest probability vocabulary tokens to keep for top-k-filtering that will be used by default in the generate method of the model.
+    int top_k{50};                     // Number of highest probability vocabulary tokens to keep for top-k-filtering that will be used by default in the generate method of the model.
     float top_p{};                     // If set to float >0 and <1, only the most probable tokens with probabilities that add up to top_p or higher are kept for generation.
     float temperature{1.0f};           // Temperature to control during generation. Default is 1.0.
     bool early_stopping{true};         //  Whether to stop the beam search when at least num_beams sentences are finished per batch or not.

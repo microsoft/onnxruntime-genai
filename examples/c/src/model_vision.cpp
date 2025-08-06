@@ -21,7 +21,9 @@ void CXX_API(const char* model_path, const char* execution_provider) {
   std::cout << "Creating multimodal processor..." << std::endl;
   auto processor = OgaMultiModalProcessor::Create(*model);
 
-  auto tokenizer_stream = OgaTokenizerStream::Create(*processor);
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  auto stream = OgaTokenizerStream::Create(*processor);
 
   while (true) {
     std::string image_paths_str;
@@ -50,18 +52,33 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     std::string text;
     std::cout << "Prompt: " << std::endl;
     std::getline(std::cin, text);
-    std::string prompt;
+
+    // Construct messages string with special tokens for ApplyChatTemplate.
+
+    // Note: The Phi-3 Vision chat template expects content to be string, whereas in
+    // Gemma-3-like models, content type is supported, so we handle these differently.
+
+    std::string messages;
     if (std::string(model->GetType()) == "phi3v") {
-      prompt = "<|user|>\n";
+      // Phi-3 Vision-style multimodal usage with image tags
+      std::string content;
       for (size_t i = 0; i < image_paths.size(); ++i)
-        prompt += "<|image_" + std::to_string(i + 1) + "|>\n";
-      prompt += text + "<|end|>\n<|assistant|>\n";
-    } else if (std::string(model->GetType()) == "gemma3") {
-      prompt += "<start_of_turn>user\n";
-      for (size_t i = 0; i < image_paths.size(); ++i)
-        prompt += "<start_of_image>";
-      prompt += text + "<end_of_turn>\n<start_of_turn>model\n";
+        content += "<|image_" + std::to_string(i + 1) + "|>\\n";
+      content += text;
+      messages = R"([{"role": "user", "content": ")" + content + R"("}])";
+    } else {
+      // Gemma-style multimodal usage with content type
+      const std::string image_content = R"({ "type": "image" })";
+      std::string content = "[";
+      for (size_t i = 0; i < image_paths.size(); ++i) {
+        content += image_content + ", ";
+      }
+      const std::string text_content = R"({ "type": "text", "text": ")";
+      content += text_content + text + R"(" }])";
+      messages = R"([{"role": "user", "content": )" + content + R"(}])";
     }
+
+    std::string prompt = std::string(tokenizer->ApplyChatTemplate("", messages.c_str(), "", true));
 
     std::cout << "Processing images and prompt..." << std::endl;
     auto input_tensors = processor->ProcessImages(prompt.c_str(), images.get());
@@ -78,7 +95,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
 
       const auto num_tokens = generator->GetSequenceCount(0);
       const auto new_token = generator->GetSequenceData(0)[num_tokens - 1];
-      std::cout << tokenizer_stream->Decode(new_token) << std::flush;
+      std::cout << stream->Decode(new_token) << std::flush;
     }
 
     for (int i = 0; i < 3; ++i)

@@ -78,44 +78,43 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
-    $ep = '${{ parameters.ep }}'
-    $target = '${{ parameters.target }}'
-    $config = '${{ parameters.build_config }}'
-    $cuda_home = if ($ep -eq 'cuda') { '--cuda_home=$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' } else { '' }
-    $use_dml = if ($ep -eq 'directml') { '--use_dml' } else { '' }
-    $package_c = if ($target -eq 'onnxruntime-genai') { '--package' } else { '' }
-    if ($target -ne 'python') {
-      $skip_wheel = '--skip_wheel'
-    } else {
-      $skip_wheel = ''
-      python -m pip install wheel
-    }
-    if ($config -eq 'release') {
-      $build_config = 'Release'
-    } elseif ($config -eq 'relwithdebinfo') {
-      $build_config = 'RelWithDebInfo'
-    } else {
-      $build_config = 'Debug'
-    }
-    python -m pip install requests
-    python build.py --use_guidance --parallel $cuda_home $use_dml $package_c $skip_wheel --config=$build_config --build_dir='$(Build.Repository.LocalPath)\$(buildDir)'
-    Rename-Item -Path '$(Build.Repository.LocalPath)\$(buildDir)\Release' -NewName '$(os)-$(arch)' -Force
-  displayName: 'Build C API and package / wheel'
+    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
+  displayName: 'Configure CMake C API with CUDA'
+  condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
 
+- powershell: |
+    cmake --preset windows_$(arch)_$(ep)_$(build_config)
+  displayName: 'Configure CMake C API without CUDA'
+  condition: ne(variables['ep'], 'cuda')
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
+    cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
+  displayName: 'Build C API'
+  workingDirectory: '$(Build.Repository.LocalPath)'
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - template: compliant/win-esrp-dll-step.yml
     parameters:
       FolderPath: '$(Build.Repository.LocalPath)\$(buildDir)'
       DisplayName: 'ESRP - Sign C++ dlls'
-      Pattern: '*genai.dll'
+      Pattern: '*genai*.dll'
 
   - task: BinSkim@4
     displayName: 'Run BinSkim'
     inputs:
       AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\**\*genai.dll'
     continueOnError: true
+
+  - powershell: |
+      python -m pip install wheel
+    displayName: 'Install wheel'
+
+  - powershell: |
+      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --target package
+    displayName: 'Package C/C++ API'
+    workingDirectory: '$(Build.Repository.LocalPath)'
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
@@ -135,7 +134,15 @@ steps:
       FolderPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\wheel\onnxruntime_genai'
       DisplayName: 'ESRP - PYD Sign'
       DoEsrp: true
-      Pattern: '*.pyd'
+      Pattern: '*.pyd,*.dll'
+
+  - powershell: |
+      python -m pip install wheel
+    displayName: 'Install wheel'
+
+  - powershell: |
+      cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target PyPackageBuild
+    displayName: 'Build Python Wheel'
 
   - powershell: |
       Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse

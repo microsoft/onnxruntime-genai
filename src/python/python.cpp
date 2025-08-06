@@ -410,7 +410,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       })
       .def("remove_model_data", [](OgaConfig& config, const std::string& model_filename) {
         config.RemoveModelData(model_filename.c_str());
-      });
+      })
+      .def("overlay", &OgaConfig::Overlay);
 
   pybind11::class_<OgaModel>(m, "Model")
       .def(pybind11::init([](const OgaConfig& config) { return OgaModel::Create(config); }))
@@ -539,6 +540,37 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       }))
       .def("unload", &OgaAdapters::UnloadAdapter)
       .def("load", &OgaAdapters::LoadAdapter);
+
+  pybind11::class_<OgaRequest>(m, "Request")
+      .def(pybind11::init(
+          [](PyGeneratorParams& params) {
+            return OgaRequest::Create(*params.params_);
+          }))
+      .def("add_tokens", [](OgaRequest& request, pybind11::array_t<int32_t> tokens) {
+        auto sequences = OgaSequences::Create();
+        auto tokens_span = ToSpan(tokens);
+        sequences->Append(tokens_span.data(), tokens_span.size());
+        request.AddTokens(*sequences);
+      })
+      .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
+      .def("is_done", &OgaRequest::IsDone)
+      .def("get_unseen_token", &OgaRequest::GetUnseenToken)
+      .def("set_opaque_data", [](OgaRequest& request, pybind11::object opaque_data) {
+        request.SetOpaqueData(opaque_data.ptr());
+      })
+      .def("get_opaque_data", [](OgaRequest& request) -> pybind11::object {
+        auto opaque_data = request.GetOpaqueData();
+        if (!opaque_data)
+          return pybind11::none();
+        return pybind11::reinterpret_borrow<pybind11::object>(static_cast<PyObject*>(opaque_data));
+      });
+
+  pybind11::class_<OgaEngine>(m, "Engine")
+      .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
+      .def("add_request", &OgaEngine::Add)
+      .def("step", &OgaEngine::Step)
+      .def("remove_request", &OgaEngine::Remove)
+      .def("has_pending_requests", &OgaEngine::HasPendingRequests);
 
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", &SetLogCallback);

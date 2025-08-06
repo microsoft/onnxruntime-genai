@@ -706,6 +706,78 @@ struct OgaAdapters : OgaAbstract {
   static void operator delete(void* p) { OgaDestroyAdapters(reinterpret_cast<OgaAdapters*>(p)); }
 };
 
+struct OgaRequest : OgaAbstract {
+  static std::unique_ptr<OgaRequest> Create(OgaGeneratorParams& params) {
+    OgaRequest* p;
+    OgaCheckResult(OgaCreateRequest(&params, &p));
+    return std::unique_ptr<OgaRequest>(p);
+  }
+
+  void AddTokens(const OgaSequences& tokens) {
+    OgaCheckResult(OgaRequestAddTokens(this, &tokens));
+  }
+
+  bool IsDone() const {
+    bool is_done{};
+    OgaCheckResult(OgaRequestIsDone(this, &is_done));
+    return is_done;
+  }
+
+  bool HasUnseenTokens() const {
+    bool has_unseen_tokens{};
+    OgaCheckResult(OgaRequestHasUnseenTokens(this, &has_unseen_tokens));
+    return has_unseen_tokens;
+  }
+
+  int32_t GetUnseenToken() {
+    int32_t token;
+    OgaCheckResult(OgaRequestGetUnseenToken(this, &token));
+    return token;
+  }
+
+  void SetOpaqueData(void* data) {
+    OgaCheckResult(OgaRequestSetOpaqueData(this, data));
+  }
+
+  void* GetOpaqueData() {
+    void* data;
+    OgaCheckResult(OgaRequestGetOpaqueData(this, &data));
+    return data;
+  }
+
+  static void operator delete(void* p) { OgaDestroyRequest(reinterpret_cast<OgaRequest*>(p)); }
+};
+
+struct OgaEngine : OgaAbstract {
+  static std::unique_ptr<OgaEngine> Create(OgaModel& model) {
+    OgaEngine* p;
+    OgaCheckResult(OgaCreateEngine(&model, &p));
+    return std::unique_ptr<OgaEngine>(p);
+  }
+
+  bool HasPendingRequests() {
+    bool f;
+    OgaCheckResult(OgaEngineHasPendingRequests(this, &f));
+    return f;
+  }
+
+  void Add(OgaRequest& request) {
+    OgaCheckResult(OgaEngineAddRequest(this, &request));
+  }
+
+  void Remove(OgaRequest& request) {
+    OgaCheckResult(OgaEngineRemoveRequest(this, &request));
+  }
+
+  std::unique_ptr<OgaRequest> Step() {
+    OgaRequest* request;
+    OgaCheckResult(OgaEngineStep(this, &request));
+    return request ? std::unique_ptr<OgaRequest>(request) : nullptr;
+  }
+
+  static void operator delete(void* p) { OgaDestroyEngine(reinterpret_cast<OgaEngine*>(p)); }
+};
+
 struct OgaHandle {
   OgaHandle() = default;
   ~OgaHandle() noexcept {

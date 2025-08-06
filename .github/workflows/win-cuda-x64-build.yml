@@ -85,6 +85,7 @@ jobs:
       - name: Build with CMake
         run: |
           cmake --build --preset windows_x64_cuda_release --parallel
+          cmake --build --preset windows_x64_cuda_release --target PyPackageBuild
 
       - name: Add CUDA to PATH
         run: |

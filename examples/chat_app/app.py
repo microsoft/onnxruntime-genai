@@ -82,6 +82,8 @@ def get_ep_name(name):
         return "cuda"
     elif "dml" in new_name:
         return "dml"
+    elif "nvtensorrtrtx" in new_name:
+        return "NvTensorRtRtx"
     raise ValueError(f"{new_name} is not recognized.")
 
 

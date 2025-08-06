@@ -135,7 +135,7 @@ jobs:
             --volume $GITHUB_WORKSPACE:/ort_genai_src \
             -w /ort_genai_src onnxruntimecudabuildx64 \
             bash -c " \
-              /usr/bin/cmake --build --preset linux_gcc_cuda_release"
+              /usr/bin/cmake --build --preset linux_gcc_cuda_release && /usr/bin/cmake --build --preset linux_gcc_cuda_release --target PyPackageBuild"
 
       - name: Install the onnxruntime-genai Python wheel and run python test
         run: |
