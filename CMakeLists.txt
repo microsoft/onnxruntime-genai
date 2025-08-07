@@ -30,12 +30,29 @@ if(MSVC)
   # Remove this definition once the conda msvcp140.dll dll is updated.
   add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 
-  # Explicitly enable (/GS) stack protection to pass BinSkim checks
-  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/GS>)
+  # # Explicitly enable (/GS) stack protection to pass BinSkim checks
+  # add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/GS>)
 
-  # Enable Control Flow Guard on compiler and linker to pass BinSkim checks
-  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/guard:cf>)
-  add_link_options(/guard:cf /DYNAMICBASE)
+  # # Enable Control Flow Guard on compiler and linker to pass BinSkim checks
+  # add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/guard:cf>)
+  # add_link_options(/guard:cf /DYNAMICBASE)
+
+  # # Enable CET shadow stack unless building for ARM64 (not supported)
+  # message(STATUS "Processor: ${CMAKE_SYSTEM_PROCESSOR}")
+
+  # if(NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+  #   message(STATUS "CET shadow stack enabled (/CETCOMPAT)")
+  #   add_link_options(/CETCOMPAT)
+  # else()
+  #   message(STATUS "CET shadow stack skipped for ARM64 build")
+  # endif()
+
+  # # Enable Spectre mitigations for C and C++ compilations only (avoid CUDA nvcc)
+  # # Must use separate generator expressions — do NOT use "C,CXX" in COMPILE_LANGUAGE.
+  # add_compile_options(
+  #   "$<$<COMPILE_LANGUAGE:C>:/Qspectre>"
+  #   "$<$<COMPILE_LANGUAGE:CXX>:/Qspectre>"
+  # )
 
   # Use updated value for __cplusplus macro (e.g. 201703L for C++17) instead of default 199711L
   # Required by some libraries/tools that check __cplusplus for feature support
