@@ -44,8 +44,8 @@ if(MSVC)
     add_link_options(/CETCOMPAT)
   endif()
 
-  # Enable Spectre mitigations globally
-  add_compile_options(/Qspectre)
+  # Enable Spectre mitigations
+  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/Qspectre>)
 
   # Use updated value for __cplusplus macro (e.g. 201703L for C++17) instead of default 199711L
   # Required by some libraries/tools that check __cplusplus for feature support
