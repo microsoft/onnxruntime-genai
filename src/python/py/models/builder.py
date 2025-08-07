@@ -2,6 +2,8 @@
 # Copyright (c) Microsoft Corporation.  All rights reserved.
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
+#
+# Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved.
 # --------------------------------------------------------------------------
 """
 Run the model builder to create the desired ONNX model.
@@ -42,7 +44,7 @@ class Model:
         self.hidden_size = config.hidden_size
         self.num_kv_heads = config.num_key_value_heads if hasattr(config, "num_key_value_heads") else config.multi_query_group_num if hasattr(config, "multi_query_group_num") else config.num_attention_heads
         self.num_attn_heads = config.num_attention_heads
-        self.head_size = config.head_dim if hasattr(config, "head_dim") else config.hidden_size // config.num_attention_heads
+        self.head_size = config.head_dim if hasattr(config, "head_dim") and config.head_dim is not None else config.hidden_size // config.num_attention_heads
         self.num_layers = int(extra_options["num_hidden_layers"]) if "num_hidden_layers" in extra_options else config.num_hidden_layers if hasattr(config, "num_hidden_layers") else config.num_layers
         self.vocab_size = config.vocab_size
         self.activation = config.hidden_activation if hasattr(config, "hidden_activation") and config.hidden_activation is not None else config.hidden_act
@@ -426,7 +428,7 @@ class Model:
                 "past_present_share_buffer": False if "config_only" in self.extra_options else self.past_present_share_buffer,
                 "repetition_penalty": config.repetition_penalty if hasattr(config, "repetition_penalty") else 1.0,
                 "temperature": config.temperature if hasattr(config, "temperature") else 1.0,
-                "top_k": 50,
+                "top_k": config.top_k if hasattr(config, "top_k") else 50,
                 "top_p": config.top_p if hasattr(config, "top_p") else 1.0,
             },
         }
@@ -913,6 +915,10 @@ class Model:
             # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
             return self.make_matmul_float(matmul, matmul_name, root_input, **kwargs)
 
+        if matmul.bits != 4:
+            # Code below assume 4 bits with hard coded shapes (* 2)
+            raise NotImplementedError(f"{matmul.bits} bits precision is not currently supported in QDQ format.")
+
         dequantize_output = self.make_dequantize_linear(f"{matmul_name}/DequantizeLinear", matmul)
 
         # Add a transpose instead of transposing the weights offline. The reason for this is that it is more natural and usually more performant to
@@ -1005,6 +1011,10 @@ class Model:
         # Create dummy PackedMatMul class
         class PackedMatMul:
             def __init__(self):
+                if q_matmul.bits != k_matmul.bits or q_matmul.bits != v_matmul.bits:
+                    raise ValueError("All MatMuls must have the same bits for packed MatMul.")
+                if q_matmul.group_size != k_matmul.group_size or q_matmul.group_size != v_matmul.group_size:
+                    raise ValueError("All MatMuls must have the same group size for packed MatMul.")
                 self.qweight = torch.cat([q_matmul.qweight, k_matmul.qweight, v_matmul.qweight], dim=0)
                 self.scales = torch.cat([q_matmul.scales, k_matmul.scales, v_matmul.scales], dim=0)
                 self.qzeros = torch.cat([q_matmul.qzeros, k_matmul.qzeros, v_matmul.qzeros], dim=0)
@@ -3772,6 +3782,20 @@ class Gemma3Model(Gemma2Model):
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)
 
 
+class ErnieModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # Ernie uses interleaved rotary position embeddings.
+        self.rotemb_attrs["interleaved"] = 1
+
+        # Ernie uses a `compression_ratio` for its RoPE scaling.
+        # The original RoPE logic in ernie is: position_ids / compression_ratio,
+        # which is equivalent to scaling the frequencies (inv_freq) by 1 / compression_ratio.
+        if hasattr(config, "compression_ratio") and config.compression_ratio != 1.0:
+            self.rotemb_attrs["rescale_factors"] = 1.0 / config.compression_ratio
+
+
 class GPTOSSModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
@@ -4151,7 +4175,10 @@ def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
     """
-    bools = ["int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "use_8bits_moe", "use_qdq", "use_webgpu_fp32"]
+    bools = [
+        "int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph",
+        "use_8bits_moe", "use_qdq", "use_webgpu_fp32", "use_cuda_bf16",
+    ]
     for key in bools:
         if key in kv_pairs:
             if kv_pairs[key] in {"false", "False", "0"}:
@@ -4217,11 +4244,15 @@ def parse_hf_token(hf_token):
 
 
 def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
-    if precision in {"int8", "fp32"} or (precision == "int4" and execution_provider == "cpu") or extra_options.get("use_webgpu_fp32", False):
+    int4_cpu = precision == "int4" and execution_provider == "cpu"
+    fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
+    bf16_cuda = precision == "int4" and execution_provider == "cuda" and extra_options.get("use_cuda_bf16", False)
+
+    if precision in {"int8", "fp32"} or int4_cpu or fp32_webgpu:
         # FP32 precision
         return ir.DataType.FLOAT
 
-    if precision == "bf16":
+    if precision == "bf16" or bf16_cuda:
         # BF16 precision
         return ir.DataType.BFLOAT16
 
@@ -4267,6 +4298,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
             config.hidden_act = "swiglu"
             onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "Ernie4_5_ForCausalLM":
+            onnx_model = ErnieModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GemmaForCausalLM":
             onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
@@ -4457,8 +4490,10 @@ def get_args():
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
                 use_qdq = Use the QDQ decomposition for ops.
                     Use this option when you want to use quantize-dequantize ops. For example, you will have a quantized MatMul op instead of the MatMulNBits op.
-                use_webgpu_fp32 = Use FP32 for WebGPU EP.
+                use_webgpu_fp32 = Use FP32 I/O precision for WebGPU EP.
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
+                use_cuda_bf16 = Use BF16 I/O precision in quantized ONNX models for CUDA EP.
+                    Use this option to create quantized ONNX models that use BF16 precision.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
             """),
