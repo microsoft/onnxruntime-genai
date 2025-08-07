@@ -36,6 +36,7 @@ The tool currently supports the following model architectures.
 - DeepSeek
 - ERNIE 4.5
 - Gemma
+- GPT-OSS
 - Granite
 - Llama
 - Mistral
