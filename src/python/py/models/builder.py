@@ -234,6 +234,7 @@ class Model:
         num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
         expert_weight_bits = 8 if extra_options.get("use_8bits_moe", False) else 4
+        swiglu_limit = config.swiglu_limit if hasattr(config, "swiglu_limit") else None
         self.moe_attrs = {
             "op_type": moe_op_type,                           # MoE op to use
             "num_experts": num_experts,                       # Number of experts in MoE layer
@@ -244,7 +245,7 @@ class Model:
             "expert_weight_bits": expert_weight_bits,         # Number of bits used in quantized MoE weights (only INT4 or INT8 are supported).
             "normalize_routing_weights": False,               # Normalize routing weights in MoE layer
             "swiglu_fusion": 0,                               # Fusion level for SwiGLU activation function
-            "swiglu_limit": None,                             # Value used to clamp results into a certain range in SwiGLU activation function
+            "swiglu_limit": swiglu_limit,                     # Value used to clamp results into a certain range in SwiGLU activation function
             "use_sparse_mixer": False,                        # Use SparseMixer in MoE layer (used in Phi-3.5 MoE)
         }
 
@@ -3812,7 +3813,6 @@ class GPTOSSModel(Model):
         self.moe_attrs["activation_beta"] = 1.0
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["normalize_routing_weights"] = True
-        self.moe_attrs["swiglu_limit"] = 7.0  # config.swiglu_limit
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
@@ -3828,7 +3828,6 @@ class GPTOSSModel(Model):
             self.layernorm_attrs["last_layernorm"] = True
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
-        layernorm.weight = layernorm.scale
         if "final_norm" in location:
             # Set cast for final LayerNorm since it is a special case and not covered in `make_layer`
             self.layernorm_attrs["cast"]["root_input"] = False
@@ -4325,6 +4324,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             extra_options["exclude_embeds"] = True
             onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GptOssForCausalLM":
+            delattr(config, "quantization_config")
             onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GraniteForCausalLM":
             onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
