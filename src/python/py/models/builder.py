@@ -94,7 +94,9 @@ class Model:
             },
             "dml": {},
             "webgpu": {},
-            "NvTensorRtRtx": {},
+            "NvTensorRtRtx": {
+                "enable_cuda_graph": "1",
+            },
         }
 
         # Map input names to their types and shapes
