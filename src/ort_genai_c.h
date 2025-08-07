@@ -23,6 +23,7 @@ extern "C" {
 #define OGA_EXPORT __declspec(dllimport)
 #endif
 #define OGA_API_CALL _stdcall
+#define ORTCHAR_T wchar_t
 #else
 // To make symbols visible on macOS/iOS
 #ifdef __APPLE__
@@ -31,6 +32,7 @@ extern "C" {
 #define OGA_EXPORT
 #endif
 #define OGA_API_CALL
+#define ORTCHAR_T char
 #endif
 
 /** \addtogroup Global
@@ -967,6 +969,21 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetUnseenToken(OgaRequest* request,
  * \return OgaResult containing the error message if the checking of the request status failed, or nullptr on success.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsDone(const OgaRequest* request, bool* out);
+
+/**
+ * \brief Registers an execution provider library with ONNXRuntime API.
+ * \param registration_name name for registration.
+ * \param path provider path.
+ *
+ */
+OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const char* library_path);
+
+/**
+ * \brief Unregisters an execution provider library with ONNXRuntime API.
+ * \param registration_name name for registration.
+ *
+ */
+OGA_EXPORT void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name);
 
 #ifdef __cplusplus
 }
