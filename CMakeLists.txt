@@ -37,11 +37,15 @@ if(MSVC)
   add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/guard:cf>)
   add_link_options(/guard:cf /DYNAMICBASE)
 
-  # Enable CET shadow stack
-  add_link_options(/CETCOMPAT)
+  # Enable CET shadow stack ONLY on x64 builds (ARM does not support it)
+  message(STATUS "Processor: ${CMAKE_SYSTEM_PROCESSOR}")
+  string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _proc)
+  if(_proc STREQUAL "amd64" OR _proc STREQUAL "x86_64")
+    add_link_options(/CETCOMPAT)
+  endif()
 
-  # Enable Spectre mitigations
-  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/Qspectre>)
+  # Enable Spectre mitigations globally
+  add_compile_options(/Qspectre)
 
   # Use updated value for __cplusplus macro (e.g. 201703L for C++17) instead of default 199711L
   # Required by some libraries/tools that check __cplusplus for feature support
