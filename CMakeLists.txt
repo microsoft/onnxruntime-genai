@@ -37,6 +37,12 @@ if(MSVC)
   add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/guard:cf>)
   add_link_options(/guard:cf /DYNAMICBASE)
 
+  # Enable CET shadow stack
+  add_link_options(/CETCOMPAT)
+
+  # Enable Spectre mitigations
+  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/Qspectre>)
+
   # Use updated value for __cplusplus macro (e.g. 201703L for C++17) instead of default 199711L
   # Required by some libraries/tools that check __cplusplus for feature support
   add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
