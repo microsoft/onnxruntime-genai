@@ -4130,34 +4130,35 @@ class GPTOSSModel(Model):
 
         if op_type == "MoE":
             # Save non-quantized MoE weights as initializers
-            self.make_initializer(mlp.experts.gate_up_proj.view(self.moe_attrs["num_experts"], self.hidden_size, -1), gate_up_proj_weight, to=self.io_dtype)  # TODO: use .weight when this isn't a torch.nn.Parameter
-            self.make_initializer(mlp.experts.down_proj.view(self.moe_attrs["num_experts"], self.intermediate_size, -1), down_proj_weight, to=self.io_dtype)  # TODO: use .weight when this isn't a torch.nn.Parameter
+            self.make_initializer(mlp.experts.gate_up_proj.view(self.moe_attrs["num_experts"], -1, self.hidden_size), gate_up_proj_weight, to=self.io_dtype)
+            self.make_initializer(mlp.experts.down_proj.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size), down_proj_weight, to=self.io_dtype)
         else:
             # Create and save quantized MoE weights as initializers
             gate_up_proj_qweight_list, gate_up_proj_scales_list = [], []
             down_proj_qweight_list, down_proj_scales_list = [], []
 
             for i in range(self.moe_attrs["num_experts"]):
-                qweight1, scales1 = self.make_qmoe_weights(mlp.experts.gate_up_proj[i])  # TODO: use .weight when this isn't a torch.nn.Parameter
+                qweight1, scales1 = self.make_qmoe_weights(mlp.experts.gate_up_proj[i])
                 gate_up_proj_qweight_list.append(qweight1)
                 gate_up_proj_scales_list.append(scales1)
-                qweight2, scales2 = self.make_qmoe_weights(mlp.experts.down_proj[i])  # TODO: use .weight when this isn't a torch.nn.Parameter
+                qweight2, scales2 = self.make_qmoe_weights(mlp.experts.down_proj[i])
                 down_proj_qweight_list.append(qweight2)
                 down_proj_scales_list.append(scales2)
 
-            gate_up_proj_qweight_tensor = torch.stack(gate_up_proj_qweight_list, dim=0)
+            gate_up_proj_qweight_tensor = torch.stack(gate_up_proj_qweight_list, dim=0).to(torch.uint8)
             gate_up_proj_scales_tensor = torch.stack(gate_up_proj_scales_list, dim=0)
-            down_proj_qweight_tensor = torch.stack(down_proj_qweight_list, dim=0)
+            down_proj_qweight_tensor = torch.stack(down_proj_qweight_list, dim=0).to(torch.uint8)
             down_proj_scales_tensor = torch.stack(down_proj_scales_list, dim=0)
 
-            self.make_initializer(gate_up_proj_qweight_tensor.to(torch.uint8).view(self.moe_attrs["num_experts"], self.hidden_size, -1), gate_up_proj_weight)
+            pack_size = 8 // self.moe_attrs["expert_weight_bits"]
+            self.make_initializer(gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, self.hidden_size // pack_size), gate_up_proj_weight)
             self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
-            self.make_initializer(down_proj_qweight_tensor.to(torch.uint8).view(self.moe_attrs["num_experts"], self.intermediate_size, -1), down_proj_weight)
+            self.make_initializer(down_proj_qweight_tensor.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size // pack_size), down_proj_weight)
             self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
 
         # Save MoE biases as initializers
-        self.make_initializer(mlp.experts.gate_up_proj_bias, gate_up_proj_bias, to=self.io_dtype)  # TODO: use .bias when this isn't a torch.nn.Parameter
-        self.make_initializer(mlp.experts.down_proj_bias, down_proj_bias, to=self.io_dtype)  # TODO: use .bias when this isn't a torch.nn.Parameter
+        self.make_initializer(mlp.experts.gate_up_proj_bias, gate_up_proj_bias, to=self.io_dtype)
+        self.make_initializer(mlp.experts.down_proj_bias, down_proj_bias, to=self.io_dtype)
 
         moe_name = f"{basename}/{op_type}"
         self.make_moe_op(
