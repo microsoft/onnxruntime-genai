@@ -434,7 +434,7 @@ class Model:
             },
         }
 
-        if self.window_size is not None and self.window_size > 0:
+        if self.ep == "NvTensorRtRtx" and self.window_size is not None and self.window_size > 0:
             genai_config["model"]["decoder"]["sliding_window"] = {"window_size": self.window_size, "slide_key_value_cache": False, "slide_inputs": False}
 
         if self.ep != "cpu":
