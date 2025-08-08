@@ -54,29 +54,6 @@ if(MSVC)
   #   "$<$<COMPILE_LANGUAGE:CXX>:/Qspectre>"
   # )
 
-  # Use updated value for __cplusplus macro (e.g. 201703L for C++17) instead of default 199711L
-  # Required by some libraries/tools that check __cplusplus for feature support
-  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
-
-  # We also add traditional compiler options here rather than later to ensure all binaries,
-  # including external ones such those from ORT Extensions, meet our security standards
-  add_compile_options(
-      # Suppress warning C5038: data member will be initialized after another
-      # Common when member initializer list is written out-of-order vs. declaration
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/w15038>"
-
-      # Suppress warning C4100: unreferenced formal parameter
-      # Often appears in template or virtual function overrides where a param is unused
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/wd4100>"
-
-      # Enable warning level 4 (more aggressive than default /W3)
-      # Captures more potential bugs or code smells
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/W4>"
-
-      # Treat all warnings as errors (fail build on any warning)
-      # Combine carefully with /W4 — suppress any known false positives
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>"
-  )
 endif()
 
 include(cmake/ortlib.cmake)
@@ -95,6 +72,37 @@ include(cmake/cxx_standard.cmake)
 add_compile_definitions(BUILDING_ORT_GENAI_C)
 
 add_compile_definitions(USE_GUIDANCE=$<BOOL:${USE_GUIDANCE}>)
+
+if(MSVC)
+  # Use updated value for __cplusplus macro (e.g. 201703L for C++17) instead of default 199711L
+  # Required by some libraries/tools that check __cplusplus for feature support
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
+
+  # Add more compiler options for security standards
+  
+  # Must use separate generator expressions — do NOT use "C,CXX" in COMPILE_LANGUAGE.
+  add_compile_options(
+      # Suppress warning C5038: data member will be initialized after another
+      # Common when member initializer list is written out-of-order vs. declaration
+      "$<$<COMPILE_LANGUAGE:C>:/w15038>"
+      "$<$<COMPILE_LANGUAGE:CXX>:/w15038>"
+
+      # Suppress warning C4100: unreferenced formal parameter
+      # Often appears in template or virtual function overrides where a param is unused
+      "$<$<COMPILE_LANGUAGE:C>:/wd4100>"
+      "$<$<COMPILE_LANGUAGE:CXX>:/wd4100>"
+
+      # Enable warning level 4 (more aggressive than default /W3)
+      # Captures more potential bugs or code smells
+      "$<$<COMPILE_LANGUAGE:C>:/W4>"
+      "$<$<COMPILE_LANGUAGE:CXX>:/W4>"
+
+      # Treat all warnings as errors (fail build on any warning)
+      # Combine carefully with /W4 — suppress any known false positives
+      "$<$<COMPILE_LANGUAGE:C>:/WX>"
+      "$<$<COMPILE_LANGUAGE:CXX>:/WX>"
+  )
+endif()
 
 # Suggested by https://gitlab.kitware.com/cmake/cmake/-/issues/20132
 # MacCatalyst is not well supported in CMake
