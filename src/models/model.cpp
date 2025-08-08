@@ -84,6 +84,28 @@ State::State(const GeneratorParams& params, const Model& model)
   }
 }
 
+void State::DumpInputs() {
+  if (g_log.enabled && g_log.model_input_values) {
+    auto& stream = Log("model_input_values");
+    stream << std::endl;
+    DumpTensors(model_, stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
+  }
+
+  if (g_log.enabled && g_log.model_output_shapes) {
+    auto& stream = Log("model_output_shapes");
+    stream << std::endl;
+    DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
+  }
+}
+
+void State::DumpOutputs() {
+  if (g_log.enabled && g_log.model_output_values) {
+    auto& stream = Log("model_output_values");
+    stream << std::endl;
+    DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
+  }
+}
+
 void State::Run(OrtSession& session, bool graph_capture_this_run) {
   DurationTrace trace{"State::Run"};
 
@@ -108,17 +130,7 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
     }
   }
 
-  if (g_log.enabled && g_log.model_input_values) {
-    auto& stream = Log("model_input_values");
-    stream << std::endl;
-    DumpTensors(model_, stream, inputs_.data(), input_names_.data(), input_names_.size(), true);
-  }
-
-  if (g_log.enabled && g_log.model_output_shapes) {
-    auto& stream = Log("model_output_shapes");
-    stream << std::endl;
-    DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), false);
-  }
+  DumpInputs();
 
   if (!ep_dynamic_options_next_run_.empty()) {
     std::vector<const char*> keys;
@@ -136,11 +148,7 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
 
   extra_outputs_.RegisterOutputs();
 
-  if (g_log.enabled && g_log.model_output_values) {
-    auto& stream = Log("model_output_values");
-    stream << std::endl;
-    DumpTensors(model_, stream, outputs_.data(), output_names_.data(), output_names_.size(), true);
-  }
+  DumpOutputs();
 }
 
 void State::SetTerminate() {
