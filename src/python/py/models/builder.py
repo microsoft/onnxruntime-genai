@@ -2370,52 +2370,6 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
-    def make_symmetric_per_column_weights(self, weights, dtype):
-        """
-        Performs symmetric per-column quantization and dequantization on a weight tensor.
-
-        This implementation is a pure PyTorch replacement for the original function that
-        relied on a custom tensorrt_llm operator. It supports both 8-bit (int8) and
-        4-bit (quint4x2 style) quantization.
-
-        Args:
-            weights (torch.Tensor): The input weight tensor to be quantized.
-            dtype (torch.dtype): The quantized dtype to target.
-
-        Returns:
-            qweight (torch.int8): The packed quantized weights.
-                For 4-bit mode, two 4-bit values are packed into a single int8.
-                For 8-bit mode, this is the standard int8 quantized tensor.
-                It is transposed relative to the input weights' shape.
-            scales: The quantization scales for each column.
-        """
-        is_4_bit = dtype == torch.quint4x2
-
-        q_bits = 4 if is_4_bit else 8
-        q_max = 2 ** (q_bits - 1) - 1  #  7 (4-bits),  127 (8-bits)
-        q_min = -(2 ** (q_bits - 1))   # -8 (4-bits), -128 (8-bits)
-
-        max_abs_val = torch.max(torch.abs(weights), dim=0, keepdim=True).values
-        max_abs_val[max_abs_val == 0] = 1.0
-        scales = max_abs_val / q_max
-
-        quant_weights = torch.round(weights / scales).clamp(q_min, q_max).to(torch.int8)
-
-        # Determine how to pack qweight
-        if is_4_bit:
-            # Pack two 4-bit integers into a single int8
-            q_weights_t = quant_weights.T.contiguous()
-            shape = q_weights_t.shape
-            q_weights_t_reshaped = q_weights_t.view(shape[0], shape[1] // 2, 2)
-            lower_nibble = q_weights_t_reshaped[..., 0]
-            upper_nibble = q_weights_t_reshaped[..., 1]
-            processed_q_weight = (lower_nibble & 0x0F) | (upper_nibble << 4)
-        else:
-            # For 8-bit, the processed weights are just the transposed quantized weights (no packing)
-            processed_q_weight = quant_weights.T.contiguous()
-
-        return processed_q_weight, scales.squeeze(0)
-
     def make_qmoe_weights(self, weights):
         dtype = torch.quint4x2 if self.moe_attrs["expert_weight_bits"] == 4 else torch.int8
         qweight, scales = None, None
@@ -2436,10 +2390,7 @@ class Model:
             unsuccessful = True
         finally:
             if unsuccessful:
-                print("WARNING: Falling back to a pure PyTorch implementation for quantizing MoE weights.")
-                print("WARNING: Parity differences may occur. Please ensure TensorRT-LLM installs and runs successfully in your environment for the best results.")
-                qweight, scales = self.make_symmetric_per_column_weights(weights.T, dtype)
-                qweight = qweight.T
+                raise RuntimeError("Failed to quantize MoE weights with TensorRT-LLM. Please ensure TensorRT-LLM installs and runs successfully in your environment.")
 
         return qweight, scales.to(torch.float16)
 
