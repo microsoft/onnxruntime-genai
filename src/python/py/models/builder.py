@@ -2424,7 +2424,7 @@ class Model:
             import tensorrt_llm
 
             _, qweight, scales = (
-                torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(weights.T.detach().cpu().contiguous(), dtype)
+                torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(weights.detach().cpu().contiguous(), dtype)
             )
         except ImportError:
             print("tensorrt_llm is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix().")
@@ -2487,9 +2487,9 @@ class Model:
 
         for i in range(self.moe_attrs["num_experts"]):
             # Quantize the weights with uint8
-            pre_qweight1, w1_scale = self.make_qmoe_weights(bsm.experts[i].w1.weight)
-            pre_qweight2, w2_scale = self.make_qmoe_weights(bsm.experts[i].w2.weight)
-            pre_qweight3, w3_scale = self.make_qmoe_weights(bsm.experts[i].w3.weight)
+            pre_qweight1, w1_scale = self.make_qmoe_weights(bsm.experts[i].w1.weight.T)
+            pre_qweight2, w2_scale = self.make_qmoe_weights(bsm.experts[i].w2.weight.T)
+            pre_qweight3, w3_scale = self.make_qmoe_weights(bsm.experts[i].w3.weight.T)
 
             w1_list.append(pre_qweight1)
             w2_list.append(pre_qweight2)
