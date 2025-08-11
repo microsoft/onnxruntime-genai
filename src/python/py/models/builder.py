@@ -2427,15 +2427,17 @@ class Model:
                 torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(weights.detach().cpu().contiguous(), dtype)
             )
         except ImportError:
-            print("tensorrt_llm is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix().")
+            print("WARNING: TensorRT-LLM is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix().")
             unsuccessful = True
         except RuntimeError as r:
+            print("WARNING: TensorRT-LLM failed to run torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix() successfully.")
             err = str(r)
             print(err[ : err.find('\n1')])  # omit internal traceback inside TensorRT-LLM
             unsuccessful = True
         finally:
             if unsuccessful:
-                print("Falling back to a pure PyTorch implementation for quantizing MoE weights.")
+                print("WARNING: Falling back to a pure PyTorch implementation for quantizing MoE weights.")
+                print("WARNING: Parity differences may occur. Please ensure TensorRT-LLM installs and runs successfully in your environment for the best results.")
                 qweight, scales = self.make_symmetric_per_column_weights(weights.T, dtype)
                 qweight = qweight.T
 
