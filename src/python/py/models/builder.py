@@ -2373,21 +2373,21 @@ class Model:
     def make_qmoe_weights(self, weights):
         dtype = torch.quint4x2 if self.moe_attrs["expert_weight_bits"] == 4 else torch.int8
         qweight, scales = None, None
-        unsuccessful = False
+
+        unsuccessful = True
         try:
             import tensorrt_llm
 
             _, qweight, scales = (
                 torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(weights.detach().cpu().contiguous(), dtype)
             )
+            unsuccessful = False
         except ImportError:
             print("WARNING: TensorRT-LLM is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix().")
-            unsuccessful = True
         except RuntimeError as r:
             print("WARNING: TensorRT-LLM failed to run torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix() successfully.")
             err = str(r)
             print(err[ : err.find('\n1')])  # omit internal traceback inside TensorRT-LLM
-            unsuccessful = True
         finally:
             if unsuccessful:
                 raise RuntimeError("Failed to quantize MoE weights with TensorRT-LLM. Please ensure TensorRT-LLM installs and runs successfully in your environment.")
