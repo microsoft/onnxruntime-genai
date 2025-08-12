@@ -1496,20 +1496,26 @@ class Model:
         # self.make_cast(cast_name, gather_output, ir.DataType.INT32, shape=None)
         # cast_output = f"{cast_name}/output_0"
 
-        # Gather second dimension of past key/value
-        shape_2_name = f"{basename}/Shape_2"
-        shape_2_output = f"{shape_2_name}/output_0"
-        self.make_shape(shape_2_name, "past_key_values.0.key", shape=[4])
-        gather_2_name = f"{basename}/Gather_2"
-        gather_2_output = f"{gather_2_name}/output_0"
-        self.make_node("Gather", inputs=[shape_2_output, "/model/constants/INT64/1"], outputs=[gather_2_output], name=gather_2_name)
-        self.make_value(gather_2_output, ir.DataType.INT64, shape=None)
+        # Create a constant for block_size
+
+        # TODO(aciddelgado): Gather second dimension of past key/value THIS DOESN'T WORK... options:
+        # Identity on key/value
+        # Pass as input block_size and num_blocks
+        # 
+        # shape_2_name = f"{basename}/Shape_2"
+        # shape_2_output = f"{shape_2_name}/output_0"
+        # self.make_shape(shape_2_name, "past_key_values.0.value", shape=[4])
+        # gather_2_name = f"{basename}/Gather_2"
+        # gather_2_output = f"{gather_2_name}/output_0"
+        # self.make_node("Gather", inputs=[shape_2_output, "/model/constants/INT64/1"], outputs=[gather_2_output], name=gather_2_name)
+        # self.make_value(gather_2_output, ir.DataType.INT64, shape=None)
+        
         # cast_2_name = f"{basename}/Cast_2"
         # self.make_cast(cast_2_name, gather_2_output, ir.DataType.INT32, shape=None)
         # cast_2_output = f"{cast_2_name}/output_0"
 
         multiply_name = f"{basename}/Multiply"
-        multiply_inputs = [gather_output, gather_2_output]
+        multiply_inputs = [gather_output, "/model/constants/INT64/256"]  # TODO(aciddelgado): Replace 256 with a dimensional input
         self.make_node("Mul", inputs=multiply_inputs, outputs=[f"{multiply_name}/output_0"], name=multiply_name)
         self.make_value(f"{multiply_name}/output_0", ir.DataType.INT64, shape=None)
 

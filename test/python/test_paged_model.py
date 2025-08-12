@@ -6,7 +6,7 @@ import torch
 def test_paged_model():
   # Create a session with PagedModelExecutionProvider
   options = SessionOptions()
-  session = InferenceSession("C:/Users/aciddelgado/onnxruntime-genai/test/test_models/phi3.5paged_7_14_25/model.onnx", options, providers=['CUDAExecutionProvider'])
+  session = InferenceSession("C:/Users/aciddelgado/onnxruntime-genai/test/test_models/phi3.5paged_8_11_25/model.onnx", options, providers=['CUDAExecutionProvider'])
 
   # Input params
   batch_size = 1
@@ -55,7 +55,10 @@ def test_paged_model():
     print(f"input pointer for past_key_values.{i}.value: {values[i].data_ptr()}")
     io_binding.bind_input(f"past_key_values.{i}.key", "cuda", 0, np.float16, keys[i].shape(), keys[i].data_ptr())
     io_binding.bind_input(f"past_key_values.{i}.value", "cuda", 0, np.float16, values[i].shape(), values[i].data_ptr())
-  io_binding.bind_output("logits")
+  logits_shape = (num_tokens, vocab_size)
+  logits = torch.empty(logits_shape, dtype=torch.float16, device='cuda')
+  logits_ortvalue = OrtValue.ortvalue_from_numpy(logits.detach().cpu().numpy(), "cuda", 0)
+  io_binding.bind_ortvalue_output("logits", logits_ortvalue)
   for i in range(num_layers):
     print(f"output pointer for present.{i}.key: {keys[i].data_ptr()}")
     print(f"output pointer for present.{i}.value: {values[i].data_ptr()}")
@@ -65,13 +68,12 @@ def test_paged_model():
   # Run inference
   outputs = session.run_with_iobinding(io_binding)
   outputs = io_binding.copy_outputs_to_cpu()
-  # print(f"Outputs: {outputs}")
 
   # Check output shape
   logits = outputs[0]
   assert logits.shape == (num_tokens, vocab_size), f"Expected output shape {(num_tokens, vocab_size)}, but got {logits.shape}"
 
-  print("Paged model test passed successfully.")
+  print("Paged model ran successfully.")
 
   session = InferenceSession("C:/Users/aciddelgado/onnxruntime-genai/test/test_models/phi-3.5-mini-12_05_24/gpu/gpu-int4-awq-block-128/model.onnx", options, providers=['CUDAExecutionProvider'])
 
@@ -96,9 +98,10 @@ def test_paged_model():
 
   logits_nopage = outputs[0]
   assert logits_nopage.shape == (batch_size, sequence_length, vocab_size), f"Expected output shape {(batch_size, sequence_length, vocab_size)}, but got {logits_nopage.shape}"
-  print("Second model test passed successfully.")
+  print("GQA model passed successfully.")
 
   # Compare logits and logits_nopage
+  print(f"Logits - logits_nopage sample: {logits[0, :10] - logits_nopage[0, 0, :10]}")
   assert np.allclose(logits, logits_nopage[0], atol=1e-3), "Logits from paged model and nopaged model do not match."
   
 
