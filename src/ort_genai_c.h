@@ -23,7 +23,6 @@ extern "C" {
 #define OGA_EXPORT __declspec(dllimport)
 #endif
 #define OGA_API_CALL _stdcall
-#define ORTCHAR_T wchar_t
 #else
 // To make symbols visible on macOS/iOS
 #ifdef __APPLE__
@@ -32,7 +31,6 @@ extern "C" {
 #define OGA_EXPORT
 #endif
 #define OGA_API_CALL
-#define ORTCHAR_T char
 #endif
 
 /** \addtogroup Global
