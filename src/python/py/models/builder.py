@@ -1892,8 +1892,11 @@ class Model:
             kwargs.get("seqlens_k", ""), kwargs.get("total_seq_len", ""),
             kwargs.get("cos_cache", ""), kwargs.get("sin_cache", ""),
             "", "",  # position_ids, attention_bias
-            kwargs.get("sinks", ""),
         ]
+        sinks = kwargs.get("sinks", "")  # TODO: add to inputs list directly once ORT 1.23 is out (one-time exception)
+        if sinks:
+            inputs += sinks
+
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
         self.make_node(
