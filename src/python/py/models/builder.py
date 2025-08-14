@@ -3756,12 +3756,6 @@ class ErnieModel(MistralModel):
 class GPTOSSModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.layernorm_attrs["cast"]["use_fp32"] = True
-        self.layernorm_attrs["cast"]["root_input"] = False
-        self.layernorm_attrs["cast"]["skip_input"] = True
-        self.layernorm_attrs["cast"]["output_0"] = True
-        self.layernorm_attrs["cast"]["output_3"] = False
-
         self.is_local = lambda layer_id: bool(layer_id % 2 == 0)
         self.attention_attrs["sinks"] = True
 
@@ -3769,6 +3763,7 @@ class GPTOSSModel(Model):
         self.moe_attrs["activation_beta"] = 1.0
         self.moe_attrs["activation_type"] = "swiglu"
         self.moe_attrs["normalize_routing_weights"] = True
+        self.moe_attrs["swiglu_fusion"] = 1
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
