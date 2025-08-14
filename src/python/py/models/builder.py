@@ -1895,7 +1895,7 @@ class Model:
         ]
         sinks = kwargs.get("sinks", "")  # TODO: add to inputs list directly once ORT 1.23 is out (one-time exception)
         if sinks:
-            inputs += sinks
+            inputs += [sinks]
 
         output = f"{name}/output_0"
         outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
