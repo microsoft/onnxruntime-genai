@@ -12,4 +12,4 @@ onnxruntime-genai
 sentencepiece
 pandas
 datasets
-torch
+torch>=2.6.0
