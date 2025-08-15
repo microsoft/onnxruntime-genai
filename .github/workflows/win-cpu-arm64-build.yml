@@ -111,7 +111,11 @@ jobs:
 
       - name: Build the Java API and Run the Java Tests
         run: |
-          python build.py --config=Release --build_dir $env:binaryDir --build_java --parallel
+          python build.py --config=Release --build_dir $env:binaryDir --build_java --update --build --parallel
+
+          Get-ChildItem -Recurse -Path $env:binaryDir
+
+          python build.py --config=Release --build_dir $env:binaryDir --build_java --test
 
       - name: Verify Build Artifacts
         if: always()
