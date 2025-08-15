@@ -240,6 +240,10 @@ final class GenAI {
     try (InputStream is = GenAI.class.getResourceAsStream(resourcePath)) {
       if (is == null) {
         // Not found in classpath resources
+        logger.log(
+            traceLevel,
+            "extractFromResource() - Resource path not found: " + resourcePath);
+
         return Optional.empty();
       } else {
         // Found in classpath resources, load via temporary file
