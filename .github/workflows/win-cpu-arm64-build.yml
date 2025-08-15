@@ -40,6 +40,7 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
+          architecture: 'aarch64'
           cache: 'gradle'
 
       - name: Setup Gradle
