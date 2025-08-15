@@ -41,6 +41,7 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
           cache: 'gradle'
+          architecture: 'aarch64'
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v3
