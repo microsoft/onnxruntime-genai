@@ -49,6 +49,8 @@ final class GenAI {
   /** The temp directory where native libraries are extracted */
   private static Path tempDirectory;
 
+  private static final Level traceLevel = Level.INFO;
+
   static synchronized void init() throws IOException {
     if (loaded) {
       return;
@@ -127,7 +129,7 @@ final class GenAI {
       return;
     }
 
-    logger.log(Level.FINE, "Deleting " + file + " on exit");
+    logger.log(traceLevel, "Deleting " + file + " on exit");
     file.deleteOnExit();
   }
 
@@ -157,7 +159,7 @@ final class GenAI {
     // 1) The user may skip loading of this library:
     String skip = System.getProperty("onnxruntime-genai.native." + library + ".skip");
     if (Boolean.TRUE.toString().equalsIgnoreCase(skip)) {
-      logger.log(Level.FINE, "Skipping load of native library '" + library + "'");
+      logger.log(traceLevel, "Skipping load of native library '" + library + "'");
       return;
     }
 
@@ -167,7 +169,7 @@ final class GenAI {
     // 2) The user may explicitly specify the path to a directory containing all shared libraries:
     if (libraryDirPathProperty != null) {
       logger.log(
-          Level.FINE,
+          traceLevel,
           "Attempting to load native library '"
               + library
               + "' from specified path: "
@@ -181,7 +183,7 @@ final class GenAI {
       }
 
       System.load(libraryFilePath);
-      logger.log(Level.FINE, "Loaded native library '" + library + "' from specified path");
+      logger.log(traceLevel, "Loaded native library '" + library + "' from specified path");
       return;
     }
 
@@ -190,7 +192,7 @@ final class GenAI {
         System.getProperty("onnxruntime-genai.native." + library + ".path");
     if (libraryPathProperty != null) {
       logger.log(
-          Level.FINE,
+          traceLevel,
           "Attempting to load native library '"
               + library
               + "' from specified path: "
@@ -202,7 +204,7 @@ final class GenAI {
       }
 
       System.load(libraryFilePath);
-      logger.log(Level.FINE, "Loaded native library '" + library + "' from specified path");
+      logger.log(traceLevel, "Loaded native library '" + library + "' from specified path");
       return;
     }
 
@@ -211,13 +213,13 @@ final class GenAI {
     if (extractedPath.isPresent()) {
       // extracted library from resources
       System.load(extractedPath.get().getAbsolutePath());
-      logger.log(Level.FINE, "Loaded native library '" + library + "' from resource path");
+      logger.log(traceLevel, "Loaded native library '" + library + "' from resource path");
     } else {
       // failed to load library from resources, try to load it from the library path
       logger.log(
-          Level.FINE, "Attempting to load native library '" + library + "' from library path");
+          traceLevel, "Attempting to load native library '" + library + "' from library path");
       System.loadLibrary(library);
-      logger.log(Level.FINE, "Loaded native library '" + library + "' from library path");
+      logger.log(traceLevel, "Loaded native library '" + library + "' from library path");
     }
   }
 
@@ -242,7 +244,7 @@ final class GenAI {
       } else {
         // Found in classpath resources, load via temporary file
         logger.log(
-            Level.FINE,
+            traceLevel,
             "Attempting to load native library '"
                 + library
                 + "' from resource path "
@@ -258,7 +260,7 @@ final class GenAI {
           }
         }
 
-        logger.log(Level.FINE, "Extracted native library '" + library + "' from resource path");
+        logger.log(traceLevel, "Extracted native library '" + library + "' from resource path");
         return Optional.of(tempFile);
       }
     } catch (IOException e) {
