@@ -848,8 +848,14 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   }
 
   if (config_session_options.custom_ops_library.has_value()) {
-    fs::path custom_library_file_prefix{config_session_options.custom_ops_library.value()};
-    session_options.RegisterCustomOpsLibrary(custom_library_file_prefix.c_str());
+    std::filesystem::path custom_library_file_prefix{config_session_options.custom_ops_library.value()};
+    if (std::filesystem::exists(custom_library_file_prefix)) {
+      std::filesystem::path custom_op_lib_path = std::filesystem::absolute(custom_library_file_prefix);
+      session_options.RegisterCustomOpsLibrary(custom_op_lib_path.c_str());
+    } else {
+      throw std::runtime_error("Custom op library registration failed. No such file " +
+                               custom_library_file_prefix.string());
+    }
   }
 
   if (config_session_options.graph_optimization_level.has_value()) {
