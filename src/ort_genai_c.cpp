@@ -983,4 +983,12 @@ void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete p; }
 void OGA_API_CALL OgaDestroyEngine(OgaEngine* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRequest(OgaRequest* p) { p->ExternalRelease(); }
 
+void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const char* library_path) {
+  Ort::RegisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name, fs::path(library_path).c_str());
+}
+
+void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name) {
+  Ort::UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name);
+}
+
 }  // extern "C"
