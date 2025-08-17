@@ -43,6 +43,7 @@ The tool currently supports the following model architectures.
 - Nemotron
 - Phi
 - Qwen
+- SmolLM3
 
 It is intended for supporting the latest, popular state-of-the-art models.
 
