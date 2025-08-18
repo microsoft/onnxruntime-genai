@@ -16,7 +16,7 @@ See documentation at https://onnxruntime.ai/docs/genai.
 
 |Support matrix|Supported now|Under development|On the roadmap|
 | -------------- | ------------- | ----------------- | -------------- |
-| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Gemma <br/> Granite <br/> Llama * <br/> Mistral + <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen <br/> SmolLM3 | Whisper | Stable diffusion |
+| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Gemma <br/> gpt-oss <br/> Granite <br/> Llama * <br/> Mistral + <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen <br/> SmolLM3 | Whisper | Stable diffusion |
 |API| Python <br/>C# <br/>C/C++ <br/> Java ^ |Objective-C||
 |Platform| Linux <br/> Windows <br/>Mac ^ <br/>Android ^  ||iOS |||
 |Architecture|x86 <br/> x64 <br/> Arm64 ~ ||||
