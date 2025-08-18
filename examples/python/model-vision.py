@@ -5,9 +5,11 @@ import argparse
 import os
 import glob
 import time
+import json
 from pathlib import Path
 
 import onnxruntime_genai as og
+# og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
 
 def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
     curr_path = Path(current_dir).absolute()
@@ -28,15 +30,17 @@ def _complete(text, state):
 def run(args: argparse.Namespace):
     print("Loading model...")
     config = og.Config(args.model_path)
-    config.clear_providers()
-    if args.execution_provider != "cpu":
-        print(f"Setting model to {args.execution_provider}...")
-        config.append_provider(args.execution_provider)
+    if args.execution_provider != "follow_config":
+        config.clear_providers()
+        if args.execution_provider != "cpu":
+            print(f"Setting model to {args.execution_provider}...")
+            config.append_provider(args.execution_provider)
     model = og.Model(config)
     print("Model loaded")
 
+    tokenizer = og.Tokenizer(model)
     processor = model.create_multimodal_processor()
-    tokenizer_stream = processor.create_stream()
+    stream = processor.create_stream()
 
     interactive = not args.non_interactive
 
@@ -64,20 +68,7 @@ def run(args: argparse.Namespace):
 
         image_paths = [image_path for image_path in image_paths if image_path]
 
-        user_tag = image_tag = assistant_tag = end_tag = ""
-        if model.type == "phi3v":
-            user_tag = "<|user|>\n"
-            image_tag = "<|image_{image_id}|>\n"
-            assistant_tag = "<|assistant|>\n"
-            end_tag = "<|end|>\n"
-        elif model.type == "gemma3":
-            user_tag = "<start_of_turn>user\n"
-            image_tag = "<start_of_image>"
-            assistant_tag = "<start_of_turn>model\n"
-            end_tag = "<end_of_turn>\n"
-
         images = None
-        prompt = f"{user_tag}"
         if len(image_paths) == 0:
             print("No image provided")
         else:
@@ -85,7 +76,6 @@ def run(args: argparse.Namespace):
                 if not os.path.exists(image_path):
                     raise FileNotFoundError(f"Image file not found: {image_path}")
                 print(f"Using image: {image_path}")
-                prompt += f"{image_tag.replace('{image_id}', str(i+1))}"
 
             images = og.Images.open(*image_paths)
 
@@ -96,23 +86,39 @@ def run(args: argparse.Namespace):
                 text = args.prompt
             else:
                 text = "What is shown in this image?"
-        prompt += f"{text}{end_tag}{assistant_tag}"
+        
+        # Construct the "messages" argument passed to apply_chat_template
+        messages = []
+        if model.type == "phi3v":
+            # Combine all image tags and text into one user message
+            content = "".join([f"<|image_{i+1}|>\n" for i in range(len(image_paths))]) + text
+            messages.append({"role": "user", "content": content})
+        else:
+            # Gemma3-style multimodal: structured content
+            content_list = [{"type": "image"} for _ in image_paths]
+            content_list.append({"type": "text", "text": text})
+            messages.append({"role": "user", "content": content_list})
+
+        # Apply the chat template using the tokenizer
+        message_json = json.dumps(messages)
+        prompt = tokenizer.apply_chat_template(message_json, add_generation_prompt=True)
+
         print("Processing images and prompt...")
         inputs = processor(prompt, images=images)
 
         print("Generating response...")
         params = og.GeneratorParams(model)
-        params.set_inputs(inputs)
         params.set_search_options(max_length=7680)
 
         generator = og.Generator(model, params)
+        generator.set_inputs(inputs)
         start_time = time.time()
 
         while not generator.is_done():
             generator.generate_next_token()
 
             new_token = generator.get_next_tokens()[0]
-            print(tokenizer_stream.decode(new_token), end="", flush=True)
+            print(stream.decode(new_token), end="", flush=True)
 
         print()
         total_run_time = time.time() - start_time
@@ -134,7 +140,7 @@ if __name__ == "__main__":
         "-m", "--model_path", type=str, required=True, help="Path to the folder containing the model"
     )
     parser.add_argument(
-        "-e", "--execution_provider", type=str, required=True, choices=["cpu", "cuda", "dml"], help="Execution provider to run model"
+        "-e", "--execution_provider", type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead."
     )
     parser.add_argument(
         "--image_paths", nargs='*', type=str, required=False, help="Path to the images, mainly for CI usage"

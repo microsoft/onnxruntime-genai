@@ -13,6 +13,8 @@ def generate_files(lines, args):
     platform_map = {
         "win-arm64": args.win_arm64,
         "win-x64": args.win_x64,
+        "osx-x64": args.osx_x64,
+        "osx-arm64": args.osx_arm64,
     }
 
     avoid_keywords = {"pdb"}
@@ -80,8 +82,10 @@ def parse_arguments():
         required=True,
         help="The last commit id included in this package.",
     )
-    parser.add_argument("--win_arm64", required=True, help="Ort win-arm64 directory")
-    parser.add_argument("--win_x64", required=True, help="Ort win-x64 directory")
+    parser.add_argument("--win_arm64", required=True, help="Ort-genai win-arm64 directory")
+    parser.add_argument("--win_x64", required=True, help="Ort-genai win-x64 directory")
+    parser.add_argument("--osx_x64", required=True, help="Ort-genai osx-x64 directory")
+    parser.add_argument("--osx_arm64", required=True, help="Ort-genai osx-arm64 directory")
 
     args = parser.parse_args()
     args.sdk_info = ""

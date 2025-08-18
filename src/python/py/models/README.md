@@ -31,15 +31,18 @@ This folder contains the model builder for quickly creating optimized and quanti
 
 The tool currently supports the following model architectures.
 
+- AMD OLMo
 - ChatGLM
+- DeepSeek
+- ERNIE 4.5
 - Gemma
 - Granite
-- LLaMA
+- Llama
 - Mistral
 - Nemotron
 - Phi
 - Qwen
-- AMD OLMo
+- SmolLM3
 
 It is intended for supporting the latest, popular state-of-the-art models.
 

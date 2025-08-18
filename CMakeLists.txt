@@ -29,6 +29,59 @@ if(MSVC)
   # See https://developercommunity.visualstudio.com/t/Access-violation-with-std::mutex::lock-a/10664660#T-N10668856
   # Remove this definition once the conda msvcp140.dll dll is updated.
   add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
+
+  # Add compiler options for security standards
+  # Note: Must use separate generator expressions — do NOT use "C,CXX" in COMPILE_LANGUAGE.
+
+  # Explicitly enable (/GS) stack protection to pass BinSkim checks
+  add_compile_options("$<$<COMPILE_LANGUAGE:C>:/GS>")
+  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/GS>")
+
+  # Enable Control Flow Guard on compiler and linker to pass BinSkim checks
+  add_compile_options("$<$<COMPILE_LANGUAGE:C>:/guard:cf>")
+  add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/guard:cf>")
+  add_link_options(/guard:cf /DYNAMICBASE)
+
+  # Enable CET shadow stack unless building for ARM64 (not supported there)
+  message(STATUS "Processor: ${CMAKE_SYSTEM_PROCESSOR}")
+  if(NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+    message(STATUS "CET shadow stack enabled (/CETCOMPAT)")
+    add_link_options(/CETCOMPAT)
+  else()
+    message(STATUS "CET shadow stack skipped for ARM64 build")
+  endif()
+
+  # Enable Spectre mitigations for C and C++ compilations only (avoid CUDA nvcc - not supported there)
+  add_compile_options(
+    "$<$<COMPILE_LANGUAGE:C>:/Qspectre>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/Qspectre>"
+  )
+
+  # Use updated value for __cplusplus macro (e.g. 201703L for C++17) instead of default 199711L
+  # Required by some libraries/tools that check __cplusplus for feature support
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
+
+  add_compile_options(
+    # Suppress warning C5038: data member will be initialized after another
+    # Common when member initializer list is written out-of-order vs. declaration
+    "$<$<COMPILE_LANGUAGE:C>:/w15038>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/w15038>"
+
+    # Suppress warning C4100: unreferenced formal parameter
+    # Often appears in template or virtual function overrides where a param is unused
+    "$<$<COMPILE_LANGUAGE:C>:/wd4100>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/wd4100>"
+
+    # Enable warning level 4 (more aggressive than default /W3)
+    # Captures more potential bugs or code smells
+    "$<$<COMPILE_LANGUAGE:C>:/W4>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/W4>"
+
+    # Treat all warnings as errors (fail build on any warning)
+    # Combine carefully with /W4 — suppress any known false positives
+    "$<$<COMPILE_LANGUAGE:C>:/WX>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/WX>"
+  )
 endif()
 
 include(cmake/ortlib.cmake)
@@ -45,17 +98,8 @@ include(cmake/check_dml.cmake)
 include(cmake/cxx_standard.cmake)
 
 add_compile_definitions(BUILDING_ORT_GENAI_C)
-if(MSVC)
-  # set updated value for __cplusplus macro instead of 199711L
-  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:__cplusplus>)
 
-  add_compile_options(
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/w15038>"
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/wd4100>"
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/W4>"
-      "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>"
-  )
-endif()
+add_compile_definitions(USE_GUIDANCE=$<BOOL:${USE_GUIDANCE}>)
 
 # Suggested by https://gitlab.kitware.com/cmake/cmake/-/issues/20132
 # MacCatalyst is not well supported in CMake
@@ -77,6 +121,11 @@ if(ENABLE_TESTS)
   endif()
 endif()
 
+if(ENABLE_TRACING)
+  message(STATUS "Tracing is enabled.")
+  add_compile_definitions(ORTGENAI_ENABLE_TRACING)
+endif()
+
 find_package(Threads REQUIRED)
 
 if(WIN32)
@@ -92,8 +141,7 @@ else()
 endif()
 
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
-target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/include)
-target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api/)
+target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
 target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(onnxruntime-genai PRIVATE Threads::Threads)
@@ -132,6 +180,16 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     set_property(TARGET onnxruntime-genai-cuda APPEND_STRING PROPERTY LINK_FLAGS "-DEF:${GENERATORS_ROOT}/cuda/symbols.def")
   else()
     message(FATAL_ERROR "${target} unknown platform, need to specify shared library exports for it")
+  endif()
+endif()
+
+
+if(USE_GUIDANCE)
+  target_include_directories(onnxruntime-genai PUBLIC ${llguidance_SOURCE_DIR}/parser/)
+  target_link_libraries(onnxruntime-genai PRIVATE llguidance)
+  if (WIN32)
+    # bcrypt is needed for the rust std lib
+    target_link_libraries(onnxruntime-genai PRIVATE bcrypt)
   endif()
 endif()
 

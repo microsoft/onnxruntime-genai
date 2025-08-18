@@ -1,0 +1,71 @@
+{
+    "model" : {
+        "bos_token_id": 50257,
+        "context_length": 448,
+        "decoder": {
+            "session_options": {
+                "log_id": "onnxruntime-genai",
+                "provider_options": []
+            },
+            "filename": "dummy_decoder.onnx",
+            "head_size": 64,
+            "hidden_size": 384,
+            "inputs": {
+                "input_ids": "input_ids",
+                "past_key_names": "past_key_self_%d",
+                "past_value_names": "past_value_self_%d",
+                "cross_past_key_names": "past_key_cross_%d",
+                "cross_past_value_names": "past_value_cross_%d"
+            },
+            "outputs": {
+                "logits": "logits",
+                "present_key_names": "present_key_self_%d",
+                "present_value_names": "present_value_self_%d",
+                "output_cross_qk_names": "output_cross_qk_%d"
+            },
+            "num_attention_heads": 6,
+            "num_hidden_layers": 1,
+            "num_key_value_heads": 6
+        },
+        "encoder": {
+            "session_options": {
+                "log_id": "onnxruntime-genai",
+                "provider_options": []
+            },
+            "filename": "dummy_encoder.onnx",
+            "head_size": 64,
+            "hidden_size": 384,
+            "inputs": {
+                "audio_features": "audio_features"
+            },
+            "outputs" : {
+                "encoder_hidden_states": "encoder_hidden_states", 
+                "cross_present_key_names": "present_key_cross_%d",
+                "cross_present_value_names": "present_value_cross_%d"
+            },
+            "num_attention_heads": 6,
+            "num_hidden_layers": 1
+        },
+        "eos_token_id": 50257,
+        "pad_token_id": 50257,
+        "type": "whisper",
+        "vocab_size": 51865
+    },
+    "search": {
+        "diversity_penalty": 0.0,
+        "do_sample": false,
+        "early_stopping": true,
+        "length_penalty": 1.0,
+        "max_length": 448,
+        "min_length": 0,
+        "no_repeat_ngram_size": 0,
+        "num_beams": 1,
+        "num_return_sequences": 1,
+        "past_present_share_buffer": false,
+        "repetition_penalty": 1.0,
+        "temperature": 1.0,
+        "top_k": 1,
+        "top_p": 1.0
+    }
+}
+  

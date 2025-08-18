@@ -11,8 +11,7 @@ void Launch_UpdatePositionIds(T* positions, int batch_beam_size, int total_lengt
 template <typename T>
 void Launch_UpdateAttentionMask(T* mask_data, T* old_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, cudaStream_t stream);
 
-void LaunchHandleEOSArray(float* batch_logits, int batch_beam_size, int vocab_size, const int32_t* eos_token_ids, int eos_token_ids_count, cudaStream_t stream);
-
+void LaunchAddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_size, const uint32_t* logits_mask, cudaStream_t stream);
 void LaunchFp16ToFp32(const uint16_t* fp16, float* fp32, int count, cudaStream_t stream);
 void LaunchFp32ToFp16(const float* fp32, uint16_t* fp16, int count, cudaStream_t stream);
 void LaunchInt32ToInt64(const int32_t* src, int64_t* dst, int count, cudaStream_t stream);
@@ -36,7 +35,7 @@ void UpdateCacheIndirectionKernelLauncher(int32_t* tgt_indir_cache,
 template <typename T>
 void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream,
                                        T* cross_qk_buffer_data,
-                                       T** qk_layer_pointers,
+                                       void** qk_layer_pointers,
                                        int token_index,
                                        int batch_beam_size,
                                        int num_layers,
@@ -44,13 +43,14 @@ void LaunchCopyCrossQKSingleDecodeStep(cudaStream_t stream,
                                        int num_alignment_heads,
                                        const int* alignment_heads,
                                        int frames,
-                                       int max_length);
+                                       int max_length,
+                                       int sequence_length);
 
 template <typename T>
 void LaunchFinalizeCrossQK(cudaStream_t stream,
                            int iteration_number,
                            int context_decoding_len,
-                           int batch_size,
+                           int batch_beam_size,
                            int num_beams,
                            int max_length,
                            int num_alignment_heads,

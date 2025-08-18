@@ -13,7 +13,7 @@ std::string RuntimeSettings::GenerateConfigOverlay() const {
       "session_options": {
         "provider_options": [
           {
-            "webgpu": {
+            "WebGPU": {
               "dawnProcTable": ")";
   constexpr std::string_view webgpu_overlay_post = R"("
             }

@@ -15,7 +15,7 @@ PresetExtraInputs::PresetExtraInputs(State& state)
            }}} {}
 
 void PresetExtraInputs::Add() {
-  const auto input_names_vector = state_.model_.session_info_->GetInputNames();
+  const auto input_names_vector = state_.model_.session_info_.GetInputNames();
   const std::unordered_set<std::string> input_names(state_.input_names_.begin(), state_.input_names_.end());
   std::vector<std::string> unclaimed_input_names;
   // Add any model input for which we don't have a corresponding input in the state to the unclaimed_input_names
@@ -45,22 +45,15 @@ void PresetExtraInputs::Add() {
 }
 
 ExtraInputs::ExtraInputs(State& state)
-    : state_{state} {
-  extra_inputs_.reserve(state_.params_->extra_inputs.size());
+    : state_{state} {}
 
-  // We don't use graph capture, so simply use the existing pointers
-  for (auto& extra_input : state_.params_->extra_inputs) {
-    extra_inputs_.push_back(extra_input.tensor->ort_tensor_.get());
-  }
-}
-
-void ExtraInputs::Add(const std::vector<std::string>& required_input_names) {
+void ExtraInputs::Add(const std::vector<ExtraInput>& extra_inputs, const std::vector<std::string>& required_input_names) {
   std::unordered_set<std::string> required_input_names_set(required_input_names.begin(), required_input_names.end());
   // Add extra user inputs
-  for (int i = 0; i < state_.params_->extra_inputs.size(); ++i) {
-    if (required_input_names_set.empty() || required_input_names_set.count(state_.params_->extra_inputs[i].name)) {
-      state_.input_names_.push_back(state_.params_->extra_inputs[i].name.c_str());
-      state_.inputs_.push_back(extra_inputs_[i]);
+  for (int i = 0; i < extra_inputs.size(); i++) {
+    if (required_input_names_set.empty() || required_input_names_set.count(extra_inputs[i].name)) {
+      state_.input_names_.push_back(extra_inputs[i].name.c_str());
+      state_.inputs_.push_back(extra_inputs[i].tensor->ort_tensor_.get());
     }
   }
 

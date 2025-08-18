@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #pragma once
+#include "model_type.h"
 #include "ortx_tokenizer.h"
 #include "../generators.h"
 #include "utils.h"
@@ -23,20 +24,24 @@ struct State {
   virtual ~State();
 
   virtual DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) = 0;
-  virtual void Finalize() {}
+  virtual void Finalize(int current_length) {}
 
   void SetTerminate();
   void UnsetTerminate();
   bool session_terminated_{};
-  OrtValue* GetInput(const char* name);
 
   virtual void RewindTo(size_t index) { (void)index; };
-
+  virtual OrtValue* GetInput(const char* name);
   virtual OrtValue* GetOutput(const char* name);
 
   void ClearIO();  // Clear all inputs/outputs
 
   void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
+
+  virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
+
+  void DumpInputs();
+  void DumpOutputs();
 
   const Model& model_;
 
@@ -49,7 +54,7 @@ struct State {
   std::vector<std::pair<std::string, std::string>> ep_dynamic_options_next_run_;
 
  protected:
-  void Run(OrtSession& session, bool graph_capture_this_run = false);  // Uses the inputs below to run
+  void Run(OrtSession& session, bool graph_capture_this_run = false);
   bool first_run_{true};
 
   std::unique_ptr<OrtRunOptions> run_options_;
@@ -82,7 +87,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
 
   std::vector<int32_t> Encode(const char* text) const;
   std::string Decode(std::span<const int32_t> tokens) const;
-  std::string ApplyChatTemplate(const char* template_str, const char* messages, bool add_generation_prompt) const;
+  std::string ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const;
 
   std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
   std::shared_ptr<Tensor> EncodeBatch(std::span<const char*> strings) const;
@@ -100,6 +105,7 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, 
   MultiModalProcessor(Config& config, const SessionInfo& session_info);
 
   std::unique_ptr<NamedTensors> Process(const std::string& prompt, const Images* images, const Audios* audios) const;
+  std::unique_ptr<NamedTensors> Process(std::span<const char*> prompts, const Images* images, const Audios* audios) const;
 
   std::shared_ptr<Tokenizer> tokenizer_;
   std::shared_ptr<Processor> processor_;
@@ -109,7 +115,7 @@ struct MultiModalProcessor : std::enable_shared_from_this<MultiModalProcessor>, 
 };
 
 struct SessionInfo {
-  SessionInfo(OrtSession& session);
+  SessionInfo() = default;
 
   void Add(OrtSession& session);
 
@@ -142,6 +148,8 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   OrtSessionOptions* GetSessionOptions(const std::string& model_id) const;
 
+  std::unique_ptr<OrtSession> CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options);
+
   std::unique_ptr<Config> config_;
   std::unique_ptr<OrtSessionOptions> session_options_;
 
@@ -151,10 +159,9 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
 
   Ort::Allocator& allocator_cpu_{GetDeviceInterface(DeviceType::CPU)->GetAllocator()};
 
-  std::unique_ptr<SessionInfo> session_info_;
+  SessionInfo session_info_;
 
  protected:
-  void InitDeviceAllocator(OrtSession& session);
   void CreateSessionOptions();
 
   void CreateSessionOptionsFromConfig(const Config::SessionOptions& config_session_options,

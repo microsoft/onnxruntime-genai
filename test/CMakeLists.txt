@@ -12,12 +12,14 @@ target_sources(unit_tests PRIVATE ${test_srcs})
 
 target_include_directories(unit_tests PRIVATE
   ${ORT_HEADER_DIR}
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
   ${CMAKE_SOURCE_DIR}/src
 )
 
 target_link_directories(unit_tests PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(unit_tests PRIVATE
   onnxruntime-genai
+  onnxruntime_extensions
   GTest::gtest
 )
 set_target_properties(unit_tests PROPERTIES
@@ -40,3 +42,5 @@ set_property(DIRECTORY ${CMAKE_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT unit_test
 if (NOT MSVC)
   target_compile_options(unit_tests PRIVATE "-fvisibility=hidden")
 endif()
+
+add_test(NAME UnitTests COMMAND unit_tests)

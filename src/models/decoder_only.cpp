@@ -4,9 +4,8 @@
 namespace Generators {
 DecoderOnly_Model::DecoderOnly_Model(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  session_decoder_ = OrtSession::Create(ort_env, (config_->config_path / fs::path(config_->model.decoder.filename)).c_str(), session_options_.get());
-
-  InitDeviceAllocator(*session_decoder_);
+  session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  session_info_.Add(*session_decoder_);
 }
 
 std::unique_ptr<State> DecoderOnly_Model::CreateState(DeviceSpan<int32_t> sequence_lengths_unk, const GeneratorParams& params) const {
@@ -17,12 +16,15 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     : State{params, model},
       model_{model},
       kv_cache_(CreateKeyValueCache(*this)),
-      position_inputs_{model, *this, sequence_lengths_unk} {
+      position_inputs_{model, *this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask} {
   input_ids_.Add();
   position_inputs_.Add();
   logits_.Add();
   kv_cache_->Add();
-  extra_inputs_.Add();
+}
+
+void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  extra_inputs_.Add(extra_inputs, model_.session_decoder_->GetInputNames());
 }
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {

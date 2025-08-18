@@ -1,362 +1,66 @@
 # ONNX Runtime GenAI C Example
 
-Note: ONNX Runtime GenAI needs to be built from source. The headers and shared libraries that are built need to be copied over to the appropriate folders (i.e. the `include` and `lib` folders). Building from source is necessary because these examples have been updated to run with the latest changes. Once the next version of ONNX Runtime GenAI is released, the below instructions will be accurate again.
-
-## Setup
-
-Clone this repo and change into the `examples/c` folder.
-
-```bash
-git clone https://github.com/microsoft/onnxruntime-genai.git
-cd onnxruntime-genai/examples/c
-```
-
-## Phi-3.5 mini
-
-### Download model
-
-This example uses the [Phi-3.5 mini model](https://huggingface.co/microsoft/Phi-3.5-mini-instruct).
-
-You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the Hugging Face CLI.
-
-```bash
-huggingface-cli download microsoft/Phi-3.5-mini-instruct-onnx --include cpu_and_mobile/cpu-int4-awq-block-128-acc-level-4/* --local-dir .
-```
-
-### Chat vs Question Answering
-
-The below examples are for scenarios where you can have chat with the model (i.e. model retains the previous conversation), but if you want to run just Question Answering (i.e. model does not remember past conversation) use `-DPHI3_QA` instead of `-DPHI3`. Also, the executable name would be `phi3_qa` instead of `phi3`.
-
-### Windows x64 CPU
-
-#### Install the onnxruntime and onnxruntime-genai binaries
-
-Change into the `onnxruntime-genai\examples\c` folder.
-
-1. Install onnxruntime
-   
-   ```cmd
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-x64-1.20.1.zip -o onnxruntime-win-x64-1.20.1.zip
-   tar -xvf onnxruntime-win-x64-1.20.1.zip
-   copy onnxruntime-win-x64-1.20.1\include\* include
-   copy onnxruntime-win-x64-1.20.1\lib\* lib
-   ```
-
-2. Install onnxruntime-genai
-
-   ```cmd
-   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.6.0/onnxruntime-genai-0.6.0-win-x64.zip -o onnxruntime-genai-0.6.0-win-x64.zip
-   tar -xvf onnxruntime-genai-0.6.0-win-x64.zip
-   copy onnxruntime-genai-0.6.0-win-x64\include\* include
-   copy onnxruntime-genai-0.6.0-win-x64\lib\* lib
-   ```
-
-#### Build this sample
-
-```bash
-cmake -A x64 -S . -B build -DPHI3=ON
-cd build
-cmake --build . --config Release
-```
-
-#### Run the sample
-
-```bash
-cd Release
-.\phi3.exe <path_to_model> <execution_provider>
-```
-
-### Windows x64 DirectML
-
-#### Install the onnxruntime and onnxruntime-genai binaries
-
-Change into the `onnxruntime-genai\examples\c` folder.
-
-1. Install onnxruntime
-   
-   ```cmd
-   mkdir onnxruntime-win-x64-directml
-   cd onnxruntime-win-x64-directml
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg
-   tar -xvf Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg
-   copy build\native\include\* ..\include
-   copy runtimes\win-x64\native\* ..\lib
-   cd ..
-   ```
-
-2. Install onnxruntime-genai
-
-   ```cmd
-   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.6.0/onnxruntime-genai-0.6.0-win-x64-dml.zip -o onnxruntime-genai-0.6.0-win-x64-dml.zip
-   tar -xvf onnxruntime-genai-0.6.0-win-x64-dml.zip
-   copy onnxruntime-genai-0.6.0-win-x64-dml\include\* ..\include
-   copy onnxruntime-genai-0.6.0-win-x64-dml\lib\* ..\lib
-   cd ..
-   ```
-
-#### Build this sample
-
-```bash
-cmake -A x64 -S . -B build -DPHI3=ON
-cd build
-cmake --build . --config Release
-```
-
-#### Run the sample
-
-```bash
-cd Release
-.\phi3.exe <path_to_model> <execution_provider>
-```
-
-### Windows arm64 CPU
-
-#### Install the onnxruntime and onnxruntime-genai binaries
-
-Change into the `onnxruntime-genai\examples\c` folder.
-
-1. Install onnxruntime
-   
-   ```cmd
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-arm64-1.20.1.zip -o onnxruntime-win-arm64-1.20.1.zip
-   tar -xvf onnxruntime-win-arm64-1.20.1.zip
-   copy onnxruntime-win-arm64-1.20.1\include\* include
-   copy onnxruntime-win-arm64-1.20.1\lib\* lib
-   ```
-
-2. Install onnxruntime-genai
-
-   ```cmd
-   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.6.0/onnxruntime-genai-0.6.0-win-arm64.zip -o onnxruntime-genai-0.6.0-win-arm64.zip
-   tar -xvf onnxruntime-genai-0.6.0-win-arm64.zip
-   copy onnxruntime-genai-0.6.0-win-arm64\include\* ..\include
-   copy onnxruntime-genai-0.6.0-win-arm64\lib\* ..\lib
-   cd ..
-   ```
-
-#### Build this sample
-
-```bash
-cmake -A arm64 -S . -B build -DPHI3=ON
-cd build
-cmake --build . --config Release
-```
-
-#### Run the sample
-
-```bash
-cd Release
-.\phi3.exe <path_to_model> <execution_provider>
-```
-
-### Windows arm64 DirectML
-
-#### Install the onnxruntime and onnxruntime-genai binaries
-
-Change into the `onnxruntime-genai\examples\c` folder.
-
-1. Install onnxruntime
-   
-   ```cmd
-   mkdir onnxruntime-win-arm64-directml
-   cd onnxruntime-win-arm64-directml
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.0/Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg -o Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg
-   tar -xvf Microsoft.ML.OnnxRuntime.DirectML.1.20.0.nupkg
-   copy build\native\include\* ..\include
-   copy runtimes\win-arm64\native\* ..\lib
-   cd ..
-   ```
-
-2. Install onnxruntime-genai
-
-   ```cmd
-   curl -L https://github.com/microsoft/onnxruntime-genai/releases/download/v0.6.0/onnxruntime-genai-0.6.0-win-arm64-dml.zip -o onnxruntime-genai-0.6.0-win-arm64-dml.zip
-   tar -xvf onnxruntime-genai-0.6.0-win-arm64-dml.zip
-   copy onnxruntime-genai-0.6.0-win-arm64-dml\include\* ..\include
-   copy onnxruntime-genai-0.6.0-win-arm64-dml\lib\* ..\lib
-   cd ..
-   ```
-
-#### Build this sample
-
-```bash
-cmake -A arm64 -S . -B build -DPHI3=ON
-cd build
-cmake --build . --config Release
-```
-
-#### Run the sample
-
-```bash
-cd Release
-.\phi3.exe <path_to_model> <execution_provider>
-```
-
-### Linux
-
-#### Install the onnxruntime and onnxruntime-genai binaries
-
-Change into the onnxruntime-genai directory.
-
-1. Install onnxruntime
-
-   ```bash
-   cd examples/c
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz -o onnxruntime-linux-x64-1.20.1.tgz
-   tar xvzf onnxruntime-linux-x64-1.20.1.tgz
-   cp -r onnxruntime-linux-x64-1.20.1/include/* include
-   cp -r onnxruntime-linux-x64-1.20.1/lib/* lib
-   cd ../..
-   ```
-
-2. Build onnxruntime-genai from source and install
-
-   This example requires onnxruntime-genai to be built from source.
-
-   ```bash
-   # This should be run from the root of the onnxruntime-genai folder
-   python build.py --config Release --ort_home examples/c
-   cp src/ort_genai.h examples/c/include
-   cp src/ort_genai_c.h examples/c/include
-   cp build/Linux/Release/libonnxruntime-genai.so examples/c/lib
-   cd examples/c
-   ```
-
-#### Build this sample
-
-Build with CUDA:
-
-```bash
-mkdir build
-cd build
-cmake ../ -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=80 -DUSE_CUDA=ON -DPHI3=ON
-cmake --build . --config Release
-```
-
-Build for CPU:
-
-```bash
-mkdir build
-cd build
-cmake .. -DPHI3=ON
-cmake --build . --config Release
-```
-
-#### Run the sample
-
-```bash
-./phi3 <path_to_model> <execution_provider>
-# Example for CPU: ./phi3 ../cpu_and_mobile/cpu-int4-awq-block-128-acc-level-4/ cpu
-```
-
-## Phi-3.5 vision
-
-### Download model
-
-This example uses the [Phi-3.5 vision model](https://huggingface.co/microsoft/Phi-3.5-vision-instruct).
-
-You can clone this entire model repository or download individual model variants. To download individual variants, you need to install the Hugging Face CLI.
-
-```bash
-huggingface-cli download microsoft/Phi-3.5-vision-instruct-onnx --include cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/* --local-dir .
-```
-
-### Run on Windows
-
-#### Install the required headers and binaries
-
-Change into the onnxruntime-genai folder.
-
-1. Install onnxruntime
-   
-   ```cmd
-   cd examples\c
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-win-x64-1.20.1.zip -o onnxruntime-win-x64-1.20.1.zip
-   tar -xvf onnxruntime-win-x64-1.20.1.zip
-   copy onnxruntime-win-x64-1.20.1\include\* include
-   copy onnxruntime-win-x64-1.20.1\lib\* lib
-   ```
-
-2. Install onnxruntime-genai
-
-   This example requires onnxruntime-genai to be built from source.
-
-   ```cmd
-   cd ..\..
-   python build.py --config Release --ort_home examples\c
-   copy src\ort_genai.h examples\c\include
-   copy src\ort_genai_c.h examples\c\include
-   copy build\Windows\Release\Release\*.dll examples\c\lib
-   copy build\Windows\Release\Release\*.lib examples\c\lib
-   cd examples\c
-   ```
-
-#### Build this sample
-
-```bash
-cmake -G "Visual Studio 17 2022" -A x64 -S . -B build -DPHI3V=ON
-cd build
-cmake --build . --config Release
-```
-
-#### Run the sample
-
-```bash
-cd Release
-.\phi3v.exe <path_to_model> <execution_provider>
-```
-
-### Run on Linux
-
-#### Install the required headers and binaries
-
-Change into the onnxruntime-genai directory.
-
-1. Install onnxruntime
-
-   ```bash
-   cd examples/c
-   curl -L https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz -o onnxruntime-linux-x64-1.20.1.tgz
-   tar xvzf onnxruntime-linux-x64-1.20.1.tgz
-   cp -r onnxruntime-linux-x64-1.20.1/include/* include
-   cp -r onnxruntime-linux-x64-1.20.1/lib/* lib
-   cd ../..
-   ```
-
-2. Build onnxruntime-genai from source and install
-
-   This example requires onnxruntime-genai to be built from source.
-
-   ```bash
-   # This should be run from the root of the onnxruntime-genai folder
-   python build.py --config Release --ort_home examples/c
-   cp src/ort_genai.h examples/c/include
-   cp src/ort_genai_c.h examples/c/include
-   cp build/Linux/Release/libonnxruntime-genai.so examples/c/lib
-   cd examples/c
-   ```
-
-#### Build this sample
-
-Build to run with CUDA:
-
-```bash
-cmake . -B build -DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=80 -DUSE_CUDA=ON -DPHI3V=ON
-cd build
-cmake --build . --config Release
-```
-
-Build for CPU:
-
-```bash
-cmake . -B build -DPHI3V=ON
-cd build
-cmake --build . --config Release
-```
-
-#### Run the sample
-
-```bash
-cd build/Release
-./phi3v <path_to_model> <execution_provider>
-```
+> 📝 **Note:** The examples from the main branch of this repository are compatible with the binaries build from the same commit. Therefore, if using the example from `main`, ONNX Runtime GenAI needs to be built from source. If this is your scenario, just build the library and the examples will be auto built along with the library.
+If this is not your scenario, please use prebuilt binaries from the release you're interested in and use the examples from the same version tag and follow the steps below.
+
+## Download the model
+
+1. Download and install [foundry-local](https://github.com/microsoft/Foundry-Local/releases)
+2. List available models: `foundry model list`
+3. Download a model you would like to run. For example: `foundry model download Phi-4-generic-cpu`
+4. Find out where the model is saved on disk: `foundry cache location`
+5. Identify the path to the model on disk. For example: `C:\Users\<user>\.foundry\Microsoft\Phi-4-generic-cpu\cpu-int4-rtn-block-32-acc-level-4`
+
+> 📝 **Note:** Foundry Local CLI is not available on Linux at the moment. Please download the model from a Windows or a macOS machine and copy it over to your Linux machine if you would like to run on Linux.
+
+For other options to download models, read through [our download options](https://github.com/microsoft/onnxruntime-genai/blob/main/documents/DownloadModels.md).
+
+## Build the C++ Example
+
+1. Clone the repo: `git clone https://github.com/microsoft/onnxruntime-genai.git`
+   - Use the relevant release tag that aligns with the version of the libraries you're planning to use.
+2. `cd onnxruntime-genai`
+3. Download the ONNX Runtime libraries.
+   - Depending on the execution provider of interest, download one of the following:
+      - [CPU execution provider](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime)
+      - [CUDA execution provider on Windows](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.Gpu.Windows)
+      - [CUDA execution provider on Linux](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.Gpu.Linux)
+      - [QNN execution provider](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.QNN)
+      - [DirectML execution provider](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.DirectML)
+   - Rename extension from `*.nupkg` to `*.zip`.
+   - Extract the zip and copy over all the files from `<package>\runtimes\<platform>\native` to `examples\c\lib`
+4. Download the [ONNX Runtime GenAI libraries](https://github.com/microsoft/onnxruntime-genai/releases).
+   - Depending on the execution provider of interest, download one of the following:
+      - CPU / QNN execution provider: `onnxruntime-genai-<version>-<platform>.zip/tar.gz`
+      - CUDA execution provider: `onnxruntime-genai-<version>-<platform>-cuda.zip/tar.gz`
+      - DirectML execution provider: `onnxruntime-genai-<version>-<platform>-dml.zip/tar.gz`
+   - Extract the zip and copy over all the files from `<package>\lib` to `examples\c\lib`
+   - Copy over the header files from `<package>\include` to `examples\c\include`
+5. Build using cmake
+   - Windows x64:
+      ```sh
+      cd examples\c
+      cmake -G "Visual Studio 17 2022" -S . -B build -DMODEL_QA=ON -DMODEL_CHAT=ON
+      cmake --build build --parallel --config Debug
+      ```
+   - Windows arm64:
+      ```sh
+      cd examples\c
+      cmake -G "Visual Studio 17 2022" -S . -B build -DMODEL_QA=ON -DMODEL_CHAT=ON -A ARM64
+      cmake --build build --parallel --config Debug
+      ```   
+   - Linux x64 and macOS:
+      ```sh
+      cd examples/c
+      cmake -G "Unix Makefiles" -S . -B build -DMODEL_QA=ON -DMODEL_CHAT=ON
+      cmake --build build --parallel --config Debug
+      ```
+
+## Run the sample
+
+1. On Windows:
+   - cd build\Debug
+   - .\model_qa.exe <path/to/model/from/above> <execution_provider>
+2. On Linux and macOS:
+   - cd build
+   - ./model_qa <path/to/model/from/above> <execution_provider>

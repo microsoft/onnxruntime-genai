@@ -14,6 +14,9 @@ allprojects {
 
 project.group = "com.microsoft.onnxruntime"
 version = rootProject.file('../../VERSION_INFO').text.trim()
+if (version.endsWith('-dev')) {
+	version = version.replace('-dev', '-SNAPSHOT')
+}
 
 // cmake runs will inform us of the build directory of the current run
 def cmakeBuildDir = System.properties['cmakeBuildDir']
@@ -103,8 +106,8 @@ sourceSets.main.java {
 // expects
 sourceSets.test {
 	if (cmakeNativeLibDir != null) {
-		// add compiled native libs
-		resources.srcDirs += [cmakeNativeLibDir]
+		def libDirs = cmakeNativeLibDir.split(File.pathSeparator)
+		resources.srcDirs += libDirs
 	}
 }
 
@@ -189,7 +192,14 @@ publishing {
 			groupId = project.group
 			artifactId = mavenArtifactId
 
-			from components.java
+			if (cmakeNativeLibDir != null) {
+				artifact allJar
+			} else {
+				from components.java
+			}
+			artifact sourcesJar
+			artifact javadocJar
+
 			pom {
 				name = 'onnxruntime-genai'
 				description = defaultDescription
@@ -223,6 +233,7 @@ publishing {
 	}
 	repositories {
 		maven {
+			name = 'sonatype'
 			url 'https://oss.sonatype.org/service/local/staging/deploy/maven2/'
 			credentials {
 				username mavenUser
@@ -240,6 +251,10 @@ signing {
 	// ORG_GRADLE_PROJECT_signingPassword but can be changed to properties
 	def signingKey = findProperty("signingKey")
 	def signingPassword = findProperty("signingPassword")
-	useInMemoryPgpKeys(signingKey, signingPassword)
-	sign publishing.publications.maven
+	if (signingKey && signingPassword) {
+		useInMemoryPgpKeys(signingKey, signingPassword)
+		sign publishing.publications.maven
+	} else {
+		logger.lifecycle("Signing key not found, skipping signing for local publication.")
+	}
 }

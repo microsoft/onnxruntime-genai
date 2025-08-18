@@ -59,6 +59,8 @@ struct DecoderOnlyPipelineState : State {
   DecoderOnlyPipelineState(const DecoderOnlyPipelineState&) = delete;
   DecoderOnlyPipelineState& operator=(const DecoderOnlyPipelineState&) = delete;
 
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+
   DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
                         DeviceSpan<int32_t> next_indices) override;
 
@@ -68,18 +70,21 @@ struct DecoderOnlyPipelineState : State {
                    DeviceSpan<int32_t> next_indices);
 
  private:
+  void UpdateKeyValueCache(DeviceSpan<int32_t> beam_indices, int total_length);
+
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,
                            int total_length);
 
   const DecoderOnlyPipelineModel& model_;
   std::vector<std::unique_ptr<IntermediatePipelineState>> pipeline_states_;
 
-  struct OverlappedKeyValueCacheUpdateRecord {
+  struct PartialKeyValueCacheUpdateRecord {
     std::vector<size_t> layer_indices{};     // indicates which layers of the KV cache are to be updated
     std::future<void> outstanding_update{};  // future for an outstanding update task
   };
 
-  std::vector<std::optional<OverlappedKeyValueCacheUpdateRecord>> pipeline_overlapped_kv_cache_update_records_;
+  std::map<size_t, size_t> pipeline_state_id_to_partial_kv_cache_update_record_idx_;
+  std::vector<PartialKeyValueCacheUpdateRecord> partial_kv_cache_update_records_;
 
   // Stores all the outputs from the previous pipeline state(s)
   std::unordered_map<std::string, std::unique_ptr<OrtValue>> ortvalue_store_;
@@ -88,7 +93,7 @@ struct DecoderOnlyPipelineState : State {
   Logits logits_{*this};
 
   std::unique_ptr<KeyValueCache> key_value_cache_;
-  const bool do_key_value_cache_partial_token_generation_update_;
+  const bool do_key_value_cache_partial_update_;
   std::optional<WorkerThread> key_value_cache_update_worker_thread_{};
 
   std::unique_ptr<PositionInputs> position_inputs_;
