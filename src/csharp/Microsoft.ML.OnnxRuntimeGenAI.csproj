@@ -123,7 +123,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="9.7.0" />
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="9.8.0" />
   </ItemGroup>
 
 </Project>
