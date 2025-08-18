@@ -19,7 +19,7 @@ def main(args):
     batch_size = len(prompts)
 
     config = og.Config(args.model_path)
-    config.overlay(f'{{"search": {{"batch_size": {batch_size}}}}}')
+    config.overlay(f'{{"search": {{"batch_size": {batch_size}, "num_beams": {3}}}}}')
 
     if args.execution_provider != "follow_config":
         config.clear_providers()
@@ -45,7 +45,6 @@ def main(args):
     params = og.GeneratorParams(model)
 
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args} 
-    search_options['num_beams'] = 3
 
     if (args.verbose): print(f'Args: {args}')
     if (args.verbose): print(f'Search options: {search_options}')

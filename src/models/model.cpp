@@ -352,7 +352,7 @@ void ConfigureNvTensorRtRTxProfile(const Config& config, OrtSessionOptions& sess
   const int num_layers = config.model.decoder.num_hidden_layers;
   const int num_kv_heads = config.model.decoder.num_key_value_heads;
   const int head_dim = config.model.decoder.head_size;
-  const int batch_size = config.search.batch_size;
+  const int batch_size = config.search.batch_size * config.search.num_beams;
 
   // Get max context length from config
   const int max_context_len = config.model.context_length;
