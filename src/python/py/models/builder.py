@@ -137,18 +137,32 @@ class Model:
 
 
         # Map output names to their types and shapes
-        self.output_names = ["logits"]
+        self.output_names = ["logits", "/model/layers.0/attn/GroupQueryAttention/output_0", "/model/layers.0/post_attention_layernorm/output_0", "/model/layers.0/mlp/act_fn/Sigmoid/output_0", "/model/layers.1/final_norm_layernorm/output_0", "/model/rotemb_caches_subgraph/Greater/output_0", "/model/layers.0/attn/qkv_proj/MatMul/output_0"]
         self.output_types = {
             "hidden_states": self.io_dtype,                                                                      # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
             "logits": self.io_dtype,                                                                             # For standard models
             "present.key": self.io_dtype,                                                                        # For standard models (note that `present.key` is written this way to match Hugging Face format)
             "present.value": self.io_dtype,                                                                      # For standard models (note that `present.value` is written this way to match Hugging Face format)
+            "/model/layers.0/attn/GroupQueryAttention/output_0": self.io_dtype,  # For GroupQueryAttention models (note that `/model/layers.0/attn/GroupQueryAttention/output_0` is written this way to match Hugging Face format)
+            "/model/layers.0/attn/PagedAttention/output_0": self.io_dtype,  # For PagedAttention models (note that `/model/layers.0/attn/PagedAttention/output_0` is written this way to match Hugging Face format)
+            "/model/layers.0/post_attention_layernorm/output_0": self.io_dtype,
+            "/model/layers.0/mlp/act_fn/Sigmoid/output_0": self.io_dtype,
+            "/model/layers.1/final_norm_layernorm/output_0": self.io_dtype,
+            "/model/rotemb_caches_subgraph/Greater/output_0": ir.DataType.BOOL,  # For rotary embedding cache update indicator
+            "/model/layers.0/attn/qkv_proj/MatMul/output_0": self.io_dtype
         }
         self.output_shapes = {
             "hidden_states": ["batch_size", "sequence_length", self.hidden_size],                                # For standard models where you want to remove the language modeling head from the model (note that `hidden_states` is written this way to match Hugging Face format)
             "logits": ["batch_size", "sequence_length", self.vocab_size],                                        # For standard models
             "present.key": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],           # For standard models (note that `present.key` is written this way to match Hugging Face format)
             "present.value": ["batch_size", self.num_kv_heads, "total_sequence_length", self.head_size],         # For standard models (note that `present.value` is written this way to match Hugging Face format)
+            "/model/layers.0/attn/GroupQueryAttention/output_0": ["batch_size", "total_sequence_length", "num_heads", self.head_size],  # For GroupQueryAttention models (note that `/model/layers.0/attn/GroupQueryAttention/output_0` is written this way to match Hugging Face format)
+            "/model/layers.0/attn/PagedAttention/output_0": ["num_tokens", self.hidden_size],  # For PagedAttention models (note that `/model/layers.0/attn/PagedAttention/output_0` is written this way to match Hugging Face format)
+            "/model/layers.0/post_attention_layernorm/output_0": ["batch_size", "total_sequence_length", self.hidden_size],
+            "/model/layers.0/mlp/act_fn/Sigmoid/output_0": ["batch_size", "sequence_length", 8192],
+            "/model/layers.1/final_norm_layernorm/output_0": ["batch_size", "total_sequence_length", self.hidden_size],
+            "/model/rotemb_caches_subgraph/Greater/output_0": [1],  # For rotary embedding cache update indicator
+            "/model/layers.0/attn/qkv_proj/MatMul/output_0": ["batch_size", "sequence_length", self.hidden_size + 2 * self.num_kv_heads * self.head_size]
         }
         self.make_outputs_init()
 
@@ -355,6 +369,11 @@ class Model:
         elif self.include_hidden_states:
             self.output_names = ["hidden_states"] + self.output_names
         if self.use_paged_attention:
+            self.output_names = [name.replace("/model/layers.0/attn/GroupQueryAttention/output_0", "/model/layers.0/attn/PagedAttention/output_0") for name in self.output_names]
+            self.output_shapes["/model/layers.1/final_norm_layernorm/output_0"] = ["num_tokens", self.hidden_size]
+            self.output_shapes["/model/layers.0/mlp/act_fn/Sigmoid/output_0"] = ["num_tokens", 8192]
+            self.output_shapes["/model/layers.0/post_attention_layernorm/output_0"] = ["num_tokens", self.hidden_size]
+            self.output_shapes["/model/layers.0/attn/PagedAttention/output_0"] = ["num_tokens", self.hidden_size + 2 * self.num_kv_heads * self.head_size]
             self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
             self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
 
@@ -367,6 +386,16 @@ class Model:
             if (self.ep, self.io_dtype) in valid_paged_configurations:
                 self.attention_attrs["op_type"] = "PagedAttention"
                 print("PagedAttention is used in this model.")
+
+                # Some EPs don't support packed Q/K/V for GQA yet
+                # Packed MatMul with LoRA/QLoRA is not currently supported
+                self.attention_attrs["use_packed_matmul"] = (
+                    self.ep not in ["dml", "webgpu"]
+                    and not self.matmul_attrs["use_lora"]
+                    and not self.attention_attrs["q_norm"]
+                    and not self.attention_attrs["k_norm"]
+                )
+
                 # No other EP's at the moment
                 self.attention_attrs["use_rope_in_attn"] = True
                 self.input_names.remove("position_ids") # TODO(aciddelgado): GQA makes these from other stuff, PA must too?
