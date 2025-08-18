@@ -17,52 +17,43 @@ Please ensure you have the following Python packages installed to create the ONN
 - `onnx`
 - `onnxruntime` and `onnxruntime-genai`
   - ONNX Runtime: Please install the latest nightly version. To ensure the right version is installed, please install ONNX Runtime GenAI first. Then you can uninstall the stable version of ONNX Runtime that gets auto-installed as a dependency.
-  - ONNX Runtime GenAI: Please build from source until the latest changes are published in a stable release package. The build instructions can be found [here](https://onnxruntime.ai/docs/genai/howto/build-from-source.html).
-  
-  - For CPU:
-  ```bash
-  # 1. Build ONNX Runtime GenAI from source for CPU
-  # Instructions: https://onnxruntime.ai/docs/genai/howto/build-from-source.html
+  - ONNX Runtime GenAI: Please install the latest stable release package.
 
-  # 2. Install ONNX Runtime GenAI wheel produced by build.py
-  pip install build/wheel/*.whl
+    - For CPU:
+    ```bash
+    # 1. Install ONNX Runtime GenAI wheel
+    pip install onnxruntime-genai
 
-  # 3. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
-  pip uninstall -y onnxruntime
+    # 2. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
+    pip uninstall -y onnxruntime
 
-  # 4. Install nightly version of ONNX Runtime
-  pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime
-  ```
+    # 3. Install nightly version of ONNX Runtime
+    pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime
+    ```
 
-  - For CUDA:
-  ```bash
-  # 1. Build ONNX Runtime GenAI from source for CUDA
-  # Instructions: https://onnxruntime.ai/docs/genai/howto/build-from-source.html
+    - For CUDA:
+    ```bash
+    # 1. Install ONNX Runtime GenAI wheel
+    pip install onnxruntime-genai-cuda
 
-  # 2. Install ONNX Runtime GenAI wheel produced by build.py
-  pip install build/wheel/*.whl
+    # 2. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
+    pip uninstall -y onnxruntime-gpu
 
-  # 3. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
-  pip uninstall -y onnxruntime-gpu
+    # 3. Install nightly version of ONNX Runtime
+    pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime-gpu
+    ```
 
-  # 4. Install nightly version of ONNX Runtime
-  pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime-gpu
-  ```
+    - For DirectML:
+    ```bash
+    # 1. Install ONNX Runtime GenAI wheel
+    pip install onnxruntime-genai-directml
 
-  - For DirectML: 
-  ```bash
-  # 1. Build ONNX Runtime GenAI from source for DirectML
-  # Instructions: https://onnxruntime.ai/docs/genai/howto/build-from-source.html
+    # 2. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
+    pip uninstall -y onnxruntime-directml
 
-  # 2. Install ONNX Runtime GenAI wheel produced by build.py
-  pip install build/wheel/*.whl
-
-  # 3. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
-  pip uninstall -y onnxruntime-directml
-
-  # 4. Install nightly version of ONNX Runtime
-  pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime-directml
-  ```
+    # 3. Install nightly version of ONNX Runtime
+    pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime-directml
+    ```
 - `onnxscript`
   - Please install the latest nightly version of onnxscript with `pip install --pre onnxscript`.
 - `pillow`
@@ -144,7 +135,7 @@ $ python3 builder.py --input ./pytorch --output ./dml --precision fp16 --executi
 
 ## 3. Build `genai_config.json` and `processor_config.json`
 
-Currently, both JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Gemma-3 vision model. [Here](https://huggingface.co/onnxruntime/gemma-3-it-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json` and [here](https://huggingface.co/onnxruntime/gemma-3-it-onnx/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/processor_config.json) is an example for `processor_config.json`.
+Currently, both JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Gemma-3 vision model. [Here](https://huggingface.co/onnxruntime/Gemma-3-ONNX/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json` and [here](https://huggingface.co/onnxruntime/Gemma-3-ONNX/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/processor_config.json) is an example for `processor_config.json`.
 
 ## 4. Run Gemma-3 vision ONNX models
 
