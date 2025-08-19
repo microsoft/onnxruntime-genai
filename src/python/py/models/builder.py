@@ -2597,13 +2597,18 @@ class Model:
         else:
             model = orig_model
 
-        # Hugging Face names
+        # Hugging Face names (all models loaded with AutoModelForCausalLM.from_pretrained)
+        #
+        # hf_norm:                        for most models
+        # hf_final_layernorm:             for Phi-2
+        # hf_transformer_final_layernorm: for ChatGLM-3
+        # hf_language_model_norm:         for Gemma-3 multimodal (4B, 12B, 27B)
         hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
         hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
         hf_transformer_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
         hf_language_model_norm = hasattr(model, "model") and hasattr(model.model, "language_model") and hasattr(model.model.language_model, "norm") and module == model.model.language_model.norm
 
-        # GGUF names
+        # GGUF names (all models loaded with GGUFModel.from_pretrained)
         gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
 
         hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm, hf_language_model_norm]
