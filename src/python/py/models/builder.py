@@ -302,6 +302,7 @@ class Model:
                 "algo_config": int4_algo_config,
             },
             "use_qdq": extra_options.get("use_qdq", False),
+            "use_tmac": extra_options.get("use_tmac", False)
         }
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
@@ -358,6 +359,7 @@ class Model:
                 and not self.matmul_attrs["use_lora"]
                 and not self.attention_attrs["q_norm"]
                 and not self.attention_attrs["k_norm"]
+                and not extra_options.get("use_tmac", False)
             )
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
@@ -799,6 +801,8 @@ class Model:
     def make_matmul_op(self, matmul, basename, root_input, **kwargs):
         if self.onnx_dtype in {ir.DataType.FLOAT16, ir.DataType.BFLOAT16, ir.DataType.FLOAT}:
             return self.make_matmul_float(matmul, basename, root_input, **kwargs)
+        elif self.quant_attrs["use_tmac"]:
+            return self.make_matmul_tmac(matmul, basename, root_input, **kwargs)
         elif self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
             if self.quant_attrs["use_qdq"]:
                 return self.make_matmul_int4_qdq(matmul, basename, root_input, **kwargs)
@@ -817,6 +821,32 @@ class Model:
         self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', last_dim])
 
         return name
+
+    def make_matmul_tmac(self, matmul, basename, root_input, **kwargs):
+        if not hasattr(matmul, "qweight"):
+            # TODO: quantize weights, then save new MatMul weights for onnx model
+            # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
+            # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
+            return self.make_matmul_float(matmul, basename, root_input, **kwargs)
+         
+        print("Using MatMulNBits for quantized MatMul with TMAC.")
+        name = f"{basename}NBits"
+
+        weight = name[1:].replace("/", ".") + ".weight"
+        self.make_initializer(matmul.qweight, weight)
+
+        inputs = [root_input, weight]
+
+        output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
+        self.make_node(
+            "MatMulNBits", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
+            accuracy_level=5,
+            bits=matmul.bits, block_size=matmul.group_size, K=matmul.in_features, N=matmul.out_features,
+        )
+        self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
+
+        return name
+
 
     def make_matmul_int4(self, matmul, basename, root_input, **kwargs):
         if not hasattr(matmul, "qweight"):
@@ -3640,6 +3670,20 @@ class ErnieModel(MistralModel):
             self.rotemb_attrs["rescale_factors"] = 1.0 / config.compression_ratio
 
 
+class BitnetModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+   # def make_mlp_proj(self, layer_id, mlp, root_input):
+      # BitNEtMLP: self.down_proj(self.ffn_layernorm(self.act_fn(self.gate_proj(x) * self.up_proj(x)))) 
+
+    # def make_attention(self, layer_id, attention, root_input, **kwargs):
+    # BitLinear layer
+    
+
+    
+
+
 def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
@@ -3828,6 +3872,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Qwen3ForCausalLM":
             onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "BitnetForCausalLM":
+            onnx_model = BitnetModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
@@ -3960,6 +4006,7 @@ def get_args():
                     Use this option to create quantized ONNX models that use BF16 precision.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
+                use_tmac = Use T-MAC for quantization. Default is false. Supports TMAC_*, Q4_0, TQ types and GPTQ, GPTQv2, BitNet and BitDistiller models.
             """),
     )
 

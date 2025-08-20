@@ -18,6 +18,7 @@ import torch
 
 import os
 import re
+import numpy as np
 
 
 class QuantizedTensorModule:
@@ -103,7 +104,7 @@ class QuantizedModel:
         self.num_layers = num_layers
         self._quant_attrs = quant_attrs
         self._load_quant_config(quant_attrs)  # codeql[py/init-calls-subclass]
-
+        print(f"Loading quantized model from {input_path} with quantization type {quant_type}")
         for weight_file in os.listdir(input_path):
             if weight_file.endswith(".safetensors"):
                 weights = load_file(os.path.join(input_path, weight_file))
@@ -114,6 +115,7 @@ class QuantizedModel:
                     # Per-layer quantization support
                     local_bits = self.get_layer_bits(name)  # codeql[py/init-calls-subclass]
                     local_group_size = self.get_layer_group_size(name)  # codeql[py/init-calls-subclass]
+                    local_sym = self.get_layer_sym(name)  # codeql[py/init-calls-subclass]
 
                     if name == "model.embed_tokens.weight" or name == "transformer.embedding.word_embeddings.weight":
                         self.embedding.weight = tensor
@@ -127,7 +129,8 @@ class QuantizedModel:
                         self.lm_head.bias = tensor
                     elif name == "transformer.rotary_pos_emb.inv_freq":
                         # transformer.rotary_pos_emb.inv_freq in ChatGLM3.
-                        # Skip rotary embedding weights since they can be re-calculated when looping through the model
+                        # Skip rotary embedding weights since they can be re-calculated wh
+                        # en looping through the model
                         continue
                     elif name == "lm_head.qweight" or name == "transformer.output_layer.qweight":
                         self._initialize_quantized_lm_head(local_bits, local_group_size)
@@ -437,6 +440,7 @@ class QuantizedModel:
     def _load_quant_config(self, quant_attrs):
         self.global_group_size = quant_attrs["config"]["group_size"]
         self.global_bits = quant_attrs["config"]["bits"]
+        self.global_sym = quant_attrs["config"].get("sym", False)
 
     def get_layer_bits(self, layer_name):
         # 'bits' is globally defined for all layers
@@ -445,6 +449,10 @@ class QuantizedModel:
     def get_layer_group_size(self, layer_name):
         # 'group_size' is globally defined for all layers
         return self.global_group_size
+    
+    def get_layer_sym(self, layer_name):
+        # 'sym' is globally defined for all layers
+        return self.global_sym
 
     def _initialize_quantized_lm_head(self, bits, group_size):
         """
@@ -801,39 +809,59 @@ class AWQModel(QuantizedModel):
 class GPTQModel(QuantizedModel):
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
         super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
+        self.use_tmac = quant_attrs.get("use_tmac", False)
+        print(quant_attrs["config"])
+        self.gptq_v2 = "gptqmodel" in quant_attrs["config"].get("quantizer", [])
+
+        # For TMAC, unpack_gptqv2 and prpreprcoess for T-MAC quantization
 
         # Unpack and repack all `QuantizedTensorModule` classes in model
+        # TODO:: handle sym quan config
         for i, layer in enumerate(self.layers):
             if i >= self.num_layers:
                 break
             print(f"Unpacking and repacking layer {i}")
 
             # Unpack and repack all `QuantizedTensorModule` classes in attention
+            print("Unpacking and repacking attention tensors")
             for _, q_tensors in layer.self_attn.__dict__.items():
                 if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
-                    self.handle_qzeros(q_tensors)
-                    self.unpack(q_tensors)
-                    self.repack(q_tensors)
+                    if self.use_tmac:
+                        self.unpack_pack_tmac(q_tensors)
+                        continue
+                    else:
+                        self.handle_qzeros(q_tensors)
+                        self.unpack(q_tensors)
+                        self.repack(q_tensors)
 
                     if not quant_attrs["use_g_idx"]:
                         # Set `g_idx` to None since it's not used in `MatMulNBits`
                         q_tensors.g_idx = None
 
+            print("Unpacking and repacking MLP tensors")            
+
             # Unpack and repack all `QuantizedTensorModule` classes in MLP
             for _, q_tensors in layer.mlp.__dict__.items():
                 if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
-                    self.handle_qzeros(q_tensors)
-                    self.unpack(q_tensors)
-                    self.repack(q_tensors)
+                    if self.use_tmac:
+                        self.unpack_pack_tmac(q_tensors)
+                    else:
+                
+                        self.handle_qzeros(q_tensors)
+                        self.unpack(q_tensors)
+                        self.repack(q_tensors)
 
                     if not quant_attrs["use_g_idx"]:
                         # Set `g_idx` to None since it's not used in `MatMulNBits`
                         q_tensors.g_idx = None
 
         if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
-            self.handle_qzeros(self.lm_head)
-            self.unpack(self.lm_head)
-            self.repack(self.lm_head)
+            if self.use_tmac:
+                self.unpack_pack_tmac(self.lm_head)
+            else:
+                self.handle_qzeros(self.lm_head)
+                self.unpack(self.lm_head)
+                self.repack(self.lm_head)
 
             if not quant_attrs["use_g_idx"]:
                 # Set `g_idx` to None since it's not used in `MatMulNBits`
@@ -862,6 +890,65 @@ class GPTQModel(QuantizedModel):
 
         self.pack_qzeros(temp_module)
         module.qzeros = temp_module.qzeros
+
+
+    def unpack_pack_tmac(self, module):
+        """
+        Return T_-MAC biased unit8 weight [0, 2 ** bits), fp16 scales and biased fp16 zeros
+        """
+
+        # assert that qweight and qzeros are of type torch.int32 type 
+        if module.qweight.dtype != torch.int32 or module.qzeros.dtype != torch.int32:
+            raise ValueError("T-MAC unpacking requires qweight and qzeros to be of type torch.int32.")
+
+
+        bits = 32  // (module.scales.shape[1] // module.qzeros.shape[1])
+        K = module.qweight.shape[0] * (32 // bits)
+        M = module.qweight.shape[1]
+        group_size =K // module.scales.shape[0]
+ 
+        # Currently only support models that all weights are coreresponding to qunatization config
+        if bits != module.bits or  group_size != module.group_size: 
+            raise ValueError(f"Error in T-MAC unpacking: bits {bits} and group_size {group_size} do not match module's bits {module.bits} and group_size {module.group_size}.")
+
+        # TODO: using numpy to pack/unpack bits for simplicity, replace it with torch operations
+        
+
+        qweight = module.qweight.numpy()
+        qzeros = module.qzeros.numpy()
+        scales = module.scales.numpy()
+
+    
+        qweights = [(qweight >> bit_offset) & ((1 << bits) - 1) for bit_offset in range(0, 32, bits)]
+        weight = np.stack(qweights, axis=1).reshape(K, M).T.astype("uint8")
+
+        scales = scales.T
+
+        # Unpack qzeros
+        zeros = [(qzeros >> bit_offset) & ((1 << bits) - 1) for bit_offset in range(0, 32, bits)]
+        zeros = np.stack(zeros, axis=-1).reshape(K // group_size, M).T.astype(scales.dtype)
+        if not self.gptq_v2:
+            # `zeros = zeros - 1` in AutoGPTQ
+            # Not in GPTQModel
+            zeros += 1
+        zeros = (zeros - (2 ** (bits - 1))) * scales
+
+
+        # get packed weight
+        mask = (1 << bits) - 1
+        flattened_bits = np.unpackbits((weight & mask).astype(np.uint8)).reshape(-1, 8)[:, -bits:]
+        weight_packed = np.packbits(flattened_bits)
+
+        if zeros is None:
+           module.qweight =  torch.from_numpy(np.concatenate([weight_packed, scales.astype(np.float16).copy().view(np.uint8).flatten()]))
+        else:
+           module.qweight = torch.from_numpy(np.concatenate([weight_packed, scales.astype(np.float16).copy().view(np.uint8).flatten(), 
+                            zeros.astype(np.float16).copy().view(np.uint8).flatten()]))
+           
+        module.qzeros = None  # qzeros is not used in T-MAC quantization
+        module.scales = None  # scales is not used in T-MAC quantization
+
+ 
 
 class QuarkModel(QuantizedModel):
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
@@ -989,6 +1076,15 @@ class OliveModel(GPTQModel):
         name = ".".join(layer_name.split(".")[:-1])
         return self.overrides.get(name, {}).get("group_size", self.global_group_size)
 
+
+class BitDistillerModel(QuantizedModel):
+    def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
+        super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
+        # TODO: Implement BitDistillerModel specific logic 
+
+       
+    
+
 class QuantModel:
     @staticmethod
     def from_pretrained(quant_type, **kwargs):
@@ -1005,6 +1101,8 @@ class QuantModel:
             model = OliveModel(quant_type, **kwargs)
         elif quant_type == "quark":
             model = QuarkModel(quant_type, **kwargs)
+        elif quant_type == "bitdistiller":
+            model = BitDistillerModel(quant_type, **kwargs)
         else:
             raise NotImplementedError(f"The {quant_type} quantized model is not currently supported.")
 
