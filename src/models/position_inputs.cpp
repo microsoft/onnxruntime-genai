@@ -56,7 +56,6 @@ void DefaultPositionInputs::Add() {
 
 void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {  
   if (has_posid_input_) {
-    // std::cout << "Updating position IDs for total_length: " << total_length << ", new_length: " << new_length << std::endl;
     // Initialize on first update
     if (is_first_update_) {
       position_ids_shape_[1] = new_length;
@@ -69,7 +68,6 @@ void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
     }
   }
   if (has_mask_input_) {
-    // std::cout << "Updating attention mask for total_length: " << total_length << ", new_length: " << new_length << std::endl;
     // Initialize on first update
     if (is_first_update_) {
       attention_mask_shape_[1] = new_length;
@@ -78,15 +76,6 @@ void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
       else
         CreateAndInitializeAttentionMask<int64_t>(next_tokens, attention_mask_shape_);
     } else {
-      // std::cout << "Next tokens: ";
-      // int dim_0 = static_cast<int>(next_tokens.size()) / new_length;
-      // for (int i = 0; i < dim_0; i++) {
-      //   for (int j = 0; j < new_length; j++) {
-      //     std::cout << next_tokens.CpuSpan()[i * new_length + j] << " ";
-      //   }
-      //   std::cout << std::endl;
-      // }
-      // std::cout << std::endl;
       UpdateAttentionMask(total_length, new_length);
     }
   }
@@ -203,7 +192,8 @@ void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> n
     for (int i = 0; i < shape[1]; ++i) {
       position_data[i] = static_cast<T>(i);
     }
-    position_data_next[0] = static_cast<T>(shape[1]);
+    position_data_next[0] = static_cast<T>(shape[1]) - 1;
+  // Otherwise we iterate backwards as to not misinterpret any right pad tokens
   } else {
     const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data() + shape[0] * shape[1] - 1;
     auto* position = position_data + shape[0] * shape[1] - 1;
@@ -219,14 +209,7 @@ void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> n
         } else if (*word_id != model_.config_->model.pad_token_id) {
           found_first_non_pad = true;
           *position = abs_position;
-          position_data_next[i] = abs_position + 1;
-          // If this was not an eos token, and this model has pad == eos, we make the position after it non-0
-          // bool is_eos = contains(model_.config_->model.eos_token_id, *word_id);
-          // bool pad_is_eos = contains(model_.config_->model.eos_token_id, model_.config_->model.pad_token_id);
-          // if (!is_eos && pad_is_eos && j < shape[1] - 1) {
-          //   *(position + 1) = abs_position + 1;
-          //   position_data_next[i] = abs_position + 2;
-          // }
+          position_data_next[i] = abs_position;
         // We have not found any non-padding token yet so we set the position to 0
         } else {
           *position = 0;
@@ -235,20 +218,6 @@ void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> n
       }
     }
   }
-
-  // Print position IDs for debugging
-  std::cout << "Position IDs init." << std::endl;
-  for (int i = 0; i < shape[0]; ++i) {
-    for (int j = 0; j < shape[1]; ++j) {
-      std::cout << static_cast<int>(position_data[i * shape[1] + j]) << " ";
-    }
-    std::cout << std::endl;
-  }
-  std::cout << "Position IDs next init." << std::endl;
-  for (int i = 0; i < shape[0]; ++i) {
-    std::cout << static_cast<int>(position_data_next[i]) << " ";
-  }
-  std::cout << std::endl;
 
   // Move tensors to appropriate device and expand by num_beams
   position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, state_.params_->search.num_beams);
@@ -301,6 +270,7 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     for (int i = 0; i < shape[1]; ++i) {
       mask_data[i] = 1;
     }
+  // Otherwise we iterate backwards as to not misinterpret any right pad tokens
   } else {
     auto* mask = mask_data + shape[0] * shape[1] - 1;
     const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data() + shape[0] * shape[1] - 1;
@@ -313,27 +283,11 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
         } else if (*word_id != model_.config_->model.pad_token_id) {
           found_first_non_pad = true;
           *mask = 1;
-          // If this was not an eos token, and this model has pad == eos, we make attention mask after it 1
-          // bool is_eos = contains(model_.config_->model.eos_token_id, *word_id);
-          // bool pad_is_eos = contains(model_.config_->model.eos_token_id, model_.config_->model.pad_token_id);
-          // if (!is_eos && pad_is_eos && j < shape[1] - 1) {
-          //   *(mask + 1) = 1;
-          // }
         } else {
           *mask = 0;
         }
-        // std::cout << "Found first non-pad: " << found_first_non_pad << " | Word ID address: " << static_cast<const void*>(word_id) << " | Word ID: " << *word_id << " | Mask address: " << static_cast<void*>(mask) << " | Mask: " << *mask << std::endl;
       }
     }
-  }
-
-  // Print attention mask for debugging
-  std::cout << "Attention mask init." << std::endl;
-  for (int i = 0; i < shape[0]; ++i) {
-    for (int j = 0; j < shape[1]; ++j) {
-      std::cout << static_cast<int>(mask_data[i * shape[1] + j]) << " ";
-    }
-    std::cout << std::endl;
   }
 
   if (ShouldUseStaticMaskHandling()) {
