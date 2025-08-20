@@ -374,10 +374,26 @@ class Model:
         self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
+        # Create config with attributes from config.json and generation_config.json (if latter file exists)
+        config = AutoConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
         try:
-            config = GenerationConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+            # Override search attributes in config based on values in generation_config.json
+            gen_config = GenerationConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+            defaults = {
+                "bos_token_id": None,
+                "do_sample": False,
+                "eos_token_id": None,
+                "pad_token_id": None,
+                "temperature": 1.0,
+                "top_k": 50,
+                "top_p": 1.0,
+            }
+            for key, default_val in defaults.items():
+                val = getattr(gen_config, key)
+                if val != default_val:
+                    setattr(config, key, getattr(gen_config, key))
         except:
-            config = AutoConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+            pass
 
         inputs = dict(zip(self.input_names, self.input_names))
         inputs.update({
@@ -393,9 +409,12 @@ class Model:
             # Remove 'hidden_states' from 'outputs' entry in config since ORT GenAI doesn't use it
             del outputs["hidden_states"]
 
+        bos_token_id = config.bos_token_id if hasattr(config, "bos_token_id") and config.bos_token_id is not None else 1
+        eos_token_id = config.eos_token_id
+        pad_token_id = config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id[0] if isinstance(config.eos_token_id, list) else config.eos_token_id
         genai_config = {
             "model": {
-                "bos_token_id": config.bos_token_id if hasattr(config, "bos_token_id") and config.bos_token_id is not None else 1,  # config.bos_token_id not present in ChatGLM model configs.
+                "bos_token_id": bos_token_id,
                 "context_length": self.context_length,
                 "decoder": {
                     "session_options" : {
@@ -411,8 +430,8 @@ class Model:
                     "num_hidden_layers": self.num_layers,
                     "num_key_value_heads": self.num_kv_heads,
                 },
-                "eos_token_id": config.eos_token_id,
-                "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id[0] if isinstance(config.eos_token_id, list) else config.eos_token_id,
+                "eos_token_id": eos_token_id,
+                "pad_token_id": pad_token_id,
                 "type": self.model_type[ : self.model_type.find("For") if "For" in self.model_type else len(self.model_type)].lower(),
                 "vocab_size": self.vocab_size,
             },
@@ -4268,6 +4287,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         # List architecture options in alphabetical order
         if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
             # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
+            config.bos_token_id = 1
             config.hidden_act = "swiglu"
             onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Ernie4_5_ForCausalLM":
