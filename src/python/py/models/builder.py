@@ -4185,10 +4185,6 @@ def check_extra_options(kv_pairs):
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
         raise ValueError("Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
-    # NvTensorRtRtx EP requires Opset 21, so force use_qdq which controls it.
-    if args.execution_provider == "NvTensorRtRtx":
-        kv_pairs["use_qdq"] = True
-
 
 def parse_extra_options(kv_items):
     """
