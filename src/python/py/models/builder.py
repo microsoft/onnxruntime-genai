@@ -2713,31 +2713,27 @@ class Model:
     def has_final_norm(self, module, orig_model):
         # Find where the language model is stored to check attributes. Some classes
         # store the language model in a different attribute than `model.model`.
-        if hasattr(orig_model, "language_model"):
-            # Model is multimodal
-            # Note: This case is checked first because the `language_model` attribute and the `base_model` attribute
-            # exist for both multimodal models and PEFT models. However they represent different classes and their attributes
-            # differ.
-            model = orig_model.language_model
-        elif hasattr(orig_model, "base_model") and hasattr(orig_model.base_model, "model"):
-            if hasattr(orig_model.base_model.model, "model"):
-                # Model is from PEFT
-                model = orig_model.base_model.model
-            else:
-                # Model is text-based only.
-                model = orig_model.base_model
+        if orig_model.__class__.__name__.startswith("Peft"):
+            # Model is from PEFT
+            model = orig_model.base_model.model
         else:
             model = orig_model
 
-        # Hugging Face names
+        # Hugging Face names (all models loaded with AutoModelForCausalLM.from_pretrained)
+        #
+        # hf_norm:                        for most models
+        # hf_final_layernorm:             for Phi-2
+        # hf_transformer_final_layernorm: for ChatGLM-3
+        # hf_language_model_norm:         for Gemma-3 multimodal (4B, 12B, 27B)
         hf_norm = hasattr(model, "model") and hasattr(model.model, "norm") and module == model.model.norm
         hf_final_layernorm = hasattr(model, "model") and hasattr(model.model, "final_layernorm") and module == model.model.final_layernorm
         hf_transformer_final_layernorm = hasattr(model, "transformer") and hasattr(model.transformer, "encoder") and hasattr(model.transformer.encoder, "final_layernorm") and module == model.transformer.encoder.final_layernorm
+        hf_language_model_norm = hasattr(model, "model") and hasattr(model.model, "language_model") and hasattr(model.model.language_model, "norm") and module == model.model.language_model.norm
 
-        # GGUF names
+        # GGUF names (all models loaded with GGUFModel.from_pretrained)
         gguf_final_norm = hasattr(model, "final_norm") and module == model.final_norm
 
-        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm]
+        hf_names = [hf_norm, hf_final_layernorm, hf_transformer_final_layernorm, hf_language_model_norm]
         gguf_names = [gguf_final_norm]
         return any(hf_names + gguf_names)
 
@@ -3264,7 +3260,7 @@ class Gemma2Model(GemmaModel):
         super().make_layernorm(layer_id, layernorm, skip, simple, location)
 
     def make_layer(self, layer_id, layer):
-        # Gemma2 decoder layer is typically defined as:
+        # Gemma-2 decoder layer is typically defined as:
         # input_layernorm --> attention --> post_attention_layernorm --> pre_ffn_layernorm --> MLP --> post_ffn_layernorm
 
         # Adjust LayerNorm attributes because of extra LayerNorms inserted
@@ -3713,7 +3709,7 @@ class Phi4MMModel(Phi3VModel):
 class Gemma3Model(Gemma2Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.is_local = lambda layer_id: bool((layer_id + 1) % config.sliding_window_pattern)
+        self.is_local = lambda layer_id: bool((layer_id + 1) % 6)
         self.rope_local_theta = config.rope_local_base_freq
         self.make_rotary_embedding_multi_cache()
 
