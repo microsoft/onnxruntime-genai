@@ -26,6 +26,29 @@
 #define GETCWD _getcwd
 #define CHDIR _wchdir
 #include <windows.h>
+
+std::wstring win_fix_vitis_ai_custom_ops_library_path(const wchar_t* input_path_wsz) {
+  std::filesystem::path input_path(input_path_wsz);
+  if (input_path.is_absolute()) {
+    return input_path.wstring();
+  } else {
+    HMODULE handle = nullptr;
+    if (!GetModuleHandleExW(
+      GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+      L"onnxruntime_providers_vitisai.dll",
+      &handle)) {
+      return input_path.wstring();
+    } else {
+      constexpr size_t max_path_len = 32768;
+      wchar_t buf[max_path_len];
+      DWORD len = GetModuleFileNameW(handle, buf, max_path_len);
+      auto ep_path = std::filesystem::path(std::wstring_view(buf, len));
+      auto fixed_path = ep_path.parent_path() / input_path;
+      return fixed_path.wstring();
+    }
+  }
+}
+
 #else
 #include <unistd.h>
 #define GETCWD getcwd
@@ -849,7 +872,20 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
   if (config_session_options.custom_ops_library.has_value()) {
     fs::path custom_library_file_prefix{config_session_options.custom_ops_library.value()};
+#ifdef _WIN32
+  bool has_vitis_ai = std::any_of(config_session_options.provider_options.begin(),
+                   config_session_options.provider_options.end(),
+                   [](const auto& options) { return options.name == "VitisAI"; });
+  if (has_vitis_ai) {
+    auto fixed_path_wstr = win_fix_vitis_ai_custom_ops_library_path(custom_library_file_prefix.c_str());
+    session_options.RegisterCustomOpsLibrary(fixed_path_wstr.c_str());
+  } else {
     session_options.RegisterCustomOpsLibrary(custom_library_file_prefix.c_str());
+  }
+#else
+    session_options.RegisterCustomOpsLibrary(custom_library_file_prefix.c_str());
+#endif
+
   }
 
   if (config_session_options.graph_optimization_level.has_value()) {
