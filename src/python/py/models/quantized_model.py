@@ -989,6 +989,10 @@ class OliveModel(GPTQModel):
         name = ".".join(layer_name.split(".")[:-1])
         return self.overrides.get(name, {}).get("group_size", self.global_group_size)
 
+    def handle_qzeros(self, module):
+        # only olive>0.9.2 created models supported, previous versions added offset like in GPTQModel
+        pass
+
 class QuantModel:
     @staticmethod
     def from_pretrained(quant_type, **kwargs):
