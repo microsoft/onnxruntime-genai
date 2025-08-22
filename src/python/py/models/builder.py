@@ -264,10 +264,11 @@ class Model:
 
         # Quantization-specific variables (INT4, INT8, etc.)
         int4_algo_config = self.make_int4_algo_config(extra_options.get("int4_algo_config", "default"))
+        self.int4_block_size = extra_options.get("int4_block_size", 32)
         self.quant_attrs = {
             "int4": {
                 "accuracy_level": int(extra_options.get("int4_accuracy_level", 4 if self.ep in ["cpu", "webgpu"] else 0)),
-                "block_size": int(extra_options.get("int4_block_size", 32)),
+                "block_size": int(self.int4_block_size),
                 "is_symmetric": extra_options.get("int4_is_symmetric", True),
                 "op_types_to_quantize": extra_options.get("int4_op_types_to_quantize", ("MatMul", )),
                 "nodes_to_exclude": extra_options.get("int4_nodes_to_exclude", []),
@@ -279,6 +280,13 @@ class Model:
             # Create quantized attributes from quantization config
             self.quant_attrs["config"] = config.quantization_config
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
+
+        self.int4_tied_embeddings = config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False
+        self.int4_tied_embeddings = extra_options.get("int4_tied_embeddings", self.int4_tied_embeddings)
+        self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last"}
+        if not self.int8_lm_head:
+            # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
+            self.int4_tied_embeddings = False
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
@@ -1069,13 +1077,28 @@ class Model:
         self.make_add_bias(add, name, root_input, **kwargs)
 
     def make_embedding(self, embedding):
-        weight = "model.embed_tokens.weight"
-        self.make_initializer(embedding, weight, to=self.io_dtype)
-
         basename = "/model/embed_tokens"
-        gather_name = f"{basename}/Gather"
-        gather_output = f"{gather_name}/output_0"
-        self.make_node('Gather', inputs=[weight, 'input_ids'], outputs=[gather_output], name=gather_name)
+        if self.int4_tied_embeddings:
+            gather_name = f"{basename}/GatherBlockQuantized"
+            gather_output = f"{gather_name}/output_0"
+
+            weight_reshape_name = f"{basename}/Reshape"
+            bits = 8 if self.int8_lm_head else 4
+            weight_reshape_inputs = [f"lm_head.MatMul.weight_Q{bits}G{self.int4_block_size}", f"/model/constants/INT64/[{self.vocab_size}, {self.hidden_size}]"]
+            weight_reshape_output = f"{weight_reshape_name}/output_0"
+            # quantized weight dtype is uint8, see here
+            # https://github.com/microsoft/onnxruntime/blob/0c9356cb986fd4cd2c5d510909d31186010ba226/onnxruntime/python/tools/quantization/neural_compressor/weight_only.py#L73
+            self.make_reshape(weight_reshape_name, weight_reshape_inputs, dtype=ir.DataType.UINT8, shape=['vocab_size', 'hidden_size'])
+
+            self.make_node('GatherBlockQuantized', inputs=[weight_reshape_output, 'input_ids', 'lm_head.MatMul.weight_scale', 'lm_head.MatMul.weight_zp'], outputs=[gather_output], name=gather_name, domain="com.microsoft", bits=bits, block_size=int(self.int4_block_size))
+        else:
+            weight = "model.embed_tokens.weight"
+            self.make_initializer(embedding, weight, to=self.io_dtype)
+
+            gather_name = f"{basename}/Gather"
+            gather_output = f"{gather_name}/output_0"
+            self.make_node('Gather', inputs=[weight, 'input_ids'], outputs=[gather_output], name=gather_name)
+
         self.make_value(gather_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
         if self.embed_attrs["scale"] != 1:
@@ -4172,7 +4195,7 @@ def check_extra_options(kv_pairs):
     """
     bools = [
         "int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph",
-        "use_8bits_moe", "use_qdq", "use_webgpu_fp32", "use_cuda_bf16",
+        "use_8bits_moe", "use_qdq", "use_webgpu_fp32", "use_cuda_bf16", "int4_tied_embeddings"
     ]
     for key in bools:
         if key in kv_pairs:
@@ -4459,6 +4482,8 @@ def get_args():
                     Currently supported options are: 'default', 'rtn', 'k_quant_mixed', 'k_quant_last'.
                     k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
                     k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
+                int4_tied_embeddings = Enable weight sharing for quantization. Default is false.
+                    Use this option when you want to share the weights in the embedding and unembedding.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model.
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
