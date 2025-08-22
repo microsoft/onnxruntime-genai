@@ -810,7 +810,7 @@ class GPTQModel(QuantizedModel):
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
         super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
         self.use_tmac = quant_attrs.get("use_tmac", False)
-        print(quant_attrs["config"])
+        self.is_symmetric = quant_attrs["config"].get("sym", False)
         self.gptq_v2 = "gptqmodel" in quant_attrs["config"].get("quantizer", [])
 
         # For TMAC, unpack_gptqv2 and prpreprcoess for T-MAC quantization
@@ -824,9 +824,10 @@ class GPTQModel(QuantizedModel):
 
             # Unpack and repack all `QuantizedTensorModule` classes in attention
             print("Unpacking and repacking attention tensors")
-            for _, q_tensors in layer.self_attn.__dict__.items():
+            for k, q_tensors in layer.self_attn.__dict__.items():
                 if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
-                    if self.use_tmac:
+                    if self.use_tmac and not quant_attrs["use_g_idx"]:
+                        print(k, "using T-MAC unpacking")
                         self.unpack_pack_tmac(q_tensors)
                         continue
                     else:
@@ -901,7 +902,6 @@ class GPTQModel(QuantizedModel):
         if module.qweight.dtype != torch.int32 or module.qzeros.dtype != torch.int32:
             raise ValueError("T-MAC unpacking requires qweight and qzeros to be of type torch.int32.")
 
-
         bits = 32  // (module.scales.shape[1] // module.qzeros.shape[1])
         K = module.qweight.shape[0] * (32 // bits)
         M = module.qweight.shape[1]
@@ -933,18 +933,18 @@ class GPTQModel(QuantizedModel):
             zeros += 1
         zeros = (zeros - (2 ** (bits - 1))) * scales
 
-
         # get packed weight
         mask = (1 << bits) - 1
         flattened_bits = np.unpackbits((weight & mask).astype(np.uint8)).reshape(-1, 8)[:, -bits:]
         weight_packed = np.packbits(flattened_bits)
 
-        if zeros is None:
-           module.qweight =  torch.from_numpy(np.concatenate([weight_packed, scales.astype(np.float16).copy().view(np.uint8).flatten()]))
+        if zeros is None or self.is_symmetric:
+           packed_data =  np.concatenate([weight_packed, scales.astype(np.float16).copy().view(np.uint8).flatten()])
         else:
-           module.qweight = torch.from_numpy(np.concatenate([weight_packed, scales.astype(np.float16).copy().view(np.uint8).flatten(), 
-                            zeros.astype(np.float16).copy().view(np.uint8).flatten()]))
-           
+           packed_data = np.concatenate([weight_packed, scales.astype(np.float16).copy().view(np.uint8).flatten(), 
+                            zeros.astype(np.float16).copy().view(np.uint8).flatten()])
+  
+        module.qweight = torch.from_numpy(packed_data.reshape(M, K //  group_size  *  (2 + group_size * bits // 8)))
         module.qzeros = None  # qzeros is not used in T-MAC quantization
         module.scales = None  # scales is not used in T-MAC quantization
 
