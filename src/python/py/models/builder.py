@@ -442,6 +442,10 @@ class Model:
                 "pad_token_id": pad_token_id,
                 "type": self.model_type[ : self.model_type.find("For") if "For" in self.model_type else len(self.model_type)].lower(),
                 "vocab_size": self.vocab_size,
+                "ep_context": {
+                    "enable": False,
+                    "filepath": "",
+                },
             },
             "search": {
                 "diversity_penalty": config.diversity_penalty if hasattr(config, "diversity_penalty") else 0.0,

@@ -920,7 +920,23 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
   }
 
   // Otherwise, load the model from the file system
-  return OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
+  auto model_path_ = config_->config_path / fs::path(model_filename);
+  
+  if(config_->model.ep_context.enable) {
+    auto model_ctx_path_ = config_->config_path / fs::path(std::string(Config::Defaults::EpContextFileName));
+    
+    // use ep context model if specified in genai config
+    if(!config_->model.ep_context.filepath.empty())
+      model_ctx_path_ = fs::path(config_->model.ep_context.filepath);
+
+    // if ep context model doesn't exist, fallback to original base ONNX
+    if(model_ctx_path_.exists())
+      model_path_ = model_ctx_path_;
+    else
+      Log("warning", "Using base ONNX model, EP context model doesn't exist: " + model_ctx_path_.string());
+  }
+  
+  return OrtSession::Create(ort_env, model_path_.c_str(), session_options);
 }
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {

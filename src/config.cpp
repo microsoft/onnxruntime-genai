@@ -686,6 +686,23 @@ struct Embedding_Element : JSON::Element {
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
 
+struct EpContext_Element : JSON::Element {
+  explicit EpContext_Element(Config::Model::EpContext& v) : v_(v) {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "enable") {
+      v_.enable = JSON::Get<bool>(value);
+    } else if (name == "filepath") {
+      v_.filepath = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  private:
+    Config::Model::EpContext& v_;
+};
+
 struct Model_Element : JSON::Element {
   explicit Model_Element(Config::Model& v) : v_{v} {}
 
@@ -733,6 +750,10 @@ struct Model_Element : JSON::Element {
     if (name == "speech") {
       return speech_;
     }
+    if (name == "ep_context") {
+      return ep_context_;
+    }
+
     throw JSON::unknown_value_error{};
   }
 
@@ -744,6 +765,7 @@ struct Model_Element : JSON::Element {
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};
+  EpContext_Element ep_context_{v_.ep_context};
 };
 
 struct Search_Element : JSON::Element {
