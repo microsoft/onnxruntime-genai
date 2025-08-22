@@ -18,13 +18,20 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
                         ? model_.session_info_.GetInputSymbolicShape(name).size()
                         : model_.session_info_.GetOutputSymbolicShape(name).size();
 
+  std::cout << "Batch size = " << batch_size << std::endl;
+
   // If the model expects 3 dimensions, add a batch dimension
   if (dims == 3) {
+    std::cout << "Adding batch size to dims" << std::endl;
     shape_.push_back(batch_size);
   }
 
   shape_.push_back(num_feature_tokens);
   shape_.push_back(model_.config_->model.decoder.hidden_size);
+
+  for (int i = 0; i < shape_.size(); i++) {
+    std::cout << "At index " << i << ": " << shape_[i] << std::endl;
+  }
 
   // There are four cases for MultiModalFeatures:
   // 1) Created as an output for vision or speech model (num_feature_tokens > 0)
@@ -39,6 +46,7 @@ MultiModalFeatures::MultiModalFeatures(State& state, MultiModalFeatures::Mode mo
   //    The tensor does not need to be pre-allocated because it will be created during (2).
   if (mode == MultiModalFeatures::Mode::Output) {
     features_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
+    std::cout << "Created output tensor" << std::endl;
   }
 }
 
