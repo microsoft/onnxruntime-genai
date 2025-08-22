@@ -427,7 +427,7 @@ TEST(CAPITests, EndToEndPhi) {
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
 
-  const char* input_string = "This is a test.";
+  const char* input_string = "This is a test.<|endoftext|>";
   auto input_sequence = OgaSequences::Create();
   tokenizer->Encode(input_string, *input_sequence);
 
@@ -447,9 +447,9 @@ TEST(CAPITests, EndToEndPhi) {
 
   // Verify outputs match expected outputs
   std::vector<int32_t> expected_output{
-      1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278,
-      6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417,
-      6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974, 82, 1039, 889, 263, 3684};
+      1212, 318, 257, 1332, 13, 50256, 198, 198, 198, 198, 4010, 4420, 43168, 15666,
+      10503, 82, 26268, 11451, 12735, 82, 19445, 427, 278, 49292, 3087, 26762, 5101,
+      14453, 5421, 278, 829, 319, 8378, 8378, 22436, 6383, 50006, 1308, 81, 2283};
 
   const auto sequence_length = generator->GetSequenceCount(0);
   const auto* sequence_data = generator->GetSequenceData(0);
