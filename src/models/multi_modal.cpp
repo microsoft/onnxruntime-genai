@@ -102,15 +102,10 @@ void VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, co
   num_image_tokens_ = num_image_tokens;
   num_images_ = num_images;
 
-  std::cout << "Num image tokens in VisionState = " << num_image_tokens_ << std::endl;
-  std::cout << "Num images in VisionState = " << num_images_ << std::endl;
-
   image_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,  // Optional model input
                                                          model_.config_->model.vision.outputs.image_features,
                                                          num_images_, num_image_tokens_);
-  std::cout << "Adding image features" << std::endl;
   image_features_->Add();
-  std::cout << "Adding extra inputs" << std::endl;
   extra_inputs_.Add(extra_inputs, model_.vision_session_->GetInputNames());
 }
 
@@ -126,7 +121,6 @@ SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorPa
 void SpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {
   num_audio_tokens_ = num_audio_tokens;
 
-  std::cout << "Num audio tokens in SpeechState = " << num_audio_tokens_ << std::endl;
   audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,  // Model output
                                                          model_.config_->model.speech.outputs.audio_features,
                                                          -1, num_audio_tokens_);
@@ -150,23 +144,17 @@ void EmbeddingState::SetExtraInputs(const int64_t num_images, const int64_t num_
   num_image_tokens_ = num_image_tokens;
   num_audio_tokens_ = num_audio_tokens;
 
-  std::cout << "Num images in EmbeddingState = " << num_images << std::endl;
-  std::cout << "Num image tokens in EmbeddingState = " << num_image_tokens_ << std::endl;
-  std::cout << "Num audio tokens in EmbeddingState = " << num_audio_tokens_ << std::endl;
-
   if (model_.vision_session_) {
     image_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,  // Optional model input
                                                            model_.config_->model.embedding.inputs.image_features,
                                                            num_images, num_image_tokens_);
     image_features_->Add();
-    std::cout << "Added image features to embedding state" << std::endl;
   }
   if (model_.speech_session_) {
     audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Input,  // Optional model input
                                                            model_.config_->model.embedding.inputs.audio_features,
                                                            -1, num_audio_tokens_);
     audio_features_->Add();
-    std::cout << "Added audio features to embedding state" << std::endl;
   }
 }
 
@@ -235,20 +223,13 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
   num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
   num_images_ = GetImageFeatureBatchSize(extra_inputs);
 
-  std::cout << "Num image tokens in MultiModalPipelineState = " << num_image_tokens_ << std::endl;
-  std::cout << "Num audio tokens in MultiModalPipelineState = " << num_audio_tokens_ << std::endl;
-  std::cout << "Num images in MultiModalPipelineState = " << num_images_ << std::endl;
-
   if (model_.vision_session_) {
     vision_state_->SetExtraInputs(extra_inputs, num_images_, num_image_tokens_);
-    std::cout << "Set vision inputs" << std::endl;
   }
   if (model_.speech_session_) {
     speech_state_->SetExtraInputs(extra_inputs, num_audio_tokens_);
-    std::cout << "Set speech inputs" << std::endl;
   }
   embedding_state_->SetExtraInputs(num_images_, num_image_tokens_, num_audio_tokens_);
-  std::cout << "Set embedding inputs" << std::endl;
 }
 
 DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {

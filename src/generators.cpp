@@ -348,10 +348,8 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
 
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->AppendTokens(input_ids_device);
-  std::cout << "Appended input ids" << std::endl;
   computed_logits_ = false;
   ComputeLogits(input_ids_device);
-  std::cout << "Computed logits" << std::endl;
 }
 
 void Generator::SetInputs(const NamedTensors& named_tensors) {
@@ -364,20 +362,17 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
     if (name == Config::Defaults::InputIdsName) {
       input_ids = cpu_span<int32_t>(tensor->ort_tensor_->GetTensorMutableData<int32_t>(),
                                     tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount());
-      std::cout << "Allocate input ids" << std::endl;
     } else {
       // If the nominal name is found in the map, use the graph name.
       // Else, use the nominal name as the graph name.
       [[maybe_unused]] const auto [graph_name, found] = model_->config_->GetGraphName(name);
       extra_inputs_.push_back({graph_name, tensor});
-      std::cout << "Add " << name << " tensor to extra_inputs" << std::endl;
     }
   }
 
   // Set any extra inputs (those defined in extra_inputs and those defined in the PresetExtraInputs registry)
   if (set_extra_inputs_) {
     state_->SetExtraInputs(extra_inputs_);
-    std::cout << "Set all extra inputs" << std::endl;
     set_extra_inputs_ = false;
   }
 
