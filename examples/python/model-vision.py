@@ -105,10 +105,6 @@ def run(args: argparse.Namespace):
 
         print("Processing images and prompt...")
         inputs = processor(prompt, images=images)
-        print(inputs["input_ids"].shape())
-        print(inputs["token_type_ids"].shape())
-        print(inputs["pixel_values"].shape())
-        print(inputs["num_image_tokens"].shape())
 
         print("Generating response...")
         params = og.GeneratorParams(model)
