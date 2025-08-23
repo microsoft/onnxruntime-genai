@@ -13,6 +13,7 @@ int64_t GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) {
     if (extra_inputs[i].name == Config::Defaults::NumImageTokens) {
       assert(extra_inputs[i].tensor->ort_tensor_);
       const int64_t* num_image_tokens_data = extra_inputs[i].tensor->ort_tensor_->GetTensorData<int64_t>();
+      std::cout << *num_image_tokens_data << std::endl;
       return std::accumulate(num_image_tokens_data,
                              num_image_tokens_data + extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount(),
                              0LL);
