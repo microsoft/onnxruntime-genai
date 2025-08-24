@@ -33,7 +33,11 @@ struct SamplingBenchmark {
       input_ids.push_back(i);
 
     const int vocab_size = 32000;
-    auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+    const char* model_path = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32";
+    if (strcmp(device_type_, "NvTensorRtRtx") == 0) {
+      model_path = MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt";
+    }
+    auto config = OgaConfig::Create(model_path);
     config->Overlay(R"({ "model": { "vocab_size" : 32000 } })");
     config->ClearProviders();
     if (strcmp(device_type_, "cpu"))
@@ -145,6 +149,13 @@ auto benchmark_values = ::testing::Values(
     BenchmarkParams{"cuda", 6, BenchmarkFunction::SelectTop},
     BenchmarkParams{"cuda", 12, BenchmarkFunction::SelectTop}
 #endif
+    ,
+    BenchmarkParams{"NvTensorRtRtx", 1, BenchmarkFunction::TopP},
+    BenchmarkParams{"NvTensorRtRtx", 1, BenchmarkFunction::TopK},
+    BenchmarkParams{"NvTensorRtRtx", 1, BenchmarkFunction::TopKTopP},
+    BenchmarkParams{"NvTensorRtRtx", 1, BenchmarkFunction::SelectTop},
+    BenchmarkParams{"NvTensorRtRtx", 6, BenchmarkFunction::SelectTop},
+    BenchmarkParams{"NvTensorRtRtx", 12, BenchmarkFunction::SelectTop}
 );
 
 INSTANTIATE_TEST_SUITE_P(Benchmarks, SamplingBenchmarkTest, benchmark_values,

@@ -249,6 +249,135 @@ TEST(ModelTests, BeamSearchGptCuda) {
 }
 #endif
 
+// NvTensorRT test cases using Phi3 models
+static const std::pair<const char*, const char*> c_phi3_nvtrt_model_paths[] = {
+    {MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt", "fp16"},
+};
+
+void Test_GreedySearch_Phi3_NvTensorRtRtx(const char* model_path, const char* model_label) {
+  std::vector<int64_t> input_ids_shape{1, 19};
+  std::vector<int32_t> input_ids{32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001};
+
+  // Complete expected sequence (input + generated) from model_qa.cpp using the working phi3-fp16-nvtrt model
+  std::vector<int32_t> expected_output{
+    32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001,  // Input tokens (19)
+    15043, 29991, 306, 29915, 29885, 2599 
+  };
+  auto config = OgaConfig::Create(model_path);
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+  auto model = OgaModel::Create(*config);
+
+  int max_length = 25;
+  int batch_size = static_cast<int>(input_ids_shape[0]);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids);
+
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify outputs match expected outputs
+  for (int i = 0; i < batch_size; i++) {
+    auto sequence = generator->GetSequence(i);
+    auto* expected_output_start = &expected_output[i * max_length];
+    
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
+  }
+
+  // Test batch size 1 continuous case - will uncomment once NVTRT supports continuous decoding
+  // input_ids_shape = {1, 19};
+  // input_ids = {32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001};
+  // std::vector<int32_t> expected_output_continuous{32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001,  // Input tokens (19)
+  //   15043, 29991, 306, 29915, 29885, 2599};
+
+  // batch_size = static_cast<int>(input_ids_shape[0]);
+  // params->SetSearchOption("batch_size", batch_size);
+
+  // generator = OgaGenerator::Create(*model, *params);
+  // generator->AppendTokens(input_ids);
+
+  // while (!generator->IsDone()) {
+  //   generator->GenerateNextToken();
+  // }
+
+  // // Verify outputs match expected outputs
+  // auto sequence = generator->GetSequence(0);
+  // auto* expected_output_start = &expected_output_continuous[0];
+  // EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
+
+  // generator->RewindTo(3);
+  // std::vector<int32_t> next_ids{32007, 32001};
+  // generator->AppendTokens(next_ids);
+  // while (!generator->IsDone()) {
+  //   generator->GenerateNextToken();
+  // }
+
+  // // Verify outputs match expected outputs
+  // sequence = generator->GetSequence(0);
+  // EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
+}
+
+TEST(ModelTests, GreedySearchPhi3NvTensorRtRtx) {
+  for (auto model_path : c_phi3_nvtrt_model_paths)
+    Test_GreedySearch_Phi3_NvTensorRtRtx(model_path.first, model_path.second);
+}
+
+void Test_BeamSearch_Phi3_NvTensorRtRtx(const char* model_path, const char* model_label) {
+  std::vector<int64_t> input_ids_shape{1, 19};
+  std::vector<int32_t> input_ids{
+      32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889,
+      32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001};
+
+      std::vector<int32_t> expected_output{
+        32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001,  // Input tokens (19)
+        15043, 29991, 306, 29915, 29885, 2599 
+      };
+  auto config = OgaConfig::Create(model_path);
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+  auto model = OgaModel::Create(*config);
+
+  int batch_size = 1;
+  int max_length = 25;
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", max_length);
+  params->SetSearchOption("batch_size", batch_size);
+  params->SetSearchOption("num_beams", 4);
+  params->SetSearchOption("length_penalty", 1.0f);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokens(input_ids);
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Verify outputs match expected outputs
+  for (int i = 0; i < batch_size; i++) {
+    auto sequence = generator->GetSequence(i);
+    std::cout << "Actual sequence length: " << sequence.size() << std::endl;
+    std::cout << "Actual sequence (all tokens): ";
+    for (size_t j = 0; j < sequence.size() && j < static_cast<size_t>(max_length); j++) {
+      std::cout << sequence[j];
+      if (j < sequence.size() - 1 && j < static_cast<size_t>(max_length) - 1) std::cout << ", ";
+    }
+    std::cout << std::endl;
+    
+    auto* expected_output_start = &expected_output[static_cast<size_t>(i) * max_length];
+    EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
+  }
+}
+
+TEST(ModelTests, BeamSearchPhi3NvTensorRtRtx) {
+  for (auto model_path : c_phi3_nvtrt_model_paths)
+    Test_BeamSearch_Phi3_NvTensorRtRtx(model_path.first, model_path.second);
+}
+
 #if TEST_PHI2 && (USE_CUDA || USE_DML)
 TEST(ModelTests, TestApiDevice) {
   auto prompt = R"(
