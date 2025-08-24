@@ -31,6 +31,84 @@ enum struct BenchmarkFunction {
   TopP,
   TopK,
   TopKTopP,
+<<<<<<< HEAD
+=======
+  SelectTop
+};
+
+struct SamplingBenchmark {
+  void Run() {
+    std::vector<int32_t> input_ids;
+    for (int i = 0; i < batch_size_; i++)
+      input_ids.push_back(i);
+
+    const int vocab_size = 32000;
+    const char* model_path = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32";
+    if (strcmp(device_type_, "NvTensorRtRtx") == 0) {
+      model_path = MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt";
+    }
+    auto config = OgaConfig::Create(model_path);
+    config->Overlay(R"({ "model": { "vocab_size" : 32000 } })");
+    config->ClearProviders();
+    if (strcmp(device_type_, "cpu"))
+      config->AppendProvider(device_type_);
+
+    auto model = OgaModel::Create(*config);
+    auto params = OgaGeneratorParams::Create(*model);
+    params->SetSearchOption("max_length", 10);
+    params->SetSearchOption("batch_size", batch_size_);
+    params->SetSearchOptionBool("do_sample", true);
+    switch (benchmark_function_) {
+      case BenchmarkFunction::TopP:
+        params->SetSearchOption("top_p", 0.95f);
+        break;
+      case BenchmarkFunction::TopK:
+        params->SetSearchOption("top_k", 5);
+        break;
+      case BenchmarkFunction::TopKTopP:
+        params->SetSearchOption("top_k", 5);
+        params->SetSearchOption("top_p", 0.95f);
+        break;
+      case BenchmarkFunction::SelectTop:
+        params->SetSearchOption("top_k", 1);
+        break;
+      default:
+        assert(false);
+    }
+
+    std::random_device rd;
+    std::mt19937 engine(rd());
+    std::uniform_int_distribution<> dist(5, 25);
+    double total_time = 0.0;
+    int num_iter = 1000;
+
+    auto logits = OgaTensor::Create<float>(nullptr, std::array<int64_t, 1>{vocab_size * batch_size_});
+    auto test_start = std::chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < num_iter; i++) {
+      auto generator = OgaGenerator::Create(*model, *params);
+      int num_large = dist(engine);
+      CreateRandomLogits(reinterpret_cast<float*>(logits->Data()), num_large, vocab_size, batch_size_, engine);
+      generator->SetLogits(*logits);
+      auto start = std::chrono::high_resolution_clock::now();
+      generator->GenerateNextToken();
+      auto result = generator->GetNextTokens();
+      auto stop = std::chrono::high_resolution_clock::now();
+      auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+      total_time += duration.count();
+      if (std::chrono::high_resolution_clock::now() - test_start > std::chrono::minutes(1)) {
+        std::cout << "\x1b[41m ABORTING \x1b[0m loop due to slow performance(took more than 1 minute) on iteration " << i << std::endl;
+        break;
+      }
+    }
+    double average_time = total_time / double(num_iter);
+    std::cout << "Average time taken: " << average_time << " microseconds" << std::endl;
+  }
+
+  BenchmarkFunction benchmark_function_;
+  int batch_size_{1};
+  const char* device_type_{"cpu"};
+>>>>>>> 4631e1b5 (Add tests for NvTensorRtRtx EP)
 };
 
 static const char* BenchmarkFunctionToString(BenchmarkFunction function) {
@@ -114,6 +192,27 @@ BenchmarkResult RunBenchmark(const BenchmarkParams& params) {
   config->ClearProviders();
   if (strcmp(params.device_type, "cpu"))
     config->AppendProvider(params.device_type);
+auto benchmark_values = ::testing::Values(
+    BenchmarkParams{"cpu", 1, BenchmarkFunction::TopP},
+    BenchmarkParams{"cpu", 1, BenchmarkFunction::TopK},
+    BenchmarkParams{"cpu", 1, BenchmarkFunction::TopKTopP}
+#if USE_CUDA
+    ,
+    BenchmarkParams{"cuda", 1, BenchmarkFunction::TopP},
+    BenchmarkParams{"cuda", 1, BenchmarkFunction::TopK},
+    BenchmarkParams{"cuda", 1, BenchmarkFunction::TopKTopP},
+    BenchmarkParams{"cuda", 1, BenchmarkFunction::SelectTop},
+    BenchmarkParams{"cuda", 6, BenchmarkFunction::SelectTop},
+    BenchmarkParams{"cuda", 12, BenchmarkFunction::SelectTop}
+#endif
+    ,
+    BenchmarkParams{"NvTensorRtRtx", 1, BenchmarkFunction::TopP},
+    BenchmarkParams{"NvTensorRtRtx", 1, BenchmarkFunction::TopK},
+    BenchmarkParams{"NvTensorRtRtx", 1, BenchmarkFunction::TopKTopP},
+    BenchmarkParams{"NvTensorRtRtx", 1, BenchmarkFunction::SelectTop},
+    BenchmarkParams{"NvTensorRtRtx", 6, BenchmarkFunction::SelectTop},
+    BenchmarkParams{"NvTensorRtRtx", 12, BenchmarkFunction::SelectTop}
+);
 
   auto model = OgaModel::Create(*config);
   auto generator_params = OgaGeneratorParams::Create(*model);
