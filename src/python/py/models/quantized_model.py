@@ -827,7 +827,6 @@ class GPTQModel(QuantizedModel):
             for k, q_tensors in layer.self_attn.__dict__.items():
                 if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
                     if self.use_tmac and not quant_attrs["use_g_idx"]:
-                        print(k, "using T-MAC unpacking")
                         self.unpack_pack_tmac(q_tensors)
                         continue
                     else:
@@ -837,17 +836,17 @@ class GPTQModel(QuantizedModel):
 
                     if not quant_attrs["use_g_idx"]:
                         # Set `g_idx` to None since it's not used in `MatMulNBits`
-                        q_tensors.g_idx = None
-
-            print("Unpacking and repacking MLP tensors")            
+                        q_tensors.g_idx = None          
 
             # Unpack and repack all `QuantizedTensorModule` classes in MLP
-            for _, q_tensors in layer.mlp.__dict__.items():
+            print("Unpacking and repacking MLP tensors")  
+            for k, q_tensors in layer.mlp.__dict__.items():
                 if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
-                    if self.use_tmac:
+                    if self.use_tmac and not quant_attrs["use_g_idx"]:
+                        print(k, "using T-MAC unpacking")
                         self.unpack_pack_tmac(q_tensors)
                     else:
-                
+                        print(k, "using standard unpacking")
                         self.handle_qzeros(q_tensors)
                         self.unpack(q_tensors)
                         self.repack(q_tensors)
@@ -857,7 +856,8 @@ class GPTQModel(QuantizedModel):
                         q_tensors.g_idx = None
 
         if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
-            if self.use_tmac:
+            print("Unpacking and repacking LM head")
+            if self.use_tmac and not quant_attrs["use_g_idx"]:
                 self.unpack_pack_tmac(self.lm_head)
             else:
                 self.handle_qzeros(self.lm_head)
@@ -912,12 +912,9 @@ class GPTQModel(QuantizedModel):
             raise ValueError(f"Error in T-MAC unpacking: bits {bits} and group_size {group_size} do not match module's bits {module.bits} and group_size {module.group_size}.")
 
         # TODO: using numpy to pack/unpack bits for simplicity, replace it with torch operations
-        
-
         qweight = module.qweight.numpy()
         qzeros = module.qzeros.numpy()
         scales = module.scales.numpy()
-
     
         qweights = [(qweight >> bit_offset) & ((1 << bits) - 1) for bit_offset in range(0, 32, bits)]
         weight = np.stack(qweights, axis=1).reshape(K, M).T.astype("uint8")
@@ -943,8 +940,9 @@ class GPTQModel(QuantizedModel):
         else:
            packed_data = np.concatenate([weight_packed, scales.astype(np.float16).copy().view(np.uint8).flatten(), 
                             zeros.astype(np.float16).copy().view(np.uint8).flatten()])
-  
-        module.qweight = torch.from_numpy(packed_data.reshape(M, K //  group_size  *  (2 + group_size * bits // 8)))
+
+        type_size = 2 + (0 if self.is_symmetric else 2) + group_size * bits // 8
+        module.qweight = torch.from_numpy(packed_data.reshape(M, K //  group_size  *  type_size))
         module.qzeros = None  # qzeros is not used in T-MAC quantization
         module.scales = None  # scales is not used in T-MAC quantization
 
