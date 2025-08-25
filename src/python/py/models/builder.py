@@ -230,7 +230,7 @@ class Model:
         }
 
         # MoE-specific variables
-        moe_op_type = "QMoE" if self.onnx_dtype == ir.DataType.INT4 else "MoE"
+        moe_op_type = "QMoE" if (self.onnx_dtype == ir.DataType.INT4) else "MoE"
         num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else 0
         top_k_experts = config.num_experts_per_tok if hasattr(config, "num_experts_per_tok") else 0
         expert_weight_bits = 8 if extra_options.get("use_8bits_moe", False) else 4
@@ -2392,29 +2392,131 @@ class Model:
         )
         self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
 
+
+    def quant_dequant(self, weights, is_4_bit_quantization: bool = True):
+        # Handle edge case of all-zero weights tensor
+        if torch.all(weights == 0):
+            if is_4_bit_quantization:
+                packed_size = (weights.shape[-1] + 1) // 2
+                packed = torch.zeros(
+                    (weights.shape[0], packed_size), dtype=torch.uint8, device=weights.device
+                )
+                return torch.zeros_like(weights[..., :1]).to(torch.float16), packed, torch.zeros_like(weights)
+            else:
+                packed = torch.zeros_like(weights, dtype=torch.uint8)
+                return torch.zeros_like(weights[..., :1]).to(torch.float16), packed, torch.zeros_like(weights)
+
+        # Calculate scale like C++ implementation
+        abs_max = weights.abs().max(dim=-1, keepdim=True)[0]
+        abs_max = torch.clamp(abs_max, min=1e-8)
+
+        if is_4_bit_quantization:
+            # 4-bit: scale = abs_max / 7.0
+            scale = (abs_max.double() / 7.0).float() + 1e-12
+
+            if torch.max(abs_max) < 1e-8:
+                packed_size = (weights.shape[-1] + 1) // 2
+                packed = torch.zeros((weights.shape[0], packed_size), dtype=torch.uint8, device=weights.device)
+                return torch.ones_like(weights[..., :1]).to(torch.float16) * 1e-8, packed, torch.zeros_like(weights)
+
+            # Quantize -> signed values in [-8,7]
+            scaled_weights = (weights.double() / scale.double())
+            quantized_weights = torch.round(scaled_weights).clamp(-8, 7).float()
+
+            # Convert to uint8 storage: shift [-8,7] -> [0,15]
+            storage = (quantized_weights + 8).to(torch.uint8)
+
+            # Pack two 4-bit values into one uint8
+            even_indices = torch.arange(0, weights.shape[-1], 2, device=weights.device)
+            odd_indices = torch.arange(1, weights.shape[-1], 2, device=weights.device)
+
+            # Handle odd length by padding with zero (which is 8 in storage representation)
+            if odd_indices.shape[0] < even_indices.shape[0]:
+                padding = torch.full((weights.shape[0], 1), fill_value=8, dtype=torch.uint8, device=weights.device)
+                storage = torch.cat([storage, padding], dim=-1)
+                odd_indices = torch.arange(1, storage.shape[-1], 2, device=weights.device)
+
+            even_weights = storage[..., even_indices]
+            odd_weights = storage[..., odd_indices]
+
+            packed_weights = (even_weights & 0xF) | ((odd_weights & 0xF) << 4)
+
+            # Dequantize for PyTorch reference: convert storage back to signed and apply scale
+            lower = packed_weights & 0xF
+            upper = (packed_weights >> 4) & 0xF
+
+            # Reconstruct full unpacked uint8 storage
+            unpacked = torch.zeros(weights.shape, dtype=torch.uint8, device=weights.device)
+            unpacked[..., even_indices] = lower
+            # handle possible shorter odd slice
+            valid_odd_len = min(odd_indices.shape[0], weights.shape[-1] - even_indices.shape[0])
+            if valid_odd_len > 0:
+                valid_odd = odd_indices[:valid_odd_len]
+                unpacked[..., valid_odd] = upper[..., :valid_odd_len]
+
+            signed = unpacked.float() - 8.0
+            result = scale.float() * signed
+
+            return scale.squeeze(-1).to(torch.float16), packed_weights, result.to(weights.dtype)
+        else:
+            # 8-bit: scale = abs_max / 127.0
+            scale = (abs_max.double() / 127.0).float() + 1e-12
+
+            if torch.max(abs_max) < 1e-8:
+                packed = torch.full_like(weights, fill_value=128, dtype=torch.uint8, device=weights.device)
+                return torch.ones_like(weights[..., :1]).to(torch.float16) * 1e-8, packed, torch.zeros_like(weights)
+
+            scaled_weights = (weights.double() / scale.double())
+            quantized_weights = torch.round(scaled_weights).clamp(-128, 127).float()
+
+            storage = (quantized_weights + 128).to(torch.uint8)
+
+            # Dequantize: convert storage back to signed values and apply scale
+            signed = storage.float() - 128.0
+            result = scale.float() * signed
+
+            return scale.squeeze(-1).to(torch.float16), storage, result.to(weights.dtype)
+
+    def make_qmoe_weights_cpu_symmetric(self, weights, is_4_bit_quantization=True):
+        """
+        Wrapper to produce packed uint8 weights and 1D float16 scales for CPU QMoE operator.
+        Delegates to `quant_dequant` to centralize the CPU quantization logic.
+        Returns: (packed_weights_uint8, scales_float16_1d)
+        """
+        # quant_dequant returns (scales_float16, packed_uint8, dequantized_weights)
+        scales, packed, _ = self.quant_dequant(weights, is_4_bit_quantization)
+        return packed, scales
+
     def make_qmoe_weights(self, weights):
-        dtype = torch.quint4x2 if self.moe_attrs["expert_weight_bits"] == 4 else torch.int8
-        qweight, scales = None, None
+        # Use different quantization paths for CPU vs CUDA
+        if self.ep == "cpu":
+            # Use CPU-specific symmetric quantization that matches the CPU ONNX kernel
+            is_4_bit = self.moe_attrs["expert_weight_bits"] == 4
+            qweight, scales = self.make_qmoe_weights_cpu_symmetric(weights, is_4_bit)
+            return qweight, scales
+        else:
+            dtype = torch.quint4x2 if self.moe_attrs["expert_weight_bits"] == 4 else torch.int8
+            qweight, scales = None, None
 
-        unsuccessful = True
-        try:
-            import tensorrt_llm
+            unsuccessful = True
+            try:
+                import tensorrt_llm
 
-            _, qweight, scales = (
-                torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(weights.detach().cpu().contiguous(), dtype)
-            )
-            unsuccessful = False
-        except ImportError:
-            print("WARNING: TensorRT-LLM is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix().")
-        except RuntimeError as r:
-            print("WARNING: TensorRT-LLM failed to run torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix() successfully.")
-            err = str(r)
-            print(err[ : err.find('\n1')])  # omit internal traceback inside TensorRT-LLM
-        finally:
-            if unsuccessful:
-                raise RuntimeError("Failed to quantize MoE weights with TensorRT-LLM. Please ensure TensorRT-LLM installs and runs successfully in your environment.")
+                _, qweight, scales = (
+                    torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix(weights.detach().cpu().contiguous(), dtype)
+                )
+                unsuccessful = False
+            except ImportError:
+                print("WARNING: TensorRT-LLM is needed to use torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix().")
+            except RuntimeError as r:
+                print("WARNING: TensorRT-LLM failed to run torch.ops.trtllm._symmetric_quantize_last_axis_of_batched_matrix() successfully.")
+                err = str(r)
+                print(err[ : err.find('\n1')])  # omit internal traceback inside TensorRT-LLM
+            finally:
+                if unsuccessful:
+                    raise RuntimeError("Failed to quantize MoE weights with TensorRT-LLM. Please ensure TensorRT-LLM installs and runs successfully in your environment.")
 
-        return qweight, scales.to(torch.float16)
+            return qweight, scales.to(torch.float16)
 
     def make_block_sparse_moe(self, layer_id, bsm, root_input):
         # Make nodes for the QMoE block-sparse subgraph
@@ -4144,6 +4246,16 @@ class GPTOSSModel(Model):
             gate_up_proj_scales_tensor = torch.stack(gate_up_proj_scales_list, dim=0)
             down_proj_qweight_tensor = torch.stack(down_proj_qweight_list, dim=0).to(torch.uint8)
             down_proj_scales_tensor = torch.stack(down_proj_scales_list, dim=0)
+
+            # Handle scale duplication for SwiGLU fusion on CPU
+            if self.ep == "cpu" and self.moe_attrs.get("swiglu_fusion", 0) > 0:
+                # Check if we need to duplicate fc1 scales for SwiGLU fusion
+                expected_fc1_len = self.intermediate_size * 2  # SwiGLU needs 2x scales
+                current_fc1_len = gate_up_proj_scales_tensor.shape[-1]
+
+                if current_fc1_len == self.intermediate_size and current_fc1_len * 2 == expected_fc1_len:
+                    # Duplicate scales: [gate_scales, gate_scales] to match kernel expectation
+                    gate_up_proj_scales_tensor = torch.cat([gate_up_proj_scales_tensor, gate_up_proj_scales_tensor], dim=-1)
 
             pack_size = 8 // self.moe_attrs["expert_weight_bits"]
             self.make_initializer(gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, self.hidden_size // pack_size), gate_up_proj_weight)
