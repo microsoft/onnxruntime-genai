@@ -68,7 +68,8 @@ def monitor_cpu_memory():
 
 # Use input model to generate prompt
 def generate_prompt(model, tokenizer, prompt_length) -> str:
-    prompt = "a"
+    text = "a"
+    prompt = f'{args.chat_template.format(input=text)}'
     tokens = tokenizer.encode(prompt)
     params=og.GeneratorParams(model)
     max_length_to_use = prompt_length + len(tokens)
@@ -89,14 +90,13 @@ def get_prompt_by_length(prompt_length):
 
 def get_target_pip_package_version(target_pip_package_name_list):
     # get package name and version
-    import pkg_resources
+    import importlib.metadata
 
-    installed_packages = pkg_resources.working_set
     installed_packages_list = sorted(
         [
-            f"{i.key}=={i.version}"
-            for i in installed_packages
-            if i.key in target_pip_package_name_list
+            f"{dist.metadata['Name']}=={dist.version}"
+            for dist in importlib.metadata.distributions()
+            if dist.metadata["Name"] in target_pip_package_name_list
         ]
     )
 
