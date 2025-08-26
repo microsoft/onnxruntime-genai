@@ -709,37 +709,5 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda_BatchSize1_LargeVocabSize) {
       EXPECT_TRUE(found);
     }
   }
-
-  /*
-  std::vector<float> logits_cpu(vocab_size * batch_size);
-
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
-
-  int batch_size = 4;
-
-  auto model = OgaModel::Create(*config);
-  auto params = OgaGeneratorParams::Create(*model);
-  params->SetSearchOption("max_length", 10);
-  params->SetSearchOptionBool("do_sample", true);
-  params->SetSearchOption("top_k", 2);
-  params->SetSearchOption("top_p", 0.25f);
-  params->SetSearchOption("batch_size", batch_size);
-
-  auto generator = OgaGenerator::Create(*model, *params);
-  auto logits_tensor = OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{batch_size, 5LL});
-  generator->SetLogits(*logits_tensor);
-
-
-  // Verify outputs match expected outputs
-  generator->GenerateNextToken();
-  auto next_tokens = generator->GetNextTokens();
-  for (int b = 0; b < batch_size; b++) {
-    auto next_token = next_tokens[b];
-    auto next_token_score = logits_cpu[next_token + 5 vocab_size * b];
-    EXPECT_GT(next_token_score, 1.25f);
-  }
-  */
-
 }
 #endif
