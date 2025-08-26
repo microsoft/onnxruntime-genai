@@ -553,9 +553,9 @@ void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, fl
   // TODO(hasesh): Tweak this heuristic by performing more benchmarks.
   // It is likely that the sort and pick top_k approach works well for
   // smallish batch_sizes on most hardware. For now, we limit it to
-  // sampling (batch_size == 1) and when vocab_size is "pretty large"
-  // (also needs benchmarking to identify cut-off).
-  if (batch_size == 1 && vocab_size >= 100000) {
+  // sampling (batch_size == 1) && when vocab_size is "pretty large"
+  // (also needs benchmarking to identify cut-off) && top_k is >= 20.
+  if (batch_size == 1 && vocab_size >= 100000 && k >= 20) {
     use_sort_and_pick_topk = true;
   }
 
