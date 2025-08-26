@@ -556,7 +556,7 @@ void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, fl
   // sampling (batch_size == 1) and when vocab_size is "pretty large"
   // (also needs benchmarking to identify cut-off).
   if (batch_size == 1 && vocab_size >= 100000) {
-    use_sort_and_pick_topk = false;
+    use_sort_and_pick_topk = true;
   }
 
   if (!use_sort_and_pick_topk && k <= 4) {

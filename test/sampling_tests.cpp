@@ -654,11 +654,11 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda_BatchSize1_LargeVocabSize) {
   // This combination of `batch_size` and `vocab_size` will use the Sort + TopK
   // algorithm to optimally use the hardware.
   int batch_size = 1;
-  int vocab_size = 55000;
+  int vocab_size = 100001;
   std::vector<int32_t> input_ids{3};
 
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
-  config->Overlay(R"({ "model": { "vocab_size" : 55000 } })");
+  config->Overlay(R"({ "model": { "vocab_size" : 100001 } })");
   config->ClearProviders();
   config->AppendProvider("cuda");
 
