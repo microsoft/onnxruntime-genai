@@ -247,6 +247,11 @@ struct Config {
 
     } decoder;
 
+    // EP device filters
+    std::optional<std::string> hardware_device_type;  // CPU, GPU, NPU
+    std::optional<uint32_t> hardware_device_id;
+    std::optional<uint32_t> hardware_vendor_id;
+  
   } model;
 
   struct Search {
