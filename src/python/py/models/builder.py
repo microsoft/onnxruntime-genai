@@ -4148,8 +4148,8 @@ class GPTOSSModel(Model):
 
         if op_type == "MoE":
             # Save non-quantized MoE weights as initializers
-            self.make_initializer(mlp.experts.gate_up_proj.view(self.moe_attrs["num_experts"], -1, self.hidden_size), gate_up_proj_weight, to=self.io_dtype)
-            self.make_initializer(mlp.experts.down_proj.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size), down_proj_weight, to=self.io_dtype)
+            self.make_initializer(mlp.experts.gate_up_proj.transpose(-1, -2).view(self.moe_attrs["num_experts"], -1, self.hidden_size), gate_up_proj_weight, to=self.io_dtype)
+            self.make_initializer(mlp.experts.down_proj.transpose(-1, -2).view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size), down_proj_weight, to=self.io_dtype)
         else:
             # Create and save quantized MoE weights as initializers
             gate_up_proj_qweight_list, gate_up_proj_scales_list = [], []
