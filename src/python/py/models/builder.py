@@ -1459,14 +1459,15 @@ class Model:
         self.rope_attrs["save_caches"] = False
         cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
 
-        if self.ep == "dml":
-            # Concat small and large cos/sin caches for DML EP only
+        if self.ep in ["dml", "NvTensorRtRtx"]:
+            # Concat small and large cos/sin caches for DML and NvTensorRtRtx EPs
+            # These EPs don't support the If operator
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
             sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
             # Save cos/sin caches to disk
             self.make_initializer(cos_cache, cos_cache_name)
             self.make_initializer(sin_cache, sin_cache_name)
-            # Do NOT make the subgraph with the If node for DML EP.
+            # Do NOT make the subgraph with the If node for these EPs.
             return
 
         # Make the following subgraph to decide which cos/sin caches to use in the rotary embeddings
