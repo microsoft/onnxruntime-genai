@@ -8,11 +8,19 @@ parameters:
   type: string
   default: 'stable'
 
+- name: enable_winml
+  type: boolean
+
 stages:
 - stage: custom_nuget_packaging
   dependsOn: [capi_packaging]
   jobs:
-    - template: jobs/custom-nuget-packaging-job.yml
-      parameters:
-        custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
-        nuget_version_type: ${{ parameters.nuget_version_type }}
+    - ${{ if eq(parameters.enable_winml, true) }}:
+      - template: jobs/winml-nuget-packaging-job.yml
+        parameters:
+          nuget_version_type: ${{ parameters.nuget_version_type }}
+    - ${{ if eq(parameters.enable_winml, false) }}:
+      - template: jobs/custom-nuget-packaging-job.yml
+        parameters:
+          custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
+          nuget_version_type: ${{ parameters.nuget_version_type }}

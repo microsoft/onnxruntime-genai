@@ -18,6 +18,9 @@ parameters:
 - name: build_config
   type: string
   default: 'release'
+- name: enable_winml
+  type: boolean
+  default: false
 
 
 jobs:
@@ -154,6 +157,7 @@ jobs:
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
 
   - ${{ if eq(parameters.os, 'osx') }}:
     - template: steps/capi-macos-step.yml

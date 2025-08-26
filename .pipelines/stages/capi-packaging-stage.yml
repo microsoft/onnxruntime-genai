@@ -1,4 +1,6 @@
 parameters:
+- name: enable_winml
+  type: boolean
 - name: enable_win_cpu
   type: boolean
 - name: enable_win_cuda
@@ -42,8 +44,9 @@ stages:
         ort_version: ${{ parameters.ort_version }}
         os: 'win'
         build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
 
-  - ${{ if eq(parameters.enable_win_arm64, true) }}:
+  - ${{ if and(eq(parameters.enable_win_arm64, true), eq(parameters.enable_win_cpu, true)) }}:
     - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'arm64'
@@ -51,8 +54,9 @@ stages:
         ort_version: ${{ parameters.ort_version }}
         os: 'win'
         build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
 
-  - ${{ if eq(parameters.enable_win_dml, true) }}:
+  - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.enable_win_dml, true)) }}:
     - template: jobs/capi-packaging-job.yml
       parameters:
         arch: 'x64'
@@ -60,6 +64,7 @@ stages:
         ort_version: ${{ parameters.ort_dml_version }}
         os: 'win'
         build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
 
   - ${{ if and(eq(parameters.enable_win_arm64, true), eq(parameters.enable_win_dml, true)) }}:
     - template: jobs/capi-packaging-job.yml
@@ -69,6 +74,7 @@ stages:
         ort_version: ${{ parameters.ort_dml_version }}
         os: 'win'
         build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
 
   - ${{ if eq(parameters.enable_win_cuda, true) }}:
     - template: jobs/capi-packaging-job.yml
@@ -79,6 +85,7 @@ stages:
         ort_version: ${{ parameters.ort_cuda_version }}
         os: 'win'
         build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
 
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
     - template: jobs/capi-packaging-job.yml
@@ -88,6 +95,7 @@ stages:
         ort_version: ${{ parameters.ort_version }}
         os: 'linux'
         build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
 
   - ${{ if eq(parameters.enable_linux_cuda, true) }}:
     - template: jobs/capi-packaging-job.yml
@@ -98,6 +106,7 @@ stages:
         ort_version: ${{ parameters.ort_cuda_version }}
         os: 'linux'
         build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
 
   - ${{ if eq(parameters.enable_macos_cpu, true) }}:
     - template: jobs/capi-packaging-job.yml
@@ -107,6 +116,7 @@ stages:
         ort_version: ${{ parameters.ort_version }}
         os: 'osx'
         build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
 
     - template: jobs/capi-packaging-job.yml
       parameters:
@@ -115,6 +125,7 @@ stages:
         ort_version: ${{ parameters.ort_version }}
         os: 'osx'
         build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
 
   - ${{ if eq(parameters.enable_android, true) }}:
     - template: jobs/android-java-api-aar.yml
@@ -130,3 +141,4 @@ stages:
         arch: 'arm64'
         ort_version: ${{ parameters.ort_version }}
         build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}

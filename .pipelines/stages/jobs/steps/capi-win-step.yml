@@ -11,6 +11,9 @@ parameters:
 - name: build_config
   type: string
   default: 'release'
+- name: enable_winml
+  type: boolean
+  default: false
 
 steps:
 - bash: |
@@ -23,6 +26,7 @@ steps:
   path: onnxruntime-genai
   clean: true
   submodules: recursive
+
 - task: onebranch.pipeline.tsaoptions@1
   displayName: 'OneBranch TSAOptions'
   inputs:
@@ -31,6 +35,8 @@ steps:
 
 - template: utils/set-nightly-build-option-variable.yml
 
+- task: NuGetToolInstaller@1
+
 - script: |
     echo "arch=$(arch)"
     echo "ort_version=$(ort_version)"
@@ -38,13 +44,58 @@ steps:
     echo "cuda_version=$(cuda_version)"
     echo "target=${{ parameters.target }}"
     echo "build_config=${{ parameters.build_config }}"
+    echo.
+    echo CUDA
+    echo  cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
+    echo.
+    echo NOT-CUDA
+    echo cmake --preset windows_$(arch)_$(ep)_$(build_config)
+    echo.
+    echo cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
+    echo.
+
   displayName: 'Print Parameters'
+
+- task: ExtractFiles@1
+  displayName: "Extract AzCLI.zip"
+  condition: eq(variables['arch'], 'arm64')
+  inputs:
+    archiveFilePatterns: '$(Build.Repository.LocalPath)\.winml\external-tools\azure-cli-2.72.0-x64.zip'
+    destinationFolder: $(Build.Repository.LocalPath)\azcli
+
+- task: CmdLine@2
+  displayName: "Install AzCLI (add to path)"
+  continueOnError: true
+  condition: eq(variables['arch'], 'arm64')
+  inputs:
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    script: |
+      dir azcli
+      echo ##vso[task.prependpath]$(Build.Repository.LocalPath)\azcli\bin
+
+- task: CmdLine@2
+  displayName: "Ensure AzCLI"
+  inputs:
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    script: |
+      where az
+      az --version
+
+- task: CmdLine@2
+  displayName: "Ensure nuget.exe"
+  inputs:
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    script: |
+      where nuget.exe
 
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
   displayName: 'Download CUDA $(cuda_version)'
   condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
+  env:
+    AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
+    NuGetPackageSourceCredentials_TheFeed: 'Username=me;Password=$(NUGET_PAT_WCR)'
 
 - powershell: |
     $exePath = "$env:TEMP\rustup-init.exe"
@@ -82,17 +133,26 @@ steps:
   displayName: 'Configure CMake C API with CUDA'
   condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
+  env:
+    AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
+    NuGetPackageSourceCredentials_TheFeed: 'Username=me;Password=$(NUGET_PAT_WCR)'
 
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_$(build_config)
   displayName: 'Configure CMake C API without CUDA'
   condition: ne(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
+  env:
+    AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
+    NuGetPackageSourceCredentials_TheFeed: 'Username=me;Password=$(NUGET_PAT_WCR)'
 
 - powershell: |
     cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
+  env:
+    AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
+    NuGetPackageSourceCredentials_TheFeed: 'Username=me;Password=$(NUGET_PAT_WCR)'
 
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - template: compliant/win-esrp-dll-step.yml

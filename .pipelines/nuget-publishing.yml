@@ -53,6 +53,11 @@ parameters:
   type: boolean
   default: true
 
+- name: enable_winml
+  displayName: "TODO - Build WinML stuff..."
+  type: boolean
+  default: false
+
 - name: ort_version
   displayName: 'OnnxRuntime version'
   type: string
@@ -79,7 +84,7 @@ parameters:
 - name: build_config
   displayName: 'Build Configuration'
   type: string
-  default: 'release'
+  default: 'relwithdebinfo'
   values:
   - 'release'
   - 'relwithdebinfo'
@@ -141,6 +146,7 @@ extends:
         ort_dml_version: ${{ parameters.ort_dml_version }}
         cuda_version: ${{ parameters.cuda_version }}
         build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
 
     - template: stages/nuget-packaging-stage.yml
       parameters:
