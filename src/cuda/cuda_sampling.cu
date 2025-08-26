@@ -548,15 +548,26 @@ void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, fl
                              k,                          \
                              temperature);
 
-  if (k <= 4) {
+  bool use_sort_and_pick_topk = false;
+
+  // TODO(hasesh): Tweak this heuristic by performing more benchmarks.
+  // It is likely that the sort and pick top_k approach works well for
+  // smallish batch_sizes on most hardware. For now, we limit it to
+  // sampling (batch_size == 1) and when vocab_size is "pretty large"
+  // (also needs benchmarking to identify cut-off).
+  if (batch_size == 1 && vocab_size >= 100000) {
+    use_sort_and_pick_topk = false;
+  }
+
+  if (!use_sort_and_pick_topk && k <= 4) {
     GetTopK(4);
-  } else if (k <= 8) {
+  } else if (!use_sort_and_pick_topk && k <= 8) {
     GetTopK(8);
-  } else if (k <= 16) {
+  } else if (!use_sort_and_pick_topk && k <= 16) {
     GetTopK(16);
-  } else if (k <= 32) {
+  } else if (!use_sort_and_pick_topk && k <= 32) {
     GetTopK(32);
-  } else if (k <= 64) {
+  } else if (!use_sort_and_pick_topk && k <= 64) {
     GetTopK(64);
   } else {
     // In this case, we need vocab_size as stride for indices_out.

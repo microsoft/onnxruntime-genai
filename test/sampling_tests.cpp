@@ -649,4 +649,47 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda) {
     }
   }
 }
+
+TEST(SamplingTests, RandomizedSamplingSelectTopCuda_BatchSize1_LargeVocabSize) {
+  // This combination of `batch_size` and `vocab_size` will use the Sort + TopK
+  // algorithm to optimally use the hardware.
+  int batch_size = 1;
+  int vocab_size = 55000;
+  std::vector<int32_t> input_ids{3};
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 55000 } })");
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", false);
+  params->SetSearchOption("batch_size", batch_size);
+
+  std::vector<float> logits_cpu(vocab_size * batch_size);
+  std::vector<int> indices(vocab_size * batch_size);
+  std::random_device rd;
+  std::mt19937 engine(rd());
+  std::uniform_int_distribution<> dist(1, 25);
+  int num_iter = 5000;
+  for (int i = 0; i < num_iter; i++) {
+    int num_large = dist(engine);
+    CreateRandomLogits(logits_cpu.data(), num_large, vocab_size, batch_size, engine);
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{batch_size, vocab_size}));
+    generator->GenerateNextToken();
+    auto next_tokens = generator->GetNextTokens();
+
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      float max_score = *std::max_element(logits_cpu.begin() + vocab_size * b, logits_cpu.begin() + vocab_size * (b + 1));
+      auto next_token = next_tokens[b];
+      auto next_token_score = logits_cpu[next_token + vocab_size * b];
+      EXPECT_EQ(next_token_score, max_score);
+    }
+  }
+}
 #endif
