@@ -1963,6 +1963,19 @@ class Model:
             num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], sparse_block_size=self.attention_attrs["block_sparse"]["sparse_block_size"],
             do_rotary=self.attention_attrs["use_rope_in_attn"], rotary_interleaved=self.rope_attrs["interleaved"],
         )
+    
+    def make_attention_sub_norm(self, layer_id, attention, attention_input):
+        sub_norm_name = f"/model/layers.{layer_id}/attn/attn_sub_norm"
+        sub_norm_weight = f"model.layers.{layer_id}.self_attn.attn_sub_norm.weight"
+        sub_norm_inputs = [attention_input, sub_norm_weight]
+        sub_norm_output = f"{sub_norm_name}/output_0"
+
+        self.make_initializer(attention.sub_norm.weight + self.layernorm_attrs["add_offset"], sub_norm_weight, to=self.io_dtype)
+            
+        layernorm_kwargs = {"epsilon": self.layernorm_attrs["epsilon"], "axis": -1}
+        self.make_node("SimplifiedLayerNormalization", inputs=sub_norm_inputs, outputs=sub_norm_output, name=sub_norm_name, **layernorm_kwargs)
+        self.make_value(sub_norm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length ', self.hidden_size])
+        
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         # Make nodes for the Attention subgraph
@@ -2088,7 +2101,13 @@ class Model:
         o_proj = 'o_proj' if hasattr(attention, 'o_proj') else 'dense'
         o_matmul_basename = f"/model/layers.{layer_id}/attn/o_proj/MatMul"
         o_weight = getattr(attention, o_proj)
-        o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, f"{attn_name}/output_0")
+        o_input_name = f"{attn_name}/output_0"
+
+        if hasattr(attention, 'attn_sub_norm'):
+            self.make_attention_sub_norm(layer_id, attention, o_input_name)
+            o_input_name =  f"/model/layers.{layer_id}/attn/attn_sub_norm/output_0"
+           
+        o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, f"{o_input_name}")
 
         # Make Add node (output projection bias node if bias exists)
         o_bias_exists = getattr(attention, o_proj).bias is not None
@@ -2252,6 +2271,18 @@ class Model:
         mlp.up_proj.weight = torch.nn.Parameter(gate_up_linear.weight[self.intermediate_size :, :])
         mlp.up_proj.bias = None if gate_up_linear.bias is None else torch.nn.Parameter(gate_up_linear.bias[self.intermediate_size :], requires_grad=False)
 
+    def make_ffn_sub_norm(self, layer_id, mlp, ffn_output):
+        sub_norm_name = f"/model/layers.{layer_id}/mlp/ffn_sub_norm"
+        sub_norm_weight = f"model.layers.{layer_id}.mlp.ffn_sub_norm.weight"
+        self.make_initializer(mlp.ffn_sub_norm.weight + self.layernorm_attrs["add_offset"], sub_norm_weight, to=self.io_dtype)
+
+        # Make RMSNorm
+        sub_norm_inputs = [ffn_output, sub_norm_weight]
+        sub_norm_output = f"{sub_norm_name}/output_0"
+        layernorm_kwargs = {"epsilon": self.layernorm_attrs["epsilon"], "axis": -1}
+        self.make_node("SimplifiedLayerNormalization", inputs=sub_norm_inputs, outputs=sub_norm_output, name=sub_norm_name, **layernorm_kwargs)
+        self.make_value(sub_norm_output, dtype=self.io_dtype, shape=['batch_size', 'sequence_length ', self.intermediate_size])
+
     def make_mlp_proj(self, layer_id, mlp, root_input):
         # Make nodes for the MLP subgraph
         #
@@ -2303,9 +2334,14 @@ class Model:
         mul_inputs = [f"{act_fn_name}/output_0", f"{up_name}/output_0"]
         self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
+        ffn_output = f"{mul_name}/output_0"
+        if hasattrs(mlp, "ffn_sub_norm"):
+            self.make_ffn_sub_norm(layer_id, mlp, ffn_output)
+            ffn_output = f"/model/layers.{layer_id}/mlp/ffn_sub_norm/output_0"
+
         # Make output MatMul node
         down_matmul_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
-        down_matmul_name = self.make_matmul(mlp.down_proj, down_matmul_basename, f"{mul_name}/output_0")
+        down_matmul_name = self.make_matmul(mlp.down_proj, down_matmul_basename, ffn_output)
         down_name = down_matmul_name
         if down_bias_exists:
             down_add_name = f"/model/layers.{layer_id}/mlp/down_proj/Add"
@@ -4189,6 +4225,11 @@ class GPTOSSModel(Model):
         self.layernorm_attrs["skip_input"] = f"{moe_name}/output_0"
 
 
+class BitnetModel(LlamaModel):
+    def __init__(self, config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+
+
 def check_extra_options(kv_pairs):
     """
     Check key-value pairs and set values correctly
@@ -4382,8 +4423,10 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "SmolLM3ForCausalLM":
             onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "BitnetForCausalLM":
+            onnx_model = BitnetModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         else:
-            raise NotImplementedError(f"The {hf_name} model is not currently supported.")
+            raise NotImplementedError(f"The {hf_name} model of architecture {config.architectures[0]} is not currently supported.")
 
         # Make ONNX model
         onnx_model.make_model(input_path)
