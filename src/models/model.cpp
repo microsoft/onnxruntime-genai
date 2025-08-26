@@ -885,7 +885,9 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       }
     }
 
-    session_options.RegisterCustomOpsLibrary(custom_library_file_prefix.c_str());
+    // Convert to fs::path for proper wide string handling on Windows
+    fs::path custom_ops_lib_path(custom_library_file_prefix);
+    session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
   }
 
   if (config_session_options.graph_optimization_level.has_value()) {
