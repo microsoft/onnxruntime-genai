@@ -235,7 +235,7 @@ steps:
     displayName: 'Publish Build Symbols'
     condition: and(succeeded(), eq(variables['build_config'], 'relwithdebinfo'))
     inputs:
-      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\src\python\RelWithDebInfo\'
+      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\src\python\MinSizeRel\'
       SearchPattern: 'onnxruntime_genai.pdb'
       SymbolServerType: teamServices
       SymbolExpirationInDays: 365
