@@ -22,6 +22,11 @@ struct SamplingData {
   cuda_unique_ptr<int> offsets;
   cuda_unique_ptr<float> temp_buffer;
   cuda_unique_ptr<curandState> curand_states;
+
+  cuda_unique_ptr<uint> top_k_distributed_lock;
+  cuda_unique_ptr<int> top_k_distirbuted_keys;
+  cuda_unique_ptr<float> top_k_distirbuted_values;
+  
   size_t temp_storage_bytes = 0;
 };
 
