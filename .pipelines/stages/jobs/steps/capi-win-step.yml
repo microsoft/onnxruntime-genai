@@ -57,6 +57,16 @@ steps:
 
   displayName: 'Print Parameters'
 
+- task: CmdLine@2
+  displayName: "(pre) Ensure AzCLI"
+  condition: eq(variables['arch'], 'arm64')
+  inputs:
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    script: |
+      where az
+      az --version
+      exit 0
+
 - task: ExtractFiles@1
   displayName: "Extract AzCLI.zip"
   condition: eq(variables['arch'], 'arm64')
@@ -66,7 +76,6 @@ steps:
 
 - task: CmdLine@2
   displayName: "Install AzCLI (add to path)"
-  continueOnError: true
   condition: eq(variables['arch'], 'arm64')
   inputs:
     workingDirectory: '$(Build.Repository.LocalPath)'
@@ -92,7 +101,7 @@ steps:
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
   displayName: 'Download CUDA $(cuda_version)'
-  condition: eq(variables['ep'], 'cuda')
+  condition: or(eq(variables['ep'], 'cuda'), and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64')))
   workingDirectory: '$(Build.Repository.LocalPath)'
   env:
     AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
@@ -132,7 +141,7 @@ steps:
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
   displayName: 'Configure CMake C API with CUDA'
-  condition: eq(variables['ep'], 'cuda')
+  condition: or(eq(variables['ep'], 'cuda'), and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64')))
   workingDirectory: '$(Build.Repository.LocalPath)'
   env:
     AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
@@ -141,7 +150,7 @@ steps:
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_$(build_config)
   displayName: 'Configure CMake C API without CUDA'
-  condition: ne(variables['ep'], 'cuda')
+  condition: not(or(eq(variables['ep'], 'cuda'), and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64'))))
   workingDirectory: '$(Build.Repository.LocalPath)'
   env:
     AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)

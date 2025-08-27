@@ -26,10 +26,28 @@ parameters:
 - name: enable_winml
   type: boolean
 
-
 stages:
 - stage: python_packaging
   jobs:
+  - ${{ if eq(parameters.enable_winml, true) }}:
+    - template: jobs/py-packaging-job.yml
+      parameters:
+        os: 'win'
+        arch: 'x64'
+        ep: 'winml'
+        cuda_version: '12.2'
+        cuda_display_version: '122'
+        build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
+
+    - template: jobs/py-packaging-job.yml
+      parameters:
+        os: 'win'
+        arch: 'arm64'
+        ep: 'winml'
+        build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
+
   - ${{ if eq(parameters.enable_win_cpu, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
