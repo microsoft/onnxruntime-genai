@@ -347,6 +347,25 @@ void LaunchPopulateOffsets(int* offsets, int size, int batch_size, cudaStream_t 
   PopulateOffsets<<<grid, block, 0, stream>>>(offsets, size, batch_size);
 }
 
+// Scaler kernel (for example: temperature scaling)
+
+__global__ void FloatElementWiseScaler(float* data, float scaler_div, int size) {
+  int index = threadIdx.x + blockIdx.x * blockDim.x;
+  if (index < size) {
+    data[index] = data[index] / scaler_div;
+  }
+}
+
+void LaunchTemperatureScaling(float* data, float temperature, int num_elements, cudaStream_t stream) {
+  if (num_elements == 0) {
+    return;
+  }
+
+  dim3 grid((num_elements / 256) + 1, 1, 1);
+  dim3 block(256, 1, 1);
+  FloatElementWiseScaler<<<grid, block, 0, stream>>>(data, temperature, num_elements);
+}
+
 // Sorting Kernel Launcher
 
 template <typename T>
@@ -528,13 +547,20 @@ void LaunchSampleKernel(SamplingData* data, cudaStream_t stream, float* scores, 
   SampleKernel<256><<<grid, block, 0, stream>>>(data->prefix_sums_adjusted.get(), indices, index_out, sample_range, indices_stride, data->thresholds.get());
 }
 
-void LaunchSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size) {
+void LaunchSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
   // Sort indices and scores
   LaunchPopulateOffsets(data->offsets.get(), vocab_size, batch_size, stream);
   LaunchPopulateIndices(data->indices_in.get(), vocab_size, batch_size, stream);
   LaunchSortPairs<float>(data->temp_buffer.get(), data->temp_storage_bytes, scores_in, scores_out,
                          data->indices_in.get(), indices_out, vocab_size * batch_size, batch_size, data->offsets.get(),
                          stream, /*is_descending*/ true);
+
+  if (temperature != 1.f) {
+    // TODO: Fuse the temperature scaling with subsequent Softmax kernel - currently it isn't a very costly
+    // kernel, so keep it unfused
+    // We only need to scale the "top_k" elements from the sorted array (which is the output of the above kernel)
+    LaunchTemperatureScaling(scores_out, temperature, k, stream);
+  }
 }
 
 void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
@@ -571,7 +597,7 @@ void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, fl
     GetTopK(64);
   } else {
     // In this case, we need vocab_size as stride for indices_out.
-    LaunchSort(data, stream, scores_in, data->scores_buffer.get(), indices_out, vocab_size, batch_size);
+    LaunchSort(data, stream, scores_in, data->scores_buffer.get(), indices_out, vocab_size, batch_size, k, temperature);
   }
   DispatchBlockwiseSoftmaxForward<false>(stream, scores_out, const_cast<const float*>(data->scores_buffer.get()), k, k <= 64 ? k : vocab_size, k, batch_size);
 }
