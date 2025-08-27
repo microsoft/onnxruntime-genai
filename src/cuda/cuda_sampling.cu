@@ -356,7 +356,7 @@ __global__ void FloatElementWiseScaler(float* data, float scaler_div, int size) 
   }
 }
 
-void LaunchTemperatureScaling(float* data, float temperature, int num_elements, cudaStream_t stream) {
+void LaunchTemperatureScaling(float* data, cudaStream_t stream, int num_elements, float temperature) {
   if (num_elements == 0) {
     return;
   }
@@ -559,7 +559,7 @@ void LaunchSort(SamplingData* data, cudaStream_t stream, float* scores_in, float
     // TODO: Fuse the temperature scaling with subsequent Softmax kernel - currently it isn't a very costly
     // kernel, so keep it unfused
     // We only need to scale the "top_k" elements from the sorted array (which is the output of the above kernel)
-    LaunchTemperatureScaling(scores_out, temperature, k, stream);
+    LaunchTemperatureScaling(scores_out, stream, k, temperature);
   }
 }
 
