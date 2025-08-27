@@ -54,7 +54,7 @@ parameters:
     default: true
 
   - name: enable_winml
-    displayName: "TODO - Build WinML stuff..."
+    displayName: "Whether Windows WinML package is built."
     type: boolean
     default: false
 
