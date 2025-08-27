@@ -42,6 +42,8 @@ SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int v
   indices_in = CudaMallocArray<int>(vocab_size * batch_size);
   offsets = CudaMallocArray<int>(batch_size + 1);
   curand_states = CudaMallocArray<curandState>(batch_size);
+  sync_counter = CudaMallocArray<int>(1);
+  cudaMemsetAsync(sync_counter.get(), 0, sizeof(int), stream);
   temp_storage_bytes = 0;
   cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr, temp_storage_bytes, (float*)nullptr, (float*)nullptr,
                                                      (int*)nullptr, (int*)nullptr, vocab_size * batch_size, batch_size, (int*)nullptr, (int*)nullptr, 0, sizeof(float) * 8, stream);
@@ -543,6 +545,7 @@ enum class TopKAlgorithm {
     DIRECT_KERNEL,
     MAP_REDUCE,
     MAP_REDUCE_SHARED,
+    SINGLE_KERNEL_MAP_REDUCE,
     FULL_SORT
 };
 
@@ -806,6 +809,92 @@ __global__ void ReduceFinalTopKAndSoftmax_SharedMemory(int* final_indices,
     }
 }
 
+// Single kernel fusion of Map and Reduce stages
+template <int max_k, int kBlockSize>
+__global__ void SingleKernelMapReduceTopKAndSoftmax(
+    int* final_indices,
+    float* final_scores,
+    const float* scores_in,
+    int* intermediate_indices,
+    float* intermediate_scores,
+    int vocab_size,
+    int num_partitions,
+    int k,
+    float temperature,
+    int* sync_counter) {
+    // --- STAGE 1: MAP (All blocks execute this) ---
+    const int batch_idx = 0; // Specialized for batch_size = 1
+    const int partition_idx = blockIdx.x;
+    const int num_intermediate_results_per_batch = num_partitions * max_k;
+
+    const int partition_size = (vocab_size + num_partitions - 1) / num_partitions;
+    const int start_index = partition_idx * partition_size;
+    const int end_index = min(start_index + partition_size, vocab_size);
+
+    TopK<float, max_k> thread_top_k;
+    thread_top_k.Init();
+
+    for (int i = start_index + threadIdx.x; i < end_index; i += kBlockSize) {
+        thread_top_k.Insert(scores_in[i], i);
+    }
+
+    typedef cub::BlockReduce<TopK<float, max_k>, kBlockSize> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+    TopK<float, max_k> block_top_k = BlockReduce(temp_storage).Reduce(thread_top_k, reduce_topk_op<float, max_k>);
+
+    if (threadIdx.x == 0) {
+        int offset = partition_idx * max_k;
+        for (int i = 0; i < max_k; ++i) {
+            intermediate_scores[offset + i] = block_top_k.value[i];
+            intermediate_indices[offset + i] = block_top_k.key[i];
+        }
+    }
+    __syncthreads();
+
+    // --- STAGE 1.5: GLOBAL SYNC ---
+    if (threadIdx.x == 0) {
+        atomicAdd(sync_counter, 1);
+    }
+
+    // --- STAGE 2: REDUCE (Only block 0 executes this) ---
+    if (blockIdx.x == 0) {
+        // Block 0 waits for all other blocks to report in
+        volatile int* p_counter = sync_counter;
+        while (*p_counter < gridDim.x) {}
+        __threadfence(); // Ensure visibility of writes from other blocks
+
+        // Now perform the reduction
+        TopK<float, max_k> final_thread_top_k;
+        final_thread_top_k.Init();
+
+        for (int i = threadIdx.x; i < num_intermediate_results_per_batch; i += kBlockSize) {
+            final_thread_top_k.Insert(intermediate_scores[i], intermediate_indices[i]);
+        }
+
+        TopK<float, max_k> final_top_k = BlockReduce(temp_storage).Reduce(final_thread_top_k, reduce_topk_op<float, max_k>);
+
+        if (threadIdx.x == 0) {
+            float top_k_scores_reg[max_k];
+            float max_val = -std::numeric_limits<float>::max();
+            for (int i = 0; i < k; i++) {
+                float scaled_score = final_top_k.value[i] / temperature;
+                top_k_scores_reg[i] = scaled_score;
+                if (scaled_score > max_val) max_val = scaled_score;
+            }
+
+            float sum_exp = 0.0f;
+            for (int i = 0; i < k; i++) {
+                sum_exp += expf(top_k_scores_reg[i] - max_val);
+            }
+
+            for (int i = 0; i < k; i++) {
+                final_scores[i] = expf(top_k_scores_reg[i] - max_val) / sum_exp;
+                final_indices[i] = final_top_k.key[i];
+            }
+        }
+    }
+}
+
 void RunTopKViaMapReduce(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions) {
     const int kBlockSize = 256;
     const int max_k = 64;
@@ -846,6 +935,29 @@ void RunTopKViaMapReduceShared(SamplingData* data, cudaStream_t stream, float* s
     ReduceFinalTopKAndSoftmax_SharedMemory<max_k, kBlockSize><<<grid_stage2, block_stage2, shared_mem_size, stream>>>(
         indices_out, scores_out, intermediate_indices, intermediate_scores,
         num_intermediate_results, k, temperature);
+}
+
+void RunTopKViaSingleKernelMapReduce(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions) {
+    const int kBlockSize = 256;
+    const int max_k = 64;
+
+    // This algorithm is specialized for batch_size = 1
+    if (batch_size != 1) {
+        // Fallback or assert
+        RunTopKViaMapReduce(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature, num_partitions);
+        return;
+    }
+
+    float* intermediate_scores = data->scores_buffer.get();
+    int* intermediate_indices = data->indices_in.get();
+
+    cudaMemsetAsync(data->sync_counter.get(), 0, sizeof(int), stream);
+
+    dim3 grid(num_partitions);
+    dim3 block(kBlockSize);
+    SingleKernelMapReduceTopKAndSoftmax<max_k, kBlockSize><<<grid, block, 0, stream>>>(
+        indices_out, scores_out, scores_in, intermediate_indices, intermediate_scores,
+        vocab_size, num_partitions, k, temperature, data->sync_counter.get());
 }
 
 // ------------------------------------------------------------------
@@ -910,6 +1022,13 @@ TopKConfig BenchmarkAndGetBestAlgorithm(SamplingData* data, cudaStream_t stream,
                 benchmark_algorithm({TopKAlgorithm::MAP_REDUCE_SHARED, num_partitions}, [&]() { RunTopKViaMapReduceShared(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature, num_partitions); });
             }
         }
+
+        // Benchmark Single Kernel Map-Reduce (only for batch_size=1)
+        if (batch_size == 1) {
+            for (int num_partitions : {64, 128, 256}) {
+                benchmark_algorithm({TopKAlgorithm::SINGLE_KERNEL_MAP_REDUCE, num_partitions}, [&]() { RunTopKViaSingleKernelMapReduce(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature, num_partitions); });
+            }
+        }
     }
     
     benchmark_algorithm({TopKAlgorithm::FULL_SORT}, [&]() { RunTopKViaFullSort(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature); });
@@ -941,6 +1060,9 @@ void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, fl
             break;
         case TopKAlgorithm::MAP_REDUCE_SHARED:
             RunTopKViaMapReduceShared(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature, chosen_config.num_partitions);
+            break;
+        case TopKAlgorithm::SINGLE_KERNEL_MAP_REDUCE:
+            RunTopKViaSingleKernelMapReduce(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature, chosen_config.num_partitions);
             break;
         case TopKAlgorithm::FULL_SORT:
             RunTopKViaFullSort(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature);
