@@ -32,5 +32,7 @@ void GetSample(SamplingData* data, cudaStream_t stream, int32_t* d_next_token, f
 template <bool is_log_softmax>
 void DispatchBlockwiseSoftmaxForward(cudaStream_t stream, float* output, const float* input, int softmax_elements, int input_stride, int output_stride, int batch_count);
 
+void RandomTopkInput(cudaStream_t stream, float* data, curandState* batch_state, int total_size, int batch_size);
+
 }  // namespace cuda
 }  // namespace Generators

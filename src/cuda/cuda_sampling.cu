@@ -810,6 +810,7 @@ __global__ void ReduceFinalTopKAndSoftmax_SharedMemory(int* final_indices,
 }
 
 // Single kernel fusion of Map and Reduce stages
+// Specialized for batch_size = 1
 template <int max_k, int kBlockSize>
 __global__ void SingleKernelMapReduceTopKAndSoftmax(
     int* final_indices,
@@ -823,7 +824,6 @@ __global__ void SingleKernelMapReduceTopKAndSoftmax(
     float temperature,
     int* sync_counter) {
     // --- STAGE 1: MAP (All blocks execute this) ---
-    const int batch_idx = 0; // Specialized for batch_size = 1
     const int partition_idx = blockIdx.x;
     const int num_intermediate_results_per_batch = num_partitions * max_k;
 
@@ -970,6 +970,9 @@ void RunTopKViaFullSort(SamplingData* data, cudaStream_t stream, float* scores_i
     DispatchBlockwiseSoftmaxForwardWithTemperature(stream, scores_out, const_cast<const float*>(unscaled_scores), k, vocab_size, k, batch_size, temperature);
 }
 
+void RandomTopkInput(cudaStream_t stream, float* data, curandState* batch_state, int total_size, int batch_size) {
+  FillRandom<<<(total_size + 255) / 256, 256, 0, stream>>>(data, batch_state, total_size, batch_size);
+}
 
 // Performs a one-time benchmark to find the fastest Top-K algorithm for a given configuration.
 TopKConfig BenchmarkAndGetBestAlgorithm(SamplingData* data, cudaStream_t stream, int vocab_size, int batch_size, int k) {
@@ -982,7 +985,7 @@ TopKConfig BenchmarkAndGetBestAlgorithm(SamplingData* data, cudaStream_t stream,
     auto d_rand_indices = CudaMallocArray<int>(k * batch_size); // Only need k indices
     auto d_rand_out = CudaMallocArray<float>(k * batch_size);
     int total_size = vocab_size * batch_size;
-    FillRandom<<<(total_size + 255) / 256, 256, 0, stream>>>(d_rand_scores.get(), data->curand_states.get(), total_size, batch_size);
+    RandomTopkInput(stream, d_rand_scores.get(), data->curand_states.get(), total_size, batch_size);
 
     cudaEvent_t start, stop;
     cudaEventCreate(&start);

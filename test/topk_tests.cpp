@@ -163,14 +163,18 @@ void RunParityTests() {
 // Main benchmark function
 void RunBenchmarks() {
     // --- Define Benchmark Configurations ---
-    std::vector<BenchmarkParams> configs = {
-        {1, 50257, 10},
-        {1, 50257, 50},
-        {1, 200000, 50},
-        {4, 50257, 50},
-        {1, 32000, 64},
-        {8, 32000, 64}
-    };
+    std::vector<int> batch_sizes = {1, 4, 8};
+    std::vector<int> vocab_sizes = {20000, 40000, 100000, 200000, 300000};
+    std::vector<int> ks = {1, 4, 8, 32, 50, 64};
+
+    std::vector<BenchmarkParams> configs;
+    for (int batch_size : batch_sizes) {
+        for (int vocab_size : vocab_sizes) {
+            for (int k : ks) {
+                configs.push_back({batch_size, vocab_size, k});
+            }
+        }
+    }
 
     std::vector<BenchmarkResult> all_results;
 
@@ -199,7 +203,7 @@ void RunBenchmarks() {
         CudaCheck(cudaEventCreate(&stop));
 
         const int warmup_runs = 5;
-        const int timing_runs = 50;
+        const int timing_runs = 1000;
         const float temperature = 1.0f;
 
         auto measure_latency = [&](const std::string& name, int num_partitions, auto func) {
