@@ -23,6 +23,7 @@ steps:
   condition: or( eq (variables['ep'], ''), eq (variables['arch'], ''))
 
 - checkout: self
+  lfs: true
   path: onnxruntime-genai
   clean: true
   submodules: recursive

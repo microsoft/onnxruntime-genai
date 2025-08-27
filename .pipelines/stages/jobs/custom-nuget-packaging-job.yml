@@ -17,25 +17,13 @@ jobs:
   - template: steps/utils/flex-download-pipeline-artifact.yml
     parameters:
       StepName: 'Download win-cuda-x64 capi Artifacts'
-      ArtifactName: onnxruntime-genai-win-cuda-x64-capi
+      ArtifactName: onnxruntime-genai-win-winml-x64-capi
       TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
   - template: steps/utils/flex-download-pipeline-artifact.yml
     parameters:
-      StepName: 'Download win-cpu-arm64 capi Artifacts'
-      ArtifactName: onnxruntime-genai-win-cpu-arm64-capi
-      TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
-
-  - template: steps/utils/flex-download-pipeline-artifact.yml
-    parameters:
-      StepName: 'Download osx-x64 capi Artifacts'
-      ArtifactName: onnxruntime-genai-osx-cpu-x64-capi
-      TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
-
-  - template: steps/utils/flex-download-pipeline-artifact.yml
-    parameters:
-      StepName: 'Download osx-arm64 capi Artifacts'
-      ArtifactName: onnxruntime-genai-osx-cpu-arm64-capi
+      StepName: 'Download genai-win-winml-arm64 capi Artifacts'
+      ArtifactName: onnxruntime-genai-win-directml-arm64-capi
       TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
 
   - checkout: self

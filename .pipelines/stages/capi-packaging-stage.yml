@@ -32,10 +32,31 @@ parameters:
   type: string
   default: 'release'
 
-
 stages:
 - stage: capi_packaging
   jobs:
+
+  - ${{ if eq(parameters.enable_winml, true) }}:
+    - template: jobs/capi-packaging-job.yml
+      parameters:
+        os: 'win'
+        arch: 'x64'
+        ep: 'winml'
+        cuda_version: ${{ parameters.cuda_version }}
+        ort_version: ${{ parameters.ort_cuda_version }}
+        build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
+
+  - ${{ if eq(parameters.enable_winml, true) }}:
+    - template: jobs/capi-packaging-job.yml
+      parameters:
+        os: 'win'
+        arch: 'arm64'
+        ep: 'winml'
+        ort_version: ${{ parameters.ort_dml_version }}
+        build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
+
   - ${{ if eq(parameters.enable_win_cpu, true) }}:
     - template: jobs/capi-packaging-job.yml
       parameters:
