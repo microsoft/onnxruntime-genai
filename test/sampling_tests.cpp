@@ -691,16 +691,14 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda_BatchSize1_LargeVocabSize) {
       // Our top_k sorted tokens (the generated token has to be one from these)
       std::vector<size_t> indices(logits_cpu.size());
       std::iota(indices.begin(), indices.end(), 0);
-      std::partial_sort(indices.begin(), indices.begin() + top_k, indices.end(),
-                    [&](size_t A, size_t B) {
-                      return logits_cpu[A] > logits_cpu[B];
-                    });
+      std::partial_sort(
+          indices.begin(), indices.begin() + top_k, indices.end(),
+          [&](size_t A, size_t B) { return logits_cpu[A] > logits_cpu[B]; });
 
       // Next token has to be in the list of the above top_k indices
       bool found = false;
-      for (int i=0; i<top_k; ++i)
-      {
-        if (indices[i] == next_token){
+      for (int i = 0; i < top_k; ++i) {
+        if (indices[i] == next_token) {
           found = true;
           break;
         }
