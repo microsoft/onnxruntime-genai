@@ -164,6 +164,10 @@ steps:
     AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
     NuGetPackageSourceCredentials_TheFeed: 'Username=me;Password=$(NUGET_PAT_WCR)'
 
+- powershell: |
+    Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
+  displayName: 'List all files in the repo for debugging'
+  
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - template: compliant/win-esrp-dll-step.yml
     parameters:
