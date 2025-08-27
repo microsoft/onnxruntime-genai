@@ -856,14 +856,14 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     fs::path custom_library_path{custom_library_file_prefix};
     if (custom_library_path.is_relative()) {
       // Get EP devices to check for library_path metadata
-      size_t num_devices;
-      const OrtEpDevice* const* device_ptrs;
+      size_t num_devices = 0;
+      const OrtEpDevice* const* device_ptrs = nullptr;
       Ort::api->GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
 
       bool resolved = false;
       for (size_t i = 0; i < num_devices && !resolved; ++i) {
         const OrtKeyValuePairs* keyvals = Ort::api->EpDevice_EpMetadata(device_ptrs[i]);
-        size_t num_entries;
+        size_t num_entries = 0;
         const char* const* keys = nullptr;
         const char* const* values = nullptr;
         Ort::api->GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
