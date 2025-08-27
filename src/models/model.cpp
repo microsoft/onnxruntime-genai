@@ -20,6 +20,7 @@
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "../dml/interface.h"
+#include "../webgpu/interface.h"
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -573,8 +574,18 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
             opt_it != provider_options.options.end() && opt_it->second == "1") {
           p_device = GetDeviceInterface(DeviceType::QNN);
         }
-      } else if (provider_options.name == "WebGPU")
+      } else if (provider_options.name == "WebGPU") {
         p_device = GetDeviceInterface(DeviceType::WEBGPU);
+        // Convert provider options to unordered_map for SetWebGPUProvider
+        std::unordered_map<std::string, std::string> webgpu_options;
+        for (const auto& option : provider_options.options) {
+          webgpu_options[option.first] = option.second;
+        }
+
+        // Use the new SetWebGPUProvider function for enhanced provider setup
+        SetWebGPUProvider(session_options, webgpu_options);
+        continue; // Skip the generic AppendExecutionProvider below
+      }
       else if (provider_options.name == "OpenVINO")
         p_device = GetDeviceInterface(DeviceType::OpenVINO);
       else if (provider_options.name == "VitisAI") {
@@ -734,7 +745,9 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   EnsureDeviceOrtInit(*p_device_, *config_);
 
   // Only CUDA, TRT-RTX and DML does every input on the device
-  if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx)
+  // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
+  if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx ||
+      (p_device_->GetType() == DeviceType::WEBGPU && IsGraphCaptureEnabled(config_->model.decoder.session_options)))
     p_device_inputs_ = p_device_;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);

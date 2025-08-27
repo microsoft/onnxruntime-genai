@@ -845,6 +845,17 @@ bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
         }
       } else if (provider_options->name == "DML") {
         return true;
+      } else if (provider_options->name == "WebGPU") {
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enableGraphCapture" && value.second == "1") {
+#ifdef USE_WEBGPU
+            return true;
+#else
+            throw std::runtime_error("Please add --use_webgpu flag when build onnxruntime-genai to enable graph capture");
+#endif
+          }
+        }
+        return false;
       } else if (provider_options->name == "NvTensorRtRtx") {
         for (const auto& value : provider_options->options) {
           if (value.first == "enable_cuda_graph" && value.second == "1") {
