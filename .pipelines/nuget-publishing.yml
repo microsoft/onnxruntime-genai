@@ -66,7 +66,7 @@ parameters:
   - name: ort_winml_version
     displayName: "Microsoft.WindowsAppSDK.ML Version (should match CMakeList.txt)"
     type: string
-    default: "1.8.1065-experimental"
+    default: "1.8.1058-experimental"
 
   - name: ort_cuda_version
     displayName: "OnnxRuntime GPU version"

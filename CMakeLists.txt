@@ -32,7 +32,6 @@ if(USE_WINML)
   include(cmake/nuget.cmake)
 
   # Download the ORT used by WCR
-  include(cmake/dependencies.cmake)
 
   install_nuget_package(
     Microsoft.WindowsAppSDK.ML

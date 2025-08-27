@@ -57,39 +57,39 @@ steps:
 
   displayName: 'Print Parameters'
 
-- task: CmdLine@2
-  displayName: "(pre) Ensure AzCLI"
-  condition: eq(variables['arch'], 'arm64')
-  inputs:
-    workingDirectory: '$(Build.Repository.LocalPath)'
-    script: |
-      where az
-      az --version
-      exit 0
+# - task: CmdLine@2
+#   displayName: "(pre) Ensure AzCLI"
+#   condition: eq(variables['arch'], 'arm64')
+#   inputs:
+#     workingDirectory: '$(Build.Repository.LocalPath)'
+#     script: |
+#       where az
+#       az --version
+#       exit 0
 
-- task: ExtractFiles@1
-  displayName: "Extract AzCLI.zip"
-  condition: eq(variables['arch'], 'arm64')
-  inputs:
-    archiveFilePatterns: '$(Build.Repository.LocalPath)\.winml\external-tools\azure-cli-2.72.0-x64.zip'
-    destinationFolder: $(Build.Repository.LocalPath)\azcli
+# - task: ExtractFiles@1
+#   displayName: "Extract AzCLI.zip"
+#   condition: eq(variables['arch'], 'arm64')
+#   inputs:
+#     archiveFilePatterns: '$(Build.Repository.LocalPath)\.winml\external-tools\azure-cli-2.72.0-x64.zip'
+#     destinationFolder: $(Build.Repository.LocalPath)\azcli
 
-- task: CmdLine@2
-  displayName: "Install AzCLI (add to path)"
-  condition: eq(variables['arch'], 'arm64')
-  inputs:
-    workingDirectory: '$(Build.Repository.LocalPath)'
-    script: |
-      dir azcli
-      echo ##vso[task.prependpath]$(Build.Repository.LocalPath)\azcli\bin
+# - task: CmdLine@2
+#   displayName: "Install AzCLI (add to path)"
+#   condition: eq(variables['arch'], 'arm64')
+#   inputs:
+#     workingDirectory: '$(Build.Repository.LocalPath)'
+#     script: |
+#       dir azcli
+#       echo ##vso[task.prependpath]$(Build.Repository.LocalPath)\azcli\bin
 
-- task: CmdLine@2
-  displayName: "Ensure AzCLI"
-  inputs:
-    workingDirectory: '$(Build.Repository.LocalPath)'
-    script: |
-      where az
-      az --version
+# - task: CmdLine@2
+#   displayName: "Ensure AzCLI"
+#   inputs:
+#     workingDirectory: '$(Build.Repository.LocalPath)'
+#     script: |
+#       where az
+#       az --version
 
 - task: CmdLine@2
   displayName: "Ensure nuget.exe"
