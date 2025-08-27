@@ -86,7 +86,7 @@
     },
     {
       "name": "windows_x64_winml_relwithdebinfo",
-      "configuration": "MinSizeRel",
+      "configuration": "RelWithDebInfo",
       "configurePreset": "windows_x64_winml_relwithdebinfo"
     },
     {
