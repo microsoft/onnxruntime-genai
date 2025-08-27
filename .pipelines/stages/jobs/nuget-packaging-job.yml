@@ -91,8 +91,11 @@ jobs:
     ${{ else }}:
       value: 'MinSizeRel'
 
-  - name: artifactName
-    value: 'onnxruntime-genai-${{ parameters.ep }}-dep-qnn-${{ parameters.enable_win_qnn }}'
+  - name: nugetArtifactName
+    ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
+      value: 'onnxruntime-genai-winml'
+    ${{ else }}:
+      value: 'onnxruntime-genai-${{ parameters.ep }}-dep-qnn-${{ parameters.enable_win_qnn }}-nuget'
 
   - name: genai_nuget_package_name
     ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
@@ -356,7 +359,7 @@ jobs:
       DoEsrp: 'true'
 
   - task: 1ES.PublishPipelineArtifact@1
-    displayName: 'Publish Artifact: ONNXRuntime Genai NuGet'
+    displayName: 'Publish Artifact: Genai NuGet'
     inputs:
       targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
-      artifactName: $(artifactName)-nuget
+      artifactName: $(nugetArtifactName)
