@@ -164,8 +164,20 @@ void RunParityTests() {
 void RunBenchmarks() {
     // --- Define Benchmark Configurations ---
     std::vector<int> batch_sizes = {1, 4, 8};
-    std::vector<int> vocab_sizes = {20000, 40000, 100000, 200000, 300000};
-    std::vector<int> ks = {1, 4, 8, 32, 50, 64};
+    std::vector<int> vocab_sizes = {200000, 20000, 40000, 100000, 300000};
+    std::vector<int> ks = {50, 1, 4, 8, 32, 64};
+
+    // By default, only test the first combination. Change it to True to test all combinations.
+    constexpr bool all_combinations = false;
+    if (!all_combinations) {
+        batch_sizes.resize(1);
+        vocab_sizes.resize(1);
+        ks.resize(1);
+    }
+
+    constexpr int warmup_runs = 5;
+    constexpr int timing_runs = 100;
+    constexpr float temperature = 0.9f;
 
     std::vector<BenchmarkParams> configs;
     for (int batch_size : batch_sizes) {
@@ -194,21 +206,17 @@ void RunBenchmarks() {
         auto scores_out = Generators::CudaMallocArray<float>(params.batch_size * params.k);
         auto indices_out = Generators::CudaMallocArray<int>(params.batch_size * params.k);
 
-        // Fill input with random data on the GPU
-        int total_size = params.batch_size * params.vocab_size;
-        Generators::cuda::RandomTopkInput(stream, scores_in.get(), sampling_data->curand_states.get(), total_size, params.batch_size);
-
         cudaEvent_t start, stop;
         CudaCheck(cudaEventCreate(&start));
         CudaCheck(cudaEventCreate(&stop));
 
-        const int warmup_runs = 5;
-        const int timing_runs = 1000;
-        const float temperature = 1.0f;
+        const int total_size = params.batch_size * params.vocab_size;
 
         auto measure_latency = [&](const std::string& name, int num_partitions, auto func) {
             // Warmup
             for (int i = 0; i < warmup_runs; ++i) {
+                // Regenerate data for each warmup run as well to ensure caches are not misleading
+                Generators::cuda::RandomTopkInput(stream, scores_in.get(), sampling_data->curand_states.get(), total_size, params.batch_size);
                 func();
             }
             CudaCheck(cudaStreamSynchronize(stream));
@@ -216,6 +224,8 @@ void RunBenchmarks() {
             // Timing
             CudaCheck(cudaEventRecord(start, stream));
             for (int i = 0; i < timing_runs; ++i) {
+                // Regenerate random data before each timed run to bust caches
+                Generators::cuda::RandomTopkInput(stream, scores_in.get(), sampling_data->curand_states.get(), total_size, params.batch_size);
                 func();
             }
             CudaCheck(cudaEventRecord(stop, stream));
