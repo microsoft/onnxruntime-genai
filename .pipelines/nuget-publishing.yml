@@ -91,7 +91,6 @@ parameters:
     type: string
     default: "relwithdebinfo"
     values:
-      - "release"
       - "relwithdebinfo"
       - "debug"
 
