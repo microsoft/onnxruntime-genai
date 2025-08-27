@@ -52,6 +52,11 @@ parameters:
   type: boolean
   default: false
 
+- name: enable_winml
+  displayName: 'Whether WinML nuget package should be built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   type: string
 
@@ -98,6 +103,8 @@ jobs:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.DirectML'
     ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.QNN'
+    ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
+      value: 'Microsoft.ML.OnnxRuntimeGenAI.WinML'
 
   - name: ort_nuget_package_name
     ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
@@ -108,6 +115,8 @@ jobs:
       value: 'Microsoft.ML.OnnxRuntime.DirectML'
     ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
       value: 'Microsoft.ML.OnnxRuntime.QNN'
+    ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
+      value: 'Microsoft.WindowsAppSDK.ML'
 
   steps:
   - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.ep, 'cpu')) }}:

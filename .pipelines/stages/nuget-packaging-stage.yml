@@ -63,6 +63,12 @@ parameters:
   type: string
   default: 'stable'
 
+- name: enable_winml
+  type: boolean
+
+- name: ort_winml_version
+  type: string
+
 stages:
 - stage: nuget_packaging
   jobs:
@@ -109,4 +115,12 @@ stages:
           enable_android: false
           enable_apple_framework: false
           enable_win_qnn: true
+          nuget_version_type: ${{ parameters.nuget_version_type }}
+    - ${{ if eq(parameters.enable_winml, true) }}:
+      - template: jobs/nuget-packaging-job.yml
+        parameters:
+          ep: 'winml'
+          enable_winml: true
+          ort_version: ${{ parameters.ort_winml_version }}
+          build_config: ${{ parameters.build_config }}
           nuget_version_type: ${{ parameters.nuget_version_type }}
