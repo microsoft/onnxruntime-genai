@@ -74,9 +74,9 @@ parameters:
     default: "1.22.0"
 
   - name: ort_winml_version
-    displayName: "OnnxRuntime WinML version"
+    displayName: "Microsoft.WindowsAppSDK.ML (WinML)"
     type: string
-    default: ""
+    default: "1.8.1065-experimental"
 
   - name: cuda_version
     displayName: "CUDA version"
