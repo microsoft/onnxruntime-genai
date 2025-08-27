@@ -21,7 +21,6 @@
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "../dml/interface.h"
-#include "onnxruntime_ep_device_ep_metadata_keys.h"
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -872,7 +871,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
         for (size_t kvi = 0; kvi < num_entries; kvi++) {
           const std::string key = keys[kvi];
           const std::string val = values[kvi];
-          if (key == kOrtEpDevice_EpMetadataKey_LibraryPath) {
+          if (key == "library_path") {
             fs::path ep_library_dir = fs::path(val).parent_path();
             fs::path resolved_path = ep_library_dir / custom_library_path;
             if (fs::exists(resolved_path)) {
