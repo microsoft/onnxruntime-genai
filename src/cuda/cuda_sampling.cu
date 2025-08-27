@@ -14,6 +14,7 @@
 #include <cub/cub.cuh>
 #include <iostream>
 #include <limits>
+#include <math.h>
 
 namespace Generators {
 namespace cuda {
@@ -537,32 +538,327 @@ void LaunchSort(SamplingData* data, cudaStream_t stream, float* scores_in, float
                          stream, /*is_descending*/ true);
 }
 
-void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
-#define GetTopK(max_k)                                   \
-  LaunchGetTopKSubset<max_k>(stream,                     \
-                             scores_in,                  \
-                             data->scores_buffer.get(),  \
-                             indices_out,                \
-                             vocab_size,                 \
-                             batch_size,                 \
-                             k,                          \
-                             temperature);
+// Enum to represent the chosen algorithm for a given Top-K task
+enum class TopKAlgorithm {
+    DIRECT_KERNEL,
+    MAP_REDUCE,
+    FULL_SORT
+};
 
-  if (k <= 4) {
-    GetTopK(4);
-  } else if (k <= 8) {
-    GetTopK(8);
-  } else if (k <= 16) {
-    GetTopK(16);
-  } else if (k <= 32) {
-    GetTopK(32);
-  } else if (k <= 64) {
-    GetTopK(64);
-  } else {
-    // In this case, we need vocab_size as stride for indices_out.
-    LaunchSort(data, stream, scores_in, data->scores_buffer.get(), indices_out, vocab_size, batch_size);
+// Cache key: a tuple of (vocab_size, batch_size, k)
+using BenchmarkingCacheKey = std::tuple<int, int, int>;
+
+// The cache stores the best algorithm for a given key. It is static to persist across calls.
+static std::map<BenchmarkingCacheKey, TopKAlgorithm> algorithm_cache;
+static std::mutex cache_mutex; // Mutex to make cache access thread-safe
+
+// Kernel to apply temperature scaling to a batched list of scores
+__global__ void ApplyTemperatureKernel(const float* scores_in, float* scores_out,
+                                       int k, int input_stride, int output_stride,
+                                       int batch_size, float temperature) {
+    int batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) return;
+
+    const float* p_in = scores_in + batch_idx * input_stride;
+    float* p_out = scores_out + batch_idx * output_stride;
+
+    for (int i = threadIdx.x; i < k; i += blockDim.x) {
+        p_out[i] = p_in[i] / temperature;
+    }
+}
+
+// Kernel to fill an array with random data for benchmarking
+__global__ void FillRandom(float* array, curandState* states, int n, int batch_size) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        int batch_idx = (static_cast<long long>(i) * batch_size) / n;
+        array[i] = curand_uniform(&states[batch_idx]);
+    }
+}
+
+// --- Softmax with Temperature ---
+// This is a modified version of the Softmax logic that integrates temperature scaling
+// to avoid a separate kernel launch, specifically for the Full Sort path.
+
+template <typename T, typename AccumT>
+struct MaxFloatWithTemp {
+  __device__ __forceinline__ MaxFloatWithTemp(AccumT t) : temp(t) {}
+  __device__ __forceinline__ AccumT operator()(AccumT max, T v) const {
+    return ::max(max, (AccumT)v / temp);
   }
-  DispatchBlockwiseSoftmaxForward<false>(stream, scores_out, const_cast<const float*>(data->scores_buffer.get()), k, k <= 64 ? k : vocab_size, k, batch_size);
+  const AccumT temp;
+};
+
+template <typename T, typename AccumT>
+struct SumExpFloatWithTemp {
+  __device__ __forceinline__ SumExpFloatWithTemp(AccumT v, AccumT t) : max_k(v), temp(t) {}
+  __device__ __forceinline__ AccumT operator()(AccumT sum, T v) const {
+    return sum + exp(((AccumT)v / temp) - max_k);
+  }
+  const AccumT max_k;
+  const AccumT temp;
+};
+
+template <typename T, typename AccumT, typename OutT>
+struct SoftmaxForwardEpilogueWithTemp {
+  __device__ __forceinline__ SoftmaxForwardEpilogueWithTemp(AccumT max_input, AccumT sum, AccumT t)
+      : max_input(max_input), sum(sum), temp(t) {}
+
+  __device__ __forceinline__ OutT operator()(T input) const {
+    return static_cast<OutT>(exp(((AccumT)input / temp) - max_input) / sum);
+  }
+
+  const AccumT max_input;
+  const AccumT sum;
+  const AccumT temp;
+};
+
+template <int ILP, typename scalar_t, typename accscalar_t, typename outscalar_t>
+__global__ void SoftmaxBlockForwardWithTemperature(outscalar_t* output, scalar_t* input, int classes,
+                                    int input_stride, int output_stride, float temperature) {
+  extern __shared__ unsigned char smem[];
+  auto sdata = reinterpret_cast<accscalar_t*>(smem);
+  input += blockIdx.x * input_stride;
+  output += blockIdx.x * output_stride;
+  
+  const int shift = 0; // Simplified for this use case, assuming aligned data
+  
+  accscalar_t threadMax = IlpReduce<MaxFloatWithTemp, ILP, scalar_t, accscalar_t>(
+      shift, input, classes, MaxFloatWithTemp<scalar_t, accscalar_t>(temperature), -std::numeric_limits<accscalar_t>::max());
+  accscalar_t max_k = SoftmaxReduce<Max, accscalar_t>(
+      sdata, threadMax, Max<accscalar_t>(), -std::numeric_limits<accscalar_t>::max());
+  
+  accscalar_t threadExp = IlpReduce<SumExpFloatWithTemp, ILP, scalar_t, accscalar_t>(
+      shift, input, classes, SumExpFloatWithTemp<scalar_t, accscalar_t>(max_k, temperature), static_cast<accscalar_t>(0));
+  accscalar_t sumAll = SoftmaxReduce<Add, accscalar_t>(
+      sdata, threadExp, Add<accscalar_t>(), static_cast<accscalar_t>(0));
+  
+  SoftmaxForwardEpilogueWithTemp<scalar_t, accscalar_t, outscalar_t> epilogue(max_k, sumAll, temperature);
+  WriteFpropResults<ILP, scalar_t, accscalar_t, outscalar_t, SoftmaxForwardEpilogueWithTemp>(classes, input, output, epilogue);
+}
+
+void DispatchBlockwiseSoftmaxForwardWithTemperature(cudaStream_t stream, float* output, const float* input, int softmax_elements,
+                                     int input_stride, int output_stride, int batch_count, float temperature) {
+  dim3 grid(batch_count);
+  constexpr int ILP = sizeof(float4) / sizeof(float);
+  dim3 block = SoftmaxGetBlockSize(ILP, softmax_elements);
+  SoftmaxBlockForwardWithTemperature<ILP, float, float, float>
+      <<<grid, block, block.x * sizeof(float), stream>>>(output, const_cast<float*>(input),
+                                                          softmax_elements, input_stride, output_stride, temperature);
+}
+// --- End of Softmax with Temperature ---
+
+
+void RunTopKViaDirectKernel(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
+    float* scaled_scores = data->scores_buffer.get();
+    #define LAUNCH_DIRECT_TOPK(max_k) \
+        LaunchGetTopKSubset<max_k>(stream, scores_in, scaled_scores, indices_out, vocab_size, batch_size, k, temperature)
+    if (k <= 4) { LAUNCH_DIRECT_TOPK(4); }
+    else if (k <= 8) { LAUNCH_DIRECT_TOPK(8); }
+    else if (k <= 16) { LAUNCH_DIRECT_TOPK(16); }
+    else if (k <= 32) { LAUNCH_DIRECT_TOPK(32); }
+    else { LAUNCH_DIRECT_TOPK(64); }
+    DispatchBlockwiseSoftmaxForward<false>(stream, scores_out, const_cast<const float*>(scaled_scores), k, k, k, batch_size);
+}
+
+// ------------------------------------------------------------------
+// START of new Map-Reduce implementation with Fused Softmax
+// ------------------------------------------------------------------
+
+// Stage 1 (Map): Each block finds the Top-K from a partition of the input scores.
+// The grid is 2D: grid.x = partitions, grid.y = batch_size
+template <int max_k, int kBlockSize>
+__global__ void FindBlockTopK(const float* scores_in,
+                              int* intermediate_indices,
+                              float* intermediate_scores,
+                              int vocab_size,
+                              int num_partitions) {
+    const int batch_idx = blockIdx.y;
+    const int partition_idx = blockIdx.x;
+
+    const float* batch_scores_in = scores_in + batch_idx * vocab_size;
+
+    const int partition_size = (vocab_size + num_partitions - 1) / num_partitions;
+    const int start_index = partition_idx * partition_size;
+    const int end_index = min(start_index + partition_size, vocab_size);
+
+    TopK<float, max_k> thread_top_k;
+    thread_top_k.Init();
+
+    for (int i = start_index + threadIdx.x; i < end_index; i += kBlockSize) {
+        thread_top_k.Insert(batch_scores_in[i], i);
+    }
+
+    typedef cub::BlockReduce<TopK<float, max_k>, kBlockSize> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+    TopK<float, max_k> block_top_k = BlockReduce(temp_storage).Reduce(thread_top_k, reduce_topk_op<float, max_k>);
+
+    if (threadIdx.x == 0) {
+        int offset = (batch_idx * num_partitions + partition_idx) * max_k;
+        for (int i = 0; i < max_k; ++i) {
+            intermediate_scores[offset + i] = block_top_k.value[i];
+            intermediate_indices[offset + i] = block_top_k.key[i];
+        }
+    }
+}
+
+// Stage 2 (Reduce): Fused kernel to find final Top-K, apply temperature, and compute softmax.
+template <int max_k, int kBlockSize>
+__global__ void ReduceFinalTopKAndSoftmax(int* final_indices,
+                                          float* final_scores,
+                                          const int* intermediate_indices,
+                                          const float* intermediate_scores,
+                                          int num_intermediate_results_per_batch,
+                                          int k,
+                                          float temperature) {
+    const int batch_idx = blockIdx.x;
+    const int* batch_intermediate_indices = intermediate_indices + batch_idx * num_intermediate_results_per_batch;
+    const float* batch_intermediate_scores = intermediate_scores + batch_idx * num_intermediate_results_per_batch;
+
+    // Find the Top-K from the intermediate results for this batch item
+    TopK<float, max_k> thread_top_k;
+    thread_top_k.Init();
+
+    for (int i = threadIdx.x; i < num_intermediate_results_per_batch; i += kBlockSize) {
+        thread_top_k.Insert(batch_intermediate_scores[i], batch_intermediate_indices[i]);
+    }
+
+    typedef cub::BlockReduce<TopK<float, max_k>, kBlockSize> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+    TopK<float, max_k> final_top_k = BlockReduce(temp_storage).Reduce(thread_top_k, reduce_topk_op<float, max_k>);
+
+    // Only one thread (thread 0) performs the final temperature scaling and softmax
+    if (threadIdx.x == 0) {
+        // Use shared memory for the small Top-K data to speed up softmax
+        __shared__ float top_k_scores_smem[max_k];
+
+        // --- Temperature Scaling and Max Value for Softmax ---
+        float max_val = -std::numeric_limits<float>::max();
+        for (int i = 0; i < k; i++) {
+            float scaled_score = final_top_k.value[i] / temperature;
+            top_k_scores_smem[i] = scaled_score;
+            if (scaled_score > max_val) {
+                max_val = scaled_score;
+            }
+        }
+
+        // --- Softmax Calculation ---
+        float sum_exp = 0.0f;
+        for (int i = 0; i < k; i++) {
+            sum_exp += expf(top_k_scores_smem[i] - max_val);
+        }
+
+        // --- Write Final Probabilities and Indices ---
+        int final_offset = batch_idx * k;
+        for (int i = 0; i < k; i++) {
+            final_scores[final_offset + i] = expf(top_k_scores_smem[i] - max_val) / sum_exp;
+            final_indices[final_offset + i] = final_top_k.key[i];
+        }
+    }
+}
+
+
+void RunTopKViaMapReduce(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
+    const int kBlockSize = 256;
+    const int max_k = 64; // Must be >= k and ideally a power of 2.
+    const int num_partitions = 256; // Tunable parameter. Good starting point to saturate the GPU.
+
+    // Reuse buffers from SamplingData to avoid cudaMalloc/Free
+    float* intermediate_scores = data->scores_buffer.get();
+    int* intermediate_indices = data->indices_in.get();
+
+    // Stage 1: Map
+    dim3 grid_stage1(num_partitions, batch_size);
+    dim3 block_stage1(kBlockSize);
+    FindBlockTopK<max_k, kBlockSize><<<grid_stage1, block_stage1, 0, stream>>>(
+        scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions);
+
+    // Stage 2: Reduce and Fused Softmax
+    int num_intermediate_results = num_partitions * max_k;
+    dim3 grid_stage2(batch_size);
+    dim3 block_stage2(kBlockSize);
+    ReduceFinalTopKAndSoftmax<max_k, kBlockSize><<<grid_stage2, block_stage2, 0, stream>>>(
+        indices_out, scores_out, intermediate_indices, intermediate_scores,
+        num_intermediate_results, k, temperature);
+}
+
+// ------------------------------------------------------------------
+// END of new Map-Reduce implementation
+// ------------------------------------------------------------------
+
+void RunTopKViaFullSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
+    float* unscaled_scores = data->scores_buffer.get();
+    LaunchSort(data, stream, scores_in, unscaled_scores, indices_out, vocab_size, batch_size);
+    DispatchBlockwiseSoftmaxForwardWithTemperature(stream, scores_out, const_cast<const float*>(unscaled_scores), k, vocab_size, k, batch_size, temperature);
+}
+
+
+// Performs a one-time benchmark to find the fastest Top-K algorithm for a given configuration.
+TopKAlgorithm BenchmarkAndGetBestAlgorithm(SamplingData* data, cudaStream_t stream, int vocab_size, int batch_size, int k) {
+    BenchmarkingCacheKey key = {vocab_size, batch_size, k};
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto it = algorithm_cache.find(key);
+    if (it != algorithm_cache.end()) return it->second;
+
+    auto d_rand_scores = CudaMallocArray<float>(vocab_size * batch_size);
+    auto d_rand_indices = CudaMallocArray<int>(k * batch_size); // Only need k indices
+    auto d_rand_out = CudaMallocArray<float>(k * batch_size);
+    int total_size = vocab_size * batch_size;
+    FillRandom<<<(total_size + 255) / 256, 256, 0, stream>>>(d_rand_scores.get(), data->curand_states.get(), total_size, batch_size);
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    constexpr int warmup_runs = 2, timing_runs = 5;
+    float temperature = 1.0f;
+    std::vector<std::pair<TopKAlgorithm, float>> results;
+
+    auto benchmark_algorithm = [&](TopKAlgorithm algo, auto func) {
+        for (int i = 0; i < warmup_runs; ++i) func();
+        cudaEventRecord(start, stream);
+        for (int i = 0; i < timing_runs; ++i) func();
+        cudaEventRecord(stop, stream);
+        cudaEventSynchronize(stop);
+        float ms = 0.0f;
+        cudaEventElapsedTime(&ms, start, stop);
+        results.push_back({algo, ms});
+    };
+
+    if (k <= 64) {
+        benchmark_algorithm(TopKAlgorithm::DIRECT_KERNEL, [&]() { RunTopKViaDirectKernel(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature); });
+    }
+    benchmark_algorithm(TopKAlgorithm::MAP_REDUCE, [&]() { RunTopKViaMapReduce(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature); });
+    benchmark_algorithm(TopKAlgorithm::FULL_SORT, [&]() { RunTopKViaFullSort(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature); });
+
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+
+    auto best_it = std::min_element(results.begin(), results.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+    TopKAlgorithm winner = best_it->first;
+    algorithm_cache[key] = winner;
+    return winner;
+}
+
+void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
+    TopKAlgorithm chosen_algorithm;
+    constexpr int benchmark_threshold = 16;
+    if (k <= benchmark_threshold) {
+        chosen_algorithm = TopKAlgorithm::DIRECT_KERNEL;
+    } else {
+        chosen_algorithm = BenchmarkAndGetBestAlgorithm(data, stream, vocab_size, batch_size, k);
+    }
+
+    switch (chosen_algorithm) {
+        case TopKAlgorithm::DIRECT_KERNEL:
+            RunTopKViaDirectKernel(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature);
+            break;
+        case TopKAlgorithm::MAP_REDUCE:
+            RunTopKViaMapReduce(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature);
+            break;
+        case TopKAlgorithm::FULL_SORT:
+            RunTopKViaFullSort(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature);
+            break;
+    }
 }
 
 // Kernel launcher for combined (or separate) top k and top p sampling; where k is the max number of tokens to sample and p is the probability threshold
