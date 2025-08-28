@@ -58,9 +58,31 @@ SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int v
   curand_states = CudaMallocArray<curandState>(batch_size);
   sync_counter = CudaMallocArray<int>(1);
   CUDA_CHECK(cudaMemsetAsync(sync_counter.get(), 0, sizeof(int), stream));
-  temp_storage_bytes = 0;
-  CUDA_CHECK(cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr, temp_storage_bytes, (float*)nullptr, (float*)nullptr,
-                                                     (int*)nullptr, (int*)nullptr, vocab_size * batch_size, batch_size, (int*)nullptr, (int*)nullptr, 0, sizeof(float) * 8, stream));
+
+  // The temp buffer is used by both the full sort (over vocab_size) and the hybrid
+  // map-reduce sort (over an intermediate buffer). We need to allocate a buffer
+  // large enough for the biggest possible sort operation.
+
+  // Case 1: Temp storage for full sort.
+  size_t temp_storage_bytes_full_sort = 0;
+  CUDA_CHECK(cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr, temp_storage_bytes_full_sort,
+                                                                (float*)nullptr, (float*)nullptr, (int*)nullptr, (int*)nullptr,
+                                                                vocab_size * batch_size, batch_size,
+                                                                (int*)nullptr, (int*)nullptr, 0, sizeof(float) * 8, stream));
+
+  // Case 2: Temp storage for hybrid map-reduce sort's worst case.
+  // This depends on the benchmark parameters for RunTopKViaMapReduceHybridSort.
+  const int max_k_intermediate = 64;
+  const int max_num_partitions = 128; // num_partitions is {64, 128} in the benchmark
+  int total_intermediate_items = batch_size * max_num_partitions * max_k_intermediate;
+
+  size_t temp_storage_bytes_hybrid_sort = 0;
+  CUDA_CHECK(cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr, temp_storage_bytes_hybrid_sort,
+                                                                (float*)nullptr, (float*)nullptr, (int*)nullptr, (int*)nullptr,
+                                                                total_intermediate_items, batch_size,
+                                                                (int*)nullptr, (int*)nullptr, 0, sizeof(float) * 8, stream));
+
+  temp_storage_bytes = std::max(temp_storage_bytes_full_sort, temp_storage_bytes_hybrid_sort);
   temp_buffer = CudaMallocArray<float>(temp_storage_bytes / sizeof(float));
 
   offsets_h.resize(batch_size + 1);
@@ -1409,13 +1431,13 @@ TopKConfig BenchmarkAndGetBestAlgorithm(SamplingData* data, cudaStream_t stream,
 }
 
 void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
-    TopKConfig chosen_config;
-    constexpr int benchmark_threshold = 16;
-    if (k <= benchmark_threshold) {
-        chosen_config = {TopKAlgorithm::DIRECT_KERNEL};
-    } else {
-        chosen_config = BenchmarkAndGetBestAlgorithm(data, stream, vocab_size, batch_size, k);
+    // For k > 64, skip benchmarking and choose the full sort algorithm directly.
+    if (k > 64) {
+        RunTopKViaFullSort(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature);
+        return;
     }
+
+    TopKConfig chosen_config = BenchmarkAndGetBestAlgorithm(data, stream, vocab_size, batch_size, k);
 
     switch (chosen_config.algorithm) {
         case TopKAlgorithm::DIRECT_KERNEL:
@@ -1451,7 +1473,9 @@ void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out,
   GetTopKSubset(data, stream, scores_in, data->scores_sorted.get(), data->indices_sorted.get(), vocab_size, batch_size, k, temperature);
   // Sample kernel
   int sample_range = k;
-  int indices_stride = (k > 0 && k <= 64) ? k : vocab_size;
+  // All Top-K algorithm paths produce a packed output buffer where the results for each
+  // batch item are contiguous. Therefore, the stride between batches is simply k.
+  int indices_stride = k;
   LaunchSampleKernel(data, stream, data->scores_sorted.get(), data->indices_sorted.get(), next_token_out, sample_range, batch_size, indices_stride, p, k);
 }
 
