@@ -20,6 +20,7 @@ struct MultiModalFeatures {
   void ReuseFeaturesBuffer(MultiModalFeatures& other);
 
   auto& GetShape() const { return shape_; }
+  size_t GetIndex() { return index_; }
   OrtValue* Get() { return features_.get(); }
 
  private:

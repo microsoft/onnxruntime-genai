@@ -148,6 +148,7 @@ struct Config {
       std::string filename;
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
+      SessionOptions session_options;
 
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
