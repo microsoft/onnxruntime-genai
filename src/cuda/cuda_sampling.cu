@@ -17,6 +17,7 @@
 #include <math.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cfloat>
 
 // Robust CUDA error checking macro
 #define CUDA_CHECK(call)                                         \
@@ -492,37 +493,69 @@ __global__ void FilterOnTopP(float* scores, float* prefix_sums, float* scores_te
   }
 }
 
-// Get top k indices and scores from unsorted input
-template <int max_k, int kBlockSize>
-__global__ void GetTopKKernel(int* indices_out, float* scores_in, float* scores_out, int batch_size, int vocab_size, int k, float temperature) {
-  TopK<float, max_k> thread_top_k;
-  thread_top_k.Init();
-  int batch = blockIdx.x;
+// This new kernel finds the top-k elements iteratively. For each of the k
+// elements, it performs a parallel reduction to find the max score, records it,
+// and then effectively removes it from the next iteration by setting its
+// score to a very low value. This avoids complex heap structures.
+struct TopK_2 {
+  int p = INT_MAX;
+  float u = -FLT_MAX;
 
-  for (int i = threadIdx.x; i < vocab_size; i += blockDim.x) {
-    thread_top_k.Insert(scores_in[i + batch * vocab_size], i);
+  __device__ __forceinline__ void insert(float elem, int elem_id) {
+    if (elem > u || (elem == u && elem_id < p)) {
+      u = elem;
+      p = elem_id;
+    }
   }
 
-  // reduce in thread block
-  typedef cub::BlockReduce<TopK<float, max_k>, kBlockSize> BlockReduce;
-  __shared__ typename BlockReduce::TempStorage temp_storage;
-  TopK<float, max_k> top_k_sequence = BlockReduce(temp_storage).Reduce(thread_top_k, reduce_topk_op<float, max_k>);
-  __syncthreads();
+  __device__ __forceinline__ void init() {
+    u = -FLT_MAX;
+    p = -1;
+  }
+};
 
-  if (threadIdx.x == 0) {
-    for (int i = 0; i < k; i++) {
-      scores_out[i + batch * k] = top_k_sequence.value[i] / temperature;
-      indices_out[i + batch * k] = top_k_sequence.key[i];
+__device__ __forceinline__ TopK_2 reduce_topk_op_2(TopK_2 const& a, TopK_2 const& b) {
+  return a.u > b.u ? a : (a.u == b.u && a.p < b.p) ? a
+                                                   : b;
+}
+
+template <int kBlockSize>
+__global__ void GetTopKKernel(int* indices_out, float* scores_in, float* scores_out, int batch_size, int vocab_size, int k, float temperature) {
+  int batch = blockIdx.x;
+  int tid = threadIdx.x;
+  TopK_2 partial;
+
+  float const MAX_T_VAL = FLT_MAX;
+
+  for (int ite = 0; ite < k; ite++) {
+    partial.init();
+    for (auto elemId = tid; elemId < vocab_size; elemId += kBlockSize) {
+      float elem = scores_in[elemId + batch * vocab_size];
+      partial.insert(elem, elemId);
     }
+    // reduce in thread block
+    typedef cub::BlockReduce<TopK_2, kBlockSize> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+    TopK_2 top_k_sequence = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op_2);
+
+    if (tid == 0) {
+      scores_out[ite + batch * k] = top_k_sequence.u / temperature;
+      indices_out[ite + batch * k] = top_k_sequence.p;
+
+      // set the max value to -MAX_T_VAL so that the value doesn't get picked again
+      scores_in[batch * vocab_size + top_k_sequence.p] = -MAX_T_VAL;
+    }
+
+    __syncthreads();
   }
 }
 
-// Gets all top K indices and scores from unsorted input
-template <int max_k>
-void LaunchGetTopKSubset(cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
+// Launcher for the improved Top-K kernel.
+void LaunchImprovedGetTopK(cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
   dim3 grid(batch_size, 1, 1);
-  dim3 block(256, 1, 1);
-  GetTopKKernel<max_k, 256><<<grid, block, 0, stream>>>(indices_out, scores_in, scores_out, batch_size, vocab_size, k, temperature);
+  // Use a larger block size for better hardware utilization, as in the improved file.
+  dim3 block(1024, 1, 1);
+  GetTopKKernel<1024><<<grid, block, 0, stream>>>(indices_out, scores_in, scores_out, batch_size, vocab_size, k, temperature);
   CUDA_CHECK(cudaGetLastError());
 }
 
@@ -693,17 +726,26 @@ void DispatchBlockwiseSoftmaxForwardWithTemperature(cudaStream_t stream, float* 
 }
 // --- End of Softmax with Temperature ---
 
-
 void RunTopKViaDirectKernel(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
-    float* scaled_scores = data->scores_buffer.get();
-    #define LAUNCH_DIRECT_TOPK(max_k) \
-        LaunchGetTopKSubset<max_k>(stream, scores_in, scaled_scores, indices_out, vocab_size, batch_size, k, temperature)
-    if (k <= 4) { LAUNCH_DIRECT_TOPK(4); }
-    else if (k <= 8) { LAUNCH_DIRECT_TOPK(8); }
-    else if (k <= 16) { LAUNCH_DIRECT_TOPK(16); }
-    else if (k <= 32) { LAUNCH_DIRECT_TOPK(32); }
-    else { LAUNCH_DIRECT_TOPK(64); }
-    DispatchBlockwiseSoftmaxForward<false>(stream, scores_out, const_cast<const float*>(scaled_scores), k, k, k, batch_size);
+  // The output of the kernel will be the temperature-scaled scores. We'll store
+  // these in another pre-allocated buffer, `scores_buffer`.
+  float* scaled_scores = data->scores_buffer.get();
+
+  constexpr copy_input = false;
+  if constexpr (copy_input) {
+    // Attention: The kernel modifies the input scores array in-place.
+    // This might have unintended side effects on the original `scores_in` tensor, which might be used elsewhere
+    // It is safer to work on a copy. We can use the pre-allocated `scores_temp` buffer like the following:
+    float* scores_copy = data->scores_temp.get();
+    CUDA_CHECK(cudaMemcpyAsync(scores_copy, scores_in, vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+    scores_in = scores_copy;
+  }
+  
+  LaunchImprovedGetTopK(stream, scores_in, scaled_scores, indices_out, vocab_size, batch_size, k, temperature);
+
+  // Finally, apply softmax to the scaled scores to get the final probabilities,
+  // writing the result to the `scores_out` buffer.
+  DispatchBlockwiseSoftmaxForward<false>(stream, scores_out, const_cast<const float*>(scaled_scores), k, k, k, batch_size);
 }
 
 // ------------------------------------------------------------------

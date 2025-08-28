@@ -14,6 +14,9 @@
 #include <mutex>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
+#include <tuple>
+#include <limits>
 
 #include "cuda_runtime.h"
 #include "../src/span.h"
@@ -183,15 +186,78 @@ void RunParityTests(const BenchmarkParams &params, float temperature) {
     CUDA_CHECK(cudaStreamDestroy(stream));
 }
 
+// New function to print the summary in CSV format
+void PrintSummary(const std::vector<BenchmarkResult>& all_results) {
+    // This struct holds the aggregated data for a unique key (batch_size, vocab_size, k)
+    struct SummaryData {
+        std::string best_algo_full_name;
+        float min_latency = std::numeric_limits<float>::max();
+        float latency_full_sort = -1.0f;
+        float latency_direct_kernel = -1.0f;
+    };
+
+    // Use a map to group results by their parameters
+    std::map<std::tuple<int, int, int>, SummaryData> summary_map;
+
+    // Iterate over all detailed results to populate the summary map
+    for (const auto& result : all_results) {
+        auto key = std::make_tuple(result.params.batch_size, result.params.vocab_size, result.params.k);
+        
+        // Create a more descriptive name for map-reduce algorithms
+        std::string full_algo_name = result.algo_name;
+        if (result.num_partitions > 0) {
+            full_algo_name += " (p=" + std::to_string(result.num_partitions) + ")";
+        }
+
+        // Check if this is the best performing algorithm for this key so far
+        if (result.latency_ms < summary_map[key].min_latency) {
+            summary_map[key].min_latency = result.latency_ms;
+            summary_map[key].best_algo_full_name = full_algo_name;
+        }
+
+        // Store the latencies for the specific baseline algorithms
+        if (result.algo_name == "FULL_SORT") {
+            summary_map[key].latency_full_sort = result.latency_ms;
+        } else if (result.algo_name == "DIRECT_KERNEL") {
+            summary_map[key].latency_direct_kernel = result.latency_ms;
+        }
+    }
+
+    // Print the CSV header
+    std::cout << "\n--- Benchmark Summary (CSV) ---\n";
+    std::cout << "batch_size,vocab_size,k,best_algo,min_latency,latency_of_baseline_1(full_sort),latency_of_baseline_2(direct_kernel),ratio_1,ratio_2\n";
+
+    // Print each row of the summary table
+    for (const auto& pair : summary_map) {
+        const auto& key = pair.first;
+        const auto& data = pair.second;
+
+        // Calculate performance ratios against the baselines
+        float ratio_1 = (data.min_latency > 0 && data.latency_full_sort > 0) ? data.latency_full_sort / data.min_latency : 0.0f;
+        float ratio_2 = (data.min_latency > 0 && data.latency_direct_kernel > 0) ? data.latency_direct_kernel / data.min_latency : 0.0f;
+
+        std::cout << std::get<0>(key) << ","
+                  << std::get<1>(key) << ","
+                  << std::get<2>(key) << ","
+                  << "\"" << data.best_algo_full_name << "\"," // Quote algorithm name
+                  << std::fixed << std::setprecision(4) << data.min_latency << ","
+                  << (data.latency_full_sort > 0 ? std::to_string(data.latency_full_sort) : "N/A") << ","
+                  << (data.latency_direct_kernel > 0 ? std::to_string(data.latency_direct_kernel) : "N/A") << ","
+                  << std::fixed << std::setprecision(2) << ratio_1 << ","
+                  << ratio_2 << "\n";
+    }
+}
+
+
 // Main benchmark function
 void RunBenchmarks() {
     // --- Define Benchmark Configurations ---
-    std::vector<int> batch_sizes = {1, 4};
-    std::vector<int> vocab_sizes = {201088, 32000, 128256, 102400, 151646}; // GPT-OSS, LLAMA2, LLAMA3, DeepSeek, QWen3
-    std::vector<int> ks = {50, 1, 8, 32, 64};
+    std::vector<int> batch_sizes = {1, 4, 16};
+    std::vector<int> vocab_sizes = {201088, 32000, 128256}; // GPT-OSS 201088, LLAMA2 32000, LLAMA3 128256, DeepSeek 102400, QWen3 151646
+    std::vector<int> ks = {50, 1, 2, 4, 8, 16, 32, 64};
 
     // By default, only test the first combination. Change it to True to test all combinations.
-    constexpr bool all_combinations = false;
+    constexpr bool all_combinations = true;
     if (!all_combinations) {
         batch_sizes.resize(1);
         vocab_sizes.resize(1);
@@ -321,7 +387,7 @@ void RunBenchmarks() {
 
     CUDA_CHECK(cudaStreamDestroy(stream));
 
-    // --- Print Results ---
+    // --- Print Detailed Results ---
     std::cout << "\n--- Benchmark Results ---\n";
     std::cout << std::left << std::setw(12) << "Batch Size"
               << std::setw(12) << "Vocab Size"
@@ -341,6 +407,9 @@ void RunBenchmarks() {
                   << std::setw(12) << result.block_size
                   << std::fixed << std::setprecision(4) << result.latency_ms << "\n";
     }
+
+    // --- Print CSV Summary ---
+    PrintSummary(all_results);
 }
 
 TEST(TopKTests, ParityTests) {
