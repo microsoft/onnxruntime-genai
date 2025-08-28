@@ -546,12 +546,14 @@ enum class TopKAlgorithm {
     MAP_REDUCE,
     MAP_REDUCE_SHARED,
     SINGLE_KERNEL_MAP_REDUCE,
+    MAP_REDUCE_VEC,
     FULL_SORT
 };
 
 struct TopKConfig {
     TopKAlgorithm algorithm;
     int num_partitions = 0; // Only relevant for map-reduce algorithms
+    int block_size = 256;
 };
 
 // Cache key: a tuple of (vocab_size, batch_size, k)
@@ -810,7 +812,6 @@ __global__ void ReduceFinalTopKAndSoftmax_SharedMemory(int* final_indices,
 }
 
 // Single kernel fusion of Map and Reduce stages
-// Specialized for batch_size = 1
 template <int max_k, int kBlockSize>
 __global__ void SingleKernelMapReduceTopKAndSoftmax(
     int* final_indices,
@@ -893,6 +894,73 @@ __global__ void SingleKernelMapReduceTopKAndSoftmax(
             }
         }
     }
+}
+
+// Vectorized Map-Reduce Kernel and Launcher
+template <int max_k, int kBlockSize>
+__global__ void FindBlockTopKVec(const float* scores_in,
+                                 int* intermediate_indices,
+                                 float* intermediate_scores,
+                                 int vocab_size,
+                                 int num_partitions) {
+    const int batch_idx = blockIdx.y;
+    const int partition_idx = blockIdx.x;
+    const float* batch_scores_in = scores_in + batch_idx * vocab_size;
+
+    const int partition_size = (vocab_size + num_partitions - 1) / num_partitions;
+    const int start_index = partition_idx * partition_size;
+    const int end_index = min(start_index + partition_size, vocab_size);
+
+    TopK<float, max_k> thread_top_k;
+    thread_top_k.Init();
+
+    // Process 4 elements at a time using float4 for vectorized loads
+    const int partition_len = end_index - start_index;
+    const int vec_loop_end = start_index + (partition_len / 4) * 4;
+
+    for (int i = start_index + threadIdx.x * 4; i < vec_loop_end; i += kBlockSize * 4) {
+        float4 scores_vec = ((const float4*)batch_scores_in)[i / 4];
+        thread_top_k.Insert(scores_vec.x, i);
+        thread_top_k.Insert(scores_vec.y, i + 1);
+        thread_top_k.Insert(scores_vec.z, i + 2);
+        thread_top_k.Insert(scores_vec.w, i + 3);
+    }
+
+    // Handle trailing elements that are not a multiple of 4
+    for (int i = vec_loop_end + threadIdx.x; i < end_index; i += kBlockSize) {
+        thread_top_k.Insert(batch_scores_in[i], i);
+    }
+
+    typedef cub::BlockReduce<TopK<float, max_k>, kBlockSize> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+    TopK<float, max_k> block_top_k = BlockReduce(temp_storage).Reduce(thread_top_k, reduce_topk_op<float, max_k>);
+
+    if (threadIdx.x == 0) {
+        int offset = (batch_idx * num_partitions + partition_idx) * max_k;
+        for (int i = 0; i < max_k; ++i) {
+            intermediate_scores[offset + i] = block_top_k.value[i];
+            intermediate_indices[offset + i] = block_top_k.key[i];
+        }
+    }
+}
+
+void RunTopKViaMapReduceVec(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions, int block_size) {
+    const int max_k = 64;
+    float* intermediate_scores = data->scores_buffer.get();
+    int* intermediate_indices = data->indices_in.get();
+
+    dim3 grid_stage1(num_partitions, batch_size);
+    dim3 block_stage1(block_size);
+    
+    if (block_size == 256) {
+        FindBlockTopKVec<max_k, 256><<<grid_stage1, block_stage1, 0, stream>>>(scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions);
+    } else if (block_size == 512) {
+        FindBlockTopKVec<max_k, 512><<<grid_stage1, block_stage1, 0, stream>>>(scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions);
+    }
+
+    int num_intermediate_results = num_partitions * max_k;
+    dim3 grid_stage2(batch_size);
+    ReduceFinalTopKAndSoftmax<max_k, 256><<<grid_stage2, 256, 0, stream>>>(indices_out, scores_out, intermediate_indices, intermediate_scores, num_intermediate_results, k, temperature);
 }
 
 void RunTopKViaMapReduce(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions) {
@@ -1007,26 +1075,29 @@ TopKConfig BenchmarkAndGetBestAlgorithm(SamplingData* data, cudaStream_t stream,
         cudaEventSynchronize(stop);
         float ms = 0.0f;
         cudaEventElapsedTime(&ms, start, stop);
-        results.push_back({config, ms});
+        results.push_back({config, ms / timing_runs});
     };
 
     if (k <= 64) {
         benchmark_algorithm({TopKAlgorithm::DIRECT_KERNEL}, [&]() { RunTopKViaDirectKernel(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature); });
     
-        // Benchmark Map-Reduce with different partition sizes
         for (int num_partitions : {64, 128, 256}) {
              benchmark_algorithm({TopKAlgorithm::MAP_REDUCE, num_partitions}, [&]() { RunTopKViaMapReduce(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature, num_partitions); });
         }
 
-        // Benchmark Map-Reduce with Shared Memory with different partition sizes
-        for (int num_partitions : {32, 64}) { // Smaller partition counts for shared memory
+        for (int num_partitions : {32, 64}) {
             size_t shared_mem_size = num_partitions * 64 * (sizeof(float) + sizeof(int));
             if (shared_mem_size < 48 * 1024) { // Check against common shared memory limit
                 benchmark_algorithm({TopKAlgorithm::MAP_REDUCE_SHARED, num_partitions}, [&]() { RunTopKViaMapReduceShared(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature, num_partitions); });
             }
         }
+        
+        for (int num_partitions : {64, 128, 256}) {
+            for (int block_size : {256, 512}) {
+                benchmark_algorithm({TopKAlgorithm::MAP_REDUCE_VEC, num_partitions, block_size}, [&]() { RunTopKViaMapReduceVec(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature, num_partitions, block_size); });
+            }
+        }
 
-        // Benchmark Single Kernel Map-Reduce (only for batch_size=1)
         if (batch_size == 1) {
             for (int num_partitions : {64, 128, 256}) {
                 benchmark_algorithm({TopKAlgorithm::SINGLE_KERNEL_MAP_REDUCE, num_partitions}, [&]() { RunTopKViaSingleKernelMapReduce(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature, num_partitions); });
@@ -1066,6 +1137,9 @@ void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, fl
             break;
         case TopKAlgorithm::SINGLE_KERNEL_MAP_REDUCE:
             RunTopKViaSingleKernelMapReduce(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature, chosen_config.num_partitions);
+            break;
+        case TopKAlgorithm::MAP_REDUCE_VEC:
+            RunTopKViaMapReduceVec(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature, chosen_config.num_partitions, chosen_config.block_size);
             break;
         case TopKAlgorithm::FULL_SORT:
             RunTopKViaFullSort(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature);

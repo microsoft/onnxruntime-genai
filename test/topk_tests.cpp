@@ -11,6 +11,7 @@
 #include <chrono>
 #include <memory>
 #include <cmath>
+#include <mutex>
 
 #include "cuda_runtime.h"
 #include "../src/span.h"
@@ -29,6 +30,7 @@ void RunTopKViaMapReduce(SamplingData* data, cudaStream_t stream, float* scores_
 void RunTopKViaMapReduceShared(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions);
 void RunTopKViaSingleKernelMapReduce(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions);
 void RunTopKViaFullSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature);
+void RunTopKViaMapReduceVec(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions, int block_size);
 
 } // namespace cuda
 } // namespace Generators
@@ -45,8 +47,12 @@ struct BenchmarkResult {
     BenchmarkParams params;
     std::string algo_name;
     int num_partitions;
+    int block_size;
     float latency_ms;
 };
+
+// Global mutex to serialize benchmark tests and prevent parallel execution on the GPU
+static std::mutex benchmark_mutex;
 
 // Helper to check for CUDA errors
 void CudaCheck(cudaError_t error) {
@@ -150,6 +156,9 @@ void RunParityTests() {
         test_algo("MAP_REDUCE_SHARED (p=64)", [&](float* s_d, int* i_d){
             Generators::cuda::RunTopKViaMapReduceShared(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 64);
         });
+        test_algo("MAP_REDUCE_VEC (p=256, b=256)", [&](float* s_d, int* i_d){
+            Generators::cuda::RunTopKViaMapReduceVec(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 256, 256);
+        });
         if (params.batch_size == 1) {
             test_algo("SINGLE_KERNEL_MAP_REDUCE (p=256)", [&](float* s_d, int* i_d){
                 Generators::cuda::RunTopKViaSingleKernelMapReduce(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 256);
@@ -212,7 +221,7 @@ void RunBenchmarks() {
 
         const int total_size = params.batch_size * params.vocab_size;
 
-        auto measure_latency = [&](const std::string& name, int num_partitions, auto func) {
+        auto measure_latency = [&](const std::string& name, int num_partitions, int block_size, auto func) {
             // Warmup
             for (int i = 0; i < warmup_runs; ++i) {
                 // Regenerate data for each warmup run as well to ensure caches are not misleading
@@ -222,29 +231,32 @@ void RunBenchmarks() {
             CudaCheck(cudaStreamSynchronize(stream));
 
             // Timing
-            CudaCheck(cudaEventRecord(start, stream));
+            float total_ms = 0.0f;
             for (int i = 0; i < timing_runs; ++i) {
                 // Regenerate random data before each timed run to bust caches
                 Generators::cuda::RandomTopkInput(stream, scores_in.get(), sampling_data->curand_states.get(), total_size, params.batch_size);
-                func();
-            }
-            CudaCheck(cudaEventRecord(stop, stream));
-            CudaCheck(cudaEventSynchronize(stop));
 
-            float ms = 0.0f;
-            CudaCheck(cudaEventElapsedTime(&ms, start, stop));
-            all_results.push_back({params, name, num_partitions, ms / timing_runs});
+                CudaCheck(cudaEventRecord(start, stream));
+                func();
+                CudaCheck(cudaEventRecord(stop, stream));
+                
+                CudaCheck(cudaEventSynchronize(stop));
+                float ms = 0.0f;
+                CudaCheck(cudaEventElapsedTime(&ms, start, stop));
+                total_ms += ms;
+            }
+            all_results.push_back({params, name, num_partitions, block_size, total_ms / timing_runs});
         };
 
         // --- Run Benchmarks for each algorithm ---
 
         if (params.k <= 64) {
-            measure_latency("DIRECT_KERNEL", 0, [&]() {
+            measure_latency("DIRECT_KERNEL", 0, 256, [&]() {
                 Generators::cuda::RunTopKViaDirectKernel(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature);
             });
 
             for (int num_partitions : {64, 128, 256}) {
-                measure_latency("MAP_REDUCE", num_partitions, [&]() {
+                measure_latency("MAP_REDUCE", num_partitions, 256, [&]() {
                     Generators::cuda::RunTopKViaMapReduce(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature, num_partitions);
                 });
             }
@@ -252,22 +264,30 @@ void RunBenchmarks() {
             for (int num_partitions : {32, 64}) {
                  size_t shared_mem_size = num_partitions * 64 * (sizeof(float) + sizeof(int));
                  if (shared_mem_size < 48 * 1024) { // Check against common shared memory limit
-                    measure_latency("MAP_REDUCE_SHARED", num_partitions, [&]() {
+                    measure_latency("MAP_REDUCE_SHARED", num_partitions, 256, [&]() {
                         Generators::cuda::RunTopKViaMapReduceShared(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature, num_partitions);
                     });
                  }
             }
+
+            for (int num_partitions : {64, 128, 256}) {
+                for (int block_size : {256, 512}) {
+                    measure_latency("MAP_REDUCE_VEC", num_partitions, block_size, [&]() {
+                        Generators::cuda::RunTopKViaMapReduceVec(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature, num_partitions, block_size);
+                    });
+                }
+            }
             
             if (params.batch_size == 1) {
                 for (int num_partitions : {64, 128, 256}) {
-                    measure_latency("SINGLE_KERNEL_MAP_REDUCE", num_partitions, [&]() {
+                    measure_latency("SINGLE_KERNEL_MAP_REDUCE", num_partitions, 256, [&]() {
                         Generators::cuda::RunTopKViaSingleKernelMapReduce(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature, num_partitions);
                     });
                 }
             }
         }
 
-        measure_latency("FULL_SORT", 0, [&]() {
+        measure_latency("FULL_SORT", 0, 256, [&]() {
             Generators::cuda::RunTopKViaFullSort(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature);
         });
 
@@ -284,8 +304,9 @@ void RunBenchmarks() {
               << std::setw(5) << "K"
               << std::setw(28) << "Algorithm"
               << std::setw(14) << "Partitions"
+              << std::setw(12) << "Block Size"
               << "Latency (ms)\n";
-    std::cout << std::string(85, '-') << "\n";
+    std::cout << std::string(97, '-') << "\n";
 
     for (const auto& result : all_results) {
         std::cout << std::left << std::setw(12) << result.params.batch_size
@@ -293,14 +314,22 @@ void RunBenchmarks() {
                   << std::setw(5) << result.params.k
                   << std::setw(28) << result.algo_name
                   << std::setw(14) << (result.num_partitions > 0 ? std::to_string(result.num_partitions) : "N/A")
+                  << std::setw(12) << result.block_size
                   << std::fixed << std::setprecision(4) << result.latency_ms << "\n";
     }
 }
 
 TEST(TopKTests, ParityTests) {
+    std::lock_guard<std::mutex> lock(benchmark_mutex);
     RunParityTests();
 }
 
-TEST(TopKTests, BenchmarkTests) {
+TEST(TopKTests, BenchmarkTests_Run1) {
+    std::lock_guard<std::mutex> lock(benchmark_mutex);
+    RunBenchmarks();
+}
+
+TEST(TopKTests, BenchmarkTests_Run2) {
+    std::lock_guard<std::mutex> lock(benchmark_mutex);
     RunBenchmarks();
 }
