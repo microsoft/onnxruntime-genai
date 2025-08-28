@@ -1,24 +1,35 @@
 parameters:
 - name: arch
   type: string
+
 - name: ep
   type: string
+
 - name: cuda_version
   type: string
   default: ''
+
 - name: cuda_display_version
   type: string
   default: ''
+
 - name: os
   type: string
   values:
   - 'linux'
   - 'win'
   - 'osx'
+
 - name: build_config
   type: string
   default: 'release'
 
+- name: enable_winml
+  type: boolean
+  default: false
+
+- name: ort_version
+  type: string
 
 jobs:
 - job: python_${{ parameters.os }}_${{ parameters.ep }}${{ parameters.cuda_display_version }}_${{ parameters.arch }}_packaging
@@ -82,6 +93,8 @@ jobs:
       value: true
     ${{ if eq(parameters.os, 'win') }}:
       value: false
+  - name: ort_version
+    value: ${{ parameters.ort_version }}
   - name: arch
     value: ${{ parameters.arch }}
   - name: artifactName
@@ -154,6 +167,7 @@ jobs:
         arch: ${{ parameters.arch }}
         ep: ${{ parameters.ep }}
         build_config: ${{ parameters.build_config }}
+        enable_winml: ${{ parameters.enable_winml }}
 
   - ${{ if eq(parameters.os, 'osx') }}:
     - template: steps/capi-macos-step.yml
