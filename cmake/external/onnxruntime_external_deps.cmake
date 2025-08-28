@@ -85,7 +85,10 @@ FetchContent_Declare(
   GIT_REPOSITORY ${DEP_URL_onnxruntime_extensions}
   GIT_TAG ${DEP_SHA1_onnxruntime_extensions}
 )
+
+set(OCOS_USE_WINRT OFF)
 set(OCOS_BUILD_PRESET ort_genai)
+
 onnxruntime_fetchcontent_makeavailable(onnxruntime_extensions)
 
 list(APPEND EXTERNAL_LIBRARIES

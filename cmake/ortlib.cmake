@@ -3,7 +3,11 @@
 
 if(ORT_HOME)
   # If ORT_HOME is specified at build time, use ORT_HOME to get the onnxruntime headers and libraries
-  message(STATUS "Using ONNX Runtime from ${ORT_HOME}")
+  message(STATUS "Using ONNX Runtime from: ${ORT_HOME} [as provided]")
+
+  # Make sure the path provided is absolute, as some tools don't react well to relative paths.
+  get_filename_component(ORT_HOME ${ORT_HOME} ABSOLUTE)
+  message(STATUS "Using ONNX Runtime from: ${ORT_HOME} [absloute]")
 
   if (ANDROID)
     # Paths are based on the directory structure of the ORT Android AAR.
