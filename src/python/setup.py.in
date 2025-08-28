@@ -19,7 +19,7 @@ if not path.exists(long_description_file):
 with open(long_description_file, encoding="utf-8") as fdesc:
     long_description = fdesc.read()
 
-extras = ["ThirdPartyNotices.txt", "LICENSE"]
+extras = ["ThirdPartyNotices.txt", "LICENSE", "MSIX/**/*.msix"]
 package_name = '@TARGET_NAME@'
 
 
@@ -46,6 +46,13 @@ def _onnxruntime_dependency() -> str:
 
     return dependency if not ort_version else dependency + ">=" + ort_version
 
+def _get_install_requires():
+    install_requires = [
+        'numpy>=1.21.6',
+    ]
+    if package_name != "onnxruntime-genai-winml":
+        install_requires.append(_onnxruntime_dependency())
+    return install_requires
 
 setup(
     name=package_name,
@@ -56,10 +63,7 @@ setup(
     packages=['onnxruntime_genai', 'onnxruntime_genai.models'],
     include_package_data=True,
     package_data={'': ['*.pyd', '*.dll', '*.so*', '*.dylib'] + extras},
-    install_requires=[
-        'numpy>=1.21.6',
-        _onnxruntime_dependency(),
-    ],
+    install_requires=_get_install_requires(),
     distclass=BinaryDistribution,
     author="Microsoft Corporation",
     author_email="onnxruntime-genai@microsoft.com",
