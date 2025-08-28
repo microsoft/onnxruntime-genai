@@ -157,18 +157,19 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
         main_prompt = "What is the meaning of life?"
         prompt = f'{user_prompt}{main_prompt}{prompt_suffix}{assistant_prompt}'        
 
-    inputs = processor(prompt, images=image, audios=audio)
-    prompt_length = inputs['input_ids'].shape[1]
+    prompts = [prompt]
+    inputs = processor(prompts, images=image, audios=audio)
+    prompt_length = inputs['input_ids'].shape()[1]
     if args.verbose: print(f"Prompt used: {prompt}")
 
     params = og.GeneratorParams(model)
-    params.set_inputs(inputs)
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
     params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
 
     if args.verbose: print("Processed inputs, running warmup runs...")
     for _ in tqdm(range(args.warmup)):
         generator = og.Generator(model, params)
+        generator.set_inputs(inputs)
         i = 1
         while not generator.is_done() and i < generation_length:
             generator.generate_next_token()
@@ -188,18 +189,18 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
 
         # Measure prompt and image processing
         process_start_time = time.perf_counter()
-        inputs = processor(prompt, images=image, audios=audio)
+        inputs = processor(prompts, images=image, audios=audio)
         process_end_time = time.perf_counter()
         process_times.append(process_end_time - process_start_time)
 
         # Prepare run
         params = og.GeneratorParams(model)
-        params.set_inputs(inputs)
         params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
         generator = og.Generator(model, params)
+        generator.set_inputs(inputs)
         prompt_end_time = time.perf_counter()
         prompt_times.append(prompt_end_time - prompt_start_time)
 
