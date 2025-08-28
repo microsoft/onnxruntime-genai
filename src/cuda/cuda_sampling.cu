@@ -493,6 +493,7 @@ __global__ void FilterOnTopP(float* scores, float* prefix_sums, float* scores_te
   }
 }
 
+// START of improved Top-K kernel and helpers from cuda_sampling_improved.cu
 // This new kernel finds the top-k elements iteratively. For each of the k
 // elements, it performs a parallel reduction to find the max score, records it,
 // and then effectively removes it from the next iteration by setting its
@@ -546,6 +547,13 @@ __global__ void GetTopKKernel(int* indices_out, float* scores_in, float* scores_
       scores_in[batch * vocab_size + top_k_sequence.p] = -MAX_T_VAL;
     }
 
+    // Attention: Add a block-level memory fence here.
+    // This ensures that the write to global memory by thread 0 is visible
+    // to all other threads in the block before the next iteration begins.
+    // Without this, other threads might read the old (pre-modification)
+    // score in the next iteration, leading to the same item being picked again.
+    __threadfence_block();
+
     __syncthreads();
   }
 }
@@ -558,6 +566,7 @@ void LaunchImprovedGetTopK(cudaStream_t stream, float* scores_in, float* scores_
   GetTopKKernel<1024><<<grid, block, 0, stream>>>(indices_out, scores_in, scores_out, batch_size, vocab_size, k, temperature);
   CUDA_CHECK(cudaGetLastError());
 }
+// END of improved Top-K kernel and helpers
 
 // Sets up random thresholds for top p or top k sampling
 __global__ void RandomThresholdKernel(curandState* curand_states, float* thresholds, int batch_size) {
@@ -731,16 +740,8 @@ void RunTopKViaDirectKernel(SamplingData* data, cudaStream_t stream, float* scor
   // these in another pre-allocated buffer, `scores_buffer`.
   float* scaled_scores = data->scores_buffer.get();
 
-  constexpr copy_input = false;
-  if constexpr (copy_input) {
-    // Attention: The kernel modifies the input scores array in-place.
-    // This might have unintended side effects on the original `scores_in` tensor, which might be used elsewhere
-    // It is safer to work on a copy. We can use the pre-allocated `scores_temp` buffer like the following:
-    float* scores_copy = data->scores_temp.get();
-    CUDA_CHECK(cudaMemcpyAsync(scores_copy, scores_in, vocab_size * batch_size * sizeof(float), cudaMemcpyDeviceToDevice, stream));
-    scores_in = scores_copy;
-  }
-  
+  // Attention: The kernel modifies the `scores_in` tensor in-place.
+  // This might have unintended side effects on the original `scores_in` tensor if it is used elsewhere later.
   LaunchImprovedGetTopK(stream, scores_in, scaled_scores, indices_out, vocab_size, batch_size, k, temperature);
 
   // Finally, apply softmax to the scaled scores to get the final probabilities,
