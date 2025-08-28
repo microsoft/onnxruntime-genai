@@ -637,6 +637,7 @@ enum class TopKAlgorithm {
     SINGLE_KERNEL_MAP_REDUCE,
     MAP_REDUCE_VEC,
     MAP_REDUCE_HYBRID_SORT,
+    MAP_REDUCE_BITONIC_SORT,
     FULL_SORT
 };
 
@@ -644,6 +645,7 @@ struct TopKConfig {
     TopKAlgorithm algorithm;
     int num_partitions = 0; // Only relevant for map-reduce algorithms
     int block_size = 256;
+    int kSortSize = 0;
 };
 
 // Cache key: a tuple of (vocab_size, batch_size, k)
@@ -1254,15 +1256,13 @@ void RunTopKViaMapReduceHybridSort(SamplingData* data, cudaStream_t stream, floa
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <int kBlockSize, int max_k>
+template <int kBlockSize, int max_k, int kSortSize>
 __global__ void FindBlockTopK_BitonicSort(const float* scores_in,
                                           int* intermediate_indices,
                                           float* intermediate_scores,
                                           int vocab_size,
                                           int num_partitions) {
     // Shared memory for sorting one partition. Its size must be a power of 2.
-    // We choose 4096 which is > 3125 (the max partition size for vocab=200k, p=64)
-    constexpr int kSortSize = 4096;
     __shared__ float smem_scores[kSortSize];
     __shared__ int smem_indices[kSortSize];
 
@@ -1276,7 +1276,7 @@ __global__ void FindBlockTopK_BitonicSort(const float* scores_in,
     // Load data from global to shared memory
     for (int i = threadIdx.x; i < kSortSize; i += kBlockSize) {
         int global_idx = partition_start + i;
-        if (i < partition_size) {
+        if (i < partition_size && global_idx < vocab_size) {
             smem_scores[i] = batch_scores_in[global_idx];
             smem_indices[i] = global_idx;
         } else {
@@ -1329,7 +1329,7 @@ __global__ void FindBlockTopK_BitonicSort(const float* scores_in,
 
 
 // Renamed algorithm to reflect the new sorting strategy
-void RunTopKViaMapReduceBitonicSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions) {
+void RunTopKViaMapReduceBitonicSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions, int kSortSize) {
     constexpr int block_size = 256;
     constexpr int max_k = 64;
 
@@ -1339,8 +1339,25 @@ void RunTopKViaMapReduceBitonicSort(SamplingData* data, cudaStream_t stream, flo
     // Stage 1: Map using the new Bitonic Sort kernel
     dim3 grid_stage1(num_partitions, batch_size);
     dim3 block_stage1(block_size);
-    FindBlockTopK_BitonicSort<block_size, max_k><<<grid_stage1, block_stage1, 0, stream>>>(
-        scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions);
+    
+    // Use a switch to launch the correctly templated kernel based on kSortSize
+    switch (kSortSize) {
+        case 1024:
+            FindBlockTopK_BitonicSort<block_size, max_k, 1024><<<grid_stage1, block_stage1, 0, stream>>>(
+                scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions);
+            break;
+        case 2048:
+            FindBlockTopK_BitonicSort<block_size, max_k, 2048><<<grid_stage1, block_stage1, 0, stream>>>(
+                scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions);
+            break;
+        case 4096:
+            FindBlockTopK_BitonicSort<block_size, max_k, 4096><<<grid_stage1, block_stage1, 0, stream>>>(
+                scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions);
+            break;
+        default:
+            // This case should not be reached if the benchmark logic is correct
+            break;
+    }
     CUDA_CHECK(cudaGetLastError());
 
     // Stage 2: Sort the small intermediate buffer using CUB Segmented Sort
@@ -1455,6 +1472,17 @@ TopKConfig BenchmarkAndGetBestAlgorithm(SamplingData* data, cudaStream_t stream,
             benchmark_algorithm({TopKAlgorithm::MAP_REDUCE_HYBRID_SORT, num_partitions, 256}, [&]() { RunTopKViaMapReduceHybridSort(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature, num_partitions, 256); });
         }
 
+        for (int kSortSize : {1024, 2048, 4096}) {
+            for (int num_partitions : {32, 64, 128}) {
+                // Check if the given vocab_size is viable for this combination.
+                if (vocab_size <= num_partitions * kSortSize) {
+                    benchmark_algorithm({TopKAlgorithm::MAP_REDUCE_BITONIC_SORT, num_partitions, 256, kSortSize}, [&]() {
+                        RunTopKViaMapReduceBitonicSort(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature, num_partitions, kSortSize);
+                    });
+                }
+            }
+        }
+
         if (batch_size == 1) {
             for (int num_partitions : {64, 128, 256}) {
                 benchmark_algorithm({TopKAlgorithm::SINGLE_KERNEL_MAP_REDUCE, num_partitions}, [&]() { RunTopKViaSingleKernelMapReduce(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature, num_partitions); });
@@ -1500,6 +1528,9 @@ void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, fl
             break;
         case TopKAlgorithm::MAP_REDUCE_HYBRID_SORT:
             RunTopKViaMapReduceHybridSort(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature, chosen_config.num_partitions, chosen_config.block_size);
+            break;
+        case TopKAlgorithm::MAP_REDUCE_BITONIC_SORT:
+            RunTopKViaMapReduceBitonicSort(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature, chosen_config.num_partitions, chosen_config.kSortSize);
             break;
         case TopKAlgorithm::FULL_SORT:
             RunTopKViaFullSort(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature);
