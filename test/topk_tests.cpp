@@ -103,10 +103,10 @@ bool CompareResults(int batch_size, int k,
 }
 
 // Function to run parity tests for all algorithms against a reference implementation
-void RunParityTests() {
-    std::cout << "\n--- Running Parity Tests ---\n";
-    BenchmarkParams params = {1, 200000, 50}; // A representative test case
-    const float temperature = 1.0f;
+void RunParityTests(const BenchmarkParams &params, float temperature) {
+    std::cout << "\n--- Running Parity Tests with batch_size=" 
+              << params.batch_size << ", vocab_size=" << params.vocab_size <<", k=" << params.k << ", temperature=" << temperature
+              << "---\n";
 
     cudaStream_t stream;
     CUDA_CHECK(cudaStreamCreate(&stream));
@@ -186,9 +186,9 @@ void RunParityTests() {
 // Main benchmark function
 void RunBenchmarks() {
     // --- Define Benchmark Configurations ---
-    std::vector<int> batch_sizes = {1, 4, 8};
-    std::vector<int> vocab_sizes = {200000, 20000, 40000, 100000, 300000};
-    std::vector<int> ks = {50, 1, 4, 8, 32, 64};
+    std::vector<int> batch_sizes = {1, 4};
+    std::vector<int> vocab_sizes = {201088, 32000, 128256, 102400, 151646}; // GPT-OSS, LLAMA2, LLAMA3, DeepSeek, QWen3
+    std::vector<int> ks = {50, 1, 8, 32, 64};
 
     // By default, only test the first combination. Change it to True to test all combinations.
     constexpr bool all_combinations = false;
@@ -345,15 +345,25 @@ void RunBenchmarks() {
 
 TEST(TopKTests, ParityTests) {
     std::lock_guard<std::mutex> lock(benchmark_mutex);
-    RunParityTests();
+
+    std::vector<int> batch_sizes = {1, 2};
+    std::vector<int> vocab_sizes = {10000, 204800};
+    std::vector<int> ks = {1, 50, 64};
+    std::vector<float> temperatures = {1.0f, 0.5f};
+
+    for (int batch_size : batch_sizes) {
+        for (int vocab_size : vocab_sizes) {
+            for (int k: ks) {
+                for (float temperature : temperatures) {
+                    BenchmarkParams params = {batch_size, vocab_size, k};
+                    RunParityTests(params, temperature);
+                }
+            }
+        }
+    }
 }
 
-TEST(TopKTests, BenchmarkTests_Run1) {
-    std::lock_guard<std::mutex> lock(benchmark_mutex);
-    RunBenchmarks();
-}
-
-TEST(TopKTests, BenchmarkTests_Run2) {
+TEST(TopKTests, BenchmarkTests) {
     std::lock_guard<std::mutex> lock(benchmark_mutex);
     RunBenchmarks();
 }

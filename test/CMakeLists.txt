@@ -36,8 +36,7 @@ if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linu
 target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
-  # target_link_libraries(unit_tests PRIVATE onnxruntime-genai-cuda)
+if(USE_CUDA AND CMAKE_CUDA_COMPILER)  
   target_link_libraries(unit_tests PRIVATE cublasLt cublas curand cufft cudart)
   set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
   add_dependencies(unit_tests onnxruntime-genai-cuda)

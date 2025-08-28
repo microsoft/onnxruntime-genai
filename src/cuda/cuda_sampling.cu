@@ -1307,9 +1307,24 @@ void RunTopKViaMapReduceBitonicSort(SamplingData* data, cudaStream_t stream, flo
 // ------------------------------------------------------------------
 
 void RunTopKViaFullSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
-    float* unscaled_scores = data->scores_buffer.get();
-    LaunchSort(data, stream, scores_in, unscaled_scores, indices_out, vocab_size, batch_size);
-    DispatchBlockwiseSoftmaxForwardWithTemperature(stream, scores_out, const_cast<const float*>(unscaled_scores), k, vocab_size, k, batch_size, temperature);
+    // Step 1: Perform a full, segmented sort on the input scores.
+    // The results (sorted scores and indices) are stored in temporary buffers.
+    float* sorted_scores = data->scores_buffer.get();
+    int* sorted_indices = data->indices_in.get();
+    LaunchSort(data, stream, scores_in, sorted_scores, sorted_indices, vocab_size, batch_size);
+
+    // Step 2: Launch a specialized kernel to handle the final steps.
+    // This kernel will:
+    //   a) Copy the top 'k' indices for each batch item from the sorted temporary buffer to the final output buffer.
+    //   b) Read the corresponding top 'k' scores.
+    //   c) Apply the temperature scaling to these scores.
+    //   d) Compute the softmax on the scaled scores.
+    //   e) Write the final softmax probabilities to the output scores buffer.
+    // The 'vocab_size' is passed as the input_stride to correctly index into the sorted results for each batch item.
+    dim3 grid(batch_size);
+    dim3 block(256);
+    CopyAndSoftmaxKernel<256><<<grid, block, 0, stream>>>(indices_out, scores_out, sorted_indices, sorted_scores, k, temperature, vocab_size);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 void RandomTopkInput(cudaStream_t stream, float* data, curandState* batch_state, int total_size, int batch_size) {
