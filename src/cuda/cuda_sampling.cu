@@ -497,7 +497,6 @@ __global__ void GetTopKKernel(int* indices_out, float* scores_in, float* scores_
     if (tid == 0) {
       scores_out[ite + batch * k] = top_k_sequence.u / temperature;
       indices_out[ite + batch * k] = top_k_sequence.p;
-
       // set the ax value to -MAX_T_VAL so that the value doesn't get picked again
       scores_in[batch * vocab_size + top_k_sequence.p] = -MAX_T_VAL;
     }
@@ -572,14 +571,15 @@ __global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, flo
       atomicExch(top_k_distributed_lock, 0);
     }
 
+    // TODO: Is there enough shared memory to bring the top_k shards to shared memory ?
     TopK_2 reduce_partial; 
     for (int ite = 0; ite < k; ite++) {
       reduce_partial.init();
   
       for (int i = threadIdx.x; i < top_k_shards*k; i += blockDim.x) {
         float score = distributed_scores_out[i];
-        int index = distributed_indices_out[i];
-        reduce_partial.insert(score, index);
+        //int index = distributed_indices_out[i];
+        reduce_partial.insert(score, i);
       }
 
       // reduce in thread block
@@ -587,7 +587,12 @@ __global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, flo
 
       if (tid == 0) {
         scores_out[ite + batch * k] = top_k_sequence_reduced.u / temperature;
-        indices_out[ite + batch * k] = top_k_sequence_reduced.p;
+        
+        int local_index = top_k_sequence_reduced.p;
+        indices_out[ite + batch * k] = distributed_indices_out[local_index];
+
+        // set the max value to -MAX_T_VAL so that the value doesn't get picked again
+        distributed_scores_out[local_index] = -MAX_T_VAL;
       }
 
       __syncthreads();
