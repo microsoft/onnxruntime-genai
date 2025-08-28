@@ -1059,7 +1059,7 @@ void RunTopKViaMapReduceVec(SamplingData* data, cudaStream_t stream, float* scor
     CUDA_CHECK(cudaGetLastError());
 }
 
-template<int kBlockSize>
+template<int kBlockSize, bool use_cub=false>
 __global__ void CopyAndSoftmaxKernel(int* final_indices, float* final_scores,
                                      const int* sorted_indices, const float* sorted_scores,
                                      int k, float temperature, int input_stride) {
@@ -1067,35 +1067,75 @@ __global__ void CopyAndSoftmaxKernel(int* final_indices, float* final_scores,
     const int* batch_sorted_indices = sorted_indices + batch_idx * input_stride;
     const float* batch_sorted_scores = sorted_scores + batch_idx * input_stride;
 
-    __shared__ float top_k_scores_smem[64]; // max_k
+    if constexpr (use_cub) {
+      // STEP 1: All threads cooperatively copy the final indices.
+      for (int i = threadIdx.x; i < k; i += kBlockSize) {
+          final_indices[batch_idx * k + i] = batch_sorted_indices[i];
+      }
 
-    // Cooperatively load the top k scores into shared memory
-    if (threadIdx.x < k) {
-        top_k_scores_smem[threadIdx.x] = batch_sorted_scores[threadIdx.x] / temperature;
-    }
-    __syncthreads();
+      // STEP 2: Perform softmax using a parallel reduction to match the reference implementation's math.
+      typedef cub::BlockReduce<float, kBlockSize> BlockReduce;
+      __shared__ union {
+          typename BlockReduce::TempStorage reduce_max;
+          typename BlockReduce::TempStorage reduce_sum;
+      } temp_storage;
 
-    // Thread 0 computes max and sum_exp for softmax
-    __shared__ float max_val;
-    __shared__ float sum_exp;
-    if (threadIdx.x == 0) {
-        max_val = -std::numeric_limits<float>::max();
-        for (int i = 0; i < k; i++) {
-            if (top_k_scores_smem[i] > max_val) {
-                max_val = top_k_scores_smem[i];
-            }
-        }
-        sum_exp = 0.0f;
-        for (int i = 0; i < k; i++) {
-            sum_exp += expf(top_k_scores_smem[i] - max_val);
-        }
-    }
-    __syncthreads();
+      // Each thread loads its score and applies temperature. Pad with a large negative for non-participating threads.
+      float thread_score = -std::numeric_limits<float>::max();
+      if (threadIdx.x < k) {
+          thread_score = batch_sorted_scores[threadIdx.x] / temperature;
+      }
 
-    // All threads write final results
-    for (int i = threadIdx.x; i < k; i += kBlockSize) {
-        final_indices[batch_idx * k + i] = batch_sorted_indices[i];
-        final_scores[batch_idx * k + i] = expf(top_k_scores_smem[i] - max_val) / sum_exp;
+      // Parallel reduction to find the maximum score.
+      float max_val = BlockReduce(temp_storage.reduce_max).Reduce(thread_score, cub::Max());
+      __syncthreads();
+
+      // Calculate `exp(score - max)` for each thread's score.
+      float thread_exp = 0.0f;
+      if (threadIdx.x < k) {
+          thread_exp = expf(thread_score - max_val);
+      }
+      
+      // Parallel reduction to find the sum of the exponentials.
+      float sum_exp = BlockReduce(temp_storage.reduce_sum).Reduce(thread_exp, cub::Sum());
+      __syncthreads();
+
+      // STEP 3: All threads write the final softmax probability.
+      for (int i = threadIdx.x; i < k; i += kBlockSize) {
+          float scaled_score = batch_sorted_scores[i] / temperature;
+          final_scores[batch_idx * k + i] = expf(scaled_score - max_val) / sum_exp;
+      }
+    } else {
+      __shared__ float top_k_scores_smem[64]; // max_k
+
+      // Cooperatively load the top k scores into shared memory
+      if (threadIdx.x < k) {
+          top_k_scores_smem[threadIdx.x] = batch_sorted_scores[threadIdx.x] / temperature;
+      }
+      __syncthreads();
+
+      // Thread 0 computes max and sum_exp for softmax
+      __shared__ float max_val;
+      __shared__ float sum_exp;
+      if (threadIdx.x == 0) {
+          max_val = -std::numeric_limits<float>::max();
+          for (int i = 0; i < k; i++) {
+              if (top_k_scores_smem[i] > max_val) {
+                  max_val = top_k_scores_smem[i];
+              }
+          }
+          sum_exp = 0.0f;
+          for (int i = 0; i < k; i++) {
+              sum_exp += expf(top_k_scores_smem[i] - max_val);
+          }
+      }
+      __syncthreads();
+
+      // All threads write final results
+      for (int i = threadIdx.x; i < k; i += kBlockSize) {
+          final_indices[batch_idx * k + i] = batch_sorted_indices[i];
+          final_scores[batch_idx * k + i] = expf(top_k_scores_smem[i] - max_val) / sum_exp;
+      }
     }
 }
 
@@ -1149,6 +1189,119 @@ void RunTopKViaMapReduceHybridSort(SamplingData* data, cudaStream_t stream, floa
     CUDA_CHECK(cudaGetLastError());
 }
 
+template <int kBlockSize, int max_k>
+__global__ void FindBlockTopK_BitonicSort(const float* scores_in,
+                                          int* intermediate_indices,
+                                          float* intermediate_scores,
+                                          int vocab_size,
+                                          int num_partitions) {
+    // Shared memory for sorting one partition. Its size must be a power of 2.
+    // We choose 4096 which is > 3125 (the max partition size for vocab=200k, p=64)
+    constexpr int kSortSize = 4096;
+    __shared__ float smem_scores[kSortSize];
+    __shared__ int smem_indices[kSortSize];
+
+    const int batch_idx = blockIdx.y;
+    const int partition_idx = blockIdx.x;
+
+    const float* batch_scores_in = scores_in + batch_idx * vocab_size;
+    const int partition_size = (vocab_size + num_partitions - 1) / num_partitions;
+    const int partition_start = partition_idx * partition_size;
+
+    // Load data from global to shared memory
+    for (int i = threadIdx.x; i < kSortSize; i += kBlockSize) {
+        int global_idx = partition_start + i;
+        if (i < partition_size) {
+            smem_scores[i] = batch_scores_in[global_idx];
+            smem_indices[i] = global_idx;
+        } else {
+            // Pad with minimum values to ensure they are sorted to the end
+            smem_scores[i] = -std::numeric_limits<float>::max();
+            smem_indices[i] = -1;
+        }
+    }
+    __syncthreads();
+
+    // --- In-place Bitonic Sort (descending) ---
+    for (int k = 2; k <= kSortSize; k <<= 1) {
+        for (int j = k >> 1; j > 0; j >>= 1) {
+            for (int i = threadIdx.x; i < kSortSize; i += kBlockSize) {
+                int ixj = i ^ j;
+                if (ixj > i) {
+                    if ((i & k) == 0) { // Sort ascending
+                        if (smem_scores[i] > smem_scores[ixj]) {
+                            float temp_s = smem_scores[i]; smem_scores[i] = smem_scores[ixj]; smem_scores[ixj] = temp_s;
+                            int temp_i = smem_indices[i]; smem_indices[i] = smem_indices[ixj]; smem_indices[ixj] = temp_i;
+                        }
+                    } else { // Sort descending
+                        if (smem_scores[i] < smem_scores[ixj]) {
+                            float temp_s = smem_scores[i]; smem_scores[i] = smem_scores[ixj]; smem_scores[ixj] = temp_s;
+                            int temp_i = smem_indices[i]; smem_indices[i] = smem_indices[ixj]; smem_indices[ixj] = temp_i;
+                        }
+                    }
+                }
+            }
+             __syncthreads();
+        }
+    }
+    // Final pass to make the whole array descending
+    for (int i = threadIdx.x; i < kSortSize / 2; i+= kBlockSize) {
+       if (smem_scores[i] < smem_scores[kSortSize - 1 - i]) {
+           float temp_s = smem_scores[i]; smem_scores[i] = smem_scores[kSortSize - 1 - i]; smem_scores[kSortSize - 1 - i] = temp_s;
+           int temp_i = smem_indices[i]; smem_indices[i] = smem_indices[kSortSize - 1 - i]; smem_indices[kSortSize - 1 - i] = temp_i;
+       }
+    }
+    __syncthreads();
+
+
+    // Have the first `max_k` threads write out the top results
+    if (threadIdx.x < max_k) {
+        int offset = (batch_idx * num_partitions + partition_idx) * max_k;
+        intermediate_scores[offset + threadIdx.x] = smem_scores[threadIdx.x];
+        intermediate_indices[offset + threadIdx.x] = smem_indices[threadIdx.x];
+    }
+}
+
+
+// Renamed algorithm to reflect the new sorting strategy
+void RunTopKViaMapReduceBitonicSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions) {
+    constexpr int block_size = 256;
+    constexpr int max_k = 64;
+
+    float* intermediate_scores = data->scores_buffer.get();
+    int* intermediate_indices = data->indices_in.get();
+
+    // Stage 1: Map using the new Bitonic Sort kernel
+    dim3 grid_stage1(num_partitions, batch_size);
+    dim3 block_stage1(block_size);
+    FindBlockTopK_BitonicSort<block_size, max_k><<<grid_stage1, block_stage1, 0, stream>>>(
+        scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions);
+    CUDA_CHECK(cudaGetLastError());
+
+    // Stage 2: Sort the small intermediate buffer using CUB Segmented Sort
+    int num_intermediate_results_per_batch = num_partitions * max_k;
+    int total_intermediate_results = batch_size * num_intermediate_results_per_batch;
+    float* sorted_scores = data->scores_temp.get();
+    int* sorted_indices = data->indices_sorted.get();
+
+    LaunchPopulateOffsets(data->offsets.get(), num_intermediate_results_per_batch, batch_size, stream);
+
+    size_t temp_storage_bytes_needed = 0;
+    CUDA_CHECK(cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr, temp_storage_bytes_needed, intermediate_scores, sorted_scores, intermediate_indices, sorted_indices, total_intermediate_results, batch_size, data->offsets.get(), data->offsets.get() + 1, 0, sizeof(float) * 8, stream));
+    
+    if (data->temp_storage_bytes < temp_storage_bytes_needed) {
+        std::cerr << "FATAL ERROR in RunTopKViaMapReduceBitonicSort: Pre-allocated temp_buffer is too small." << std::endl;
+        return;
+    }
+    
+    CUDA_CHECK(cub::DeviceSegmentedRadixSort::SortPairsDescending(data->temp_buffer.get(), temp_storage_bytes_needed, intermediate_scores, sorted_scores, intermediate_indices, sorted_indices, total_intermediate_results, batch_size, data->offsets.get(), data->offsets.get() + 1, 0, sizeof(float) * 8, stream));
+
+    // Stage 3: Launch the (known good) kernel to copy the top k and apply softmax
+    dim3 grid_stage3(batch_size);
+    dim3 block_stage3(256);
+    CopyAndSoftmaxKernel<256><<<grid_stage3, block_stage3, 0, stream>>>(indices_out, scores_out, sorted_indices, sorted_scores, k, temperature, num_intermediate_results_per_batch);
+    CUDA_CHECK(cudaGetLastError());
+}
 // ------------------------------------------------------------------
 // END of Map-Reduce implementations
 // ------------------------------------------------------------------
