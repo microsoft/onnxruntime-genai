@@ -12,6 +12,8 @@
 #include <memory>
 #include <cmath>
 #include <mutex>
+#include <cstdio>
+#include <cstdlib>
 
 #include "cuda_runtime.h"
 #include "../src/span.h"
@@ -19,6 +21,18 @@
 #include "../src/cuda/cuda_sampling.cuh"
 #include "smartptrs.h" // For CudaMallocArray
 #include <gtest/gtest.h>
+
+// Robust CUDA error checking macro
+#define CUDA_CHECK(call)                                         \
+do {                                                             \
+    cudaError_t err = call;                                      \
+    if (err != cudaSuccess) {                                    \
+        fprintf(stderr, "CUDA Error: %s at %s:%d\n",             \
+                cudaGetErrorString(err), __FILE__, __LINE__);    \
+        exit(EXIT_FAILURE);                                      \
+    }                                                            \
+} while (0)
+
 
 // Forward declarations of the internal functions we want to benchmark,
 // as they are not in the .cuh header.
@@ -31,7 +45,7 @@ void RunTopKViaMapReduceShared(SamplingData* data, cudaStream_t stream, float* s
 void RunTopKViaSingleKernelMapReduce(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions);
 void RunTopKViaFullSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature);
 void RunTopKViaMapReduceVec(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions, int block_size);
-
+void RunTopKViaMapReduceHybridSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions, int block_size);
 } // namespace cuda
 } // namespace Generators
 
@@ -54,14 +68,6 @@ struct BenchmarkResult {
 // Global mutex to serialize benchmark tests and prevent parallel execution on the GPU
 static std::mutex benchmark_mutex;
 
-// Helper to check for CUDA errors
-void CudaCheck(cudaError_t error) {
-    if (error != cudaSuccess) {
-        std::cerr << "CUDA Error: " << cudaGetErrorString(error) << std::endl;
-        exit(1);
-    }
-}
-
 // Function to compare results between a test algorithm and a reference
 bool CompareResults(int batch_size, int k,
                     const std::vector<float>& reference_scores, const std::vector<int>& reference_indices,
@@ -81,7 +87,8 @@ bool CompareResults(int batch_size, int k,
         // Compare scores
         if (std::abs(reference_scores[i] - actual_scores[i]) > epsilon) {
             std::cerr << "Parity Test Failed for " << algo_name << ": Score mismatch at position " << i
-                      << ". Expected: " << reference_scores[i] << ", Got: " << actual_scores[i] << std::endl;
+                      << ". Expected: " << std::fixed << std::setprecision(6) << reference_scores[i] 
+                      << ", Got: " << actual_scores[i] << std::endl;
             match = false;
             break;
         }
@@ -101,7 +108,7 @@ void RunParityTests() {
     const float temperature = 1.0f;
 
     cudaStream_t stream;
-    CudaCheck(cudaStreamCreate(&stream));
+    CUDA_CHECK(cudaStreamCreate(&stream));
 
     // --- Setup ---
     auto sampling_data = std::make_unique<Generators::cuda::SamplingData>(1234, params.batch_size, params.vocab_size, stream);
@@ -114,30 +121,30 @@ void RunParityTests() {
     for (auto& val : scores_in_h) {
         val = dis(gen);
     }
-    CudaCheck(cudaMemcpy(scores_in_d.get(), scores_in_h.data(), scores_in_h.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(scores_in_d.get(), scores_in_h.data(), scores_in_h.size() * sizeof(float), cudaMemcpyHostToDevice));
 
     // --- Get Reference Result using Full Sort ---
     auto ref_scores_d = Generators::CudaMallocArray<float>(params.batch_size * params.k);
     auto ref_indices_d = Generators::CudaMallocArray<int>(params.batch_size * params.k);
     Generators::cuda::RunTopKViaFullSort(sampling_data.get(), stream, scores_in_d.get(), ref_scores_d.get(), ref_indices_d.get(), params.vocab_size, params.batch_size, params.k, temperature);
-    CudaCheck(cudaStreamSynchronize(stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 
     std::vector<float> ref_scores_h(params.batch_size * params.k);
     std::vector<int> ref_indices_h(params.batch_size * params.k);
-    CudaCheck(cudaMemcpy(ref_scores_h.data(), ref_scores_d.get(), ref_scores_h.size() * sizeof(float), cudaMemcpyDeviceToHost));
-    CudaCheck(cudaMemcpy(ref_indices_h.data(), ref_indices_d.get(), ref_indices_h.size() * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(ref_scores_h.data(), ref_scores_d.get(), ref_scores_h.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(ref_indices_h.data(), ref_indices_d.get(), ref_indices_h.size() * sizeof(int), cudaMemcpyDeviceToHost));
 
     // --- Test Other Algorithms ---
     auto test_algo = [&](const std::string& name, auto func) {
         auto actual_scores_d = Generators::CudaMallocArray<float>(params.batch_size * params.k);
         auto actual_indices_d = Generators::CudaMallocArray<int>(params.batch_size * params.k);
         func(actual_scores_d.get(), actual_indices_d.get());
-        CudaCheck(cudaStreamSynchronize(stream));
+        CUDA_CHECK(cudaStreamSynchronize(stream));
 
         std::vector<float> actual_scores_h(params.batch_size * params.k);
         std::vector<int> actual_indices_h(params.batch_size * params.k);
-        CudaCheck(cudaMemcpy(actual_scores_h.data(), actual_scores_d.get(), actual_scores_h.size() * sizeof(float), cudaMemcpyDeviceToHost));
-        CudaCheck(cudaMemcpy(actual_indices_h.data(), actual_indices_d.get(), actual_indices_h.size() * sizeof(int), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(actual_scores_h.data(), actual_scores_d.get(), actual_scores_h.size() * sizeof(float), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(actual_indices_h.data(), actual_indices_d.get(), actual_indices_h.size() * sizeof(int), cudaMemcpyDeviceToHost));
 
         if (CompareResults(params.batch_size, params.k, ref_scores_h, ref_indices_h, actual_scores_h, actual_indices_h, name)) {
             std::cout << "  [PASS] " << name << std::endl;
@@ -159,6 +166,9 @@ void RunParityTests() {
         test_algo("MAP_REDUCE_VEC (p=256, b=256)", [&](float* s_d, int* i_d){
             Generators::cuda::RunTopKViaMapReduceVec(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 256, 256);
         });
+        test_algo("MAP_REDUCE_HYBRID_SORT (p=64, b=256)", [&](float* s_d, int* i_d){
+            Generators::cuda::RunTopKViaMapReduceHybridSort(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 64, 256);
+        });
         if (params.batch_size == 1) {
             test_algo("SINGLE_KERNEL_MAP_REDUCE (p=256)", [&](float* s_d, int* i_d){
                 Generators::cuda::RunTopKViaSingleKernelMapReduce(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 256);
@@ -166,7 +176,7 @@ void RunParityTests() {
         }
     }
 
-    CudaCheck(cudaStreamDestroy(stream));
+    CUDA_CHECK(cudaStreamDestroy(stream));
 }
 
 // Main benchmark function
@@ -200,7 +210,7 @@ void RunBenchmarks() {
     std::vector<BenchmarkResult> all_results;
 
     cudaStream_t stream;
-    CudaCheck(cudaStreamCreate(&stream));
+    CUDA_CHECK(cudaStreamCreate(&stream));
 
     for (const auto& params : configs) {
         std::cout << "\nRunning benchmark for: batch_size=" << params.batch_size
@@ -216,8 +226,8 @@ void RunBenchmarks() {
         auto indices_out = Generators::CudaMallocArray<int>(params.batch_size * params.k);
 
         cudaEvent_t start, stop;
-        CudaCheck(cudaEventCreate(&start));
-        CudaCheck(cudaEventCreate(&stop));
+        CUDA_CHECK(cudaEventCreate(&start));
+        CUDA_CHECK(cudaEventCreate(&stop));
 
         const int total_size = params.batch_size * params.vocab_size;
 
@@ -228,7 +238,7 @@ void RunBenchmarks() {
                 Generators::cuda::RandomTopkInput(stream, scores_in.get(), sampling_data->curand_states.get(), total_size, params.batch_size);
                 func();
             }
-            CudaCheck(cudaStreamSynchronize(stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
 
             // Timing
             float total_ms = 0.0f;
@@ -236,13 +246,13 @@ void RunBenchmarks() {
                 // Regenerate random data before each timed run to bust caches
                 Generators::cuda::RandomTopkInput(stream, scores_in.get(), sampling_data->curand_states.get(), total_size, params.batch_size);
 
-                CudaCheck(cudaEventRecord(start, stream));
+                CUDA_CHECK(cudaEventRecord(start, stream));
                 func();
-                CudaCheck(cudaEventRecord(stop, stream));
+                CUDA_CHECK(cudaEventRecord(stop, stream));
                 
-                CudaCheck(cudaEventSynchronize(stop));
+                CUDA_CHECK(cudaEventSynchronize(stop));
                 float ms = 0.0f;
-                CudaCheck(cudaEventElapsedTime(&ms, start, stop));
+                CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
                 total_ms += ms;
             }
             all_results.push_back({params, name, num_partitions, block_size, total_ms / timing_runs});
@@ -271,11 +281,15 @@ void RunBenchmarks() {
             }
 
             for (int num_partitions : {64, 128, 256}) {
-                for (int block_size : {256, 512}) {
-                    measure_latency("MAP_REDUCE_VEC", num_partitions, block_size, [&]() {
-                        Generators::cuda::RunTopKViaMapReduceVec(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature, num_partitions, block_size);
-                    });
-                }
+                measure_latency("MAP_REDUCE_VEC", num_partitions, 256, [&]() {
+                    Generators::cuda::RunTopKViaMapReduceVec(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature, num_partitions, 256);
+                });
+            }
+
+            for (int num_partitions : {64, 128}) {
+                measure_latency("MAP_REDUCE_HYBRID_SORT", num_partitions, 256, [&]() {
+                    Generators::cuda::RunTopKViaMapReduceHybridSort(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature, num_partitions, 256);
+                });
             }
             
             if (params.batch_size == 1) {
@@ -291,11 +305,11 @@ void RunBenchmarks() {
             Generators::cuda::RunTopKViaFullSort(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature);
         });
 
-        CudaCheck(cudaEventDestroy(start));
-        CudaCheck(cudaEventDestroy(stop));
+        CUDA_CHECK(cudaEventDestroy(start));
+        CUDA_CHECK(cudaEventDestroy(stop));
     }
 
-    CudaCheck(cudaStreamDestroy(stream));
+    CUDA_CHECK(cudaStreamDestroy(stream));
 
     // --- Print Results ---
     std::cout << "\n--- Benchmark Results ---\n";
