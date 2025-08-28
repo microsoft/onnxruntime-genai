@@ -1046,7 +1046,9 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
 }
 
 std::unique_ptr<NamedTensors> MultiModalProcessor::Process(const std::string& prompt, const Images* images, const Audios* audios) const {
-  Payload payload{prompt, {}, images, audios};
+  const char* prompt_list[] = { prompt.c_str() };
+  std::span<const char*> prompts(prompt_list, 1);
+  Payload payload{prompt, prompts, images, audios};
   return processor_->Process(*tokenizer_, payload);
 }
 
