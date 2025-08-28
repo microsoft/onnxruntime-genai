@@ -59,7 +59,7 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 
 }  // namespace
 
-MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
+MultiModalPipelineLanguageModel::MultiModalPipelineLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
     : Model(std::move(config)) {
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
@@ -71,7 +71,7 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
     }
     vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options.get());
   }
-  std::cout << "Inside MultiModalLanguageModel" << std::endl;
+  std::cout << "Inside MultiModalPipelineLanguageModel" << std::endl;
 
   if (speech) {
     auto speech_session_options = OrtSessionOptions::Create();
@@ -83,9 +83,11 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   CreateSessionOptionsFromConfig(config_->model.decoder.session_options, *embedding_session_options, true, true);
 
   embedding_session_ = CreateSession(ort_env, config_->model.embedding.filename, embedding_session_options.get());
-  decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
+  // decoder_session_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
 
-  session_info_.Add(*decoder_session_);
+  // session_info_.Add(*decoder_session_);
+
+  decoder_pipeline_model_ = std::make_unique<DecoderOnlyPipelineModel>(config, ort_env);
   session_info_.Add(*embedding_session_);
   if (speech) {
     session_info_.Add(*speech_session_);
@@ -95,11 +97,11 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   }
 }
 
-std::unique_ptr<State> MultiModalLanguageModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
+std::unique_ptr<State> MultiModalPipelineLanguageModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
   return std::make_unique<MultiModalPipelineState>(*this, sequence_lengths, params);
 }
 
-VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorParams& params)
+VisionState::VisionState(const MultiModalPipelineLanguageModel& model, const GeneratorParams& params)
     : State{params, model},
       model_{model} {}
 
@@ -119,7 +121,7 @@ DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next
   return {};
 }
 
-SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params)
+SpeechState::SpeechState(const MultiModalPipelineLanguageModel& model, const GeneratorParams& params)
     : State{params, model},
       model_{model} {}
 
@@ -136,7 +138,7 @@ DeviceSpan<float> SpeechState::Run(int current_length, DeviceSpan<int32_t>& next
   return {};
 }
 
-EmbeddingState::EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params)
+EmbeddingState::EmbeddingState(const MultiModalPipelineLanguageModel& model, const GeneratorParams& params)
     : State{params, model},
       model_{model} {
   input_ids_.Add();
@@ -172,7 +174,7 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
   return {};
 }
 
-DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
+DecoderState::DecoderState(const MultiModalPipelineLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
       position_inputs_{model, *this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask} {
@@ -197,7 +199,7 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   inputs_embeds_.UpdateSequenceLength(new_length);
 }
 
-MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
+MultiModalPipelineState::MultiModalPipelineState(const MultiModalPipelineLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
       adapters_{std::make_shared<Adapters>(&model_)} {

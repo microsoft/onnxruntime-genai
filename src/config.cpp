@@ -547,6 +547,10 @@ struct Vision_Element : JSON::Element {
       return inputs_;
     } else if (name == "outputs") {
       return outputs_;
+    } else if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -556,6 +560,7 @@ struct Vision_Element : JSON::Element {
   Config::Model::Vision& v_;
   VisionInputs_Element inputs_{v_.inputs};
   VisionOutputs_Element outputs_{v_.outputs};
+  std::unique_ptr<SessionOptions_Element> session_options_;
 };
 
 struct SpeechInputs_Element : JSON::Element {

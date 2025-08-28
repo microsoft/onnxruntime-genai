@@ -479,6 +479,17 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                            const Config& config) {
   DeviceInterface* p_device{};
 
+  std::cout << "Inside SetProviderSessionOptions" << std::endl;
+
+  std::cout << "Providers:" << std::endl;
+  for (const Config::ProviderOptions& provider : provider_options_list) {
+      std::cout << "  - " << provider.name << std::endl;
+      for (auto& option : provider.options) {
+        std::cout << "   - " << option.first.c_str() << std::endl;
+        std::cout << "   - " << option.second.c_str() << std::endl;
+      }
+  }
+
   auto providers_list = providers;
   if (!is_primary_session_options) {
     // Providers specified in a non-primary provider options list are added
@@ -859,7 +870,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
                                                   config_session_options.provider_options, is_primary_session_options,
                                                   disable_graph_capture, *config_);
-
+  
   if (!p_device_) {
     p_device_ = session_device;
   } else if (session_device != nullptr && session_device->GetType() != p_device_->GetType()) {
@@ -896,8 +907,10 @@ OrtSessionOptions* Model::GetSessionOptions(const std::string& model_id) const {
 }
 
 std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::string& model_filename, OrtSessionOptions* session_options) {
+  std::cout << "Inside CreateSession model_filename: " << model_filename << std::endl;
   if (auto model_data_it = config_->model_data_spans_.find(model_filename);
       model_data_it != config_->model_data_spans_.end()) {
+    std::cout << "Inside CreateSession data if" << std::endl;
     // If model data was provided, load the model from memory
     if (model_data_it->second.empty()) {
       throw std::runtime_error("Failed to load model data from memory for " + model_filename);
@@ -947,6 +960,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
+  if (ModelType::IsVLM(config->model.type))
+    return std::make_shared<MultiModalPipelineLanguageModel>(std::move(config), ort_env, true, false);
   if (ModelType::IsVLM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (ModelType::IsPipe(config->model.type))

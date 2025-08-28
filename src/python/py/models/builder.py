@@ -535,6 +535,8 @@ class Model:
         # Save ONNX model with only one external data file and delete any existing duplicate copies
         out_path = os.path.join(out_dir, self.filename)
         data_path = os.path.join(out_dir, os.path.basename(out_path) + ".data")
+        print("### inside save_model")
+        print("data_path", data_path)
         if os.path.exists(out_path):
             print(f"Overwriting {out_path}")
             os.remove(out_path)
