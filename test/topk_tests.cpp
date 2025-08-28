@@ -117,7 +117,8 @@ void RunParityTests(const BenchmarkParams &params, float temperature) {
     // --- Setup ---
     auto sampling_data = std::make_unique<Generators::cuda::SamplingData>(1234, params.batch_size, params.vocab_size, stream);
     auto scores_in_d = Generators::CudaMallocArray<float>(params.batch_size * params.vocab_size);
-    
+    auto scores_in_d_copy = Generators::CudaMallocArray<float>(params.batch_size * params.vocab_size);
+
     // Use a fixed seed for reproducibility
     std::mt19937 gen(3407);
     std::uniform_real_distribution<float> dis(0.0f, 100.0f);
@@ -126,6 +127,7 @@ void RunParityTests(const BenchmarkParams &params, float temperature) {
         val = dis(gen);
     }
     CUDA_CHECK(cudaMemcpy(scores_in_d.get(), scores_in_h.data(), scores_in_h.size() * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(scores_in_d_copy.get(), scores_in_d.get(), scores_in_h.size() * sizeof(float), cudaMemcpyDeviceToDevice));
 
     // --- Get Reference Result using Full Sort ---
     auto ref_scores_d = Generators::CudaMallocArray<float>(params.batch_size * params.k);
@@ -159,7 +161,8 @@ void RunParityTests(const BenchmarkParams &params, float temperature) {
 
     if (params.k <= 64) {
         test_algo("DIRECT_KERNEL", [&](float* s_d, int* i_d){
-            Generators::cuda::RunTopKViaDirectKernel(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature);
+            // DirectKernel will change scores_in inplace so we made a copy here.
+            Generators::cuda::RunTopKViaDirectKernel(sampling_data.get(), stream, scores_in_d_copy.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature);
         });
         test_algo("MAP_REDUCE (p=256)", [&](float* s_d, int* i_d){
             Generators::cuda::RunTopKViaMapReduce(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 256);
