@@ -85,6 +85,10 @@ if(MSVC)
 endif()
 
 include(cmake/ortlib.cmake)
+
+
+
+
 include(cmake/external/onnxruntime_external_deps.cmake)
 # All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
 include(cmake/global_variables.cmake)
