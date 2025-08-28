@@ -39,3 +39,6 @@ examples/csharp/HelloPhi/models
 /src/java/build
 /src/java/CMakeFiles
 /src/java/CMakeCache.txt
+__dependencies
+_deps
+.github
