@@ -42,7 +42,7 @@ do {                                                             \
 namespace Generators {
 namespace cuda {
 
-void RunTopKViaDirectKernel(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature);
+void RunTopKViaSelectionSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature);
 void RunTopKViaFullSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature);
 void RunTopKViaMapReduceBitonicSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions, int kSortSize);
 } // namespace cuda
@@ -155,11 +155,11 @@ void RunParityTests(const BenchmarkParams &params, float temperature) {
     };
 
     if (params.k <= 64) {
-        test_algo("DIRECT_KERNEL", [&](float* s_d, int* i_d){
-            // DirectKernel will change scores_in inplace so we made a copy here.
-            Generators::cuda::RunTopKViaDirectKernel(sampling_data.get(), stream, scores_in_d_copy.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature);
+        test_algo("SELECTION_SORT", [&](float* s_d, int* i_d){
+            // Selection Sort kernel will change scores_in inplace so we made a copy here.
+            Generators::cuda::RunTopKViaSelectionSort(sampling_data.get(), stream, scores_in_d_copy.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature);
         });
-        test_algo("MAP_REDUCE_BITONIC_SORT (p=128, s=4096)", [&](float* s_d, int* i_d) {
+        test_algo("BITONIC_SORT (s=4096, p=128)", [&](float* s_d, int* i_d) {
           Generators::cuda::RunTopKViaMapReduceBitonicSort(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 128, 4096);
         });
     }
@@ -174,7 +174,7 @@ void PrintSummary(const std::vector<BenchmarkResult>& all_results) {
         std::string best_algo_full_name;
         float min_latency = std::numeric_limits<float>::max();
         float latency_full_sort = -1.0f;
-        float latency_direct_kernel = -1.0f;
+        float latency_selection_sort = -1.0f;
     };
 
     // Use a map to group results by their parameters
@@ -186,9 +186,9 @@ void PrintSummary(const std::vector<BenchmarkResult>& all_results) {
         
         // Create a more descriptive name for map-reduce algorithms
         std::string full_algo_name = result.algo_name;
-        if (result.num_partitions > 0) {
-            full_algo_name += " (p=" + std::to_string(result.num_partitions) + ")";
-        }
+        // if (result.num_partitions > 0) {
+        //     full_algo_name += " (p=" + std::to_string(result.num_partitions) + ")";
+        // }
 
         // Check if this is the best performing algorithm for this key so far
         if (result.latency_ms < summary_map[key].min_latency) {
@@ -199,8 +199,8 @@ void PrintSummary(const std::vector<BenchmarkResult>& all_results) {
         // Store the latencies for the specific baseline algorithms
         if (result.algo_name == "FULL_SORT") {
             summary_map[key].latency_full_sort = result.latency_ms;
-        } else if (result.algo_name == "DIRECT_KERNEL") {
-            summary_map[key].latency_direct_kernel = result.latency_ms;
+        } else if (result.algo_name == "SELECTION_SORT") {
+            summary_map[key].latency_selection_sort = result.latency_ms;
         }
     }
 
@@ -215,7 +215,7 @@ void PrintSummary(const std::vector<BenchmarkResult>& all_results) {
 
         // Calculate performance ratios against the baselines
         float ratio_1 = (data.min_latency > 0 && data.latency_full_sort > 0) ? data.latency_full_sort / data.min_latency : 0.0f;
-        float ratio_2 = (data.min_latency > 0 && data.latency_direct_kernel > 0) ? data.latency_direct_kernel / data.min_latency : 0.0f;
+        float ratio_2 = (data.min_latency > 0 && data.latency_selection_sort > 0) ? data.latency_selection_sort / data.min_latency : 0.0f;
 
         std::cout << std::get<0>(key) << ","
                   << std::get<1>(key) << ","
@@ -223,7 +223,7 @@ void PrintSummary(const std::vector<BenchmarkResult>& all_results) {
                   << "\"" << data.best_algo_full_name << "\"," // Quote algorithm name
                   << std::fixed << std::setprecision(4) << data.min_latency << ","
                   << (data.latency_full_sort > 0 ? std::to_string(data.latency_full_sort) : "N/A") << ","
-                  << (data.latency_direct_kernel > 0 ? std::to_string(data.latency_direct_kernel) : "N/A") << ","
+                  << (data.latency_selection_sort > 0 ? std::to_string(data.latency_selection_sort) : "N/A") << ","
                   << std::fixed << std::setprecision(2) << ratio_1 << ","
                   << ratio_2 << "\n";
     }
@@ -313,14 +313,15 @@ void RunBenchmarks() {
         // --- Run Benchmarks for each algorithm ---
 
         if (params.k <= 64) {
-            measure_latency("DIRECT_KERNEL", 0, 256, [&]() {
-                Generators::cuda::RunTopKViaDirectKernel(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature);
+            measure_latency("SELECTION_SORT", 0, 256, [&]() {
+                Generators::cuda::RunTopKViaSelectionSort(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature);
             });
 
-            for (int kSortSize : {1024, 2048, 4096}) {
-              for (int num_partitions : {32, 64, 128}) {
-                if (params.vocab_size <= num_partitions * kSortSize) {
-                  std::string algo_name = "BITONIC (s=" + std::to_string(kSortSize) + ")";
+            for (int kSortSize : {512, 1024, 2048, 4096}) {
+              for (int num_partitions : {32, 64, 128, 256}) {
+                assert(num_partitions <= Generators::cuda::kBitonicSortMaxPartitions);
+                if (params.vocab_size <= kSortSize * num_partitions && params.vocab_size > kSortSize * num_partitions / 2) {
+                  std::string algo_name = "BITONIC (s=" + std::to_string(kSortSize) + ",p=" + std::to_string(num_partitions) + ")";
                   measure_latency(algo_name, num_partitions, 256, [&, kSortSize, num_partitions]() {
                     Generators::cuda::RunTopKViaMapReduceBitonicSort(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature, num_partitions, kSortSize);
                   });

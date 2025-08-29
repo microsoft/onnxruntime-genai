@@ -46,20 +46,32 @@ __global__ void InitCurandStates(unsigned long long seed, curandState* states, i
 }
 
 SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int vocab_size, cudaStream_t stream) {
-  indices_sorted = CudaMallocArray<int>(vocab_size * batch_size);
-  scores_sorted = CudaMallocArray<float>(vocab_size * batch_size);
-  scores_buffer = CudaMallocArray<float>(vocab_size * batch_size);
-  prefix_sums = CudaMallocArray<float>(vocab_size * batch_size);
-  scores_temp = CudaMallocArray<float>(vocab_size * batch_size);
-  scores_adjusted = CudaMallocArray<float>(vocab_size * batch_size);
-  prefix_sums_adjusted = CudaMallocArray<float>(vocab_size * batch_size);
+  const size_t vocab_batch_size = static_cast<size_t>(vocab_size) * batch_size;
+
+  // The intermediate buffers are used by bitonic sort algorithms. We need to allocate
+  // them to be large enough for the worst-case scenario from the benchmarks.
+  const size_t intermediate_buffer_elements = static_cast<size_t>(batch_size) * kBitonicSortMaxPartitions * kBitonicSortMaxK;
+
+  // These buffers are used for intermediate results in bitonic sort, which can be larger than the vocab size.
+  const size_t max_buffer_elements = std::max(vocab_batch_size, intermediate_buffer_elements);
+  indices_sorted = CudaMallocArray<int>(max_buffer_elements);
+  scores_sorted = CudaMallocArray<float>(max_buffer_elements);
+  scores_buffer = CudaMallocArray<float>(max_buffer_elements);
+  scores_temp = CudaMallocArray<float>(max_buffer_elements);
+  indices_in = CudaMallocArray<int>(max_buffer_elements);
+
+  // These buffers are used in sampling and are safe with vocab_batch_size
+  prefix_sums = CudaMallocArray<float>(vocab_batch_size);
+  scores_adjusted = CudaMallocArray<float>(vocab_batch_size);
+  prefix_sums_adjusted = CudaMallocArray<float>(vocab_batch_size);
+
   thresholds = CudaMallocArray<float>(batch_size);
-  indices_in = CudaMallocArray<int>(vocab_size * batch_size);
   offsets = CudaMallocArray<int>(batch_size + 1);
   curand_states = CudaMallocArray<curandState>(batch_size);
 
-  // The temp buffer is used by the full sort (over vocab_size).
-  // We need to allocate a buffer large enough for the sort operation.
+  // The temp buffer is used by both the full sort (over vocab_size) and the
+  // map-reduce bitonic sort (over an intermediate buffer). We need to allocate a buffer
+  // large enough for the biggest possible sort operation.
 
   // Case 1: Temp storage for full sort.
   size_t temp_storage_bytes_full_sort = 0;
@@ -68,8 +80,18 @@ SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int v
                                                                 vocab_size * batch_size, batch_size,
                                                                 (int*)nullptr, (int*)nullptr, 0, sizeof(float) * 8, stream));
 
-  temp_storage_bytes = temp_storage_bytes_full_sort;
-  temp_buffer = CudaMallocArray<float>(temp_storage_bytes / sizeof(float));
+  // Case 2: Temp storage for map-reduce bitonic sort's worst case.
+  size_t temp_storage_bytes_bitonic_sort = 0;
+  CUDA_CHECK(cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr, temp_storage_bytes_bitonic_sort,
+                                                                (float*)nullptr, (float*)nullptr, (int*)nullptr, (int*)nullptr,
+                                                                intermediate_buffer_elements, batch_size,
+                                                                (int*)nullptr, (int*)nullptr, 0, sizeof(float) * 8, stream));
+
+  temp_storage_bytes = std::max(temp_storage_bytes_full_sort, temp_storage_bytes_bitonic_sort);
+  
+  // Allocate the temporary buffer with the exact number of bytes required by CUB.
+  // The original code used `temp_storage_bytes / sizeof(float)`, which truncated the size.
+  temp_buffer = CudaMallocArray<unsigned char>(temp_storage_bytes);
 
   InitCurandStates<<<int(batch_size / 128) + 1, 128, 0, stream>>>(random_seed, curand_states.get(), batch_size);
   CUDA_CHECK(cudaGetLastError());
@@ -614,8 +636,8 @@ void LaunchSort(SamplingData* data, cudaStream_t stream, float* scores_in, float
 
 // Enum to represent the chosen algorithm for a given Top-K task
 enum class TopKAlgorithm {
-    DIRECT_KERNEL,
-    MAP_REDUCE_BITONIC_SORT,
+    SELECTION_SORT,
+    BITONIC_SORT,
     FULL_SORT
 };
 
@@ -715,7 +737,7 @@ void DispatchBlockwiseSoftmaxForwardWithTemperature(cudaStream_t stream, float* 
 }
 // --- End of Softmax with Temperature ---
 
-void RunTopKViaDirectKernel(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
+void RunTopKViaSelectionSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
   // The output of the kernel will be the temperature-scaled scores. We'll store
   // these in another pre-allocated buffer, `scores_buffer`.
   float* scaled_scores = data->scores_buffer.get();
@@ -973,8 +995,8 @@ void RandomTopkInput(cudaStream_t stream, float* data, curandState* batch_state,
 
 const char* AlgorithmToString(TopKAlgorithm algo) {
     switch (algo) {
-        case TopKAlgorithm::DIRECT_KERNEL: return "DIRECT_KERNEL";
-        case TopKAlgorithm::MAP_REDUCE_BITONIC_SORT: return "MAP_REDUCE_BITONIC_SORT";
+        case TopKAlgorithm::SELECTION_SORT: return "SELECTION_SORT";
+        case TopKAlgorithm::BITONIC_SORT: return "BITONIC_SORT";
         case TopKAlgorithm::FULL_SORT: return "FULL_SORT";
         default: return "UNKNOWN";
     }
@@ -1044,13 +1066,14 @@ TopKConfig BenchmarkAndGetBestAlgorithm(SamplingData* data, cudaStream_t stream,
 
 
     if (k <= 64) {
-        benchmark_algorithm({TopKAlgorithm::DIRECT_KERNEL}, [&]() { RunTopKViaDirectKernel(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature); });
+        benchmark_algorithm({TopKAlgorithm::SELECTION_SORT}, [&]() { RunTopKViaSelectionSort(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature); });
     
-        for (int kSortSize : {1024, 2048, 4096}) {
-            for (int num_partitions : {32, 64, 128}) {
-                // Check if the given vocab_size is viable for this combination.
-                if (vocab_size <= num_partitions * kSortSize) {
-                    benchmark_algorithm({TopKAlgorithm::MAP_REDUCE_BITONIC_SORT, num_partitions, 256, kSortSize}, [&]() {
+            for (int kSortSize : {512, 1024, 2048, 4096}) {
+              for (int num_partitions : {32, 64, 128, 256}) {
+                assert(num_partitions <= kBitonicSortMaxPartitions);
+                // Check if the partition size is valid for the given kSortSize
+                if (vocab_size <= kSortSize * num_partitions && vocab_size > kSortSize * num_partitions / 2) {
+                    benchmark_algorithm({TopKAlgorithm::BITONIC_SORT, num_partitions, 256, kSortSize}, [&]() {
                         RunTopKViaMapReduceBitonicSort(data, stream, d_rand_scores.get(), d_rand_out.get(), d_rand_indices.get(), vocab_size, batch_size, k, temperature, num_partitions, kSortSize);
                     });
                 }
@@ -1079,10 +1102,10 @@ void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, fl
     TopKConfig chosen_config = BenchmarkAndGetBestAlgorithm(data, stream, vocab_size, batch_size, k);
 
     switch (chosen_config.algorithm) {
-        case TopKAlgorithm::DIRECT_KERNEL:
-            RunTopKViaDirectKernel(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature);
+        case TopKAlgorithm::SELECTION_SORT:
+            RunTopKViaSelectionSort(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature);
             break;
-        case TopKAlgorithm::MAP_REDUCE_BITONIC_SORT:
+        case TopKAlgorithm::BITONIC_SORT:
             RunTopKViaMapReduceBitonicSort(data, stream, scores_in, scores_out, indices_out, vocab_size, batch_size, k, temperature, chosen_config.num_partitions, chosen_config.kSortSize);
             break;
         case TopKAlgorithm::FULL_SORT:

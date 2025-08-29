@@ -1,3 +1,5 @@
+// cuda_sampling.cuh
+
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
@@ -7,6 +9,9 @@
 
 namespace Generators {
 namespace cuda {
+
+constexpr int kBitonicSortMaxPartitions = 256;
+constexpr int kBitonicSortMaxK = 64;
 
 struct SamplingData {
   SamplingData(unsigned long long random_seed, int batch_size, int vocab_size, cudaStream_t stream);
@@ -20,7 +25,8 @@ struct SamplingData {
   cuda_unique_ptr<float> thresholds;
   cuda_unique_ptr<int> indices_in;
   cuda_unique_ptr<int> offsets;
-  cuda_unique_ptr<float> temp_buffer;
+  // Changed from float to unsigned char for byte-level allocation
+  cuda_unique_ptr<unsigned char> temp_buffer;
   cuda_unique_ptr<curandState> curand_states;
   size_t temp_storage_bytes = 0;
 };
