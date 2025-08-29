@@ -69,6 +69,7 @@ class QuantizedAttention:
         self.rotary_emb = TensorModule()
         self.k_norm = TensorModule()
         self.q_norm = TensorModule()
+        self.attn_sub_norm = TensorModule()
 
 class QuantizedMLP:
     def __init__(self):
@@ -77,6 +78,7 @@ class QuantizedMLP:
         self.down_proj = QuantizedTensorModule()
         self.fc1 = QuantizedTensorModule()
         self.fc2 = QuantizedTensorModule()
+        self.ffn_sub_norm = TensorModule()                   
 
 
 class QuantizedDecoderLayer:
@@ -252,6 +254,9 @@ class QuantizedModel:
                             # model.layers.layer_id.self_attn.o_proj.bias
                             # model.layers.layer_id.self_attention.dense.bias
                             tensor_map["self_attn.o_proj.bias"] = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.self_attn\.attn_sub_norm\.weight$", name)):
+                            # model.layers.layer_id.self_attn.attn_sub_norm.weight
+                            tensor_map["self_attn.attn_sub_norm.weight"] = tensor
                         elif bool(re.match(r"^model.layers\.\d+\.post_attention_layernorm\.weight$", name)):
                             # model.layers.layer_id.post_attention_layernorm.weight
                             tensor_map["post_attention_layernorm.weight"] = tensor
@@ -332,6 +337,9 @@ class QuantizedModel:
                             # model.layers.layer_id.mlp.down_proj.bias
                             # model.layers.layer_id.mlp.dense_4h_to_h.bias
                             tensor_map["mlp.down_proj.bias"] = tensor
+                        elif bool(re.match(r"^model.layers\.\d+\.mlp\.ffn_sub_norm\.weight$", name)):
+                            # model.layers.layer_id.mlp.ffn_sub_norm.weight
+                            tensor_map["mlp.ffn_sub_norm.weight"] = tensor
                         # Match against fused layers
                         elif bool(re.match(r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.q?weight$", name)):
                             # model.layers.layer_id.self_attn.qkv_proj.qweight
@@ -538,7 +546,25 @@ class QuantizedModel:
                 module.mlp.up_proj.in_features = module.mlp.up_proj.qweight.shape[0] * 32 // module.mlp.up_proj.bits
                 module.mlp.down_proj.out_features = module.mlp.down_proj.qweight.shape[1]
                 module.mlp.down_proj.in_features = module.mlp.down_proj.qweight.shape[0] * 32 // module.mlp.down_proj.bits
-
+            elif self.quant_type == "bitnet":
+                module.self_attn.q_proj.out_features = module.self_attn.q_proj.scales.shape[1]
+                module.self_attn.q_proj.in_features = module.self_attn.q_proj.qweight.shape[0]
+                module.self_attn.k_proj.out_features = module.self_attn.k_proj.scales.shape[1]
+                module.self_attn.k_proj.in_features = module.self_attn.k_proj.qweight.shape[0]
+                module.self_attn.v_proj.out_features = module.self_attn.v_proj.scales.shape[1]
+                module.self_attn.v_proj.in_features = module.self_attn.v_proj.qweight.shape[0]
+                module.self_attn.o_proj.out_features = module.self_attn.o_proj.scales.shape[1]
+                module.self_attn.o_proj.in_features = module.self_attn.o_proj.qweight.shape[0]
+                module.self_attn.attn_sub_norm.out_features = module.self_attn.attn_sub_norm.scales.shape[1]
+                module.self_attn.attn_sub_norm.in_features = module.self_attn.attn_sub_norm.qweight.shape[0]
+                module.mlp.gate_proj.out_features = module.mlp.gate_proj.scales.shape[1]
+                module.mlp.gate_proj.in_features = module.mlp.gate_proj.qweight.shape[0]
+                module.mlp.up_proj.out_features = module.mlp.up_proj.scales.shape[1]
+                module.mlp.up_proj.in_features = module.mlp.up_proj.qweight.shape[0]
+                module.mlp.down_proj.out_features = module.mlp.down_proj.scales.shape[1]
+                module.mlp.down_proj.in_features = module.mlp.down_proj.qweight.shape[0]
+                module.mlp.ffn_sub_norm.out_features = module.mlp.ffn_sub_norm.scales.shape[1]
+                module.mlp.ffn_sub_norm.in_features = module.mlp.ffn_sub_norm.qweight.shape[0]
             else:
                 raise NotImplementedError(f"The {self.quant_type} quantization method is not recognized.")
 
@@ -989,6 +1015,36 @@ class OliveModel(GPTQModel):
         name = ".".join(layer_name.split(".")[:-1])
         return self.overrides.get(name, {}).get("group_size", self.global_group_size)
 
+
+class BitNetModel(QuantizedModel):
+    def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
+        super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
+        self.linear_class = quant_attrs["config"].get("linear_class", "Linear")
+        self.quant_mode = quant_attrs["config"].get("quant_mode", "dynamic")
+
+        # Unpack and repack all `QuantizedTensorModule` classes in model
+        for i, layer in enumerate(self.layers):
+            if i >= self.num_layers:
+                break
+            print(f"Unpacking and repacking layer {i}")
+
+            # Unpack and repack all `QuantizedTensorModule` classes in attention
+            for _, q_tensors in layer.self_attn.__dict__.items():
+                if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
+                    q_tensors.weight = self.adjust_weight(q_tensors.qweight)
+                    
+            # Unpack and repack all `QuantizedTensorModule` classes in MLP
+            for _, q_tensors in layer.mlp.__dict__.items():
+                if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
+                    q_tensors.weight = self.adjust_weight(q_tensors.qweight)
+
+    def adjust_weight(weight: torch.Tensor) -> torch.Tensor:
+        dtype = weight.dtype
+        weight = weight.float()
+        iscale = 1.0 / weight.abs().mean().clamp_(min=1e-5)
+        result = (weight * iscale).round().clamp(-1, 1) / iscale
+        return result.type(dtype)
+
 class QuantModel:
     @staticmethod
     def from_pretrained(quant_type, **kwargs):
@@ -1005,6 +1061,8 @@ class QuantModel:
             model = OliveModel(quant_type, **kwargs)
         elif quant_type == "quark":
             model = QuarkModel(quant_type, **kwargs)
+        elif quant_type == "bitnet":
+            model = BitNetModel(quant_type, **kwargs)
         else:
             raise NotImplementedError(f"The {quant_type} quantized model is not currently supported.")
 

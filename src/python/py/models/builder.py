@@ -2335,7 +2335,7 @@ class Model:
         self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
 
         ffn_output = f"{mul_name}/output_0"
-        if hasattrs(mlp, "ffn_sub_norm"):
+        if hasattr(mlp, "ffn_sub_norm"):
             self.make_ffn_sub_norm(layer_id, mlp, ffn_output)
             ffn_output = f"/model/layers.{layer_id}/mlp/ffn_sub_norm/output_0"
 
@@ -4225,7 +4225,7 @@ class GPTOSSModel(Model):
         self.layernorm_attrs["skip_input"] = f"{moe_name}/output_0"
 
 
-class BitnetModel(LlamaModel):
+class BitNetModel(LlamaModel):
     def __init__(self, config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
 
@@ -4338,7 +4338,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     hf_name = input_path if os.path.isdir(input_path) else model_name
     hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
 
-    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=True, **extra_kwargs)
+    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=False, **extra_kwargs)
     if "adapter_path" in extra_options:
         from peft import PeftConfig
         peft_config = PeftConfig.from_pretrained(extra_options["adapter_path"], token=hf_token, trust_remote_code=True, **extra_kwargs)
@@ -4423,8 +4423,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "SmolLM3ForCausalLM":
             onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "BitnetForCausalLM":
-            onnx_model = BitnetModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        elif config.architectures[0] == "BitNetForCausalLM":
+            onnx_model = BitNetModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         else:
             raise NotImplementedError(f"The {hf_name} model of architecture {config.architectures[0]} is not currently supported.")
 
