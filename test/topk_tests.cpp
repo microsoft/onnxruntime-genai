@@ -238,7 +238,7 @@ void RunBenchmarks() {
 
   // Enable this to to find heuristics for kernel selection.
   // It lists vocabulary sizes within the range of 16K to 512K (32 data points using step of 16K).
-  constexpr bool comprehensive_vocab_size = true;
+  constexpr bool comprehensive_vocab_size = false;
   if constexpr (comprehensive_vocab_size) {
     vocab_sizes.clear();
     for (int v = 16 * 1024; v <= 512 * 1024; v += 16 * 1024) {
