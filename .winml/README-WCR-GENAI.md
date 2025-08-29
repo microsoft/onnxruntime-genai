@@ -5,16 +5,12 @@ https://microsoft.visualstudio.com/ProjectOxford/_wiki/wikis/ProjectOxford.wiki/
 ## NUGET
 
 1. Find the latest version you want to use.
-https://microsoft.visualstudio.com/ProjectOxford/_artifacts/feed/windows-aifabric/NuGet/Microsoft.WindowsAppSDK.ML/overview/1.8.1058-experimental
+https://microsoft.visualstudio.com/ProjectOxford/_artifacts/feed/windows-aifabric/NuGet/Microsoft.WindowsAppSDK.ML/overview/1.8.1078-preview
 
-2. Update CMakeList.txt with the version. 
+2. Set the version or update the pipeline. 
 
-  install_nuget_package(
-    Microsoft.WindowsAppSDK.ML
-    1.8.1065-experimental
-    WINML_ROOT)
-
-3. TODO: Make this a variable and pass it in from the build.
+  [nuget - ort_winml_version](/.pipelines/nuget-publishing.yml)
+  [python - ort_winml_version](/.pipelines/pypl-publishing.yml)
 
 ## WCR Official Build 
 
