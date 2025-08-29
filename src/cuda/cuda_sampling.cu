@@ -46,8 +46,8 @@ SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int v
   top_k_distributed_lock = CudaMallocArray<uint>(1);
   cudaMemset(top_k_distributed_lock.get(), 0, sizeof(uint));
 
-  top_k_distirbuted_keys = CudaMallocArray<int>(top_k_shards * 50);  // 50 should be top_k
-  top_k_distirbuted_values = CudaMallocArray<float>(top_k_shards * 50); // 50 should be top_k
+  top_k_distirbuted_keys = CudaMallocArray<int>(top_k_shards * 64);  // We support distributed sharding upto top_k 64
+  top_k_distirbuted_values = CudaMallocArray<float>(top_k_shards * 64); // We support distributed sharding upto top_k 64
 
   temp_storage_bytes = 0;
   cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr, temp_storage_bytes, (float*)nullptr, (float*)nullptr,
@@ -527,6 +527,7 @@ __global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, flo
 
   for (int ite = 0; ite < k; ite++) {
     partial.init();
+
     for (auto elemId = start_i; elemId < vocab_size; elemId += kBlockSize* gridDim.z) {
       float elem = scores_in[elemId + batch * vocab_size];
       partial.insert(elem, elemId);
@@ -571,14 +572,13 @@ __global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, flo
       atomicExch(top_k_distributed_lock, 0);
     }
 
-    // TODO: Is there enough shared memory to bring the top_k shards to shared memory ?
+    // TODO: Is there enough shared memory to bring the top_k shards to shared memory on all GPUs?
     TopK_2 reduce_partial; 
     for (int ite = 0; ite < k; ite++) {
       reduce_partial.init();
   
       for (int i = threadIdx.x; i < top_k_shards*k; i += blockDim.x) {
         float score = distributed_scores_out[i];
-        //int index = distributed_indices_out[i];
         reduce_partial.insert(score, i);
       }
 
@@ -603,8 +603,10 @@ __global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, flo
 
 // Gets all top K indices and scores from unsorted input
 void LaunchGetTopKSubset(cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, SamplingData* data = nullptr) {
-  bool enable_distributed_top_k = true;
-  if (batch_size == 1 && k <= 64 && enable_distributed_top_k) {
+  // Use "distributed" TopK only when:
+  // `batch_size` is small enough && 'k' is small enough && `vocab_size` is large enough.
+  // All parameters are tunable.
+  if (batch_size == 1 && k <= 64 && vocab_size >= 100000) {
     dim3 grid(1, 1, top_k_shards);
     // use large block size for better utilization
     dim3 block(1024, 1, 1);
