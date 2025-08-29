@@ -22,9 +22,7 @@ struct SamplingData {
   cuda_unique_ptr<int> offsets;
   cuda_unique_ptr<float> temp_buffer;
   cuda_unique_ptr<curandState> curand_states;
-  cuda_unique_ptr<int> sync_counter; // For single-kernel map-reduce sync
   size_t temp_storage_bytes = 0;
-  std::vector<int> offsets_h;  
 };
 
 void LaunchPopulateIndices(int* indices, int size, int batch_size, cudaStream_t stream);

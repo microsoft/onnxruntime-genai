@@ -43,12 +43,7 @@ namespace Generators {
 namespace cuda {
 
 void RunTopKViaDirectKernel(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature);
-void RunTopKViaMapReduce(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions);
-void RunTopKViaMapReduceShared(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions);
-void RunTopKViaSingleKernelMapReduce(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions);
 void RunTopKViaFullSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature);
-void RunTopKViaMapReduceVec(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions, int block_size);
-void RunTopKViaMapReduceHybridSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions, int block_size);
 void RunTopKViaMapReduceBitonicSort(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, int num_partitions, int kSortSize);
 } // namespace cuda
 } // namespace Generators
@@ -164,26 +159,9 @@ void RunParityTests(const BenchmarkParams &params, float temperature) {
             // DirectKernel will change scores_in inplace so we made a copy here.
             Generators::cuda::RunTopKViaDirectKernel(sampling_data.get(), stream, scores_in_d_copy.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature);
         });
-        test_algo("MAP_REDUCE (p=256)", [&](float* s_d, int* i_d){
-            Generators::cuda::RunTopKViaMapReduce(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 256);
-        });
-        test_algo("MAP_REDUCE_SHARED (p=64)", [&](float* s_d, int* i_d){
-            Generators::cuda::RunTopKViaMapReduceShared(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 64);
-        });
-        test_algo("MAP_REDUCE_VEC (p=256, b=256)", [&](float* s_d, int* i_d){
-            Generators::cuda::RunTopKViaMapReduceVec(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 256, 256);
-        });
-        test_algo("MAP_REDUCE_HYBRID_SORT (p=64, b=256)", [&](float* s_d, int* i_d){
-            Generators::cuda::RunTopKViaMapReduceHybridSort(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 64, 256);
-        });
         test_algo("MAP_REDUCE_BITONIC_SORT (p=128, s=4096)", [&](float* s_d, int* i_d) {
           Generators::cuda::RunTopKViaMapReduceBitonicSort(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 128, 4096);
         });
-        if (params.batch_size == 1) {
-            test_algo("SINGLE_KERNEL_MAP_REDUCE (p=256)", [&](float* s_d, int* i_d){
-                Generators::cuda::RunTopKViaSingleKernelMapReduce(sampling_data.get(), stream, scores_in_d.get(), s_d, i_d, params.vocab_size, params.batch_size, params.k, temperature, 256);
-            });
-        }
     }
 
     CUDA_CHECK(cudaStreamDestroy(stream));
@@ -339,33 +317,6 @@ void RunBenchmarks() {
                 Generators::cuda::RunTopKViaDirectKernel(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature);
             });
 
-            for (int num_partitions : {64, 128, 256}) {
-                measure_latency("MAP_REDUCE", num_partitions, 256, [&]() {
-                    Generators::cuda::RunTopKViaMapReduce(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature, num_partitions);
-                });
-            }
-
-            for (int num_partitions : {32, 64}) {
-                 size_t shared_mem_size = num_partitions * 64 * (sizeof(float) + sizeof(int));
-                 if (shared_mem_size < 48 * 1024) { // Check against common shared memory limit
-                    measure_latency("MAP_REDUCE_SHARED", num_partitions, 256, [&]() {
-                        Generators::cuda::RunTopKViaMapReduceShared(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature, num_partitions);
-                    });
-                 }
-            }
-
-            for (int num_partitions : {64, 128, 256}) {
-                measure_latency("MAP_REDUCE_VEC", num_partitions, 256, [&]() {
-                    Generators::cuda::RunTopKViaMapReduceVec(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature, num_partitions, 256);
-                });
-            }
-
-            for (int num_partitions : {64, 128}) {
-                measure_latency("MAP_REDUCE_HYBRID_SORT", num_partitions, 256, [&]() {
-                    Generators::cuda::RunTopKViaMapReduceHybridSort(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature, num_partitions, 256);
-                });
-            }
-            
             for (int kSortSize : {1024, 2048, 4096}) {
               for (int num_partitions : {32, 64, 128}) {
                 if (params.vocab_size <= num_partitions * kSortSize) {
@@ -375,14 +326,6 @@ void RunBenchmarks() {
                   });
                 }
               }
-            }
-
-            if (params.batch_size == 1) {
-                for (int num_partitions : {64, 128, 256}) {
-                    measure_latency("SINGLE_KERNEL_MAP_REDUCE", num_partitions, 256, [&]() {
-                        Generators::cuda::RunTopKViaSingleKernelMapReduce(sampling_data.get(), stream, scores_in.get(), scores_out.get(), indices_out.get(), params.vocab_size, params.batch_size, params.k, temperature, num_partitions);
-                    });
-                }
             }
         }
 
