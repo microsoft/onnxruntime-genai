@@ -295,4 +295,11 @@ void OverlayConfig(Config& config, std::string_view json);
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
 
+void SetHardwareDeviceType(Config& config, std::string_view hardware_device_type);
+void SetHardwareDeviceId(Config& config, uint32_t hardware_device_id);
+void SetHardwareVendorId(Config& config, uint32_t hardware_vendor_id);
+void ClearHardwareDeviceType(Config& config);
+void ClearHardwareDeviceId(Config& config);
+void ClearHardwareVendorId(Config& config);
+
 }  // namespace Generators

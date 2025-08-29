@@ -289,6 +289,54 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAddModelData(OgaConfig* config, cons
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigRemoveModelData(OgaConfig* config, const char* model_filename);
 
 /**
+ * \brief Filter EP devices by hardware device type property with ONNXRuntime API.
+ * \param[in] config The config to overlay the JSON on.
+ * \param[in] hardware_device_type hardware device type, e.g., CPU, GPU, NPU.
+ * \return OgaResult containing the error message if the overlaying of the JSON failed.
+ *
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetHardwareDeviceType(OgaConfig* config, const char* hardware_device_type);
+
+/**
+ * \brief Filter EP devices by hardware device id property with ONNXRuntime API.
+ * \param[in] config The config to overlay the JSON on.
+ * \param[in] hardware_device_type hardware device id.
+ * \return OgaResult containing the error message if the overlaying of the JSON failed.
+ *
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetHardwareDeviceId(OgaConfig* config, uint32_t hardware_device_id);
+
+/**
+ * \brief Filter EP devices by hardware vendor id property with ONNXRuntime API.
+ * \param[in] config The config to overlay the JSON on.
+ * \param[in] hardware_device_type hardware vendor id.
+ * \return OgaResult containing the error message if the overlaying of the JSON failed.
+ *
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetHardwareVendorId(OgaConfig* config, uint32_t hardware_vendor_id);
+
+/**
+ * \brief Clear the hardware device type property
+ * \param[in] config The config to clear hardware device type property.
+ * \return OgaResult containing the error message if the clearing failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearHardwareDeviceType(OgaConfig* config);
+
+/**
+ * \brief Clear the hardware device id property
+ * \param[in] config The config to clear hardware device id property.
+ * \return OgaResult containing the error message if the clearing failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearHardwareDeviceId(OgaConfig* config);
+
+/**
+ * \brief Clear the hardware vendor id property
+ * \param[in] config The config to clear hardware vendor id property.
+ * \return OgaResult containing the error message if the clearing failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearHardwareVendorId(OgaConfig* config);
+
+/**
  * \brief Overlay JSON on top of config file
  * \param[in] config The config to overlay the JSON on.
  * \param[in] json The JSON to overlay on the config.

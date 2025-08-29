@@ -290,6 +290,53 @@ OgaResult* OGA_API_CALL OgaConfigRemoveModelData(OgaConfig* config, const char* 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaConfigSetHardwareDeviceType(OgaConfig* config, const char* hardware_device_type) {
+  OGA_TRY
+  Generators::SetHardwareDeviceType(*config, hardware_device_type);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigSetHardwareDeviceId(OgaConfig* config, uint32_t hardware_device_id) {
+  OGA_TRY
+  Generators::SetHardwareDeviceId(*config, hardware_device_id);
+  return nullptr;
+  OGA_CATCH
+  ;
+}
+
+OgaResult* OGA_API_CALL OgaConfigSetHardwareVendorId(OgaConfig* config, uint32_t hardware_vendor_id) {
+  OGA_TRY
+  Generators::SetHardwareVendorId(*config, hardware_vendor_id);
+  return nullptr;
+  OGA_CATCH
+  ;
+}
+
+OgaResult* OGA_API_CALL OgaConfigClearHardwareDeviceType(OgaConfig* config) {
+  OGA_TRY
+  Generators::ClearHardwareDeviceType(*config);
+  return nullptr;
+  OGA_CATCH
+  ;
+}
+
+OgaResult* OGA_API_CALL OgaConfigClearHardwareDeviceId(OgaConfig* config) {
+  OGA_TRY
+  Generators::ClearHardwareDeviceId(*config);
+  return nullptr;
+  OGA_CATCH
+  ;
+}
+
+OgaResult* OGA_API_CALL OgaConfigClearHardwareVendorId(OgaConfig* config) {
+  OGA_TRY
+  Generators::ClearHardwareVendorId(*config);
+  return nullptr;
+  OGA_CATCH
+  ;
+}
+
 OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
   OGA_TRY
   auto config_copy = std::make_unique<Generators::Config>(*config);

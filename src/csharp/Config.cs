@@ -46,6 +46,36 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaConfigRemoveModelData(_configHandle, StringUtils.ToUtf8(modelFilename)));
         }
 
+        public void SetHardwareDeviceType(string hardware_device_type)
+        {
+            Result.VerifySuccess(NativeMethods.OgaConfigSetHardwareDeviceType(_configHandle, StringUtils.ToUtf8(hardware_device_type)));
+        }
+
+        public void SetHardwareDeviceId(uint hardware_device_id)
+        {
+            Result.VerifySuccess(NativeMethods.OgaConfigSetHardwareDeviceId(_configHandle, hardware_device_id));
+        }
+
+        public void SetHardwareVendorId(uint hardware_vendor_id)
+        {
+            Result.VerifySuccess(NativeMethods.OgaConfigSetHardwareVendorId(_configHandle, hardware_vendor_id));
+        }
+
+        public void ClearHardwareDeviceType()
+        {
+            Result.VerifySuccess(NativeMethods.OgaConfigClearHardwareDeviceType(_configHandle));
+        }
+
+        public void ClearHardwareDeviceId()
+        {
+            Result.VerifySuccess(NativeMethods.OgaConfigClearHardwareDeviceId(_configHandle));
+        }
+
+        public void ClearHardwareVendorId()
+        {
+            Result.VerifySuccess(NativeMethods.OgaConfigClearHardwareVendorId(_configHandle));
+        }
+
         ~Config()
         {
             Dispose(false);

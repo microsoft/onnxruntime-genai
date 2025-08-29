@@ -62,6 +62,24 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaConfigRemoveModelData(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ model_filename);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigSetHardwareDeviceType(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ hardware_device_type);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigSetHardwareDeviceId(IntPtr /* OgaConfig* */ config, uint /* uint32_t  */ hardware_device_id);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigSetHardwareVendorId(IntPtr /* OgaConfig* */ config, uint /* uint32_t  */ hardware_vendor_id);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigClearHardwareDeviceType(IntPtr /* OgaConfig* */ config);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigClearHardwareDeviceId(IntPtr /* OgaConfig* */ config);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigClearHardwareVendorId(IntPtr /* OgaConfig* */ config);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateModel(byte[] /* const char* */ configPath,
                                                                     out IntPtr /* OgaModel** */ model);
 
