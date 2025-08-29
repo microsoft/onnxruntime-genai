@@ -11,6 +11,7 @@ concurrency:
   cancel-in-progress: true
 env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_NIGHTLY_FEED: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 jobs:
   mac-cpu-arm64-build:
@@ -44,7 +45,9 @@ jobs:
           echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
       - name: Download OnnxRuntime Nightly
         run: |
-          nuget install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
+          dotnet new console
+          dotnet nuget source add ${{ env.ORT_NIGHTLY_FEED }} -n ort-nightly
+          dotnet add package Microsoft.ML.OnnxRuntime -s ort-nightly --pre-release
 
       - name: Extract OnnxRuntime library and header files
         run: |
