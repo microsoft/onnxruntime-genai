@@ -69,9 +69,6 @@ steps:
   displayName: 'Download CUDA $(cuda_version)'
   condition: or(eq(variables['ep'], 'cuda'), and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64')))
   workingDirectory: '$(Build.Repository.LocalPath)'
-  env:
-    AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
-    NuGetPackageSourceCredentials_TheFeed: 'Username=me;Password=$(NUGET_PAT_WCR)'
 
 - powershell: |
     $exePath = "$env:TEMP\rustup-init.exe"
@@ -109,44 +106,29 @@ steps:
   displayName: 'Configure CMake C API with WinML (arm64, NO CUDA) - $(ort_version)'
   condition: and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'arm64'))
   workingDirectory: '$(Build.Repository.LocalPath)'
-  env:
-    AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
-    NuGetPackageSourceCredentials_TheFeed: 'Username=me;Password=$(NUGET_PAT_WCR)'
 
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DWINML_SDK_VERSION='$(ort_version)'
   displayName: 'Configure CMake C API with WinML (x64, WITH CUDA) - $(ort_version)'
   condition: and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64'))
   workingDirectory: '$(Build.Repository.LocalPath)'
-  env:
-    AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
-    NuGetPackageSourceCredentials_TheFeed: 'Username=me;Password=$(NUGET_PAT_WCR)'
 
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
   displayName: 'Configure CMake C API with CUDA'
   condition: eq(variables['ep'], 'cuda')
   workingDirectory: '$(Build.Repository.LocalPath)'
-  env:
-    AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
-    NuGetPackageSourceCredentials_TheFeed: 'Username=me;Password=$(NUGET_PAT_WCR)'
 
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_$(build_config)
   displayName: 'Configure CMake C API without CUDA'
   condition: not(or(eq(variables['ep'], 'cuda'), eq(variables['ep'], 'winml')))
   workingDirectory: '$(Build.Repository.LocalPath)'
-  env:
-    AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
-    NuGetPackageSourceCredentials_TheFeed: 'Username=me;Password=$(NUGET_PAT_WCR)'
 
 - powershell: |
     cmake --build --preset windows_$(arch)_$(ep)_$(build_config) --parallel --target ${{ parameters.target }}
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
-  env:
-    AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
-    NuGetPackageSourceCredentials_TheFeed: 'Username=me;Password=$(NUGET_PAT_WCR)'
 
 - powershell: |
     Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
