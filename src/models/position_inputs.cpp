@@ -290,6 +290,13 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     }
   }
 
+  // Print mask
+  std::cout << "Attention mask: ";
+  for (int i = 0; i < shape[0] * shape[1]; ++i) {
+    std::cout << mask_data[i] << " ";
+  }
+  std::cout << std::endl;
+
   if (ShouldUseStaticMaskHandling()) {
     InitializeStaticMask<T>(*attention_mask);
   } else {

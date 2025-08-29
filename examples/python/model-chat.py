@@ -99,10 +99,12 @@ def main(args):
 
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
     search_options['batch_size'] = 1
+    search_options['do_sample'] = False
 
-    if args.verbose: print(search_options)
+    # if args.verbose: 
+    print(search_options)
 
-    system_prompt = args.system_prompt
+    system_prompt = "" # args.system_prompt
     guidance_type = ""
     prompt_tool_input = ""
     guidance_input = ""
@@ -122,6 +124,7 @@ def main(args):
             raise ValueError("Guidance Type can only be [json_schema, regex, or lark_grammar]")
 
     params = og.GeneratorParams(model)
+    print(search_options)
     params.set_search_options(**search_options)
     if guidance_type:
         params.set_guidance(guidance_type, guidance_input)
@@ -145,14 +148,16 @@ def main(args):
             template_str = f.read()
             tokenizer_input_system_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=False, template_str=template_str)
     else:
-        tokenizer_input_system_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=False)
+        tokenizer_input_system_prompt = system_prompt
+        # tokenizer_input_system_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=False)
+        
 
-    input_tokens = tokenizer.encode(tokenizer_input_system_prompt)
-    # Ignoring the last end of text token as it is messes up the generation when grammar is enabled
-    if guidance_type:
-        input_tokens = input_tokens[:-1]
-    system_prompt_length = len(input_tokens)
-    generator.append_tokens(input_tokens)
+    # input_tokens = tokenizer.encode(tokenizer_input_system_prompt)
+    # # Ignoring the last end of text token as it is messes up the generation when grammar is enabled
+    # if guidance_type:
+    #     input_tokens = input_tokens[:-1]
+    # system_prompt_length = len(input_tokens)
+    # generator.append_tokens(input_tokens)
 
     # Keep asking for input prompts in a loop
     while True:
@@ -173,7 +178,8 @@ def main(args):
         if os.path.exists(jinja_path):
             user_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True, template_str=template_str)
         else:
-            user_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+            # user_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+            user_prompt = text + "<|endoftext|><|endoftext|>"
         input_tokens = tokenizer.encode(user_prompt)
         generator.append_tokens(input_tokens)
 
@@ -196,6 +202,7 @@ def main(args):
                 new_token = generator.get_next_tokens()[0]
                 print(tokenizer_stream.decode(new_token), end='', flush=True)
                 if args.timings: new_tokens.append(new_token)
+            print(generator.get_sequence(0))
         except KeyboardInterrupt:
             print("  --control+c pressed, aborting generation--")
         print()

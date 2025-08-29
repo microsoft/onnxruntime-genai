@@ -117,7 +117,7 @@ if(ENABLE_TESTS)
   if (USE_CUDA OR TEST_PHI2)
     add_compile_definitions(TEST_PHI2=1)
   else()
-    add_compile_definitions(TEST_PHI2=0)
+    add_compile_definitions(TEST_PHI2=1)
   endif()
 endif()
 

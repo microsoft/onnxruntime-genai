@@ -98,6 +98,7 @@ def main(args):
 
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
     search_options['batch_size'] = 1
+    search_options['do_sample'] = False
 
     if args.verbose: print(search_options)
 
@@ -154,7 +155,8 @@ def main(args):
         if model.type == "marian-ssru":
             prompt = text
         else:
-            prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+            # prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+            prompt = text
 
         input_tokens = tokenizer.encode(prompt)
         generator.append_tokens(input_tokens)
@@ -183,8 +185,9 @@ def main(args):
         print()
         print()
 
-        # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
+        print(f"Tokens generated: {generator.get_sequence(0)}")
 
+        # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
 
         if args.timings:
