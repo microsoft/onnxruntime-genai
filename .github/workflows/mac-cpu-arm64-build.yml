@@ -51,8 +51,8 @@ jobs:
       - name: Extract OnnxRuntime library and header files
         run: |
           mkdir -p ort/lib
-          mv ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
-          mv ${{ env.ORT_PACKAGE_NAME }}/runtimes/osx-arm64/native/* ort/lib/
+          mv ${{ env.ORT_PACKAGE_NAME }}/${{ env.ORT_NIGHTLY_VERSION }}/build/native/include ort/
+          mv ${{ env.ORT_PACKAGE_NAME }}/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/osx-arm64/native/* ort/lib/
 
       - name: Install Rust Toolchain
         run: |
