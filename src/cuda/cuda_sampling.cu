@@ -445,7 +445,7 @@ __global__ void FilterOnTopP(float* scores, float* prefix_sums, float* scores_te
 
 // Get top k indices and scores from unsorted input
 struct TopK_2 {
-  int p = INT_MAX;
+  int p = -1;
   float u = -FLT_MAX;
 
   __device__ __forceinline__ void insert(float elem, int elem_id) {
@@ -489,8 +489,9 @@ __global__ void GetTopKKernel(int* indices_out, float* scores_in, float* scores_
       scores_out[ite + batch * k] = top_k_sequence.u / temperature;
       indices_out[ite + batch * k] = top_k_sequence.p;
 
-      // set the ax value to -MAX_T_VAL so that the value doesn't get picked again
+      // set the max value to -MAX_T_VAL so that the value doesn't get picked again
       scores_in[batch * vocab_size + top_k_sequence.p] = -MAX_T_VAL;
+      __threadfence_block();
     }
 
     __syncthreads();
