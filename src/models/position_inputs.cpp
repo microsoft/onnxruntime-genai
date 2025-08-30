@@ -54,7 +54,7 @@ void DefaultPositionInputs::Add() {
   }
 }
 
-void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {  
+void DefaultPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
   if (has_posid_input_) {
     // Initialize on first update
     if (is_first_update_) {
@@ -193,7 +193,7 @@ void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> n
       position_data[i] = static_cast<T>(i);
     }
     position_data_next[0] = static_cast<T>(shape[1]) - 1;
-  // Otherwise we iterate backwards as to not misinterpret any right pad tokens
+    // Otherwise we iterate backwards as to not misinterpret any right pad tokens
   } else {
     const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data() + shape[0] * shape[1] - 1;
     auto* position = position_data + shape[0] * shape[1] - 1;
@@ -205,12 +205,12 @@ void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> n
         // Non-pad tokens are set to their corresponding position
         if (found_first_non_pad) {
           *position = abs_position;
-        // If we found first non-padding token, we can now set the rest of the positions to non-0 values
+          // If we found first non-padding token, we can now set the rest of the positions to non-0 values
         } else if (*word_id != model_.config_->model.pad_token_id) {
           found_first_non_pad = true;
           *position = abs_position;
           position_data_next[i] = abs_position;
-        // We have not found any non-padding token yet so we set the position to 0
+          // We have not found any non-padding token yet so we set the position to 0
         } else {
           *position = 0;
         }
@@ -270,7 +270,7 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     for (int i = 0; i < shape[1]; ++i) {
       mask_data[i] = 1;
     }
-  // Otherwise we iterate backwards as to not misinterpret any right pad tokens
+    // Otherwise we iterate backwards as to not misinterpret any right pad tokens
   } else {
     auto* mask = mask_data + shape[0] * shape[1] - 1;
     const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data() + shape[0] * shape[1] - 1;
