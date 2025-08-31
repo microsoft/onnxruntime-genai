@@ -112,8 +112,8 @@ struct Config {
     struct EpContext {
       // use EP context model for inference
       bool enable{false};
-      // file path for EP context model. Default is config_path / "model_ctx.onnx"
-      std::string filepath{""};
+      // file name for EP context model. Default is "model_ctx.onnx"
+      std::string filename{""};
     } ep_context;
 
 

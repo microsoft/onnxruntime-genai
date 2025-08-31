@@ -415,10 +415,6 @@ class Model:
                 "pad_token_id": config.pad_token_id if hasattr(config, "pad_token_id") and config.pad_token_id is not None else config.eos_token_id[0] if isinstance(config.eos_token_id, list) else config.eos_token_id,
                 "type": self.model_type[ : self.model_type.find("For") if "For" in self.model_type else len(self.model_type)].lower(),
                 "vocab_size": self.vocab_size,
-                "ep_context": {
-                    "enable": False,
-                    "filepath": "",
-                },
             },
             "search": {
                 "diversity_penalty": config.diversity_penalty if hasattr(config, "diversity_penalty") else 0.0,
@@ -440,6 +436,9 @@ class Model:
 
         if self.ep == "NvTensorRtRtx" and self.window_size is not None and self.window_size > 0:
             genai_config["model"]["decoder"]["sliding_window"] = {"window_size": self.window_size, "slide_key_value_cache": False, "slide_inputs": False}
+        
+        if self.ep == "NvTensorRtRtx":
+            genai_config["model"]["ep_context"] = {"enable": False, "filename": "model_ctx.onnx"}
 
         if self.ep != "cpu":
             ep_options = { self.ep : self.ep_attrs[self.ep] }

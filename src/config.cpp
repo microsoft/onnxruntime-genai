@@ -692,8 +692,8 @@ struct EpContext_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "enable") {
       v_.enable = JSON::Get<bool>(value);
-    } else if (name == "filepath") {
-      v_.filepath = JSON::Get<std::string_view>(value);
+    } else if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }

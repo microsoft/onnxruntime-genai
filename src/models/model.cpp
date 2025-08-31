@@ -926,8 +926,8 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
     auto model_ctx_path_ = config_->config_path / fs::path(std::string(Config::Defaults::EpContextFileName));
     
     // use ep context model if specified in genai config
-    if(!config_->model.ep_context.filepath.empty())
-      model_ctx_path_ = fs::path(config_->model.ep_context.filepath);
+    if(!config_->model.ep_context.filename.empty())
+      model_ctx_path_ = config_->config_path / fs::path(config_->model.ep_context.filename);
 
     // if ep context model doesn't exist, fallback to original base ONNX
     if(model_ctx_path_.exists())
