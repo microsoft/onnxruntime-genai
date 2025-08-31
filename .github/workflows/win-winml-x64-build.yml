@@ -1,4 +1,4 @@
-name: "Windows WinML x64 Build"
+name: "Windows CUDA x64 Build"
 on:
   workflow_dispatch:
   push:
@@ -62,7 +62,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_winml_relwithdebinfo -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DWINML_SDK_VERSION="1.8.1078-preview-genai"
+          cmake --preset windows_x64_winml_relwithdebinfo -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DWINML_SDK_VERSION=1.8.1078-preview-genai
 
       - name: Build with CMake
         run: |
