@@ -4,6 +4,7 @@
 // Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #include <algorithm>
 #include <climits>
+#include <iostream>
 #include <random>
 #include <set>
 #include <string>
@@ -847,9 +848,48 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
   }
 
+  // Register custom ops libraries only if explicitly configured
   if (config_session_options.custom_ops_library.has_value()) {
-    fs::path custom_library_file_prefix{config_session_options.custom_ops_library.value()};
-    session_options.RegisterCustomOpsLibrary(custom_library_file_prefix.c_str());
+    // From include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
+    static const char* const kOrtEpDevice_EpMetadataKey_LibraryPath = "library_path";
+
+    std::string custom_library_file_prefix = config_session_options.custom_ops_library.value();
+
+    // If relative path, try to resolve using EP library path from metadata
+    fs::path custom_library_path{custom_library_file_prefix};
+    if (custom_library_path.is_relative()) {
+      // Get EP devices to check for library_path metadata
+      size_t num_devices = 0;
+      const OrtEpDevice* const* device_ptrs = nullptr;
+      Ort::api->GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
+
+      bool resolved = false;
+      for (size_t i = 0; i < num_devices && !resolved; ++i) {
+        const OrtKeyValuePairs* keyvals = Ort::api->EpDevice_EpMetadata(device_ptrs[i]);
+        size_t num_entries = 0;
+        const char* const* keys = nullptr;
+        const char* const* values = nullptr;
+        Ort::api->GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
+
+        for (size_t kvi = 0; kvi < num_entries; kvi++) {
+          const std::string key = keys[kvi];
+          const std::string val = values[kvi];
+          if (key == kOrtEpDevice_EpMetadataKey_LibraryPath) {
+            fs::path ep_library_dir = fs::path(val).parent_path();
+            fs::path resolved_path = ep_library_dir / custom_library_path;
+            if (fs::exists(resolved_path)) {
+              custom_library_file_prefix = resolved_path.string();
+              resolved = true;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    // Convert to fs::path for proper wide string handling on Windows
+    fs::path custom_ops_lib_path(custom_library_file_prefix);
+    session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
   }
 
   if (config_session_options.graph_optimization_level.has_value()) {
