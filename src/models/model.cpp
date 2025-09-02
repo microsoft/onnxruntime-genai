@@ -4,7 +4,6 @@
 // Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #include <algorithm>
 #include <climits>
-#include <iostream>
 #include <random>
 #include <set>
 #include <string>
@@ -851,37 +850,59 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   // Register custom ops libraries only if explicitly configured
   if (config_session_options.custom_ops_library.has_value()) {
     // From include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
-    static const char* const kOrtEpDevice_EpMetadataKey_LibraryPath = "library_path";
+    constexpr const char* const library_path_metadata_key_name = "library_path";
 
     std::string custom_library_file_prefix = config_session_options.custom_ops_library.value();
 
-    // If relative path, try to resolve using EP library path from metadata
+    // If relative path, try to resolve using multiple search locations
     fs::path custom_library_path{custom_library_file_prefix};
     if (custom_library_path.is_relative()) {
-      // Get EP devices to check for library_path metadata
-      size_t num_devices = 0;
-      const OrtEpDevice* const* device_ptrs = nullptr;
-      Ort::api->GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
-
       bool resolved = false;
-      for (size_t i = 0; i < num_devices && !resolved; ++i) {
-        const OrtKeyValuePairs* keyvals = Ort::api->EpDevice_EpMetadata(device_ptrs[i]);
-        size_t num_entries = 0;
-        const char* const* keys = nullptr;
-        const char* const* values = nullptr;
-        Ort::api->GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
 
-        for (size_t kvi = 0; kvi < num_entries; kvi++) {
-          const std::string key = keys[kvi];
-          const std::string val = values[kvi];
-          if (key == kOrtEpDevice_EpMetadataKey_LibraryPath) {
-            fs::path ep_library_dir = fs::path(val).parent_path();
-            fs::path resolved_path = ep_library_dir / custom_library_path;
-            if (fs::exists(resolved_path)) {
-              custom_library_file_prefix = resolved_path.string();
-              resolved = true;
-              break;
+      // First try: resolve relative to GenAI model folder (most intuitive for users)
+      fs::path model_relative_path = config_->config_path / custom_library_path;
+      if (fs::exists(model_relative_path)) {
+        custom_library_file_prefix = model_relative_path.string();
+        resolved = true;
+      }
+
+      // Second try: resolve relative to EP library directory (for system-wide installations)
+      if (!resolved) {
+        size_t num_devices = 0;
+        const OrtEpDevice* const* device_ptrs = nullptr;
+        Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
+
+        for (size_t i = 0; i < num_devices && !resolved; ++i) {
+          const OrtKeyValuePairs* keyvals = Ort::GetEpDeviceMetadata(device_ptrs[i]);
+          size_t num_entries = 0;
+          const char* const* keys = nullptr;
+          const char* const* values = nullptr;
+          Ort::GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
+
+          for (size_t kvi = 0; kvi < num_entries; kvi++) {
+            const std::string key = keys[kvi];
+            const std::string val = values[kvi];
+            if (key == library_path_metadata_key_name) {
+              fs::path ep_library_dir = fs::path(val).parent_path();
+              fs::path resolved_path = ep_library_dir / custom_library_path;
+              if (fs::exists(resolved_path)) {
+                custom_library_file_prefix = resolved_path.string();
+                resolved = true;
+                break;
+              }
             }
+          }
+        }
+      }
+
+      // Third try: resolve relative to current working directory (for development/portable apps)
+      if (!resolved) {
+        char cwd_buffer[PATH_MAX];
+        if (GETCWD(cwd_buffer, sizeof(cwd_buffer))) {
+          fs::path cwd_relative_path = fs::path(cwd_buffer) / custom_library_path;
+          if (fs::exists(cwd_relative_path)) {
+            custom_library_file_prefix = cwd_relative_path.string();
+            resolved = true;
           }
         }
       }
