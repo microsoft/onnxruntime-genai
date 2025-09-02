@@ -4,7 +4,6 @@
 // Modifications Copyright(C) 2024-2025 Advanced Micro Devices, Inc. All rights reserved.
 #include <algorithm>
 #include <climits>
-#include <iostream>
 #include <random>
 #include <set>
 #include <string>
@@ -861,15 +860,15 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
       // Get EP devices to check for library_path metadata
       size_t num_devices = 0;
       const OrtEpDevice* const* device_ptrs = nullptr;
-      Ort::api->GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
+      Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
 
       bool resolved = false;
       for (size_t i = 0; i < num_devices && !resolved; ++i) {
-        const OrtKeyValuePairs* keyvals = Ort::api->EpDevice_EpMetadata(device_ptrs[i]);
+        const OrtKeyValuePairs* keyvals = Ort::GetEpDeviceMetadata(device_ptrs[i]);
         size_t num_entries = 0;
         const char* const* keys = nullptr;
         const char* const* values = nullptr;
-        Ort::api->GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
+        Ort::GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
 
         for (size_t kvi = 0; kvi < num_entries; kvi++) {
           const std::string key = keys[kvi];
