@@ -850,7 +850,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   // Register custom ops libraries only if explicitly configured
   if (config_session_options.custom_ops_library.has_value()) {
     // From include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
-    static const char* const kOrtEpDevice_EpMetadataKey_LibraryPath = "library_path";
+    constexpr const char* const library_path_metadata_key_name = "library_path";
 
     std::string custom_library_file_prefix = config_session_options.custom_ops_library.value();
 
@@ -882,7 +882,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
           for (size_t kvi = 0; kvi < num_entries; kvi++) {
             const std::string key = keys[kvi];
             const std::string val = values[kvi];
-            if (key == kOrtEpDevice_EpMetadataKey_LibraryPath) {
+            if (key == library_path_metadata_key_name) {
               fs::path ep_library_dir = fs::path(val).parent_path();
               fs::path resolved_path = ep_library_dir / custom_library_path;
               if (fs::exists(resolved_path)) {
