@@ -2412,6 +2412,7 @@ class Model:
             normalize_routing_weights=self.moe_attrs["normalize_routing_weights"],
             swiglu_fusion=self.moe_attrs["swiglu_fusion"],
             use_sparse_mixer=self.moe_attrs["use_sparse_mixer"],
+            block_size=self.quant_attrs["int4"]["block_size"] if self.quant_attrs["int4"]["block_size"] > 0 else 0,
             **extra_kwargs,
         )
         self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
@@ -2420,6 +2421,20 @@ class Model:
         dtype = torch.quint4x2 if self.moe_attrs["expert_weight_bits"] == 4 else torch.int8
         qweight, scales = None, None
 
+        # Get block size from quantization attributes
+        block_size = self.quant_attrs["int4"]["block_size"]
+
+        # Use block-wise quantization if block_size > 0
+        if block_size > 0:
+            try:
+                qweight, scales = self._symmetric_blockwise_quantize(weights, block_size)
+                return qweight, scales.to(torch.float16)
+            except Exception as e:
+                print(f"WARNING: Block-wise quantization failed: {e}")
+                print("Falling back to tensor-level quantization")
+                # Fall through to existing implementation
+
+        # Existing tensor-level quantization implementation (fallback)
         unsuccessful = True
         try:
             import tensorrt_llm
@@ -2439,6 +2454,89 @@ class Model:
                 raise RuntimeError("Failed to quantize MoE weights with TensorRT-LLM. Please ensure TensorRT-LLM installs and runs successfully in your environment.")
 
         return qweight, scales.to(torch.float16)
+
+    def _symmetric_blockwise_quantize(self, weights, block_size):
+        # Ensure weights are on CPU for quantization
+        original_device = weights.device
+        weights = weights.cpu().contiguous()
+
+        original_shape = weights.shape
+        bits = self.moe_attrs["expert_weight_bits"]
+
+        block_size = original_shape[-1]
+
+        if bits == 4:
+            qmax = 7
+            qmin = -7
+        else:  # 8-bit
+            qmax = 127
+            qmin = -127
+
+        # Reshape weights to process the last dimension in blocks
+        # weights shape: [..., hidden_size] -> [..., num_blocks, block_size]
+        last_dim = original_shape[-1]
+        num_blocks = (last_dim + block_size - 1) // block_size
+
+        # Pad the last dimension if necessary
+        pad_size = num_blocks * block_size - last_dim
+        if pad_size > 0:
+            pad_shape = list(original_shape)
+            pad_shape[-1] = pad_size
+            padding = torch.zeros(pad_shape, dtype=weights.dtype, device=weights.device)
+            weights_padded = torch.cat([weights, padding], dim=-1)
+        else:
+            weights_padded = weights
+
+        reshaped_weights = weights_padded.view(*original_shape[:-1], num_blocks, block_size)
+        block_max_abs = torch.max(torch.abs(reshaped_weights), dim=-1)[0]
+        scales = block_max_abs / qmax
+
+        # Avoid division by zero - set minimum scale
+        min_scale = 1e-8
+        scales = torch.where(scales < min_scale, torch.tensor(min_scale, dtype=scales.dtype, device=scales.device), scales)
+
+        # Expand scales for broadcasting: [..., num_blocks, 1]
+        scales_expanded = scales.unsqueeze(-1)
+
+        # Quantize: q = round(w / scale), then clamp to valid range
+        quantized = torch.round(reshaped_weights / scales_expanded)
+        quantized = torch.clamp(quantized, qmin, qmax)
+
+        if bits == 4:
+            quantized_int8 = quantized.to(torch.int8)
+
+            quantized_flat = quantized_int8.view(*original_shape[:-1], num_blocks * block_size)
+
+            if pad_size > 0:
+                quantized_flat = quantized_flat[..., :-pad_size]
+
+            quantized_uint4 = (quantized_flat + 8).to(torch.uint8)
+
+            packed_shape = list(original_shape)
+            packed_shape[-1] = (original_shape[-1] + 1) // 2
+            qweight = torch.zeros(packed_shape, dtype=torch.uint8, device=weights.device)
+
+            # Pack two 4-bit values per byte
+            for i in range(0, quantized_uint4.shape[-1], 2):
+                val1 = quantized_uint4[..., i]
+                if i + 1 < quantized_uint4.shape[-1]:
+                    val2 = quantized_uint4[..., i + 1]
+                    packed_val = (val1 & 0xF) | ((val2 & 0xF) << 4)
+                else:
+                    # Odd number of values - pack only lower 4 bits
+                    packed_val = val1 & 0xF
+                qweight[..., i // 2] = packed_val
+
+        else:  # 8-bit
+            quantized_int8 = quantized.to(torch.int8)
+
+            qweight = quantized_int8.view(*original_shape[:-1], num_blocks * block_size)
+            if pad_size > 0:
+                qweight = qweight[..., :-pad_size]
+            else:
+                qweight = qweight.view(original_shape)
+
+        return qweight.cpu(), scales.cpu()
 
     def make_block_sparse_moe(self, layer_id, bsm, root_input):
         # Make nodes for the QMoE block-sparse subgraph
@@ -4157,10 +4255,12 @@ class GPTOSSModel(Model):
             down_proj_qweight_list, down_proj_scales_list = [], []
 
             for i in range(self.moe_attrs["num_experts"]):
-                qweight1, scales1 = self.make_qmoe_weights(mlp.experts.gate_up_proj[i])
+                gate_up_weight_transposed = mlp.experts.gate_up_proj[i].transpose(-1, -2)
+                qweight1, scales1 = self.make_qmoe_weights(gate_up_weight_transposed)
                 gate_up_proj_qweight_list.append(qweight1)
                 gate_up_proj_scales_list.append(scales1)
-                qweight2, scales2 = self.make_qmoe_weights(mlp.experts.down_proj[i])
+                down_weight_transposed = mlp.experts.down_proj[i].transpose(-1, -2)
+                qweight2, scales2 = self.make_qmoe_weights(down_weight_transposed)
                 down_proj_qweight_list.append(qweight2)
                 down_proj_scales_list.append(scales2)
 
@@ -4169,11 +4269,24 @@ class GPTOSSModel(Model):
             down_proj_qweight_tensor = torch.stack(down_proj_qweight_list, dim=0).to(torch.uint8)
             down_proj_scales_tensor = torch.stack(down_proj_scales_list, dim=0)
 
-            pack_size = 8 // self.moe_attrs["expert_weight_bits"]
-            self.make_initializer(gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, self.hidden_size // pack_size), gate_up_proj_weight)
-            self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
-            self.make_initializer(down_proj_qweight_tensor.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size // pack_size), down_proj_weight)
-            self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
+            # Handle different tensor shapes for block-wise vs tensor-level quantization
+            block_size = self.quant_attrs["int4"]["block_size"]
+            if block_size > 0:
+                gate_up_qweight_shape = gate_up_proj_qweight_tensor.shape
+                down_qweight_shape = down_proj_qweight_tensor.shape
+
+                # Provide 3D scales as specified by the operator definition
+                self.make_initializer(gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], gate_up_qweight_shape[1], gate_up_qweight_shape[2]), gate_up_proj_weight)
+                self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
+                self.make_initializer(down_proj_qweight_tensor.view(self.moe_attrs["num_experts"], down_qweight_shape[1], down_qweight_shape[2]), down_proj_weight)
+                self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
+            else:
+                # Tensor-level quantization: use original packing logic
+                pack_size = 8 // self.moe_attrs["expert_weight_bits"]
+                self.make_initializer(gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, self.hidden_size // pack_size), gate_up_proj_weight)
+                self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
+                self.make_initializer(down_proj_qweight_tensor.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size // pack_size), down_proj_weight)
+                self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
 
         # Save MoE biases as initializers
         self.make_initializer(mlp.experts.gate_up_proj_bias, gate_up_proj_bias, to=self.io_dtype)
