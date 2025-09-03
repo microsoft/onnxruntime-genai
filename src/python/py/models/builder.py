@@ -2096,7 +2096,7 @@ class Model:
         self.make_node(
             "PagedAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
             num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], # local_window_size=self.window_size,  # Disable sliding window attribute temporarily
-            softcap=self.attention_attrs["softcap"], do_rotary=self.attention_attrs["use_rope_in_attn"], rotary_interleaved=self.rotemb_attrs["interleaved"],
+            softcap=self.attention_attrs["softcap"], do_rotary=self.attention_attrs["use_rope_in_attn"], rotary_interleaved=self.rope_attrs["interleaved"],
         )
         self.make_value(output, self.io_dtype, shape=['num_tokens', self.head_size * self.num_attn_heads])
 

@@ -6,7 +6,7 @@ import torch
 def test_paged_model():
   # Create a session with PagedModelExecutionProvider
   options = SessionOptions()
-  session = InferenceSession("C:/Users/aciddelgado/onnxruntime-genai/test/test_models/phi3.5paged_micro/model.onnx", options, providers=['CUDAExecutionProvider'])
+  session = InferenceSession("C:\\Users\\aciddelgado\\onnxruntime-genai\\test\\test_models\\phi-3.5-mini\\cuda-fp16-complete-paged\\model.onnx", options, providers=['CUDAExecutionProvider'])
   # session = InferenceSession("C:/Users/aciddelgado/onnxruntime-genai/test/test_models/phi3.5paged_8_11_25/model.onnx", options, providers=['CUDAExecutionProvider'])
 
   # Input params
@@ -112,7 +112,7 @@ def test_paged_model():
 
   print("Paged model ran successfully.")
 
-  session = InferenceSession("C:/Users/aciddelgado/onnxruntime-genai/test/test_models/phi3.5_micro/model.onnx", options, providers=['CUDAExecutionProvider'])
+  session = InferenceSession("C:\\Users\\aciddelgado\\onnxruntime-genai\\test\\test_models\\phi-3.5-mini\\cuda-fp16-complete\\model.onnx", options, providers=['CUDAExecutionProvider'])
   # session = InferenceSession("C:/Users/aciddelgado/onnxruntime-genai/test/test_models/phi-3.5-mini-12_05_24/gpu/gpu-int4-awq-block-128/model.onnx", options, providers=['CUDAExecutionProvider'])
 
   # Prepare input data for the second model
