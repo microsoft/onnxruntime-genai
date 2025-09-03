@@ -28,6 +28,7 @@ struct SamplingData {
   cuda_unique_ptr<float> top_k_distirbuted_values;
   
   size_t temp_storage_bytes = 0;
+  int top_k_shards = 32;
 };
 
 void LaunchPopulateIndices(int* indices, int size, int batch_size, cudaStream_t stream);

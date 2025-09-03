@@ -20,7 +20,6 @@ namespace cuda {
 
 constexpr int kMaxThreads = 1024;
 constexpr int kGPUWarpSize = 32;
-constexpr int top_k_shards = 32;
 
 __global__ void InitCurandStates(unsigned long long seed, curandState* states, int batch_size) {
   int index = threadIdx.x + blockIdx.x * blockDim.x;
@@ -45,6 +44,10 @@ SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int v
 
   top_k_distributed_lock = CudaMallocArray<uint>(1);
   cudaMemset(top_k_distributed_lock.get(), 0, sizeof(uint));
+
+  cudaDeviceProp deviceProp;
+  cudaGetDeviceProperties(&deviceProp, 0); // Get properties for device 0
+  top_k_shards = std::min(top_k_shards, deviceProp.multiProcessorCount);
 
   top_k_distirbuted_keys = CudaMallocArray<int>(top_k_shards * 64);  // We support distributed sharding upto top_k 64
   top_k_distirbuted_values = CudaMallocArray<float>(top_k_shards * 64); // We support distributed sharding upto top_k 64
@@ -454,7 +457,7 @@ __global__ void FilterOnTopP(float* scores, float* prefix_sums, float* scores_te
 #define FLT_MAX 3.40282347e+38F
 // Get top k indices and scores from unsorted input
 struct TopK_2 {
-  int p = INT_MAX;
+  int p = -1;
   float u = -FLT_MAX;
 
   __device__ __forceinline__ void insert(float elem, int elem_id) {
@@ -497,8 +500,9 @@ __global__ void GetTopKKernel(int* indices_out, float* scores_in, float* scores_
     if (tid == 0) {
       scores_out[ite + batch * k] = top_k_sequence.u / temperature;
       indices_out[ite + batch * k] = top_k_sequence.p;
-      // set the ax value to -MAX_T_VAL so that the value doesn't get picked again
+      // set the max value to -MAX_T_VAL so that the value doesn't get picked again
       scores_in[batch * vocab_size + top_k_sequence.p] = -MAX_T_VAL;
+      __threadfence_block();
     }
 
     __syncthreads();
@@ -508,7 +512,7 @@ __global__ void GetTopKKernel(int* indices_out, float* scores_in, float* scores_
 // Get top k indices and scores from unsorted input
 template <int kBlockSize>
 __global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, float* scores_out, int batch_size, 
-                                        int vocab_size, int k, float temperature, 
+                                        int vocab_size, int k, float temperature, int top_k_shards, 
                                         uint* top_k_distributed_lock, int* distributed_indices_out, float* distributed_scores_out) {
   int batch = blockIdx.x; // batch should always be 1 for this implementation TODO: Support batch > 1 later
   TopK_2 partial;
@@ -538,9 +542,9 @@ __global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, flo
     if (tid == 0) {
       distributed_scores_out_curr[ite + batch * k] = top_k_sequence.u;
       distributed_indices_out_curr[ite + batch * k] = top_k_sequence.p;
-
-      // set the ax value to -MAX_T_VAL so that the value doesn't get picked again
+      // set the max value to -MAX_T_VAL so that the value doesn't get picked again
       scores_in[batch * vocab_size + top_k_sequence.p] = -MAX_T_VAL;
+      __threadfence_block();
     }
 
     __syncthreads();
@@ -593,6 +597,7 @@ __global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, flo
 
         // set the max value to -MAX_T_VAL so that the value doesn't get picked again
         distributed_scores_out[local_index] = -MAX_T_VAL;
+        __threadfence_block();
       }
 
       __syncthreads();
@@ -606,12 +611,15 @@ void LaunchGetTopKSubset(cudaStream_t stream, float* scores_in, float* scores_ou
   // Use "distributed" TopK only when:
   // `batch_size` is small enough && 'k' is small enough && `vocab_size` is large enough.
   // All parameters are tunable.
-  if (batch_size == 1 && k <= 64 && vocab_size >= 100000) {
-    dim3 grid(1, 1, top_k_shards);
+
+  // TODO(hasesh): Tune this and support slightly igher batch sizes. For now, only sampling is supported.
+  bool enable_distributed_selection_sort = (batch_size == 1) && (k <= 64) && (vocab_size >= 100000) && (data->top_k_shards > 0);
+  if (enable_distributed_selection_sort) {
+    dim3 grid(1, 1, data->top_k_shards);
     // use large block size for better utilization
     dim3 block(1024, 1, 1);
     GetTopKKernelDistributed<1024><<<grid, block, 0, stream>>>(indices_out, scores_in, 
-                            scores_out, batch_size, vocab_size, k, temperature, data->top_k_distributed_lock.get(), data->top_k_distirbuted_keys.get(), data->top_k_distirbuted_values.get());
+                            scores_out, batch_size, vocab_size, k, temperature, data->top_k_shards, data->top_k_distributed_lock.get(), data->top_k_distirbuted_keys.get(), data->top_k_distirbuted_values.get());
   } else {
     dim3 grid(batch_size, 1, 1);
     // use large block size for better utilization
