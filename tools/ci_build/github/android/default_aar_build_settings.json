@@ -10,6 +10,7 @@
         "--parallel",
         "--cmake_generator=Ninja",
         "--build_java",
-        "--skip_tests"
+        "--skip_tests",
+        "--skip_wheel"
     ]
 }

@@ -135,6 +135,18 @@ inline std::vector<std::string> GetAvailableProviders() {
   return available_providers;
 }
 
+inline void GetEpDevices(OrtEnv* env, const OrtEpDevice* const** device_ptrs, size_t* num_devices) {
+  ThrowOnError(api->GetEpDevices(env, device_ptrs, num_devices));
+}
+
+inline const OrtKeyValuePairs* GetEpDeviceMetadata(const OrtEpDevice* device) {
+  return api->EpDevice_EpMetadata(device);
+}
+
+inline void GetKeyValuePairs(const OrtKeyValuePairs* keyvals, const char* const** keys, const char* const** values, size_t* num_entries) {
+  api->GetKeyValuePairs(keyvals, keys, values, num_entries);
+}
+
 inline void* Allocator::Alloc(size_t size) {
   void* out;
   ThrowOnError(api->AllocatorAlloc(this, size, &out));

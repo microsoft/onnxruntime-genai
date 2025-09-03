@@ -10,7 +10,12 @@
 namespace Generators {
 
 LogItems g_log;
-static std::ostream* gp_stream{&std::cerr};
+
+static std::ostream*& GlobalLogStreamPtr() {
+  static std::ostream* stream = &std::cerr;
+  return stream;
+}
+
 static std::unique_ptr<std::ofstream> gp_logfile;
 static CallbackFn gp_callback{};
 
@@ -33,11 +38,11 @@ struct CallbackStream : std::ostream {
 
 void SetLogStream() {
   if (gp_callback)
-    gp_stream = &gp_callback_stream;
+    GlobalLogStreamPtr() = &gp_callback_stream;
   else if (gp_logfile)
-    gp_stream = gp_logfile.get();
+    GlobalLogStreamPtr() = gp_logfile.get();
   else
-    gp_stream = &std::cerr;
+    GlobalLogStreamPtr() = &std::cerr;
 }
 
 void SetLogBool(std::string_view name, bool value) {
@@ -122,10 +127,10 @@ std::ostream& Log(std::string_view label, std::string_view string) {
   assert(g_log.enabled);
 
   // Warnings will be yellow, all other labels will be blue
-  *gp_stream << SGR::Bold << (label == "warning" ? SGR::Bg_Yellow : SGR::Bg_Blue) << "  " << label << "  " << SGR::Reset << ' ';
+  *GlobalLogStreamPtr() << SGR::Bold << (label == "warning" ? SGR::Bg_Yellow : SGR::Bg_Blue) << "  " << label << "  " << SGR::Reset << ' ';
   if (!string.empty())
-    *gp_stream << string << std::endl;
-  return *gp_stream;
+    *GlobalLogStreamPtr() << string << std::endl;
+  return *GlobalLogStreamPtr();
 }
 
 std::ostream& Log(std::string_view label, const char* fmt, ...) {

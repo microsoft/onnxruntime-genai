@@ -3,8 +3,9 @@
 
 import onnxruntime_genai as og
 import argparse
-import time
+import os
 import json
+import time
 
 def get_tools_list(input_tools):
     # input_tools format: '[{"name": "fn1", "description": "fn details", "parameters": {"p1": {"description": "details", "type": "string"}}},
@@ -134,8 +135,18 @@ def main(args):
         messages = f"""[{{"role": "system", "content": "{system_prompt}", "tools": "{prompt_tool_input}"}}]"""
     else:
         messages = f"""[{{"role": "system", "content": "{system_prompt}"}}]"""
+
     # Apply Chat Template
-    tokenizer_input_system_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=False)
+    template_str = ""
+    tokenizer_input_system_prompt = None
+    jinja_path = os.path.join(args.model_path, "chat_template.jinja")
+    if os.path.exists(jinja_path):
+        with open(jinja_path, "r", encoding="utf-8") as f:
+            template_str = f.read()
+            tokenizer_input_system_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=False, template_str=template_str)
+    else:
+        tokenizer_input_system_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=False)
+
     input_tokens = tokenizer.encode(tokenizer_input_system_prompt)
     # Ignoring the last end of text token as it is messes up the generation when grammar is enabled
     if guidance_type:
@@ -156,8 +167,13 @@ def main(args):
         if args.timings: started_timestamp = time.time()
 
         messages = f"""[{{"role": "user", "content": "{text}"}}]"""
+
         # Apply Chat Template
-        user_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+        user_prompt = ""
+        if os.path.exists(jinja_path):
+            user_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True, template_str=template_str)
+        else:
+            user_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
         input_tokens = tokenizer.encode(user_prompt)
         generator.append_tokens(input_tokens)
 

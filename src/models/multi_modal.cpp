@@ -119,6 +119,8 @@ SpeechState::SpeechState(const MultiModalLanguageModel& model, const GeneratorPa
       model_{model} {}
 
 void SpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens) {
+  num_audio_tokens_ = num_audio_tokens;
+
   audio_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,  // Model output
                                                          model_.config_->model.speech.outputs.audio_features,
                                                          -1, num_audio_tokens_);

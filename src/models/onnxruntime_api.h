@@ -206,6 +206,8 @@ inline void InitApi() {
     Generators::SetLogBool("ort_lib", true);
   }
 
+  OrtApiBaseFn ort_api_base_fn{};
+
 #if defined(__linux__) || defined(MACOS_USE_DLOPEN)
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
   // version of OrtGetApiBase.
@@ -257,7 +259,7 @@ inline void InitApi() {
     throw std::runtime_error(std::string("Failed to load onnxruntime. Set ORTGENAI_LOG_ORT_LIB envvar to enable detailed logging."));
   }
 
-  OrtApiBaseFn ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
+  ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
   if (ort_api_base_fn == nullptr) {
     char* err = dlerror();
     throw std::runtime_error(std::string("Failed to load symbol OrtGetApiBase: ") + (err != nullptr ? err : "Unknown"));
@@ -265,10 +267,13 @@ inline void InitApi() {
 
   InitApiWithDynamicFn(ort_api_base_fn);
 #else   // defined(__linux__) || defined(MACOS_USE_DLOPEN)
-  api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+  ort_api_base_fn = &OrtGetApiBase;
+  api = ort_api_base_fn()->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
 #endif  // defined(__linux__) || defined(MACOS_USE_DLOPEN)
+
+  LOG_INFO("ORT Version: %s. %s", ort_api_base_fn()->GetVersionString(), api->GetBuildInfoString());
 }
 
 /** \brief All C++ methods that can fail will throw an exception of this type
@@ -288,6 +293,15 @@ struct Exception : std::exception {
 
 /// This is a C++ wrapper for OrtApi::GetAvailableProviders() and returns a vector of strings representing the available execution providers.
 std::vector<std::string> GetAvailableProviders();
+
+/// This is a C++ wrapper for OrtApi::GetEpDevices() to get execution provider devices.
+void GetEpDevices(OrtEnv* env, const OrtEpDevice* const** device_ptrs, size_t* num_devices);
+
+/// This is a C++ wrapper for OrtApi::EpDevice_EpMetadata() to get execution provider metadata.
+const OrtKeyValuePairs* GetEpDeviceMetadata(const OrtEpDevice* device);
+
+/// This is a C++ wrapper for OrtApi::GetKeyValuePairs() to get key-value pairs from metadata.
+void GetKeyValuePairs(const OrtKeyValuePairs* keyvals, const char* const** keys, const char* const** values, size_t* num_entries);
 
 inline void SetCurrentGpuDeviceId(int device_id);
 inline int GetCurrentGpuDeviceId();
@@ -409,6 +423,14 @@ std::span<TAlloc> Allocate(OrtAllocator& allocator,
   assert(!unique_ptr.get());  // Ensure pointer is empty, to avoid accidentally passing the wrong pointer and overwriting things
   unique_ptr = IAllocatorUniquePtr<TAlloc>(reinterpret_cast<TAlloc*>(allocator.Alloc(&allocator, size * sizeof(TAlloc))), AllocatorDeleter(&allocator));
   return std::span(unique_ptr.get(), size);
+}
+
+inline void RegisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name, const ORTCHAR_T* path) {
+  Ort::api->RegisterExecutionProviderLibrary(env, registration_name, path);
+}
+
+inline void UnregisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name) {
+  Ort::api->UnregisterExecutionProviderLibrary(env, registration_name);
 }
 
 }  // namespace Ort

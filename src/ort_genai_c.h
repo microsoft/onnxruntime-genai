@@ -77,6 +77,8 @@ typedef struct OgaMultiModalProcessor OgaMultiModalProcessor;
 typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
+typedef struct OgaEngine OgaEngine;
+typedef struct OgaRequest OgqRequest;
 
 //! @}
 
@@ -793,6 +795,194 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUnloadAdapter(OgaAdapters* adapters, const
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters,
                                                        const char* adapter_name);
+
+/**
+ * \brief Creates an OgaEngine object from the given model.
+ *
+ * The OgaEngine is responsible for managing and scheduling multiple requests, executing model inference,
+ * and coordinating batching, caching, and resource management for efficient processing. This function
+ * initializes a new engine instance using the provided model, allowing requests to be added, removed, and
+ * processed through the engine's API. The engine must be destroyed with OgaDestroyEngine when no longer needed.
+ *
+ * \param[in] model The model to use for the engine. The model must remain valid for the lifetime of the engine.
+ * \param[out] out Pointer to the created engine instance. On success, *out will be set to the new engine object.
+ * \return OgaResult containing the error message if the engine creation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** out);
+
+/**
+ * \brief Destroys the given engine.
+ * \param[in] engine The engine to be destroyed.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
+
+/**
+ * \brief Returns a ready request of runs one step of the OgaEngine if there are pending requests.
+ *
+ * This function advances the state of the engine by processing a subset of the currently pending requests.
+ * It schedules and executes model inference for requests that are ready, updates their state with the generated results,
+ * and manages batching and resource allocation as needed. This function should be called repeatedly (e.g., in a loop)
+ * to ensure all requests are processed efficiently. It is a core part of the engine's request processing pipeline.
+ * If the engine has ready requests from a previous call, it will return one of them in the request parameter.
+ * If there are no ready requests, a new subset of requests will be scheduled for processing and the request parameter
+ * will be set to the first request from this subset that is ready to be queried for results.
+ *
+ * \param[in] engine The engine instance to run a processing step on.
+ * \param[out] request A request that has been processed by the engine and is ready to be queried for results.
+ *                     If the engine has no ready requests, this will be set to a nullptr.
+ * \return OgaResult containing the error message if the operation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineStep(OgaEngine* engine, OgaRequest** request);
+
+/**
+ * \brief Checks if the engine has any pending requests to process.
+ *
+ * This function queries the OgaEngine to determine whether there are any requests that have not yet been fully processed.
+ *
+ * \param[in] engine The engine instance to check for pending requests.
+ * \param[out] out Pointer to a boolean value that will be set to true if there are pending requests, or false otherwise.
+ * \return OgaResult containing the error message if the operation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine, bool* out);
+
+/**
+ * \brief Adds a request to the OgaEngine for processing.
+ *
+ * This function submits a new request to the engine, which will then be processed in subsequent calls to OgaEngineStep.
+ * The request must be created using OgaCreateRequest and should contain the necessary parameters for model inference.
+ *
+ * \param[in] engine The engine instance to which the request is being added.
+ * \param[in] request The request to add to the engine. The request must remain valid until it is removed or processed.
+ * \return OgaResult containing the error message if the operation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineAddRequest(OgaEngine* engine, OgaRequest* request);
+
+/**
+ * \brief Removes a request from the OgaEngine.
+ *
+ * This function removes a request from the engine, allowing it to be cleaned up. The request must have been previously added
+ * to the engine using OgaEngineAddRequest. After this call, the request will no longer be processed by the engine.
+ *
+ * \param[in] engine The engine instance from which the request is being removed.
+ * \param[in] request The request to remove from the engine. The request must have been previously added to the engine.
+ * \return OgaResult containing the error message if the operation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRemoveRequest(OgaEngine* engine, OgaRequest* request);
+
+/**
+ * \brief Creates a new request for the OgaEngine.
+ *
+ * This function initializes a new request object that can be used to submit input sequences for model inference.
+ * Once added to the engine, the request will be processed by the engine in subsequent calls to OgaEngineStep.
+ *
+ * \param[in] params The parameters for the generator, such as temperature, top-k, etc.
+ * \param[out] out Pointer to the created request instance. On success, *out will be set to the new request object.
+ * \return OgaResult containing the error message if the request creation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRequest(OgaGeneratorParams* params, OgaRequest** out);
+
+/**
+ * \brief Adds input sequences to the request.
+ *
+ * This function sets the input sequences for the request. The input sequences are used to seed the generation process.
+ * The request must have been created using OgaCreateRequest before calling this function.
+ *
+ * \param[in] request The request to set the input sequences on.
+ * \param[in] tokens The input sequences to set on the request.
+ * \return OgaResult containing the error message if the setting of the input sequences failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestAddTokens(OgaRequest* request, const OgaSequences* tokens);
+
+/**
+ * \brief Destroys the given request.
+ *
+ * This function cleans up the resources associated with the request, including any input sequences and parameters.
+ * It should be called when the request is no longer needed, either after it has been processed.
+ *
+ * \param[in] request The request to be destroyed. The request must have been created using OgaCreateRequest.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyRequest(OgaRequest* request);
+
+/**
+ * \brief Sets custom user data on the request.
+ *
+ * This function sets custom user data on the request that is opaque to the request. It can be queried
+ * later using OgaRequestGetOpaqueData. This is useful for associating additional information with the
+ * request that may be actionable by the user or application logic.
+ *
+ * \param[in] request The request to set the input sequences on.
+ * \param[in] tokens The input sequences to set on the request.
+ * \return OgaResult containing the error message if the setting of the input sequences failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestSetOpaqueData(OgaRequest* request, void* opaque_data);
+
+/**
+ * \brief Gets the custom user data from the request.
+ *
+ * This function retrieves the custom user data that was set on the request using OgaRequestSetOpaqueData.
+ * The user data is opaque to the request and can be used to store additional information that may be
+ * useful for the application logic.
+ *
+ * \param[in] request The request to get the opaque data from.
+ * \param[out] opaque_data Pointer to where the opaque data will be stored.
+ * \return OgaResult containing the error message if the getting of the opaque data failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetOpaqueData(OgaRequest* request, void** opaque_data);
+
+/**
+ * \brief Checks if the request has any unseen tokens.
+ *
+ * This function checks if the request has any unseen tokens that have not yet been queried by the user
+ * or application yet. Unseen tokens are those that have been generated by the model but not yet
+ * retrieved by the user.
+ *
+ * \param[in] request The request to check for unseen tokens.
+ * \param[out] out Boolean flag that will be set to true if there are unseen tokens, or false otherwise.
+ * \return OgaResult containing the error message if the setting of the input sequences failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestHasUnseenTokens(const OgaRequest* request, bool* out);
+
+/**
+ * \brief Gets an unseen token from the request.
+ *
+ * This function retrieves the next unseen token from the request. If there are no unseen tokens,
+ * it will return an error. The unseen token is a token that has been generated by the model but
+ * has not yet been queried by the user.
+ *
+ * \param[in] request The request to get the unseen token from.
+ * \param[out] out Pointer to where the unseen token will be stored.
+ * \return OgaResult containing the error message if the getting of the unseen token failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetUnseenToken(OgaRequest* request, int32_t* out);
+
+/**
+ * \brief Checks if the request is done processing.
+ *
+ * This function checks if the request has finished processing. The request is done when one of the termination
+ * conditions has been reached (e.g. end of sequence token is encountered or the request was cancelled).
+ * If the request is done, it will return true; otherwise, it will return false.
+ *
+ * \param[in] request The request to check if it is done.
+ * \param[out] out Boolean flag that will be set to true if the request is done, or false otherwise.
+ * \return OgaResult containing the error message if the checking of the request status failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsDone(const OgaRequest* request, bool* out);
+
+/**
+ * \brief Registers an execution provider library with ONNXRuntime API.
+ * \param registration_name name for registration.
+ * \param path provider path.
+ *
+ */
+OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const char* library_path);
+
+/**
+ * \brief Unregisters an execution provider library with ONNXRuntime API.
+ * \param registration_name name for registration.
+ *
+ */
+OGA_EXPORT void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name);
+
 #ifdef __cplusplus
 }
 #endif

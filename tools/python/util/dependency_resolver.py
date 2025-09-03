@@ -12,7 +12,7 @@ from pathlib import Path
 import requests
 
 from .logger import get_logger
-from .platform_helpers import is_linux, is_windows
+from .platform_helpers import is_linux, is_windows, is_windows_arm
 
 _log = get_logger("util.dependency_resolver")
 
@@ -48,6 +48,8 @@ def _download_ort(
         package_name = "Microsoft.ML.OnnxRuntime.DirectML"
     else:
         package_name = "Microsoft.ML.OnnxRuntime"
+        if is_windows_arm():
+            package_name = "Microsoft.ML.OnnxRuntime.QNN"
 
     package_path = destination_dir / f"{package_name}.zip"
     if package_path.exists():

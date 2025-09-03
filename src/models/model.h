@@ -37,7 +37,11 @@ struct State {
   void ClearIO();  // Clear all inputs/outputs
 
   void SetActiveAdapter(Adapters* adapters, const std::string& adapter_name);
+
   virtual void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {}
+
+  void DumpInputs();
+  void DumpOutputs();
 
   const Model& model_;
 
@@ -50,7 +54,7 @@ struct State {
   std::vector<std::pair<std::string, std::string>> ep_dynamic_options_next_run_;
 
  protected:
-  void Run(OrtSession& session, bool graph_capture_this_run = false);  // Uses the inputs below to run
+  void Run(OrtSession& session, bool graph_capture_this_run = false);
   bool first_run_{true};
 
   std::unique_ptr<OrtRunOptions> run_options_;

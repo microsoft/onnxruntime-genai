@@ -12,6 +12,7 @@
 #include "runtime_settings.h"
 #include "search.h"
 #include "smartptrs.h"
+#include "engine/engine.h"
 
 namespace Generators {
 
@@ -57,6 +58,8 @@ struct OgaStringArray : std::vector<std::string>, OgaAbstract {};
 struct OgaTensor : Generators::Tensor, OgaAbstract {};
 struct OgaTokenizer : Generators::Tokenizer, OgaAbstract {};
 struct OgaTokenizerStream : Generators::TokenizerStream, OgaAbstract {};
+struct OgaEngine : Generators::Engine, OgaAbstract {};
+struct OgaRequest : Generators::Request, OgaAbstract {};
 
 // Helper function to return a shared pointer as a raw pointer. It won't compile if the types are wrong.
 // Exposed types that are internally owned by shared_ptrs inherit from ExternalRefCounted. Then we
@@ -870,6 +873,96 @@ OgaResult* OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters, c
   OGA_CATCH
 }
 
+OgaResult* OgaCreateEngine(OgaModel* model, OgaEngine** out) {
+  OGA_TRY
+  auto engine = std::make_shared<Generators::Engine>(model->shared_from_this());
+  *out = ReturnShared<OgaEngine>(engine);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineStep(OgaEngine* engine, OgaRequest** request) {
+  OGA_TRY
+  auto ready_request = engine->Step();
+  *request = ready_request ? ReturnShared<OgaRequest>(ready_request) : nullptr;
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineHasPendingRequests(OgaEngine* engine, bool* out) {
+  OGA_TRY
+  *out = engine->HasPendingRequests();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineAddRequest(OgaEngine* engine, OgaRequest* request) {
+  OGA_TRY
+  engine->AddRequest(request->shared_from_this());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaEngineRemoveRequest(OgaEngine* engine, OgaRequest* request) {
+  OGA_TRY
+  engine->RemoveRequest(request->shared_from_this());
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaCreateRequest(OgaGeneratorParams* params, OgaRequest** out) {
+  OGA_TRY
+  auto request = std::make_shared<Generators::Request>(params->shared_from_this());
+  *out = ReturnShared<OgaRequest>(request);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestAddTokens(OgaRequest* request, const OgaSequences* tokens) {
+  OGA_TRY
+  if (tokens->size() > 1) {
+    throw std::runtime_error("Request can only be created with a single sequence");
+  }
+  request->AddTokens((*tokens)[0]);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestHasUnseenTokens(const OgaRequest* request, bool* out) {
+  OGA_TRY
+  *out = request->HasUnseenTokens();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestGetUnseenToken(OgaRequest* request, int32_t* token) {
+  OGA_TRY
+  *token = request->UnseenToken();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestIsDone(const OgaRequest* request, bool* out) {
+  OGA_TRY
+  *out = request->IsDone();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OgaRequestSetOpaqueData(OgaRequest* request, void* data) {
+  OGA_TRY
+  request->SetOpaqueData(data);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaRequestGetOpaqueData(OgaRequest* request, void** data) {
+  OGA_TRY
+  *data = request->GetOpaqueData();
+  return nullptr;
+  OGA_CATCH
+}
+
 void OGA_API_CALL OgaDestroyStringArray(OgaStringArray* string_array) { delete string_array; }
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) { delete p; }
 void OGA_API_CALL OgaDestroyString(const char* p) { delete p; }
@@ -887,5 +980,15 @@ void OGA_API_CALL OgaDestroyAudios(OgaAudios* p) { delete p; }
 void OGA_API_CALL OgaDestroyNamedTensors(OgaNamedTensors* p) { delete p; }
 void OGA_API_CALL OgaDestroyAdapters(OgaAdapters* p) { p->ExternalRelease(); }
 void OGA_API_CALL OgaDestroyRuntimeSettings(OgaRuntimeSettings* p) { delete p; }
+void OGA_API_CALL OgaDestroyEngine(OgaEngine* p) { p->ExternalRelease(); }
+void OGA_API_CALL OgaDestroyRequest(OgaRequest* p) { p->ExternalRelease(); }
+
+void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const char* library_path) {
+  Ort::RegisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name, fs::path(library_path).c_str());
+}
+
+void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name) {
+  Ort::UnregisterExecutionProviderLibrary(&(Generators::GetOrtEnv()), registration_name);
+}
 
 }  // extern "C"

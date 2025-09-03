@@ -4,18 +4,6 @@ import time
 
 def main(args):
     if args.verbose: print("Loading model...")
-    config = og.Config(args.model_path)
-    if args.execution_provider != "follow_config":
-        config.clear_providers()
-        if args.execution_provider != "cpu":
-            if args.verbose:
-                print(f"Setting model to {args.execution_provider}...")
-            config.append_provider(args.execution_provider)
-    model = og.Model(config)
-
-    if args.verbose: print("Model loaded")
-    tokenizer = og.Tokenizer(model)
-    if args.verbose: print("Tokenizer created")
 
     if hasattr(args, 'prompts'):
         prompts = args.prompts
@@ -27,6 +15,23 @@ def main(args):
         else:
             text = input("Input: ")
             prompts = [text]
+
+    batch_size = len(prompts)
+
+    config = og.Config(args.model_path)
+    config.overlay(f'{{"search": {{"batch_size": {batch_size}, "num_beams": {3}}}}}')
+
+    if args.execution_provider != "follow_config":
+        config.clear_providers()
+        if args.execution_provider != "cpu":
+            if args.verbose:
+                print(f"Setting model to {args.execution_provider}...")
+            config.append_provider(args.execution_provider)
+    model = og.Model(config)
+
+    if args.verbose: print("Model loaded")
+    tokenizer = og.Tokenizer(model)
+    if args.verbose: print("Tokenizer created")
 
     if args.chat_template:
         if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
@@ -40,8 +45,6 @@ def main(args):
     params = og.GeneratorParams(model)
 
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args} 
-    search_options['batch_size'] = len(prompts)
-    search_options['num_beams'] = 3
 
     if (args.verbose): print(f'Args: {args}')
     if (args.verbose): print(f'Search options: {search_options}')
@@ -75,7 +78,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end token generation loop example for gen-ai")
     parser.add_argument('-m', '--model_path', type=str, required=True, help='Onnx model folder path (must contain genai_config.json and model.onnx)')
-    parser.add_argument('-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
+    parser.add_argument('-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "NvTensorRtRtx", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
     parser.add_argument('-pr', '--prompts', nargs='*', required=False, help='Input prompts to generate tokens from. Provide this parameter multiple times to batch multiple prompts')
     parser.add_argument('-i', '--min_length', type=int, default=25, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, default=50, help='Max number of tokens to generate including the prompt')

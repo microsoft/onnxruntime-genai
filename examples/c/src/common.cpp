@@ -39,46 +39,11 @@ void Timing::Log(const int prompt_tokens_length, const int new_tokens_length) {
   std::cout << "-------------" << std::endl;
 }
 
-void TerminateSession::signalHandler(int signum) {
-  std::cout << "Interrupt signal received. Terminating current session...\n";
-  std::unique_lock<std::mutex> lock(mtx);
-  stopFlag = true;
-  cv.notify_one();
-}
-
-void TerminateSession::Generator_SetTerminate_Call(OgaGenerator* generator) {
-  std::unique_lock<std::mutex> lock(mtx);
-  while (!generator->IsDone()) {
-    if (stopFlag) {
-      generator->SetRuntimeOption("terminate_session", "1");
-      stopFlag = false;
-      break;
-    }
-    // Wait for stopflag to become true or it will timeout after 1000 ms
-    auto timeout = std::chrono::milliseconds(1000);
-    cv.wait_for(lock, timeout, [this] { return stopFlag; });
-  }
-}
-
-void TerminateSession::Generator_SetTerminate_Call_C(OgaGenerator* generator) {
-  std::unique_lock<std::mutex> lock(mtx);
-  while (!OgaGenerator_IsDone(generator)) {
-    if (stopFlag) {
-      OgaGenerator_SetRuntimeOption(generator, "terminate_session", "1");
-      stopFlag = false;
-      break;
-    }
-    // Wait for stopflag to become true or it will timeout after 1000 ms
-    auto timeout = std::chrono::milliseconds(1000);
-    cv.wait_for(lock, timeout, [this] { return stopFlag; });
-  }
-}
-
 bool FileExists(const char* path) {
   return static_cast<bool>(std::ifstream(path));
 }
 
-std::string trim(const std::string& str) {
+std::string Trim(const std::string& str) {
   const size_t first = str.find_first_not_of(' ');
   if (std::string::npos == first) {
     return str;

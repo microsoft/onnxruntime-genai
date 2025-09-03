@@ -7,7 +7,14 @@ namespace Generators {
 
 WhisperModel::WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
-  session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename, session_options_.get());
+  // If provider options were explicitly added for the encoder, create session options from this config.
+  if (!config_->model.encoder.session_options.provider_options.empty()) {
+    encoder_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(config_->model.encoder.session_options, *encoder_session_options_, true, false);
+  }
+
+  session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename,
+                                   encoder_session_options_ ? encoder_session_options_.get() : session_options_.get());
   session_decoder_ = CreateSession(ort_env, config_->model.decoder.filename, session_options_.get());
 
   session_info_.Add(*session_decoder_);
@@ -319,31 +326,29 @@ DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t>& nex
     }
 
     return logits;
-  } else {
-    if (first_run_ && decoder_state_->UsesDecoderMaskedMHA()) {
-      // Transpose the K caches only when the else branch is run for the first time.
-      // Otherwise the GetOutput(present_key_{self/cross}_{i}) method returns transposed K caches.
-      TransposeKCaches(cross_cache_->GetValues());
-      TransposeKCaches(decoder_state_->kv_cache_.GetPresents());
-    }
-
-    // Update inputs and outputs for decoder
-    decoder_state_->UpdateInputsOutputs(next_tokens, next_indices, current_length, first_run_);
-
-    // Run decoder-with-past
-    auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
-
-    if (decoder_state_->output_cross_qk_type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
-      UpdateCrossQKSearchBuffer<Ort::Float16_t>(current_length);
-    } else {
-      UpdateCrossQKSearchBuffer<float>(current_length);
-    }
-
-    first_run_ = false;
-    return logits;
   }
-  // Not reached
-  return {};
+
+  if (first_run_ && decoder_state_->UsesDecoderMaskedMHA()) {
+    // Transpose the K caches only when the else branch is run for the first time.
+    // Otherwise the GetOutput(present_key_{self/cross}_{i}) method returns transposed K caches.
+    TransposeKCaches(cross_cache_->GetValues());
+    TransposeKCaches(decoder_state_->kv_cache_.GetPresents());
+  }
+
+  // Update inputs and outputs for decoder
+  decoder_state_->UpdateInputsOutputs(next_tokens, next_indices, current_length, first_run_);
+
+  // Run decoder-with-past
+  auto logits = decoder_state_->Run(current_length, next_tokens, next_indices);
+
+  if (decoder_state_->output_cross_qk_type_ == Ort::TypeToTensorType<Ort::Float16_t>) {
+    UpdateCrossQKSearchBuffer<Ort::Float16_t>(current_length);
+  } else {
+    UpdateCrossQKSearchBuffer<float>(current_length);
+  }
+
+  first_run_ = false;
+  return logits;
 }
 
 void WhisperState::Finalize(int current_length) {

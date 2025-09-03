@@ -5,6 +5,7 @@ import onnxruntime_genai as og
 import argparse
 import time
 import json
+import numpy as np
 
 def get_tools_list(input_tools):
     # input_tools format: '[{"name": "fn1", "description": "fn details", "parameters": {"p1": {"description": "details", "type": "string"}}},
@@ -154,6 +155,7 @@ def main(args):
             prompt = text
         else:
             prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+
         input_tokens = tokenizer.encode(prompt)
         generator.append_tokens(input_tokens)
 
@@ -196,7 +198,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")
     parser.add_argument('-m', '--model_path', type=str, required=True, help='Onnx model folder path (must contain genai_config.json and model.onnx)')
-    parser.add_argument('-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
+    parser.add_argument('-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "NvTensorRtRtx", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
     parser.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
     parser.add_argument('-l', '--max_length', type=int, help='Max number of tokens to generate including the prompt')
     parser.add_argument('-ds', '--do_sample', action='store_true', help='Do random sampling. When false, greedy or beam search are used to generate the output. Defaults to false')
