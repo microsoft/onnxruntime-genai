@@ -454,7 +454,6 @@ __global__ void FilterOnTopP(float* scores, float* prefix_sums, float* scores_te
   }
 }
 
-#define FLT_MAX 3.40282347e+38F
 // Get top k indices and scores from unsorted input
 struct TopK_2 {
   int p = -1;
@@ -616,7 +615,7 @@ void LaunchGetTopKSubset(cudaStream_t stream, float* scores_in, float* scores_ou
   // Use "distributed" TopK only when:
   // `batch_size` is small enough && 'k' is small enough && `vocab_size` is large enough.
   // TODO(hasesh): Tune this and support slightly igher batch sizes. For now, only sampling is supported.
-  bool enable_distributed_selection_sort = (batch_size == 1) && (k <= 64) && (vocab_size >= 100000) && (data->top_k_shards > 0);
+  bool enable_distributed_selection_sort = ((batch_size == 1) && (k <= 64) && (vocab_size >= 100000) && (data->top_k_shards > 0));
   if (enable_distributed_selection_sort) {
     dim3 grid(1, 1, data->top_k_shards);
 
