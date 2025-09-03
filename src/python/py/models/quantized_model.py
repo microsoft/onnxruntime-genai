@@ -935,16 +935,27 @@ class GPTQModel(QuantizedModel):
         flattened_bits = np.unpackbits((weight & mask).astype(np.uint8)).reshape(-1, 8)[:, -bits:]
         weight_packed = np.packbits(flattened_bits)
 
-        if zeros is None or self.is_symmetric:
-           packed_data =  np.concatenate([weight_packed, scales.astype(np.float16).copy().view(np.uint8).flatten()])
-        else:
-           packed_data = np.concatenate([weight_packed, scales.astype(np.float16).copy().view(np.uint8).flatten(), 
-                            zeros.astype(np.float16).copy().view(np.uint8).flatten()])
 
-        type_size = 2 + (0 if self.is_symmetric else 2) + group_size * bits // 8
-        module.qweight = torch.from_numpy(packed_data.reshape(M, K //  group_size  *  type_size))
-        module.qzeros = None  # qzeros is not used in T-MAC quantization
-        module.scales = None  # scales is not used in T-MAC quantization
+
+
+        if not self.is_symmetric and zeros is not None:
+            module.qzeros = torch.from_numpy(zeros.astype(np.float16))
+        else :
+            module.qzeros = None
+        
+        module.scales = torch.from_numpy(scales.astype(np.float16))
+        module.qweight = torch.from_numpy(weight_packed.reshape(M, K * bits // 8))
+
+        # if zeros is None or self.is_symmetric:
+        #    packed_data =  np.concatenate([weight_packed, scales.astype(np.float16).copy().view(np.uint8).flatten()])
+        # else:
+        #    packed_data = np.concatenate([weight_packed, scales.astype(np.float16).copy().view(np.uint8).flatten(), 
+        #                     zeros.astype(np.float16).copy().view(np.uint8).flatten()])
+
+        # type_size = 2 + (0 if self.is_symmetric else 2) + group_size * bits // 8
+        # module.qweight = torch.from_numpy(packed_data.reshape(M, K //  group_size  *  type_size))
+        # module.qzeros = None  # qzeros is not used in T-MAC quantization
+        # module.scales = None  # scales is not used in T-MAC quantization
 
  
 

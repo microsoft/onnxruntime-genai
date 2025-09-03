@@ -832,12 +832,21 @@ class Model:
         print("Using MatMulNBits for quantized MatMul with TMAC.")
         name = f"{basename}NBits"
 
-        weight = name[1:].replace("/", ".") + ".weight"
+        weight = name[1:].replace("/", ".") + ".qweight"
         self.make_initializer(matmul.qweight, weight)
+        scales = name[1:].replace("/", ".") + ".scales"
+        self.make_initializer(matmul.scales, scales, to=self.io_dtype)
 
-        inputs = [root_input, weight]
+        inputs = [root_input, weight, scales]
+
+        if hasattr(matmul, "qzeros") and matmul.qzeros is not None:
+            zeros = name[1:].replace("/", ".") + ".qzeros"
+            self.make_initializer(matmul.qzeros, zeros)
+            inputs.append(zeros)
+
 
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
+        # TODO:: How to represent tmac types in matmulnbits
         self.make_node(
             "MatMulNBits", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
             accuracy_level=5,
