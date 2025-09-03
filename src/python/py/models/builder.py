@@ -2735,7 +2735,7 @@ class Model:
             model = GGUFModel.from_pretrained(self.model_type, input_path, self.head_size, self.hidden_size, self.intermediate_size, self.num_attn_heads, self.num_kv_heads, self.vocab_size)
             self.layernorm_attrs["add_offset"] = 0  # add offset already done for GGUF models
 
-        elif self.quant_type is not None:
+        elif self.quant_type is not None and self.quant_type != "bitnet":
             # Load quantized PyTorch model
             try:
                 from quantized_model import QuantModel
@@ -2748,7 +2748,7 @@ class Model:
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
-            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, **extra_kwargs)
 
         if "adapter_path" in self.extra_options:
             from peft import PeftModel
@@ -4227,7 +4227,33 @@ class GPTOSSModel(Model):
 
 class BitNetModel(LlamaModel):
     def __init__(self, config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options):
+        # Should set linear rope scaling factor to 1
+        # https://github.com/microsoft/BitNet/blob/404980eecae38affa4871c3e419eae3f44536a95/utils/convert-hf-to-gguf-bitnet.py#L967C26-L967C47
         super().__init__(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        # adjust weights for bitnet
+        attention.q_proj.weight.data = self.adjust_weight(attention.q_proj.weight.data)
+        attention.k_proj.weight.data = self.adjust_weight(attention.k_proj.weight.data)
+        attention.v_proj.weight.data = self.adjust_weight(attention.v_proj.weight.data)
+        attention.o_proj.weight.data = self.adjust_weight(attention.o_proj.weight.data)
+
+        super().make_attention(layer_id, attention, root_input, **kwargs)
+
+    def make_mlp_proj(self, layer_id, mlp, root_input):
+        # adjust weights for bitnet
+        mlp.down_proj.weight.data = self.adjust_weight(mlp.down_proj.weight.data)
+        mlp.up_proj.weight.data = self.adjust_weight(mlp.up_proj.weight.data)
+        mlp.gate_proj.weight.data = self.adjust_weight(mlp.gate_proj.weight.data)
+
+        super().make_mlp_proj(layer_id, mlp, root_input)
+
+    def adjust_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        dtype = weight.dtype
+        weight = weight.float()
+        iscale = 1.0 / weight.abs().mean().clamp_(min=1e-5)
+        result = (weight * iscale).round().clamp(-1, 1) / iscale
+        return result.type(dtype)
 
 
 def check_extra_options(kv_pairs):

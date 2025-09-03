@@ -546,25 +546,6 @@ class QuantizedModel:
                 module.mlp.up_proj.in_features = module.mlp.up_proj.qweight.shape[0] * 32 // module.mlp.up_proj.bits
                 module.mlp.down_proj.out_features = module.mlp.down_proj.qweight.shape[1]
                 module.mlp.down_proj.in_features = module.mlp.down_proj.qweight.shape[0] * 32 // module.mlp.down_proj.bits
-            elif self.quant_type == "bitnet":
-                module.self_attn.q_proj.out_features = module.self_attn.q_proj.scales.shape[1]
-                module.self_attn.q_proj.in_features = module.self_attn.q_proj.qweight.shape[0]
-                module.self_attn.k_proj.out_features = module.self_attn.k_proj.scales.shape[1]
-                module.self_attn.k_proj.in_features = module.self_attn.k_proj.qweight.shape[0]
-                module.self_attn.v_proj.out_features = module.self_attn.v_proj.scales.shape[1]
-                module.self_attn.v_proj.in_features = module.self_attn.v_proj.qweight.shape[0]
-                module.self_attn.o_proj.out_features = module.self_attn.o_proj.scales.shape[1]
-                module.self_attn.o_proj.in_features = module.self_attn.o_proj.qweight.shape[0]
-                module.self_attn.attn_sub_norm.out_features = module.self_attn.attn_sub_norm.scales.shape[1]
-                module.self_attn.attn_sub_norm.in_features = module.self_attn.attn_sub_norm.qweight.shape[0]
-                module.mlp.gate_proj.out_features = module.mlp.gate_proj.scales.shape[1]
-                module.mlp.gate_proj.in_features = module.mlp.gate_proj.qweight.shape[0]
-                module.mlp.up_proj.out_features = module.mlp.up_proj.scales.shape[1]
-                module.mlp.up_proj.in_features = module.mlp.up_proj.qweight.shape[0]
-                module.mlp.down_proj.out_features = module.mlp.down_proj.scales.shape[1]
-                module.mlp.down_proj.in_features = module.mlp.down_proj.qweight.shape[0]
-                module.mlp.ffn_sub_norm.out_features = module.mlp.ffn_sub_norm.scales.shape[1]
-                module.mlp.ffn_sub_norm.in_features = module.mlp.ffn_sub_norm.qweight.shape[0]
             else:
                 raise NotImplementedError(f"The {self.quant_type} quantization method is not recognized.")
 
@@ -1031,12 +1012,19 @@ class BitNetModel(QuantizedModel):
             # Unpack and repack all `QuantizedTensorModule` classes in attention
             for _, q_tensors in layer.self_attn.__dict__.items():
                 if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
+                    print("Adjusting weights for BitNet inside quantized self-attention")
                     q_tensors.weight = self.adjust_weight(q_tensors.qweight)
                     
             # Unpack and repack all `QuantizedTensorModule` classes in MLP
             for _, q_tensors in layer.mlp.__dict__.items():
                 if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
+                    print("Adjusting weights for BitNet inside quantized MLP")
                     q_tensors.weight = self.adjust_weight(q_tensors.qweight)
+
+    def _load_quant_config(self, quant_attrs):
+        self.global_group_size = None
+        self.global_bits = 2
+    
 
     def adjust_weight(weight: torch.Tensor) -> torch.Tensor:
         dtype = weight.dtype
