@@ -55,18 +55,12 @@ jobs:
           dotnet workload install macos
         displayName: "Install dependencies"
         workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
-        env:
-          AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
-          NuGetPackageSourceCredentials_TheFeed: "Username=me;Password=$(NUGET_PAT_WCR)"
 
       - powershell: |
           dotnet --info
           dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:IncludeMobileTargets=true --verbosity normal
         displayName: "Build CSharp"
         workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
-        env:
-          AZURE_DEVOPS_EXT_PAT: $(NUGET_PAT_WCR)
-          NuGetPackageSourceCredentials_TheFeed: "Username=me;Password=$(NUGET_PAT_WCR)"
 
       - task: BinSkim@4
         displayName: "Run BinSkim"
