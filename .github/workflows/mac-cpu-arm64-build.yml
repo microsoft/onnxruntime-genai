@@ -11,6 +11,7 @@ concurrency:
   cancel-in-progress: true
 env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
+  ORT_NIGHTLY_SOURCE: "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/nuget/v3/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 jobs:
   mac-cpu-arm64-build:
@@ -44,13 +45,14 @@ jobs:
           echo "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" >> $GITHUB_ENV
       - name: Download OnnxRuntime Nightly
         run: |
-          nuget install ${{ env.ORT_PACKAGE_NAME }} -version ${{ env.ORT_NIGHTLY_VERSION }} -x
+          dotnet new console
+          dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
 
       - name: Extract OnnxRuntime library and header files
         run: |
           mkdir -p ort/lib
-          mv ${{ env.ORT_PACKAGE_NAME }}/build/native/include ort/
-          mv ${{ env.ORT_PACKAGE_NAME }}/runtimes/osx-arm64/native/* ort/lib/
+          mv ${{ env.ORT_PACKAGE_NAME }}/${{ env.ORT_NIGHTLY_VERSION }}/build/native/include ort/
+          mv ${{ env.ORT_PACKAGE_NAME }}/${{ env.ORT_NIGHTLY_VERSION }}/runtimes/osx-arm64/native/* ort/lib/
 
       - name: Install Rust Toolchain
         run: |

@@ -1459,14 +1459,15 @@ class Model:
         self.rope_attrs["save_caches"] = False
         cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
 
-        if self.ep == "dml":
-            # Concat small and large cos/sin caches for DML EP only
+        if self.ep in ["dml", "NvTensorRtRtx"]:
+            # Concat small and large cos/sin caches for DML and NvTensorRtRtx EPs
+            # These EPs don't support the If operator
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
             sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
             # Save cos/sin caches to disk
             self.make_initializer(cos_cache, cos_cache_name)
             self.make_initializer(sin_cache, sin_cache_name)
-            # Do NOT make the subgraph with the If node for DML EP.
+            # Do NOT make the subgraph with the If node for these EPs.
             return
 
         # Make the following subgraph to decide which cos/sin caches to use in the rotary embeddings
@@ -4148,8 +4149,8 @@ class GPTOSSModel(Model):
 
         if op_type == "MoE":
             # Save non-quantized MoE weights as initializers
-            self.make_initializer(mlp.experts.gate_up_proj.view(self.moe_attrs["num_experts"], -1, self.hidden_size), gate_up_proj_weight, to=self.io_dtype)
-            self.make_initializer(mlp.experts.down_proj.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size), down_proj_weight, to=self.io_dtype)
+            self.make_initializer(mlp.experts.gate_up_proj.transpose(-1, -2).view(self.moe_attrs["num_experts"], -1, self.hidden_size), gate_up_proj_weight, to=self.io_dtype)
+            self.make_initializer(mlp.experts.down_proj.transpose(-1, -2).view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size), down_proj_weight, to=self.io_dtype)
         else:
             # Create and save quantized MoE weights as initializers
             gate_up_proj_qweight_list, gate_up_proj_scales_list = [], []

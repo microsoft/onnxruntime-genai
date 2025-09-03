@@ -294,6 +294,15 @@ struct Exception : std::exception {
 /// This is a C++ wrapper for OrtApi::GetAvailableProviders() and returns a vector of strings representing the available execution providers.
 std::vector<std::string> GetAvailableProviders();
 
+/// This is a C++ wrapper for OrtApi::GetEpDevices() to get execution provider devices.
+void GetEpDevices(OrtEnv* env, const OrtEpDevice* const** device_ptrs, size_t* num_devices);
+
+/// This is a C++ wrapper for OrtApi::EpDevice_EpMetadata() to get execution provider metadata.
+const OrtKeyValuePairs* GetEpDeviceMetadata(const OrtEpDevice* device);
+
+/// This is a C++ wrapper for OrtApi::GetKeyValuePairs() to get key-value pairs from metadata.
+void GetKeyValuePairs(const OrtKeyValuePairs* keyvals, const char* const** keys, const char* const** values, size_t* num_entries);
+
 inline void SetCurrentGpuDeviceId(int device_id);
 inline int GetCurrentGpuDeviceId();
 

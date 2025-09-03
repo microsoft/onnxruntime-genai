@@ -184,21 +184,39 @@ void DefaultPositionInputs::CreateAndInitializePositionIDs(DeviceSpan<int32_t> n
   // Set attention mask to be 0 for pad tokens, and 1 for all other tokens.
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
-  auto position_ids_next = OrtValue::CreateTensor(model_.allocator_cpu_, std::array<int64_t, 2>{shape[0], 1}, type_);
   auto* position_data = position_ids->GetTensorMutableData<T>();
+  auto position_ids_next = OrtValue::CreateTensor(model_.allocator_cpu_, std::array<int64_t, 2>{shape[0], 1}, type_);
   auto* position_data_next = position_ids_next->GetTensorMutableData<T>();
-  const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data();
-  auto* position = position_data;
-  for (int i = 0; i < shape[0]; i++) {
-    T abs_position = 0;
-    for (int j = 0; j < shape[1]; j++, word_id++, position++) {
-      if (*word_id == model_.config_->model.pad_token_id) {
-        *position = 0;
-      } else {
-        *position = abs_position++;
+  // If batch_size is 1 we have no padding, so we do simple ascending
+  if (shape[0] == 1) {
+    for (int i = 0; i < shape[1]; ++i) {
+      position_data[i] = static_cast<T>(i);
+    }
+    position_data_next[0] = static_cast<T>(shape[1]) - 1;
+    // Otherwise we iterate backwards as to not misinterpret any right pad tokens
+  } else {
+    const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data() + shape[0] * shape[1] - 1;
+    auto* position = position_data + shape[0] * shape[1] - 1;
+    bool found_first_non_pad = false;
+    for (int i = static_cast<int>(shape[0] - 1); i >= 0; i--) {
+      T abs_position = static_cast<T>(shape[1] - 1);
+      found_first_non_pad = false;
+      for (int j = static_cast<int>(shape[1] - 1); j >= 0; j--, word_id--, position--) {
+        // Non-pad tokens are set to their corresponding position
+        if (found_first_non_pad) {
+          *position = abs_position;
+          // If we found first non-padding token, we can now set the rest of the positions to non-0 values
+        } else if (*word_id != model_.config_->model.pad_token_id) {
+          found_first_non_pad = true;
+          *position = abs_position;
+          position_data_next[i] = abs_position;
+          // We have not found any non-padding token yet so we set the position to 0
+        } else {
+          *position = 0;
+        }
+        abs_position--;
       }
     }
-    position_data_next[i] = abs_position - 1;
   }
 
   // Move tensors to appropriate device and expand by num_beams
@@ -247,14 +265,27 @@ void DefaultPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
   // Set position id to be 0 for pad tokens, and accumulated sum of mask in a batch for other tokens
   auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
   auto* mask_data = attention_mask->GetTensorMutableData<T>();
-  const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data();
-  auto* mask = mask_data;
-  for (int i = 0; i < shape[0]; i++) {
-    for (int j = 0; j < shape[1]; j++, word_id++, mask++) {
-      if (*word_id == model_.config_->model.pad_token_id) {
-        *mask = 0;
-      } else {
-        *mask = 1;
+  // If batch size is 1, we have no padding, so we simply set all tokens to 1
+  if (shape[0] == 1) {
+    for (int i = 0; i < shape[1]; ++i) {
+      mask_data[i] = 1;
+    }
+    // Otherwise we iterate backwards as to not misinterpret any right pad tokens
+  } else {
+    auto* mask = mask_data + shape[0] * shape[1] - 1;
+    const auto* word_id = const_cast<DeviceSpan<int32_t>&>(next_tokens).CpuSpan().data() + shape[0] * shape[1] - 1;
+    bool found_first_non_pad = false;
+    for (int i = static_cast<int>(shape[0] - 1); i >= 0; i--) {
+      found_first_non_pad = false;
+      for (int j = static_cast<int>(shape[1] - 1); j >= 0; j--, word_id--, mask--) {
+        if (found_first_non_pad) {
+          *mask = 1;
+        } else if (*word_id != model_.config_->model.pad_token_id) {
+          found_first_non_pad = true;
+          *mask = 1;
+        } else {
+          *mask = 0;
+        }
       }
     }
   }

@@ -107,6 +107,30 @@ class path {
 #endif
   }
 
+  bool is_relative() const {
+#ifdef _WIN32
+    // On Windows, check if path starts with drive letter or UNC path
+    if (path_.length() >= 2 && path_[1] == ':') {
+      return false;  // Absolute path with drive letter (e.g., "C:\")
+    }
+    if (path_.length() >= 2 && path_[0] == '\\' && path_[1] == '\\') {
+      return false;  // UNC path (e.g., "\\server\share")
+    }
+    return true;  // Relative path
+#else
+    // On Unix-like systems, absolute paths start with '/'
+    return !path_.empty() && path_[0] != '/';
+#endif
+  }
+
+  path parent_path() const {
+    size_t pos = path_.find_last_of("/\\");
+    if (pos == std::string::npos) {
+      return path();  // No parent directory found
+    }
+    return path(path_.substr(0, pos));
+  }
+
  private:
   std::string path_;
 
@@ -148,5 +172,10 @@ class path {
   }
 #endif  // _WIN32
 };
+
+// Namespace-level functions
+inline bool exists(const path& p) {
+  return p.exists();
+}
 
 }  // namespace fs
