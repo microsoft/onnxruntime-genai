@@ -297,8 +297,7 @@ void DefaultPositionInputs::RewindMask(size_t index) {
 bool DefaultPositionInputs::ShouldUseStaticMaskHandling() const {
   return state_.params_->use_graph_capture ||
          (state_.params_->search.past_present_share_buffer &&
-          (model_.p_device_->GetType() == DeviceType::NvTensorRtRtx ||
-           model_.p_device_->GetType() == DeviceType::WEBGPU));
+          model_.p_device_->GetType() == DeviceType::NvTensorRtRtx);
 }
 
 // TODO: SlidingWindow does not support graph capture

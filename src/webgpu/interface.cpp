@@ -348,8 +348,9 @@ struct InterfaceImpl : DeviceInterface {
 
     // Configure device toggles (add this after error callbacks, before setting features)
     std::vector<const char*> enabledDeviceToggles = {
+        "skip_validation",  // only use "skip_validation" when ValidationMode is set to "Disabled"
         "disable_robustness",
-        "d3d_disable_ieee_strictness"  // Critical for ShaderF16 support on D3D12
+        "d3d_disable_ieee_strictness"
     };
 
     std::vector<const char*> disabledDeviceToggles = {
