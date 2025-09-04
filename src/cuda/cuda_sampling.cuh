@@ -24,8 +24,8 @@ struct SamplingData {
   cuda_unique_ptr<curandState> curand_states;
 
   cuda_unique_ptr<uint> top_k_distributed_lock;
-  cuda_unique_ptr<int> top_k_distirbuted_keys;
-  cuda_unique_ptr<float> top_k_distirbuted_values;
+  cuda_unique_ptr<int> top_k_distributed_keys;
+  cuda_unique_ptr<float> top_k_distributed_values;
   
   size_t temp_storage_bytes = 0;
   int top_k_shards = 32;
