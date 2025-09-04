@@ -19,7 +19,7 @@ def test_paged_model():
   block_size = 256
   num_heads = 32
   head_size = 96
-  num_layers = 1
+  num_layers = 32
   vocab_size = 32064
 
   # Prepare input data
@@ -73,12 +73,6 @@ def test_paged_model():
   logits = torch.empty(logits_shape, dtype=torch.float16, device='cuda')
   logits_ortvalue = OrtValue.ortvalue_from_numpy(logits.detach().cpu().numpy(), "cuda", 0)
   io_binding.bind_ortvalue_output("logits", logits_ortvalue)
-  io_binding.bind_output("/model/layers.0/attn/PagedAttention/output_0")
-  io_binding.bind_output("/model/layers.0/post_attention_layernorm/output_0")
-  io_binding.bind_output("/model/layers.0/mlp/act_fn/Sigmoid/output_0")
-  io_binding.bind_output("/model/layers.1/final_norm_layernorm/output_0")
-  io_binding.bind_output("/model/rotemb_caches_subgraph/Greater/output_0")
-  io_binding.bind_output("/model/layers.0/attn/qkv_proj/MatMul/output_0")
   for i in range(num_layers):
     io_binding.bind_ortvalue_output(f"present.{i}.key", keys[i])
     io_binding.bind_ortvalue_output(f"present.{i}.value", values[i])
@@ -90,25 +84,6 @@ def test_paged_model():
   # Check output shape
   logits = outputs[0]
   assert logits.shape == (num_tokens, vocab_size), f"Expected output shape {(num_tokens, vocab_size)}, but got {logits.shape}"
-
-  attention_output_page = outputs[1]
-  assert attention_output_page.shape == (num_tokens, num_heads * head_size), f"Expected attention output shape {(num_tokens, num_heads * head_size)}, but got {attention_output_page.shape}"
-  present_key_paged = outputs[1]
-
-  post_attention_layernorm_page = outputs[2]
-  assert post_attention_layernorm_page.shape == (num_tokens, num_heads * head_size), f"Expected post attention layernorm shape {(num_tokens, num_heads * head_size)}, but got {post_attention_layernorm_page.shape}"
-
-  sigmoid_output_page = outputs[3]
-  assert sigmoid_output_page.shape == (num_tokens, 8192), f"Expected sigmoid output shape {(num_tokens, 8192)}, but got {sigmoid_output_page.shape}"
-
-  final_norm_output_page = outputs[4]
-  assert final_norm_output_page.shape == (num_tokens, num_heads * head_size), f"Expected final norm output shape {(num_tokens, num_heads * head_size)}, but got {final_norm_output_page.shape}"
-
-  greater_output_page = outputs[5]
-  print(f"Greater output (Rotary Embedding Cache Update Indicator): {greater_output_page}")
-
-  qkv_matmul_page = outputs[6]
-  assert qkv_matmul_page.shape == (num_tokens, 9216), f"Expected QKV MatMul output shape {(num_tokens, 9216)}, but got {qkv_matmul_page.shape}"
 
   print("Paged model ran successfully.")
 
@@ -126,12 +101,6 @@ def test_paged_model():
   io_binding.bind_cpu_input("attention_mask", attention_mask.detach().cpu().numpy())
   # io_binding.bind_cpu_input("position_ids", position_ids.detach().cpu().numpy())
   io_binding.bind_output("logits")
-  io_binding.bind_output("/model/layers.0/attn/GroupQueryAttention/output_0")
-  io_binding.bind_output("/model/layers.0/post_attention_layernorm/output_0")
-  io_binding.bind_output("/model/layers.0/mlp/act_fn/Sigmoid/output_0")
-  io_binding.bind_output("/model/layers.1/final_norm_layernorm/output_0")
-  io_binding.bind_output("/model/rotemb_caches_subgraph/Greater/output_0")
-  io_binding.bind_output("/model/layers.0/attn/qkv_proj/MatMul/output_0")
   for i in range(num_layers):
     io_binding.bind_input(f"past_key_values.{i}.key", "cuda", 0, np.float16, keys_gqa[i].shape(), keys_gqa[i].data_ptr())
     io_binding.bind_input(f"past_key_values.{i}.value", "cuda", 0, np.float16, values_gqa[i].shape(), values_gqa[i].data_ptr())
@@ -144,100 +113,21 @@ def test_paged_model():
   assert logits_gqa.shape == (batch_size, sequence_length, vocab_size), f"Expected output shape {(batch_size, sequence_length, vocab_size)}, but got {logits_gqa.shape}"
   print("GQA model passed successfully.")
 
-  greater_output_page = outputs[5]
-  print(f"Greater output (Rotary Embedding Cache Update Indicator): {greater_output_page}")
-
-  # Compare qkv matmul output
-  qkv_matmul_gqa = outputs[6]
-  assert qkv_matmul_gqa.shape == (batch_size, sequence_length, 9216), f"Expected QKV MatMul output shape {(batch_size, sequence_length, 9216)}, but got {qkv_matmul_gqa.shape}"
-  diff = qkv_matmul_page[0] - qkv_matmul_gqa[0, 0]
-  # Maximum absolute difference and its index
-  max_diff = np.max(np.abs(diff))
-  max_diff_index = np.argmax(np.abs(diff))
-  # Average (mean) absolute difference
-  avg_diff = np.mean(np.abs(diff))
-  # Print results
-  print("QKV MatMul Comparison:")
-  print(f"Max absolute difference: {max_diff} at index {max_diff_index}")
-  print(f"Average absolute difference: {avg_diff}")
-  # print(f"Difference in QKV MatMul output: {qkv_matmul_page[0, :10] - qkv_matmul_gqa[0, 0, :10]}")
-  assert np.allclose(qkv_matmul_page, qkv_matmul_gqa[0], atol=1e-3), "QKV MatMul output from paged model and gqa model do not match."
-
-  # Compare attention output
-  attention_output_gqa = outputs[1]
-  assert attention_output_gqa.shape == (batch_size, sequence_length, num_heads * head_size), f"Expected attention output shape {(batch_size, sequence_length, num_heads * head_size)}, but got {attention_output_gqa.shape}"
-  diff = attention_output_page[0] - attention_output_gqa[0, 0]
-  diff = diff.reshape(num_heads, head_size)
-  # Maximum absolute difference and its index
-  max_diff = np.max(np.abs(diff), axis=1)
-  max_diff_index = np.argmax(np.abs(diff), axis=1)
-  # Average (mean) absolute difference
-  avg_diff = np.mean(np.abs(diff), axis=1)
-  print(f"Difference in attention output: {diff}")
-  # Print results
-  print("Attention Comparison:")
-  print(f"Max absolute difference: {max_diff} at index {max_diff_index}")
-  print(f"Average absolute difference: {avg_diff}")
-  # print(f"Difference in attention output: {attention_output_page[0, :10] - attention_output_gqa[0, 0, :10]}")
-  assert np.allclose(attention_output_page, attention_output_gqa[0], atol=1e-3), "Attention output from paged model and gqa model do not match."
-
-  # Compare post attention layernorm output
-  post_attention_layernorm_gqa = outputs[2]
-  assert post_attention_layernorm_gqa.shape == (batch_size, sequence_length, num_heads * head_size), f"Expected post attention layernorm shape {(batch_size, sequence_length, num_heads * head_size)}, but got {post_attention_layernorm_gqa.shape}"
-  diff = post_attention_layernorm_page[0] - post_attention_layernorm_gqa[0, 0]
-  # Maximum absolute difference and its index
-  max_diff = np.max(np.abs(diff))
-  max_diff_index = np.argmax(np.abs(diff))
-  # Average (mean) absolute difference
-  avg_diff = np.mean(np.abs(diff))
-  # Print results
-  print("Post Attention Layernorm Comparison:")
-  print(f"Max absolute difference: {max_diff} at index {max_diff_index}")
-  print(f"Average absolute difference: {avg_diff}")
-  # print(f"Difference in post attention layernorm output: {post_attention_layernorm_page[0, :10] - post_attention_layernorm_gqa[0, 0, :10]}")
-  assert np.allclose(post_attention_layernorm_page, post_attention_layernorm_gqa[0], atol=1e-3), "Post attention layernorm output from paged model and gqa model do not match."
-
-  # Compare sigmoid output
-  sigmoid_output_gqa = outputs[3]
-  assert sigmoid_output_gqa.shape == (batch_size, sequence_length, 8192), f"Expected sigmoid output shape {(batch_size, sequence_length, 8192)}, but got {sigmoid_output_gqa.shape}"
-  diff = sigmoid_output_page[0] - sigmoid_output_gqa[0, 0]
-  # Maximum absolute difference and its index
-  max_diff = np.max(np.abs(diff))
-  max_diff_index = np.argmax(np.abs(diff))
-  # Average (mean) absolute difference
-  avg_diff = np.mean(np.abs(diff))
-  # Print results
-  print("Sigmoid Output Comparison:")
-  print(f"Max absolute difference: {max_diff} at index {max_diff_index}")
-  print(f"Average absolute difference: {avg_diff}")
-  # print(f"Difference in sigmoid output: {sigmoid_output_page[0, :10] - sigmoid_output_gqa[0, 0, :10]}")
-  assert np.allclose(sigmoid_output_page, sigmoid_output_gqa[0], atol=1e-3), "Sigmoid output from paged model and gqa model do not match."
-
-  # Compare final norm output
-  final_norm_output_gqa = outputs[4]
-  assert final_norm_output_gqa.shape == (batch_size, sequence_length, num_heads * head_size), f"Expected final norm output shape {(batch_size, sequence_length, num_heads * head_size)}, but got {final_norm_output_gqa.shape}"
-  diff = final_norm_output_page[0] - final_norm_output_gqa[0, 0]
-  # Maximum absolute difference and its index
-  max_diff = np.max(np.abs(diff))
-  max_diff_index = np.argmax(np.abs(diff))
-  # Average (mean) absolute difference
-  avg_diff = np.mean(np.abs(diff))
-  # Print results
-  print("Final Norm Output Comparison:")
-  print(f"Max absolute difference: {max_diff} at index {max_diff_index}")
-  print(f"Average absolute difference: {avg_diff}")
-  # print(f"Difference in final norm output: {final_norm_output_page[0, :10] - final_norm_output_gqa[0, 0, :10]}")
-  assert np.allclose(final_norm_output_page, final_norm_output_gqa[0], atol=1e-3), "Final norm output from paged model and gqa model do not match."
-
   # Compare first present key between paged model and gqa model
   present_key_gqa = outputs[1]
   # print(f"Present key paged shape: {present_key_paged.shape}, Present key gqa shape: {present_key_gqa.shape}")
   # print(f"Difference between paged and gqa present key: {present_key_paged[1, total_sequence_length-block_size-1, 4, :50] - present_key_gqa[0, 4, total_sequence_length-1, :50]}")
 
+  # Compare top logit indices
+  top_logit_indices = np.argsort(logits, axis=1)[:, -32:][:, ::-1]
+  top_logit_indices_gqa = np.argsort(logits_gqa[0], axis=1)[:, -32:][:, ::-1]
+  print(f"Top logit indices paged: {top_logit_indices}")
+  print(f"Top logit indices gqa: {top_logit_indices_gqa}")
+  assert np.array_equal(top_logit_indices, top_logit_indices_gqa), "Top logit indices from paged model and gqa model do not match."
+
   # Compare logits and logits_gqa
-  print(f"Logits - logits_gqa sample: {logits[0, :10] - logits_gqa[0, 0, :10]}")
-  assert np.allclose(logits, logits_gqa[0], atol=1e-3), "Logits from paged model and gqad model do not match."
-  
+  print(f"Logits - logits_gqa sample: {logits[0, :32] - logits_gqa[0, 0, :32]}")
+  assert np.allclose(logits, logits_gqa[0], atol=1e-3), "Logits from paged model and gqa model do not match."
 
 if __name__ == "__main__":
   test_paged_model()
