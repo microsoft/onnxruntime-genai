@@ -623,8 +623,8 @@ void LaunchGetTopKSubset(cudaStream_t stream, float* scores_in, float* scores_ou
     dim3 block(1024, 1, 1);
     GetTopKKernelDistributed<1024><<<grid, block, 0, stream>>>(indices_out, scores_in, 
                             scores_out, batch_size, vocab_size, k, temperature, data->top_k_shards, 
-                            data->top_k_distributed_lock.get(), data->top_k_distirbuted_keys.get(), 
-                            data->top_k_distirbuted_values.get());
+                            data->top_k_distributed_lock.get(), data->top_k_distributed_keys.get(), 
+                            data->top_k_distributed_values.get());
   } else {
     dim3 grid(batch_size, 1, 1);
 
