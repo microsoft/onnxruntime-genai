@@ -157,7 +157,11 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
         main_prompt = "What is the meaning of life?"
         prompt = f'{user_prompt}{main_prompt}{prompt_suffix}{assistant_prompt}'        
 
-    prompts = [prompt]
+    if model_type == "whisper":
+        decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
+        prompts = ["".join(decoder_prompt_tokens)]
+    else:
+        prompts = [prompt]
     inputs = processor(prompts, images=image, audios=audio)
     prompt_length = inputs['input_ids'].shape()[1]
     if args.verbose: print(f"Prompt used: {prompt}")

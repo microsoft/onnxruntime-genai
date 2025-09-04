@@ -36,7 +36,7 @@ def run(args: argparse.Namespace):
         readline.set_completer(_complete)
 
         if args.non_interactive:
-            audio_paths = [args.audio]
+            audio_paths = [audio_path.strip() for audio_path in args.audio.split(",")]
         else:
             audio_paths = [audio_path.strip() for audio_path in input("Audio Paths (comma separated): ").split(",")]
         if len(audio_paths) == 0:
@@ -60,6 +60,7 @@ def run(args: argparse.Namespace):
             num_beams=args.num_beams,
             num_return_sequences=args.num_beams,
             max_length=448,
+            batch_size=batch_size,
         )
 
         generator = og.Generator(model, params)
