@@ -50,7 +50,7 @@ SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int v
   top_k_shards = std::min(top_k_shards, deviceProp.multiProcessorCount);
 
   top_k_distributed_keys = CudaMallocArray<int>(top_k_shards * 64);  // We support distributed sharding upto top_k 64
-  top_k_distirbuted_values = CudaMallocArray<float>(top_k_shards * 64); // We support distributed sharding upto top_k 64
+  top_k_distributed_values = CudaMallocArray<float>(top_k_shards * 64); // We support distributed sharding upto top_k 64
 
   temp_storage_bytes = 0;
   cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr, temp_storage_bytes, (float*)nullptr, (float*)nullptr,
