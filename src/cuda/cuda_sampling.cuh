@@ -23,6 +23,8 @@ struct SamplingData {
   cuda_unique_ptr<float> temp_buffer;
   cuda_unique_ptr<curandState> curand_states;
 
+  // Breaks Windows CI builds without this typedef
+  typedef unsigned int uint;
   cuda_unique_ptr<uint> top_k_distributed_lock;
   cuda_unique_ptr<int> top_k_distributed_keys;
   cuda_unique_ptr<float> top_k_distributed_values;
