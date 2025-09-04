@@ -49,7 +49,7 @@ SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int v
   cudaGetDeviceProperties(&deviceProp, 0); // Get properties for device 0
   top_k_shards = std::min(top_k_shards, deviceProp.multiProcessorCount);
 
-  top_k_distirbuted_keys = CudaMallocArray<int>(top_k_shards * 64);  // We support distributed sharding upto top_k 64
+  top_k_distributed_keys = CudaMallocArray<int>(top_k_shards * 64);  // We support distributed sharding upto top_k 64
   top_k_distirbuted_values = CudaMallocArray<float>(top_k_shards * 64); // We support distributed sharding upto top_k 64
 
   temp_storage_bytes = 0;
