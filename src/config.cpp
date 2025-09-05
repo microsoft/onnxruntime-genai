@@ -751,27 +751,27 @@ struct Model_Element : JSON::Element {
 };
 
 int safe_double_to_int(double x, std::string_view name) {
-    // 1. Check for non-finite values (NaN, infinity)
-    if (!std::isfinite(x)) {
-        std::stringstream ss;
-        ss << "Field '" << name << "' cannot be converted to int32 (NaN or Inf)";
-        throw std::overflow_error(ss.str());
-    }
+  // 1. Check for non-finite values (NaN, infinity)
+  if (!std::isfinite(x)) {
+    std::stringstream ss;
+    ss << "Field '" << name << "' cannot be converted to int32 (NaN or Inf)";
+    throw std::overflow_error(ss.str());
+  }
 
-    // 2. Check if the value is outside the representable range of an integer.
-    constexpr double min_int_val = static_cast<double>(std::numeric_limits<int>::min());
-    constexpr double max_int_val = static_cast<double>(std::numeric_limits<int>::max());
+  // 2. Check if the value is outside the representable range of an integer.
+  constexpr double min_int_val = static_cast<double>(std::numeric_limits<int>::min());
+  constexpr double max_int_val = static_cast<double>(std::numeric_limits<int>::max());
 
-    if (x < min_int_val || x > max_int_val) {
-        std::stringstream ss;
-        ss << "Field '" << name << "' value " << x << " is out of int32 range ["
-           << std::numeric_limits<int>::min() << ", " << std::numeric_limits<int>::max() << "]";
-        throw std::overflow_error(ss.str());
-    }
+  if (x < min_int_val || x > max_int_val) {
+    std::stringstream ss;
+    ss << "Field '" << name << "' value " << x << " is out of int32 range ["
+       << std::numeric_limits<int>::min() << ", " << std::numeric_limits<int>::max() << "]";
+    throw std::overflow_error(ss.str());
+  }
 
-    // 3. Perform the cast. This truncates any fractional part (e.g., 3.9 becomes 3).
-    // If rounding is desired, use `return static_cast<int>(std::round(x));`
-    return static_cast<int>(x);
+  // 3. Perform the cast. This truncates any fractional part (e.g., 3.9 becomes 3).
+  // If rounding is desired, use `return static_cast<int>(std::round(x));`
+  return static_cast<int>(x);
 }
 
 struct Search_Element : JSON::Element {

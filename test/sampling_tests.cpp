@@ -21,7 +21,6 @@
 #define MODEL_PATH "../../test/test_models/"
 #endif
 
-
 namespace {
 
 void Softmax(std::span<float> scores, float temperature) {
@@ -36,11 +35,11 @@ void Softmax(std::span<float> scores, float temperature) {
   // Divide each score by the sum of exponentials
   std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](float score) { return score / exp_sum; });
 }
-  
+
 /**
  * @brief Helper function to run a randomized sampling test with specified parameters.
  * * This function encapsulates the entire test logic, including setting up the model,
- * generating tokens over multiple iterations, calculating the expected probability 
+ * generating tokens over multiple iterations, calculating the expected probability
  * distribution on the CPU, and verifying the results.
  * * @param batch_size The number of sequences to process in parallel.
  * @param k The number of highest probability vocabulary tokens to keep for top-k-filtering.
@@ -111,7 +110,7 @@ void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_ite
 
   // --- 4. Calculate Expected Distribution on CPU ---
   std::vector<float> top_k_logits(k);
-  std::iota(top_k_logits.rbegin(), top_k_logits.rend(), 1.0f); // Fills with {k, k-1, ..., 1}
+  std::iota(top_k_logits.rbegin(), top_k_logits.rend(), 1.0f);  // Fills with {k, k-1, ..., 1}
 
   // Apply temperature to get initial probabilities
   std::vector<float> initial_probs = top_k_logits;
@@ -126,7 +125,7 @@ void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_ite
     }
     cumulative_prob += initial_probs[i];
   }
-  
+
   // Re-normalize the filtered logits to get the final expected distribution.
   // The final softmax should always use temperature=1.0 according to the sampling logic.
   std::vector<float> expected_distributions = filtered_logits;
@@ -143,7 +142,7 @@ void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_ite
 
     const float expected_prob = expected_distributions[logit_index];
     const float actual_prob = static_cast<float>(count) / total_count;
-    
+
     EXPECT_NEAR(actual_prob, expected_prob, 0.01);
   }
 }
@@ -652,17 +651,16 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
 
 TEST(SamplingTests, RandomizedSamplingTopPAndKCuda) {
   RunSamplingTest(
-    /*batch_size=*/2, 
-    /*k=*/10, 
-    /*p=*/0.75f, 
-    /*vocab_size=*/2048, 
-    /*num_iter=*/5000, 
-    /*temperature=*/1.0f,
-    /*use_cuda=*/true
-  );
+      /*batch_size=*/2,
+      /*k=*/10,
+      /*p=*/0.75f,
+      /*vocab_size=*/2048,
+      /*num_iter=*/5000,
+      /*temperature=*/1.0f,
+      /*use_cuda=*/true);
 }
 
-#if 0 // TODO: Enable this test once we fix sampling bug. Current code base cannot pass this test.
+#if 0  // TODO: Enable this test once we fix sampling bug. Current code base cannot pass this test.
 TEST(SamplingTests, RandomizedSamplingTopPAndKWithTemperatureCuda) {
   RunSamplingTest(
     /*batch_size=*/1,
