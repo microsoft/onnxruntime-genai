@@ -3227,7 +3227,11 @@ class Model:
             kwargs.get("weight3", ""),
             kwargs.get("scales3", ""),
             kwargs.get("bias3", ""),
+            kwargs.get("zero_points1", ""),
+            kwargs.get("zero_points2", ""),
+            kwargs.get("zero_points3", ""),
         ]
+
         output = f"{name}/output_0"
 
         extra_kwargs = (
