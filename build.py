@@ -130,6 +130,8 @@ def _parse_args():
 
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
+    parser.add_argument("--use_webgpu", action="store_true", help="Whether to use WebGPU. Default is to not use WebGPU.")
+
     parser.add_argument("--use_guidance", action="store_true", help="Whether to add guidance support. Default is False.")
     
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
@@ -506,6 +508,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
         f"-DUSE_ROCM={'ON' if args.use_rocm else 'OFF'}",
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
+        f"-DUSE_WEBGPU={'ON' if args.use_webgpu else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
         f"-DBUILD_WHEEL={build_wheel}",
         f"-DUSE_GUIDANCE={'ON' if args.use_guidance else 'OFF'}",
