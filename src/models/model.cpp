@@ -636,9 +636,9 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
           {"VitisAI", "VitisAIExecutionProvider"},
           {"NvTensorRtRtx", "NvTensorRTRTXExecutionProvider"},
       };
-      std::string epName{};
+      std::string ep_name{};
       if (auto search = s_providerNameToExecutionProvider.find(provider_options.name); search != s_providerNameToExecutionProvider.end()) {
-        epName = search->second;
+        ep_name = search->second;
       }
 
       size_t num_devices;
@@ -680,7 +680,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         bool hardware_ov_device_type_matched = check_ov_device_type(device_ptrs[i]);
 
         // Append matched EP device
-        if (Ort::api->EpDevice_EpName(device_ptrs[i]) == epName &&
+        if (Ort::api->EpDevice_EpName(device_ptrs[i]) == ep_name &&
             hardware_device_id_matched &&
             hardware_vendor_id_matched &&
             hardware_device_type_matched &&
