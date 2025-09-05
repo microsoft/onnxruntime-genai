@@ -42,8 +42,8 @@ SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int v
   offsets = CudaMallocArray<int>(batch_size + 1);
   curand_states = CudaMallocArray<curandState>(batch_size);
 
-  top_k_distributed_lock = CudaMallocArray<uint>(1);
-  cudaMemset(top_k_distributed_lock.get(), 0, sizeof(uint));
+  top_k_distributed_lock = CudaMallocArray<int>(1);
+  cudaMemset(top_k_distributed_lock.get(), 0, sizeof(int));
 
   cudaDeviceProp deviceProp;
   cudaGetDeviceProperties(&deviceProp, 0); // Get properties for device 0
@@ -513,7 +513,7 @@ __global__ void GetTopKKernel(int* indices_out, float* scores_in, float* scores_
 template <int kBlockSize>
 __global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, float* scores_out, int batch_size, 
                                         int vocab_size, int k, float temperature, int top_k_shards, 
-                                        uint* top_k_distributed_lock, int* distributed_indices_out, float* distributed_scores_out) {
+                                        int* top_k_distributed_lock, int* distributed_indices_out, float* distributed_scores_out) {
   int batch = blockIdx.x;
   int tid = threadIdx.x;
   TopK_2 partial;
@@ -568,10 +568,10 @@ __global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, flo
     {
       uint count_of_completed_TBs = 0;
 
-      asm volatile("ld.volatile.global.u32 %0, [%1];" : "=r"(count_of_completed_TBs) : "l"(top_k_distributed_lock));
+      asm volatile("ld.volatile.global.s32 %0, [%1];" : "=r"(count_of_completed_TBs) : "l"(top_k_distributed_lock));
       while (count_of_completed_TBs < top_k_shards)
       {
-          asm volatile("ld.volatile.global.u32 %0, [%1];" : "=r"(count_of_completed_TBs) : "l"(top_k_distributed_lock));
+          asm volatile("ld.volatile.global.s32 %0, [%1];" : "=r"(count_of_completed_TBs) : "l"(top_k_distributed_lock));
       }
 
       // Reset the lock for next kernel call
