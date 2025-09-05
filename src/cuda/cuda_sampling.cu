@@ -566,7 +566,7 @@ __global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, flo
     // Elected thread spins while waiting for other TBs to complete their work
     if (threadIdx.x == 0)
     {
-      uint count_of_completed_TBs = 0;
+      int count_of_completed_TBs = 0;
 
       asm volatile("ld.volatile.global.s32 %0, [%1];" : "=r"(count_of_completed_TBs) : "l"(top_k_distributed_lock));
       while (count_of_completed_TBs < top_k_shards)
