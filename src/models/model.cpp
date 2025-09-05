@@ -637,11 +637,13 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         ep_name = search->second;
       }
 
-      size_t num_devices;
-      const OrtEpDevice* const* device_ptrs;
-      Ort::api->GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
+      size_t num_devices = 0;
+      const OrtEpDevice* const* device_ptrs = nullptr;
+      Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
+
       std::vector<const OrtEpDevice*> ep_devices_ptrs;
       ep_devices_ptrs.reserve(num_devices);
+
       for (size_t i = 0; i < num_devices; ++i) {
         const OrtHardwareDevice* hardware_device = Ort::api->EpDevice_Device(device_ptrs[i]);
         const uint32_t hardware_device_id = Ort::api->HardwareDevice_DeviceId(hardware_device);
