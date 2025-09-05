@@ -438,7 +438,7 @@ class Model:
             genai_config["model"]["decoder"]["sliding_window"] = {"window_size": self.window_size, "slide_key_value_cache": False, "slide_inputs": False}
         
         if self.ep == "NvTensorRtRtx":
-            genai_config["model"]["ep_context"] = {"enable": False, "filename": "model_ctx.onnx"}
+            genai_config["model"]["ep_context"] = {"enable": False}
 
         if self.ep != "cpu":
             ep_options = { self.ep : self.ep_attrs[self.ep] }

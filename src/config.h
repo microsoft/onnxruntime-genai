@@ -60,9 +60,6 @@ struct Config {
     static constexpr std::string_view EncoderOutputsName = "encoder_outputs";
     static constexpr std::string_view EncoderAttentionMaskName = "encoder_attention_mask";
 
-    // EP context model default file name
-    static constexpr std::string_view EpContextFileName = "model_ctx.onnx";
-
   };
 
   fs::path config_path;  // Path of the config directory
@@ -111,9 +108,8 @@ struct Config {
 
     struct EpContext {
       // use EP context model for inference
+      // it assumes the EP context model is in the same directory as the base model with name as "filename_ctx.onnx"
       bool enable{false};
-      // file name for EP context model. Default is "model_ctx.onnx"
-      std::string filename{""};
     } ep_context;
 
 
