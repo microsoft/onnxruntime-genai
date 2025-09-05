@@ -734,7 +734,7 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   EnsureDeviceOrtInit(*p_device_, *config_);
 
   // Only CUDA, TRT-RTX and DML does every input on the device
-  if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx)
+  if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML)
     p_device_inputs_ = p_device_;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
