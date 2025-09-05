@@ -138,7 +138,7 @@ BenchmarkResult RunBenchmark(const BenchmarkParams& params) {
   std::mt19937 engine(rd());
   std::uniform_int_distribution<> dist(5, 25);
   const int warm_up_runs = 5;
-  const int total_runs = 100;
+  const int total_runs = 1000;
 
   std::vector<double> latencies;
 
@@ -180,19 +180,18 @@ TEST(SamplingBenchmarks, PerformanceTests) {
   device_types.push_back("cuda");
 #endif
 
-  std::vector<int> batch_sizes = {1, 4};
-  std::vector<int> vocab_sizes = {32000, 201088};
-  std::vector<int> ks = {1, 8, 20, 50, 64, 100};
+  std::vector<int> batch_sizes = {1};
+  std::vector<int> vocab_sizes = {201088};
+  std::vector<int> ks = {1, 8, 20, 50, 100};
 
   for (const auto& device_type : device_types) {
     for (int batch_size : batch_sizes) {
       for (int vocab_size : vocab_sizes) {
+        test_cases.push_back({device_type, batch_size, vocab_size, 0, BenchmarkFunction::TopP});        
         for (int k : ks) {
-          if (k > vocab_size) continue;
           test_cases.push_back({device_type, batch_size, vocab_size, k, BenchmarkFunction::TopK});
           test_cases.push_back({device_type, batch_size, vocab_size, k, BenchmarkFunction::TopKTopP});
         }
-        test_cases.push_back({device_type, batch_size, vocab_size, 0, BenchmarkFunction::TopP});
       }
     }
   }
