@@ -5,7 +5,7 @@
 #include <atomic>
 #include <memory>
 #include "span.h"
-
+#include "models/onnxruntime_api.h" // for ONNXTensorElementDataType
 namespace Ort {
 struct Allocator;
 }
