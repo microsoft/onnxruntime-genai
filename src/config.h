@@ -59,6 +59,7 @@ struct Config {
     static constexpr std::string_view EncoderHiddenStatesName = "encoder_hidden_states";
     static constexpr std::string_view EncoderOutputsName = "encoder_outputs";
     static constexpr std::string_view EncoderAttentionMaskName = "encoder_attention_mask";
+
   };
 
   fs::path config_path;  // Path of the config directory
@@ -104,6 +105,13 @@ struct Config {
     int decoder_start_token_id{};   // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
     int vocab_size{};
     int context_length{};
+
+    struct EpContext {
+      // use EP context model for inference
+      // it assumes the EP context model is in the same directory as the base model with name as "filename_ctx.onnx"
+      bool enable{false};
+    } ep_context;
+
 
     struct Encoder {
       std::string filename;
