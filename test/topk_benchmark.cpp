@@ -124,16 +124,6 @@ void RunBenchmarks(const BenchmarkParams& params) {
       });
       all_results.push_back({params, "SELECTION_SORT", 0, mean_ms, stdev_ms, p95_ms});
     }
-
-    // Benchmark Hybrid Sort
-    for (int p_size : {1024, 2048, 4096, 8192}) {
-      if (p_size > params.vocab_size) continue;
-      auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
-        Generators::cuda::RunTopKViaHybridSort(data.get(), stream, scores_in_d.get(), params.vocab_size,
-                                               params.batch_size, params.k, p_size);
-      });
-      all_results.push_back({params, "HYBRID_SORT", p_size, mean_ms, stdev_ms, p95_ms});
-    }
   }
 
   PrintSummary(all_results);
