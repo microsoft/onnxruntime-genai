@@ -98,7 +98,6 @@ def main(args):
 
     search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
     search_options['batch_size'] = 1
-    search_options['do_sample'] = False
 
     if args.verbose: print(search_options)
 
