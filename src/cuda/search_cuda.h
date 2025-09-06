@@ -4,7 +4,7 @@
 #pragma once
 #include <cuda_runtime.h>
 #include "search_cuda.cuh"
-#include "cuda_sampling.cuh"
+#include "cuda_sampling.h"
 
 namespace Generators {
 
