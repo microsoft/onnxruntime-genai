@@ -8,6 +8,12 @@ file(GLOB test_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
 
+if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+  target_sources(unit_tests PRIVATE ${test_srcs} ${generator_cudalib_srcs})
+else()
+  target_sources(unit_tests PRIVATE ${test_srcs})
+endif()
+
 target_sources(unit_tests PRIVATE ${test_srcs})
 
 target_include_directories(unit_tests PRIVATE
@@ -28,6 +34,12 @@ set_target_properties(unit_tests PROPERTIES
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
 target_link_libraries(unit_tests PRIVATE ${ONNXRUNTIME_LIB})
+endif()
+
+if(USE_CUDA AND CMAKE_CUDA_COMPILER)  
+  target_link_libraries(unit_tests PRIVATE cublasLt cublas curand cufft cudart)
+  set_target_properties(unit_tests PROPERTIES LINKER_LANGUAGE CUDA)
+  add_dependencies(unit_tests onnxruntime-genai-cuda)
 endif()
 
 set(TEST_MODEL_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/test_models/")
