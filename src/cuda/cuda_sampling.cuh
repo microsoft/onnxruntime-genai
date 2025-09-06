@@ -22,7 +22,13 @@ struct SamplingData {
   cuda_unique_ptr<int> offsets;
   cuda_unique_ptr<float> temp_buffer;
   cuda_unique_ptr<curandState> curand_states;
+
+  cuda_unique_ptr<int> top_k_distributed_lock;
+  cuda_unique_ptr<int> top_k_distributed_keys;
+  cuda_unique_ptr<float> top_k_distributed_values;
+  
   size_t temp_storage_bytes = 0;
+  int top_k_shards = 32;
 };
 
 void LaunchPopulateIndices(int* indices, int size, int batch_size, cudaStream_t stream);

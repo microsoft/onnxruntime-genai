@@ -41,6 +41,17 @@ SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int v
   indices_in = CudaMallocArray<int>(vocab_size * batch_size);
   offsets = CudaMallocArray<int>(batch_size + 1);
   curand_states = CudaMallocArray<curandState>(batch_size);
+
+  top_k_distributed_lock = CudaMallocArray<int>(1);
+  cudaMemset(top_k_distributed_lock.get(), 0, sizeof(int));
+
+  cudaDeviceProp deviceProp;
+  cudaGetDeviceProperties(&deviceProp, 0); // Get properties for device 0
+  top_k_shards = std::min(top_k_shards, deviceProp.multiProcessorCount);
+
+  top_k_distributed_keys = CudaMallocArray<int>(top_k_shards * 64);  // We support distributed sharding upto top_k 64
+  top_k_distributed_values = CudaMallocArray<float>(top_k_shards * 64); // We support distributed sharding upto top_k 64
+
   temp_storage_bytes = 0;
   cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr, temp_storage_bytes, (float*)nullptr, (float*)nullptr,
                                                      (int*)nullptr, (int*)nullptr, vocab_size * batch_size, batch_size, (int*)nullptr, (int*)nullptr, 0, sizeof(float) * 8, stream);
@@ -498,13 +509,129 @@ __global__ void GetTopKKernel(int* indices_out, float* scores_in, float* scores_
   }
 }
 
-// Gets all top K indices and scores from unsorted input
-void LaunchGetTopKSubset(cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
-  dim3 grid(batch_size, 1, 1);
+// Distributed Selection Sort based TopK kernel (multiple TB works along vocab space)
+template <int kBlockSize>
+__global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, float* scores_out, int batch_size, 
+                                        int vocab_size, int k, float temperature, int top_k_shards, 
+                                        int* top_k_distributed_lock, int* distributed_indices_out, float* distributed_scores_out) {
+  int batch = blockIdx.x;
+  int tid = threadIdx.x;
+  TopK_2 partial;
 
-  // use large block size for better utilization
-  dim3 block(1024, 1, 1);
-  GetTopKKernel<1024><<<grid, block, 0, stream>>>(indices_out, scores_in, scores_out, batch_size, vocab_size, k, temperature);
+  float const MAX_T_VAL = FLT_MAX;
+
+  int* distributed_indices_out_curr = distributed_indices_out + blockIdx.z * k;
+  float* distributed_scores_out_curr = distributed_scores_out + blockIdx.z * k;
+
+  int start_i = blockIdx.z * blockDim.x + tid;  
+ 
+  for (int ite = 0; ite < k; ite++) {
+    partial.init();
+
+    for (auto elemId = start_i; elemId < vocab_size; elemId += kBlockSize* gridDim.z) {
+      float elem = scores_in[elemId + batch * vocab_size];
+      partial.insert(elem, elemId);
+    }
+    // reduce in thread block
+    typedef cub::BlockReduce<TopK_2, kBlockSize> BlockReduce;
+    __shared__ typename BlockReduce::TempStorage temp_storage;
+    TopK_2 top_k_sequence = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op_2);
+
+    if (tid == 0) {
+      // No temperature scaling here - we will do it after the final reduction
+      distributed_scores_out_curr[ite + batch * k] = top_k_sequence.u;
+
+      distributed_indices_out_curr[ite + batch * k] = top_k_sequence.p;
+
+      // set the max value to -MAX_T_VAL so that the value doesn't get picked again
+      scores_in[batch * vocab_size + top_k_sequence.p] = -MAX_T_VAL;
+      __threadfence_block();
+    }
+
+    __syncthreads();
+  }
+
+  // All TBs flush their data and it should be visible to every other TB
+  __threadfence();   
+  __syncthreads();
+
+  // Signal that each threadblock has done its work using elected thread
+  if (threadIdx.x == 0)
+  {
+    atomicAdd(top_k_distributed_lock, 1);
+  }
+
+  // The reduction threadblock
+  if (blockIdx.z == 0) {
+    // Elected thread spins while waiting for other TBs to complete their work
+    if (threadIdx.x == 0)
+    {
+      int count_of_completed_TBs = 0;
+
+      asm volatile("ld.volatile.global.s32 %0, [%1];" : "=r"(count_of_completed_TBs) : "l"(top_k_distributed_lock));
+      while (count_of_completed_TBs < top_k_shards)
+      {
+          asm volatile("ld.volatile.global.s32 %0, [%1];" : "=r"(count_of_completed_TBs) : "l"(top_k_distributed_lock));
+      }
+
+      // Reset the lock for next kernel call
+      atomicExch(top_k_distributed_lock, 0);
+    }
+
+    // TODO: Is there enough shared memory to bring the top_k shards to shared memory on all GPUs?
+    TopK_2 reduce_partial; 
+    for (int ite = 0; ite < k; ite++) {
+      reduce_partial.init();
+  
+      for (int i = threadIdx.x; i < top_k_shards*k; i += blockDim.x) {
+        float score = distributed_scores_out[i];
+        reduce_partial.insert(score, i);
+      }
+
+      // reduce in thread block
+      typedef cub::BlockReduce<TopK_2, kBlockSize> BlockReduce;
+      __shared__ typename BlockReduce::TempStorage temp_storage;
+      TopK_2 top_k_sequence_reduced = BlockReduce(temp_storage).Reduce(reduce_partial, reduce_topk_op_2);
+
+      if (tid == 0) {
+        // Do temperature scaling
+        scores_out[ite + batch * k] = top_k_sequence_reduced.u / temperature;
+        
+        int local_index = top_k_sequence_reduced.p;
+        indices_out[ite + batch * k] = distributed_indices_out[local_index];
+
+        // set the max value to -MAX_T_VAL so that the value doesn't get picked again
+        distributed_scores_out[local_index] = -MAX_T_VAL;
+        __threadfence_block();
+      }
+
+      __syncthreads();
+    }
+  }
+}
+
+// Gets all top K indices and scores from unsorted input
+void LaunchGetTopKSubset(cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, SamplingData* data = nullptr) {
+  // Use "distributed" TopK only when:
+  // `batch_size` is small enough && 'k' is small enough && `vocab_size` is large enough.
+  // TODO(hasesh): Tune this and support slightly igher batch sizes. For now, only sampling is supported.
+  bool enable_distributed_selection_sort = ((batch_size == 1) && (k <= 64) && (vocab_size >= 100000) && (data->top_k_shards > 0));
+  if (enable_distributed_selection_sort) {
+    dim3 grid(1, 1, data->top_k_shards);
+
+    // use large block size for better utilization
+    dim3 block(1024, 1, 1);
+    GetTopKKernelDistributed<1024><<<grid, block, 0, stream>>>(indices_out, scores_in, 
+                            scores_out, batch_size, vocab_size, k, temperature, data->top_k_shards, 
+                            data->top_k_distributed_lock.get(), data->top_k_distributed_keys.get(), 
+                            data->top_k_distributed_values.get());
+  } else {
+    dim3 grid(batch_size, 1, 1);
+
+    // use large block size for better utilization
+    dim3 block(1024, 1, 1);
+    GetTopKKernel<1024><<<grid, block, 0, stream>>>(indices_out, scores_in, scores_out, batch_size, vocab_size, k, temperature);
+  }
 }
 
 // Sets up random thresholds for top p or top k sampling
@@ -573,7 +700,8 @@ void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, fl
                       vocab_size,                \
                       batch_size,                \
                       k,                         \
-                      temperature);
+                      temperature,               \
+                      data);
 
   if (k <= 64) {
     GetTopK;
