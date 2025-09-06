@@ -21,11 +21,34 @@ parameters:
 - name: build_config
   type: string
   default: 'release'
-
+- name: enable_winml
+  type: boolean
+- name: ort_version
+  type: string
 
 stages:
 - stage: python_packaging
   jobs:
+  - ${{ if eq(parameters.enable_winml, true) }}:
+    - template: jobs/py-packaging-job.yml
+      parameters:
+        enable_winml: true
+        os: 'win'
+        arch: 'x64'
+        ep: 'winml'
+        cuda_version: '12.2'
+        cuda_display_version: '122'
+        build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+
+    - template: jobs/py-packaging-job.yml
+      parameters:
+        os: 'win'
+        arch: 'arm64'
+        ep: 'winml'
+        build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+
   - ${{ if eq(parameters.enable_win_cpu, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
@@ -33,6 +56,7 @@ stages:
         ep: 'cpu'
         os: 'win'
         build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
 
   - ${{ if eq(parameters.enable_win_arm64_cpu, true) }}:
     - template: jobs/py-packaging-job.yml
@@ -41,6 +65,7 @@ stages:
         ep: 'cpu'
         os: 'win'
         build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
 
   - ${{ if eq(parameters.enable_win_dml, true) }}:
     - template: jobs/py-packaging-job.yml
@@ -49,6 +74,7 @@ stages:
         ep: 'directml'
         os: 'win'
         build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
 
   - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '11.8')) }}:
     - template: jobs/py-packaging-job.yml
@@ -59,6 +85,7 @@ stages:
         ep: 'cuda'
         os: 'win'
         build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
 
   - ${{ if and(eq(parameters.enable_win_cuda, true), contains(parameters.cuda_versions, '12.2')) }}:
     - template: jobs/py-packaging-job.yml
@@ -69,6 +96,7 @@ stages:
         ep: 'cuda'
         os: 'win'
         build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
 
   - ${{ if eq(parameters.enable_linux_cpu, true) }}:
     - template: jobs/py-packaging-job.yml
@@ -77,6 +105,7 @@ stages:
         ep: 'cpu'
         os: 'linux'
         build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
 
   - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '11.8')) }}:
     - template: jobs/py-packaging-job.yml
@@ -86,6 +115,8 @@ stages:
         cuda_display_version: '118'
         ep: 'cuda'
         os: 'linux'
+        build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
 
   - ${{ if and(eq(parameters.enable_linux_cuda, true), contains(parameters.cuda_versions, '12.2')) }}:
     - template: jobs/py-packaging-job.yml
@@ -96,6 +127,7 @@ stages:
         ep: 'cuda'
         os: 'linux'
         build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
 
   - ${{ if eq(parameters.enable_linux_rocm, true) }}:
     - template: jobs/py-packaging-job.yml
@@ -104,6 +136,8 @@ stages:
         ep: 'rocm'
         os: 'linux'
         build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+
   - ${{ if eq(parameters.enable_macos_cpu, true) }}:
     - template: jobs/py-packaging-job.yml
       parameters:
@@ -111,9 +145,12 @@ stages:
         ep: 'cpu'
         os: 'osx'
         build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}
+
     - template: jobs/py-packaging-job.yml
       parameters:
         arch: 'arm64'
         ep: 'cpu'
         os: 'osx'
         build_config: ${{ parameters.build_config }}
+        ort_version: ${{ parameters.ort_version }}

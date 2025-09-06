@@ -51,10 +51,13 @@ parameters:
 
 - name: ort_version
   type: string
+
 - name: ort_cuda_version
   type: string
+
 - name: ort_dml_version
   type: string
+
 - name: build_config
   type: string
   default: 'release'

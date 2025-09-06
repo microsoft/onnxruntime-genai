@@ -256,6 +256,19 @@
       }
     },
     {
+      "name": "windows_x64_winml_relwithdebinfo",
+      "inherits": [
+        "windows_relwithdebinfo_default",
+        "windows_cuda_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows x64 winml relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/winml/win-x64",
+      "cacheVariables": {
+        "USE_WINML": "ON"
+      }
+    },
+    {
       "name": "windows_x64_cuda_minsizerel",
       "inherits": [
         "windows_minsizerel_default",
@@ -368,6 +381,17 @@
       "displayName": "windows arm64 directml relwithdebinfo",
       "binaryDir": "${sourceDir}/build/directml/win-arm64",
       "architecture": "arm64"
+    },
+    {
+      "name": "windows_arm64_winml_relwithdebinfo",
+      "inherits": [
+        "windows_arm64_directml_relwithdebinfo"
+      ],
+      "displayName": "windows arm64 winml relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/winml/win-arm64",
+      "cacheVariables": {
+        "USE_WINML": "ON"
+      }
     },
     {
       "name": "windows_arm64_directml_release",

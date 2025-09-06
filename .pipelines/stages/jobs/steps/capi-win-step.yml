@@ -11,6 +11,9 @@ parameters:
 - name: build_config
   type: string
   default: 'release'
+- name: enable_winml
+  type: boolean
+  default: false
 
 steps:
 - bash: |
@@ -20,9 +23,11 @@ steps:
   condition: or( eq (variables['ep'], ''), eq (variables['arch'], ''))
 
 - checkout: self
+  lfs: true
   path: onnxruntime-genai
   clean: true
   submodules: recursive
+
 - task: onebranch.pipeline.tsaoptions@1
   displayName: 'OneBranch TSAOptions'
   inputs:
@@ -31,6 +36,8 @@ steps:
 
 - template: utils/set-nightly-build-option-variable.yml
 
+- task: NuGetToolInstaller@1
+
 - script: |
     echo "arch=$(arch)"
     echo "ort_version=$(ort_version)"
@@ -38,12 +45,20 @@ steps:
     echo "cuda_version=$(cuda_version)"
     echo "target=${{ parameters.target }}"
     echo "build_config=${{ parameters.build_config }}"
+
   displayName: 'Print Parameters'
+
+- task: CmdLine@2
+  displayName: "Ensure nuget.exe"
+  inputs:
+    workingDirectory: '$(Build.Repository.LocalPath)'
+    script: |
+      where nuget.exe
 
 - powershell: |
     azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v$(cuda_version)" 'cuda_sdk'
   displayName: 'Download CUDA $(cuda_version)'
-  condition: eq(variables['ep'], 'cuda')
+  condition: or(eq(variables['ep'], 'cuda'), and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64')))
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
@@ -78,6 +93,18 @@ steps:
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
+    cmake --preset windows_$(arch)_$(ep)_$(build_config) -DWINML_SDK_VERSION='$(ort_version)'
+  displayName: 'Configure CMake C API with WinML (arm64, NO CUDA) - $(ort_version)'
+  condition: and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'arm64'))
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
+    cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)' -DWINML_SDK_VERSION='$(ort_version)'
+  displayName: 'Configure CMake C API with WinML (x64, WITH CUDA) - $(ort_version)'
+  condition: and(eq(variables['ep'], 'winml'), eq(variables['arch'], 'x64'))
+  workingDirectory: '$(Build.Repository.LocalPath)'
+
+- powershell: |
     cmake --preset windows_$(arch)_$(ep)_$(build_config) -T cuda='$(Build.Repository.LocalPath)\cuda_sdk\v$(cuda_version)'
   displayName: 'Configure CMake C API with CUDA'
   condition: eq(variables['ep'], 'cuda')
@@ -86,7 +113,7 @@ steps:
 - powershell: |
     cmake --preset windows_$(arch)_$(ep)_$(build_config)
   displayName: 'Configure CMake C API without CUDA'
-  condition: ne(variables['ep'], 'cuda')
+  condition: not(or(eq(variables['ep'], 'cuda'), eq(variables['ep'], 'winml')))
   workingDirectory: '$(Build.Repository.LocalPath)'
 
 - powershell: |
@@ -94,6 +121,10 @@ steps:
   displayName: 'Build C API'
   workingDirectory: '$(Build.Repository.LocalPath)'
 
+- powershell: |
+    Get-ChildItem -Path $(Build.Repository.LocalPath) -Recurse
+  displayName: 'List all files in the repo for debugging'
+  
 - ${{ if eq(parameters.target, 'onnxruntime-genai') }}:
   - template: compliant/win-esrp-dll-step.yml
     parameters:

@@ -1,0 +1,19 @@
+parameters:
+- name: nuget_version_type
+  type: string
+
+- name: ort_winml_version
+  type: string
+
+- name: build_config
+  type: string
+
+stages:
+- stage: winml_nuget_packaging
+  dependsOn: [capi_packaging]
+  jobs:
+    - template: jobs/winml-nuget-packaging-job.yml
+      parameters:
+        nuget_version_type: ${{ parameters.nuget_version_type }}
+        ort_winml_version: ${{ parameters.ort_winml_version }}
+        build_config: ${{ parameters.build_config }}
