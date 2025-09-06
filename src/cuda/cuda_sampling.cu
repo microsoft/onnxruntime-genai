@@ -14,6 +14,7 @@
 #include <cub/cub.cuh>
 #include <iostream>
 #include <limits>
+#include <cfloat>
 
 namespace Generators {
 namespace cuda {
