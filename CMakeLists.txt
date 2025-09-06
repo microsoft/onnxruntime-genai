@@ -159,7 +159,7 @@ if(USE_WEBGPU)
     set(DAWN_LIB_SUBDIR "Debug")
     message(STATUS "Using Dawn Debug libraries")
   else()
-    set(DAWN_BUILD_DIR "${DAWN_ROOT}/out/Release1")
+    set(DAWN_BUILD_DIR "${DAWN_ROOT}/out/Release")
     set(DAWN_LIB_SUBDIR "Release")
     message(STATUS "Using Dawn Release libraries")
   endif()
@@ -180,7 +180,7 @@ if(USE_WEBGPU)
     # Dawn libraries
     "${DAWN_BUILD_DIR}/src/dawn/common/${DAWN_LIB_SUBDIR}/dawn_common.lib"
     "${DAWN_BUILD_DIR}/src/dawn/${DAWN_LIB_SUBDIR}/dawn_proc.lib"
- #   "${DAWN_BUILD_DIR}/src/dawn/glfw/${DAWN_LIB_SUBDIR}/dawn_glfw.lib"
+    "${DAWN_BUILD_DIR}/src/dawn/glfw/${DAWN_LIB_SUBDIR}/dawn_glfw.lib"
     "${DAWN_BUILD_DIR}/src/dawn/native/${DAWN_LIB_SUBDIR}/dawn_native.lib"
     "${DAWN_BUILD_DIR}/src/dawn/native/dawn_native_objects.dir/${DAWN_LIB_SUBDIR}/dawn_native_objects.lib"
     "${DAWN_BUILD_DIR}/src/dawn/platform/${DAWN_LIB_SUBDIR}/dawn_platform.lib"
@@ -199,7 +199,7 @@ if(USE_WEBGPU)
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_core_intrinsic.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_core_ir.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_core_ir_analysis.lib"
-   # "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_core_ir_binary.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_core_ir_binary.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_core_ir_transform.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_core_ir_type.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_core_type.lib"
@@ -227,19 +227,19 @@ if(USE_WEBGPU)
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_intrinsic.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_ir.lib"
-   # "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader.lib"
-   # "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_ast_lower.lib"
-  #  "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_ast_parser.lib"
-  #  "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_common.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_ast_lower.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_ast_parser.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_common.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_lower.lib"
-  #  "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_parser.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_parser.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_type.lib"
-  #  "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_validate.lib"
-  #  "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_writer.lib"
-  #  "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_writer_common.lib"
-  #  "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_writer_helpers.lib"
-  #  "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_writer_printer.lib"
-  #  "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_writer_raise.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_validate.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_writer.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_writer_common.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_writer_helpers.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_writer_printer.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_writer_raise.lib"
 
     # Tint HLSL support
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_hlsl.lib"
@@ -257,7 +257,7 @@ if(USE_WEBGPU)
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_glsl.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_glsl_intrinsic.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_glsl_ir.lib"
-   # "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_glsl_validate.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_glsl_validate.lib"
 
     # Tint MSL support
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_msl.lib"
@@ -277,8 +277,8 @@ if(USE_WEBGPU)
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_utils_macros.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_utils_math.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_utils_memory.lib"
-   # "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_utils_protos_ir_fuzz_proto.lib"
-   # "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_utils_protos_ir_proto.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_utils_protos_ir_fuzz_proto.lib"
+    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_utils_protos_ir_proto.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_utils_rtti.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_utils_strconv.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_utils_symbol.lib"
@@ -302,7 +302,7 @@ if(USE_WEBGPU)
     # Abseil hash libraries
     "${DAWN_BUILD_DIR}/third_party/abseil/absl/hash/${DAWN_LIB_SUBDIR}/absl_city.lib"
     "${DAWN_BUILD_DIR}/third_party/abseil/absl/hash/${DAWN_LIB_SUBDIR}/absl_hash.lib"
-   # "${DAWN_BUILD_DIR}/third_party/abseil/absl/hash/${DAWN_LIB_SUBDIR}/absl_low_level_hash.lib"
+    "${DAWN_BUILD_DIR}/third_party/abseil/absl/hash/${DAWN_LIB_SUBDIR}/absl_low_level_hash.lib"
 
     # Abseil debugging libraries
     "${DAWN_BUILD_DIR}/third_party/abseil/absl/debugging/${DAWN_LIB_SUBDIR}/absl_debugging_internal.lib"
@@ -343,13 +343,13 @@ if(USE_WEBGPU)
     "${DAWN_BUILD_DIR}/third_party/abseil/absl/numeric/${DAWN_LIB_SUBDIR}/absl_int128.lib"
 
     # Abseil types libraries
-  #  "${DAWN_BUILD_DIR}/third_party/abseil/absl/types/${DAWN_LIB_SUBDIR}/absl_bad_any_cast_impl.lib"
-  #  "${DAWN_BUILD_DIR}/third_party/abseil/absl/types/${DAWN_LIB_SUBDIR}/absl_bad_optional_access.lib"
-   # "${DAWN_BUILD_DIR}/third_party/abseil/absl/types/${DAWN_LIB_SUBDIR}/absl_bad_variant_access.lib"
+    "${DAWN_BUILD_DIR}/third_party/abseil/absl/types/${DAWN_LIB_SUBDIR}/absl_bad_any_cast_impl.lib"
+    "${DAWN_BUILD_DIR}/third_party/abseil/absl/types/${DAWN_LIB_SUBDIR}/absl_bad_optional_access.lib"
+    "${DAWN_BUILD_DIR}/third_party/abseil/absl/types/${DAWN_LIB_SUBDIR}/absl_bad_variant_access.lib"
 
     # SPIRV-Tools libraries
-  #  "${DAWN_BUILD_DIR}/third_party/spirv-tools/source/${DAWN_LIB_SUBDIR}/SPIRV-Tools.lib"
-  #  "${DAWN_BUILD_DIR}/third_party/spirv-tools/source/opt/${DAWN_LIB_SUBDIR}/SPIRV-Tools-opt.lib"
+    "${DAWN_BUILD_DIR}/third_party/spirv-tools/source/${DAWN_LIB_SUBDIR}/SPIRV-Tools.lib"
+    "${DAWN_BUILD_DIR}/third_party/spirv-tools/source/opt/${DAWN_LIB_SUBDIR}/SPIRV-Tools-opt.lib"
 
     # DXC libraries (DirectX Shader Compiler)
     "${DAWN_BUILD_DIR}/third_party/dxc/${DAWN_LIB_SUBDIR}/lib/dxcompiler.lib"
