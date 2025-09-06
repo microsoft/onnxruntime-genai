@@ -6,6 +6,7 @@
 #include <climits>
 #include <random>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -590,6 +591,21 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       }
 
       std::vector<const char*> keys, values;
+      std::vector<std::string> extra_values;  // To hold the string values in scope
+
+      // For NvTensorRtRtx, add user_compute_stream to provider options if we have a device
+      if (provider_options.name == "NvTensorRtRtx" && is_primary_session_options && p_device) {
+        // Convert the stream pointer to a string that can be passed through provider options
+        // Use pointer as void* cast to uintptr_t format
+        void* stream_ptr = p_device->GetCudaStream();
+        std::stringstream stream_value;
+        stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
+        extra_values.push_back(stream_value.str());
+
+        keys.emplace_back("user_compute_stream");
+        values.emplace_back(extra_values.back().c_str());
+      }
+
       for (auto& option : provider_options.options) {
         keys.emplace_back(option.first.c_str());
         values.emplace_back(option.second.c_str());
