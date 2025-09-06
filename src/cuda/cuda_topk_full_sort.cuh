@@ -5,6 +5,7 @@
 
 #include <cub/device/device_segmented_radix_sort.cuh>
 #include "cuda_topk.h"
+#include "cuda_topk_hybrid_sort.cuh"  // For CompactStridedData
 
 namespace Generators {
 namespace cuda {
