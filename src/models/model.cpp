@@ -595,8 +595,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
       // For NvTensorRtRtx, add user_compute_stream to provider options if we have a device
       if (provider_options.name == "NvTensorRtRtx" && is_primary_session_options && p_device) {
-        // Convert the stream pointer to a string that can be passed through provider options
-        // Use pointer as void* cast to uintptr_t format
         void* stream_ptr = p_device->GetCudaStream();
         std::stringstream stream_value;
         stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
