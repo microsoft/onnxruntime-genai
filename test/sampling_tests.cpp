@@ -205,8 +205,11 @@ void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_ite
   auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
   std::string overlay_json = R"({ "model": { "vocab_size" : )" + std::to_string(vocab_size) + R"( } })";
   config->Overlay(overlay_json.c_str());
-  config->ClearProviders();
-  config->AppendProvider(use_cuda ? "cuda" : "cpu");
+
+  if (use_cuda) {
+    config->ClearProviders();
+    config->AppendProvider("cuda");
+  }
 
   auto model = OgaModel::Create(*config);
   auto params = OgaGeneratorParams::Create(*model);
