@@ -144,7 +144,7 @@ TEST(TopKBenchmarks, PerformanceTests) {
     }
   }
 
-  constexpr bool is_build_pipeline = false;  // Change it false to trigger more runs in local machine.
+  constexpr bool is_build_pipeline = true;  // Change it false to trigger more runs in local machine.
 
   // Test batch sizes.
   if constexpr (!is_build_pipeline) {
