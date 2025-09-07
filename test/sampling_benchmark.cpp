@@ -143,7 +143,7 @@ BenchmarkResult RunBenchmark(const BenchmarkParams& params) {
   std::vector<double> latencies;
 
   const int64_t tensor_size = static_cast<int64_t>(params.batch_size) * static_cast<int64_t>(params.vocab_size);
-  std::vector<float> logits_data(tensor_size);
+  std::vector<float> logits_data(static_cast<size_t>(tensor_size));
   auto logits_tensor = OgaTensor::Create(
       logits_data.data(),
       std::array<int64_t, 2>{static_cast<int64_t>(params.batch_size), static_cast<int64_t>(params.vocab_size)});
@@ -162,7 +162,7 @@ BenchmarkResult RunBenchmark(const BenchmarkParams& params) {
     auto stop = std::chrono::high_resolution_clock::now();
 
     if (i >= warm_up_runs) {
-      latencies.push_back(std::chrono::duration_cast<std::chrono::microseconds>(stop - start).count());
+      latencies.push_back(static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(stop - start).count()));
     }
   }
 
