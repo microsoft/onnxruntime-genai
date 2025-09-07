@@ -130,4 +130,3 @@ void RunTopKViaSelectionSort(TopkData* data, cudaStream_t stream, const float* s
 }
 }  // namespace cuda
 }  // namespace Generators
-

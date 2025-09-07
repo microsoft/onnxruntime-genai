@@ -9,31 +9,6 @@
 namespace Generators {
 namespace cuda {
 
-// Kernel to initialize an index tensor where indices[i] = i % vocab_size.
-__global__ void PopulateIndices(int* indices, int vocab_size, int batch_size);
-
-void LaunchPopulateIndices(int* indices, int vocab_size, int batch_size, cudaStream_t stream);
-
-// Kernel to create the segment offsets required by CUB's segmented sort.
-__global__ void PopulateOffsets(int* offsets, int vocab_size, int batch_size);
-
-void LaunchPopulateOffsets(int* offsets, int vocab_size, int batch_size, cudaStream_t stream);
-
-// Wrapper for CUB's segmented radix sort for (float, int) key-value pairs.
-void LaunchSortPairs(void* d_temp_storage, size_t temp_storage_bytes, const float* d_keys_in, float* d_keys_out,
-                     const int* d_values_in, int* d_values_out, int num_items, int num_segments, int* d_offsets,
-                     cudaStream_t stream);
-
-// Helper to determine the size of temporary storage needed by CUB for the sort.
-inline size_t GetFullSortCubTempStorageBytes(int num_items, int num_segments, cudaStream_t stream);
-
-// Performs a full sort on the entire vocabulary for each batch item, writing to the specified buffers.
-// This is the non-compacting version used internally by the high-performance GetTopK path.
-void LaunchSort(TopkData* data, cudaStream_t stream, const float* scores_in, float* scores_out, int* indices_out,
-                int vocab_size, int batch_size);
-
-// --- Implementations ---
-
 __global__ void PopulateIndices(int* indices, int vocab_size, int batch_size) {
   int global_index = threadIdx.x + blockIdx.x * blockDim.x;
   if (global_index < vocab_size * batch_size) {

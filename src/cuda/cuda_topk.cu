@@ -52,7 +52,6 @@ void GetTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
   if (k > 64) {
     RunTopKViaFullSort(topk_data, stream, scores_in, vocab_size, batch_size, k);
   } else {
-    // NOTE: This modifies scores_in in-place
     RunTopKViaSelectionSort(topk_data, stream, scores_in, vocab_size, batch_size, k);
   }
 }

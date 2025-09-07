@@ -33,12 +33,11 @@ __global__ void CopyAndSoftmaxKernel(int* final_indices, float* final_scores, co
   float thread_score =
       (threadIdx.x < k) ? (batch_sorted_scores[threadIdx.x] / temperature) : -std::numeric_limits<float>::max();
 
-  // CUB reduces the values, placing the result in thread 0.
-  float max_val_reduced = BlockReduce(temp_storage).Reduce(thread_score, cub::Max());
+  // For sorted input, the max score is always the first element.
   if (threadIdx.x == 0) {
-    block_max_val = max_val_reduced;
+    block_max_val = batch_sorted_scores[0] / temperature;
   }
-  __syncthreads();  // Ensure block_max_val is visible to all threads.
+  __syncthreads();
 
   // STEP 2: Find sum_exp in parallel
   // Each thread calculates its contribution to the sum using the correct max value.

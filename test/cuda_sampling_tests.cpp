@@ -41,8 +41,9 @@ void Softmax(std::span<float> scores, float temperature) {
     // Create a uniform distribution among the original max elements
     // This is a rare edge case but important for correctness
     int count = 0;
-    for(auto& score : scores) if(score > 0) count++; // exp(0)=1
-    for(auto& score : scores) score = (score > 0) ? 1.0f/count : 0.0f;
+    for (auto& score : scores)
+      if (score > 0) count++;  // exp(0)=1
+    for (auto& score : scores) score = (score > 0) ? 1.0f / count : 0.0f;
     return;
   }
 
@@ -70,13 +71,13 @@ class CudaSamplingTopKTopPTest : public CudaSamplingTest, public ::testing::With
 TEST_P(CudaSamplingTopKTopPTest, StatisticalVerification) {
   // 1. Test Parameters
   const int batch_size = 4;
-  const int vocab_size = 512; // Smaller vocab for faster test execution
+  const int vocab_size = 512;  // Smaller vocab for faster test execution
   const int k = GetParam();
   const float p = 0.9f;
   const float temperature = 0.7f;
   const int num_iter = 5000;
   const unsigned long long initial_seed = 42;
-  const double tolerance = 0.015; // Tolerance for statistical comparison
+  const double tolerance = 0.015;  // Tolerance for statistical comparison
 
   // 2. Setup CUDA resources and memory
   auto sampling_data = std::make_unique<SamplingData>(initial_seed, batch_size, vocab_size, stream_);
@@ -97,7 +98,7 @@ TEST_P(CudaSamplingTopKTopPTest, StatisticalVerification) {
 
   // 4. Calculate expected probability distribution on the CPU
   std::vector<float> top_k_logits(k);
-  std::iota(top_k_logits.rbegin(), top_k_logits.rend(), 1.0f); // Fills with {k, k-1, ..., 1}
+  std::iota(top_k_logits.rbegin(), top_k_logits.rend(), 1.0f);  // Fills with {k, k-1, ..., 1}
 
   // 4.1. Apply temperature and initial softmax
   std::vector<float> initial_probs = top_k_logits;
@@ -114,7 +115,7 @@ TEST_P(CudaSamplingTopKTopPTest, StatisticalVerification) {
 
   // 4.3. Re-normalize to get final expected distribution
   std::vector<float> expected_distribution = top_k_logits;
-  Softmax(expected_distribution, 1.0f); // Temperature is 1.0 for the final softmax
+  Softmax(expected_distribution, 1.0f);  // Temperature is 1.0 for the final softmax
 
   // 5. Run the CUDA kernel in a loop to gather statistics
   std::mt19937 engine(initial_seed);
@@ -156,8 +157,8 @@ TEST_P(CudaSamplingTopKTopPTest, StatisticalVerification) {
   EXPECT_NEAR(observed_total_prob, 1.0, tolerance);
   // Verify no tokens outside the top-K range were ever selected.
   for (auto const& [token_id, count] : token_counts) {
-      EXPECT_GE(token_id, 0);
-      EXPECT_LT(token_id, k);
+    EXPECT_GE(token_id, 0);
+    EXPECT_LT(token_id, k);
   }
 }
 
@@ -165,16 +166,14 @@ TEST_P(CudaSamplingTopKTopPTest, StatisticalVerification) {
 INSTANTIATE_TEST_SUITE_P(
     SamplingKernels,
     CudaSamplingTopKTopPTest,
-    ::testing::Values(64, 300)
-);
-
+    ::testing::Values(64, 300));
 
 TEST_F(CudaSamplingTest, TopKOnlyVerification) {
   // This test disables Top-P to verify the initial softmax and sampling logic.
   const int batch_size = 4;
   const int vocab_size = 256;
   const int k = 50;
-  const float p = 1.0f; // p=1.0 disables Top-P filtering
+  const float p = 1.0f;  // p=1.0 disables Top-P filtering
   const float temperature = 1.0f;
   const int num_iter = 5000;
   const unsigned long long initial_seed = 42;
@@ -220,49 +219,49 @@ TEST_F(CudaSamplingTest, TopKOnlyVerification) {
 }
 
 TEST_F(CudaSamplingTest, DeterministicTop1) {
-    // With k=1, the result should always be the token with the highest logit, regardless of other parameters.
-    const int batch_size = 8;
-    const int vocab_size = 1024;
-    const int k = 1;
-    const float p = 0.5f;
-    const float temperature = 0.01f;
-    const unsigned long long seed = 1337;
+  // With k=1, the result should always be the token with the highest logit, regardless of other parameters.
+  const int batch_size = 8;
+  const int vocab_size = 1024;
+  const int k = 1;
+  const float p = 0.5f;
+  const float temperature = 0.01f;
+  const unsigned long long seed = 1337;
 
-    auto sampling_data = std::make_unique<SamplingData>(seed, batch_size, vocab_size, stream_);
-    auto d_scores = CudaMallocArray<float>(static_cast<size_t>(batch_size) * vocab_size);
-    auto d_next_tokens = CudaMallocArray<int32_t>(batch_size);
-    std::vector<int32_t> h_next_tokens(batch_size);
+  auto sampling_data = std::make_unique<SamplingData>(seed, batch_size, vocab_size, stream_);
+  auto d_scores = CudaMallocArray<float>(static_cast<size_t>(batch_size) * vocab_size);
+  auto d_next_tokens = CudaMallocArray<int32_t>(batch_size);
+  std::vector<int32_t> h_next_tokens(batch_size);
 
-    // Create random logits, but ensure a unique max for each batch item.
-    std::vector<float> h_scores(static_cast<size_t>(batch_size) * vocab_size);
-    std::mt19937 engine(seed);
-    std::uniform_real_distribution<float> dist(0.0f, 100.0f);
-    std::vector<int> expected_tokens(batch_size);
+  // Create random logits, but ensure a unique max for each batch item.
+  std::vector<float> h_scores(static_cast<size_t>(batch_size) * vocab_size);
+  std::mt19937 engine(seed);
+  std::uniform_real_distribution<float> dist(0.0f, 100.0f);
+  std::vector<int> expected_tokens(batch_size);
 
-    for (int i = 0; i < batch_size; i++) {
-        for (int j = 0; j < vocab_size; j++) {
-            h_scores[static_cast<size_t>(i) * vocab_size + j] = dist(engine);
-        }
-        // Set a guaranteed maximum value at a known index.
-        int max_index = engine() % vocab_size;
-        h_scores[static_cast<size_t>(i) * vocab_size + max_index] = 101.0f;
-        expected_tokens[i] = max_index;
+  for (int i = 0; i < batch_size; i++) {
+    for (int j = 0; j < vocab_size; j++) {
+      h_scores[static_cast<size_t>(i) * vocab_size + j] = dist(engine);
     }
-    
-    CUDA_CHECK(cudaMemcpyAsync(d_scores.get(), h_scores.data(), h_scores.size() * sizeof(float), cudaMemcpyHostToDevice, stream_));
+    // Set a guaranteed maximum value at a known index.
+    int max_index = engine() % vocab_size;
+    h_scores[static_cast<size_t>(i) * vocab_size + max_index] = 101.0f;
+    expected_tokens[i] = max_index;
+  }
 
-    GetSample(sampling_data.get(), stream_, d_next_tokens.get(), d_scores.get(),
-              vocab_size, batch_size, k, p, temperature);
+  CUDA_CHECK(cudaMemcpyAsync(d_scores.get(), h_scores.data(), h_scores.size() * sizeof(float), cudaMemcpyHostToDevice, stream_));
 
-    CUDA_CHECK(cudaMemcpyAsync(h_next_tokens.data(), d_next_tokens.get(), h_next_tokens.size() * sizeof(int32_t), cudaMemcpyDeviceToHost, stream_));
-    cudaStreamSynchronize(stream_);
+  GetSample(sampling_data.get(), stream_, d_next_tokens.get(), d_scores.get(),
+            vocab_size, batch_size, k, p, temperature);
 
-    for (int i = 0; i < batch_size; ++i) {
-        EXPECT_EQ(h_next_tokens[i], expected_tokens[i]) << "Mismatch in batch item " << i;
-    }
+  CUDA_CHECK(cudaMemcpyAsync(h_next_tokens.data(), d_next_tokens.get(), h_next_tokens.size() * sizeof(int32_t), cudaMemcpyDeviceToHost, stream_));
+  cudaStreamSynchronize(stream_);
+
+  for (int i = 0; i < batch_size; ++i) {
+    EXPECT_EQ(h_next_tokens[i], expected_tokens[i]) << "Mismatch in batch item " << i;
+  }
 }
 
-} // namespace test
-} // namespace cuda
-} // namespace Generators
+}  // namespace test
+}  // namespace cuda
+}  // namespace Generators
 #endif

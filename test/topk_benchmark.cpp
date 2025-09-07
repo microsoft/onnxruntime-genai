@@ -125,7 +125,6 @@ void RunBenchmarks(const BenchmarkParams& params) {
 }  // namespace
 
 TEST(TopKBenchmarks, PerformanceTests) {
-
   // Test K
   {
     std::vector<int> batch_sizes = {1};
@@ -145,7 +144,7 @@ TEST(TopKBenchmarks, PerformanceTests) {
     }
   }
 
-  constexpr bool is_build_pipeline = false; // Change it false to trigger more runs in local machine.
+  constexpr bool is_build_pipeline = false;  // Change it false to trigger more runs in local machine.
 
   // Test batch sizes.
   if constexpr (!is_build_pipeline) {
@@ -170,7 +169,7 @@ TEST(TopKBenchmarks, PerformanceTests) {
   // Test vocab_sizes.
   if constexpr (!is_build_pipeline) {
     std::vector<int> batch_sizes = {1};
-    std::vector<int> vocab_sizes = {512, 1*1024, 2*1024, 4 * 1024, 8* 1024, 16 * 1024, 32 * 1024, 64* 1024, 128 * 1024, 256 * 1024};
+    std::vector<int> vocab_sizes = {512, 1 * 1024, 2 * 1024, 4 * 1024, 8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024};
     std::vector<int> ks = {8, 16, 50};
 
     std::vector<BenchmarkParams> test_cases;
