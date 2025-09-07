@@ -813,10 +813,6 @@ class GPTQModel(QuantizedModel):
         self.is_symmetric = quant_attrs["config"].get("sym", False)
         self.gptq_v2 = "gptqmodel" in quant_attrs["config"].get("quantizer", [])
 
-        # For TMAC, unpack_gptqv2 and prpreprcoess for T-MAC quantization
-
-        # Unpack and repack all `QuantizedTensorModule` classes in model
-        # TODO:: handle sym quan config
         for i, layer in enumerate(self.layers):
             if i >= self.num_layers:
                 break
@@ -828,7 +824,6 @@ class GPTQModel(QuantizedModel):
                 if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
                     if self.use_tmac and not quant_attrs["use_g_idx"]:
                         self.unpack_pack_tmac(q_tensors)
-                        continue
                     else:
                         self.handle_qzeros(q_tensors)
                         self.unpack(q_tensors)
@@ -843,7 +838,6 @@ class GPTQModel(QuantizedModel):
             for k, q_tensors in layer.mlp.__dict__.items():
                 if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
                     if self.use_tmac and not quant_attrs["use_g_idx"]:
-                        print(k, "using T-MAC unpacking")
                         self.unpack_pack_tmac(q_tensors)
                     else:
                         print(k, "using standard unpacking")
@@ -911,11 +905,11 @@ class GPTQModel(QuantizedModel):
         if bits != module.bits or  group_size != module.group_size: 
             raise ValueError(f"Error in T-MAC unpacking: bits {bits} and group_size {group_size} do not match module's bits {module.bits} and group_size {module.group_size}.")
 
-        # TODO: using numpy to pack/unpack bits for simplicity, replace it with torch operations
         qweight = module.qweight.numpy()
         qzeros = module.qzeros.numpy()
         scales = module.scales.numpy()
     
+        # TODO: use unpack_on_row with transpose = true
         qweights = [(qweight >> bit_offset) & ((1 << bits) - 1) for bit_offset in range(0, 32, bits)]
         weight = np.stack(qweights, axis=1).reshape(K, M).T.astype("uint8")
 
@@ -925,38 +919,23 @@ class GPTQModel(QuantizedModel):
         zeros = [(qzeros >> bit_offset) & ((1 << bits) - 1) for bit_offset in range(0, 32, bits)]
         zeros = np.stack(zeros, axis=-1).reshape(K // group_size, M).T.astype(scales.dtype)
         if not self.gptq_v2:
-            # `zeros = zeros - 1` in AutoGPTQ
-            # Not in GPTQModel
+            # `zeros = zeros - 1` in AutoGPTQ, Not in GPTQModel
             zeros += 1
         zeros = (zeros - (2 ** (bits - 1))) * scales
 
         # get packed weight
+        # TODO: use torch operations for packing, can't use pack_on_row
         mask = (1 << bits) - 1
         flattened_bits = np.unpackbits((weight & mask).astype(np.uint8)).reshape(-1, 8)[:, -bits:]
         weight_packed = np.packbits(flattened_bits)
 
-
-
-
         if not self.is_symmetric and zeros is not None:
-            module.qzeros = torch.from_numpy(zeros.astype(np.float16))
+            module.qzeros = torch.from_numpy(zeros.astype(np.float16).copy().view(np.uint8).flatten())
         else :
             module.qzeros = None
         
         module.scales = torch.from_numpy(scales.astype(np.float16))
         module.qweight = torch.from_numpy(weight_packed.reshape(M, K * bits // 8))
-
-        # if zeros is None or self.is_symmetric:
-        #    packed_data =  np.concatenate([weight_packed, scales.astype(np.float16).copy().view(np.uint8).flatten()])
-        # else:
-        #    packed_data = np.concatenate([weight_packed, scales.astype(np.float16).copy().view(np.uint8).flatten(), 
-        #                     zeros.astype(np.float16).copy().view(np.uint8).flatten()])
-
-        # type_size = 2 + (0 if self.is_symmetric else 2) + group_size * bits // 8
-        # module.qweight = torch.from_numpy(packed_data.reshape(M, K //  group_size  *  type_size))
-        # module.qzeros = None  # qzeros is not used in T-MAC quantization
-        # module.scales = None  # scales is not used in T-MAC quantization
-
  
 
 class QuarkModel(QuantizedModel):
@@ -1086,14 +1065,6 @@ class OliveModel(GPTQModel):
         return self.overrides.get(name, {}).get("group_size", self.global_group_size)
 
 
-class BitDistillerModel(QuantizedModel):
-    def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
-        super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
-        # TODO: Implement BitDistillerModel specific logic 
-
-       
-    
-
 class QuantModel:
     @staticmethod
     def from_pretrained(quant_type, **kwargs):
@@ -1110,8 +1081,6 @@ class QuantModel:
             model = OliveModel(quant_type, **kwargs)
         elif quant_type == "quark":
             model = QuarkModel(quant_type, **kwargs)
-        elif quant_type == "bitdistiller":
-            model = BitDistillerModel(quant_type, **kwargs)
         else:
             raise NotImplementedError(f"The {quant_type} quantized model is not currently supported.")
 
