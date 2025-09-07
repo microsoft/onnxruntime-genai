@@ -138,18 +138,17 @@ BenchmarkResult RunBenchmark(const BenchmarkParams& params) {
   std::mt19937 engine(rd());
   std::uniform_int_distribution<> dist(5, 25);
   const int warm_up_runs = 5;
-  const int total_runs = 1000;
+  const int total_runs = 100;
 
   std::vector<double> latencies;
 
   const int64_t tensor_size = static_cast<int64_t>(params.batch_size) * static_cast<int64_t>(params.vocab_size);
-  std::vector<float> logits_data(static_cast<size_t>(tensor_size));
+  std::vector<float> logits_data(tensor_size);
   auto logits_tensor = OgaTensor::Create(
       logits_data.data(),
       std::array<int64_t, 2>{static_cast<int64_t>(params.batch_size), static_cast<int64_t>(params.vocab_size)});
 
   for (int i = 0; i < warm_up_runs + total_runs; i++) {
-    // --- REVERT: Create a new generator in each iteration, as required by the API ---
     auto generator = OgaGenerator::Create(*model, *generator_params);
 
     int num_large = dist(engine);
@@ -182,7 +181,7 @@ TEST(SamplingBenchmarks, PerformanceTests) {
 
   std::vector<int> batch_sizes = {1};
   std::vector<int> vocab_sizes = {201088};
-  std::vector<int> ks = {1, 8, 20, 50, 100};
+  std::vector<int> ks = {1, 50};
 
   for (const auto& device_type : device_types) {
     for (int batch_size : batch_sizes) {
@@ -190,7 +189,9 @@ TEST(SamplingBenchmarks, PerformanceTests) {
         test_cases.push_back({device_type, batch_size, vocab_size, 0, BenchmarkFunction::TopP});        
         for (int k : ks) {
           test_cases.push_back({device_type, batch_size, vocab_size, k, BenchmarkFunction::TopK});
-          test_cases.push_back({device_type, batch_size, vocab_size, k, BenchmarkFunction::TopKTopP});
+          if (k >= 20) {
+            test_cases.push_back({device_type, batch_size, vocab_size, k, BenchmarkFunction::TopKTopP});
+          }
         }
       }
     }

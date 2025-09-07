@@ -8,7 +8,6 @@
 #include <sstream>
 #include <limits>
 #include <cmath>
-#include <sstream>
 #include <stdexcept>
 
 namespace Generators {
@@ -750,7 +749,7 @@ struct Model_Element : JSON::Element {
   Speech_Element speech_{v_.speech};
 };
 
-int safe_double_to_int(double x, std::string_view name) {
+int SafeDoubleToInt(double x, std::string_view name) {
   // 1. Check for non-finite values (NaN, infinity)
   if (!std::isfinite(x)) {
     std::stringstream ss;
@@ -805,7 +804,7 @@ struct Search_Element : JSON::Element {
     } else if (name == "length_penalty") {
       v_.length_penalty = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "random_seed") {
-      v_.random_seed = safe_double_to_int(JSON::Get<double>(value), name);
+      v_.random_seed = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "do_sample") {
       v_.do_sample = JSON::Get<bool>(value);
     } else if (name == "past_present_share_buffer") {
