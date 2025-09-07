@@ -34,13 +34,11 @@ void SamplingData::ReInitCurandStates(unsigned long long random_seed, int batch_
 
 SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int vocab_size, cudaStream_t stream)
     : TopkData(batch_size, vocab_size, stream) {
-  const size_t topk_batch_size = static_cast<size_t>(kHybridSortMaxK) * batch_size;
-
-  // Allocate buffers. These are sized for the largest possible k (kHybridSortMaxK),
-  // but are used by the fused kernel which operates on a smaller, variable k.
-  prefix_sums = CudaMallocArray<float>(topk_batch_size);
-  scores_adjusted = CudaMallocArray<float>(std::max(topk_batch_size, static_cast<size_t>(vocab_size) * batch_size));
-  prefix_sums_adjusted = CudaMallocArray<float>(topk_batch_size);
+  // Allocate buffers. These are sized for the largest possible k (vocab_size)
+  size_t vocab_batch_size = static_cast<size_t>(vocab_size) * batch_size;
+  prefix_sums = CudaMallocArray<float>(vocab_batch_size);
+  scores_adjusted = CudaMallocArray<float>(vocab_batch_size);
+  prefix_sums_adjusted = CudaMallocArray<float>(vocab_batch_size);
   thresholds = CudaMallocArray<float>(batch_size);
   curand_states = CudaMallocArray<curandState>(batch_size);
   ReInitCurandStates(random_seed, batch_size, stream);
@@ -279,6 +277,20 @@ void LaunchMultiStageSampleKernel(SamplingData* data, cudaStream_t stream, const
                                                 data->thresholds.get());
 }
 
+void LaunchFusedSampleKernel(SamplingData* data, cudaStream_t stream, const float* scores, const int* indices,
+                             int32_t* next_token_out, int k, int batch_size, float p, float temperature, int stride) {
+  assert(k <= kFusedSamplingMaxK);
+  dim3 grid(batch_size);
+  constexpr int block_size = 256;
+  dim3 block(block_size);
+
+  // Shared memory size is determined by the needs of the fused kernel: two float arrays of size block_size.
+  constexpr size_t shared_mem_bytes = 2 * block_size * sizeof(float);
+
+  FusedSamplingKernel<block_size><<<grid, block, shared_mem_bytes, stream>>>(
+      next_token_out, scores, indices, k, p, temperature, stride, data->curand_states.get());
+}
+
 void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out, const float* scores_in,
                int vocab_size, int batch_size, int k, float p, float temperature) {
   if (k <= 0 || k > vocab_size) {
@@ -291,17 +303,11 @@ void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out,
   int topk_stride = data->topk_stride;
 
   // The fused kernel is the most performant approach for k up to 256.
-  if (k <= 256) {
-    dim3 grid(batch_size);
-    const int block_size = 256;
-    dim3 block(block_size);
-    // Shared memory size is determined by the needs of the fused kernel: two float arrays of size block_size.
-    size_t shared_mem_bytes = 2 * block_size * sizeof(float);
-
-    FusedSamplingKernel<block_size><<<grid, block, shared_mem_bytes, stream>>>(
-        next_token_out, topk_scores, topk_indices, k, p, temperature, topk_stride, data->curand_states.get());
+  if (k <= kFusedSamplingMaxK) {
+    LaunchFusedSampleKernel(data, stream, topk_scores, topk_indices, next_token_out, k, batch_size, p,
+                            temperature, topk_stride);
   } else {
-    // For k > 256, fall back to multi-stage sampling pipeline. This is not a typical use case.
+    // Fall back to multi-stage sampling pipeline. This is not a typical use case.
     LaunchMultiStageSampleKernel(data, stream, topk_scores, topk_indices, next_token_out, k, batch_size, p,
                                  temperature, topk_stride);
   }

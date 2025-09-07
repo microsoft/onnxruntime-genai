@@ -6,9 +6,6 @@
 #include "json.h"
 #include <fstream>
 #include <sstream>
-#include <limits>
-#include <cmath>
-#include <stdexcept>
 
 namespace Generators {
 
@@ -749,30 +746,6 @@ struct Model_Element : JSON::Element {
   Speech_Element speech_{v_.speech};
 };
 
-int SafeDoubleToInt(double x, std::string_view name) {
-  // 1. Check for non-finite values (NaN, infinity)
-  if (!std::isfinite(x)) {
-    std::stringstream ss;
-    ss << "Field '" << name << "' cannot be converted to int32 (NaN or Inf)";
-    throw std::overflow_error(ss.str());
-  }
-
-  // 2. Check if the value is outside the representable range of an integer.
-  constexpr double min_int_val = static_cast<double>(std::numeric_limits<int>::min());
-  constexpr double max_int_val = static_cast<double>(std::numeric_limits<int>::max());
-
-  if (x < min_int_val || x > max_int_val) {
-    std::stringstream ss;
-    ss << "Field '" << name << "' value " << x << " is out of int32 range ["
-       << std::numeric_limits<int>::min() << ", " << std::numeric_limits<int>::max() << "]";
-    throw std::overflow_error(ss.str());
-  }
-
-  // 3. Perform the cast. This truncates any fractional part (e.g., 3.9 becomes 3).
-  // If rounding is desired, use `return static_cast<int>(std::round(x));`
-  return static_cast<int>(x);
-}
-
 struct Search_Element : JSON::Element {
   explicit Search_Element(Config::Search& v) : v_{v} {}
 
@@ -804,7 +777,7 @@ struct Search_Element : JSON::Element {
     } else if (name == "length_penalty") {
       v_.length_penalty = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "random_seed") {
-      v_.random_seed = SafeDoubleToInt(JSON::Get<double>(value), name);
+      v_.random_seed = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "do_sample") {
       v_.do_sample = JSON::Get<bool>(value);
     } else if (name == "past_present_share_buffer") {

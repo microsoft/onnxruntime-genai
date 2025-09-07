@@ -34,8 +34,35 @@ __device__ __forceinline__ TopK_Pair reduce_topk_op(TopK_Pair const& a, TopK_Pai
                                                    : b;
 }
 
-// Kernel to find the top K elements using iterative selection sort.
-// In each of the k iterations, it finds the single largest element remaining in the vocabulary.
+// Specialized kernel optimized for finding only the Top-1 element.
+// It is read-only on `scores_in` and avoids the overhead of the iterative version.
+template <int kBlockSize>
+__global__ void GetTop1Kernel(const float* scores_in, float* scores_out, int* indices_out, int batch_size, int vocab_size) {
+  int batch = blockIdx.x;
+  int tid = threadIdx.x;
+  TopK_Pair partial;
+  partial.init();
+
+  // Each thread block processes one batch item.
+  // Threads cooperatively scan the vocabulary to find the max element.
+  for (auto elemId = tid; elemId < vocab_size; elemId += kBlockSize) {
+    float elem = scores_in[elemId + batch * vocab_size];
+    partial.insert(elem, elemId);
+  }
+  // Reduce within the thread block to find the block's top element.
+  typedef cub::BlockReduce<TopK_Pair, kBlockSize> BlockReduce;
+  __shared__ typename BlockReduce::TempStorage temp_storage;
+  TopK_Pair top_k_sequence = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op);
+
+  // Thread 0 writes the final result. No fence or write-back to scores_in is needed.
+  if (tid == 0) {
+    scores_out[batch] = top_k_sequence.u;
+    indices_out[batch] = top_k_sequence.p;
+  }
+}
+
+// General kernel to find the top K elements using iterative selection sort.
+// This version modifies its input `scores_in` in-place for maximum performance.
 template <int kBlockSize>
 __global__ void GetTopKKernel(float* scores_in, float* scores_out, int* indices_out, int batch_size, int vocab_size,
                               int k) {
@@ -48,44 +75,54 @@ __global__ void GetTopKKernel(float* scores_in, float* scores_out, int* indices_
 
   for (int ite = 0; ite < k; ite++) {
     partial.init();
-    // Each thread block processes one batch item.
-    // Threads cooperatively scan the vocabulary to find the max element.
     for (auto elemId = tid; elemId < vocab_size; elemId += kBlockSize) {
       float elem = scores_in[elemId + batch * vocab_size];
       partial.insert(elem, elemId);
     }
-    // Reduce within the thread block to find the block's top element.
     typedef cub::BlockReduce<TopK_Pair, kBlockSize> BlockReduce;
     __shared__ typename BlockReduce::TempStorage temp_storage;
     TopK_Pair top_k_sequence = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op);
 
-    // Thread 0 writes the result and blanks out the selected score.
     if (tid == 0) {
       scores_out[ite + batch * k] = top_k_sequence.u;
       indices_out[ite + batch * k] = top_k_sequence.p;
-
-      // Set the max value to a large negative number so it isn't picked again.
       scores_in[batch * vocab_size + top_k_sequence.p] = MIN_FLOAT;
-      __threadfence_block();  // Ensure the write is visible to other threads in the next iteration.
+      __threadfence_block();
     }
     __syncthreads();
   }
 }
 
+void LaunchGetTop1(cudaStream_t stream, const float* scores_in, float* scores_out, int* indices_out, int vocab_size,
+                   int batch_size) {
+  dim3 grid(batch_size, 1, 1);
+  dim3 block(1024, 1, 1);
+  GetTop1Kernel<1024><<<grid, block, 0, stream>>>(scores_in, scores_out, indices_out, batch_size, vocab_size);
+  CUDA_CHECK(cudaGetLastError());
+}
+
 void LaunchGetTopK(cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size,
                    int batch_size, int k) {
   dim3 grid(batch_size, 1, 1);
-  dim3 block(1024, 1, 1);  // Use a large block size for better hardware utilization.
+  dim3 block(1024, 1, 1);
   GetTopKKernel<1024><<<grid, block, 0, stream>>>(scores_in, scores_out, indices_out, batch_size, vocab_size, k);
   CUDA_CHECK(cudaGetLastError());
 }
 
-void RunTopKViaSelectionSort(TopkData* data, cudaStream_t stream, float* scores_in, int vocab_size, int batch_size, int k) {
-  // IMPORTANT: This kernel modifies the `scores_in` tensor in-place. The caller is responsible
-  // for making a copy if the original data is needed after this call.
+void RunTopKViaSelectionSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
   float* topk_scores = data->intermediate_scores_1.get();
   int* topk_indices = data->intermediate_indices_1.get();
-  LaunchGetTopK(stream, scores_in, topk_scores, topk_indices, vocab_size, batch_size, k);
+
+  if (k == 1) {
+    // For Top-1, use the specialized read-only kernel. No copy is needed.
+    LaunchGetTop1(stream, scores_in, topk_scores, topk_indices, vocab_size, batch_size);
+  } else {
+    // For k > 1, use the "copy-on-write" strategy with the general kernel.
+    float* mutable_scores = data->intermediate_scores_2.get();
+    size_t buffer_size = static_cast<size_t>(batch_size) * vocab_size * sizeof(float);
+    CUDA_CHECK(cudaMemcpyAsync(mutable_scores, scores_in, buffer_size, cudaMemcpyDeviceToDevice, stream));
+    LaunchGetTopK(stream, mutable_scores, topk_scores, topk_indices, vocab_size, batch_size, k);
+  }
 
   data->topk_scores = topk_scores;
   data->topk_indices = topk_indices;
@@ -93,3 +130,4 @@ void RunTopKViaSelectionSort(TopkData* data, cudaStream_t stream, float* scores_
 }
 }  // namespace cuda
 }  // namespace Generators
+
