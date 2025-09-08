@@ -9,7 +9,7 @@ if(USE_WINML)
   if(NOT DEFINED WINML_SDK_VERSION OR WINML_SDK_VERSION STREQUAL "")
     #set(WINML_SDK_VERSION "1.8.1065-experimental")
     # message(STATUS "WINML_SDK_VERSION not set, defaulting to ${WINML_SDK_VERSION}")
-    message(FATAL_ERROR "WINML_SDK_VERSION must be set when USE_WINML=ON. Configure CMake with -DWINML_SDK_VERSION=1.8.1075-preview-g295f112894.")
+    message(FATAL_ERROR "WINML_SDK_VERSION must be set when USE_WINML=ON. Configure CMake with -DWINML_SDK_VERSION=<version>.")
   endif()
 
   if(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
