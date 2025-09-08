@@ -595,7 +595,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
       std::vector<const char*> keys, values;
 
-      std::string stream_value_str;
       if (provider_options.name == "NvTensorRtRtx" && is_primary_session_options && p_device) {
         void* stream_ptr = p_device->GetCudaStream();
         std::stringstream stream_value;
