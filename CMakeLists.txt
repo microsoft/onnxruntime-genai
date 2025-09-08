@@ -163,7 +163,7 @@ endif()
 
 
 # Build all source files using CUDA as a separate shared library we dynamically load at runtime
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${ORT_HEADER_DIR})
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${GENERATORS_ROOT})

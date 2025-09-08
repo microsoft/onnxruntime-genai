@@ -70,6 +70,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include <vector>
 #include <unordered_map>
 #include <array>
+#include <stdexcept>
 
 #include "onnxruntime_c_api.h"
 #include "../span.h"

@@ -1,7 +1,7 @@
 # Checking if CUDA is supported
 include(CheckLanguage)
 
-if(USE_CUDA)
+if(USE_CUDA OR USE_TRT_RTX)
   # Temporary add -allow-unsupported-compiler
   # Do this before enable_cuda
   if(WIN32 AND NOT CMAKE_CUDA_FLAGS_INIT)
@@ -30,7 +30,7 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(_DEBUG=1)
 endif()
 
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
   # cmake_policy(SET CMP0104 OLD)
   # enable_language(CUDA)
@@ -46,7 +46,11 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER)
     "${GENERATORS_ROOT}/cuda/*.cuh"
   )
 
-  add_compile_definitions(USE_CUDA=1)
+  if(USE_CUDA)
+    add_compile_definitions(USE_CUDA=1)
+  else()
+    add_compile_definitions(USE_CUDA=0)
+  endif()
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 elseif(USE_CUDA)
   # USE_CUDA is true but cmake could not find the cuda compiler
