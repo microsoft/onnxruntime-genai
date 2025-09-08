@@ -126,6 +126,8 @@ def _parse_args():
              "Used when --use_cuda is specified.",
     )
 
+    parser.add_argument("--use_trt_rtx", action="store_true", help="Whether to use TensorRT-RTX. Default is to not use TensorRT-RTX.")
+
     parser.add_argument("--use_rocm", action="store_true", help="Whether to use ROCm. Default is to not use rocm.")
 
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
@@ -245,8 +247,8 @@ def _validate_build_dir(args: argparse.Namespace):
 
 
 def _validate_cuda_args(args: argparse.Namespace):
-    if args.cuda_home:
-        # default use_cuda to True if cuda_home is specified
+    if args.cuda_home and not args.use_trt_rtx:
+        # default use_cuda to True if cuda_home is specified and use_trt_rtx is not enabled
         args.use_cuda = True
 
     if args.use_cuda:
@@ -259,6 +261,23 @@ def _validate_cuda_args(args: argparse.Namespace):
         if not cuda_home_valid:
             raise RuntimeError(
                 f"cuda_home paths must be specified and valid. cuda_home='{cuda_home}' valid={cuda_home_valid}."
+            )
+
+        args.cuda_home = cuda_home.resolve(strict=True)
+
+
+def _validate_trt_rtx_args(args: argparse.Namespace):
+    if args.use_trt_rtx:
+        # TRT_RTX requires CUDA, so validate cuda_home
+        cuda_home = args.cuda_home if args.cuda_home else _path_from_env_var("CUDA_HOME")
+        if not cuda_home and util.is_windows():
+            cuda_home = _path_from_env_var("CUDA_PATH")
+
+        cuda_home_valid = cuda_home.exists() if cuda_home else False
+
+        if not cuda_home_valid:
+            raise RuntimeError(
+                f"TRT_RTX requires CUDA. cuda_home paths must be specified and valid. cuda_home='{cuda_home}' valid={cuda_home_valid}."
             )
 
         args.cuda_home = cuda_home.resolve(strict=True)
@@ -341,6 +360,7 @@ def _validate_args(args: argparse.Namespace):
 
     _validate_build_dir(args)
     _validate_cuda_args(args)
+    _validate_trt_rtx_args(args)
     _validate_android_args(args)
     _validate_ios_args(args)
     _validate_cmake_args(args)
@@ -355,7 +375,7 @@ def _validate_args(args: argparse.Namespace):
 def _create_env(args: argparse.Namespace):
     env = os.environ.copy()
 
-    if args.use_cuda:
+    if args.use_cuda or args.use_trt_rtx:
         env["CUDA_HOME"] = str(args.cuda_home)
         env["PATH"] = str(args.cuda_home / "bin") + os.pathsep + os.environ["PATH"]
 
@@ -477,7 +497,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
 
     if util.is_windows():
         if args.cmake_generator == "Ninja":
-            if args.use_cuda:
+            if args.use_cuda or args.use_trt_rtx:
                 command += ["-DCUDA_TOOLKIT_ROOT_DIR=" + str(args.cuda_home)]
 
         elif args.cmake_generator.startswith("Visual Studio"):
@@ -487,7 +507,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             if is_x64_host:
                 pass
 
-            if args.use_cuda:
+            if args.use_cuda or args.use_trt_rtx:
                 toolset_options += ["cuda=" + str(args.cuda_home)]
 
             if toolset_options:
@@ -504,6 +524,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
         str(args.build_dir),
         "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
         f"-DUSE_CUDA={'ON' if args.use_cuda else 'OFF'}",
+        f"-DUSE_TRT_RTX={'ON' if args.use_trt_rtx else 'OFF'}",
         f"-DUSE_ROCM={'ON' if args.use_rocm else 'OFF'}",
         f"-DUSE_DML={'ON' if args.use_dml else 'OFF'}",
         f"-DENABLE_JAVA={'ON' if args.build_java else 'OFF'}",
@@ -515,7 +536,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
     if args.ort_home:
         command += [f"-DORT_HOME={args.ort_home}"]
 
-    if args.use_cuda:
+    if args.use_cuda or args.use_trt_rtx:
         cuda_compiler = str(args.cuda_home / "bin" / "nvcc")
         command += [f"-DCMAKE_CUDA_COMPILER={cuda_compiler}"]
 
