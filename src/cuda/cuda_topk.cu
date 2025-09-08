@@ -9,6 +9,7 @@
 #include "cuda_topk_radix_sort.cuh"
 #include "cuda_topk_hybrid_sort.cuh"
 #include "cuda_topk_select_sort.cuh"
+#include "cuda_topk_distributed_sort.cuh"
 
 namespace Generators {
 namespace cuda {
@@ -33,6 +34,20 @@ TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream) {
   auto full_sort_temp_storage_bytes = GetFullSortCubTempStorageBytes(vocab_batch_size, batch_size, stream);
   cub_temp_storage_bytes = std::max(radix_sort_temp_storage_bytes, full_sort_temp_storage_bytes);
   cub_temp_storage = CudaMallocArray<unsigned char>(this->cub_temp_storage_bytes);
+
+  // Allocate buffers for distributed top-k
+  int num_sm;
+  cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, 0);
+  top_k_shards = 32; // From cuda_sampling_v0.cuh
+  top_k_shards = std::min(top_k_shards, num_sm);
+
+  top_k_distributed_lock = CudaMallocArray<int>(1);
+  CUDA_CHECK(cudaMemsetAsync(top_k_distributed_lock.get(), 0, sizeof(int), stream));
+
+  // The original implementation supported k<=64. We allocate for this max k.
+  size_t distributed_buffer_size = (size_t)batch_size * top_k_shards * kDistributedSortMaxK;
+  top_k_distributed_keys = CudaMallocArray<int>(distributed_buffer_size);
+  top_k_distributed_values = CudaMallocArray<float>(distributed_buffer_size);
 }
 
 // Kernel to compact strided data into a dense layout.
@@ -78,3 +93,4 @@ void GetTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
 
 }  // namespace cuda
 }  // namespace Generators
+

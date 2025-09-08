@@ -10,6 +10,7 @@ namespace Generators {
 namespace cuda {
 
 constexpr int kHybridSortMaxK = 256;  // The maximum k allowed for hybrid sort.
+constexpr int kDistributedSortMaxK = 64; // The maximum k allowed for the v0 distributed sort.
 
 // This struct holds all the device memory buffers and other data required for Top-K operations.
 struct TopkData {
@@ -51,6 +52,12 @@ struct TopkData {
   // - Full sort: Stores the start offset of each batch segment for CUB's segmented sort
   cuda_unique_ptr<int> batch_offsets;
 
+  // --- Buffers for Distributed Top-K ---
+  int top_k_shards;
+  cuda_unique_ptr<int> top_k_distributed_lock;
+  cuda_unique_ptr<int> top_k_distributed_keys;
+  cuda_unique_ptr<float> top_k_distributed_values;
+
   // --- Information of Final Output (Input to Sampling Stage) ---
   const float* topk_scores = nullptr;  // pointer to the top-k scores data (in either intermediate_scores_1 or intermediate_scores_2)
   const int* topk_indices = nullptr;   // pointer to the top-k indices data (in either intermediate_indices_1 or intermediate_indices_2)
@@ -78,10 +85,10 @@ void GetTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
 void RunTopKViaSelectionSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 void RunTopKViaFullSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 void RunTopKViaHybridSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
-
-void RunTopKViaBitonicSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
+void RunTopKViaDistributedSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 
 void RunTopKViaRadixSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 
 }  // namespace cuda
 }  // namespace Generators
+

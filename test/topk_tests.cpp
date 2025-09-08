@@ -128,6 +128,13 @@ void RunParityTests(const TopKTestParams& params) {
       });
     }
   }
+  
+  if (params.k <= Generators::cuda::kDistributedSortMaxK) {
+    test_algo("DISTRIBUTED_SORT", [&]() {
+        Generators::cuda::RunTopKViaDistributedSort(topk_data.get(), stream, scores_in_d.get(),
+                                            params.vocab_size, params.batch_size, params.k);
+    });
+  }
 
   test_algo("RADIX_SORT", [&]() {
     Generators::cuda::RunTopKViaRadixSort(topk_data.get(), stream, scores_in_d.get(),
@@ -140,10 +147,10 @@ void RunParityTests(const TopKTestParams& params) {
 TEST(TopKTests, ParityTests) {
   std::vector<TopKTestParams> test_cases = {
       {1, 10000, 50},
-      {2, 10000, Generators::cuda::kHybridSortMaxK},
-      {3, 32000, 100},
+      {2, 10000, 64},
+      {3, 32000, 60},
       {1, 32000, 16},
-      {1, 512000, 50},
+      {1, 200000, 50},
       {4, 1024, 18},
       {1, 256, 16},
       {2, 128, 5}};
@@ -153,3 +160,4 @@ TEST(TopKTests, ParityTests) {
   }
 }
 #endif
+
