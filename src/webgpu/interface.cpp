@@ -179,12 +179,16 @@ struct InterfaceImpl : DeviceInterface {
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
-#if 0
-  bool UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
 #ifdef USE_WEBGPU
+  bool UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
     if (!device_) {
       // Fall back to CPU implementation if WebGPU context is not initialized
       return false;
+    }
+
+    // Only support static mask updates (update_only = true)
+    if (!update_only) {
+      return false;  // Fall back to CPU for dynamic mask handling
     }
 
     try {
@@ -205,9 +209,6 @@ struct InterfaceImpl : DeviceInterface {
     } catch (const std::exception&) {
       return false;  // Fall back to CPU on any error
     }
-#else
-    return false;  // WebGPU support not enabled in build
-#endif
   }
 #endif
   void Synchronize() override {}  // Nothing to do

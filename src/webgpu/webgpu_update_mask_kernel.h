@@ -33,12 +33,13 @@ class WebGPUUpdateMaskKernel {
     uint32_t new_kv_length;
     uint32_t total_length;
     uint32_t max_length;
-    uint32_t update_only;
-    uint32_t padding[3];  // Align to 16 bytes
   };
 
   wgpu::ComputePipeline pipeline_;
+  wgpu::Buffer constants_buffer_;
+  wgpu::BindGroup bind_group_;
   bool initialized_ = false;
+  bool bind_group_initialized_ = false;
 
   void InitializePipeline(wgpu::Device device);
   std::string GetShaderSource();

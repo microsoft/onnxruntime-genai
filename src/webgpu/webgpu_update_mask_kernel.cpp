@@ -14,63 +14,70 @@
 
 namespace {
 
-// WGSL compute shader for updating attention masks
-const char* kUpdateMaskShaderTemplate = R"(
+// WGSL compute shader for updating attention masks (static mask handling only)
+const char* kUpdateMaskShaderI64 = R"(
 struct Constants {
     batch_beam_size: u32,
     new_kv_length: u32,
     total_length: u32,
     max_length: u32,
-    update_only: u32,
-    padding: array<u32, 3>,
 }
 
-@group(0) @binding(0) var<storage, read_write> next_mask: array<DATA_TYPE>;
-@group(0) @binding(1) var<storage, read> mask: array<DATA_TYPE>;
-@group(0) @binding(2) var<uniform> constants: Constants;
+@group(0) @binding(0) var<storage, read_write> mask: array<vec2<u32>>;
+@group(0) @binding(1) var<uniform> constants: Constants;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let index = global_id.x;
-    let total_elements = constants.batch_beam_size * constants.max_length;
+    let total_elements = constants.batch_beam_size * constants.new_kv_length;
     
     if (index >= total_elements) {
         return;
     }
     
-    let batch_index = index / constants.max_length;
-    let seq_index = index % constants.max_length;
+    let batch_id = index / constants.new_kv_length;
+    let seq_id = (index % constants.new_kv_length) + 1u;
     
-    if (constants.update_only == 1u) {
-        // Static mask update: set ones for new tokens
-        if (seq_index < constants.total_length) {
-            next_mask[index] = DATA_TYPE(1);
-        } else {
-            next_mask[index] = DATA_TYPE(0);
-        }
-    } else {
-        // Dynamic mask update: copy existing mask and extend
-        if (seq_index < (constants.total_length - constants.new_kv_length)) {
-            next_mask[index] = mask[batch_index * constants.max_length + seq_index];
-        } else if (seq_index < constants.total_length) {
-            next_mask[index] = DATA_TYPE(1);
-        } else {
-            next_mask[index] = DATA_TYPE(0);
-        }
+    // Update mask_data[batch_id * max_length + total_length - seq_id] = 1
+    let mask_index = batch_id * constants.max_length + constants.total_length - seq_id;
+    mask[mask_index] = vec2<u32>(1u, 0u);
+}
+)";
+
+const char* kUpdateMaskShaderI32 = R"(
+struct Constants {
+    batch_beam_size: u32,
+    new_kv_length: u32,
+    total_length: u32,
+    max_length: u32,
+}
+
+@group(0) @binding(0) var<storage, read_write> mask: array<i32>;
+@group(0) @binding(1) var<uniform> constants: Constants;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let index = global_id.x;
+    let total_elements = constants.batch_beam_size * constants.new_kv_length;
+    
+    if (index >= total_elements) {
+        return;
     }
+    
+    let batch_id = index / constants.new_kv_length;
+    let seq_id = (index % constants.new_kv_length) + 1u;
+    
+    // Update mask_data[batch_id * max_length + total_length - seq_id] = 1
+    let mask_index = batch_id * constants.max_length + constants.total_length - seq_id;
+    mask[mask_index] = i32(1);
 }
 )";
 
 std::string GetShaderForType(bool is_int64) {
-  std::string shader = kUpdateMaskShaderTemplate;
-  // WebGPU doesn't universally support i64, use i32 for both
-  std::string data_type = "i32";
-  size_t pos = 0;
-  while ((pos = shader.find("DATA_TYPE", pos)) != std::string::npos) {
-    shader.replace(pos, 9, data_type);
-    pos += data_type.length();
+  if (is_int64) {
+    return kUpdateMaskShaderI64;
   }
-  return shader;
+  return kUpdateMaskShaderI32;
 }
 
 }  // namespace
@@ -92,29 +99,23 @@ void WebGPUUpdateMaskKernel<T>::InitializePipeline(wgpu::Device device) {
 
   wgpu::ShaderModule shader_module = device.CreateShaderModule(&shader_desc);
 
-  // Create bind group layout
-  wgpu::BindGroupLayoutEntry bind_group_layout_entries[3];
-
-  // next_mask buffer (read_write)
+  // Create bind group layout for static shader: mask buffer (read_write) + constants buffer (uniform)
+  wgpu::BindGroupLayoutEntry bind_group_layout_entries[2];
+  
+  // mask buffer (read_write)
   bind_group_layout_entries[0].binding = 0;
   bind_group_layout_entries[0].visibility = wgpu::ShaderStage::Compute;
   bind_group_layout_entries[0].buffer.type = wgpu::BufferBindingType::Storage;
   bind_group_layout_entries[0].buffer.hasDynamicOffset = false;
 
-  // mask buffer (read)
+  // constants buffer (uniform)
   bind_group_layout_entries[1].binding = 1;
   bind_group_layout_entries[1].visibility = wgpu::ShaderStage::Compute;
-  bind_group_layout_entries[1].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
+  bind_group_layout_entries[1].buffer.type = wgpu::BufferBindingType::Uniform;
   bind_group_layout_entries[1].buffer.hasDynamicOffset = false;
 
-  // constants buffer (uniform)
-  bind_group_layout_entries[2].binding = 2;
-  bind_group_layout_entries[2].visibility = wgpu::ShaderStage::Compute;
-  bind_group_layout_entries[2].buffer.type = wgpu::BufferBindingType::Uniform;
-  bind_group_layout_entries[2].buffer.hasDynamicOffset = false;
-
   wgpu::BindGroupLayoutDescriptor bind_group_layout_desc;
-  bind_group_layout_desc.entryCount = 3;
+  bind_group_layout_desc.entryCount = 2;
   bind_group_layout_desc.entries = bind_group_layout_entries;
 
   wgpu::BindGroupLayout bind_group_layout = device.CreateBindGroupLayout(&bind_group_layout_desc);
@@ -133,6 +134,13 @@ void WebGPUUpdateMaskKernel<T>::InitializePipeline(wgpu::Device device) {
   pipeline_desc.compute.entryPoint = "main";
 
   pipeline_ = device.CreateComputePipeline(&pipeline_desc);
+
+  // Create and cache the constants buffer
+  wgpu::BufferDescriptor constants_buffer_desc;
+  constants_buffer_desc.size = sizeof(Constants);
+  constants_buffer_desc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+  constants_buffer_ = device.CreateBuffer(&constants_buffer_desc);
+
   initialized_ = true;
 }
 
@@ -147,60 +155,52 @@ void WebGPUUpdateMaskKernel<T>::UpdateMask(
     int total_length,
     int max_length,
     bool update_only) {
+  
+  // Only handle static mask updates (update_only = true)
+  if (!update_only) {
+    throw std::runtime_error("Dynamic mask handling not supported in WebGPU implementation");
+  }
+  
+  // Initialize the pipeline and cached resources
   InitializePipeline(device);
 
-  // Create constants
+  // Create constants and upload to cached buffer
   Constants constants;
   constants.batch_beam_size = static_cast<uint32_t>(batch_beam_size);
   constants.new_kv_length = static_cast<uint32_t>(new_kv_length);
   constants.total_length = static_cast<uint32_t>(total_length);
   constants.max_length = static_cast<uint32_t>(max_length);
-  constants.update_only = update_only ? 1u : 0u;
 
-  // Calculate buffer sizes
-  size_t mask_size = batch_beam_size * max_length * sizeof(T);
+  // Upload constants to cached buffer
+  queue.WriteBuffer(constants_buffer_, 0, &constants, sizeof(Constants));
 
-  // Create buffers - Note: In real implementation, these buffers should be
-  // obtained from ONNX Runtime's WebGPU provider, not created here
-  wgpu::BufferDescriptor next_mask_buffer_desc;
-  next_mask_buffer_desc.size = mask_size;
-  next_mask_buffer_desc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::CopySrc;
-  wgpu::Buffer next_mask_buffer = device.CreateBuffer(&next_mask_buffer_desc);
+  // Create cached bind group if not already created
+  if (!bind_group_initialized_) {
+    // Get the existing mask buffer (already on GPU)
+    // Create a wgpu::Buffer from the existing WGPUBuffer handle without taking ownership
+    WGPUBuffer raw_mask_buffer = reinterpret_cast<WGPUBuffer>(mask_data);
+    wgpu::Buffer mask_buffer = wgpu::Buffer(raw_mask_buffer);
 
-  wgpu::BufferDescriptor mask_buffer_desc;
-  mask_buffer_desc.size = mask_size;
-  mask_buffer_desc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst;
-  wgpu::Buffer mask_buffer = device.CreateBuffer(&mask_buffer_desc);
+    // Create bind group for this specific mask buffer and cache it
+    wgpu::BindGroupEntry bind_group_entries[2];
+    bind_group_entries[0].binding = 0;
+    bind_group_entries[0].buffer = mask_buffer;
+    bind_group_entries[0].size = mask_buffer.GetSize();
 
-  wgpu::BufferDescriptor constants_buffer_desc;
-  constants_buffer_desc.size = sizeof(Constants);
-  constants_buffer_desc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
-  wgpu::Buffer constants_buffer = device.CreateBuffer(&constants_buffer_desc);
+    bind_group_entries[1].binding = 1;
+    bind_group_entries[1].buffer = constants_buffer_;
+    bind_group_entries[1].size = sizeof(Constants);
 
-  // Upload data to buffers
-  queue.WriteBuffer(mask_buffer, 0, mask_data, mask_size);
-  queue.WriteBuffer(constants_buffer, 0, &constants, sizeof(Constants));
+    wgpu::BindGroupDescriptor bind_group_desc;
+    bind_group_desc.layout = pipeline_.GetBindGroupLayout(0);
+    bind_group_desc.entryCount = 2;
+    bind_group_desc.entries = bind_group_entries;
 
-  // Create bind group
-  wgpu::BindGroupEntry bind_group_entries[3];
-  bind_group_entries[0].binding = 0;
-  bind_group_entries[0].buffer = next_mask_buffer;
-  bind_group_entries[0].size = mask_size;
+    bind_group_ = device.CreateBindGroup(&bind_group_desc);
+    bind_group_initialized_ = true;
+  }
 
-  bind_group_entries[1].binding = 1;
-  bind_group_entries[1].buffer = mask_buffer;
-  bind_group_entries[1].size = mask_size;
-
-  bind_group_entries[2].binding = 2;
-  bind_group_entries[2].buffer = constants_buffer;
-  bind_group_entries[2].size = sizeof(Constants);
-
-  wgpu::BindGroupDescriptor bind_group_desc;
-  bind_group_desc.layout = pipeline_.GetBindGroupLayout(0);
-  bind_group_desc.entryCount = 3;
-  bind_group_desc.entries = bind_group_entries;
-
-  wgpu::BindGroup bind_group = device.CreateBindGroup(&bind_group_desc);
+  uint32_t workgroup_count = (batch_beam_size * new_kv_length + 255) / 256;
 
   // Create command encoder and dispatch
   wgpu::CommandEncoderDescriptor encoder_desc;
@@ -210,39 +210,12 @@ void WebGPUUpdateMaskKernel<T>::UpdateMask(
   wgpu::ComputePassEncoder compute_pass = encoder.BeginComputePass(&compute_pass_desc);
 
   compute_pass.SetPipeline(pipeline_);
-  compute_pass.SetBindGroup(0, bind_group);
-
-  uint32_t workgroup_count = (batch_beam_size * max_length + 255) / 256;
+  compute_pass.SetBindGroup(0, bind_group_);
   compute_pass.DispatchWorkgroups(workgroup_count);
-
   compute_pass.End();
-
-  // Copy result back to host memory
-  wgpu::BufferDescriptor staging_buffer_desc;
-  staging_buffer_desc.size = mask_size;
-  staging_buffer_desc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
-  wgpu::Buffer staging_buffer = device.CreateBuffer(&staging_buffer_desc);
-
-  encoder.CopyBufferToBuffer(next_mask_buffer, 0, staging_buffer, 0, mask_size);
 
   wgpu::CommandBuffer command_buffer = encoder.Finish();
   queue.Submit(1, &command_buffer);
-
-  // Map and read result - Note: This is synchronous and blocking
-  // In a real implementation, this should be asynchronous
-  // For now, we'll use a simpler synchronous approach
-  auto future = staging_buffer.MapAsync(wgpu::MapMode::Read, 0, mask_size, wgpu::CallbackMode::WaitAnyOnly,
-                                        [](wgpu::MapAsyncStatus status, wgpu::StringView message) {
-                                          // Callback for async mapping
-                                        });
-
-  // Wait for the mapping to complete
-  wgpu::Instance instance = wgpu::CreateInstance();
-  instance.WaitAny(future, UINT64_MAX);
-
-  const T* mapped_data = static_cast<const T*>(staging_buffer.GetConstMappedRange());
-  std::memcpy(next_mask_data, mapped_data, mask_size);
-  staging_buffer.Unmap();
 }
 
 template <typename T>
