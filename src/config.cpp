@@ -14,12 +14,20 @@ namespace Generators {
 
 // Fix casing of certain historical names to match current Onnxruntime names
 std::string_view NormalizeProviderName(std::string_view name) {
-  if (name == "qnn") {
+  std::string lower_name(name);
+  std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c){ return static_cast<unsigned char>(std::tolower(c)); });
+  if (lower_name == "qnn") {
     return "QNN";
-  } else if (name == "webgpu") {
+  } else if (lower_name == "webgpu") {
     return "WebGPU";
-  } else if (name == "dml") {
+  } else if (lower_name == "dml") {
     return "DML";
+  } else if (lower_name == "openvino") {
+    return "OpenVINO";
+  } else if (lower_name == "vitisai") {
+    return "VitisAI";
+  } else if (lower_name == "nvtensorrtrtx") {
+    return "NvTensorRTRTX";
   }
   return name;  // Return name unchanged
 }
