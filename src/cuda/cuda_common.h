@@ -103,15 +103,52 @@ cuda_unique_ptr<T> CudaMallocArray(size_t count, std::span<T>* p_span = nullptr)
 
 inline int CeilDiv(int a, int b) { return (a + (b - 1)) / b; }
 
-#ifndef CUDA_CHECK
-#define CUDA_CHECK(call)                                                    \
-  do {                                                                      \
-    cudaError_t err = (call);                                               \
-    if (err != cudaSuccess) {                                               \
-      fprintf(stderr, "CUDA Error: %s at %s:%d\n", cudaGetErrorString(err), \
-              __FILE__, __LINE__);                                          \
-      throw std::exception();                                               \
-    }                                                                       \
+class CudaError : public std::runtime_error {
+ public:
+  explicit CudaError(const std::string& msg, cudaError_t code)
+      : std::runtime_error(msg), code_(code) {}
+
+  cudaError_t code() const noexcept { return code_; }
+
+ private:
+  cudaError_t code_;
+};
+
+#define CUDA_CHECK(call)                                          \
+  do {                                                            \
+    cudaError_t err = (call);                                     \
+    if (err != cudaSuccess) {                                     \
+      throw Generators::CudaError(                                \
+          std::string("CUDA error in ") + __func__ + " at " +     \
+              __FILE__ + ":" + std::to_string(__LINE__) + " - " + \
+              cudaGetErrorString(err),                            \
+          err);                                                   \
+    }                                                             \
+  } while (0)
+
+#ifdef NDEBUG
+#define CUDA_CHECK_LAUNCH()                                        \
+  do {                                                             \
+    cudaError_t err = cudaPeekAtLastError();                       \
+    if (err != cudaSuccess) {                                      \
+      throw Generators::CudaError(                                 \
+          std::string("CUDA launch error in ") + __func__ +        \
+              " at " + __FILE__ + ":" + std::to_string(__LINE__) + \
+              " - " + cudaGetErrorString(err),                     \
+          err);                                                    \
+    }                                                              \
+  } while (0)
+#else
+#define CUDA_CHECK_LAUNCH()                                        \
+  do {                                                             \
+    cudaError_t err = cudaGetLastError();                          \
+    if (err != cudaSuccess) {                                      \
+      throw Generators::CudaError(                                 \
+          std::string("CUDA launch error in ") + __func__ +        \
+              " at " + __FILE__ + ":" + std::to_string(__LINE__) + \
+              " - " + cudaGetErrorString(err),                     \
+          err);                                                    \
+    }                                                              \
   } while (0)
 #endif
 

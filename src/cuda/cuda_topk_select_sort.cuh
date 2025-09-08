@@ -98,7 +98,6 @@ void LaunchGetTop1(cudaStream_t stream, const float* scores_in, float* scores_ou
   dim3 grid(batch_size, 1, 1);
   dim3 block(1024, 1, 1);
   GetTop1Kernel<1024><<<grid, block, 0, stream>>>(scores_in, scores_out, indices_out, batch_size, vocab_size);
-  CUDA_CHECK(cudaGetLastError());
 }
 
 void LaunchGetTopK(cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size,
@@ -106,7 +105,6 @@ void LaunchGetTopK(cudaStream_t stream, float* scores_in, float* scores_out, int
   dim3 grid(batch_size, 1, 1);
   dim3 block(1024, 1, 1);
   GetTopKKernel<1024><<<grid, block, 0, stream>>>(scores_in, scores_out, indices_out, batch_size, vocab_size, k);
-  CUDA_CHECK(cudaGetLastError());
 }
 
 void RunTopKViaSelectionSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
@@ -123,6 +121,7 @@ void RunTopKViaSelectionSort(TopkData* data, cudaStream_t stream, const float* s
     CUDA_CHECK(cudaMemcpyAsync(mutable_scores, scores_in, buffer_size, cudaMemcpyDeviceToDevice, stream));
     LaunchGetTopK(stream, mutable_scores, topk_scores, topk_indices, vocab_size, batch_size, k);
   }
+  CUDA_CHECK_LAUNCH();
 
   data->topk_scores = topk_scores;
   data->topk_indices = topk_indices;

@@ -20,7 +20,6 @@ inline void LaunchPopulateIndices(int* indices, int vocab_size, int batch_size, 
   dim3 grid(CeilDiv(batch_size * vocab_size, 256), 1, 1);
   dim3 block(256, 1, 1);
   PopulateIndices<<<grid, block, 0, stream>>>(indices, vocab_size, batch_size);
-  CUDA_CHECK(cudaGetLastError());
 }
 
 __global__ void PopulateOffsets(int* offsets, int vocab_size, int batch_size) {
@@ -35,7 +34,6 @@ inline void LaunchPopulateOffsets(int* offsets, int vocab_size, int batch_size, 
   dim3 grid(CeilDiv(batch_size + 1, 256), 1, 1);
   dim3 block(256, 1, 1);
   PopulateOffsets<<<grid, block, 0, stream>>>(offsets, vocab_size, batch_size);
-  CUDA_CHECK(cudaGetLastError());
 }
 
 inline void LaunchSortPairs(void* d_temp_storage, size_t temp_storage_bytes, const float* d_keys_in, float* d_keys_out,
@@ -72,7 +70,7 @@ void RunTopKViaFullSort(TopkData* data, cudaStream_t stream, const float* scores
   data->topk_scores = topk_scores;
   data->topk_indices = topk_indices;
   data->topk_stride = vocab_size;
-  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK_LAUNCH();
 }
 
 }  // namespace cuda

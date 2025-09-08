@@ -29,7 +29,7 @@ __global__ void InitCurandStates(unsigned long long seed, curandState* states, i
 void SamplingData::ReInitCurandStates(unsigned long long random_seed, int batch_size, cudaStream_t stream) {
   random_seed_ = random_seed;
   InitCurandStates<<<CeilDiv(batch_size, 128), 128, 0, stream>>>(random_seed, curand_states.get(), batch_size);
-  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK_LAUNCH();
 }
 
 SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int vocab_size, cudaStream_t stream)
@@ -311,7 +311,7 @@ void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out,
     LaunchMultiStageSampleKernel(data, stream, topk_scores, topk_indices, next_token_out, k, batch_size, p,
                                  temperature, topk_stride);
   }
-  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK_LAUNCH();
 }
 
 // Implementation for the general-purpose block-wise softmax, used by beam search.
@@ -375,7 +375,7 @@ void DispatchBlockwiseSoftmaxForward(cudaStream_t stream, float* output, const f
 
   BlockwiseSoftmaxKernel<kBlockSize, is_log_softmax><<<grid, block, 0, stream>>>(output, input, softmax_elements,
                                                                                  input_stride, output_stride);
-  CUDA_CHECK(cudaGetLastError());
+  CUDA_CHECK_LAUNCH();
 }
 
 // Explicitly instantiate the templates to be linked from other translation units.
