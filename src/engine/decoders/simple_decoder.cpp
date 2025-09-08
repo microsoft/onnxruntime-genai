@@ -224,16 +224,16 @@ void VarlenDecoderIO::PrepareInputIds(std::shared_ptr<DecoderOnly_Model> model, 
   auto cpu_span = device_span.CpuSpan();
 
   const std::vector<int64_t> cumulative_sequence_lengths_shape = {static_cast<int64_t>(scheduled_requests.size() + 1)};
-  auto cumulative_sequence_lengths_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
+  auto cumulative_sequence_lengths_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int32_t>);
   cumulative_sequence_lengths_tensor->CreateTensor(cumulative_sequence_lengths_shape);
-  auto cumulative_sequence_lengths_span = cumulative_sequence_lengths_tensor->GetDeviceSpan<int64_t>();
+  auto cumulative_sequence_lengths_span = cumulative_sequence_lengths_tensor->GetDeviceSpan<int32_t>();
   auto cumulative_sequence_lengths_cpu_span = cumulative_sequence_lengths_span.CpuSpan();
   cumulative_sequence_lengths_cpu_span[0] = 0;
 
   const std::vector<int64_t> sequence_lengths_shape = {static_cast<int64_t>(scheduled_requests.size())};
-  auto sequence_lengths_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int64_t>);
+  auto sequence_lengths_tensor = std::make_unique<Tensor>(model->p_device_inputs_, Ort::TypeToTensorType<int32_t>);
   sequence_lengths_tensor->CreateTensor(sequence_lengths_shape);
-  auto sequence_lengths_span = sequence_lengths_tensor->GetDeviceSpan<int64_t>();
+  auto sequence_lengths_span = sequence_lengths_tensor->GetDeviceSpan<int32_t>();
   auto sequence_lengths_cpu_span = sequence_lengths_span.CpuSpan();
 
   for (size_t i = 0, running_length = 0; i < scheduled_requests.size(); ++i) {

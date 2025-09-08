@@ -271,16 +271,16 @@ struct Config {
     int no_repeat_ngram_size{};        // Unused param
     float diversity_penalty{};         // Unused param
     float length_penalty{1.0f};        // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
-    bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
+    bool past_present_share_buffer{};  // The past/present kv tensors are shared and  allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
   } search;
 
   struct Engine {
     struct DynamicBatching {
-      size_t block_size{256};                          // Enable dynamic batching for the engine
-      std::optional<size_t> num_blocks;             // Maximum batch size for dynamic batching
-      std::optional<float> gpu_utilization_factor;  // Maximum sequence length for dynamic batching
-      size_t max_batch_size{16};                       // Maximum batch size for dynamic batching
+      size_t block_size{256};                       // Total number of slots per block.
+      std::optional<size_t> num_blocks;             // Total number of blocks per layer.
+      std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
+      size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
     };
     std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
 
@@ -288,8 +288,7 @@ struct Config {
       size_t max_batch_size{4};  // Maximum batch size for static batching
     };
     std::optional<StaticBatching> static_batching;  // Static batching settings
-  };
-  std::optional<Engine> engine;  // Engine settings
+  } engine;                                         // Engine settings
 
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping

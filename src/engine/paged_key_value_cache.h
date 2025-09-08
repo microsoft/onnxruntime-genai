@@ -31,6 +31,8 @@ struct PagedKeyValueCache {
 
   std::vector<std::pair<const char*, const char*>> Names();
 
+  std::vector<std::pair<const char*, const char*>> OutputNames();
+
   // Shape: [batch_size, max_num_blocks_per_sequence]
   // Assume that the block tables are requested for 3 sequences
   // Assume the block tables for given sequence / requests are:
@@ -59,6 +61,8 @@ struct PagedKeyValueCache {
     std::unique_ptr<OrtValue> value_cache;  // Shape: [num_blocks, block_size * num_kv_heads * head_size]
     std::string key_cache_name;
     std::string value_cache_name;
+    std::string key_cache_output_name;
+    std::string value_cache_output_name;
   };
 
   //   The key and the value cache is represented as an array of blocks. Each block contains

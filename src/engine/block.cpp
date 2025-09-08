@@ -34,7 +34,7 @@ size_t Block::Capacity() const {
 
 void Block::AddSlot() {
   if (IsFull()) {
-    throw std::runtime_error("Cannot add a slot. Block is full.");
+    throw std::runtime_error("Cannot add a slot. The block is full.");
   }
 
   size_++;
@@ -51,7 +51,7 @@ BlockPool::BlockPool(size_t block_size, size_t num_blocks)
 
 std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots) {
   const auto allocate_block = [this](size_t num_slots) {
-    for (size_t i = 0; i < Size(); ++i) {
+    for (size_t i = 0; i < Capacity(); ++i) {
       if (blocks_[i] == nullptr) {
         blocks_[i] = std::make_shared<Block>(i, num_slots, block_size_);
         return blocks_[i];
@@ -68,7 +68,7 @@ std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots) 
   for (size_t i = 0; i < num_slots; i += block_size_) {
     auto block = allocate_block(std::min(block_size_, num_slots - i));
     if (!block) {
-      throw std::runtime_error("Failed to allocate block.");
+      throw std::runtime_error("Failed to allocate a block.");
     }
     allocated_blocks.push_back(block);
   }

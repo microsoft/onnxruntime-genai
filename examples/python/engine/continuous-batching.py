@@ -146,7 +146,7 @@ def run(args: argparse.Namespace):
     end = time.time()
 
     request_pool.bar.close()
-    print(f"⌛Tokens per second: {engine.tokens_decoded / (end - start):.2f}")
+    print(f"⌛ Tokens per second: {engine.tokens_decoded / (end - start):.2f}")
 
 
 if __name__ == "__main__":

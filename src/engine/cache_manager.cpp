@@ -6,7 +6,7 @@
 namespace Generators {
 
 std::unique_ptr<CacheManager> CacheManager::Create(std::shared_ptr<Model> model) {
-  if (model->config_->engine && model->config_->engine->dynamic_batching) {
+  if (model->config_->engine.dynamic_batching) {
     return std::make_unique<PagedCacheManager>(model);
   }
 
@@ -105,7 +105,7 @@ PagedCacheManager::PagedCacheManager(std::shared_ptr<Model> model)
 }
 
 bool PagedCacheManager::CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const {
-  if (cache_allocated_requests_.size() + requests.size() > model_->config_->engine->dynamic_batching->max_batch_size) {
+  if (cache_allocated_requests_.size() + requests.size() > model_->config_->engine.dynamic_batching->max_batch_size) {
     return false;
   }
 
