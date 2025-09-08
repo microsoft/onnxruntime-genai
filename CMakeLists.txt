@@ -168,7 +168,7 @@ endif()
 
 
 # Build all source files using CUDA as a separate shared library we dynamically load at runtime
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   # Suppress nvcc warning 1650 (result of call is not used) and deprecated GPU targets warning for cuda 12.8 or later.
   add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress;1650;-Wno-deprecated-gpu-targets>")
   
