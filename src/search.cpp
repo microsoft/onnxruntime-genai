@@ -6,6 +6,7 @@
 #include <queue>
 #include <algorithm>
 #include <limits>
+#include <unordered_set>
 
 namespace Generators {
 
@@ -24,7 +25,7 @@ GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
   else {
     std::random_device rd;
     std::array<uint32_t, decltype(gen_)::state_size> data;
-    std::generate(std::begin(data), std::end(data), std::ref(rd));
+    std::generate(data.begin(), data.end(), std::ref(rd));
     std::seed_seq seq(data.begin(), data.end());
     gen_.seed(seq);
   }
@@ -234,7 +235,10 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
         break;
       }
     }
-    SoftmaxWithMax(scores_top_k_filtering, temperature, scores_top_k_filtering[0]);
+
+    // The final softmax should always use temperature=1.0.
+    SoftmaxWithMax(scores_top_k_filtering, 1.0f, scores_top_k_filtering[0]);
+
     // Sample a probability threshold
     threshold = dis(gen_);
     int32_t token = indices[k - 1];

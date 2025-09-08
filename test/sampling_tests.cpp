@@ -232,7 +232,7 @@ void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_ite
   std::vector<int> indices(vocab_size);
   std::map<float, int> logit_to_count;
 
-  std::vector<float> logits_cpu(vocab_size * batch_size);
+  std::vector<float> logits_cpu(static_cast<size_t>(vocab_size) * static_cast<size_t>(batch_size));
   // Create a predictable set of logits with the top k values being {k, k-1, ..., 1}
   for (int b = 0; b < batch_size; b++) {
     std::iota(indices.begin(), indices.end(), 0);
