@@ -599,10 +599,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         void* stream_ptr = p_device->GetCudaStream();
         std::stringstream stream_value;
         stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
-        stream_value_str = stream_value.str();
-
         keys.emplace_back("user_compute_stream");
-        values.emplace_back(stream_value_str.c_str());
+        values.emplace_back(stream_value.str().c_str());
       }
 
       for (auto& option : provider_options.options) {
