@@ -77,7 +77,8 @@ void RunParityTests(const TopKTestParams& params) {
 
   // --- Get Reference Result using Full Sort ---
   auto topk_data = std::make_unique<Generators::cuda::TopkDataCompact>(params.batch_size, params.vocab_size, stream);
-  Generators::cuda::RunTopKViaFullSort(topk_data.get(), stream, scores_in_d.get(), params.vocab_size, params.batch_size, params.k);
+  Generators::cuda::RunTopKViaFullSort(topk_data.get(), stream, scores_in_d.get(),
+                                       params.vocab_size, params.batch_size, params.k);
   topk_data->CompactOutput(params.batch_size, params.vocab_size, stream, params.k);
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
@@ -113,13 +114,33 @@ void RunParityTests(const TopKTestParams& params) {
                                               params.vocab_size, params.batch_size, params.k);
   });
 
+  if (params.k <= Generators::cuda::kHybridSortMaxK) {
+    for (int partition_size : {1024, 2048, 4096, 8192}) {
+      if (partition_size > 1024 && partition_size > params.vocab_size * 2) {
+        continue;
+      }
+
+      topk_data->hybrid_sort_partition_size = partition_size;
+      std::string algo_name = "HYBRID (" + std::to_string(partition_size) + ")";
+      test_algo(algo_name, [&]() {
+        Generators::cuda::RunTopKViaHybridSort(topk_data.get(), stream, scores_in_d.get(),
+                                               params.vocab_size, params.batch_size, params.k);
+      });
+    }
+  }
+
+  test_algo("RADIX_SORT", [&]() {
+    Generators::cuda::RunTopKViaRadixSort(topk_data.get(), stream, scores_in_d.get(),
+                                          params.vocab_size, params.batch_size, params.k);
+  });
+
   CUDA_CHECK(cudaStreamDestroy(stream));
 }
 
 TEST(TopKTests, ParityTests) {
   std::vector<TopKTestParams> test_cases = {
       {1, 10000, 50},
-      {2, 10000, 64},
+      {2, 10000, Generators::cuda::kHybridSortMaxK},
       {3, 32000, 100},
       {1, 32000, 16},
       {1, 512000, 50},

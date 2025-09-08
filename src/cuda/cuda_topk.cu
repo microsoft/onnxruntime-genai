@@ -4,24 +4,34 @@
 #include <cub/device/device_segmented_radix_sort.cuh>
 
 #include "cuda_topk.h"
+#include "cuda_topk_threshold.cuh"
 #include "cuda_topk_full_sort.cuh"
+#include "cuda_topk_radix_sort.cuh"
+#include "cuda_topk_hybrid_sort.cuh"
 #include "cuda_topk_select_sort.cuh"
 
 namespace Generators {
 namespace cuda {
 
 TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream) {
+  hybrid_sort_partition_size = EstimateHybridSortBestPartitionSize(vocab_size);
+  selection_sort_k_threshold = EstimateThresholdK(batch_size, vocab_size);
+
+  size_t hybrid_sort_buffer_elements = GetHybridSortIntermediateSize(batch_size, vocab_size, hybrid_sort_partition_size);
+
   size_t vocab_batch_size = static_cast<size_t>(vocab_size) * batch_size;
+  size_t max_buffer_elements = std::max(vocab_batch_size, hybrid_sort_buffer_elements);
 
   // Allocate all necessary device memory
-  // The buffers are sized for the full sort algorithm, which is the largest.
-  intermediate_indices_1 = CudaMallocArray<int>(vocab_batch_size);
-  intermediate_indices_2 = CudaMallocArray<int>(vocab_batch_size);
-  intermediate_scores_1 = CudaMallocArray<float>(vocab_batch_size);
-  intermediate_scores_2 = CudaMallocArray<float>(vocab_batch_size);
+  intermediate_indices_1 = CudaMallocArray<int>(max_buffer_elements);
+  intermediate_indices_2 = CudaMallocArray<int>(max_buffer_elements);
+  intermediate_scores_1 = CudaMallocArray<float>(max_buffer_elements);
+  intermediate_scores_2 = CudaMallocArray<float>(max_buffer_elements);
   batch_offsets = CudaMallocArray<int>(batch_size + 1);
 
-  cub_temp_storage_bytes = GetFullSortCubTempStorageBytes(vocab_batch_size, batch_size, stream);
+  auto radix_sort_temp_storage_bytes = GetRadixSortCubTempStorageBytes(vocab_size, stream);
+  auto full_sort_temp_storage_bytes = GetFullSortCubTempStorageBytes(vocab_batch_size, batch_size, stream);
+  cub_temp_storage_bytes = std::max(radix_sort_temp_storage_bytes, full_sort_temp_storage_bytes);
   cub_temp_storage = CudaMallocArray<unsigned char>(this->cub_temp_storage_bytes);
 }
 
@@ -49,10 +59,20 @@ void TopkDataCompact::CompactOutput(int batch_size, int vocab_size, cudaStream_t
 void GetTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
   assert(topk_data != nullptr);
 
-  if (k > 64) {
-    RunTopKViaFullSort(topk_data, stream, scores_in, vocab_size, batch_size, k);
-  } else {
+  if (k <= topk_data->selection_sort_k_threshold) {
     RunTopKViaSelectionSort(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    return;
+  }
+
+  if (k <= kHybridSortMaxK) {
+    RunTopKViaHybridSort(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    return;
+  }
+
+  if (batch_size <= 2) {
+    RunTopKViaRadixSort(topk_data, stream, scores_in, vocab_size, batch_size, k);
+  } else {
+    RunTopKViaFullSort(topk_data, stream, scores_in, vocab_size, batch_size, k);
   }
 }
 

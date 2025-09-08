@@ -143,8 +143,10 @@ TEST(CudaSamplingBenchmarks, PerformanceTests) {
       for (int k : ks) {
         // Test different stride scenarios from the Top-K stage
         int stride;
-        if (k <= 64) {
+        if (k <= 8) {
           stride = k;  // selection sort
+        } else if (k <= Generators::cuda::kHybridSortMaxK) {
+          stride = Generators::cuda::kHybridSortMaxK;  // hybrid sort
         } else {
           stride = vocab_size;  // Full sort
         }
