@@ -271,14 +271,19 @@ void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_ite
   Softmax(initial_probs, temperature);
 
   // Apply top-p filtering
-  float cumulative_prob = 0.0f;
   std::vector<float> filtered_logits = top_k_logits;
   if (p < 1.0f) {
+    float cumulative_prob = 0.0f;
+    bool threshold_reached = false;
     for (int i = 0; i < k; ++i) {
-      if (cumulative_prob >= p) {
+      if (threshold_reached) {
         filtered_logits[i] = std::numeric_limits<float>::lowest();
+      } else {
+        cumulative_prob += initial_probs[i];
+        if (cumulative_prob >= p) {
+          threshold_reached = true;
+        }
       }
-      cumulative_prob += initial_probs[i];
     }
   }
 
