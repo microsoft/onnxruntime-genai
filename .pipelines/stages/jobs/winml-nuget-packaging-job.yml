@@ -124,8 +124,7 @@ jobs:
       - powershell: |
           # Package dependencie
           $ort_nuget_package_name = "Microsoft.WindowsAppSDK.ML"
-          # 1.8.1001 to 1.8.2000 will NOT include breaking ORT changes.
-          $ort_package_version = "[1.8.1001,1.8.2000]"
+          $ort_package_version = "[1.8.2001,1.8.3000]"
 
           $genai_nuget_package_name = "Microsoft.ML.OnnxRuntimeGenAI.WinML"
           Write-Host "##vso[task.setvariable variable=genai_nuget_package_name;]$genai_nuget_package_name"
