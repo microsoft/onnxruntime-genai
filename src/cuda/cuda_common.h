@@ -1,11 +1,12 @@
 #pragma once
 
-#include <assert.h>
-#include <cuda_runtime.h>
-
-#include <cstdio>
+#include <stdexcept>
+#include <string>
+#include <sstream>
 #include <memory>
+#include <cassert>
 
+#include <cuda_runtime.h>
 #include "span.h"
 
 namespace Generators {
@@ -118,11 +119,10 @@ class CudaError : public std::runtime_error {
   do {                                                            \
     cudaError_t err = (call);                                     \
     if (err != cudaSuccess) {                                     \
-      throw Generators::CudaError(                                \
-          std::string("CUDA error in ") + __func__ + " at " +     \
-              __FILE__ + ":" + std::to_string(__LINE__) + " - " + \
-              cudaGetErrorString(err),                            \
-          err);                                                   \
+      std::stringstream ss;                                       \
+      ss << "CUDA error in " << __func__ << " at " << __FILE__    \
+         << ":" << __LINE__ << " - " << cudaGetErrorString(err);   \
+      throw Generators::CudaError(ss.str(), err);                 \
     }                                                             \
   } while (0)
 
@@ -131,11 +131,11 @@ class CudaError : public std::runtime_error {
   do {                                                             \
     cudaError_t err = cudaPeekAtLastError();                       \
     if (err != cudaSuccess) {                                      \
-      throw Generators::CudaError(                                 \
-          std::string("CUDA launch error in ") + __func__ +        \
-              " at " + __FILE__ + ":" + std::to_string(__LINE__) + \
-              " - " + cudaGetErrorString(err),                     \
-          err);                                                    \
+      std::stringstream ss;                                        \
+      ss << "CUDA launch error in " << __func__ << " at "          \
+         << __FILE__ << ":" << __LINE__ << " - "                   \
+         << cudaGetErrorString(err);                               \
+      throw Generators::CudaError(ss.str(), err);                  \
     }                                                              \
   } while (0)
 #else
@@ -143,11 +143,11 @@ class CudaError : public std::runtime_error {
   do {                                                             \
     cudaError_t err = cudaGetLastError();                          \
     if (err != cudaSuccess) {                                      \
-      throw Generators::CudaError(                                 \
-          std::string("CUDA launch error in ") + __func__ +        \
-              " at " + __FILE__ + ":" + std::to_string(__LINE__) + \
-              " - " + cudaGetErrorString(err),                     \
-          err);                                                    \
+      std::stringstream ss;                                        \
+      ss << "CUDA launch error in " << __func__ << " at "          \
+         << __FILE__ << ":" << __LINE__ << " - "                   \
+         << cudaGetErrorString(err);                               \
+      throw Generators::CudaError(ss.str(), err);                  \
     }                                                              \
   } while (0)
 #endif
