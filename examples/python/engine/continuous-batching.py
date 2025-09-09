@@ -55,7 +55,7 @@ class RequestPool:
         tokenizer: og.Tokenizer,
         engine: og.Engine,
         num_requests: int,
-        load_factor: float = 0.2,
+        load_factor: float = 1,
         debug: bool = False,
     ):
         self.model = model
@@ -135,6 +135,7 @@ def run(args: argparse.Namespace):
         engine.tokenizer,
         engine.engine,
         args.num_requests,
+        load_factor=args.load_factor,
         debug=args.debug,
     )
 
@@ -146,7 +147,7 @@ def run(args: argparse.Namespace):
     end = time.time()
 
     request_pool.bar.close()
-    print(f"⌛Tokens per second: {engine.tokens_decoded / (end - start):.2f}")
+    print(f"⌛ Tokens per second: {engine.tokens_decoded / (end - start):.2f}")
 
 
 if __name__ == "__main__":
@@ -180,6 +181,13 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Number of requests to process in the pool",
+    )
+    parser.add_argument(
+        "-l",
+        "--load_factor",
+        type=float,
+        default=1.0,
+        help="Load factor to control the number of preloaded in-flight requests (default: 1.0)",
     )
     args = parser.parse_args()
 
