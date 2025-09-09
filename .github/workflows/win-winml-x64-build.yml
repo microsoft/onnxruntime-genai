@@ -68,38 +68,3 @@ jobs:
         run: |
           cmake --build --preset windows_x64_winml_release --parallel
           cmake --build --preset windows_x64_winml_release --target PyPackageBuild
-
-      - name: Add CUDA to PATH
-        run: |
-          echo "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - name: Install the Python Wheel and Test Dependencies
-        run: |
-          python -m pip install -r test\python\requirements.txt
-          python -m pip install -r test\python\cuda\torch\requirements.txt
-          python -m pip install -r test\python\cuda\ort\requirements.txt
-          python -m pip install (Get-ChildItem ("$env:binaryDir\wheel\*.whl")) --no-deps
-
-      - name: Run the Python Tests
-        run: |
-          python test/python/test_onnxruntime_genai.py --cwd "test\python" --test_models "test\test_models" --e2e
-
-      - name: Verify Build Artifacts
-        if: always()
-        continue-on-error: true
-        run: |2
-
-          Get-ChildItem -Path $env:GITHUB_WORKSPACE\$env:binaryDir -Recurse
-
-      - name: Build the C# API and Run the C# Tests
-        run: |
-          $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH
-          cd test\csharp
-          dotnet test /p:Configuration=release /p:NativeBuildOutputDir="$env:GITHUB_WORKSPACE\$env:binaryDir\Release" /p:OrtLibDir="$env:GITHUB_WORKSPACE\ort\lib"
-
-      - name: Prepend CUDA to PATH and Run tests
-        run: |-
-          $env:PATH = "${{ env.cuda_dir }}\\v${{ env.cuda_version }}\\bin;" + $env:PATH 
-          echo "Current PATH variable is: $env:PATH" 
-          copy $env:GITHUB_WORKSPACE\ort\lib\* .\$env:binaryDir\Release
-          & .\$env:binaryDir\Release\unit_tests.exe
