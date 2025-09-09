@@ -8,6 +8,11 @@
 
 namespace Generators {
 
+/*
+ * Block represents a contiguous set of slots in the paged key-value cache.
+ * Each block has a fixed capacity (number of slots it can hold) and tracks
+ * the number of currently used slots.
+ */
 struct Block {
   Block(size_t id, size_t slots, size_t block_size);
 
@@ -31,6 +36,11 @@ struct Block {
   size_t capacity_;
 };
 
+/*
+ * BlockPool manages a pool of blocks for the paged key-value cache.
+ * It allows allocation and deallocation of blocks, and keeps track
+ * of the total capacity and currently available blocks.
+ */
 struct BlockPool {
   BlockPool(size_t block_size, size_t num_blocks);
 

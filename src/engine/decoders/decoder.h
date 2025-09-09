@@ -9,6 +9,11 @@
 
 namespace Generators {
 
+/*
+ * ModelIO is a base class for managing model inputs and outputs.
+ * It inherits from State since its purpose is to maintain the model's state.
+ * This class can be extended for specific model types that require input/output management.
+ */
 struct ModelIO : State {
   ModelIO(const GeneratorParams& params, const Model& model) : State(params, model) {}
 
@@ -25,6 +30,13 @@ struct ModelIO : State {
   };
 };
 
+/*
+ * DecoderIO is a base class for managing inputs and outputs specific to decoder models.
+ * It extends ModelIO and adds functionality for handling scheduled requests and cache management.
+ * This class can be further extended for different types of decoder models.
+ * Classes inheriting from DecoderIO must implement the ProcessLogits method to return
+ * the logits output from the model for each request in the scheduled batch.
+ */
 struct DecoderIO : ModelIO {
   DecoderIO(std::shared_ptr<Model> model,
             ScheduledRequests& scheduled_requests,
@@ -33,6 +45,12 @@ struct DecoderIO : ModelIO {
         scheduled_requests_{scheduled_requests},
         cache_manager_{cache_manager} {}
 
+  /*
+   * ProcessLogits processes the logits output from the model and returns a vector of DeviceSpan<float>,
+   * where each DeviceSpan corresponds to the logits for a specific request in the scheduled batch.
+   * The implementation of this method will depend on the specific decoder model and how it outputs logits.
+   * This is a pure virtual function, so any class inheriting from DecoderIO must provide an implementation.
+   */
   virtual std::vector<DeviceSpan<float>> ProcessLogits() = 0;
 
  protected:

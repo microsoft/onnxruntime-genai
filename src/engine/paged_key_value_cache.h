@@ -12,6 +12,16 @@
 
 namespace Generators {
 
+/*
+ * PagedKeyValueCache manages a paged key-value cache for models that use the PagedAttention operator.
+ * The cache is divided into blocks, each containing a fixed number of slots. Each slot holds
+ * the key and value vectors for a single token across all attention heads.
+ * The cache is allocated on a device (e.g., GPU) and is shared across multiple requests.
+ * Requests can be added to the cache, and blocks are allocated as needed. The cache
+ * supports appending tokens to existing requests and removing requests from the cache.
+ * The cache also provides methods to retrieve the current key-value cache and block tables
+ * for all requests.
+ */
 struct PagedKeyValueCache {
  public:
   PagedKeyValueCache(std::shared_ptr<Model> model);
@@ -57,8 +67,8 @@ struct PagedKeyValueCache {
 
  private:
   struct LayerCache {
-    std::unique_ptr<OrtValue> key_cache;    // Shape: [num_blocks, block_size * num_kv_heads * head_size]
-    std::unique_ptr<OrtValue> value_cache;  // Shape: [num_blocks, block_size * num_kv_heads * head_size]
+    std::unique_ptr<OrtValue> key_cache;    // Shape: [num_blocks, block_size, num_kv_heads, head_size]
+    std::unique_ptr<OrtValue> value_cache;  // Shape: [num_blocks, block_size, num_kv_heads, head_size]
     std::string key_cache_name;
     std::string value_cache_name;
     std::string key_cache_output_name;
