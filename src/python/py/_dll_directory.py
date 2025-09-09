@@ -40,7 +40,7 @@ def add_onnxruntime_dependency(package_id: str):
             import ctypes
             _ = ctypes.CDLL(dml_path)
 
-        # temporary workaround for onnxruntime.dll loading
+        # Workaround for onnxruntime.dll loading
         ort_path = os.path.join(ort_package_path, "capi", "onnxruntime.dll")
         # The dependent onnxruntime package may have multiple execution providers.
         # Check to see if onnxruntime.dll exists before trying to load it.
