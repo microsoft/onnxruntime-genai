@@ -14,12 +14,20 @@ namespace Generators {
 
 // Fix casing of certain historical names to match current Onnxruntime names
 std::string_view NormalizeProviderName(std::string_view name) {
-  if (name == "qnn") {
+  std::string lower_name(name);
+  std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+  if (lower_name == "qnn") {
     return "QNN";
-  } else if (name == "webgpu") {
+  } else if (lower_name == "webgpu") {
     return "WebGPU";
-  } else if (name == "dml") {
+  } else if (lower_name == "dml") {
     return "DML";
+  } else if (lower_name == "openvino") {
+    return "OpenVINO";
+  } else if (lower_name == "vitisai") {
+    return "VitisAI";
+  } else if (lower_name == "nvtensorrtrtx") {
+    return "NvTensorRTRTX";
   }
   return name;  // Return name unchanged
 }
@@ -709,6 +717,12 @@ struct Model_Element : JSON::Element {
       v_.decoder_start_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "sep_token_id") {
       v_.sep_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "hardware_device_type") {
+      v_.hardware_device_type = JSON::Get<std::string_view>(value);
+    } else if (name == "hardware_device_id") {
+      v_.hardware_device_id = static_cast<uint32_t>(JSON::Get<double>(value));
+    } else if (name == "hardware_vendor_id") {
+      v_.hardware_vendor_id = static_cast<uint32_t>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }

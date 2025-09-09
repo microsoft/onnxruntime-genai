@@ -85,6 +85,8 @@ if(MSVC)
 endif()
 
 include(cmake/ortlib.cmake)
+
+
 include(cmake/external/onnxruntime_external_deps.cmake)
 # All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
 include(cmake/global_variables.cmake)
@@ -155,6 +157,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
   add_compile_definitions(_ORT_GENAI_USE_DLOPEN)
 else()
   target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+  if(USE_WINML)
+    target_link_options(onnxruntime-genai PRIVATE "/DELAYLOAD:${ONNXRUNTIME_LIB}")
+  endif()
 endif()
 
 if(APPLE)

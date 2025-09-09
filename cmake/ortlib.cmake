@@ -1,9 +1,69 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+if(USE_WINML)
+  message(STATUS "----- Building with WinML support ----- ")
+
+  add_compile_definitions(USE_WINML=1)
+
+  if(NOT DEFINED WINML_SDK_VERSION OR WINML_SDK_VERSION STREQUAL "")
+    #set(WINML_SDK_VERSION "1.8.1065-experimental")
+    # message(STATUS "WINML_SDK_VERSION not set, defaulting to ${WINML_SDK_VERSION}")
+    message(FATAL_ERROR "WINML_SDK_VERSION must be set when USE_WINML=ON. Configure CMake with -DWINML_SDK_VERSION=<version>.")
+  endif()
+
+  if(CMAKE_GENERATOR_PLATFORM STREQUAL "x64")
+      set(ORT_PLATFORM "win-x64")
+  elseif(CMAKE_GENERATOR_PLATFORM STREQUAL "arm64" OR CMAKE_GENERATOR_PLATFORM STREQUAL "arm64X" OR CMAKE_GENERATOR_PLATFORM STREQUAL "arm64EC")
+      set(ORT_PLATFORM "win-arm64")
+  else()
+      message(FATACMAKE_GENERATOR_PLATFORML_ERROR "Unsupported platform for GenAI: ${CMAKE_GENERATOR_PLATFORM}")
+      return()
+  endif()
+
+  include(cmake/nuget.cmake)
+
+  # We could have this as a variable in the build pipeline...
+  install_nuget_package(
+    Microsoft.WindowsAppSDK.ML
+    ${WINML_SDK_VERSION}
+    WINML_ROOT)
+
+  message(STATUS "WINML_ROOT: ${WINML_ROOT}")
+  message(STATUS "WINML_SDK_VERSION: ${WINML_SDK_VERSION}")
+  message(STATUS "ORT_PLATFORM: ${ORT_PLATFORM}")
+  message(STATUS "CMAKE_BUILD_TYPE: ${CMAKE_BUILD_TYPE}")
+  message(STATUS "CMAKE_GENERATOR_PLATFORM: ${CMAKE_GENERATOR_PLATFORM}")
+
+  if(ORT_HOME)
+    message(STATUS "WARNING: ORT_HOME will be overridden with USE_WINML=ON")
+  endif()
+
+  set(ORT_HOME "${CMAKE_CURRENT_SOURCE_DIR}/ort")
+  file(MAKE_DIRECTORY "${ORT_HOME}/lib")
+  file(MAKE_DIRECTORY "${ORT_HOME}/include")
+
+  file (GLOB ORT_HEADERS_1 CONFIGURE_DEPENDS "${WINML_ROOT}/include/winml/*.h")
+  file (GLOB ORT_HEADERS_2 CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/.winml/include/*.h")
+
+  file(COPY ${ORT_HEADERS_1} DESTINATION "${ORT_HOME}/include")
+  file(COPY ${ORT_HEADERS_2} DESTINATION "${ORT_HOME}/include")
+
+  file (GLOB ORT_LIBS_1 CONFIGURE_DEPENDS "${WINML_ROOT}/runtimes/${ORT_PLATFORM}/native/onnxruntime.lib")
+  file(COPY ${ORT_LIBS_1} DESTINATION "${ORT_HOME}/lib")
+
+  message(STATUS "USE_WINML: ORT_HOME set to: ${ORT_HOME}")
+else()
+  add_compile_definitions(USE_WINML=0)
+endif()
+
 if(ORT_HOME)
   # If ORT_HOME is specified at build time, use ORT_HOME to get the onnxruntime headers and libraries
-  message(STATUS "Using ONNX Runtime from ${ORT_HOME}")
+  message(STATUS "Using ONNX Runtime from: ${ORT_HOME} [as provided]")
+
+  # Make sure the path provided is absolute, as some tools don't react well to relative paths.
+  get_filename_component(ORT_HOME ${ORT_HOME} ABSOLUTE)
+  message(STATUS "Using ONNX Runtime from: ${ORT_HOME} [absloute]")
 
   if (ANDROID)
     # Paths are based on the directory structure of the ORT Android AAR.

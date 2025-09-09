@@ -52,6 +52,11 @@ parameters:
   type: boolean
   default: false
 
+- name: enable_winml
+  displayName: 'Whether WinML nuget package should be built.'
+  type: boolean
+  default: false
+
 - name: ort_version
   type: string
 
@@ -86,8 +91,11 @@ jobs:
     ${{ else }}:
       value: 'MinSizeRel'
 
-  - name: artifactName
-    value: 'onnxruntime-genai-${{ parameters.ep }}-dep-qnn-${{ parameters.enable_win_qnn }}'
+  - name: nugetArtifactName
+    ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
+      value: 'onnxruntime-genai-winml'
+    ${{ else }}:
+      value: 'onnxruntime-genai-${{ parameters.ep }}-dep-qnn-${{ parameters.enable_win_qnn }}-nuget'
 
   - name: genai_nuget_package_name
     ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
@@ -98,6 +106,8 @@ jobs:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.DirectML'
     ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
       value: 'Microsoft.ML.OnnxRuntimeGenAI.QNN'
+    ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
+      value: 'Microsoft.ML.OnnxRuntimeGenAI.WinML'
 
   - name: ort_nuget_package_name
     ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, false)) }}:
@@ -108,8 +118,22 @@ jobs:
       value: 'Microsoft.ML.OnnxRuntime.DirectML'
     ${{ if and(eq(parameters.ep, 'cpu'), eq(parameters.enable_win_qnn, true)) }}:
       value: 'Microsoft.ML.OnnxRuntime.QNN'
+    ${{ if and(eq(parameters.ep, 'winml'), eq(parameters.enable_winml, true)) }}:
+      value: 'Microsoft.WindowsAppSDK.ML'
 
   steps:
+  - ${{ if eq(parameters.enable_winml, true) }}:
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download onnxruntime-genai-win-winml-x64-capi Artifacts'
+        ArtifactName: onnxruntime-genai-win-winml-x64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+    - template: steps/utils/flex-download-pipeline-artifact.yml
+      parameters:
+        StepName: 'Download onnxruntime-genai-win-winml-arm64-capi Artifacts'
+        ArtifactName: onnxruntime-genai-win-winml-arm64-capi
+        TargetPath: '$(Build.BinariesDirectory)/artifact-downloads'
+
   - ${{ if and(eq(parameters.enable_win_cpu, true), eq(parameters.ep, 'cpu')) }}:
     - template: steps/utils/flex-download-pipeline-artifact.yml
       parameters:
@@ -323,7 +347,7 @@ jobs:
       DoEsrp: 'true'
 
   - task: 1ES.PublishPipelineArtifact@1
-    displayName: 'Publish Artifact: ONNXRuntime Genai NuGet'
+    displayName: 'Publish Artifact: Genai NuGet'
     inputs:
       targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
-      artifactName: $(artifactName)-nuget
+      artifactName: $(nugetArtifactName)
