@@ -15,7 +15,7 @@ namespace Generators {
 // Fix casing of certain historical names to match current Onnxruntime names
 std::string_view NormalizeProviderName(std::string_view name) {
   std::string lower_name(name);
-  std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c){ return static_cast<unsigned char>(std::tolower(c)); });
+  std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
   if (lower_name == "qnn") {
     return "QNN";
   } else if (lower_name == "webgpu") {
