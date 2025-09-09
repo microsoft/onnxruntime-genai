@@ -143,6 +143,10 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
     ep_dynamic_options_next_run_.clear();
   }
 
+  if (model_.p_device_ && model_.p_device_->GetType() == DeviceType::NvTensorRtRtx) {
+    run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
+  }
+
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
 
@@ -590,6 +594,17 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       }
 
       std::vector<const char*> keys, values;
+      std::string stream_value_str;
+      if (provider_options.name == "NvTensorRtRtx" && is_primary_session_options && p_device) {
+        void* stream_ptr = p_device->GetCudaStream();
+        std::stringstream stream_value;
+        stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
+        stream_value_str = stream_value.str();
+
+        keys.emplace_back("user_compute_stream");
+        values.emplace_back(stream_value_str.c_str());
+      }
+
       for (auto& option : provider_options.options) {
         keys.emplace_back(option.first.c_str());
         values.emplace_back(option.second.c_str());
