@@ -7,6 +7,7 @@
 
 #ifdef USE_WEBGPU
 #include "webgpu_update_mask_kernel.h"
+#include "webgpu_update_position_ids_kernel.h"
 
 // Dawn WebGPU headers for native API access
 #include <dawn/webgpu_cpp.h>
@@ -210,6 +211,50 @@ struct InterfaceImpl : DeviceInterface {
       return false;  // Fall back to CPU on any error
     }
   }
+
+  bool Cast(void* input_data, void* output_data, ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type, size_t element_count) override {
+    if (!device_) {
+      return false;  // Fall back to CPU if WebGPU context is not initialized
+    }
+
+    if (input_type == output_type) {
+      throw std::runtime_error("Cast - input and output types are the same");
+    }
+
+    // For now, return false to fall back to CPU implementation
+    // TODO: Implement WebGPU compute shaders for type casting if needed
+    return false;
+  }
+
+  bool UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
+    if (!device_) {
+      return false;  // Fall back to CPU if WebGPU context is not initialized
+    }
+
+    // Only support batch_beam_size == 1 for graph capture (continuous decoding)
+    if (batch_beam_size != 1) {
+      return false;  // Fall back to CPU for batch_size > 1
+    }
+
+    try {
+      if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+        webgpu_update_position_ids_kernel_int32_.UpdatePositionIds(
+            device_, queue_,
+            static_cast<int32_t*>(position_ids), 
+            batch_beam_size, total_length, new_kv_length);
+      } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+        webgpu_update_position_ids_kernel_int64_.UpdatePositionIds(
+            device_, queue_,
+            static_cast<int64_t*>(position_ids), 
+            batch_beam_size, total_length, new_kv_length);
+      } else {
+        return false;  // Unsupported data type
+      }
+      return true;
+    } catch (const std::exception&) {
+      return false;  // Fall back to CPU on any error
+    }
+  }
 #endif
   void Synchronize() override {}  // Nothing to do
 
@@ -220,6 +265,8 @@ struct InterfaceImpl : DeviceInterface {
   wgpu::Queue queue_;
   WebGPUUpdateMaskKernel<int32_t> webgpu_update_mask_kernel_int32_;
   WebGPUUpdateMaskKernel<int64_t> webgpu_update_mask_kernel_int64_;
+  WebGPUUpdatePositionIdsKernel<int32_t> webgpu_update_position_ids_kernel_int32_;
+  WebGPUUpdatePositionIdsKernel<int64_t> webgpu_update_position_ids_kernel_int64_;
 
   std::vector<wgpu::FeatureName> GetAvailableRequiredFeatures(const wgpu::Adapter& adapter) const {
     std::vector<wgpu::FeatureName> required_features;

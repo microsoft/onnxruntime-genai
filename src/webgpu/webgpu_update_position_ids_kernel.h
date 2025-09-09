@@ -1,0 +1,43 @@
+#pragma once
+
+#ifdef USE_WEBGPU
+
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include "../models/onnxruntime_api.h"
+#include <dawn/webgpu_cpp.h>
+
+// WebGPU kernel for updating position IDs efficiently on GPU
+template <typename T>
+class WebGPUUpdatePositionIdsKernel {
+ public:
+  WebGPUUpdatePositionIdsKernel() = default;
+  ~WebGPUUpdatePositionIdsKernel() = default;
+
+  // Update position IDs using WebGPU compute shader (continuous decoding only)
+  void UpdatePositionIds(
+      wgpu::Device device,
+      wgpu::Queue queue,
+      T* position_ids,
+      int batch_beam_size,
+      int total_length,
+      int new_kv_length);
+
+ private:
+  struct Constants {
+    uint32_t total_length;
+    uint32_t new_kv_length;
+  };
+
+  wgpu::ComputePipeline pipeline_;
+  wgpu::Buffer constants_buffer_;
+  wgpu::BindGroup bind_group_;
+  bool initialized_ = false;
+  bool bind_group_initialized_ = false;
+
+  void InitializePipeline(wgpu::Device device);
+  std::string GetShaderSource();
+};
+
+#endif  // USE_WEBGPU
