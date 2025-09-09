@@ -46,7 +46,7 @@ def _onnxruntime_dependency() -> str:
     else:
         raise ValueError(f'Unable to determine the onnxruntime dependency for {package_name}.')
 
-    # For onnxruntime-trt-rtx, don't add version constraint
+    # For onnxruntime-trt-rtx, don't add version constraint:
     if dependency == "onnxruntime-trt-rtx":
         return dependency
     
