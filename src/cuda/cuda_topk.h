@@ -9,8 +9,12 @@
 namespace Generators {
 namespace cuda {
 
-constexpr int kHybridSortMaxK = 256;  // The maximum k allowed for hybrid sort.
-constexpr int kDistributedSortMaxK = 64; // The maximum k allowed for the v0 distributed sort.
+constexpr int kHybridSortMaxK = 256;      // The maximum k allowed for hybrid sort.
+constexpr int kDistributedSortMaxK = 64;  // The maximum k allowed for distributed sort.
+constexpr int kMaxBenchmarkK = 32;        // The maximum k for online benchmarking.
+
+// Enum for the different Top-K algorithms used in online benchmarking.
+enum class TopkAlgo { SELECTION, DISTRIBUTED, HYBRID, RADIX, FULL, UNKNOWN = -1 };
 
 // This struct holds all the device memory buffers and other data required for Top-K operations.
 struct TopkData {
@@ -18,12 +22,19 @@ struct TopkData {
   TopkData() = delete;
   TopkData(const TopkData&) = delete;
   TopkData& operator=(const TopkData&) = delete;
-  
+
+  // Cache for online benchmarking results for k <= kMaxBenchmarkK.
+  // Stores the best algorithm for a given k.
+  TopkAlgo best_algo_cache[kMaxBenchmarkK + 1];
+
   // The estimated best partition size for hybrid sort.
   int hybrid_sort_partition_size;
 
   // The estimated threshold to use selection sort instead of other algorithm when k <= threshold
   int selection_sort_k_threshold;
+
+  // The number of shards to use for distributed sort.
+  int top_k_shards = 32;
 
   // --- Intermediate Buffers for Top-K Algorithms ---
 
@@ -52,8 +63,7 @@ struct TopkData {
   // - Full sort: Stores the start offset of each batch segment for CUB's segmented sort
   cuda_unique_ptr<int> batch_offsets;
 
-  // --- Buffers for Distributed Top-K ---
-  int top_k_shards;
+  // --- Buffers specific to Distributed Sort ---
   cuda_unique_ptr<int> top_k_distributed_lock;
   cuda_unique_ptr<int> top_k_distributed_keys;
   cuda_unique_ptr<float> top_k_distributed_values;
@@ -78,17 +88,16 @@ struct TopkDataCompact : public TopkData {
   cuda_unique_ptr<int> topk_indices_compact;   // compact [batch_size, k] output indices
 };
 
-// Main dispatcher for Top-K. Used by the sampling logic. The topk_data will be updated for output pointers and stride.
-void GetTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
+// Main dispatcher for Top-K.
+void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 
-// Top-K algorithm implementations. These are exposed for testing and benchmarking.
+// Top-K algorithm implementations. These are not public APIs. Exposed for testing and benchmarking.
 void RunTopKViaSelectionSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 void RunTopKViaFullSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 void RunTopKViaHybridSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
-void RunTopKViaDistributedSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
-
+void RunTopKViaFlashSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 void RunTopKViaRadixSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
+void RunTopKViaDistributedSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 
 }  // namespace cuda
 }  // namespace Generators
-

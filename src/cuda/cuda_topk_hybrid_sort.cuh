@@ -10,12 +10,13 @@
 
 namespace Generators {
 namespace cuda {
-// Stage 1 of Hybrid Sort: Find the top-k elements within large, contiguous partitions of the vocabulary.
+// Stage 1 of Hybrid Sort: Finds the top-k elements within partitions of the vocabulary.
+// This single, unified kernel handles both padded and non-padded cases with the "on-the-fly" padding logic.
 template <int kBlockSize, int kPartitionSize, int K>
-__global__ void FindBlockTopK_CubRegisterSort(const float* __restrict__ scores_in,
-                                              int* __restrict__ intermediate_indices,
-                                              float* __restrict__ intermediate_scores, int vocab_size,
-                                              int num_partitions) {
+__global__ void HybridSort_Stage1_FindPartitionsTopK(const float* __restrict__ scores_in,
+                                                     int* __restrict__ intermediate_indices,
+                                                     float* __restrict__ intermediate_scores, int vocab_size,
+                                                     int num_partitions) {
   constexpr int ItemsPerThread = kPartitionSize / kBlockSize;
   typedef cub::BlockRadixSort<float, kBlockSize, ItemsPerThread, int> BlockRadixSort;
   __shared__ typename BlockRadixSort::TempStorage temp_storage;
@@ -23,15 +24,18 @@ __global__ void FindBlockTopK_CubRegisterSort(const float* __restrict__ scores_i
   const int batch_idx = blockIdx.y;
   const int partition_idx = blockIdx.x;
   const int partition_start = partition_idx * kPartitionSize;
-  const float* batch_scores_in = scores_in + batch_idx * vocab_size;
+  const float* batch_scores_in = scores_in + static_cast<size_t>(batch_idx) * vocab_size;
 
   float thread_keys[ItemsPerThread];
   int thread_values[ItemsPerThread];
 
-  // Coalesced load from global memory into per-thread registers.
+  // Coalesced load from global memory. The boundary check handles both the standard
+  // case and the "on-the-fly" padding for the Flash version, where some threads
+  // in the final partition will deliberately read out of bounds of the original
+  // vocab_size and generate a sentinel value instead.
   for (int i = 0; i < ItemsPerThread; ++i) {
     int global_idx = partition_start + threadIdx.x + i * kBlockSize;
-    if (global_idx < vocab_size && global_idx < partition_start + kPartitionSize) {
+    if (global_idx < vocab_size) {
       thread_keys[i] = batch_scores_in[global_idx];
       thread_values[i] = global_idx;
     } else {
@@ -45,7 +49,7 @@ __global__ void FindBlockTopK_CubRegisterSort(const float* __restrict__ scores_i
 
   // The first K threads now hold the top K elements for this partition. Write them out.
   if (threadIdx.x < K) {
-    int offset = (batch_idx * num_partitions + partition_idx) * K;
+    size_t offset = (static_cast<size_t>(batch_idx) * num_partitions + partition_idx) * K;
     intermediate_scores[offset + threadIdx.x] = thread_keys[0];
     intermediate_indices[offset + threadIdx.x] = thread_values[0];
   }
@@ -64,22 +68,16 @@ inline int select_partitions_per_block(int num_partitions) {
   if (num_partitions <= 2) return 2;
   if (num_partitions <= 4) return 4;
 
-  // Start with the largest reduction size as the default.
   int best_p_size = 8;
-  // Waste is the number of empty slots we must process.
   int min_waste = ((num_partitions + 7) / 8) * 8 - num_partitions;
-  if (min_waste == 0) {
-    return 8;  // Perfect alignment, no need to check further.
-  }
+  if (min_waste == 0) return 8;
 
-  // Check if a reduction size of 4 is strictly better.
   const int p4_waste = ((num_partitions + 3) / 4) * 4 - num_partitions;
   if (p4_waste < min_waste) {
     min_waste = p4_waste;
     best_p_size = 4;
   }
 
-  // Check if a reduction size of 2 is strictly better than the current best.
   const int p2_waste = ((num_partitions + 1) / 2) * 2 - num_partitions;
   if (p2_waste < min_waste) {
     best_p_size = 2;
@@ -88,49 +86,68 @@ inline int select_partitions_per_block(int num_partitions) {
   return best_p_size;
 }
 
-void RunTopKViaHybridSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
-  constexpr int max_k = kHybridSortMaxK;
-  constexpr int block_size = 256;
-  static_assert(kHybridSortMaxK <= block_size);
+// Kernel for the special case where the vocab fits in one partition. It takes the
+// unsorted top-K candidates from Stage 1 and performs a final sort in shared
+// memory to produce the true top-k result.
+template <int kBlockSize, int K_padded>
+__global__ void FinalSinglePartitionSort(const float* __restrict__ scores_in, const int* __restrict__ indices_in,
+                                         float* __restrict__ scores_out, int* __restrict__ indices_out, int k_final) {
+  __shared__ float smem_scores[K_padded];
+  __shared__ int smem_indices[K_padded];
 
-  int partition_size = data->hybrid_sort_partition_size;
+  const int batch_idx = blockIdx.y;
+  const size_t in_offset = static_cast<size_t>(batch_idx) * K_padded;
+  const size_t out_offset = static_cast<size_t>(batch_idx) * k_final;
 
-  const int num_partitions = (vocab_size + partition_size - 1) / partition_size;
-  dim3 grid_stage1(num_partitions, batch_size);
-  dim3 block_stage1(block_size);
-
-  // Stage 1: Find Top-K within partitions.
-  // The results are written to intermediate buffers.
-  switch (partition_size) {
-    case 1024:
-      FindBlockTopK_CubRegisterSort<block_size, 1024, max_k><<<grid_stage1, block_stage1, 0, stream>>>(
-          scores_in, data->intermediate_indices_1.get(), data->intermediate_scores_1.get(), vocab_size, num_partitions);
-      break;
-    case 2048:
-      FindBlockTopK_CubRegisterSort<block_size, 2048, max_k><<<grid_stage1, block_stage1, 0, stream>>>(
-          scores_in, data->intermediate_indices_1.get(), data->intermediate_scores_1.get(), vocab_size, num_partitions);
-      break;
-    case 4096:
-      FindBlockTopK_CubRegisterSort<block_size, 4096, max_k><<<grid_stage1, block_stage1, 0, stream>>>(
-          scores_in, data->intermediate_indices_1.get(), data->intermediate_scores_1.get(), vocab_size, num_partitions);
-      break;
-    case 8192:
-      FindBlockTopK_CubRegisterSort<block_size, 8192, max_k><<<grid_stage1, block_stage1, 0, stream>>>(
-          scores_in, data->intermediate_indices_1.get(), data->intermediate_scores_1.get(), vocab_size, num_partitions);
-      break;
-    default:
-      assert(false && "Unsupported partition_size");
-      break;
+  // Load the K_padded candidates into shared memory
+  for (int i = threadIdx.x; i < K_padded; i += kBlockSize) {
+    smem_scores[i] = scores_in[in_offset + i];
+    smem_indices[i] = indices_in[in_offset + i];
   }
-  CUDA_CHECK(cudaGetLastError());
+  __syncthreads();
 
-  // Stage 2: Iteratively reduce the candidates from each partition until only one partition remains.
-  // This uses a ping-pong buffer scheme for scores and indices.
+  // Sort the K_padded candidates in shared memory
+  bitonic::SharedMemBitonicSort_SoA<kBlockSize, K_padded>(smem_scores, smem_indices);
+
+  // Write out the final top-k_final results
+  if (threadIdx.x < k_final) {
+    scores_out[out_offset + threadIdx.x] = smem_scores[threadIdx.x];
+    indices_out[out_offset + threadIdx.x] = smem_indices[threadIdx.x];
+  }
+}
+
+// Stage 2 of Hybrid Sort: Iteratively reduces partitions to find the final top-K.
+// This logic is shared between the standard and Flash versions.
+template <int K>
+void HybridSort_ReducePartitions(TopkData* data, cudaStream_t stream, int num_partitions, int batch_size, int k) {
+  if (num_partitions == 1) {
+    // Special case: Vocab fits in one partition. Stage 1 found the top K candidates,
+    // but they are not fully sorted. We must perform a final, single-block sort on
+    // these K candidates to get the true top k. This is more efficient than running
+    // the multi-partition reduction loop for this scenario.
+    constexpr int block_size = 256;
+    dim3 grid(1, batch_size);
+    dim3 block(block_size);
+
+    FinalSinglePartitionSort<block_size, K><<<grid, block, 0, stream>>>(
+        data->intermediate_scores_1.get(), data->intermediate_indices_1.get(),
+        data->intermediate_scores_2.get(), data->intermediate_indices_2.get(),
+        k);
+    CUDA_CHECK(cudaGetLastError());
+
+    // The final sorted data is in buffer 2. The output is compact with size k.
+    data->topk_scores = data->intermediate_scores_2.get();
+    data->topk_indices = data->intermediate_indices_2.get();
+    data->topk_stride = k;
+    return;
+  }
+
   int current_num_partitions = num_partitions;
   float* input_scores = data->intermediate_scores_1.get();
   float* output_scores = data->intermediate_scores_2.get();
   int* input_indices = data->intermediate_indices_1.get();
   int* output_indices = data->intermediate_indices_2.get();
+  constexpr int block_size = 256;
 
   while (current_num_partitions > 1) {
     const int partitions_per_block = select_partitions_per_block(current_num_partitions);
@@ -138,19 +155,15 @@ void RunTopKViaHybridSort(TopkData* data, cudaStream_t stream, const float* scor
     dim3 grid_reduce(num_blocks, batch_size);
     dim3 block_reduce(block_size);
 
-    // Dispatch to the kernel with the optimal reduction size.
     switch (partitions_per_block) {
       case 8:
-        bitonic::reduction::BlockReduceTopK<block_size, max_k, 8><<<grid_reduce, block_reduce, 0, stream>>>(
-            input_scores, input_indices, output_scores, output_indices, current_num_partitions);
+        bitonic::reduction::BlockReduceTopK_SoA<block_size, K, 8><<<grid_reduce, block_reduce, 0, stream>>>(input_scores, input_indices, output_scores, output_indices, current_num_partitions);
         break;
       case 4:
-        bitonic::reduction::BlockReduceTopK<block_size, max_k, 4><<<grid_reduce, block_reduce, 0, stream>>>(
-            input_scores, input_indices, output_scores, output_indices, current_num_partitions);
+        bitonic::reduction::BlockReduceTopK_SoA<block_size, K, 4><<<grid_reduce, block_reduce, 0, stream>>>(input_scores, input_indices, output_scores, output_indices, current_num_partitions);
         break;
       case 2:
-        bitonic::reduction::BlockReduceTopK<block_size, max_k, 2><<<grid_reduce, block_reduce, 0, stream>>>(
-            input_scores, input_indices, output_scores, output_indices, current_num_partitions);
+        bitonic::reduction::BlockReduceTopK_SoA<block_size, K, 2><<<grid_reduce, block_reduce, 0, stream>>>(input_scores, input_indices, output_scores, output_indices, current_num_partitions);
         break;
     }
 
@@ -160,46 +173,63 @@ void RunTopKViaHybridSort(TopkData* data, cudaStream_t stream, const float* scor
     current_num_partitions = num_blocks;
   }
 
-
-  // After reduction, input_scores and input_indices point to the device buffers containing the final top-`max_k` raw scores and indices.
   data->topk_scores = input_scores;
   data->topk_indices = input_indices;
-  data->topk_stride = max_k;
+  data->topk_stride = K;
   CUDA_CHECK(cudaGetLastError());
 }
 
+void RunTopKViaHybridSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
+  constexpr int block_size = 256;
+
+  const int partition_size = data->hybrid_sort_partition_size;
+  const int num_partitions = (vocab_size + partition_size - 1) / partition_size;
+  dim3 grid_stage1(num_partitions, batch_size);
+  dim3 block_stage1(block_size);
+
+  auto launch_stage1_flash = [&](auto k_const) {
+    constexpr int K = decltype(k_const)::value;
+    switch (partition_size) {
+      case 1024:
+        HybridSort_Stage1_FindPartitionsTopK<block_size, 1024, K><<<grid_stage1, block_stage1, 0, stream>>>(
+            scores_in, data->intermediate_indices_1.get(), data->intermediate_scores_1.get(), vocab_size, num_partitions);
+        break;
+      case 2048:
+        HybridSort_Stage1_FindPartitionsTopK<block_size, 2048, K><<<grid_stage1, block_stage1, 0, stream>>>(
+            scores_in, data->intermediate_indices_1.get(), data->intermediate_scores_1.get(), vocab_size, num_partitions);
+        break;
+      case 4096:
+        HybridSort_Stage1_FindPartitionsTopK<block_size, 4096, K><<<grid_stage1, block_stage1, 0, stream>>>(
+            scores_in, data->intermediate_indices_1.get(), data->intermediate_scores_1.get(), vocab_size, num_partitions);
+        break;
+      case 8192:
+        HybridSort_Stage1_FindPartitionsTopK<block_size, 8192, K><<<grid_stage1, block_stage1, 0, stream>>>(
+            scores_in, data->intermediate_indices_1.get(), data->intermediate_scores_1.get(), vocab_size, num_partitions);
+        break;
+      default:
+        assert(false && "Unsupported partition_size");
+        break;
+    }
+    CUDA_CHECK(cudaGetLastError());
+    HybridSort_ReducePartitions<K>(data, stream, num_partitions, batch_size, k);
+  };
+
+  if (k <= 64) {
+    launch_stage1_flash(std::integral_constant<int, 64>());
+  } else {
+    launch_stage1_flash(std::integral_constant<int, kHybridSortMaxK>());
+  }
+}
 
 /**
  * @brief Estimates the best partition size for the hybrid Top-K sorting algorithm.
- *
- * This function uses a heuristic based on extensive benchmarking and analysis of the
- * hybrid sort's two-stage nature. The goal is to select a partition size that
- * creates an optimal amount of parallel work to saturate the GPU, while minimizing
- * the overhead of the reduction stage.
- *
- * The heuristic is based on the following rules derived from empirical data:
- * 1.  If the vocabulary fits within a single partition, the smallest partition that
- * can contain it is chosen to eliminate the reduction stage overhead.
- * 2.  If the vocabulary is larger than the biggest available partition, 8192 is
- * consistently the best choice across all batch sizes, as it minimizes the
- * number of partitions that need to be processed in the reduction stage.
- *
- * @param vocab_size The size of the vocabulary to sort over.
- * @return The estimated optimal partition size (e.g., 1024, 2048, 4096, 8192).
  */
 inline int EstimateHybridSortBestPartitionSize(int vocab_size) {
-  // --- Rule 1: Single Partition Dominance ---
-  // If the vocabulary fits entirely within a partition, use the smallest one that fits.
-  // This is the most efficient case as it completely avoids the reduction stage.
   if (vocab_size <= 1024) return 1024;
   if (vocab_size <= 2048) return 2048;
   if (vocab_size <= 4096) return 4096;
   if (vocab_size <= 8192) return 8192;
 
-  // --- Rule 2: Default to Largest Partition Size ---
-  // For any vocabulary size larger than 8192, the benchmark data consistently
-  // shows that using the largest partition size (8192) is optimal. This minimizes
-  // the number of partitions, making the reduction stage as efficient as possible.
   return 8192;
 }
 

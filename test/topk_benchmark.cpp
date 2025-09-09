@@ -52,6 +52,7 @@ struct CsvSummaryResult {
   float selection_sort_latency = -1.0f;
   float hybrid_sort_latency = -1.0f;
   float distributed_sort_latency = -1.0f;
+  float default_latency = -1.0f;
 
   std::string best_algorithm = "NA";
   float best_latency = std::numeric_limits<float>::max();
@@ -75,8 +76,7 @@ void PrintSummary(const std::vector<BenchmarkResult>& results) {
   }
 }
 
-// **MODIFIED FUNCTION**
-// This function now writes the benchmark summary to a CSV file instead of standard output.
+
 void PrintCsvSummary(const std::vector<CsvSummaryResult>& results) {
   if (results.empty()) {
     return;
@@ -91,7 +91,7 @@ void PrintCsvSummary(const std::vector<CsvSummaryResult>& results) {
   std::cout << "\n--- Writing TopK Benchmark CSV Summary to " << filename << " ---\n";
 
   // Write header
-  summary_file << "batch_size,vocab_size,k,full_sort,radix_sort,selection_sort,hybrid_sort,distributed_sort,best_algorithm,best_latency\n";
+  summary_file << "batch_size,vocab_size,k,full_sort,radix_sort,selection_sort,hybrid_sort,distributed_sort,best_algorithm,best_latency,default\n";
 
   for (const auto& result : results) {
     summary_file << result.params.batch_size << ","
@@ -117,15 +117,16 @@ void PrintCsvSummary(const std::vector<CsvSummaryResult>& results) {
     summary_file << ",";
     print_latency(summary_file, result.distributed_sort_latency);
     summary_file << ",";
-
     summary_file << result.best_algorithm << ",";
-
     if (result.best_latency == std::numeric_limits<float>::max()) {
       summary_file << "NA";
     } else {
       print_latency(summary_file, result.best_latency);
     }
-
+    
+    summary_file << ",";
+    print_latency(summary_file, result.default_latency);
+    
     summary_file << "\n";
   }
 
@@ -133,7 +134,7 @@ void PrintCsvSummary(const std::vector<CsvSummaryResult>& results) {
   std::cout << "--- CSV summary successfully written. ---\n";
 }
 
-void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>& csv_results, bool use_default_partition_size = true) {
+void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>& csv_results) {
   std::cout << "\n--- Running Benchmarks with batch_size=" << params.batch_size << ", vocab_size=" << params.vocab_size
             << ", k=" << params.k << " ---\n";
 
@@ -220,10 +221,10 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
   }
 
   // Benchmark Distributed Sort
-  if (params.k <= Generators::cuda::kDistributedSortMaxK) {
+  if (params.batch_size == 1 && params.k <= Generators::cuda::kDistributedSortMaxK) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
       Generators::cuda::RunTopKViaDistributedSort(data.get(), stream, scores_in_d.get(), params.vocab_size,
-                                            params.batch_size, params.k);
+                                                  params.batch_size, params.k);
     });
     all_results.push_back({params, "DISTRIBUTED_SORT", mean_ms, stdev_ms, p95_ms});
     current_csv_result.distributed_sort_latency = mean_ms;
@@ -237,6 +238,15 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
       current_csv_result.best_algorithm = pair.first;
     }
   }
+
+  // Benchmark RunTopK (Backend can be any of the above algorithms)
+  auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
+    Generators::cuda::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
+                              params.batch_size, params.k);
+  });
+  all_results.push_back({params, "DEFAULT", mean_ms, stdev_ms, p95_ms});
+  current_csv_result.default_latency = mean_ms;
+  algo_latencies["DEFAULT"] = mean_ms;
 
   csv_results.push_back(current_csv_result);
 
@@ -295,4 +305,3 @@ TEST(TopKBenchmarks, PerformanceTests) {
 }
 
 #endif
-

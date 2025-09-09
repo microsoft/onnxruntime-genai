@@ -128,8 +128,8 @@ void RunParityTests(const TopKTestParams& params) {
       });
     }
   }
-  
-  if (params.k <= Generators::cuda::kDistributedSortMaxK) {
+
+  if (params.batch_size == 1 && params.k <= Generators::cuda::kDistributedSortMaxK) {
     test_algo("DISTRIBUTED_SORT", [&]() {
         Generators::cuda::RunTopKViaDistributedSort(topk_data.get(), stream, scores_in_d.get(),
                                             params.vocab_size, params.batch_size, params.k);
@@ -141,23 +141,32 @@ void RunParityTests(const TopKTestParams& params) {
                                           params.vocab_size, params.batch_size, params.k);
   });
 
+  // Test RunTopK (Backend can be any of the above algorithms).
+  test_algo("DEFAULT", [&]() {
+    Generators::cuda::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                              params.vocab_size, params.batch_size, params.k);
+  });
+
   CUDA_CHECK(cudaStreamDestroy(stream));
 }
 
 TEST(TopKTests, ParityTests) {
-  std::vector<TopKTestParams> test_cases = {
-      {1, 10000, 50},
-      {2, 10000, 64},
-      {3, 32000, 60},
-      {1, 32000, 16},
-      {1, 200000, 50},
-      {4, 1024, 18},
-      {1, 256, 16},
-      {2, 128, 5}};
+  std::vector<TopKTestParams> test_cases;
 
+  std::vector<int> batch_sizes = {1, 4, 32};
+    std::vector<int> vocab_sizes = {200, 2000, 20000, 200000};
+    std::vector<int> ks = {1, 16, 64, 256, 512};
+
+    for (int batch_size : batch_sizes) {
+      for (int vocab_size : vocab_sizes) {
+        for (int k : ks) {
+          test_cases.push_back({batch_size, vocab_size, std::min(k, vocab_size)});
+        }
+      }
+    }
+    
   for (const auto& params : test_cases) {
     RunParityTests(params);
   }
 }
 #endif
-
