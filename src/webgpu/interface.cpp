@@ -85,7 +85,7 @@ struct WebGPUMemory final : DeviceBuffer {
             [&](wgpu::MapAsyncStatus status, wgpu::StringView message) {
               if (status == wgpu::MapAsyncStatus::Success) {
                 // Get a pointer to the mapped data
-                const void* mapped_data = staging_buffer.GetConstMappedRange();
+                const void* mapped_data = staging_buffer.GetConstMappedRange(0, size_in_bytes_);
                 // Copy the data to our vector
                 memcpy(p_cpu_, mapped_data, size_in_bytes_);
               } else {
