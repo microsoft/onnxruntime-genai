@@ -594,10 +594,17 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       }
 
 #if USE_WINML
-      // Get model device config
-      std::optional<uint32_t> config_device_id = config.model.hardware_device_id;
-      std::optional<uint32_t> config_vendor_id = config.model.hardware_vendor_id;
-      std::optional<std::string> config_device_type = config.model.hardware_device_type;
+      // Get device filtering config
+      Config::DeviceFilteringOptions resolved_device_filtering;
+      if (provider_options.device_filtering_options.has_value()) {
+        resolved_device_filtering = provider_options.device_filtering_options.value();
+      } else if (config.model.device_filtering_options.has_value()) {
+        resolved_device_filtering = config.model.device_filtering_options.value();
+      }
+      
+      std::optional<uint32_t> config_device_id = resolved_device_filtering.hardware_device_id;
+      std::optional<uint32_t> config_vendor_id = resolved_device_filtering.hardware_vendor_id;
+      std::optional<std::string> config_device_type = resolved_device_filtering.hardware_device_type;
       // for OpenVINO, use "device_type" in provider_options exclusively if it's provided
       std::optional<std::string> config_ov_device_type = std::nullopt;
       if (provider_options.name == "OpenVINO") {

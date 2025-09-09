@@ -64,9 +64,17 @@ struct Config {
   fs::path config_path;  // Path of the config directory
 
   using NamedString = std::pair<std::string, std::string>;
+  
+  struct DeviceFilteringOptions {
+    std::optional<std::string> hardware_device_type;  // CPU, GPU, NPU
+    std::optional<uint32_t> hardware_device_id;
+    std::optional<uint32_t> hardware_vendor_id;
+  };
+
   struct ProviderOptions {
     std::string name;
     std::vector<NamedString> options;
+    std::optional<DeviceFilteringOptions> device_filtering_options;
   };
 
   struct SessionOptions {
@@ -247,10 +255,7 @@ struct Config {
 
     } decoder;
 
-    // EP device filters
-    std::optional<std::string> hardware_device_type;  // CPU, GPU, NPU
-    std::optional<uint32_t> hardware_device_id;
-    std::optional<uint32_t> hardware_vendor_id;
+    std::optional<DeviceFilteringOptions> device_filtering_options;
 
   } model;
 
