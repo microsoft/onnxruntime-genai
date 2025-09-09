@@ -8,6 +8,7 @@
 #ifdef USE_WEBGPU
 #include "webgpu_update_mask_kernel.h"
 #include "webgpu_update_position_ids_kernel.h"
+#include "webgpu_cast_kernel.h"
 
 // Dawn WebGPU headers for native API access
 #include <dawn/webgpu_cpp.h>
@@ -221,9 +222,25 @@ struct InterfaceImpl : DeviceInterface {
       throw std::runtime_error("Cast - input and output types are the same");
     }
 
-    // For now, return false to fall back to CPU implementation
-    // TODO: Implement WebGPU compute shaders for type casting if needed
-    return false;
+    try {
+      // Handle supported type conversions
+      if (input_type == Ort::TypeToTensorType<int32_t> && output_type == Ort::TypeToTensorType<int64_t>) {
+        return webgpu_cast_kernel_.CastInt32ToInt64(
+            input_data, 
+            output_data, 
+            element_count);
+      } else if (input_type == Ort::TypeToTensorType<Ort::Float16_t> && output_type == Ort::TypeToTensorType<float>) {
+        return webgpu_cast_kernel_.CastFloat16ToFloat32(
+            input_data, 
+            output_data, 
+            element_count);
+      } else {
+        // Unsupported type conversion, fall back to CPU
+        return false;
+      }
+    } catch (const std::exception&) {
+      return false;  // Fall back to CPU on any error
+    }
   }
 
   bool UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
@@ -267,6 +284,7 @@ struct InterfaceImpl : DeviceInterface {
   WebGPUUpdateMaskKernel<int64_t> webgpu_update_mask_kernel_int64_;
   WebGPUUpdatePositionIdsKernel<int32_t> webgpu_update_position_ids_kernel_int32_;
   WebGPUUpdatePositionIdsKernel<int64_t> webgpu_update_position_ids_kernel_int64_;
+  CastKernel webgpu_cast_kernel_;
 
   std::vector<wgpu::FeatureName> GetAvailableRequiredFeatures(const wgpu::Adapter& adapter) const {
     std::vector<wgpu::FeatureName> required_features;
@@ -442,6 +460,9 @@ struct InterfaceImpl : DeviceInterface {
     device_.SetLoggingCallback([](wgpu::LoggingType type, struct wgpu::StringView message) {
       std::cerr << message.data;
     });
+
+    // Initialize kernels
+    webgpu_cast_kernel_.Initialize(device_, queue_);
 
     std::cout << "WebGPU device initialized successfully!" << std::endl;
     return true;
