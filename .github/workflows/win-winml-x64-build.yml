@@ -62,9 +62,9 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_winml_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DWINML_SDK_VERSION='1.8.2084'
+          cmake --preset windows_x64_winml_relwithdebinfo -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DWINML_SDK_VERSION='1.8.2084'
 
       - name: Build with CMake
         run: |
-          cmake --build --preset windows_x64_winml_release --parallel
-          cmake --build --preset windows_x64_winml_release --target PyPackageBuild
+          cmake --build --preset windows_x64_winml_relwithdebinfo --parallel
+          cmake --build --preset windows_x64_winml_relwithdebinfo --target PyPackageBuild
