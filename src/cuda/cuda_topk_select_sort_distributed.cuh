@@ -255,7 +255,7 @@ __global__ void DistributedTopKKernel(
   }
 }
 
-void RunTopKViaDistributedSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
+void RunTopKViaDistributedSelectionSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
   assert(data != nullptr);
   assert(scores_in != nullptr);
   assert(vocab_size > 0);

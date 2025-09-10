@@ -131,7 +131,7 @@ void RunParityTests(const TopKTestParams& params) {
 
   if (params.batch_size == 1 && params.k <= Generators::cuda::kDistributedSortMaxK) {
     test_algo("DISTRIBUTED_SORT", [&]() {
-        Generators::cuda::RunTopKViaDistributedSort(topk_data.get(), stream, scores_in_d.get(),
+        Generators::cuda::RunTopKViaDistributedSelectionSort(topk_data.get(), stream, scores_in_d.get(),
                                             params.vocab_size, params.batch_size, params.k);
     });
   }

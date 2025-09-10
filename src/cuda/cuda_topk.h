@@ -34,6 +34,7 @@ struct TopkData {
   int selection_sort_k_threshold;
 
   // The number of shards to use for distributed sort.
+  // TODO: re-visit this hard-coded value in the future. For example, compute shard number from vocab_size.
   int top_k_shards = 32;
 
   // --- Intermediate Buffers for Top-K Algorithms ---
@@ -91,13 +92,21 @@ struct TopkDataCompact : public TopkData {
 // Main dispatcher for Top-K.
 void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 
-// Top-K algorithm implementations. These are not public APIs. Exposed for testing and benchmarking.
+// Below are NOT public APIs. Exposed for testing and benchmarking.
+
+// Find top-k elements with simple selection sort.
 void RunTopKViaSelectionSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
+
+// Use CUB's device fragmented radix sort to perform full sort, then select top-k from the sorted results.
 void RunTopKViaFullSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
+
+// Use a hybrid multi-stage reduction: First stage uses BlockRadixSort on partitions, then followed by Bitonic sort in reductions.
 void RunTopKViaHybridSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
-void RunTopKViaFlashSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
+
+// Use CUB's device radix sort to perform full sort on each batch sequentially.
 void RunTopKViaRadixSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
-void RunTopKViaDistributedSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
+
+void RunTopKViaDistributedSelectionSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 
 }  // namespace cuda
 }  // namespace Generators

@@ -103,7 +103,7 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
         RunTopKViaSelectionSort(topk_data, stream, scores_in, vocab_size, batch_size, k);
         return;
       case TopkAlgo::DISTRIBUTED:
-        RunTopKViaDistributedSort(topk_data, stream, scores_in, vocab_size, batch_size, k);
+        RunTopKViaDistributedSelectionSort(topk_data, stream, scores_in, vocab_size, batch_size, k);
         return;
       case TopkAlgo::HYBRID:
         RunTopKViaHybridSort(topk_data, stream, scores_in, vocab_size, batch_size, k);

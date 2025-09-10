@@ -57,7 +57,7 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data, cudaStream_t str
   // Candidate 2: Distributed Sort (if k is within its supported range)
   if (batch_size == 1 && k <= kDistributedSortMaxK) {
     float distributed_latency = TimeKernel(stream, [&]() {
-      RunTopKViaDistributedSort(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      RunTopKViaDistributedSelectionSort(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
     if (distributed_latency < min_latency) {
       min_latency = distributed_latency;

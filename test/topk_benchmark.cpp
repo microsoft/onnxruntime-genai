@@ -223,7 +223,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
   // Benchmark Distributed Sort
   if (params.batch_size == 1 && params.k <= Generators::cuda::kDistributedSortMaxK) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
-      Generators::cuda::RunTopKViaDistributedSort(data.get(), stream, scores_in_d.get(), params.vocab_size,
+      Generators::cuda::RunTopKViaDistributedSelectionSort(data.get(), stream, scores_in_d.get(), params.vocab_size,
                                                   params.batch_size, params.k);
     });
     all_results.push_back({params, "DISTRIBUTED_SORT", mean_ms, stdev_ms, p95_ms});
