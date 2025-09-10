@@ -605,9 +605,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaM
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudiosAndPrompts(const OgaMultiModalProcessor*, const OgaStringArray* prompts, const OgaImages* images, const OgaAudios* audios, OgaNamedTensors** input_tensors);
 
-/** Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
+/** Decode a single token sequence and returns a null terminated utf8 string, and skip special tokens. out_string must be freed with OgaDestroyString
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);
+
+/** Decode a single token sequence and returns a null terminated utf8 string, but do NOT skip special tokens. out_string must be freed with OgaDestroyString
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeWithSpecial(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);
+
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor*, const int32_t* tokens, size_t token_count, const char** out_string);
 
 /**

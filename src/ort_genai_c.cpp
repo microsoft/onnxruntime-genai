@@ -568,6 +568,13 @@ OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer* tokenizer, const 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaTokenizerDecodeWithSpecial(const OgaTokenizer* tokenizer, const int32_t* tokens, size_t token_count, const char** out_string) {
+  OGA_TRY
+  *out_string = AllocOgaString(tokenizer->DecodeWithSpecial({tokens, token_count}));
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer* tokenizer, const char* template_str, const char* messages, const char* tools, bool add_generation_prompt, const char** out_string) {
   OGA_TRY
   *out_string = AllocOgaString(tokenizer->ApplyChatTemplate(template_str, messages, tools, add_generation_prompt));

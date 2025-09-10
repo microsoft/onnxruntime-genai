@@ -212,6 +212,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                UIntPtr /* size_t */ sequenceLength,
                                                                                out IntPtr /* const char** */ outStr);
 
+        // This function is used to decode the given token into a string, but without skipping special tokens. The caller
+        // is responsible for freeing the returned string using the OgaDestroyString function when it is no longer needed.
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern unsafe IntPtr /* OgaResult* */ OgaTokenizerDecodeWithSpecial(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                                          int* /* const int32_t* */ sequence,
+                                                                                          UIntPtr /* size_t */ sequenceLength,
+                                                                                          out IntPtr /* const char** */ outStr);
+
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaTokenizerApplyChatTemplate(IntPtr /* const OgaTokenizer* */ tokenizer,
                                                                                    byte[] /* const char* */ template_string,

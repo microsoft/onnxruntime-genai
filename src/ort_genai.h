@@ -303,6 +303,12 @@ struct OgaTokenizer : OgaAbstract {
     return p;
   }
 
+  OgaString DecodeWithSpecial(const int32_t* tokens_data, size_t tokens_length) const {
+    const char* p;
+    OgaCheckResult(OgaTokenizerDecodeWithSpecial(this, tokens_data, tokens_length, &p));
+    return p;
+  }
+
   OgaString ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const {
     const char* p{};
     OgaCheckResult(OgaTokenizerApplyChatTemplate(this, template_str, messages, tools, add_generation_prompt, &p));
