@@ -80,6 +80,26 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        public string DecodeWithSpecial(ReadOnlySpan<int> sequence)
+        {
+            IntPtr outStr = IntPtr.Zero;
+            unsafe
+            {
+                fixed (int* sequencePtr = sequence)
+                {
+                    Result.VerifySuccess(NativeMethods.OgaTokenizerDecodeWithSpecial(_tokenizerHandle, sequencePtr, (UIntPtr)sequence.Length, out outStr));
+                }
+            }
+            try
+            {
+                return StringUtils.FromUtf8(outStr);
+            }
+            finally
+            {
+                NativeMethods.OgaDestroyString(outStr);
+            }
+        }
+
         public string ApplyChatTemplate(string template_str, string messages, string tools, bool add_generation_prompt)
         {
             IntPtr outStr = IntPtr.Zero;

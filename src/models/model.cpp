@@ -285,6 +285,15 @@ std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   return string;
 }
 
+std::string Tokenizer::DecodeWithSpecial(std::span<const int32_t> tokens) const {
+  OrtxPtr<OrtxStringArray> ortx_string_array;
+  CheckResult(OrtxDetokenize1DWithOptions(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address(), false /* skip_special_tokens */));
+
+  const char* string;
+  CheckResult(OrtxStringArrayGetItem(ortx_string_array, 0, &string));
+  return string;
+}
+
 std::string Tokenizer::ApplyChatTemplate(const char* template_str, const char* messages, const char* tools, bool add_generation_prompt) const {
   ort_extensions::OrtxObjectPtr<OrtxTensorResult> templated_text;
   CheckResult(OrtxApplyChatTemplate(tokenizer_, template_str, messages, tools, templated_text.ToBeAssigned(), add_generation_prompt, false /*tokenize*/));
