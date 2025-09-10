@@ -64,7 +64,6 @@ struct Config {
   fs::path config_path;  // Path of the config directory
 
   using NamedString = std::pair<std::string, std::string>;
-  
   struct DeviceFilteringOptions {
     std::optional<std::string> hardware_device_type;  // CPU, GPU, NPU
     std::optional<uint32_t> hardware_device_id;

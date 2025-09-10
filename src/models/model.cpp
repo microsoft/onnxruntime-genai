@@ -601,7 +601,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       } else if (config.model.device_filtering_options.has_value()) {
         resolved_device_filtering = config.model.device_filtering_options.value();
       }
-      
+
       std::optional<uint32_t> config_device_id = resolved_device_filtering.hardware_device_id;
       std::optional<uint32_t> config_vendor_id = resolved_device_filtering.hardware_vendor_id;
       std::optional<std::string> config_device_type = resolved_device_filtering.hardware_device_type;

@@ -98,7 +98,7 @@ struct ProviderOptions_Element : JSON::Element {
     throw JSON::unknown_value_error{};
   }
 
-  private:
+ private:
   Config::ProviderOptions& v_;
   std::unique_ptr<DeviceFilteringOptions_Element> device_filtering_options_element_;
 };

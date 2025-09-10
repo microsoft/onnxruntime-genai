@@ -302,7 +302,6 @@ OgaResult* OGA_API_CALL OgaConfigSetHardwareDeviceId(OgaConfig* config, uint32_t
   Generators::SetHardwareDeviceId(*config, hardware_device_id);
   return nullptr;
   OGA_CATCH
-  ;
 }
 
 OgaResult* OGA_API_CALL OgaConfigSetHardwareVendorId(OgaConfig* config, uint32_t hardware_vendor_id) {
@@ -310,7 +309,6 @@ OgaResult* OGA_API_CALL OgaConfigSetHardwareVendorId(OgaConfig* config, uint32_t
   Generators::SetHardwareVendorId(*config, hardware_vendor_id);
   return nullptr;
   OGA_CATCH
-  ;
 }
 
 OgaResult* OGA_API_CALL OgaConfigClearHardwareDeviceType(OgaConfig* config) {
@@ -318,7 +316,6 @@ OgaResult* OGA_API_CALL OgaConfigClearHardwareDeviceType(OgaConfig* config) {
   Generators::ClearHardwareDeviceType(*config);
   return nullptr;
   OGA_CATCH
-  ;
 }
 
 OgaResult* OGA_API_CALL OgaConfigClearHardwareDeviceId(OgaConfig* config) {
@@ -326,7 +323,6 @@ OgaResult* OGA_API_CALL OgaConfigClearHardwareDeviceId(OgaConfig* config) {
   Generators::ClearHardwareDeviceId(*config);
   return nullptr;
   OGA_CATCH
-  ;
 }
 
 OgaResult* OGA_API_CALL OgaConfigClearHardwareVendorId(OgaConfig* config) {
@@ -334,7 +330,6 @@ OgaResult* OGA_API_CALL OgaConfigClearHardwareVendorId(OgaConfig* config) {
   Generators::ClearHardwareVendorId(*config);
   return nullptr;
   OGA_CATCH
-  ;
 }
 
 OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
