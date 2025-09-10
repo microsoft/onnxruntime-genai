@@ -321,11 +321,23 @@ struct OgaTokenizer : OgaAbstract {
     OgaCheckResult(OgaTokenizerDecode(this, tokens.data(), tokens.size(), &p));
     return p;
   }
+
+  OgaString DecodeWithSpecial(std::span<const int32_t> tokens) const {
+    const char* p;
+    OgaCheckResult(OgaTokenizerDecodeWithSpecial(this, tokens.data(), tokens.size(), &p));
+    return p;
+  }
 #endif
 
   std::unique_ptr<OgaStringArray> DecodeBatch(const OgaTensor& tensor) const {
     OgaStringArray* p;
     OgaCheckResult(OgaTokenizerDecodeBatch(this, &tensor, &p));
+    return std::unique_ptr<OgaStringArray>(p);
+  }
+
+  std::unique_ptr<OgaStringArray> DecodeBatchWithSpecial(const OgaTensor& tensor) const {
+    OgaStringArray* p;
+    OgaCheckResult(OgaTokenizerDecodeBatchWithSpecial(this, &tensor, &p));
     return std::unique_ptr<OgaStringArray>(p);
   }
 
@@ -353,6 +365,17 @@ struct OgaTokenizerStream : OgaAbstract {
   const char* Decode(int32_t token) {
     const char* out;
     OgaCheckResult(OgaTokenizerStreamDecode(this, token, &out));
+    return out;
+  }
+
+  /*
+   * Decode a single token (including special token ids) in the stream. If this results in a word being generated,
+   * it will be returned in 'out'. The caller is responsible for concatenating each chunk together to generate the complete result.
+   * 'out' is valid until the next call to OgaTokenizerStreamDecodeWithSpecial or when the OgaTokenizerStream is destroyed
+   */
+  const char* DecodeWithSpecial(int32_t token) {
+    const char* out;
+    OgaCheckResult(OgaTokenizerStreamDecodeWithSpecial(this, token, &out));
     return out;
   }
 

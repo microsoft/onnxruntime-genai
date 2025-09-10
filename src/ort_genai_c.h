@@ -541,6 +541,11 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerEncodeBatch(const OgaTokenizer*, 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer*, const OgaTensor* tensor, OgaStringArray** out);
 
 /**
+ * Batch decode a tensor of token ids (including special token ids) and return an array of strings
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeBatchWithSpecial(const OgaTokenizer*, const OgaTensor* tensor, OgaStringArray** out);
+
+/**
  * \brief Converts the given string to a single token id.
  * \param[in] tokenizer The tokenizer to use to convert the string to a token id.
  * \param[in] str The string to convert to a token id.
@@ -644,6 +649,13 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyTokenizerStream(OgaTokenizerStream*);
  * 'out' is valid until the next call to OgaTokenizerStreamDecode or when the OgaTokenizerStream is destroyed
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream*, int32_t token, const char** out);
+
+/**
+ * Decode a single token (including special token ids) in the stream. If this results in a word being generated,
+ * it will be returned in 'out'. The caller is responsible for concatenating each chunk together to generate the complete result.
+ * 'out' is valid until the next call to OgaTokenizerStreamDecode or when the OgaTokenizerStream is destroyed
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithSpecial(OgaTokenizerStream*, int32_t token, const char** out);
 
 /** Create an OgaTensor from an optional user owned buffer. If a user owned buffer is supplied, the OgaTensor does
  * not own the memory (as it has no way to free it) so the 'data' parameter must be valid for the lifetime of the OgaTensor.

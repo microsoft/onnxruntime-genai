@@ -258,6 +258,13 @@ const std::string& TokenizerStream::Decode(int32_t token) {
   return chunk_;
 }
 
+const std::string& TokenizerStream::DecodeWithSpecial(int32_t token) {
+  const char* string;
+  CheckResult(OrtxDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
+  chunk_ = string;
+  return chunk_;
+}
+
 Tokenizer::Tokenizer(Config& config) : pad_token_id_{config.model.pad_token_id} {
   CheckResult(OrtxCreateTokenizer(tokenizer_.Address(), config.config_path.string().c_str()));
 }
@@ -343,6 +350,16 @@ std::vector<std::string> Tokenizer::DecodeBatch(std::span<const int32_t> sequenc
   std::vector<std::string> strings;
   for (size_t i = 0; i < count; i++)
     strings.emplace_back(Decode(sequences.subspan(sequence_length * i, sequence_length)));
+  return strings;
+}
+
+std::vector<std::string> Tokenizer::DecodeBatchWithSpecial(std::span<const int32_t> sequences, size_t count) const {
+  if (sequences.size() % count != 0)
+    throw std::runtime_error("DecodeBatch: sequences must be evenly divisible by the count");
+  size_t sequence_length = sequences.size() / count;
+  std::vector<std::string> strings;
+  for (size_t i = 0; i < count; i++)
+    strings.emplace_back(DecodeWithSpecial(sequences.subspan(sequence_length * i, sequence_length)));
   return strings;
 }
 
