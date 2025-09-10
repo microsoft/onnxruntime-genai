@@ -69,6 +69,7 @@ struct TokenizerStream : LeakChecked<TokenizerStream> {
   TokenizerStream(const Tokenizer& tokenizer);
 
   const std::string& Decode(int32_t token);
+  const std::string& DecodeWithSpecial(int32_t token);
 
  private:
   std::shared_ptr<const Tokenizer> tokenizer_;
@@ -93,6 +94,7 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::vector<int32_t> EncodeBatch(std::span<const std::string> strings) const;
   std::shared_ptr<Tensor> EncodeBatch(std::span<const char*> strings) const;
   std::vector<std::string> DecodeBatch(std::span<const int32_t> sequences, size_t count) const;
+  std::vector<std::string> DecodeBatchWithSpecial(std::span<const int32_t> sequences, size_t count) const;
 
   int32_t TokenToTokenId(const char* token) const;
 

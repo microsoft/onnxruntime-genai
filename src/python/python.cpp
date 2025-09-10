@@ -321,7 +321,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("set_guidance", &PyGeneratorParams::SetGuidance);
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
-      .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
+      .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); })
+      .def("decode_with_special", [](OgaTokenizerStream& t, int32_t token) { return t.DecodeWithSpecial(token); });
 
   pybind11::class_<OgaNamedTensors>(m, "NamedTensors")
       .def(pybind11::init([]() { return OgaNamedTensors::Create(); }))
@@ -378,6 +379,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("decode_batch", [](const OgaTokenizer& t, const OgaTensor& tokens) {
         std::vector<std::string> strings;
         auto decoded = t.DecodeBatch(tokens);
+        for (size_t i = 0; i < decoded->Count(); i++)
+          strings.push_back(decoded->Get(i));
+        return strings; })
+      .def("decode_batch_with_special", [](const OgaTokenizer& t, const OgaTensor& tokens) {
+        std::vector<std::string> strings;
+        auto decoded = t.DecodeBatchWithSpecial(tokens);
         for (size_t i = 0; i < decoded->Count(); i++)
           strings.push_back(decoded->Get(i));
         return strings; })

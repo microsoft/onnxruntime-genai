@@ -593,6 +593,17 @@ OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer* tokenizer, c
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaTokenizerDecodeBatchWithSpecial(const OgaTokenizer* tokenizer, const OgaTensor* tensor, OgaStringArray** out) {
+  OGA_TRY
+  auto shape = tensor->GetShape();
+  if (shape.size() != 2)
+    throw std::runtime_error("Expected a 2D tensor");
+  auto strings = tokenizer->DecodeBatchWithSpecial(std::span<const int32_t>{tensor->GetData<int32_t>(), tensor->GetElementCount()}, shape[0]);
+  *out = ReturnUnique<OgaStringArray>(std::make_unique<std::vector<std::string>>(std::move(strings)));
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcessor* processor, const int32_t* tokens, size_t token_count, const char** out_string) {
   OGA_TRY
   *out_string = AllocOgaString(processor->tokenizer_->Decode({tokens, token_count}));
@@ -617,6 +628,13 @@ OgaResult* OGA_API_CALL OgaCreateTokenizerStreamFromProcessor(const OgaMultiModa
 OgaResult* OGA_API_CALL OgaTokenizerStreamDecode(OgaTokenizerStream* p, int32_t token, const char** out) {
   OGA_TRY
   *out = p->Decode(token).c_str();
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaTokenizerStreamDecodeWithSpecial(OgaTokenizerStream* p, int32_t token, const char** out) {
+  OGA_TRY
+  *out = p->DecodeWithSpecial(token).c_str();
   return nullptr;
   OGA_CATCH
 }
