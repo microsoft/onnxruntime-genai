@@ -8,6 +8,7 @@
 #include <cub/cub.cuh>
 #include "cuda_topk.h"
 #include "cuda_common.h"
+#include "cuda_topk_bitonic_sort_helper.cuh"
 
 namespace Generators {
 namespace cuda {
@@ -188,7 +189,7 @@ __global__ void DistributedTopKKernel(
     atomicAdd(&top_k_distributed_lock[batch_idx], 1);
   }
 
-  // Part 2: The master shard (shard_idx == 0) for each batch reduces the candidates.
+  // Part 2: The master shard (shard_idx == 0) for each batch reduces the candidates using a parallel bitonic sort.
   if (shard_idx == 0) {
     if (tid == 0) {
       int count_of_completed_TBs = 0;
@@ -198,59 +199,57 @@ __global__ void DistributedTopKKernel(
     }
     __syncthreads();
 
-    // Perform selection sort on the collected candidates for the current batch.
-    for (int ite = 0; ite < k; ite++) {
-      // Using simpler KVPair. `partial.index` will store the buffer_idx.
-      KVPair partial;
-      partial.index = -1; // Initialize with invalid index
+    // The maximum number of candidates is 32 shards * 64 k = 2048.
+    constexpr int kMaxSortSize = 2048;
+    __shared__ float smem_scores[kMaxSortSize];
+    __shared__ int smem_indices[kMaxSortSize];
 
-      const int num_total_candidates = num_shards * k;
-      for (int i = tid; i < num_total_candidates; i += kBlockSize) {
-        int shard_scan = i / k;
-        int k_scan = i % k;
-        int candidate_buffer_idx = shard_scan * kDistributedSortMaxK + k_scan;
+    const int num_total_candidates = num_shards * k;
 
-        float score = batch_distributed_scores[candidate_buffer_idx];
-        
-        // Manually perform comparison to ensure correct tie-breaking,
-        // as the simple KVPair doesn't carry the vocab_idx needed for reduction.
-        bool is_better = false;
-        if (score > partial.value) {
-            is_better = true;
-        } else if (score == partial.value && score > -FLT_MAX) {
-            // Tie-break on the original vocabulary index
-            int current_vocab_idx = batch_distributed_indices[candidate_buffer_idx];
-            // Get vocab_idx of the current best. partial.index is the buffer_idx.
-            int best_vocab_idx = (partial.index == -1) ? INT_MAX : batch_distributed_indices[partial.index];
-            if (current_vocab_idx < best_vocab_idx) {
-                is_better = true;
-            }
-        }
+    // Calculate the smallest power of two that is >= num_total_candidates for the bitonic sort.
+    int sort_size = 1;
+    while(sort_size < num_total_candidates) {
+        sort_size <<= 1;
+    }
+    if (sort_size > kMaxSortSize) sort_size = kMaxSortSize;
 
-        if (is_better) {
-            partial.value = score;
-            partial.index = candidate_buffer_idx;
-        }
-      }
-
-      using BlockReduce = cub::BlockReduce<KVPair, kBlockSize>;
-      // The reduce_kv_op now reduces partials that have already been correctly tie-broken.
-      KVPair top_candidate = BlockReduce(kv_temp_storage).Reduce(partial, reduce_kv_op);
-
-      if (tid == 0) {
-        if (top_candidate.index != -1) {
-            current_final_scores_out[ite] = top_candidate.value;
-            // Get the final vocab_idx from the buffer_idx (top_candidate.index)
-            current_final_indices_out[ite] = batch_distributed_indices[top_candidate.index];
-            // Blank out the winner in the candidate list
-            batch_distributed_scores[top_candidate.index] = -FLT_MAX;
+    // Cooperatively load candidates into shared memory.
+    for (int i = tid; i < sort_size; i += kBlockSize) {
+        if (i < num_total_candidates) {
+            int shard_scan = i / k;
+            int k_scan = i % k;
+            int candidate_buffer_idx = shard_scan * kDistributedSortMaxK + k_scan;
+            smem_scores[i] = batch_distributed_scores[candidate_buffer_idx];
+            smem_indices[i] = batch_distributed_indices[candidate_buffer_idx];
         } else {
-            current_final_scores_out[ite] = -FLT_MAX;
-            current_final_indices_out[ite] = -1;
+            // Pad the rest with sentinel values for the sort
+            smem_scores[i] = -FLT_MAX;
+            smem_indices[i] = -1;
         }
-        __threadfence_block();
-      }
-      __syncthreads();
+    }
+    __syncthreads();
+
+    // Perform the sort on the data in shared memory using a switch to call the correctly templated function.
+    switch (sort_size) {
+        case 2:    bitonic::SharedMemBitonicSort_SoA<kBlockSize, 2>(smem_scores, smem_indices); break;
+        case 4:    bitonic::SharedMemBitonicSort_SoA<kBlockSize, 4>(smem_scores, smem_indices); break;
+        case 8:    bitonic::SharedMemBitonicSort_SoA<kBlockSize, 8>(smem_scores, smem_indices); break;
+        case 16:   bitonic::SharedMemBitonicSort_SoA<kBlockSize, 16>(smem_scores, smem_indices); break;
+        case 32:   bitonic::SharedMemBitonicSort_SoA<kBlockSize, 32>(smem_scores, smem_indices); break;
+        case 64:   bitonic::SharedMemBitonicSort_SoA<kBlockSize, 64>(smem_scores, smem_indices); break;
+        case 128:  bitonic::SharedMemBitonicSort_SoA<kBlockSize, 128>(smem_scores, smem_indices); break;
+        case 256:  bitonic::SharedMemBitonicSort_SoA<kBlockSize, 256>(smem_scores, smem_indices); break;
+        case 512:  bitonic::SharedMemBitonicSort_SoA<kBlockSize, 512>(smem_scores, smem_indices); break;
+        case 1024: bitonic::SharedMemBitonicSort_SoA<kBlockSize, 1024>(smem_scores, smem_indices); break;
+        case 2048: bitonic::SharedMemBitonicSort_SoA<kBlockSize, 2048>(smem_scores, smem_indices); break;
+        default: if(sort_size > 1) { /* This case should ideally not be hit with the logic above */ } break;
+    }
+     __syncthreads();
+
+    // The first k threads write out the final top-k results.
+    if (tid < k) {
+        current_final_scores_out[tid] = smem_scores[tid];
+        current_final_indices_out[tid] = smem_indices[tid];
     }
   }
 }
