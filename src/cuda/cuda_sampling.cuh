@@ -28,6 +28,8 @@ struct SamplingData {
   cuda_unique_ptr<float> top_k_distributed_values;
   
   size_t temp_storage_bytes = 0;
+  // Don't change this hard-coded value without making appropriate changes
+  // in the GetTopKKernelDistributed kernel
   int top_k_shards = 32;
 };
 

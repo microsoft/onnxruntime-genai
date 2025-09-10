@@ -456,8 +456,8 @@ __global__ void FilterOnTopP(float* scores, float* prefix_sums, float* scores_te
 
 // Get top k indices and scores from unsorted input
 struct TopK_2 {
-  int p = -1;
   float u = -FLT_MAX;
+  int p = -1;
 
   __device__ __forceinline__ void insert(float elem, int elem_id) {
     if (elem > u || (elem == u && elem_id < p)) {
@@ -475,6 +475,30 @@ struct TopK_2 {
 __device__ __forceinline__ TopK_2 reduce_topk_op_2(TopK_2 const& a, TopK_2 const& b) {
   return a.u > b.u ? a : (a.u == b.u && a.p < b.p) ? a
                                                    : b;
+}
+
+struct TopK_2_Reduce {
+  float u = -FLT_MAX;
+  int p = -1;
+  int p_indirection = -1;
+
+  __device__ __forceinline__ void insert(float elem, int elem_id, int elem_id_indirection) {
+    if (elem > u || (elem == u && elem_id_indirection < p_indirection)) {
+      u = elem;
+      p = elem_id;
+      p_indirection = elem_id_indirection;
+    }
+  }
+
+  __device__ __forceinline__ void init() {
+    u = -FLT_MAX;
+    p = -1;
+    p_indirection = -1;
+  }
+};
+
+__device__ __forceinline__ TopK_2_Reduce reduce_topk_reduce_op_2(TopK_2_Reduce const& a, TopK_2_Reduce const& b) {
+  return a.u > b.u ? a : (a.u == b.u && a.p_indirection < b.p_indirection) ? a : b;
 }
 
 template <int kBlockSize>
@@ -578,30 +602,45 @@ __global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, flo
       atomicExch(top_k_distributed_lock, 0);
     }
 
-    // TODO: Is there enough shared memory to bring the top_k shards to shared memory on all GPUs?
-    TopK_2 reduce_partial; 
+    // Number of shards is atmost 32 and top_k for this kernel is atmost 64
+    __shared__ float shared_distributed_scores_out[32 * 64];
+    __shared__ float shared_distributed_indices_out[32 * 64];
+
+    // Load distributed results into shared memory for fast access
+    for (int i = threadIdx.x; i < top_k_shards*k; i += blockDim.x) {
+      shared_distributed_scores_out[i] = distributed_scores_out[i];
+      shared_distributed_indices_out[i] = distributed_indices_out[i];
+    }
+
+    __syncthreads();
+
+    // Perform the reduction
+    TopK_2_Reduce reduce_partial; 
     for (int ite = 0; ite < k; ite++) {
       reduce_partial.init();
   
       for (int i = threadIdx.x; i < top_k_shards*k; i += blockDim.x) {
-        float score = distributed_scores_out[i];
-        reduce_partial.insert(score, i);
+        float score = shared_distributed_scores_out[i];
+        int vocab_index = shared_distributed_indices_out[i];
+        reduce_partial.insert(score, i, vocab_index);
       }
 
       // reduce in thread block
-      typedef cub::BlockReduce<TopK_2, kBlockSize> BlockReduce;
+      typedef cub::BlockReduce<TopK_2_Reduce, kBlockSize> BlockReduce;
       __shared__ typename BlockReduce::TempStorage temp_storage;
-      TopK_2 top_k_sequence_reduced = BlockReduce(temp_storage).Reduce(reduce_partial, reduce_topk_op_2);
+      TopK_2_Reduce top_k_sequence_reduced = BlockReduce(temp_storage).Reduce(reduce_partial, reduce_topk_reduce_op_2);
 
       if (tid == 0) {
         // Do temperature scaling
         scores_out[ite + batch * k] = top_k_sequence_reduced.u / temperature;
         
-        int local_index = top_k_sequence_reduced.p;
-        indices_out[ite + batch * k] = distributed_indices_out[local_index];
+        int index = top_k_sequence_reduced.p;
+        int vocab_index = top_k_sequence_reduced.p_indirection;
 
+        indices_out[ite + batch * k] = vocab_index;
         // set the max value to -MAX_T_VAL so that the value doesn't get picked again
-        distributed_scores_out[local_index] = -MAX_T_VAL;
+        shared_distributed_scores_out[index] = -MAX_T_VAL;
+
         __threadfence_block();
       }
 
