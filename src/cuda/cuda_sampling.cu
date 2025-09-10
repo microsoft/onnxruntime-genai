@@ -65,17 +65,17 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   __shared__ float block_sum_exp;
 
   // --- Stage 1: Initial Softmax with Temperature (for Top-P filtering) ---
-  float thread_val = -FLT_MAX;
+
+  // For sorted input, the max score is always the first element.
   for (int i = threadIdx.x; i < k; i += kBlockSize) {
-    float logit = batch_scores[i] / temperature;
-    temp_scaled_logits[i] = logit;
-    thread_val = max(thread_val, logit);
+    temp_scaled_logits[i] = batch_scores[i] / temperature;
   }
-  float reduced_max = BlockReduce(reduce_temp_storage).Reduce(thread_val, cub::Max());
-  if (threadIdx.x == 0) block_max_val = reduced_max;
+  if (threadIdx.x == 0) {
+    block_max_val = batch_scores[0] / temperature;
+  }
   __syncthreads();
 
-  thread_val = 0.0f;
+  float thread_val = 0.0f;
   for (int i = threadIdx.x; i < k; i += kBlockSize) {
     thread_val += expf(temp_scaled_logits[i] - block_max_val);
   }
@@ -118,7 +118,7 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   for (int i = threadIdx.x; i < k; i += kBlockSize) {
     thread_val = max(thread_val, filtered_logits[i]);
   }
-  reduced_max = BlockReduce(reduce_temp_storage).Reduce(thread_val, cub::Max());
+  float reduced_max = BlockReduce(reduce_temp_storage).Reduce(thread_val, cub::Max());
   if (threadIdx.x == 0) block_max_val = reduced_max;
   __syncthreads();
 
@@ -153,7 +153,9 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   __shared__ float threshold_smem;
 
   if (threadIdx.x == 0) {
-    threshold_smem = 0.9999999f * curand_uniform(&curand_states[batch_idx]);
+    // Use min to prevent multiplying down the random value, which could introduce bias.
+    // This robustly handles the case where curand_uniform is exactly 1.0.
+    threshold_smem = min(curand_uniform(&curand_states[batch_idx]), 0.9999999f);
     selected_index_smem = k - 1;
   }
   __syncthreads();
@@ -215,7 +217,8 @@ __global__ void FilterOnTopPKernel(float* filtered_logits, const float* original
 __global__ void RandomThresholdKernel(curandState* curand_states, float* thresholds, int batch_size) {
   const int i = threadIdx.x + blockIdx.x * blockDim.x;
   if (i < batch_size) {
-    thresholds[i] = 0.9999999f * curand_uniform(&curand_states[i]);
+    // Use min to prevent multiplying down the random value, which could introduce bias.
+    thresholds[i] = min(curand_uniform(&curand_states[i]), 0.9999999f);
   }
 }
 

@@ -20,8 +20,8 @@
 #include <vector>
 
 #include <cuda_runtime.h>
-#include "../src/cuda/cuda_sampling.h"
-#include "statistics_helper.h"
+#include "../../src/cuda/cuda_sampling.h"
+#include "../statistics_helper.h"
 
 namespace {
 
@@ -136,7 +136,7 @@ void RunBenchmarks(const BenchmarkParams& params) {
 TEST(CudaSamplingBenchmarks, PerformanceTests) {
   std::vector<int> batch_sizes = {1};
   std::vector<int> vocab_sizes = {204800};
-  std::vector<int> ks = {1, 8, 50};
+  std::vector<int> ks = {1, 8, 50, 64, 128, 192, 256};
 
   for (int batch_size : batch_sizes) {
     for (int vocab_size : vocab_sizes) {

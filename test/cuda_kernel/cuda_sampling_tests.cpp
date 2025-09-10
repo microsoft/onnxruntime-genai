@@ -10,8 +10,8 @@
 #include <map>
 #include <cfloat>
 
-#include "../src/cuda/cuda_sampling.h"
-#include "../src/cuda/cuda_common.h"
+#include "../../src/cuda/cuda_sampling.h"
+#include "../../src/cuda/cuda_common.h"
 
 namespace Generators {
 namespace cuda {

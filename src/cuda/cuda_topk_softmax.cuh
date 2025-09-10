@@ -28,7 +28,6 @@ __global__ void CopyAndSoftmaxKernel(int* final_indices, float* final_scores, co
   __shared__ float block_max_val;
   __shared__ float block_sum_exp;
 
-  // STEP 1: Find max_val in parallel
   // Each thread (where threadIdx.x < k) loads its score and applies temperature.
   float thread_score =
       (threadIdx.x < k) ? (batch_sorted_scores[threadIdx.x] / temperature) : -std::numeric_limits<float>::max();

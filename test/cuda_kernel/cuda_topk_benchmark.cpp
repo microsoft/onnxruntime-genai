@@ -19,8 +19,8 @@
 #include <tuple>
 #include <vector>
 
-#include "../src/cuda/cuda_topk.h"
-#include "statistics_helper.h"
+#include "../../src/cuda/cuda_topk.h"
+#include "../statistics_helper.h"
 
 namespace {
 

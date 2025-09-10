@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+
 #if USE_CUDA
 #include <gtest/gtest.h>
 
@@ -19,7 +20,7 @@
 #include <tuple>
 #include <vector>
 
-#include "../src/cuda/cuda_topk.h"
+#include "../../src/cuda/cuda_topk.h"
 
 // A struct to hold the parameters for a test configuration
 struct TopKTestParams {
@@ -77,7 +78,8 @@ void RunParityTests(const TopKTestParams& params) {
 
   // --- Get Reference Result using Full Sort ---
   auto topk_data = std::make_unique<Generators::cuda::TopkDataCompact>(params.batch_size, params.vocab_size, stream);
-  Generators::cuda::RunTopKViaFullSort(topk_data.get(), stream, scores_in_d.get(), params.vocab_size, params.batch_size, params.k);
+  Generators::cuda::RunTopKViaFullSort(topk_data.get(), stream, scores_in_d.get(),
+                                       params.vocab_size, params.batch_size, params.k);
   topk_data->CompactOutput(params.batch_size, params.vocab_size, stream, params.k);
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
@@ -117,15 +119,18 @@ void RunParityTests(const TopKTestParams& params) {
 }
 
 TEST(TopKTests, ParityTests) {
-  std::vector<TopKTestParams> test_cases = {
-      {1, 10000, 50},
-      {2, 10000, 64},
-      {3, 32000, 100},
-      {1, 32000, 16},
-      {1, 512000, 50},
-      {4, 1024, 18},
-      {1, 256, 16},
-      {2, 128, 5}};
+  std::vector<int> batch_sizes = {1, 4, 32};
+  std::vector<int> vocab_sizes = {200, 2000, 20000, 200000};
+  std::vector<int> ks = {1, 16, 64, 256, 512};
+
+  std::vector<TopKTestParams> test_cases;
+  for (int batch_size : batch_sizes) {
+    for (int vocab_size : vocab_sizes) {
+      for (int k : ks) {
+        test_cases.push_back({batch_size, vocab_size, std::min(k, vocab_size)});
+      }
+    }
+  }
 
   for (const auto& params : test_cases) {
     RunParityTests(params);
