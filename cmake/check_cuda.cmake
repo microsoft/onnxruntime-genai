@@ -8,6 +8,11 @@ if(USE_CUDA OR USE_TRT_RTX)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler")
   endif()
 
+  # For TRT_RTX, apply the CUDA flags from preset
+  if(USE_TRT_RTX AND WIN32 AND CMAKE_CUDA_FLAGS_INIT)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS_INIT}")
+  endif()
+
   enable_language(CUDA)
   message( STATUS "CMAKE_CUDA_COMPILER_VERSION: ${CMAKE_CUDA_COMPILER_VERSION}")
   if(CMAKE_CUDA_COMPILER)
@@ -46,11 +51,7 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
     "${GENERATORS_ROOT}/cuda/*.cuh"
   )
 
-  if(USE_CUDA)
-    add_compile_definitions(USE_CUDA=1)
-  else()
-    add_compile_definitions(USE_CUDA=0)
-  endif()
+  add_compile_definitions(USE_CUDA=1)
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 elseif(USE_CUDA)
   # USE_CUDA is true but cmake could not find the cuda compiler
