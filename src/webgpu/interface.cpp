@@ -10,7 +10,6 @@
 #include "webgpu_update_position_ids_kernel.h"
 #include "webgpu_cast_kernel.h"
 
-// Dawn WebGPU headers for native API access
 #include <dawn/webgpu_cpp.h>
 #include <dawn/dawn_proc.h>
 #include <dawn/native/DawnNative.h>

@@ -1,15 +1,17 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include "webgpu_update_position_ids_kernel.h"
 
 #ifdef USE_WEBGPU
-
-#include <stdexcept>
-#include <cassert>
-#include <string>
-#include <type_traits>
 #include <dawn/webgpu_cpp.h>
 #include <dawn/dawn_proc.h>
 #include <dawn/native/DawnNative.h>
 #include <dawn/webgpu.h>
+#include <stdexcept>
+#include <cassert>
+#include <string>
+#include <type_traits>
 
 namespace {
 

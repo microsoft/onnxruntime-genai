@@ -1,16 +1,18 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
 #include "webgpu_update_mask_kernel.h"
 
 #ifdef USE_WEBGPU
-
+#include <dawn/webgpu_cpp.h>
+#include <dawn/dawn_proc.h>
+#include <dawn/native/DawnNative.h>
+#include <dawn/webgpu.h>
 #include <stdexcept>
 #include <cassert>
 #include <string>
 #include <type_traits>
 #include <cstring>
-#include <dawn/webgpu_cpp.h>
-#include <dawn/dawn_proc.h>
-#include <dawn/native/DawnNative.h>
-#include <dawn/webgpu.h>  // For C API types like WGPUBufferMapAsyncStatus
 
 namespace {
 

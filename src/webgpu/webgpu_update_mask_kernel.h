@@ -1,12 +1,13 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
 #pragma once
 
 #ifdef USE_WEBGPU
-
+#include <dawn/webgpu_cpp.h>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include "../models/onnxruntime_api.h"
-#include <dawn/webgpu_cpp.h>
 
 // WebGPU kernel for updating attention masks efficiently on GPU
 template <typename T>
