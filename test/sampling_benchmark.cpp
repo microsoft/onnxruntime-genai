@@ -138,7 +138,7 @@ BenchmarkResult RunBenchmark(const BenchmarkParams& params) {
   std::mt19937 engine(rd());
   std::uniform_int_distribution<> dist(5, 25);
   const int warm_up_runs = 5;
-  const int total_runs = 100;
+  const int total_runs = 500;
 
   std::vector<double> latencies;
 
