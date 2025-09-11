@@ -249,6 +249,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                               int /* int32_t */ token,
                                                                               out IntPtr /* const char** */ outStr);
 
+        // This function is used to decode the given token into a string (including special token ids).
+        // The returned pointer is freed when the OgaTokenizerStream object is destroyed.
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerStreamDecodeWithSpecial(IntPtr /* const OgaTokenizerStream* */ tokenizerStream,
+                                                                                         int /* int32_t */ token,
+                                                                                         out IntPtr /* const char** */ outStr);
+
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateTensorFromBuffer(IntPtr /* data* */ data,
                                                                                long[] shapeDims,
