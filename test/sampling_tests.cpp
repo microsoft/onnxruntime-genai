@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>  // for memcmp
+#include <map>
 #include <numeric>
 #include <random>
 #include <limits>
@@ -200,11 +201,15 @@ void Softmax(std::span<float> scores, float temperature) {
 }
 
 /**
- * @brief Helper function to run a randomized sampling test with specified parameters.
+ * @brief Helper function to run a statistically-valid, batched sampling test.
  *
- * This function encapsulates the entire test logic, including setting up the model,
- * generating tokens over multiple iterations, calculating the expected probability
- * distribution on the CPU, and verifying the results.
+ * This function fixes the flaw in the original statistical test by ensuring each
+ * item within a batch is an independent and identically distributed (i.i.d.) trial.
+ * It achieves this by providing the *exact same* input logits to every item in the batch.
+ *
+ * The test aggregates the results over multiple iterations and verifies that the
+ * observed token distribution matches the expected distribution within a tolerance.
+ * This approach is implementation-agnostic and works for both CPU and CUDA backends.
  *
  * @param batch_size The number of sequences to process in parallel.
  * @param k The number of highest probability vocabulary tokens to keep for top-k-filtering.
@@ -232,103 +237,98 @@ void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_ite
   if (k > 0) {
     params->SetSearchOption("top_k", k);
   }
-  if (p > 0.0f) {
+  if (p < 1.0f) {
     params->SetSearchOption("top_p", p);
   }
   params->SetSearchOption("temperature", temperature);
   params->SetSearchOption("batch_size", batch_size);
 
-  // --- 2. Initialize Logits and Random Generators ---
-  std::random_device rd;
-  std::mt19937 engine(rd());
-  std::uniform_int_distribution<int> dist(
-      std::numeric_limits<int>::min(),
-      std::numeric_limits<int>::max());
-
-  std::map<float, int> logit_to_count;
-
-  std::vector<float> logits_cpu(static_cast<size_t>(vocab_size) * static_cast<size_t>(batch_size));
-  // Create a predictable set of logits
+  // --- 2. Create Predictable, IDENTICAL Logits for the whole batch ---
   const int num_top_logits = (k > 0) ? k : vocab_size;
+  std::vector<float> single_logits(vocab_size, 0.0f);
+  std::vector<int32_t> top_indices(vocab_size);
+  std::iota(top_indices.begin(), top_indices.end(), 0);
+
+  // Shuffle the indices to place top logits at random positions in the vocabulary
+  std::mt19937 shuffle_engine(12345);  // Use a fixed seed for deterministic shuffling
+  std::shuffle(top_indices.begin(), top_indices.end(), shuffle_engine);
+
+  // Assign descending scores to the first num_top_logits of the shuffled indices
+  for (int j = 0; j < num_top_logits; j++) {
+    single_logits[top_indices[j]] = static_cast<float>(num_top_logits - j);
+  }
+  // Keep only the indices that were assigned scores for the verification step
+  top_indices.resize(num_top_logits);
+
+  std::vector<float> logits_cpu(static_cast<size_t>(vocab_size) * batch_size);
   for (int b = 0; b < batch_size; b++) {
-    std::vector<int> indices(vocab_size);
-    std::iota(indices.begin(), indices.end(), 0);
-    std::shuffle(indices.begin(), indices.end(), engine);
-    for (int j = 0; j < num_top_logits; j++) {
-      logits_cpu[indices[j] + vocab_size * b] = float(num_top_logits - j);
-    }
+    std::copy(single_logits.begin(), single_logits.end(), logits_cpu.begin() + b * vocab_size);
   }
 
-  // --- 3. Run Generation Loop ---
-  std::array<int64_t, 2> shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(vocab_size)};
-  for (int i = 0; i < num_iter; i++) {
-    params->SetSearchOption("random_seed", static_cast<double>(dist(engine)));
-    auto generator = OgaGenerator::Create(*model, *params);
+  // --- 3. Pre-compute the Expected Distribution ---
+  std::vector<float> expected_distributions(num_top_logits);
+  std::iota(expected_distributions.rbegin(), expected_distributions.rend(), 1.0f);  // Fills with {k, k-1, ..., 1}
 
-    auto logits_tensor = OgaTensor::Create(logits_cpu.data(), shape);
-    generator->SetLogits(*logits_tensor);
-    generator->GenerateNextToken();
-    auto next_tokens = generator->GetNextTokens();
-
-    // Collect statistics on the generated tokens
-    for (int b = 0; b < batch_size; b++) {
-      auto next_token = next_tokens[b];
-      auto next_token_score = logits_cpu[next_token + vocab_size * b];
-      logit_to_count[next_token_score]++;
-      EXPECT_GT(next_token_score, 0.0f);
-    }
-  }
-
-  // --- 4. Calculate Expected Distribution on CPU (Optimized Logic) ---
-  std::vector<float> top_k_logits(num_top_logits);
-  std::iota(top_k_logits.rbegin(), top_k_logits.rend(), 1.0f);  // Fills with {k, k-1, ..., 1}
-
-  // Apply temperature
   if (temperature != 1.0f) {
-    for (float& logit : top_k_logits) {
+    for (float& logit : expected_distributions) {
       logit /= temperature;
     }
   }
 
-  // Top-p filtering
   if (p < 1.0f) {
-    std::vector<float> temp_probs = top_k_logits;
-    Softmax(temp_probs, 1.0f);  // Temp is already in logits
-
+    std::vector<float> temp_probs = expected_distributions;
+    Softmax(temp_probs, 1.0f);
     float cumulative_prob = 0.0f;
     for (int i = 0; i < num_top_logits; ++i) {
       cumulative_prob += temp_probs[i];
       if (cumulative_prob >= p) {
         for (int j = i + 1; j < num_top_logits; ++j) {
-          top_k_logits[j] = -std::numeric_limits<float>::infinity();
+          expected_distributions[j] = -std::numeric_limits<float>::infinity();
         }
         break;
       }
     }
   }
-
-  // Final softmax to get distribution
-  std::vector<float> expected_distributions = top_k_logits;
   Softmax(expected_distributions, 1.0f);
 
-  // --- 5. Verify Results ---
-  const int total_count = batch_size * num_iter;
-  for (const auto& [logit, count] : logit_to_count) {
-    // Map the logit value back to its index
-    const int logit_index = num_top_logits - static_cast<int>(logit);
+  // --- 4. Run Generation Loop and Collect Statistics ---
+  std::map<int32_t, int> token_counts;
+  std::mt19937 engine(12345);  // Use a fixed seed for the test runner
+  std::uniform_int_distribution<int> dist;
+  std::array<int64_t, 2> shape = {static_cast<int64_t>(batch_size), static_cast<int64_t>(vocab_size)};
 
-    ASSERT_GE(logit_index, 0);
-    ASSERT_LT(logit_index, num_top_logits);
+  for (int i = 0; i < num_iter; i++) {
+    params->SetSearchOption("random_seed", static_cast<double>(dist(engine)));
+    auto generator = OgaGenerator::Create(*model, *params);
+    auto logits_tensor = OgaTensor::Create(logits_cpu.data(), shape);
+    generator->SetLogits(*logits_tensor);
+    generator->GenerateNextToken();
+    auto next_tokens = generator->GetNextTokens();
 
-    const float expected_prob = expected_distributions[logit_index];
-    const float actual_prob = static_cast<float>(count) / total_count;
+    for (int b = 0; b < batch_size; b++) {
+      token_counts[next_tokens[b]]++;
+    }
+  }
 
-    EXPECT_NEAR(actual_prob, expected_prob, 0.015);
+  // --- 5. Verify Observed Distribution vs. Expected ---
+  const int total_samples = batch_size * num_iter;
+  for (int i = 0; i < num_top_logits; ++i) {
+    // top_indices now correctly maps the rank (i) to the shuffled token ID
+    const int32_t token_id = top_indices[i];
+    const double expected_prob = expected_distributions[i];
+    const double actual_prob = static_cast<double>(token_counts[token_id]) / total_samples;
+
+    if (expected_prob > 0) {
+      EXPECT_NEAR(actual_prob, expected_prob, 0.015) << "Mismatch for token_id: " << token_id;
+    } else {
+      EXPECT_EQ(token_counts[token_id], 0) << "Token " << token_id << " was generated but should have been filtered.";
+    }
   }
 }
 
+// UPDATE THE TEST CALLS to include the 'num_iter' parameter
 TEST(SamplingTests, RandomizedSamplingTopKCpu) {
-  RunSamplingTest(/*batch_size*/ 5, /*k*/ 5, /*p*/ 1.0f, /*vocab_size*/ 13, /*num_iter*/ 1000, /*temperature*/ 1.0f, /*use_cuda*/ false);
+  RunSamplingTest(/*batch_size*/ 5, /*k*/ 5, /*p*/ 1.0f, /*vocab_size*/ 13, /*num_iter*/ 1000, /*temperature*/ 0.8f, /*use_cuda*/ false);
 }
 
 TEST(SamplingTests, RandomizedSamplingTopPAndKCpu) {
@@ -443,7 +443,7 @@ TEST(SamplingTests, RandomizedSamplingTopKCuda) {
 }
 
 TEST(SamplingTests, RandomizedSamplingTopPAndKCuda) {
-  RunSamplingTest(/*batch_size*/ 5, /*k*/ 7, /*p*/ 0.75f, /*vocab_size*/ 21, /*num_iter*/ 5000, /*temperature*/ 1.0f, /*use_cuda*/ true);
+  RunSamplingTest(/*batch_size*/ 5, /*k*/ 7, /*p*/ 0.75f, /*vocab_size*/ 21, /*num_iter*/ 5000, /*temperature*/ 0.8f, /*use_cuda*/ true);
 }
 
 TEST(SamplingTests, RandomizedSamplingSelectTopCuda) {
