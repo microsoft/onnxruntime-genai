@@ -45,6 +45,17 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return result;
         }
 
+        public string[] DecodeBatchWithSpecial(Sequences sequences)
+        {
+            string[] result = new string[sequences.NumSequences];
+            for (ulong i = 0; i < sequences.NumSequences; i++)
+            {
+                result[i] = DecodeWithSpecial(sequences[i]);
+            }
+
+            return result;
+        }
+
         public Sequences Encode(string str)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateSequences(out IntPtr nativeSequences));
