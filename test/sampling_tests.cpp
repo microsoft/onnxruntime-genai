@@ -173,16 +173,30 @@ TEST(SamplingTests, RandomizedSamplingTopPCpu) {
 }
 
 void Softmax(std::span<float> scores, float temperature) {
-  float const max_score = *std::max_element(scores.begin(), scores.end());
+  float max_score = -std::numeric_limits<float>::infinity();
+  for (float score : scores) {
+    if (score > max_score) {
+      max_score = score;
+    }
+  }
 
-  // Subtract max score and scale by temperature
-  std::transform(scores.begin(), scores.end(), scores.begin(), [max_score, temperature](float score) { return std::exp((score - max_score) / temperature); });
+  if (max_score == -std::numeric_limits<float>::infinity()) {
+    // Handle case where all scores are -inf
+    if (!scores.empty()) {
+      std::fill(scores.begin(), scores.end(), 1.0f / scores.size());
+    }
+    return;
+  }
 
-  // Compute sum of exponentials
-  float const exp_sum = std::accumulate(scores.begin(), scores.end(), 0.0f);
+  float exp_sum = 0.0f;
+  for (float& score : scores) {
+    score = std::exp((score - max_score) / temperature);
+    exp_sum += score;
+  }
 
-  // Divide each score by the sum of exponentials
-  std::transform(scores.begin(), scores.end(), scores.begin(), [exp_sum](float score) { return score / exp_sum; });
+  for (float& score : scores) {
+    score /= exp_sum;
+  }
 }
 
 /**
@@ -215,7 +229,9 @@ void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_ite
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 10);
   params->SetSearchOptionBool("do_sample", true);
-  params->SetSearchOption("top_k", k);
+  if (k > 0) {
+    params->SetSearchOption("top_k", k);
+  }
   if (p > 0.0f) {
     params->SetSearchOption("top_p", p);
   }
@@ -229,16 +245,17 @@ void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_ite
       std::numeric_limits<int>::min(),
       std::numeric_limits<int>::max());
 
-  std::vector<int> indices(vocab_size);
   std::map<float, int> logit_to_count;
 
   std::vector<float> logits_cpu(static_cast<size_t>(vocab_size) * static_cast<size_t>(batch_size));
-  // Create a predictable set of logits with the top k values being {k, k-1, ..., 1}
+  // Create a predictable set of logits
+  const int num_top_logits = (k > 0) ? k : vocab_size;
   for (int b = 0; b < batch_size; b++) {
+    std::vector<int> indices(vocab_size);
     std::iota(indices.begin(), indices.end(), 0);
     std::shuffle(indices.begin(), indices.end(), engine);
-    for (int j = 0; j < k; j++) {
-      logits_cpu[indices[j] + vocab_size * b] = float(k - j);
+    for (int j = 0; j < num_top_logits; j++) {
+      logits_cpu[indices[j] + vocab_size * b] = float(num_top_logits - j);
     }
   }
 
@@ -262,44 +279,46 @@ void RunSamplingTest(int batch_size, int k, float p, int vocab_size, int num_ite
     }
   }
 
-  // --- 4. Calculate Expected Distribution on CPU ---
-  std::vector<float> top_k_logits(k);
+  // --- 4. Calculate Expected Distribution on CPU (Optimized Logic) ---
+  std::vector<float> top_k_logits(num_top_logits);
   std::iota(top_k_logits.rbegin(), top_k_logits.rend(), 1.0f);  // Fills with {k, k-1, ..., 1}
 
-  // Apply temperature to get initial probabilities
-  std::vector<float> initial_probs = top_k_logits;
-  Softmax(initial_probs, temperature);
+  // Apply temperature
+  if (temperature != 1.0f) {
+    for (float& logit : top_k_logits) {
+      logit /= temperature;
+    }
+  }
 
-  // Apply top-p filtering
-  std::vector<float> filtered_logits = top_k_logits;
+  // Top-p filtering
   if (p < 1.0f) {
+    std::vector<float> temp_probs = top_k_logits;
+    Softmax(temp_probs, 1.0f);  // Temp is already in logits
+
     float cumulative_prob = 0.0f;
-    bool threshold_reached = false;
-    for (int i = 0; i < k; ++i) {
-      if (threshold_reached) {
-        filtered_logits[i] = std::numeric_limits<float>::lowest();
-      } else {
-        cumulative_prob += initial_probs[i];
-        if (cumulative_prob >= p) {
-          threshold_reached = true;
+    for (int i = 0; i < num_top_logits; ++i) {
+      cumulative_prob += temp_probs[i];
+      if (cumulative_prob >= p) {
+        for (int j = i + 1; j < num_top_logits; ++j) {
+          top_k_logits[j] = -std::numeric_limits<float>::infinity();
         }
+        break;
       }
     }
   }
 
-  // Re-normalize the filtered logits to get the final expected distribution.
-  // The final softmax should always use temperature=1.0 according to the sampling logic.
-  std::vector<float> expected_distributions = filtered_logits;
+  // Final softmax to get distribution
+  std::vector<float> expected_distributions = top_k_logits;
   Softmax(expected_distributions, 1.0f);
 
   // --- 5. Verify Results ---
   const int total_count = batch_size * num_iter;
   for (const auto& [logit, count] : logit_to_count) {
-    // Map the logit value back to its index in the sorted distribution array
-    const int logit_index = k - static_cast<int>(logit);
+    // Map the logit value back to its index
+    const int logit_index = num_top_logits - static_cast<int>(logit);
 
     ASSERT_GE(logit_index, 0);
-    ASSERT_LT(logit_index, k);
+    ASSERT_LT(logit_index, num_top_logits);
 
     const float expected_prob = expected_distributions[logit_index];
     const float actual_prob = static_cast<float>(count) / total_count;
@@ -416,7 +435,7 @@ TEST(SamplingTests, BatchedSamplingTopPAndKCuda) {
 }
 
 TEST(SamplingTests, RandomizedSamplingTopPCuda) {
-  RunSamplingTest(/*batch_size*/ 5, /*k*/ 11, /*p*/ 0.95f, /*vocab_size*/ 21, /*num_iter*/ 5000, /*temperature*/ 1.0f, /*use_cuda*/ true);
+  RunSamplingTest(/*batch_size*/ 5, /*k*/ 0, /*p*/ 0.95f, /*vocab_size*/ 21, /*num_iter*/ 5000, /*temperature*/ 1.0f, /*use_cuda*/ true);
 }
 
 TEST(SamplingTests, RandomizedSamplingTopKCuda) {

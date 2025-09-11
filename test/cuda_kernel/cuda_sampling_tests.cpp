@@ -1,4 +1,3 @@
-
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 #if USE_CUDA
@@ -96,26 +95,34 @@ TEST_P(CudaSamplingTopKTopPTest, StatisticalVerification) {
   }
   CUDA_CHECK(cudaMemcpyAsync(d_scores.get(), h_scores.data(), h_scores.size() * sizeof(float), cudaMemcpyHostToDevice, stream_));
 
-  // 4. Calculate expected probability distribution on the CPU
+  // 4. Calculate expected probability distribution on the CPU, mirroring the kernel's logic.
   std::vector<float> top_k_logits(k);
   std::iota(top_k_logits.rbegin(), top_k_logits.rend(), 1.0f);  // Fills with {k, k-1, ..., 1}
 
-  // 4.1. Apply temperature and initial softmax
-  std::vector<float> initial_probs = top_k_logits;
-  Softmax(initial_probs, temperature);
+  // 4.1. Apply temperature to the logits upfront, just like the kernel.
+  std::vector<float> scaled_logits = top_k_logits;
+  if (temperature != 0.0f) {
+    for (auto& logit : scaled_logits) {
+      logit /= temperature;
+    }
+  }
 
-  // 4.2. Filter logits based on Top-P
+  // 4.2. Calculate initial probabilities from the scaled logits (using T=1.0 for softmax).
+  std::vector<float> initial_probs = scaled_logits;
+  Softmax(initial_probs, 1.0f);
+
+  // 4.3. Filter the scaled logits based on Top-P cumulative probability.
   float cumulative_prob = 0.0f;
   for (int i = 0; i < k; ++i) {
     if (cumulative_prob >= p) {
-      top_k_logits[i] = -FLT_MAX;
+      scaled_logits[i] = -FLT_MAX;
     }
     cumulative_prob += initial_probs[i];
   }
 
-  // 4.3. Re-normalize to get final expected distribution
-  std::vector<float> expected_distribution = top_k_logits;
-  Softmax(expected_distribution, 1.0f);  // Temperature is 1.0 for the final softmax
+  // 4.4. Re-normalize the filtered, scaled logits to get the final expected distribution (using T=1.0).
+  std::vector<float> expected_distribution = scaled_logits;
+  Softmax(expected_distribution, 1.0f);
 
   // 5. Run the CUDA kernel in a loop to gather statistics
   std::mt19937 engine(initial_seed);

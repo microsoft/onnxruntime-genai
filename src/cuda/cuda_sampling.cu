@@ -66,10 +66,12 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
 
   // --- Stage 1: Initial Softmax with Temperature (for Top-P filtering) ---
 
-  // For sorted input, the max score is always the first element.
+  // Apply temperature scaling.
   for (int i = threadIdx.x; i < k; i += kBlockSize) {
     temp_scaled_logits[i] = batch_scores[i] / temperature;
   }
+
+  // For sorted input, the max score is always the first element.
   if (threadIdx.x == 0) {
     block_max_val = batch_scores[0] / temperature;
   }
@@ -106,14 +108,16 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
     __syncthreads();
   }
 
-  // --- Stage 3: Filter original logits based on the CDF ---
+  // --- Stage 3: Filter SCALED logits based on the CDF ---
   for (int i = threadIdx.x; i < k; i += kBlockSize) {
     const float prev_sum = (i == 0) ? 0.0f : temp_scaled_logits[i - 1];
-    filtered_logits[i] = (prev_sum < p) ? batch_scores[i] : -FLT_MAX;
+    // Reread scaled logits from global memory to filter
+    float current_scaled_logit = batch_scores[i] / temperature;
+    filtered_logits[i] = (prev_sum < p) ? current_scaled_logit : -FLT_MAX;
   }
   __syncthreads();
 
-  // --- Stage 4: Re-normalize filtered logits (temp=1.0) ---
+  // --- Stage 4: Re-normalize filtered logits (temperature=1.0 as it's already baked in) ---
   thread_val = -FLT_MAX;
   for (int i = threadIdx.x; i < k; i += kBlockSize) {
     thread_val = max(thread_val, filtered_logits[i]);
@@ -206,11 +210,12 @@ __global__ void CorrectPrefixSumKernel(const float* scores, float* prefix_sums, 
 }
 
 __global__ void FilterOnTopPKernel(float* filtered_logits, const float* original_logits, const float* cdf, int k,
-                                   float p, int stride) {
+                                   float p, float temperature, int stride) {
   const int batch_idx = blockIdx.x;
   for (int i = threadIdx.x; i < k; i += blockDim.x) {
     const float prev_sum = (i == 0) ? 0.0f : cdf[batch_idx * k + i - 1];
-    filtered_logits[batch_idx * k + i] = (prev_sum < p) ? original_logits[batch_idx * stride + i] : -FLT_MAX;
+    float scaled_logit = original_logits[batch_idx * stride + i] / temperature;
+    filtered_logits[batch_idx * k + i] = (prev_sum < p) ? scaled_logit : -FLT_MAX;
   }
 }
 
@@ -260,11 +265,11 @@ void LaunchMultiStageSampleKernel(SamplingData* data, cudaStream_t stream, const
   // Stage 2: Compute Initial CDF.
   CorrectPrefixSumKernel<256><<<grid, block, 0, stream>>>(data->prefix_sums_adjusted.get(), data->prefix_sums.get(), k);
 
-  // Stage 3: Filter original logits.
+  // Stage 3: Filter scaled logits.
   FilterOnTopPKernel<<<grid, block, 0, stream>>>(data->scores_adjusted.get(), scores, data->prefix_sums.get(), k, p,
-                                                 stride);
+                                                 temperature, stride);
 
-  // Stage 4: Re-normalize filtered logits.
+  // Stage 4: Re-normalize filtered logits (temperature is already baked in).
   ApplySoftmaxToSortedTopK<false>(stream, data->prefix_sums_adjusted.get(), nullptr, data->scores_adjusted.get(),
                                   nullptr, k, batch_size, k, 1.0f);
 
