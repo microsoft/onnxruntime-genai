@@ -147,6 +147,12 @@ steps:
     displayName: 'Package C/C++ API'
     workingDirectory: '$(Build.Repository.LocalPath)'
 
+  - template: compliant/win-esrp-dll-step.yml
+    parameters:
+      FolderPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\package'
+      DisplayName: 'ESRP - Sign C++ Package'
+      Pattern: '*.zip'
+
   - task: 1ES.PublishPipelineArtifact@1
     displayName: 'Publish Artifact: ONNXRuntime Genai capi'
     inputs:

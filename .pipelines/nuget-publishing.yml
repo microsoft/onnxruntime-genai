@@ -92,6 +92,7 @@ parameters:
     default: 'release'
     values:
       - 'release'
+      - 'relwithdebinfo'
       - 'debug'
 
   - name: 'nuget_version_type'
