@@ -1127,7 +1127,21 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
   }
 
   // Otherwise, load the model from the file system
-  return OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
+  auto model_path_ = config_->config_path / fs::path(model_filename);
+  
+  if(config_->model.ep_context.enable) {
+    size_t dot_pos = model_filename.find('.'); // get the base name of the model from model.onnx
+    std::string model_base_name = model_filename.substr(0, dot_pos);
+    auto model_ctx_path = config_->config_path / fs::path(model_base_name + "_ctx.onnx");
+
+    // if ep context model doesn't exist, fallback to original base ONNX
+    if(model_ctx_path.exists())
+      model_path_ = model_ctx_path;
+    else
+      Log("warning", "Using base ONNX model, EP context model doesn't exist: " + model_ctx_path.string());
+  }
+  
+  return OrtSession::Create(ort_env, model_path_.c_str(), session_options);
 }
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {
