@@ -72,9 +72,10 @@ void TopkData::InitializeBuffers(int batch_size, int vocab_size, cudaStream_t st
 TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream, void* buffer, size_t buffer_size) {
   hybrid_sort_partition_size = hybrid_sort::EstimateBestPartitionSize(vocab_size);
 
-  int device_id;
+  // Get and cache the device ID once during initialization.
   CUDA_CHECK(cudaGetDevice(&device_id));
-  best_algo_cache_ = GetTopkBenchmarkCache(device_id, batch_size, vocab_size);
+  // Initialize the local cache.
+  local_algo_cache_.fill(TopkAlgo::UNKNOWN);
 
   if (buffer) {
     // Wrap an externally provided buffer. The caller is responsible for the size.
@@ -118,10 +119,20 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
 
   // For small k, use online benchmarking to find the best algorithm and cache the result.
   if (k <= kMaxBenchmarkK) {
-    TopkAlgo algo = topk_data->best_algo_cache_->at(k);
+    // Check the local cache first for the fastest path.
+    TopkAlgo algo = topk_data->local_algo_cache_.at(k);
+
     if (algo == TopkAlgo::UNKNOWN) {
-      // First time for this k, run benchmark.
-      algo = BenchmarkAndSelectBestAlgo(topk_data->best_algo_cache_, topk_data, stream, scores_in, vocab_size, batch_size, k);
+      // Local cache miss, check the global persistent cache.
+      algo = GetTopkBenchmarkCache(topk_data->device_id, batch_size, vocab_size, k);
+
+      if (algo == TopkAlgo::UNKNOWN) {
+        // Global cache also miss, run benchmark.
+        algo = BenchmarkAndSelectBestAlgo(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      }
+
+      // Update the local cache for subsequent calls.
+      topk_data->local_algo_cache_[k] = algo;
     }
 
     switch (algo) {
@@ -140,13 +151,18 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
     }
   }
 
+  if (batch_size == 1 && k <= kFlashSortMaxK) {
+    flash_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    return;
+  }
+
   if (k <= kHybridSortMaxK) {
     hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     return;
   }
 
   // For very large k, CUB-based segmented full sort or per-batch radix sort are the fallbacks.
-  if (batch_size <= 2) {
+  if (batch_size <= 8) {
     radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
   } else {
     full_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);

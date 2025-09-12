@@ -3,6 +3,7 @@
 #pragma once
 #include <mutex>
 #include <unordered_map>
+#include "cuda_topk.h"
 
 namespace Generators {
 namespace cuda {
@@ -14,51 +15,54 @@ struct TopkBenchmarkCacheKey {
   int device_id;
   int batch_size;
   int vocab_size;
+  int k;
 
   bool operator==(const TopkBenchmarkCacheKey& other) const {
     return device_id == other.device_id &&
            batch_size == other.batch_size &&
-           vocab_size == other.vocab_size;
+           vocab_size == other.vocab_size &&
+           k == other.k;
   }
 };
 
 // Hasher for the custom key struct, required for std::unordered_map.
 struct TopkBenchmarkCacheKeyHash {
-  std::size_t operator()(const TopkBenchmarkCacheKey& k) const {
+  std::size_t operator()(const TopkBenchmarkCacheKey& key) const {
     // A simple hash combination function.
-    size_t h1 = std::hash<int>{}(k.device_id);
-    size_t h2 = std::hash<int>{}(k.batch_size);
-    size_t h3 = std::hash<int>{}(k.vocab_size);
-    return h1 ^ (h2 << 1) ^ (h3 << 2);
+    size_t h1 = std::hash<int>{}(key.device_id);
+    size_t h2 = std::hash<int>{}(key.batch_size);
+    size_t h3 = std::hash<int>{}(key.vocab_size);
+    size_t h4 = std::hash<int>{}(key.k);
+    return h1 ^ (h2 << 1) ^ (h3 << 2) ^ (h4 << 3);
   }
 };
-
-using TopkAlgoCachePtr = std::shared_ptr<std::array<TopkAlgo, kMaxBenchmarkK + 1>>;
 
 // The global cache manager.
 class TopkBenchmarkCacheManager {
  public:
-  // Gets (or creates) the algorithm cache for a specific configuration.
-  TopkAlgoCachePtr GetOrCreateCache(int device_id, int batch_size, int vocab_size) {
+  // Gets the cached algorithm for a specific configuration.
+  TopkAlgo Get(int device_id, int batch_size, int vocab_size, int k) {
     std::lock_guard<std::mutex> lock(mutex_);
-    TopkBenchmarkCacheKey key{device_id, batch_size, vocab_size};
+    TopkBenchmarkCacheKey key{device_id, batch_size, vocab_size, k};
 
     auto it = cache_.find(key);
     if (it != cache_.end()) {
       return it->second;
     }
 
-    // Cache miss: create a new cache entry, initialize it with UNKNOWN, and return it.
-    auto new_cache_array = std::make_shared<std::array<TopkAlgo, kMaxBenchmarkK + 1>>();
-    new_cache_array->fill(TopkAlgo::UNKNOWN);
+    return TopkAlgo::UNKNOWN;
+  }
 
-    cache_[key] = new_cache_array;
-    return new_cache_array;
+  // Sets the algorithm for a specific configuration.
+  void Set(int device_id, int batch_size, int vocab_size, int k, TopkAlgo algo) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    TopkBenchmarkCacheKey key{device_id, batch_size, vocab_size, k};
+    cache_[key] = algo;
   }
 
  private:
   std::mutex mutex_;
-  std::unordered_map<TopkBenchmarkCacheKey, TopkAlgoCachePtr, TopkBenchmarkCacheKeyHash> cache_;
+  std::unordered_map<TopkBenchmarkCacheKey, TopkAlgo, TopkBenchmarkCacheKeyHash> cache_;
 };
 
 // The single static instance of our cache.
@@ -66,9 +70,13 @@ static TopkBenchmarkCacheManager g_topk_benchmark_cache;
 
 }  // namespace
 
-// Public-facing function to access the cache.
-std::shared_ptr<std::array<TopkAlgo, kMaxBenchmarkK + 1>> GetTopkBenchmarkCache(int device_id, int batch_size, int vocab_size) {
-  return g_topk_benchmark_cache.GetOrCreateCache(device_id, batch_size, vocab_size);
+// Public-facing functions to access the cache.
+inline TopkAlgo GetTopkBenchmarkCache(int device_id, int batch_size, int vocab_size, int k) {
+  return g_topk_benchmark_cache.Get(device_id, batch_size, vocab_size, k);
+}
+
+inline void SetTopkBenchmarkCache(int device_id, int batch_size, int vocab_size, int k, TopkAlgo algo) {
+  g_topk_benchmark_cache.Set(device_id, batch_size, vocab_size, k, algo);
 }
 
 }  // namespace cuda

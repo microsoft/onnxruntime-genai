@@ -40,11 +40,14 @@ struct TopkData {
   // Calculates the total memory required for all buffers.
   static size_t CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t stream);
 
-  // A shared pointer to the persistent cache for online benchmarking results.
-  std::shared_ptr<std::array<TopkAlgo, kMaxBenchmarkK + 1>> best_algo_cache_;
-
   // The estimated best partition size for hybrid sort.
   int hybrid_sort_partition_size;
+
+  // Caching the device_id to avoid repeated calls to cudaGetDevice
+  int device_id;
+
+  // A local, lock-free cache for the best algorithm for each k.
+  std::array<TopkAlgo, kMaxBenchmarkK + 1> local_algo_cache_;
 
   // --- Intermediate Buffers for Top-K Algorithms (Pointers into memory_buffer_span_) ---
 
@@ -52,7 +55,7 @@ struct TopkData {
   // - Selection sort: Holds top-k indices for output
   // - Hybrid sort: A "ping-pong" buffer for indices during the reduction phase.
   int* intermediate_indices_1;
-  
+
   // - Full sort - Holds the initial vocabulary indices before sorting.
   // - Hybrid sort - A "ping-pong" buffer for indices during the reduction phase.
   int* intermediate_indices_2;
@@ -104,7 +107,7 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
 // Below are NOT public APIs. They are exposed for testing purpose.
 
 /**
- * @brief Finds the top-k elements from a batch of scores using a basic selection sort algorithm on the GPU. 
+ * @brief Finds the top-k elements from a batch of scores using a basic selection sort algorithm on the GPU.
  * Primarily intended for baseline performance comparison.
  */
 namespace selection_sort {
