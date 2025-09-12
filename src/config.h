@@ -254,8 +254,6 @@ struct Config {
 
     } decoder;
 
-    std::optional<DeviceFilteringOptions> device_filtering_options;
-
   } model;
 
   struct Search {
