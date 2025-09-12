@@ -34,14 +34,14 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   constexpr int block_size = 256;
   int blocks_per_batch = CeilDiv(vocab_size, block_size);
 
-  auto* temp_storage = data->cub_temp_storage.get();
+  auto* temp_storage = data->cub_temp_storage;
   auto temp_storage_bytes = data->cub_temp_storage_bytes;
 
-  auto* final_scores_buffer = data->intermediate_scores_1.get();
-  auto* final_indices_buffer = data->intermediate_indices_1.get();
+  auto* final_scores_buffer = data->intermediate_scores_1;
+  auto* final_indices_buffer = data->intermediate_indices_1;
 
-  auto* workspace_scores = data->intermediate_scores_2.get();
-  auto* workspace_indices = data->intermediate_indices_2.get();
+  auto* workspace_scores = data->intermediate_scores_2;
+  auto* workspace_indices = data->intermediate_indices_2;
 
   for (int i = 0; i < batch_size; i++) {
     const float* current_scores_in = scores_in + static_cast<size_t>(i) * vocab_size;

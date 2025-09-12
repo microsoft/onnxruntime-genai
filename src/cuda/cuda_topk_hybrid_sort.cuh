@@ -131,23 +131,23 @@ void HybridSort_ReducePartitions(TopkData* data, cudaStream_t stream, int num_pa
     dim3 block(block_size);
 
     FinalSinglePartitionSort<block_size, K><<<grid, block, 0, stream>>>(
-        data->intermediate_scores_1.get(), data->intermediate_indices_1.get(),
-        data->intermediate_scores_2.get(), data->intermediate_indices_2.get(),
+        data->intermediate_scores_1, data->intermediate_indices_1,
+        data->intermediate_scores_2, data->intermediate_indices_2,
         k);
     CUDA_CHECK(cudaGetLastError());
 
     // The final sorted data is in buffer 2. The output is compact with size k.
-    data->topk_scores = data->intermediate_scores_2.get();
-    data->topk_indices = data->intermediate_indices_2.get();
+    data->topk_scores = data->intermediate_scores_2;
+    data->topk_indices = data->intermediate_indices_2;
     data->topk_stride = k;
     return;
   }
 
   int current_num_partitions = num_partitions;
-  float* input_scores = data->intermediate_scores_1.get();
-  float* output_scores = data->intermediate_scores_2.get();
-  int* input_indices = data->intermediate_indices_1.get();
-  int* output_indices = data->intermediate_indices_2.get();
+  float* input_scores = data->intermediate_scores_1;
+  float* output_scores = data->intermediate_scores_2;
+  int* input_indices = data->intermediate_indices_1;
+  int* output_indices = data->intermediate_indices_2;
   constexpr int block_size = 256;
 
   while (current_num_partitions > 1) {
@@ -193,19 +193,19 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
     switch (partition_size) {
       case 1024:
         HybridSort_Stage1_FindPartitionsTopK<block_size, 1024, K><<<grid_stage1, block_stage1, 0, stream>>>(
-            scores_in, data->intermediate_indices_1.get(), data->intermediate_scores_1.get(), vocab_size, num_partitions);
+            scores_in, data->intermediate_indices_1, data->intermediate_scores_1, vocab_size, num_partitions);
         break;
       case 2048:
         HybridSort_Stage1_FindPartitionsTopK<block_size, 2048, K><<<grid_stage1, block_stage1, 0, stream>>>(
-            scores_in, data->intermediate_indices_1.get(), data->intermediate_scores_1.get(), vocab_size, num_partitions);
+            scores_in, data->intermediate_indices_1, data->intermediate_scores_1, vocab_size, num_partitions);
         break;
       case 4096:
         HybridSort_Stage1_FindPartitionsTopK<block_size, 4096, K><<<grid_stage1, block_stage1, 0, stream>>>(
-            scores_in, data->intermediate_indices_1.get(), data->intermediate_scores_1.get(), vocab_size, num_partitions);
+            scores_in, data->intermediate_indices_1, data->intermediate_scores_1, vocab_size, num_partitions);
         break;
       case 8192:
         HybridSort_Stage1_FindPartitionsTopK<block_size, 8192, K><<<grid_stage1, block_stage1, 0, stream>>>(
-            scores_in, data->intermediate_indices_1.get(), data->intermediate_scores_1.get(), vocab_size, num_partitions);
+            scores_in, data->intermediate_indices_1, data->intermediate_scores_1, vocab_size, num_partitions);
         break;
       default:
         assert(false && "Unsupported partition_size");

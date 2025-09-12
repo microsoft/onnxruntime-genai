@@ -76,10 +76,11 @@ void RunParityTests(const TopKTestParams& params) {
   CUDA_CHECK(cudaMemcpy(scores_in_d.get(), scores_in_h.data(), scores_in_h.size() * sizeof(float), cudaMemcpyHostToDevice));
 
   // --- Get Reference Result using Full Sort ---
+  // The constructor will self-allocate memory as the buffer argument is defaulted to nullptr.
   auto topk_data = std::make_unique<Generators::cuda::TopkDataCompact>(params.batch_size, params.vocab_size, stream);
   Generators::cuda::full_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
                                        params.vocab_size, params.batch_size, params.k);
-  topk_data->CompactOutput(params.batch_size, params.vocab_size, stream, params.k);
+  topk_data->CompactOutput(params.batch_size, params.k, stream);
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
   std::vector<float> ref_scores_h(topk_size);
@@ -96,7 +97,7 @@ void RunParityTests(const TopKTestParams& params) {
     std::vector<float> actual_scores_h(topk_size);
     std::vector<int> actual_indices_h(topk_size);
 
-    topk_data->CompactOutput(params.batch_size, params.vocab_size, stream, params.k);
+    topk_data->CompactOutput(params.batch_size, params.k, stream);
     CUDA_CHECK(cudaStreamSynchronize(stream));
 
     CUDA_CHECK(cudaMemcpy(actual_scores_h.data(), topk_data->topk_scores_compact.get(), actual_scores_h.size() * sizeof(float),
@@ -158,7 +159,7 @@ TEST(TopKTests, ParityTests) {
   std::vector<TopKTestParams> test_cases;
 
   std::vector<int> batch_sizes = {1, 4, 32};
-    std::vector<int> vocab_sizes = {200, 2000, 20000, 200000};
+  std::vector<int> vocab_sizes = {200, 2000, 20000, 200000};
   std::vector<int> ks = {1, 16, 64, 256, 512};
 
   for (int batch_size : batch_sizes) {
@@ -175,3 +176,4 @@ TEST(TopKTests, ParityTests) {
   }
 }
 #endif
+

@@ -105,15 +105,15 @@ void LaunchGetTopK(cudaStream_t stream, float* scores_in, float* scores_out, int
 }
 
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
-  float* topk_scores = data->intermediate_scores_1.get();
-  int* topk_indices = data->intermediate_indices_1.get();
+  float* topk_scores = data->intermediate_scores_1;
+  int* topk_indices = data->intermediate_indices_1;
 
   if (k == 1) {
     // For Top-1, use the specialized read-only kernel. No copy is needed.
     LaunchGetTop1(stream, scores_in, topk_scores, topk_indices, vocab_size, batch_size);
   } else {
     // For k > 1, use the "copy-on-write" strategy with the general kernel.
-    float* mutable_scores = data->intermediate_scores_2.get();
+    float* mutable_scores = data->intermediate_scores_2;
     size_t buffer_size = static_cast<size_t>(batch_size) * vocab_size * sizeof(float);
     CUDA_CHECK(cudaMemcpyAsync(mutable_scores, scores_in, buffer_size, cudaMemcpyDeviceToDevice, stream));
     LaunchGetTopK(stream, mutable_scores, topk_scores, topk_indices, vocab_size, batch_size, k);

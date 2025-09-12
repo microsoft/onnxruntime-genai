@@ -179,7 +179,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
   // Benchmark Full Sort
   {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
-      Generators::cuda::flash_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
+      Generators::cuda::full_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
                                            params.batch_size, params.k);
     });
     all_results.push_back({params, "FULL_SORT", mean_ms, stdev_ms, p95_ms});

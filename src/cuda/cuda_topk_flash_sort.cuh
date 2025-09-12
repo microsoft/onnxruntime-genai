@@ -184,8 +184,8 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 
     // The final result is in intermediate_indices_1 and intermediate_scores_1.
     // The reduction logic swaps pointers, and the final write goes to these buffers.
-    data->topk_scores = data->intermediate_scores_1.get();
-    data->topk_indices = data->intermediate_indices_1.get();
+    data->topk_scores = data->intermediate_scores_1;
+    data->topk_indices = data->intermediate_indices_1;
   };
 
   if (k <= 4) {

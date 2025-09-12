@@ -3,6 +3,7 @@
 
 #include <cub/device/device_segmented_radix_sort.cuh>
 
+#include "../generators.h"
 #include "cuda_topk.h"
 #include "cuda_topk_benchmark_cache.h"
 #include "cuda_topk_benchmark.cuh"
@@ -11,48 +12,85 @@
 #include "cuda_topk_hybrid_sort.cuh"
 #include "cuda_topk_flash_sort.cuh"
 #include "cuda_topk_select_sort.cuh"
+#include <cassert>
+#include <cstdio> // For printf
 
 namespace Generators {
 namespace cuda {
 
-TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream) {
-  hybrid_sort_partition_size = hybrid_sort::EstimateBestPartitionSize(vocab_size);
+size_t TopkData::CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t stream) {
+  size_t total_size = 0;
 
-  // Get the device ID to use as part of the cache key.
-  int device_id;
-  CUDA_CHECK(cudaGetDevice(&device_id));
-
-  // Get or create the shared cache for this configuration.
-  best_algo_cache_ = GetTopkBenchmarkCache(device_id, batch_size, vocab_size);
-
-  // --- Buffer Size Calculation ---
-  // We must calculate the maximum potential buffer sizes across all algorithms that use the intermediate buffers.
-
-  // Size needed for intermediate reduction buffers in HybridSort.
-  size_t hybrid_sort_buffer_elements = hybrid_sort::GetIntermediateSize(batch_size, vocab_size, hybrid_sort_partition_size);
-
-  // Size needed for other algorithms (like RadixSort, FullSort).
+  int partition_size = hybrid_sort::EstimateBestPartitionSize(vocab_size);
+  size_t hybrid_sort_buffer_elements = hybrid_sort::GetIntermediateSize(batch_size, vocab_size, partition_size);
   size_t vocab_batch_size = static_cast<size_t>(vocab_size) * batch_size;
-
-  // The intermediate buffers must be large enough for any of these scenarios.
   size_t max_buffer_elements = std::max({vocab_batch_size, hybrid_sort_buffer_elements});
 
-  // Allocate all necessary device memory
-  // TODO: Allocate a huge chunk and points to different offsets for each buffer to reduce fragmentation.
-  intermediate_indices_1 = CudaMallocArray<int>(max_buffer_elements);
-  intermediate_indices_2 = CudaMallocArray<int>(max_buffer_elements);
-  intermediate_scores_1 = CudaMallocArray<float>(max_buffer_elements);
-  intermediate_scores_2 = CudaMallocArray<float>(max_buffer_elements);
-  batch_offsets = CudaMallocArray<int>(batch_size + 1);
+  total_size += AlignUp(max_buffer_elements * sizeof(int), kGpuBufferAlignment);
+  total_size += AlignUp(max_buffer_elements * sizeof(int), kGpuBufferAlignment);
+  total_size += AlignUp(max_buffer_elements * sizeof(float), kGpuBufferAlignment);
+  total_size += AlignUp(max_buffer_elements * sizeof(float), kGpuBufferAlignment);
+  total_size += AlignUp((batch_size + 1) * sizeof(int), kGpuBufferAlignment);
 
   auto radix_sort_temp_storage_bytes = radix_sort::GetTempStorageBytes(vocab_size, stream);
   auto full_sort_temp_storage_bytes = full_sort::GetTempStorageBytes(vocab_batch_size, batch_size, stream);
-  cub_temp_storage_bytes = std::max(radix_sort_temp_storage_bytes, full_sort_temp_storage_bytes);
-  cub_temp_storage = CudaMallocArray<unsigned char>(this->cub_temp_storage_bytes);
+  size_t temp_storage_bytes = std::max(radix_sort_temp_storage_bytes, full_sort_temp_storage_bytes);
+  total_size += AlignUp(temp_storage_bytes, kGpuBufferAlignment);
+
+  return total_size;
 }
 
-// Kernel to compact strided data into a dense layout.
-// Used to convert data from a [batch, stride] layout to a dense [batch, k] layout.
+void TopkData::InitializeBuffers(int batch_size, int vocab_size, cudaStream_t stream) {
+  uint8_t* current_ptr = memory_buffer_span_.data();
+  size_t max_buffer_elements = std::max({static_cast<size_t>(vocab_size) * batch_size,
+                                         hybrid_sort::GetIntermediateSize(batch_size, vocab_size, hybrid_sort_partition_size)});
+
+  intermediate_indices_1 = reinterpret_cast<int*>(current_ptr);
+  current_ptr += AlignUp(max_buffer_elements * sizeof(int), kGpuBufferAlignment);
+
+  intermediate_indices_2 = reinterpret_cast<int*>(current_ptr);
+  current_ptr += AlignUp(max_buffer_elements * sizeof(int), kGpuBufferAlignment);
+
+  intermediate_scores_1 = reinterpret_cast<float*>(current_ptr);
+  current_ptr += AlignUp(max_buffer_elements * sizeof(float), kGpuBufferAlignment);
+
+  intermediate_scores_2 = reinterpret_cast<float*>(current_ptr);
+  current_ptr += AlignUp(max_buffer_elements * sizeof(float), kGpuBufferAlignment);
+
+  batch_offsets = reinterpret_cast<int*>(current_ptr);
+  current_ptr += AlignUp((batch_size + 1) * sizeof(int), kGpuBufferAlignment);
+
+  size_t vocab_batch_size = static_cast<size_t>(vocab_size) * batch_size;
+  auto radix_sort_temp_storage_bytes = radix_sort::GetTempStorageBytes(vocab_size, stream);
+  auto full_sort_temp_storage_bytes = full_sort::GetTempStorageBytes(vocab_batch_size, batch_size, stream);
+  cub_temp_storage_bytes = std::max(radix_sort_temp_storage_bytes, full_sort_temp_storage_bytes);
+
+  cub_temp_storage = reinterpret_cast<unsigned char*>(current_ptr);
+  current_ptr += AlignUp(cub_temp_storage_bytes, kGpuBufferAlignment);
+}
+
+TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream, void* buffer, size_t buffer_size) {
+  hybrid_sort_partition_size = hybrid_sort::EstimateBestPartitionSize(vocab_size);
+
+  int device_id;
+  CUDA_CHECK(cudaGetDevice(&device_id));
+  best_algo_cache_ = GetTopkBenchmarkCache(device_id, batch_size, vocab_size);
+
+  if (buffer) {
+    // Wrap an externally provided buffer. The caller is responsible for the size.
+    assert(buffer_size >= CalculateTotalSize(batch_size, vocab_size, stream));
+    memory_buffer_span_ = std::span<uint8_t>(static_cast<uint8_t*>(buffer), buffer_size);
+  } else {
+    // Self-allocate. If buffer_size is provided by a derived class, use it.
+    // Otherwise, calculate the size needed for this base class.
+    size_t self_size = (buffer_size > 0) ? buffer_size : CalculateTotalSize(batch_size, vocab_size, stream);
+    memory_buffer_owner_ = CudaMallocArray<uint8_t>(self_size);
+    memory_buffer_span_ = std::span<uint8_t>(memory_buffer_owner_.get(), self_size);
+  }
+
+  InitializeBuffers(batch_size, vocab_size, stream);
+}
+
 template <typename T>
 __global__ void CompactStridedData(const T* input, T* output, int k, int batch_size, int input_stride) {
   const int batch_idx = blockIdx.x;
@@ -63,7 +101,7 @@ __global__ void CompactStridedData(const T* input, T* output, int k, int batch_s
   }
 }
 
-void TopkDataCompact::CompactOutput(int batch_size, int vocab_size, cudaStream_t stream, int k) {
+void TopkDataCompact::CompactOutput(int batch_size, int k, cudaStream_t stream) {
   topk_scores_compact = CudaMallocArray<float>(static_cast<size_t>(batch_size) * k);
   topk_indices_compact = CudaMallocArray<int>(static_cast<size_t>(batch_size) * k);
   dim3 grid(batch_size);
@@ -117,3 +155,4 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
 
 }  // namespace cuda
 }  // namespace Generators
+

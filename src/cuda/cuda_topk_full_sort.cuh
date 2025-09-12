@@ -54,17 +54,17 @@ inline size_t GetTempStorageBytes(int num_items, int num_segments, cudaStream_t 
 
 inline void LaunchSort(TopkData* data, cudaStream_t stream, const float* scores_in, float* scores_out,
                        int* indices_out, int vocab_size, int batch_size) {
-  LaunchPopulateOffsets(data->batch_offsets.get(), vocab_size, batch_size, stream);
+  LaunchPopulateOffsets(data->batch_offsets, vocab_size, batch_size, stream);
   // For the sort, we need a temporary buffer for the initial indices.
-  LaunchPopulateIndices(data->intermediate_indices_2.get(), vocab_size, batch_size, stream);
-  LaunchSortPairs(data->cub_temp_storage.get(), data->cub_temp_storage_bytes, scores_in, scores_out,
-                  data->intermediate_indices_2.get(), indices_out, vocab_size * batch_size, batch_size,
-                  data->batch_offsets.get(), stream);
+  LaunchPopulateIndices(data->intermediate_indices_2, vocab_size, batch_size, stream);
+  LaunchSortPairs(data->cub_temp_storage, data->cub_temp_storage_bytes, scores_in, scores_out,
+                  data->intermediate_indices_2, indices_out, vocab_size * batch_size, batch_size,
+                  data->batch_offsets, stream);
 }
 
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
-  float* topk_scores = data->intermediate_scores_1.get();
-  int* topk_indices = data->intermediate_indices_1.get();
+  float* topk_scores = data->intermediate_scores_1;
+  int* topk_indices = data->intermediate_indices_1;
   LaunchSort(data, stream, scores_in, topk_scores, topk_indices, vocab_size, batch_size);
 
   data->topk_scores = topk_scores;

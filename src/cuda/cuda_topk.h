@@ -7,10 +7,17 @@
 #include <array>
 
 #include "cuda_common.h"
+#include "../smartptrs.h"
 
 namespace Generators {
 namespace cuda {
 
+// Helper to align memory addresses.
+__host__ __device__ inline size_t AlignUp(size_t size, size_t alignment) {
+  return (size + alignment - 1) & ~(alignment - 1);
+}
+
+constexpr int kGpuBufferAlignment = 256;
 constexpr int kHybridSortMaxK = 256;      // The maximum k allowed for hybrid sort.
 constexpr int kFlashSortMaxK = 256;       // The maximum k allowed for flash sort.
 constexpr int kMaxBenchmarkK = 64;        // The maximum k for online benchmarking.
@@ -25,10 +32,13 @@ enum class TopkAlgo { SELECTION,
 
 // This struct holds all the device memory buffers and other data required for Top-K operations.
 struct TopkData {
-  TopkData(int batch_size, int vocab_size, cudaStream_t stream);
-  TopkData() = delete;
+  TopkData(int batch_size, int vocab_size, cudaStream_t stream, void* buffer = nullptr, size_t buffer_size = 0);
+  virtual ~TopkData() = default;
   TopkData(const TopkData&) = delete;
   TopkData& operator=(const TopkData&) = delete;
+
+  // Calculates the total memory required for all buffers.
+  static size_t CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t stream);
 
   // A shared pointer to the persistent cache for online benchmarking results.
   std::shared_ptr<std::array<TopkAlgo, kMaxBenchmarkK + 1>> best_algo_cache_;
@@ -36,51 +46,53 @@ struct TopkData {
   // The estimated best partition size for hybrid sort.
   int hybrid_sort_partition_size;
 
-  // The estimated threshold to use selection sort instead of other algorithm when k <= threshold
-  int selection_sort_k_threshold;
-
-  // --- Intermediate Buffers for Top-K Algorithms ---
+  // --- Intermediate Buffers for Top-K Algorithms (Pointers into memory_buffer_span_) ---
 
   // - Full sort - Holds top-k indices for output
   // - Selection sort: Holds top-k indices for output
   // - Hybrid sort: A "ping-pong" buffer for indices during the reduction phase.
-  cuda_unique_ptr<int> intermediate_indices_1;
-
+  int* intermediate_indices_1;
+  
   // - Full sort - Holds the initial vocabulary indices before sorting.
   // - Hybrid sort - A "ping-pong" buffer for indices during the reduction phase.
-  cuda_unique_ptr<int> intermediate_indices_2;
+  int* intermediate_indices_2;
 
   // - Full sort: Holds the fully sorted raw scores.
   // - Selection sort: Holds the top-k scores for selection sort.
   // - Hybrid sort: A "ping-pong" buffer for raw scores during the reduction phase.
-  cuda_unique_ptr<float> intermediate_scores_1;
+  float* intermediate_scores_1;
 
   // - Selection sort: Holds a copy of input scores. Will be updated in place by selection sort kernel.
   // - Hybrid sort: A "ping-pong" buffer for raw scores during the reduction phase.
-  cuda_unique_ptr<float> intermediate_scores_2;
-
+  float* intermediate_scores_2;
   // - Full sort: General-purpose temporary storage for CUB's DeviceSegmentedRadixSort
-  cuda_unique_ptr<unsigned char> cub_temp_storage;
+  unsigned char* cub_temp_storage;
   size_t cub_temp_storage_bytes = 0;
 
   // - Full sort: Stores the start offset of each batch segment for CUB's segmented sort
-  cuda_unique_ptr<int> batch_offsets;
+  int* batch_offsets;
 
   // --- Information of Final Output (Input to Sampling Stage) ---
-  const float* topk_scores = nullptr;  // pointer to the top-k scores data (in either intermediate_scores_1 or intermediate_scores_2)
-  const int* topk_indices = nullptr;   // pointer to the top-k indices data (in either intermediate_indices_1 or intermediate_indices_2)
-  int topk_stride = 0;                 // stride of the top-k output data: k for selection sort, vocab_size for full sort, kHybridSortMaxK for hybrid sort
+  const float* topk_scores = nullptr;
+  const int* topk_indices = nullptr;
+  int topk_stride = 0;
+
+ protected:
+  // Assigns pointers based on offsets into the single allocated buffer.
+  virtual void InitializeBuffers(int batch_size, int vocab_size, cudaStream_t stream);
+
+  // If buffer is provided externally, this will just be a view.
+  // If not, this unique_ptr will own the allocated memory.
+  cuda_unique_ptr<uint8_t> memory_buffer_owner_;
+  std::span<uint8_t> memory_buffer_span_;
 };
 
 // For parity test, a derived struct to help compact output buffers.
 struct TopkDataCompact : public TopkData {
-  TopkDataCompact(int batch_size, int vocab_size, cudaStream_t stream)
-      : TopkData(batch_size, vocab_size, stream) {}
-  TopkDataCompact() = delete;
-  TopkDataCompact(const TopkDataCompact&) = delete;
-  TopkDataCompact& operator=(const TopkDataCompact&) = delete;
+  TopkDataCompact(int batch_size, int vocab_size, cudaStream_t stream, void* buffer = nullptr, size_t buffer_size = 0)
+      : TopkData(batch_size, vocab_size, stream, buffer, buffer_size) {}
 
-  void CompactOutput(int batch_size, int vocab_size, cudaStream_t stream, int k);
+  void CompactOutput(int batch_size, int k, cudaStream_t stream);
 
   cuda_unique_ptr<float> topk_scores_compact;  // compact [batch_size, k] output scores
   cuda_unique_ptr<int> topk_indices_compact;   // compact [batch_size, k] output indices
@@ -132,3 +144,4 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 
 }  // namespace cuda
 }  // namespace Generators
+
