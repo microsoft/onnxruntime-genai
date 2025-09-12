@@ -8,7 +8,7 @@
 
 namespace Generators {
 namespace cuda {
-
+namespace full_sort {
 __global__ void PopulateIndices(int* indices, int vocab_size, int batch_size) {
   int global_index = threadIdx.x + blockIdx.x * blockDim.x;
   if (global_index < vocab_size * batch_size) {
@@ -44,7 +44,7 @@ inline void LaunchSortPairs(void* d_temp_storage, size_t temp_storage_bytes, con
       d_offsets, d_offsets + 1, 0, sizeof(float) * 8, stream));
 }
 
-inline size_t GetFullSortCubTempStorageBytes(int num_items, int num_segments, cudaStream_t stream) {
+inline size_t GetTempStorageBytes(int num_items, int num_segments, cudaStream_t stream) {
   size_t temp_storage_bytes = 0;
   CUDA_CHECK(cub::DeviceSegmentedRadixSort::SortPairsDescending(
       nullptr, temp_storage_bytes, (float*)nullptr, (float*)nullptr, (int*)nullptr, (int*)nullptr, num_items,
@@ -62,7 +62,7 @@ inline void LaunchSort(TopkData* data, cudaStream_t stream, const float* scores_
                   data->batch_offsets.get(), stream);
 }
 
-void RunTopKViaFullSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
+void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
   float* topk_scores = data->intermediate_scores_1.get();
   int* topk_indices = data->intermediate_indices_1.get();
   LaunchSort(data, stream, scores_in, topk_scores, topk_indices, vocab_size, batch_size);
@@ -72,6 +72,6 @@ void RunTopKViaFullSort(TopkData* data, cudaStream_t stream, const float* scores
   data->topk_stride = vocab_size;
   CUDA_CHECK_LAUNCH();
 }
-
+} // namespace full_sort
 }  // namespace cuda
 }  // namespace Generators

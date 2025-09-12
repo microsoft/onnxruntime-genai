@@ -305,7 +305,7 @@ void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out,
     k = vocab_size;
   }
 
-  GetTopK(data, stream, scores_in, vocab_size, batch_size, k);
+  RunTopK(data, stream, scores_in, vocab_size, batch_size, k);
   const float* topk_scores = data->topk_scores;
   const int* topk_indices = data->topk_indices;
   int topk_stride = data->topk_stride;

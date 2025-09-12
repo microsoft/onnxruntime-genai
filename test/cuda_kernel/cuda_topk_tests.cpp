@@ -1,6 +1,5 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-
 #if USE_CUDA
 #include <gtest/gtest.h>
 
@@ -78,7 +77,7 @@ void RunParityTests(const TopKTestParams& params) {
 
   // --- Get Reference Result using Full Sort ---
   auto topk_data = std::make_unique<Generators::cuda::TopkDataCompact>(params.batch_size, params.vocab_size, stream);
-  Generators::cuda::RunTopKViaFullSort(topk_data.get(), stream, scores_in_d.get(),
+  Generators::cuda::flash_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
                                        params.vocab_size, params.batch_size, params.k);
   topk_data->CompactOutput(params.batch_size, params.vocab_size, stream, params.k);
   CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -111,27 +110,65 @@ void RunParityTests(const TopKTestParams& params) {
   };
 
   test_algo("SELECTION_SORT", [&]() {
-    Generators::cuda::RunTopKViaSelectionSort(topk_data.get(), stream, scores_in_d.get(),
+    Generators::cuda::selection_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
                                               params.vocab_size, params.batch_size, params.k);
+  });
+
+  if (params.k <= Generators::cuda::kHybridSortMaxK) {
+    for (int partition_size : {1024, 2048, 4096, 8192}) {
+      if (partition_size > 1024 && partition_size > params.vocab_size * 2) {
+        continue;
+      }
+
+      topk_data->hybrid_sort_partition_size = partition_size;
+      std::string algo_name = "HYBRID (" + std::to_string(partition_size) + ")";
+      test_algo(algo_name, [&]() {
+        Generators::cuda::hybrid_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                               params.vocab_size, params.batch_size, params.k);
+      });
+    }
+  }
+
+  if (params.batch_size == 1 && params.k <= Generators::cuda::kFlashSortMaxK) {
+    int cooperative_launch_support = 0;
+    cudaDeviceGetAttribute(&cooperative_launch_support, cudaDevAttrCooperativeLaunch, 0);
+    if (cooperative_launch_support) {
+      test_algo("FLASH_SORT", [&]() {
+        Generators::cuda::flash_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                              params.vocab_size, params.batch_size, params.k);
+      });
+    }
+  }
+
+  test_algo("RADIX_SORT", [&]() {
+    Generators::cuda::radix_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                          params.vocab_size, params.batch_size, params.k);
+  });
+
+  // Test RunTopK (Backend can be any of the above algorithms).
+  test_algo("DEFAULT", [&]() {
+    Generators::cuda::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                              params.vocab_size, params.batch_size, params.k);
   });
 
   CUDA_CHECK(cudaStreamDestroy(stream));
 }
 
 TEST(TopKTests, ParityTests) {
-  std::vector<int> batch_sizes = {1, 4, 32};
-  std::vector<int> vocab_sizes = {200, 2000, 20000, 200000};
-  std::vector<int> ks = {1, 16, 64, 256, 512};
-
   std::vector<TopKTestParams> test_cases;
-  for (int batch_size : batch_sizes) {
-    for (int vocab_size : vocab_sizes) {
-      for (int k : ks) {
-        test_cases.push_back({batch_size, vocab_size, std::min(k, vocab_size)});
+
+  std::vector<int> batch_sizes = {1, 4, 32};
+    std::vector<int> vocab_sizes = {200, 2000, 20000, 200000};
+    std::vector<int> ks = {1, 16, 64, 256, 512};
+
+    for (int batch_size : batch_sizes) {
+      for (int vocab_size : vocab_sizes) {
+        for (int k : ks) {
+          test_cases.push_back({batch_size, vocab_size, std::min(k, vocab_size)});
+        }
       }
     }
-  }
-
+    
   for (const auto& params : test_cases) {
     RunParityTests(params);
   }
