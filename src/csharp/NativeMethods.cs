@@ -62,6 +62,24 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaConfigRemoveModelData(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ model_filename);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigSetDecoderProviderOptionsHardwareDeviceType(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ provider_name, byte[] /* const char* */ hardware_device_type);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigSetDecoderProviderOptionsHardwareDeviceId(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ provider_name, uint /* uint32_t  */ hardware_device_id);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigSetDecoderProviderOptionsHardwareVendorId(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ provider_name, uint /* uint32_t  */ hardware_vendor_id);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigClearDecoderProviderOptionsHardwareDeviceType(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ provider_name);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigClearDecoderProviderOptionsHardwareDeviceId(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ provider_name);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaConfigClearDecoderProviderOptionsHardwareVendorId(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ provider_name);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateModel(byte[] /* const char* */ configPath,
                                                                     out IntPtr /* OgaModel** */ model);
 

@@ -64,9 +64,16 @@ struct Config {
   fs::path config_path;  // Path of the config directory
 
   using NamedString = std::pair<std::string, std::string>;
+  struct DeviceFilteringOptions {
+    std::optional<OrtHardwareDeviceType> hardware_device_type;  // OrtHardwareDeviceType_CPU, OrtHardwareDeviceType_GPU, OrtHardwareDeviceType_NPU
+    std::optional<uint32_t> hardware_device_id;
+    std::optional<uint32_t> hardware_vendor_id;
+  };
+
   struct ProviderOptions {
     std::string name;
     std::vector<NamedString> options;
+    std::optional<DeviceFilteringOptions> device_filtering_options;
   };
 
   struct SessionOptions {
@@ -247,11 +254,6 @@ struct Config {
 
     } decoder;
 
-    // EP device filters
-    std::optional<std::string> hardware_device_type;  // CPU, GPU, NPU
-    std::optional<uint32_t> hardware_device_id;
-    std::optional<uint32_t> hardware_vendor_id;
-
   } model;
 
   struct Search {
@@ -289,5 +291,12 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
 void OverlayConfig(Config& config, std::string_view json);
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
+
+void SetDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name, std::string_view hardware_device_type);
+void SetDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name, uint32_t hardware_device_id);
+void SetDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view provider_name, uint32_t hardware_vendor_id);
+void ClearDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name);
+void ClearDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name);
+void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view provider_name);
 
 }  // namespace Generators
