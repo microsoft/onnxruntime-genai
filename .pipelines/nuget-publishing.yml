@@ -89,8 +89,9 @@ parameters:
   - name: build_config
     displayName: 'Build Configuration'
     type: string
-    default: 'relwithdebinfo'
+    default: 'release'
     values:
+      - 'release'
       - 'relwithdebinfo'
       - 'debug'
 
