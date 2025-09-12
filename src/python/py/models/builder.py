@@ -2412,7 +2412,7 @@ class Model:
             normalize_routing_weights=self.moe_attrs["normalize_routing_weights"],
             swiglu_fusion=self.moe_attrs["swiglu_fusion"],
             use_sparse_mixer=self.moe_attrs["use_sparse_mixer"],
-            block_size=self.quant_attrs["int4"]["block_size"] if self.quant_attrs["int4"]["block_size"] > 0 else 0,
+            block_size=self.moe_attrs.get("actual_block_size", 0),
             **extra_kwargs,
         )
         self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
@@ -2428,11 +2428,17 @@ class Model:
         if block_size > 0:
             try:
                 qweight, scales = self._symmetric_blockwise_quantize(weights, block_size)
+                if self.moe_attrs.get("actual_block_size") != 0:
+                    self.moe_attrs["actual_block_size"] = block_size
                 return qweight, scales.to(torch.float16)
             except Exception as e:
                 print(f"WARNING: Block-wise quantization failed: {e}")
                 print("Falling back to tensor-level quantization")
+                self.moe_attrs["actual_block_size"] = 0
                 # Fall through to existing implementation
+        else:
+            # block_size is 0, so we're using tensor-level quantization
+            self.moe_attrs["actual_block_size"] = 0
 
         # Existing tensor-level quantization implementation (fallback)
         unsuccessful = True
@@ -2465,12 +2471,7 @@ class Model:
 
         block_size = original_shape[-1]
 
-        if bits == 4:
-            qmax = 7
-            qmin = -7
-        else:  # 8-bit
-            qmax = 127
-            qmin = -127
+        qmin, qmax = (-7, 7) if bits == 4 else (-127, 127)
 
         # Reshape weights to process the last dimension in blocks
         # weights shape: [..., hidden_size] -> [..., num_blocks, block_size]
@@ -4245,22 +4246,24 @@ class GPTOSSModel(Model):
         down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
 
+        # Apply transpose once for both branches
+        gate_up_proj_transposed = mlp.experts.gate_up_proj.transpose(-1, -2)
+        down_proj_transposed = mlp.experts.down_proj.transpose(-1, -2)
+
         if op_type == "MoE":
             # Save non-quantized MoE weights as initializers
-            self.make_initializer(mlp.experts.gate_up_proj.transpose(-1, -2).view(self.moe_attrs["num_experts"], -1, self.hidden_size), gate_up_proj_weight, to=self.io_dtype)
-            self.make_initializer(mlp.experts.down_proj.transpose(-1, -2).view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size), down_proj_weight, to=self.io_dtype)
+            self.make_initializer(gate_up_proj_transposed.view(self.moe_attrs["num_experts"], -1, self.hidden_size), gate_up_proj_weight, to=self.io_dtype)
+            self.make_initializer(down_proj_transposed.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size), down_proj_weight, to=self.io_dtype)
         else:
             # Create and save quantized MoE weights as initializers
             gate_up_proj_qweight_list, gate_up_proj_scales_list = [], []
             down_proj_qweight_list, down_proj_scales_list = [], []
 
             for i in range(self.moe_attrs["num_experts"]):
-                gate_up_weight_transposed = mlp.experts.gate_up_proj[i].transpose(-1, -2)
-                qweight1, scales1 = self.make_qmoe_weights(gate_up_weight_transposed)
+                qweight1, scales1 = self.make_qmoe_weights(gate_up_proj_transposed[i])
                 gate_up_proj_qweight_list.append(qweight1)
                 gate_up_proj_scales_list.append(scales1)
-                down_weight_transposed = mlp.experts.down_proj[i].transpose(-1, -2)
-                qweight2, scales2 = self.make_qmoe_weights(down_weight_transposed)
+                qweight2, scales2 = self.make_qmoe_weights(down_proj_transposed[i])
                 down_proj_qweight_list.append(qweight2)
                 down_proj_scales_list.append(scales2)
 
@@ -4269,24 +4272,14 @@ class GPTOSSModel(Model):
             down_proj_qweight_tensor = torch.stack(down_proj_qweight_list, dim=0).to(torch.uint8)
             down_proj_scales_tensor = torch.stack(down_proj_scales_list, dim=0)
 
-            # Handle different tensor shapes for block-wise vs tensor-level quantization
-            block_size = self.quant_attrs["int4"]["block_size"]
-            if block_size > 0:
-                gate_up_qweight_shape = gate_up_proj_qweight_tensor.shape
-                down_qweight_shape = down_proj_qweight_tensor.shape
-
-                # Provide 3D scales as specified by the operator definition
-                self.make_initializer(gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], gate_up_qweight_shape[1], gate_up_qweight_shape[2]), gate_up_proj_weight)
-                self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
-                self.make_initializer(down_proj_qweight_tensor.view(self.moe_attrs["num_experts"], down_qweight_shape[1], down_qweight_shape[2]), down_proj_weight)
-                self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
-            else:
-                # Tensor-level quantization: use original packing logic
-                pack_size = 8 // self.moe_attrs["expert_weight_bits"]
-                self.make_initializer(gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, self.hidden_size // pack_size), gate_up_proj_weight)
-                self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
-                self.make_initializer(down_proj_qweight_tensor.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size // pack_size), down_proj_weight)
-                self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
+            # qweight tensors always use the same shape regardless of quantization method
+            pack_size = 8 // self.moe_attrs["expert_weight_bits"]
+            self.make_initializer(gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, self.hidden_size // pack_size), gate_up_proj_weight)
+            self.make_initializer(down_proj_qweight_tensor.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size // pack_size), down_proj_weight)
+            
+            # scales tensors have different shapes depending on quantization method
+            self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
+            self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
 
         # Save MoE biases as initializers
         self.make_initializer(mlp.experts.gate_up_proj_bias, gate_up_proj_bias, to=self.io_dtype)
