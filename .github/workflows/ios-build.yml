@@ -14,11 +14,11 @@ jobs:
     runs-on: macos-latest # arm64
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: true
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12.x'
 

@@ -31,11 +31,11 @@ jobs:
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Win2022-GPU-A10"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: true
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.11.x'
           architecture: 'x64'
