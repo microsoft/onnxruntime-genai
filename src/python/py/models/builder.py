@@ -85,6 +85,8 @@ class Model:
             "NvTensorRtRtx": {"enable_cuda_graph": "1"}
         }
 
+        self.use_paged_attention = extra_options.get("use_paged_attention", False)
+
         # Map input names to their types and shapes
         self.input_names = ["input_ids", "attention_mask", "position_ids"]
         self.input_types = {
@@ -106,6 +108,19 @@ class Model:
         self.exclude_embeds = extra_options.get("exclude_embeds", False)
         if self.exclude_embeds:
             self.input_names = [name.replace("input_ids", "inputs_embeds") for name in self.input_names]
+        
+        if self.use_paged_attention:
+            self.input_shapes["input_ids"] = ["token_count"]
+            self.input_names.remove("attention_mask")
+            self.input_shapes["past_key_values.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.input_shapes["past_key_values.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.input_names += ["block_table", "cumulative_sequence_length", "past_seqlens"]
+            self.input_types["block_table"] = ir.DataType.INT32
+            self.input_types["cumulative_sequence_length"] = ir.DataType.INT32
+            self.input_types["past_seqlens"] = ir.DataType.INT32
+            self.input_shapes["block_table"] = ["batch_size", "max_num_blocks"]
+            self.input_shapes["cumulative_sequence_length"] = ["batch_size + 1"]
+            self.input_shapes["past_seqlens"] = ["batch_size"]
 
         # Map output names to their types and shapes
         self.output_names = ["logits"]
@@ -129,12 +144,15 @@ class Model:
         # Mask-specific variables
         # TODO: Reconcile differences between `seqlens_k` and `key_total_seq_lens` in the GroupQueryAttention and SparseAttention implementations. Ideally the same subgraph can be shared for both.
         self.mask_attrs = {
-            "mask_name": "",            # Name of node that outputs 4D causal attention mask (used as add_qk in MultiHeadAttention)
-            "seqlens_k": "",            # Sum of each row in attention mask - 1 (used as input to GroupQueryAttention)
-            "total_seq_len": "",        # Size of total sequence length in attention mask (used as input to GroupQueryAttention and SparseAttention)
-            "block_row_indices": "",    # Row indices of CSR format of block mask (used as input to SparseAttention)
-            "block_col_indices": "",    # Col indices of CSR format of block mask (used as input to SparseAttention)
-            "key_total_seq_lens": "",   # Sum of each row in attention mask (used as input to SparseAttention)
+            "mask_name": "",                    # Name of node that outputs 4D causal attention mask (used as add_qk in MultiHeadAttention)
+            "seqlens_k": "",                    # Sum of each row in attention mask - 1 (used as input to GroupQueryAttention)
+            "total_seq_len": "",                # Size of total sequence length in attention mask (used as input to GroupQueryAttention and SparseAttention)
+            "block_row_indices": "",            # Row indices of CSR format of block mask (used as input to SparseAttention)
+            "block_col_indices": "",            # Col indices of CSR format of block mask (used as input to SparseAttention)
+            "key_total_seq_lens": "",           # Sum of each row in attention mask (used as input to SparseAttention)
+            "cumulative_sequence_length": "",   # Cumulative sequence length of each row in attention mask (used as input to SparseAttention and PagedAttention)
+            "past_seqlens": "",                 # Past sequence lengths (used as input to PagedAttention)
+            "block_table": "",                  # Block table for paged KV-cache (used as input to PagedAttention)
         }
 
         # Embedding-specific variables
@@ -303,6 +321,10 @@ class Model:
             self.output_names = [name.replace("logits", "hidden_states") for name in self.output_names]
         elif self.include_hidden_states:
             self.output_names = ["hidden_states"] + self.output_names
+        if self.use_paged_attention:
+            self.output_shapes["present.key"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+            self.output_shapes["present.value"] = ["num_blocks", "block_size", self.num_kv_heads, self.head_size]
+
 
     def make_rope_init(self, config):
         if "short_factor" in config.rope_scaling:
@@ -350,36 +372,56 @@ class Model:
             }
 
     def make_attention_init(self):
-        valid_gqa_configurations = {
-            ("cpu", ir.DataType.FLOAT),
-            ("cuda", ir.DataType.FLOAT16),
-            ("cuda", ir.DataType.BFLOAT16),
-            ("dml", ir.DataType.FLOAT16),
-            ("webgpu", ir.DataType.FLOAT16),
-            ("webgpu", ir.DataType.FLOAT),
-            ("NvTensorRtRtx", ir.DataType.FLOAT16),
-        }
-        if (self.ep, self.io_dtype) in valid_gqa_configurations:
-            # Change model settings for GroupQueryAttention
-            self.attention_attrs["op_type"] = "GroupQueryAttention"
-            print("GroupQueryAttention (GQA) is used in this model.")
+        if self.use_paged_attention:
+            valid_paged_configurations = [
+                ("cuda", ir.DataType.FLOAT16)
+            ]
+            if (self.ep, self.io_dtype) in valid_paged_configurations:
+                self.attention_attrs["op_type"] = "PagedAttention"
+                print("PagedAttention is used in this model.")
 
-            # Some EPs don't support packed Q/K/V for GQA yet
-            # Packed MatMul with LoRA/QLoRA is not currently supported
-            self.attention_attrs["use_packed_matmul"] = (
-                self.ep not in ["dml", "webgpu"]
-                and not self.matmul_attrs["use_lora"]
-                and not self.attention_attrs["q_norm"]
-                and not self.attention_attrs["k_norm"]
-            )
+                # Some EPs don't support packed Q/K/V for GQA yet
+                # Packed MatMul with LoRA/QLoRA is not currently supported
+                self.attention_attrs["use_packed_matmul"] = (
+                    not self.matmul_attrs["use_lora"]
+                    and not self.attention_attrs["q_norm"]
+                    and not self.attention_attrs["k_norm"]
+                )
 
-            # Some EPs don't support fusing rotary embeddings inside GQA yet
-            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml", "webgpu"]
-            if self.attention_attrs["use_rope_in_attn"]:
-                # GQA + Rot.Emb. does not require `position_ids` as input
+                # No other EP's at the moment
+                self.attention_attrs["use_rope_in_attn"] = True
                 self.input_names.remove("position_ids")
+        else:
+            valid_gqa_configurations = {
+                ("cpu", ir.DataType.FLOAT),
+                ("cuda", ir.DataType.FLOAT16),
+                ("cuda", ir.DataType.BFLOAT16),
+                ("dml", ir.DataType.FLOAT16),
+                ("webgpu", ir.DataType.FLOAT16),
+                ("webgpu", ir.DataType.FLOAT),
+                ("NvTensorRtRtx", ir.DataType.FLOAT16),
+            }
+            if (self.ep, self.io_dtype) in valid_gqa_configurations:
+                # Change model settings for GroupQueryAttention
+                self.attention_attrs["op_type"] = "GroupQueryAttention"
+                print("GroupQueryAttention (GQA) is used in this model.")
 
-        self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention"
+                # Some EPs don't support packed Q/K/V for GQA yet
+                # Packed MatMul with LoRA/QLoRA is not currently supported
+                self.attention_attrs["use_packed_matmul"] = (
+                    self.ep not in ["dml", "webgpu"]
+                    and not self.matmul_attrs["use_lora"]
+                    and not self.attention_attrs["q_norm"]
+                    and not self.attention_attrs["k_norm"]
+                )
+
+                # Some EPs don't support fusing rotary embeddings inside GQA yet
+                self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml", "webgpu"]
+                if self.attention_attrs["use_rope_in_attn"]:
+                    # GQA + Rot.Emb. does not require `position_ids` as input
+                    self.input_names.remove("position_ids")
+
+        self.past_present_share_buffer = self.attention_attrs["op_type"] == "GroupQueryAttention" or self.use_paged_attention
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
@@ -855,7 +897,8 @@ class Model:
         last_dim = matmul.weight.shape[0]
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
         self.make_node("MatMul", inputs=[root_input, weight], outputs=[output], name=name)
-        self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', last_dim])
+        output_shape = ['batch_size', 'sequence_length', last_dim] if not self.use_paged_attention else ['num_tokens', last_dim]
+        self.make_value(output, self.io_dtype, shape=output_shape)
 
         return name
 
@@ -892,7 +935,8 @@ class Model:
             accuracy_level=self.quant_attrs["int4"]["accuracy_level"],
             bits=matmul.bits, block_size=matmul.group_size, K=matmul.in_features, N=matmul.out_features,
         )
-        self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
+        output_shape = ['batch_size', 'sequence_length', matmul.out_features] if not self.use_paged_attention else ['num_tokens', matmul.out_features]
+        self.make_value(output, self.io_dtype, shape=output_shape)
 
         return name
 
@@ -960,7 +1004,8 @@ class Model:
 
         matmul_output = "logits" if kwargs.get("logits", False) else f"{matmul_name}/output_0"
         self.make_node("MatMul", inputs=[root_input, f"{transpose_name}/output_0"], outputs=[matmul_output], name=matmul_name)
-        self.make_value(matmul_output, self.io_dtype, shape=['batch_size', 'sequence_length', matmul.out_features])
+        output_shape = ['batch_size', 'sequence_length', matmul.out_features] if not self.use_paged_attention else ['num_tokens', matmul.out_features]
+        self.make_value(matmul_output, self.io_dtype, shape=output_shape)
 
         return matmul_name
 
@@ -999,7 +1044,7 @@ class Model:
         # Make LoRA Add node
         add_name = "/".join(basename_parts[:-1] + ["lora", "Add"])
         add_inputs = [f"{matmul_name}/output_0", lora_B]
-        add_shape = ["batch_size", "sequence_length", last_dim]
+        add_shape = ["batch_size", "sequence_length", last_dim] if not self.use_paged_attention else ["num_tokens", last_dim]
         self.make_add(add_name, add_inputs, dtype=self.io_dtype, shape=add_shape)
 
         return add_name
@@ -1062,7 +1107,7 @@ class Model:
         self.make_initializer(add, bias, to=self.io_dtype)
 
         add_bias_inputs = [root_input, bias]
-        shape = ['batch_size', 'sequence_length', add.shape[0]]
+        shape = ['batch_size', 'sequence_length', add.shape[0]] if not self.use_paged_attention else ['num_tokens', add.shape[0]]
 
         if kwargs.get("logits", False):
             output = "logits"
@@ -1099,7 +1144,8 @@ class Model:
             gather_output = f"{gather_name}/output_0"
             self.make_node('Gather', inputs=[weight, 'input_ids'], outputs=[gather_output], name=gather_name)
 
-        self.make_value(gather_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        gather_shape = ['batch_size', 'sequence_length', self.hidden_size] if not self.use_paged_attention else ['num_tokens', self.hidden_size]
+        self.make_value(gather_output, self.io_dtype, shape=gather_shape)
 
         if self.embed_attrs["scale"] != 1:
             # Scale the embeddings
@@ -1107,7 +1153,7 @@ class Model:
             mul_inputs = [gather_output, f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.embed_attrs['scale']}"]
             mul_output = f"{mul_name}/output_0"
             self.make_node('Mul', inputs=mul_inputs, outputs=[mul_output], name=mul_name)
-            self.make_value(mul_output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self.make_value(mul_output, self.io_dtype, shape=gather_shape)
 
             layernorm_attrs_value = mul_output
         else:
@@ -1173,9 +1219,10 @@ class Model:
 
         # Make op and its shape
         self.make_node(op_type, inputs=inputs, outputs=outputs, name=name, domain=("com.microsoft" if skip else None), **kwargs)
-        self.make_value(outputs[0], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        layernorm_shape = ['batch_size', 'sequence_length', self.hidden_size] if not self.use_paged_attention else ['num_tokens', self.hidden_size]
+        self.make_value(outputs[0], new_io_dtype, shape=layernorm_shape)
         if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.make_value(outputs[3], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self.make_value(outputs[3], new_io_dtype, shape=layernorm_shape)
 
         # Update LayerNorm attributes
         self.layernorm_attrs["output_0"] = output_0
@@ -1185,6 +1232,8 @@ class Model:
             # Assign output 3 of current SkipLayerNorm as root input to next SkipLayerNorm
             self.layernorm_attrs["root_input"] = output_3
 
+    # TODO(aciddelgado): Why do we have two versions of this method?
+    # The other one is in the `make_layernorm_op` method above.
     def _make_layernorm_op(self, layer_id, layernorm, skip, simple, location):
         root_input = self.layernorm_attrs["root_input"]
         skip_input = self.layernorm_attrs["skip_input"]
@@ -1229,17 +1278,18 @@ class Model:
             root_input = inputs[0]
             skip_input = inputs[1] if skip else None
 
+        layernorm_shape = ['batch_size', 'sequence_length', self.hidden_size] if not self.use_paged_attention else ['num_tokens', self.hidden_size]
         if op_type == "SimplifiedLayerNormalization":
-            self._make_simplified_layer_norm(name, root_input, weight, outputs[0], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self._make_simplified_layer_norm(name, root_input, weight, outputs[0], new_io_dtype, shape=layernorm_shape)
         elif op_type == "SkipSimplifiedLayerNormalization":
-            self._make_skip_simplified_layer_norm(name, root_input, skip_input, weight, outputs[0], output_3, new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self._make_skip_simplified_layer_norm(name, root_input, skip_input, weight, outputs[0], output_3, new_io_dtype, shape=layernorm_shape)
         elif op_type == "SkipLayerNormalization":
-            self._make_skip_layer_norm(name, root_input, skip_input, weight, bias, outputs[0], output_3, new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self._make_skip_layer_norm(name, root_input, skip_input, weight, bias, outputs[0], output_3, new_io_dtype, shape=layernorm_shape)
         else:
             raise ValueError(f"Invalid op_type: {op_type}")
 
         if skip and not self.layernorm_attrs["last_layernorm"]:
-            self.make_value(outputs[3], new_io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+            self.make_value(outputs[3], new_io_dtype, shape=layernorm_shape)
 
         # Update LayerNorm attributes
         self.layernorm_attrs["output_0"] = output_0
@@ -1475,11 +1525,18 @@ class Model:
         # attention_mask --> Shape --> Gather --> Greater --> If --> (cos_cache, sin_cache)
         #                             (idx=1)
         #
+        # Or for PagedAttention:
+        #
+        # block_table --> Shape --> Gather --> Multiply --> Greater --> If --> (cos_cache, sin_cache)
+        #                           (idx=1)    (x block_size)
 
         basename = "/model/rotemb_caches_subgraph"
         gather_name = ""
         if self.attention_attrs["op_type"] == "GroupQueryAttention":
             gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather"
+        elif self.attention_attrs["op_type"] == "PagedAttention":
+            self.make_paged_rotary_multi_cache_subgraph()
+            gather_name = "/model/context_length_subgraph/Multiply"
         else:
             gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2"
 
@@ -1538,6 +1595,44 @@ class Model:
         )
         self.make_value(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+
+    def make_paged_rotary_multi_cache_subgraph(self):
+        # Create subgraph for PagedAttention to handle rotary embeddings with multi-cache
+        # The subgraph will be used to determine which cos/sin caches to use based on the context length
+        basename = "/model/context_length_subgraph"
+        shape_name = f"{basename}/Shape"
+        shape_output = f"{shape_name}/output_0"
+        self.make_shape(shape_name, "block_table", shape=[2])
+        gather_name = f"{basename}/Gather"
+        gather_output = f"{gather_name}/output_0"
+        self.make_node("Gather", inputs=[shape_output, "/model/constants/INT64/1"], outputs=[gather_output], name=gather_name)
+        self.make_value(gather_output, ir.DataType.INT64, shape=None)
+        # cast_name = f"{basename}/Cast"
+        # self.make_cast(cast_name, gather_output, ir.DataType.INT32, shape=None)
+        # cast_output = f"{cast_name}/output_0"
+
+        # Create a constant for block_size
+
+        # TODO(aciddelgado): Gather second dimension of past key/value THIS DOESN'T WORK... options:
+        # Identity on key/value
+        # Pass as input block_size and num_blocks
+        # 
+        # shape_2_name = f"{basename}/Shape_2"
+        # shape_2_output = f"{shape_2_name}/output_0"
+        # self.make_shape(shape_2_name, "past_key_values.0.value", shape=[4])
+        # gather_2_name = f"{basename}/Gather_2"
+        # gather_2_output = f"{gather_2_name}/output_0"
+        # self.make_node("Gather", inputs=[shape_2_output, "/model/constants/INT64/1"], outputs=[gather_2_output], name=gather_2_name)
+        # self.make_value(gather_2_output, ir.DataType.INT64, shape=None)
+        
+        # cast_2_name = f"{basename}/Cast_2"
+        # self.make_cast(cast_2_name, gather_2_output, ir.DataType.INT32, shape=None)
+        # cast_2_output = f"{cast_2_name}/output_0"
+
+        multiply_name = f"{basename}/Multiply"
+        multiply_inputs = [gather_output, "/model/constants/INT64/256"]  # TODO(aciddelgado): Replace 256 with a dimensional input
+        self.make_node("Mul", inputs=multiply_inputs, outputs=[f"{multiply_name}/output_0"], name=multiply_name)
+        self.make_value(f"{multiply_name}/output_0", ir.DataType.INT64, shape=None)
 
     # This expansion of contrib-op can be updated / deprecated in future.
     def _make_skip_simplified_layer_norm(self, basename, root_input, skip_input, weight_name, output_0, output_3, io_dtype, shape):
@@ -1911,6 +2006,8 @@ class Model:
             self.make_group_query_attention(name, seqlens_k=f"{self.mask_attrs['seqlens_k']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
         elif op_type == "SparseAttention":
             self.make_sparse_attention(name, block_row_indices=self.mask_attrs['block_row_indices'], block_col_indices=self.mask_attrs['block_col_indices'], key_total_seq_lens=f"{self.mask_attrs['key_total_seq_lens']}/output_0", total_seq_len=f"{self.mask_attrs['total_seq_len']}/output_0", **kwargs)
+        elif op_type == "PagedAttention":
+            self.make_paged_attention(name, past_seqlens="past_seqlens", cumulative_sequence_length="cumulative_sequence_length", block_table="block_table", **kwargs) 
         else:
             raise NotImplementedError(f"The {op_type} op is not currently supported.")
 
@@ -1965,6 +2062,24 @@ class Model:
             do_rotary=self.attention_attrs["use_rope_in_attn"], rotary_interleaved=self.rope_attrs["interleaved"],
         )
 
+    def make_paged_attention(self, name, **kwargs):
+        inputs = [
+            kwargs["q_path"], kwargs["k_path"], kwargs["v_path"],
+            kwargs["past_k"], kwargs["past_v"],
+            kwargs["cumulative_sequence_length"], 
+            kwargs["past_seqlens"], kwargs["block_table"],
+            kwargs.get("cos_cache", ""), kwargs.get("sin_cache", ""),
+        ]
+        output = f"{name}/output_0"
+        outputs = [output, kwargs.get("present_k", ""), kwargs.get("present_v", "")]
+        self.make_node(
+            "PagedAttention", inputs=inputs, outputs=outputs, name=name, domain="com.microsoft",
+            num_heads=self.num_attn_heads, kv_num_heads=self.num_kv_heads, scale=self.attention_attrs["scale"], # local_window_size=self.window_size,  # Disable sliding window attribute temporarily
+            softcap=self.attention_attrs["softcap"], do_rotary=self.attention_attrs["use_rope_in_attn"], rotary_interleaved=self.rope_attrs["interleaved"],
+        )
+        self.make_value(output, self.io_dtype, shape=['num_tokens', self.head_size * self.num_attn_heads])
+
+
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         # Make nodes for the Attention subgraph
         #
@@ -1995,6 +2110,22 @@ class Model:
         #       Q_Rotary  K_Rotary     |                       |
         #           \        |        /                        |
         #            GroupQueryAttention-----------------------+
+        #                    |
+        #                O_MatMul
+        #                    |
+        #                  O_Add
+        #
+        # PagedAttention example:
+        #
+        #               root_input
+        #              /     |     \
+        #       Q_MatMul  K_MatMul  V_MatMul  cumulative_sequence_length  past_seqlens  key_cache  value_cache  block_table
+        #           |        |         |                   |                   |            |           |            |
+        #         Q_Add    K_Add     V_Add                 +-----------------+--------------+-----------+------------+
+        #           |        |         |                                     |
+        #       Q_Rotary  K_Rotary     |                                     |
+        #           \        |        /                                      |
+        #              PagedAttention----------------------------------------+
         #                    |
         #                O_MatMul
         #                    |
@@ -2302,7 +2433,8 @@ class Model:
         # Make Mul node after activation
         mul_name = f"/model/layers.{layer_id}/mlp/Mul"
         mul_inputs = [f"{act_fn_name}/output_0", f"{up_name}/output_0"]
-        self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        mul_shape = ["batch_size", "sequence_length", self.intermediate_size] if not self.use_paged_attention else ["num_tokens", self.intermediate_size]
+        self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=mul_shape)
 
         # Make output MatMul node
         down_matmul_basename = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
@@ -2544,11 +2676,12 @@ class Model:
         act_name = f"/model/layers.{layer_id}/mlp/act_fn/{activation}"
         act_output = f"{act_name}/output_0"
         self.make_node(activation, inputs=[root_input], outputs=[act_output], name=act_name, domain=domain)
-        self.make_value(act_output, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        shape = ["batch_size", "sequence_length", self.intermediate_size] if not self.use_paged_attention else ["num_tokens", self.intermediate_size]
+        self.make_value(act_output, dtype=self.io_dtype, shape=shape)
 
         mul_act_name = f"/model/layers.{layer_id}/mlp/act_fn/Mul"
         mul_act_inputs = [root_input, act_output]
-        self.make_mul(mul_act_name, mul_act_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_mul(mul_act_name, mul_act_inputs, dtype=self.io_dtype, shape=shape)
 
         return mul_act_name
 
@@ -2795,8 +2928,10 @@ class Model:
             assert self.past_present_share_buffer
 
         if self.attention_attrs["op_type"] == "GroupQueryAttention":
+            print("Using GroupQueryAttention attention mask reformatting")
             self.make_attention_mask_reformatting_for_gqa()
         elif self.attention_attrs["op_type"] == "MultiHeadAttention":
+            print("Using MultiHeadAttention attention mask reformatting")
             # Make attention mask reformatting nodes
             #
             #           2D attention mask
@@ -2807,6 +2942,7 @@ class Model:
             self.make_attention_mask_reformatting_for_mha()
 
         if self.attention_attrs["block_sparse"]["sparse_block_size"] != 0:
+            print("Using BlockSparse attention mask reformatting")
             self.make_attention_mask_reformatting_for_sparse_attn()
 
     def make_attention_mask_reformatting_for_mha(self):
@@ -3548,45 +3684,46 @@ class Phi3SmallModel(Model):
         up_add_name = f"/model/layers.{layer_id}/mlp/up_proj/Add"
         self.make_add_bias(mlp.up_proj.bias, up_add_name, f"{up_matmul_name}/output_0")
 
+        shape = ["batch_size", "sequence_length", self.intermediate_size] if not self.use_paged_attention else ["num_tokens", self.intermediate_size]
         # Left path
         slice_1_name = f"/model/layers.{layer_id}/mlp/gelu/Slice"
         slice_1_inputs = [f"{up_add_name}/output_0", "/model/constants/INT64/[0]", f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]", "/model/constants/INT64/[-1]", "/model/constants/INT64/[2]"]
-        self.make_slice(slice_1_name, slice_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_slice(slice_1_name, slice_1_inputs, dtype=self.io_dtype, shape=shape)
         cast_1_name = f"/model/layers.{layer_id}/mlp/gelu/Cast"
-        self.make_cast(cast_1_name, f"{slice_1_name}/output_0", dtype=ir.DataType.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_cast(cast_1_name, f"{slice_1_name}/output_0", dtype=ir.DataType.FLOAT, shape=shape)
         isinf_1_name = f"/model/layers.{layer_id}/mlp/gelu/IsInf"
-        self.make_isinf(isinf_1_name, f"{cast_1_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_isinf(isinf_1_name, f"{cast_1_name}/output_0", shape=shape)
         clip_1_name = f"/model/layers.{layer_id}/mlp/gelu/Clip"
         clip_1_inputs = [f"{slice_1_name}/output_0", "", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.clamp_limit}"]
-        self.make_clip(clip_1_name, clip_1_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_clip(clip_1_name, clip_1_inputs, self.io_dtype, shape=shape)
         where_1_name = f"/model/layers.{layer_id}/mlp/gelu/Where"
         where_1_inputs = [f"{isinf_1_name}/output_0", f"{slice_1_name}/output_0", f"{clip_1_name}/output_0"]
-        self.make_where(where_1_name, where_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_where(where_1_name, where_1_inputs, dtype=self.io_dtype, shape=shape)
         # Make activation
         act_fn_name = self.make_activation(layer_id, root_input=f"{where_1_name}/output_0")
 
         # Right path
         slice_2_name = f"/model/layers.{layer_id}/mlp/linear/Slice"
         slice_2_inputs = [f"{up_add_name}/output_0", "/model/constants/INT64/[1]", f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]", "/model/constants/INT64/[-1]", "/model/constants/INT64/[2]"]
-        self.make_slice(slice_2_name, slice_2_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_slice(slice_2_name, slice_2_inputs, dtype=self.io_dtype, shape=shape)
         cast_2_name = f"/model/layers.{layer_id}/mlp/linear/Cast"
-        self.make_cast(cast_2_name, f"{slice_2_name}/output_0", dtype=ir.DataType.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_cast(cast_2_name, f"{slice_2_name}/output_0", dtype=ir.DataType.FLOAT, shape=shape)
         isinf_2_name = f"/model/layers.{layer_id}/mlp/linear/IsInf"
-        self.make_isinf(isinf_2_name, f"{cast_2_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_isinf(isinf_2_name, f"{cast_2_name}/output_0", shape=shape)
         clip_2_name = f"/model/layers.{layer_id}/mlp/linear/Clip"
         clip_2_inputs = [f"{slice_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/-{self.clamp_limit}", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.clamp_limit}"]
-        self.make_clip(clip_2_name, clip_2_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_clip(clip_2_name, clip_2_inputs, self.io_dtype, shape=shape)
         where_2_name = f"/model/layers.{layer_id}/mlp/linear/Where"
         where_2_inputs = [f"{isinf_2_name}/output_0", f"{slice_2_name}/output_0", f"{clip_2_name}/output_0"]
-        self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=shape)
         add_name = f"/model/layers.{layer_id}/mlp/linear/Add"
         add_inputs = [f"{where_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/1"]
-        self.make_add(add_name, add_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_add(add_name, add_inputs, dtype=self.io_dtype, shape=shape)
 
         # Make Mul node after activation
         mul_name = f"/model/layers.{layer_id}/mlp/Mul"
         mul_inputs = [f"{act_fn_name}/output_0", f"{add_name}/output_0"]
-        self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=shape)
 
         # Make output MatMul and Add nodes
         down_matmul_name = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
