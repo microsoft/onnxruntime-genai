@@ -52,7 +52,7 @@ parameters:
   - name: ort_winml_version
     displayName: 'Microsoft.WindowsAppSDK.ML Version (should match CMakeList.txt)'
     type: string
-    default: '1.8.2088'
+    default: '1.8.2091'
 
   - name: cuda_versions
     displayName: 'CUDA versions'
