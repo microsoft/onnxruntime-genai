@@ -960,40 +960,40 @@ bool IsMultiProfileEnabled(const Config::SessionOptions& session_options) {
   return false;
 }
 
-void SetHardwareDeviceType(Config& config, std::string_view hardware_device_type) {
+void SetDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view hardware_device_type) {
   if (!config.model.device_filtering_options) {
     config.model.device_filtering_options = Config::DeviceFilteringOptions{};
   }
   config.model.device_filtering_options->hardware_device_type = hardware_device_type;
 }
 
-void SetHardwareDeviceId(Config& config, uint32_t hardware_device_id) {
+void SetDecoderProviderOptionsHardwareDeviceId(Config& config, uint32_t hardware_device_id) {
   if (!config.model.device_filtering_options) {
     config.model.device_filtering_options = Config::DeviceFilteringOptions{};
   }
   config.model.device_filtering_options->hardware_device_id = hardware_device_id;
 }
 
-void SetHardwareVendorId(Config& config, uint32_t hardware_vendor_id) {
+void SetDecoderProviderOptionsHardwareVendorId(Config& config, uint32_t hardware_vendor_id) {
   if (!config.model.device_filtering_options) {
     config.model.device_filtering_options = Config::DeviceFilteringOptions{};
   }
   config.model.device_filtering_options->hardware_vendor_id = hardware_vendor_id;
 }
 
-void ClearHardwareDeviceType(Config& config) {
+void ClearDecoderProviderOptionsHardwareDeviceType(Config& config) {
   if (config.model.device_filtering_options) {
     config.model.device_filtering_options->hardware_device_type = std::nullopt;
   }
 }
 
-void ClearHardwareDeviceId(Config& config) {
+void ClearDecoderProviderOptionsHardwareDeviceId(Config& config) {
   if (config.model.device_filtering_options) {
     config.model.device_filtering_options->hardware_device_id = std::nullopt;
   }
 }
 
-void ClearHardwareVendorId(Config& config) {
+void ClearDecoderProviderOptionsHardwareVendorId(Config& config) {
   if (config.model.device_filtering_options) {
     config.model.device_filtering_options->hardware_vendor_id = std::nullopt;
   }

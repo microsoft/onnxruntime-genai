@@ -62,22 +62,22 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         public static extern IntPtr /* OgaResult* */ OgaConfigRemoveModelData(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ model_filename);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaConfigSetHardwareDeviceType(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ hardware_device_type);
+        public static extern IntPtr /* OgaResult* */ OgaConfigSetDecoderProviderOptionsHardwareDeviceType(IntPtr /* OgaConfig* */ config, byte[] /* const char* */ hardware_device_type);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaConfigSetHardwareDeviceId(IntPtr /* OgaConfig* */ config, uint /* uint32_t  */ hardware_device_id);
+        public static extern IntPtr /* OgaResult* */ OgaConfigSetDecoderProviderOptionsHardwareDeviceId(IntPtr /* OgaConfig* */ config, uint /* uint32_t  */ hardware_device_id);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaConfigSetHardwareVendorId(IntPtr /* OgaConfig* */ config, uint /* uint32_t  */ hardware_vendor_id);
+        public static extern IntPtr /* OgaResult* */ OgaConfigSetDecoderProviderOptionsHardwareVendorId(IntPtr /* OgaConfig* */ config, uint /* uint32_t  */ hardware_vendor_id);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaConfigClearHardwareDeviceType(IntPtr /* OgaConfig* */ config);
+        public static extern IntPtr /* OgaResult* */ OgaConfigClearDecoderProviderOptionsHardwareDeviceType(IntPtr /* OgaConfig* */ config);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaConfigClearHardwareDeviceId(IntPtr /* OgaConfig* */ config);
+        public static extern IntPtr /* OgaResult* */ OgaConfigClearDecoderProviderOptionsHardwareDeviceId(IntPtr /* OgaConfig* */ config);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
-        public static extern IntPtr /* OgaResult* */ OgaConfigClearHardwareVendorId(IntPtr /* OgaConfig* */ config);
+        public static extern IntPtr /* OgaResult* */ OgaConfigClearDecoderProviderOptionsHardwareVendorId(IntPtr /* OgaConfig* */ config);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaCreateModel(byte[] /* const char* */ configPath,

@@ -412,12 +412,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         config.RemoveModelData(model_filename.c_str());
       })
       .def("overlay", &OgaConfig::Overlay)
-      .def("set_hardware_device_type", &OgaConfig::SetHardwareDeviceType)
-      .def("set_hardware_device_id", &OgaConfig::SetHardwareDeviceId)
-      .def("set_hardware_vendor_id", &OgaConfig::SetHardwareVendorId)
-      .def("clear_hardware_device_type", &OgaConfig::ClearHardwareDeviceType)
-      .def("clear_hardware_device_id", &OgaConfig::ClearHardwareDeviceId)
-      .def("clear_hardware_vendor_id", &OgaConfig::ClearHardwareVendorId);
+      .def("set_decoder_provider_options_hardware_device_type", &OgaConfig::SetDecoderProviderOptionsHardwareDeviceType)
+      .def("set_decoder_provider_options_hardware_device_id", &OgaConfig::SetDecoderProviderOptionsHardwareDeviceId)
+      .def("set_decoder_provider_options_hardware_vendor_id", &OgaConfig::SetDecoderProviderOptionsHardwareVendorId)
+      .def("clear_decoder_provider_options_hardware_device_type", &OgaConfig::ClearDecoderProviderOptionsHardwareDeviceType)
+      .def("clear_decoder_provider_options_hardware_device_id", &OgaConfig::ClearDecoderProviderOptionsHardwareDeviceId)
+      .def("clear_decoder_provider_options_hardware_vendor_id", &OgaConfig::ClearDecoderProviderOptionsHardwareVendorId);
 
   pybind11::class_<OgaModel>(m, "Model")
       .def(pybind11::init([](const OgaConfig& config) { return OgaModel::Create(config); }))

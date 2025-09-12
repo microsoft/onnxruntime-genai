@@ -46,34 +46,34 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaConfigRemoveModelData(_configHandle, StringUtils.ToUtf8(modelFilename)));
         }
 
-        public void SetHardwareDeviceType(string hardware_device_type)
+        public void SetDecoderProviderOptionsHardwareDeviceType(string hardware_device_type)
         {
-            Result.VerifySuccess(NativeMethods.OgaConfigSetHardwareDeviceType(_configHandle, StringUtils.ToUtf8(hardware_device_type)));
+            Result.VerifySuccess(NativeMethods.OgaConfigSetDecoderProviderOptionsHardwareDeviceType(_configHandle, StringUtils.ToUtf8(hardware_device_type)));
         }
 
-        public void SetHardwareDeviceId(uint hardware_device_id)
+        public void SetDecoderProviderOptionsHardwareDeviceId(uint hardware_device_id)
         {
-            Result.VerifySuccess(NativeMethods.OgaConfigSetHardwareDeviceId(_configHandle, hardware_device_id));
+            Result.VerifySuccess(NativeMethods.OgaConfigSetDecoderProviderOptionsHardwareDeviceId(_configHandle, hardware_device_id));
         }
 
-        public void SetHardwareVendorId(uint hardware_vendor_id)
+        public void SetDecoderProviderOptionsHardwareVendorId(uint hardware_vendor_id)
         {
-            Result.VerifySuccess(NativeMethods.OgaConfigSetHardwareVendorId(_configHandle, hardware_vendor_id));
+            Result.VerifySuccess(NativeMethods.OgaConfigSetDecoderProviderOptionsHardwareVendorId(_configHandle, hardware_vendor_id));
         }
 
-        public void ClearHardwareDeviceType()
+        public void ClearDecoderProviderOptionsHardwareDeviceType()
         {
-            Result.VerifySuccess(NativeMethods.OgaConfigClearHardwareDeviceType(_configHandle));
+            Result.VerifySuccess(NativeMethods.OgaConfigClearDecoderProviderOptionsHardwareDeviceType(_configHandle));
         }
 
-        public void ClearHardwareDeviceId()
+        public void ClearDecoderProviderOptionsHardwareDeviceId()
         {
-            Result.VerifySuccess(NativeMethods.OgaConfigClearHardwareDeviceId(_configHandle));
+            Result.VerifySuccess(NativeMethods.OgaConfigClearDecoderProviderOptionsHardwareDeviceId(_configHandle));
         }
 
-        public void ClearHardwareVendorId()
+        public void ClearDecoderProviderOptionsHardwareVendorId()
         {
-            Result.VerifySuccess(NativeMethods.OgaConfigClearHardwareVendorId(_configHandle));
+            Result.VerifySuccess(NativeMethods.OgaConfigClearDecoderProviderOptionsHardwareVendorId(_configHandle));
         }
 
         ~Config()

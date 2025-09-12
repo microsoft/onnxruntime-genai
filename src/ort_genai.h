@@ -197,28 +197,28 @@ struct OgaConfig : OgaAbstract {
     OgaCheckResult(OgaConfigRemoveModelData(this, model_filename.c_str()));
   }
 
-  void SetHardwareDeviceType(const char* hardware_device_type) {
-    OgaCheckResult(OgaConfigSetHardwareDeviceType(this, hardware_device_type));
+  void SetDecoderProviderOptionsHardwareDeviceType(const char* hardware_device_type) {
+    OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareDeviceType(this, hardware_device_type));
   }
 
-  void SetHardwareDeviceId(uint32_t hardware_device_id) {
-    OgaCheckResult(OgaConfigSetHardwareDeviceId(this, hardware_device_id));
+  void SetDecoderProviderOptionsHardwareDeviceId(uint32_t hardware_device_id) {
+    OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareDeviceId(this, hardware_device_id));
   }
 
-  void SetHardwareVendorId(uint32_t hardware_vendor_id) {
-    OgaCheckResult(OgaConfigSetHardwareVendorId(this, hardware_vendor_id));
+  void SetDecoderProviderOptionsHardwareVendorId(uint32_t hardware_vendor_id) {
+    OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareVendorId(this, hardware_vendor_id));
   }
 
-  void ClearHardwareDeviceType() {
-    OgaCheckResult(OgaConfigClearHardwareDeviceType(this));
+  void ClearDecoderProviderOptionsHardwareDeviceType() {
+    OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareDeviceType(this));
   }
 
-  void ClearHardwareDeviceId() {
-    OgaCheckResult(OgaConfigClearHardwareDeviceId(this));
+  void ClearDecoderProviderOptionsHardwareDeviceId() {
+    OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareDeviceId(this));
   }
 
-  void ClearHardwareVendorId() {
-    OgaCheckResult(OgaConfigClearHardwareVendorId(this));
+  void ClearDecoderProviderOptionsHardwareVendorId() {
+    OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareVendorId(this));
   }
 
   static void operator delete(void* p) { OgaDestroyConfig(reinterpret_cast<OgaConfig*>(p)); }

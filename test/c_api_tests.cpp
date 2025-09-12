@@ -46,16 +46,16 @@ TEST(CAPITests, Config) {
   config->ClearProviders();
   config->AppendProvider("cuda");
   config->AppendProvider("dml");
-  config->SetHardwareDeviceType("npu");
-  config->ClearHardwareDeviceType();
-  config->OgaConfigSetHardwareDeviceId(1);
-  config->ClearHardwareDeviceId();
-  config->OgaConfigSetHardwareVendorId(2);
-  config->ClearHardwareVendorId();
-  config->SetHardwareDeviceType("cpu");
-  config->SetHardwareDeviceType("gpu");
-  config->OgaConfigSetHardwareDeviceId(2);
-  config->OgaConfigSetHardwareVendorId(1);
+  config->SetDecoderProviderOptionsHardwareDeviceType("npu");
+  config->ClearDecoderProviderOptionsHardwareDeviceType();
+  config->SetDecoderProviderOptionsHardwareDeviceId(1);
+  config->ClearDecoderProviderOptionsHardwareDeviceId();
+  config->SetDecoderProviderOptionsHardwareVendorId(2);
+  config->ClearDecoderProviderOptionsHardwareVendorId();
+  config->SetDecoderProviderOptionsHardwareDeviceType("cpu");
+  config->SetDecoderProviderOptionsHardwareDeviceType("gpu");
+  config->SetDecoderProviderOptionsHardwareDeviceId(2);
+  config->SetDecoderProviderOptionsHardwareVendorId(1);
 #endif
 }
 
