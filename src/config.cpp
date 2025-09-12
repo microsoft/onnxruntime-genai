@@ -41,6 +41,21 @@ ONNXTensorElementDataType TranslateTensorType(std::string_view value) {
   throw std::runtime_error("Invalid tensor type: " + std::string(value));
 }
 
+OrtHardwareDeviceType ParseHardwareDeviceType(std::string_view value) {
+  std::string lower_value(value);
+  std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(), [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+  
+  if (lower_value == "cpu") {
+    return OrtHardwareDeviceType_CPU;
+  } else if (lower_value == "gpu") {
+    return OrtHardwareDeviceType_GPU;
+  } else if (lower_value == "npu") {
+    return OrtHardwareDeviceType_NPU;
+  } else {
+    throw std::runtime_error("Unsupported hardware device type: " + std::string(value));
+  }
+}
+
 struct NamedStrings_Element : JSON::Element {
   explicit NamedStrings_Element(std::vector<Config::NamedString>& v) : v_{v} {}
 
@@ -68,7 +83,7 @@ struct DeviceFilteringOptions_Element : JSON::Element {
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "hardware_device_type") {
-      v_.hardware_device_type = JSON::Get<std::string_view>(value);
+      v_.hardware_device_type = ParseHardwareDeviceType(JSON::Get<std::string_view>(value));
     } else if (name == "hardware_device_id") {
       v_.hardware_device_id = static_cast<uint32_t>(JSON::Get<double>(value));
     } else if (name == "hardware_vendor_id") {
@@ -961,7 +976,7 @@ void SetDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_vie
       if (!provider_option.device_filtering_options) {
         provider_option.device_filtering_options = Config::DeviceFilteringOptions{};
       }
-      provider_option.device_filtering_options->hardware_device_type = hardware_device_type;
+      provider_option.device_filtering_options->hardware_device_type = ParseHardwareDeviceType(hardware_device_type);
     }
   }
 }

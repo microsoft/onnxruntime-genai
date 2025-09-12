@@ -65,7 +65,7 @@ struct Config {
 
   using NamedString = std::pair<std::string, std::string>;
   struct DeviceFilteringOptions {
-    std::optional<std::string> hardware_device_type;  // CPU, GPU, NPU
+    std::optional<OrtHardwareDeviceType> hardware_device_type;  // OrtHardwareDeviceType_CPU, OrtHardwareDeviceType_GPU, OrtHardwareDeviceType_NPU
     std::optional<uint32_t> hardware_device_id;
     std::optional<uint32_t> hardware_vendor_id;
   };

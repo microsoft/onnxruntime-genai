@@ -602,7 +602,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
       std::optional<uint32_t> config_device_id = resolved_device_filtering.hardware_device_id;
       std::optional<uint32_t> config_vendor_id = resolved_device_filtering.hardware_vendor_id;
-      std::optional<std::string> config_device_type = resolved_device_filtering.hardware_device_type;
+      std::optional<OrtHardwareDeviceType> config_device_type_enum = resolved_device_filtering.hardware_device_type;
       // for OpenVINO, use "device_type" in provider_options exclusively if it's provided
       std::optional<std::string> config_ov_device_type = std::nullopt;
       if (provider_options.name == "OpenVINO") {
@@ -614,21 +614,9 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         if (config_ov_device_type.has_value()) {
           config_device_id = std::nullopt;
           config_vendor_id = std::nullopt;
-          config_device_type = std::nullopt;
-        } else if (!(config_device_id.has_value() || config_vendor_id.has_value() || config_device_type.has_value())) {
+          config_device_type_enum = std::nullopt;
+        } else if (!(config_device_id.has_value() || config_vendor_id.has_value() || config_device_type_enum.has_value())) {
           config_ov_device_type = "CPU";
-        }
-      }
-      std::optional<OrtHardwareDeviceType> config_device_type_enum;
-      if (config_device_type.has_value()) {
-        if (*config_device_type == "CPU") {
-          config_device_type_enum = OrtHardwareDeviceType_CPU;
-        } else if (*config_device_type == "GPU") {
-          config_device_type_enum = OrtHardwareDeviceType_GPU;
-        } else if (*config_device_type == "NPU") {
-          config_device_type_enum = OrtHardwareDeviceType_NPU;
-        } else {
-          throw std::runtime_error("Unsupported hardware device type: " + *config_device_type);
         }
       }
 
