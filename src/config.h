@@ -292,11 +292,11 @@ void OverlayConfig(Config& config, std::string_view json);
 bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options);
 bool IsMultiProfileEnabled(const Config::SessionOptions& session_options);
 
-void SetDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view hardware_device_type);
-void SetDecoderProviderOptionsHardwareDeviceId(Config& config, uint32_t hardware_device_id);
-void SetDecoderProviderOptionsHardwareVendorId(Config& config, uint32_t hardware_vendor_id);
-void ClearDecoderProviderOptionsHardwareDeviceType(Config& config);
-void ClearDecoderProviderOptionsHardwareDeviceId(Config& config);
-void ClearDecoderProviderOptionsHardwareVendorId(Config& config);
+void SetDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name, std::string_view hardware_device_type);
+void SetDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name, uint32_t hardware_device_id);
+void SetDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view provider_name, uint32_t hardware_vendor_id);
+void ClearDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name);
+void ClearDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name);
+void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view provider_name);
 
 }  // namespace Generators

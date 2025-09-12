@@ -954,52 +954,64 @@ bool IsMultiProfileEnabled(const Config::SessionOptions& session_options) {
   return false;
 }
 
-void SetDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view hardware_device_type) {
+void SetDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name, std::string_view hardware_device_type) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
   for (auto& provider_option : config.model.decoder.session_options.provider_options) {
-    if (!provider_option.device_filtering_options) {
-      provider_option.device_filtering_options = Config::DeviceFilteringOptions{};
+    if (provider_option.name == normalized_provider) {
+      if (!provider_option.device_filtering_options) {
+        provider_option.device_filtering_options = Config::DeviceFilteringOptions{};
+      }
+      provider_option.device_filtering_options->hardware_device_type = hardware_device_type;
     }
-    provider_option.device_filtering_options->hardware_device_type = hardware_device_type;
   }
 }
 
-void SetDecoderProviderOptionsHardwareDeviceId(Config& config, uint32_t hardware_device_id) {
+void SetDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name, uint32_t hardware_device_id) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
   for (auto& provider_option : config.model.decoder.session_options.provider_options) {
-    if (!provider_option.device_filtering_options) {
-      provider_option.device_filtering_options = Config::DeviceFilteringOptions{};
+    if (provider_option.name == normalized_provider) {
+      if (!provider_option.device_filtering_options) {
+        provider_option.device_filtering_options = Config::DeviceFilteringOptions{};
+      }
+      provider_option.device_filtering_options->hardware_device_id = hardware_device_id;
     }
-    provider_option.device_filtering_options->hardware_device_id = hardware_device_id;
   }
 }
 
-void SetDecoderProviderOptionsHardwareVendorId(Config& config, uint32_t hardware_vendor_id) {
+void SetDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view provider_name, uint32_t hardware_vendor_id) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
   for (auto& provider_option : config.model.decoder.session_options.provider_options) {
-    if (!provider_option.device_filtering_options) {
-      provider_option.device_filtering_options = Config::DeviceFilteringOptions{};
+    if (provider_option.name == normalized_provider) {
+      if (!provider_option.device_filtering_options) {
+        provider_option.device_filtering_options = Config::DeviceFilteringOptions{};
+      }
+      provider_option.device_filtering_options->hardware_vendor_id = hardware_vendor_id;
     }
-    provider_option.device_filtering_options->hardware_vendor_id = hardware_vendor_id;
   }
 }
 
-void ClearDecoderProviderOptionsHardwareDeviceType(Config& config) {
+void ClearDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
   for (auto& provider_option : config.model.decoder.session_options.provider_options) {
-    if (provider_option.device_filtering_options) {
+    if (provider_option.name == normalized_provider && provider_option.device_filtering_options) {
       provider_option.device_filtering_options->hardware_device_type = std::nullopt;
     }
   }
 }
 
-void ClearDecoderProviderOptionsHardwareDeviceId(Config& config) {
+void ClearDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
   for (auto& provider_option : config.model.decoder.session_options.provider_options) {
-    if (provider_option.device_filtering_options) {
+    if (provider_option.name == normalized_provider && provider_option.device_filtering_options) {
       provider_option.device_filtering_options->hardware_device_id = std::nullopt;
     }
   }
 }
 
-void ClearDecoderProviderOptionsHardwareVendorId(Config& config) {
+void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view provider_name) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
   for (auto& provider_option : config.model.decoder.session_options.provider_options) {
-    if (provider_option.device_filtering_options) {
+    if (provider_option.name == normalized_provider && provider_option.device_filtering_options) {
       provider_option.device_filtering_options->hardware_vendor_id = std::nullopt;
     }
   }

@@ -295,7 +295,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigRemoveModelData(OgaConfig* config, c
  * \return OgaResult containing the error message if the overlaying of the JSON failed.
  *
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDeviceType(OgaConfig* config, const char* hardware_device_type);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDeviceType(OgaConfig* config, const char* provider, const char* hardware_device_type);
 
 /**
  * \brief Filter EP devices by hardware device id property with ONNXRuntime API.
@@ -304,7 +304,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDev
  * \return OgaResult containing the error message if the overlaying of the JSON failed.
  *
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDeviceId(OgaConfig* config, uint32_t hardware_device_id);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDeviceId(OgaConfig* config, const char* provider, uint32_t hardware_device_id);
 
 /**
  * \brief Filter EP devices by hardware vendor id property with ONNXRuntime API.
@@ -313,28 +313,28 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDev
  * \return OgaResult containing the error message if the overlaying of the JSON failed.
  *
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareVendorId(OgaConfig* config, uint32_t hardware_vendor_id);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareVendorId(OgaConfig* config, const char* provider, uint32_t hardware_vendor_id);
 
 /**
  * \brief Clear the hardware device type property
  * \param[in] config The config to clear hardware device type property.
  * \return OgaResult containing the error message if the clearing failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareDeviceType(OgaConfig* config);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareDeviceType(OgaConfig* config, const char* provider);
 
 /**
  * \brief Clear the hardware device id property
  * \param[in] config The config to clear hardware device id property.
  * \return OgaResult containing the error message if the clearing failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareDeviceId(OgaConfig* config);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareDeviceId(OgaConfig* config, const char* provider);
 
 /**
  * \brief Clear the hardware vendor id property
  * \param[in] config The config to clear hardware vendor id property.
  * \return OgaResult containing the error message if the clearing failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareVendorId(OgaConfig* config);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareVendorId(OgaConfig* config, const char* provider);
 
 /**
  * \brief Overlay JSON on top of config file

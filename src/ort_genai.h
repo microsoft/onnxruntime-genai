@@ -197,28 +197,28 @@ struct OgaConfig : OgaAbstract {
     OgaCheckResult(OgaConfigRemoveModelData(this, model_filename.c_str()));
   }
 
-  void SetDecoderProviderOptionsHardwareDeviceType(const char* hardware_device_type) {
-    OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareDeviceType(this, hardware_device_type));
+  void SetDecoderProviderOptionsHardwareDeviceType(const char* provider, const char* hardware_device_type) {
+    OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareDeviceType(this, provider, hardware_device_type));
   }
 
-  void SetDecoderProviderOptionsHardwareDeviceId(uint32_t hardware_device_id) {
-    OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareDeviceId(this, hardware_device_id));
+  void SetDecoderProviderOptionsHardwareDeviceId(const char* provider, uint32_t hardware_device_id) {
+    OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareDeviceId(this, provider, hardware_device_id));
   }
 
-  void SetDecoderProviderOptionsHardwareVendorId(uint32_t hardware_vendor_id) {
-    OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareVendorId(this, hardware_vendor_id));
+  void SetDecoderProviderOptionsHardwareVendorId(const char* provider, uint32_t hardware_vendor_id) {
+    OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareVendorId(this, provider, hardware_vendor_id));
   }
 
-  void ClearDecoderProviderOptionsHardwareDeviceType() {
-    OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareDeviceType(this));
+  void ClearDecoderProviderOptionsHardwareDeviceType(const char* provider) {
+    OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareDeviceType(this, provider));
   }
 
-  void ClearDecoderProviderOptionsHardwareDeviceId() {
-    OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareDeviceId(this));
+  void ClearDecoderProviderOptionsHardwareDeviceId(const char* provider) {
+    OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareDeviceId(this, provider));
   }
 
-  void ClearDecoderProviderOptionsHardwareVendorId() {
-    OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareVendorId(this));
+  void ClearDecoderProviderOptionsHardwareVendorId(const char* provider) {
+    OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareVendorId(this, provider));
   }
 
   static void operator delete(void* p) { OgaDestroyConfig(reinterpret_cast<OgaConfig*>(p)); }

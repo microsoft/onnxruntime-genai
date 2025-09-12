@@ -46,16 +46,16 @@ TEST(CAPITests, Config) {
   config->ClearProviders();
   config->AppendProvider("cuda");
   config->AppendProvider("dml");
-  config->SetDecoderProviderOptionsHardwareDeviceType("npu");
-  config->ClearDecoderProviderOptionsHardwareDeviceType();
-  config->SetDecoderProviderOptionsHardwareDeviceId(1);
-  config->ClearDecoderProviderOptionsHardwareDeviceId();
-  config->SetDecoderProviderOptionsHardwareVendorId(2);
-  config->ClearDecoderProviderOptionsHardwareVendorId();
-  config->SetDecoderProviderOptionsHardwareDeviceType("cpu");
-  config->SetDecoderProviderOptionsHardwareDeviceType("gpu");
-  config->SetDecoderProviderOptionsHardwareDeviceId(2);
-  config->SetDecoderProviderOptionsHardwareVendorId(1);
+  config->SetDecoderProviderOptionsHardwareDeviceType("OpenVINO", "npu");
+  config->ClearDecoderProviderOptionsHardwareDeviceType("OpenVINO");
+  config->SetDecoderProviderOptionsHardwareDeviceId("OpenVINO", 1);
+  config->ClearDecoderProviderOptionsHardwareDeviceId("OpenVINO");
+  config->SetDecoderProviderOptionsHardwareVendorId("OpenVINO", 2);
+  config->ClearDecoderProviderOptionsHardwareVendorId("OpenVINO");
+  config->SetDecoderProviderOptionsHardwareDeviceType("OpenVINO", "cpu");
+  config->SetDecoderProviderOptionsHardwareDeviceType("DML", "gpu");
+  config->SetDecoderProviderOptionsHardwareDeviceId("DML", 2);
+  config->SetDecoderProviderOptionsHardwareVendorId("DML", 1);
 #endif
 }
 

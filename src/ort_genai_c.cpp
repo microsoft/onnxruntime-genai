@@ -290,44 +290,44 @@ OgaResult* OGA_API_CALL OgaConfigRemoveModelData(OgaConfig* config, const char* 
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDeviceType(OgaConfig* config, const char* hardware_device_type) {
+OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDeviceType(OgaConfig* config, const char* provider, const char* hardware_device_type) {
   OGA_TRY
-  Generators::SetDecoderProviderOptionsHardwareDeviceType(*config, hardware_device_type);
+  Generators::SetDecoderProviderOptionsHardwareDeviceType(*config, provider, hardware_device_type);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDeviceId(OgaConfig* config, uint32_t hardware_device_id) {
+OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDeviceId(OgaConfig* config, const char* provider, uint32_t hardware_device_id) {
   OGA_TRY
-  Generators::SetDecoderProviderOptionsHardwareDeviceId(*config, hardware_device_id);
+  Generators::SetDecoderProviderOptionsHardwareDeviceId(*config, provider, hardware_device_id);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareVendorId(OgaConfig* config, uint32_t hardware_vendor_id) {
+OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareVendorId(OgaConfig* config, const char* provider, uint32_t hardware_vendor_id) {
   OGA_TRY
-  Generators::SetDecoderProviderOptionsHardwareVendorId(*config, hardware_vendor_id);
+  Generators::SetDecoderProviderOptionsHardwareVendorId(*config, provider, hardware_vendor_id);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareDeviceType(OgaConfig* config) {
+OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareDeviceType(OgaConfig* config, const char* provider) {
   OGA_TRY
-  Generators::ClearDecoderProviderOptionsHardwareDeviceType(*config);
+  Generators::ClearDecoderProviderOptionsHardwareDeviceType(*config, provider);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareDeviceId(OgaConfig* config) {
+OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareDeviceId(OgaConfig* config, const char* provider) {
   OGA_TRY
-  Generators::ClearDecoderProviderOptionsHardwareDeviceId(*config);
+  Generators::ClearDecoderProviderOptionsHardwareDeviceId(*config, provider);
   return nullptr;
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareVendorId(OgaConfig* config) {
+OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareVendorId(OgaConfig* config, const char* provider) {
   OGA_TRY
-  Generators::ClearDecoderProviderOptionsHardwareVendorId(*config);
+  Generators::ClearDecoderProviderOptionsHardwareVendorId(*config, provider);
   return nullptr;
   OGA_CATCH
 }
