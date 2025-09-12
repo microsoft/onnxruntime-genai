@@ -3,6 +3,8 @@
 
 #pragma once
 #include <curand_kernel.h>
+#include <memory>
+#include <array>
 
 #include "cuda_common.h"
 
@@ -11,12 +13,10 @@ namespace cuda {
 
 constexpr int kHybridSortMaxK = 256;      // The maximum k allowed for hybrid sort.
 constexpr int kFlashSortMaxK = 256;       // The maximum k allowed for flash sort.
-constexpr int kDistributedSortMaxK = 64;  // The maximum k allowed for distributed sort.
 constexpr int kMaxBenchmarkK = 64;        // The maximum k for online benchmarking.
 
 // Enum for the different Top-K algorithms used in online benchmarking.
 enum class TopkAlgo { SELECTION,
-                      DISTRIBUTED,
                       HYBRID,
                       FLASH,
                       RADIX,
@@ -30,9 +30,8 @@ struct TopkData {
   TopkData(const TopkData&) = delete;
   TopkData& operator=(const TopkData&) = delete;
 
-  // Cache for online benchmarking results for k <= kMaxBenchmarkK.
-  // Stores the best algorithm for a given k.
-  TopkAlgo best_algo_cache[kMaxBenchmarkK + 1];
+  // A shared pointer to the persistent cache for online benchmarking results.
+  std::shared_ptr<std::array<TopkAlgo, kMaxBenchmarkK + 1>> best_algo_cache_;
 
   // The estimated best partition size for hybrid sort.
   int hybrid_sort_partition_size;
@@ -66,11 +65,6 @@ struct TopkData {
 
   // - Full sort: Stores the start offset of each batch segment for CUB's segmented sort
   cuda_unique_ptr<int> batch_offsets;
-
-  // --- Buffers specific to Distributed Sort ---
-  cuda_unique_ptr<int> top_k_distributed_lock;
-  cuda_unique_ptr<int> top_k_distributed_keys;
-  cuda_unique_ptr<float> top_k_distributed_values;
 
   // --- Information of Final Output (Input to Sampling Stage) ---
   const float* topk_scores = nullptr;  // pointer to the top-k scores data (in either intermediate_scores_1 or intermediate_scores_2)

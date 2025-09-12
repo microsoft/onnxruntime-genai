@@ -5,11 +5,16 @@
 
 #include <functional>
 #include <limits>
+#include <memory>
+#include <array>
 
 #include "cuda_topk.h"
 
 namespace Generators {
 namespace cuda {
+
+// Forward declaration for the cache getter function, implemented in cuda_topk_benchmark.cpp
+std::shared_ptr<std::array<TopkAlgo, kMaxBenchmarkK + 1>> GetTopkBenchmarkCache(int device_id, int batch_size, int vocab_size);
 
 // Measures the average execution time of a CUDA kernel over several runs.
 // This is a lightweight version for online benchmarking, using fewer iterations
@@ -42,8 +47,14 @@ static float TimeKernel(cudaStream_t stream, std::function<void()> kernel_func) 
 
 // Performs online benchmarking for small k to select the best Top-K algorithm.
 // It times several candidate algorithms and picks the fastest one. The result
-// is cached in TopkData for subsequent calls with the same k.
-static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
+// is cached for subsequent calls with the same k.
+static TopkAlgo BenchmarkAndSelectBestAlgo(std::shared_ptr<std::array<TopkAlgo, kMaxBenchmarkK + 1>> best_algo_cache,
+                                           TopkData* topk_data,
+                                           cudaStream_t stream,
+                                           const float* scores_in,
+                                           int vocab_size,
+                                           int batch_size,
+                                           int k) {
   float min_latency = std::numeric_limits<float>::max();
   TopkAlgo best_algo = TopkAlgo::UNKNOWN;
 
@@ -81,8 +92,8 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data, cudaStream_t str
     }
   }
 
-  // Cache the result for future calls to avoid re-benchmarking.
-  topk_data->best_algo_cache[k] = best_algo;
+  // Cache the result in the shared cache for future calls to avoid re-benchmarking.
+  (*best_algo_cache)[k] = best_algo;
   return best_algo;
 }
 

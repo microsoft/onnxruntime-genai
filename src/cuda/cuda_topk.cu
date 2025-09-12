@@ -4,6 +4,7 @@
 #include <cub/device/device_segmented_radix_sort.cuh>
 
 #include "cuda_topk.h"
+#include "cuda_topk_benchmark_cache.h"
 #include "cuda_topk_benchmark.cuh"
 #include "cuda_topk_full_sort.cuh"
 #include "cuda_topk_radix_sort.cuh"
@@ -17,10 +18,12 @@ namespace cuda {
 TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream) {
   hybrid_sort_partition_size = hybrid_sort::EstimateBestPartitionSize(vocab_size);
 
-  // Initialize the benchmark cache with UNKNOWN.
-  for (int i = 0; i <= kMaxBenchmarkK; ++i) {
-    best_algo_cache[i] = TopkAlgo::UNKNOWN;
-  }
+  // Get the device ID to use as part of the cache key.
+  int device_id;
+  CUDA_CHECK(cudaGetDevice(&device_id));
+
+  // Get or create the shared cache for this configuration.
+  best_algo_cache_ = GetTopkBenchmarkCache(device_id, batch_size, vocab_size);
 
   // --- Buffer Size Calculation ---
   // We must calculate the maximum potential buffer sizes across all algorithms that use the intermediate buffers.
@@ -77,10 +80,10 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
 
   // For small k, use online benchmarking to find the best algorithm and cache the result.
   if (k <= kMaxBenchmarkK) {
-    TopkAlgo algo = topk_data->best_algo_cache[k];
+    TopkAlgo algo = topk_data->best_algo_cache_->at(k);
     if (algo == TopkAlgo::UNKNOWN) {
       // First time for this k, run benchmark.
-      algo = BenchmarkAndSelectBestAlgo(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      algo = BenchmarkAndSelectBestAlgo(topk_data->best_algo_cache_, topk_data, stream, scores_in, vocab_size, batch_size, k);
     }
 
     switch (algo) {
