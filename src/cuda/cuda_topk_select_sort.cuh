@@ -9,7 +9,7 @@
 
 namespace Generators {
 namespace cuda {
-namespace select_sort {
+namespace selection_sort {
 // A simple struct to hold a key-value pair for reduction.
 struct TopK_Pair {
   int p = INT_MAX;

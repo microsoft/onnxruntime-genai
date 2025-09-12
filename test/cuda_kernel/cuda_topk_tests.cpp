@@ -77,7 +77,7 @@ void RunParityTests(const TopKTestParams& params) {
 
   // --- Get Reference Result using Full Sort ---
   auto topk_data = std::make_unique<Generators::cuda::TopkDataCompact>(params.batch_size, params.vocab_size, stream);
-  Generators::cuda::flash_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+  Generators::cuda::full_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
                                        params.vocab_size, params.batch_size, params.k);
   topk_data->CompactOutput(params.batch_size, params.vocab_size, stream, params.k);
   CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -159,16 +159,17 @@ TEST(TopKTests, ParityTests) {
 
   std::vector<int> batch_sizes = {1, 4, 32};
     std::vector<int> vocab_sizes = {200, 2000, 20000, 200000};
-    std::vector<int> ks = {1, 16, 64, 256, 512};
+  std::vector<int> ks = {1, 16, 64, 256, 512};
 
-    for (int batch_size : batch_sizes) {
-      for (int vocab_size : vocab_sizes) {
-        for (int k : ks) {
-          test_cases.push_back({batch_size, vocab_size, std::min(k, vocab_size)});
-        }
+  for (int batch_size : batch_sizes) {
+    for (int vocab_size : vocab_sizes) {
+      for (int k : ks) {
+        if (k > vocab_size) continue;
+        test_cases.push_back({batch_size, vocab_size, k});
       }
     }
-    
+  }
+
   for (const auto& params : test_cases) {
     RunParityTests(params);
   }

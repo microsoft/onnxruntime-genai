@@ -46,21 +46,6 @@ TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream) {
   auto full_sort_temp_storage_bytes = full_sort::GetTempStorageBytes(vocab_batch_size, batch_size, stream);
   cub_temp_storage_bytes = std::max(radix_sort_temp_storage_bytes, full_sort_temp_storage_bytes);
   cub_temp_storage = CudaMallocArray<unsigned char>(this->cub_temp_storage_bytes);
-
-  // Allocate buffers for distributed sort
-  top_k_distributed_lock = CudaMallocArray<int>(batch_size);
-  cudaMemset(top_k_distributed_lock.get(), 0, batch_size * sizeof(int));
-
-  // The intermediate candidate buffer for distributed sort must be large enough for the
-  // worst-case number of shards that any of its kernels might launch.
-  constexpr int kDefaultMaxShards = 32;
-  constexpr int kSmallKPartitionSize = 4096;
-  const int max_shards_for_small_k = (vocab_size + kSmallKPartitionSize - 1) / kSmallKPartitionSize;
-  const int max_possible_shards = std::max(kDefaultMaxShards, max_shards_for_small_k);
-
-  size_t dist_buffer_size = static_cast<size_t>(batch_size) * max_possible_shards * kDistributedSortMaxK;
-  top_k_distributed_keys = CudaMallocArray<int>(dist_buffer_size);
-  top_k_distributed_values = CudaMallocArray<float>(dist_buffer_size);
 }
 
 // Kernel to compact strided data into a dense layout.

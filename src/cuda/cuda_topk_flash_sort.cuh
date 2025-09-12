@@ -41,7 +41,8 @@ __global__ void FlashSortBs1Kernel(const float* __restrict__ input_scores,
                                    float* __restrict__ intermediate_scores_1,
                                    int* __restrict__ intermediate_indices_2,
                                    float* __restrict__ intermediate_scores_2,
-                                   int vocab_size, int k_final) {
+                                   int vocab_size, 
+                                   int k_final) {
   auto grid = cg::this_grid();
   const int partition_idx = blockIdx.x;
   const int num_partitions = gridDim.x;
