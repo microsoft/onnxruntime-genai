@@ -43,8 +43,8 @@ ONNXTensorElementDataType TranslateTensorType(std::string_view value) {
 
 OrtHardwareDeviceType ParseHardwareDeviceType(std::string_view value) {
   std::string lower_value(value);
-  std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(), [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
-  
+  std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(),
+                 [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
   if (lower_value == "cpu") {
     return OrtHardwareDeviceType_CPU;
   } else if (lower_value == "gpu") {
