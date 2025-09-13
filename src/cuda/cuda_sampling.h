@@ -16,20 +16,23 @@ constexpr int kFusedSamplingMaxK = 256;  // Threshold to switch from Fused to Mu
 // This struct holds buffers for the SAMPLING stage.
 // It inherits the Top-K buffers from the TopkData struct.
 struct SamplingData : public TopkData {
-  SamplingData(unsigned long long random_seed, int batch_size, int vocab_size, cudaStream_t stream);
+  SamplingData(unsigned long long random_seed, int batch_size, int vocab_size, cudaStream_t stream, void* buffer = nullptr, size_t buffer_size = 0);
 
-  // Re-initializes the cuRAND states with a new seed.
+  static size_t CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t stream);
+
   void ReInitCurandStates(unsigned long long random_seed, int batch_size, cudaStream_t stream);
 
-  // Buffers for the sampling logic (Top-P, temperature, etc.)
-  cuda_unique_ptr<float> prefix_sums;
-  cuda_unique_ptr<float> scores_adjusted;
-  cuda_unique_ptr<float> prefix_sums_adjusted;
-  cuda_unique_ptr<float> thresholds;
-  cuda_unique_ptr<curandState> curand_states;
+  // Buffers for the sampling logic
+  float* prefix_sums;
+  float* scores_adjusted;
+  float* prefix_sums_adjusted;
+  float* thresholds;
+  curandState* curand_states;
 
-  cuda_unique_ptr<unsigned char> scan_temp_buffer;
   unsigned long long random_seed_{};
+
+ private:
+  void InitializeBuffers(int batch_size, int vocab_size, cudaStream_t stream) override;
 };
 
 // Main entry point for the sampling process.

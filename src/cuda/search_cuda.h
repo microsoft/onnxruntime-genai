@@ -55,6 +55,7 @@ struct GreedySearch_Cuda : Search_Cuda {
   void RewindTo(size_t index) override;
 
  private:
+  DeviceSpan<uint8_t> sampling_buffer_;
   DeviceSpan<int32_t> next_tokens_buffer_;
   std::unique_ptr<cuda::ArgMaxData> argmaxdata_;
   std::unique_ptr<cuda::SamplingData> samplingdata_;
