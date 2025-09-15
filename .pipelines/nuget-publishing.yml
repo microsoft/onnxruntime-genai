@@ -56,7 +56,7 @@ parameters:
   - name: enable_winml
     displayName: 'Whether Windows WinML package is built.'
     type: boolean
-    default: false
+    default: true
 
   - name: ort_version
     displayName: 'OnnxRuntime version'
