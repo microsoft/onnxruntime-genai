@@ -78,7 +78,7 @@ typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
 typedef struct OgaEngine OgaEngine;
-typedef struct OgaRequest OgqRequest;
+typedef struct OgaRequest OgaRequest;
 
 //! @}
 
