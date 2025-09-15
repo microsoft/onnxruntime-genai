@@ -27,7 +27,7 @@ std::string_view NormalizeProviderName(std::string_view name) {
   } else if (lower_name == "vitisai") {
     return "VitisAI";
   } else if (lower_name == "nvtensorrtrtx") {
-    return "NvTensorRTRTX";
+    return "NvTensorRtRtx";
   }
   return name;  // Return name unchanged
 }

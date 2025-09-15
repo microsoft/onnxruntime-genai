@@ -591,6 +591,14 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
           session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.enable_cuda_graph", "1");
         }
         p_device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
+
+        if (is_primary_session_options && p_device) {
+          void* stream_ptr = p_device->GetCudaStream();
+          std::stringstream stream_value;
+          stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
+          std::string stream_value_str = stream_value.str();
+          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.user_compute_stream", stream_value_str.c_str());
+        }
       }
 
 #if USE_WINML
@@ -716,16 +724,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       }
 #else
       std::vector<const char*> keys, values;
-      std::string stream_value_str;
-      if (provider_options.name == "NvTensorRtRtx" && is_primary_session_options && p_device) {
-        void* stream_ptr = p_device->GetCudaStream();
-        std::stringstream stream_value;
-        stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
-        stream_value_str = stream_value.str();
-
-        keys.emplace_back("user_compute_stream");
-        values.emplace_back(stream_value_str.c_str());
-      }
 
       for (auto& option : provider_options.options) {
         keys.emplace_back(option.first.c_str());
