@@ -45,7 +45,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 
   for (int i = 0; i < batch_size; i++) {
     const float* current_scores_in = scores_in + static_cast<size_t>(i) * vocab_size;
-  
+
     // Sort from workspace directly into the final strided destination buffer.
     float* final_scores_out = final_scores_buffer + static_cast<size_t>(i) * vocab_size;
     int* final_indices_out = final_indices_buffer + static_cast<size_t>(i) * vocab_size;
@@ -58,7 +58,6 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   data->topk_indices = final_indices_buffer;
   data->topk_stride = vocab_size;
 }
-} // namespace radix_sort
+}  // namespace radix_sort
 }  // namespace cuda
 }  // namespace Generators
-

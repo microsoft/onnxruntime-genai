@@ -18,14 +18,15 @@ __host__ __device__ inline size_t AlignUp(size_t size, size_t alignment) {
 }
 
 constexpr int kGpuBufferAlignment = 256;
-constexpr int kHybridSortMaxK = 256;      // The maximum k allowed for hybrid sort.
-constexpr int kFlashSortMaxK = 256;       // The maximum k allowed for flash sort.
-constexpr int kMaxBenchmarkK = 64;        // The maximum k for online benchmarking.
+constexpr int kHybridSortMaxK = 128;         // The maximum k (up to 256) allowed for hybrid sort.
+constexpr int kFlashSortMaxK = 128;          // The maximum k (up to 256) allowed for flash sort.
+constexpr int kMaxBenchmarkLocalCache = 64;  // The maximum local cache of online benchmarking results.
 
 // Enum for the different Top-K algorithms used in online benchmarking.
 enum class TopkAlgo { SELECTION,
                       HYBRID,
                       FLASH,
+                      LLM,
                       RADIX,
                       FULL,
                       UNKNOWN = -1 };
@@ -40,14 +41,20 @@ struct TopkData {
   // Calculates the total memory required for all buffers.
   static size_t CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t stream);
 
-  // The estimated best partition size for hybrid sort.
+  // The estimated best partition size for hybrid sort
   int hybrid_sort_partition_size;
+
+  // The estimated best partition size for flash sort
+  int flash_sort_partition_size;
+
+  // The estimated best partition size for llm sort
+  int llm_sort_partition_size;
 
   // Caching the device_id to avoid repeated calls to cudaGetDevice
   int device_id;
 
   // A local, lock-free cache for the best algorithm for each k.
-  std::array<TopkAlgo, kMaxBenchmarkK + 1> local_algo_cache_;
+  std::array<TopkAlgo, kMaxBenchmarkLocalCache + 1> local_algo_cache_;
 
   // --- Intermediate Buffers for Top-K Algorithms (Pointers into memory_buffer_span_) ---
 
@@ -123,6 +130,14 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 }  // namespace full_sort
 
 /**
+ * @brief Sequentially sorts each item in the batch using CUB's device radix sort. This is an effective strategy for smaller batch sizes
+ * where launching separate, independent sorts is efficient.
+ */
+namespace radix_sort {
+void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
+}  // namespace radix_sort
+
+/**
  * @brief Implements a hybrid, multi-stage approach. Data is first partitioned and sorted locally within thread blocks with radix sort.
  * A final reduction stage using bitonic sort merges these partitions to find the global top-k.
  */
@@ -131,20 +146,20 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 }  // namespace hybrid_sort
 
 /**
- * @brief A high-performance, single-kernel cooperative sort algorithm specifically optimized for a batch size of one (batch_size=1).
+ * @brief A high-performance, single-kernel cooperative sort algorithm with iterative reduction.
  */
 namespace flash_sort {
+bool IsSupported(int batch_size, int vocab_size, int k);
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 }  // namespace flash_sort
 
 /**
- * @brief Sequentially sorts each item in the batch using CUB's device radix sort. This is an effective strategy for smaller batch sizes
- * where launching separate, independent sorts is efficient.
+ * @brief A high-performance, single-kernel cooperative cascaded sort algorithm optimized for popular LLM.
  */
-namespace radix_sort {
+namespace llm_sort {
+bool IsSupported(int batch_size, int vocab_size, int k);
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
-}  // namespace radix_sort
+}  // namespace llm_sort
 
 }  // namespace cuda
 }  // namespace Generators
-

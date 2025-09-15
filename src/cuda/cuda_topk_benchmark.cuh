@@ -19,7 +19,7 @@ namespace cuda {
 // than an offline profiler to minimize runtime overhead.
 static float TimeKernel(cudaStream_t stream, std::function<void()> kernel_func) {
   const int warm_up_runs = 2;
-  const int total_runs = 15;
+  const int total_runs = 5;
 
   cuda_event_holder start_event, stop_event;
 
@@ -55,12 +55,20 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
   float min_latency = std::numeric_limits<float>::max();
   TopkAlgo best_algo = TopkAlgo::UNKNOWN;
 
+  // Selection sort helps only for small k. This threshold is based on benchmark results.
+  constexpr int kSelectionSortBenchmarkMaxK = 8;
+
+  // Radix sort helps only for small batch size. This threshold is based on benchmark results.
+  constexpr int kRadixSortBenchmarkMaxBatchSize = 8;
+
   // Candidate: Selection Sort
-  float selection_latency = TimeKernel(stream, [&]() {
-    selection_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-  });
-  min_latency = selection_latency;
-  best_algo = TopkAlgo::SELECTION;
+  if (k <= kSelectionSortBenchmarkMaxK) {
+    float selection_latency = TimeKernel(stream, [&]() {
+      selection_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    });
+    min_latency = selection_latency;
+    best_algo = TopkAlgo::SELECTION;
+  }
 
   // Candidate: Hybrid Sort
   if (k <= kHybridSortMaxK) {
@@ -71,21 +79,44 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
       min_latency = hybrid_latency;
       best_algo = TopkAlgo::HYBRID;
     }
+  } else {
+    float full_sort_latency = TimeKernel(stream, [&]() {
+      full_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    });
+    if (full_sort_latency < min_latency) {
+      min_latency = full_sort_latency;
+      best_algo = TopkAlgo::FULL;
+    }
+
+    if (batch_size <= kRadixSortBenchmarkMaxBatchSize) {
+      float radix_sort_latency = TimeKernel(stream, [&]() {
+        radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      });
+      if (radix_sort_latency < min_latency) {
+        min_latency = radix_sort_latency;
+        best_algo = TopkAlgo::RADIX;
+      }
+    }
   }
 
   // Candidate: Flash Sort (Cooperative Kernel)
-  if (batch_size == 1 && k <= kFlashSortMaxK) {
-    // Check for cooperative launch support
-    int cooperative_launch_support = 0;
-    cudaDeviceGetAttribute(&cooperative_launch_support, cudaDevAttrCooperativeLaunch, 0);
-    if (cooperative_launch_support) {
-      float flash_latency = TimeKernel(stream, [&]() {
-        flash_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-      });
-      if (flash_latency < min_latency) {
-        min_latency = flash_latency;
-        best_algo = TopkAlgo::FLASH;
-      }
+  if (flash_sort::IsSupported(batch_size, vocab_size, k)) {
+    float flash_latency = TimeKernel(stream, [&]() {
+      flash_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    });
+    if (flash_latency < min_latency) {
+      min_latency = flash_latency;
+      best_algo = TopkAlgo::FLASH;
+    }
+  }
+
+  if (llm_sort::IsSupported(batch_size, vocab_size, k)) {
+    float llm_latency = TimeKernel(stream, [&]() {
+      llm_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    });
+    if (llm_latency < min_latency) {
+      min_latency = llm_latency;
+      best_algo = TopkAlgo::LLM;
     }
   }
 

@@ -125,6 +125,6 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   data->topk_stride = k;
 }
 
-}  // namespace select_sort
+}  // namespace selection_sort
 }  // namespace cuda
 }  // namespace Generators

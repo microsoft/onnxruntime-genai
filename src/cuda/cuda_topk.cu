@@ -11,9 +11,9 @@
 #include "cuda_topk_radix_sort.cuh"
 #include "cuda_topk_hybrid_sort.cuh"
 #include "cuda_topk_flash_sort.cuh"
+#include "cuda_topk_llm_sort.cuh"
 #include "cuda_topk_select_sort.cuh"
 #include <cassert>
-#include <cstdio> // For printf
 
 namespace Generators {
 namespace cuda {
@@ -21,10 +21,16 @@ namespace cuda {
 size_t TopkData::CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t stream) {
   size_t total_size = 0;
 
-  int partition_size = hybrid_sort::EstimateBestPartitionSize(vocab_size);
-  size_t hybrid_sort_buffer_elements = hybrid_sort::GetIntermediateSize(batch_size, vocab_size, partition_size);
+  int hybrid_partition_size = hybrid_sort::EstimateBestPartitionSize(vocab_size);
+  int flash_partition_size = flash_sort::EstimateBestPartitionSize(vocab_size);
+  int llm_partition_size = llm_sort::EstimateBestPartitionSize(vocab_size);
+
+  size_t hybrid_sort_buffer_elements = hybrid_sort::GetIntermediateSize(batch_size, vocab_size, hybrid_partition_size);
+  size_t flash_sort_buffer_elements = flash_sort::GetIntermediateSize(batch_size, vocab_size, flash_partition_size);
+  size_t llm_sort_buffer_elements = llm_sort::GetIntermediateSize(batch_size, vocab_size, llm_partition_size);
+
   size_t vocab_batch_size = static_cast<size_t>(vocab_size) * batch_size;
-  size_t max_buffer_elements = std::max({vocab_batch_size, hybrid_sort_buffer_elements});
+  size_t max_buffer_elements = std::max({vocab_batch_size, hybrid_sort_buffer_elements, flash_sort_buffer_elements, llm_sort_buffer_elements});
 
   total_size += AlignUp(max_buffer_elements * sizeof(int), kGpuBufferAlignment);
   total_size += AlignUp(max_buffer_elements * sizeof(int), kGpuBufferAlignment);
@@ -43,7 +49,9 @@ size_t TopkData::CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t
 void TopkData::InitializeBuffers(int batch_size, int vocab_size, cudaStream_t stream) {
   uint8_t* current_ptr = memory_buffer_span_.data();
   size_t max_buffer_elements = std::max({static_cast<size_t>(vocab_size) * batch_size,
-                                         hybrid_sort::GetIntermediateSize(batch_size, vocab_size, hybrid_sort_partition_size)});
+                                         hybrid_sort::GetIntermediateSize(batch_size, vocab_size, hybrid_sort_partition_size),
+                                         flash_sort::GetIntermediateSize(batch_size, vocab_size, flash_sort_partition_size),
+                                         llm_sort::GetIntermediateSize(batch_size, vocab_size, llm_sort_partition_size)});
 
   intermediate_indices_1 = reinterpret_cast<int*>(current_ptr);
   current_ptr += AlignUp(max_buffer_elements * sizeof(int), kGpuBufferAlignment);
@@ -71,9 +79,12 @@ void TopkData::InitializeBuffers(int batch_size, int vocab_size, cudaStream_t st
 
 TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream, void* buffer, size_t buffer_size) {
   hybrid_sort_partition_size = hybrid_sort::EstimateBestPartitionSize(vocab_size);
+  flash_sort_partition_size = flash_sort::EstimateBestPartitionSize(vocab_size);
+  llm_sort_partition_size = llm_sort::EstimateBestPartitionSize(vocab_size);
 
   // Get and cache the device ID once during initialization.
   CUDA_CHECK(cudaGetDevice(&device_id));
+
   // Initialize the local cache.
   local_algo_cache_.fill(TopkAlgo::UNKNOWN);
 
@@ -117,48 +128,45 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
   assert(batch_size > 0);
   assert(k > 0 && k <= vocab_size);
 
-  // For small k, use online benchmarking to find the best algorithm and cache the result.
-  if (k <= kMaxBenchmarkK) {
-    // Check the local cache first for the fastest path.
-    TopkAlgo algo = topk_data->local_algo_cache_.at(k);
+  // Check the local cache first.
+  TopkAlgo algo = (k <= kMaxBenchmarkLocalCache) ? topk_data->local_algo_cache_.at(k) : TopkAlgo::UNKNOWN;
+  if (algo == TopkAlgo::UNKNOWN) {
+    // Local cache miss, check the global persistent cache.
+    algo = GetTopkBenchmarkCache(topk_data->device_id, batch_size, vocab_size, k);
 
     if (algo == TopkAlgo::UNKNOWN) {
-      // Local cache miss, check the global persistent cache.
-      algo = GetTopkBenchmarkCache(topk_data->device_id, batch_size, vocab_size, k);
+      // Global cache also miss, run benchmark.
+      algo = BenchmarkAndSelectBestAlgo(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    }
 
-      if (algo == TopkAlgo::UNKNOWN) {
-        // Global cache also miss, run benchmark.
-        algo = BenchmarkAndSelectBestAlgo(topk_data, stream, scores_in, vocab_size, batch_size, k);
-      }
-
-      // Update the local cache for subsequent calls.
+    // Update the local cache for subsequent calls.
+    if (k <= kMaxBenchmarkLocalCache) {
       topk_data->local_algo_cache_[k] = algo;
     }
-
-    switch (algo) {
-      case TopkAlgo::SELECTION:
-        selection_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-        return;
-      case TopkAlgo::HYBRID:
-        hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-        return;
-      case TopkAlgo::FLASH:
-        flash_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-        return;
-      default:
-        // Fallback to below algorithms if something went wrong during benchmarking.
-        break;
-    }
   }
 
-  if (batch_size == 1 && k <= kFlashSortMaxK) {
-    flash_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-    return;
-  }
-
-  if (k <= kHybridSortMaxK) {
-    hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-    return;
+  switch (algo) {
+    case TopkAlgo::SELECTION:
+      selection_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      return;
+    case TopkAlgo::HYBRID:
+      hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      return;
+    case TopkAlgo::FLASH:
+      flash_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      return;
+    case TopkAlgo::LLM:
+      llm_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      return;
+    case TopkAlgo::RADIX:
+      radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      return;
+    case TopkAlgo::FULL:
+      full_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      return;
+    default:
+      // Fallback to below algorithms if something went wrong during benchmarking.
+      break;
   }
 
   // For very large k, CUB-based segmented full sort or per-batch radix sort are the fallbacks.
@@ -171,4 +179,3 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
 
 }  // namespace cuda
 }  // namespace Generators
-

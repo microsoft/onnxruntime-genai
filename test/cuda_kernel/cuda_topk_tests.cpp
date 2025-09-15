@@ -116,29 +116,24 @@ void RunParityTests(const TopKTestParams& params) {
   });
 
   if (params.k <= Generators::cuda::kHybridSortMaxK) {
-    for (int partition_size : {1024, 2048, 4096, 8192}) {
-      if (partition_size > 1024 && partition_size > params.vocab_size * 2) {
-        continue;
-      }
-
-      topk_data->hybrid_sort_partition_size = partition_size;
-      std::string algo_name = "HYBRID (" + std::to_string(partition_size) + ")";
-      test_algo(algo_name, [&]() {
-        Generators::cuda::hybrid_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
-                                               params.vocab_size, params.batch_size, params.k);
-      });
-    }
+    test_algo("HYBRID_SORT", [&]() {
+      Generators::cuda::hybrid_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                             params.vocab_size, params.batch_size, params.k);
+    });
   }
 
-  if (params.batch_size == 1 && params.k <= Generators::cuda::kFlashSortMaxK) {
-    int cooperative_launch_support = 0;
-    cudaDeviceGetAttribute(&cooperative_launch_support, cudaDevAttrCooperativeLaunch, 0);
-    if (cooperative_launch_support) {
-      test_algo("FLASH_SORT", [&]() {
-        Generators::cuda::flash_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
-                                              params.vocab_size, params.batch_size, params.k);
-      });
-    }
+  if (Generators::cuda::flash_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
+    test_algo("FLASH_SORT", [&]() {
+      Generators::cuda::flash_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                            params.vocab_size, params.batch_size, params.k);
+    });
+  }
+
+  if (Generators::cuda::llm_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
+    test_algo("LLM_SORT", [&]() {
+      Generators::cuda::llm_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                          params.vocab_size, params.batch_size, params.k);
+    });
   }
 
   test_algo("RADIX_SORT", [&]() {
@@ -160,7 +155,7 @@ TEST(TopKTests, ParityTests) {
 
   std::vector<int> batch_sizes = {1, 4, 32};
   std::vector<int> vocab_sizes = {200, 2000, 20000, 200000};
-  std::vector<int> ks = {1, 16, 64, 256, 512};
+  std::vector<int> ks = {1, 16, 64, 100, 256, 512};
 
   for (int batch_size : batch_sizes) {
     for (int vocab_size : vocab_sizes) {
@@ -176,4 +171,3 @@ TEST(TopKTests, ParityTests) {
   }
 }
 #endif
-

@@ -80,7 +80,6 @@ SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int v
   ReInitCurandStates(random_seed, batch_size, stream);
 }
 
-
 // A fused kernel that performs all steps of Top-P sampling on a pre-selected set of Top-K candidates.
 // This monolithic approach minimizes kernel launch overhead and maximizes data locality by using shared memory.
 // It has been empirically shown to be the most performant approach for k <= 256.

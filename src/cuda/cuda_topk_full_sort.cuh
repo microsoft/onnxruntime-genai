@@ -72,6 +72,6 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   data->topk_stride = vocab_size;
   CUDA_CHECK_LAUNCH();
 }
-} // namespace full_sort
+}  // namespace full_sort
 }  // namespace cuda
 }  // namespace Generators

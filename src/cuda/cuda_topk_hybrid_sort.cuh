@@ -18,6 +18,7 @@ __global__ void HybridSort_Stage1_FindPartitionsTopK(const float* __restrict__ s
                                                      int* __restrict__ intermediate_indices,
                                                      float* __restrict__ intermediate_scores,
                                                      int vocab_size, int num_partitions) {
+  static_assert(kPartitionSize % kBlockSize == 0, "kPartitionSize must be a multiple of kBlockSize");
   constexpr int ItemsPerThread = kPartitionSize / kBlockSize;
   typedef cub::BlockRadixSort<float, kBlockSize, ItemsPerThread, int> BlockRadixSort;
   __shared__ typename BlockRadixSort::TempStorage temp_storage;
@@ -58,33 +59,14 @@ __global__ void HybridSort_Stage1_FindPartitionsTopK(const float* __restrict__ s
 
 // Helper to calculate the size of intermediate buffers needed by hybrid sort.
 inline size_t GetIntermediateSize(int batch_size, int vocab_size, int partition_size) {
-  const int num_partitions = (vocab_size + partition_size - 1) / partition_size;
+  const int num_partitions = CeilDiv(vocab_size, partition_size);
   return static_cast<size_t>(batch_size) * num_partitions * kHybridSortMaxK;
 }
 
-// Selects the most efficient reduction size (partitions per block) for a given number of partitions.
-// The goal is to minimize the number of "wasted" slots in the final, partially-filled thread block.
-// In case of a tie in waste, the larger reduction size is preferred to minimize kernel launch overhead.
-inline int select_partitions_per_block(int num_partitions) {
+inline int GetPartitionsPerBlock(int num_partitions) {
   if (num_partitions <= 2) return 2;
   if (num_partitions <= 4) return 4;
-
-  int best_p_size = 8;
-  int min_waste = ((num_partitions + 7) / 8) * 8 - num_partitions;
-  if (min_waste == 0) return 8;
-
-  const int p4_waste = ((num_partitions + 3) / 4) * 4 - num_partitions;
-  if (p4_waste < min_waste) {
-    min_waste = p4_waste;
-    best_p_size = 4;
-  }
-
-  const int p2_waste = ((num_partitions + 1) / 2) * 2 - num_partitions;
-  if (p2_waste < min_waste) {
-    best_p_size = 2;
-  }
-
-  return best_p_size;
+  return 8;
 }
 
 // Kernel for the special case where the vocab fits in one partition. It takes the
@@ -151,8 +133,8 @@ void HybridSort_ReducePartitions(TopkData* data, cudaStream_t stream, int num_pa
   constexpr int block_size = 256;
 
   while (current_num_partitions > 1) {
-    const int partitions_per_block = select_partitions_per_block(current_num_partitions);
-    const int num_blocks = (current_num_partitions + partitions_per_block - 1) / partitions_per_block;
+    const int partitions_per_block = GetPartitionsPerBlock(current_num_partitions);
+    const int num_blocks = CeilDiv(current_num_partitions, partitions_per_block);
     dim3 grid_reduce(num_blocks, batch_size);
     dim3 block_reduce(block_size);
 
@@ -163,7 +145,7 @@ void HybridSort_ReducePartitions(TopkData* data, cudaStream_t stream, int num_pa
       case 4:
         bitonic_sort::reduction::BlockReduceTopK_SoA<block_size, K, 4><<<grid_reduce, block_reduce, 0, stream>>>(input_scores, input_indices, output_scores, output_indices, current_num_partitions);
         break;
-      case 2:
+      default:
         bitonic_sort::reduction::BlockReduceTopK_SoA<block_size, K, 2><<<grid_reduce, block_reduce, 0, stream>>>(input_scores, input_indices, output_scores, output_indices, current_num_partitions);
         break;
     }
@@ -184,7 +166,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   constexpr int block_size = 256;
 
   const int partition_size = data->hybrid_sort_partition_size;
-  const int num_partitions = (vocab_size + partition_size - 1) / partition_size;
+  const int num_partitions = CeilDiv(vocab_size, partition_size);
   dim3 grid_stage1(num_partitions, batch_size);
   dim3 block_stage1(block_size);
 
@@ -203,12 +185,9 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
         HybridSort_Stage1_FindPartitionsTopK<block_size, 4096, K><<<grid_stage1, block_stage1, 0, stream>>>(
             scores_in, data->intermediate_indices_1, data->intermediate_scores_1, vocab_size, num_partitions);
         break;
-      case 8192:
+      default:
         HybridSort_Stage1_FindPartitionsTopK<block_size, 8192, K><<<grid_stage1, block_stage1, 0, stream>>>(
             scores_in, data->intermediate_indices_1, data->intermediate_scores_1, vocab_size, num_partitions);
-        break;
-      default:
-        assert(false && "Unsupported partition_size");
         break;
     }
     CUDA_CHECK(cudaGetLastError());
@@ -229,11 +208,9 @@ inline int EstimateBestPartitionSize(int vocab_size) {
   if (vocab_size <= 1024) return 1024;
   if (vocab_size <= 2048) return 2048;
   if (vocab_size <= 4096) return 4096;
-  if (vocab_size <= 8192) return 8192;
-
   return 8192;
 }
 
-} // namespace hybrid_sort
+}  // namespace hybrid_sort
 }  // namespace cuda
 }  // namespace Generators
