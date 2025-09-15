@@ -19,7 +19,8 @@ def main(args):
     batch_size = len(prompts)
 
     config = og.Config(args.model_path)
-    config.overlay(f'{{"search": {{"batch_size": {batch_size}, "num_beams": {3}}}}}')
+    # Example: Configure search parameters including chunk_size for prefix chunking  
+    config.overlay(f'{{"search": {{"batch_size": {batch_size}, "num_beams": {3}, "chunk_size": {args.chunk_size}}}}}')
 
     if args.execution_provider != "follow_config":
         config.clear_providers()
@@ -90,6 +91,7 @@ if __name__ == "__main__":
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-b', '--batch_size_for_cuda_graph', type=int, default=1, help='Max batch size for CUDA graph')
     parser.add_argument('-c', '--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}. If not set, the prompt is used as is.')
+    parser.add_argument('--chunk_size', type=int, default=-1, help='Chunk size for prefix chunking during context processing (default: -1 = disabled, >0 = enabled)')
     parser.add_argument('--non-interactive', action=argparse.BooleanOptionalAction, required=False, default=False, help='Non-interactive mode, mainly for CI usage')
 
     args = parser.parse_args()
