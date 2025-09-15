@@ -47,7 +47,7 @@ parameters:
   - name: enable_winml
     displayName: 'Whether Windows WinML package is built for x64 and arm64'
     type: boolean
-    default: false
+    default: true
 
   - name: ort_winml_version
     displayName: 'Microsoft.WindowsAppSDK.ML Version (should match CMakeList.txt)'
