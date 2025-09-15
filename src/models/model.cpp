@@ -259,8 +259,13 @@ const std::string& TokenizerStream::Decode(int32_t token) {
 }
 
 const std::string& TokenizerStream::DecodeWithSpecial(int32_t token) {
+  OrtxPtr<OrtxStringArray> ortx_string_array;
+  std::vector<int32_t> tokens_vec({token});
+  std::span<const int32_t> tokens(tokens_vec);
+  CheckResult(OrtxDetokenize1DWithOptions(tokenizer_->tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address(), false /* skip_special_tokens */));
+
   const char* string;
-  CheckResult(OrtxDetokenizeCached(tokenizer_->tokenizer_, cache_, token, &string));
+  CheckResult(OrtxStringArrayGetItem(ortx_string_array, 0, &string));
   chunk_ = string;
   return chunk_;
 }
