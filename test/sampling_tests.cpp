@@ -484,7 +484,6 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda) {
     }
   }
 }
-<<<<<<< HEAD
 
 TEST(SamplingTests, RandomizedSamplingSelectTopCuda_BatchSize1_LargeVocabSize) {
   // This combination of `batch_size` + `vocab_size` + `top_k` will use the Sort + TopK
@@ -545,6 +544,3 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda_BatchSize1_LargeVocabSize) {
   }
 }
 #endif
-=======
-#endif
->>>>>>> onnxruntime-genai/main
