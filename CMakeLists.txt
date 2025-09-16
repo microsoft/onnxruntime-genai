@@ -51,7 +51,7 @@ if(MSVC)
     message(STATUS "CET shadow stack skipped for ARM64 build")
   endif()
 
-  # Enable Spectre mitigations for C and C++ compilations only (avoid CUDA nvcc - not supported there)
+  # Enable Spectre mitigations for C and C++ compilations only (avoid CUDA nvcc that is not supported there)
   add_compile_options(
     "$<$<COMPILE_LANGUAGE:C>:/Qspectre>"
     "$<$<COMPILE_LANGUAGE:CXX>:/Qspectre>"
@@ -85,6 +85,8 @@ if(MSVC)
 endif()
 
 include(cmake/ortlib.cmake)
+
+
 include(cmake/external/onnxruntime_external_deps.cmake)
 # All Global variables, including GLOB, for the top level CMakeLists.txt should be defined here
 include(cmake/global_variables.cmake)
@@ -114,7 +116,7 @@ if(ENABLE_TESTS)
   # call enable_testing so we can add tests from subdirectories (e.g. test and src/java)
   # it applies recursively to all subdirectories
   enable_testing()
-  if (USE_CUDA OR TEST_PHI2)
+  if (TEST_PHI2)
     add_compile_definitions(TEST_PHI2=1)
   else()
     add_compile_definitions(TEST_PHI2=0)
@@ -155,6 +157,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
   add_compile_definitions(_ORT_GENAI_USE_DLOPEN)
 else()
   target_link_libraries(onnxruntime-genai PRIVATE ${ONNXRUNTIME_LIB})
+  if(USE_WINML)
+    target_link_options(onnxruntime-genai PRIVATE "/DELAYLOAD:${ONNXRUNTIME_LIB}")
+  endif()
 endif()
 
 if(APPLE)
@@ -164,6 +169,9 @@ endif()
 
 # Build all source files using CUDA as a separate shared library we dynamically load at runtime
 if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+  # Suppress nvcc warning 1650 (result of call is not used) and deprecated GPU targets warning for cuda 12.8 or later.
+  add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress;1650;-Wno-deprecated-gpu-targets>")
+  
   add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${ORT_HEADER_DIR})
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${GENERATORS_ROOT})

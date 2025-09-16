@@ -46,6 +46,36 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaConfigRemoveModelData(_configHandle, StringUtils.ToUtf8(modelFilename)));
         }
 
+        public void SetDecoderProviderOptionsHardwareDeviceType(string provider, string hardware_device_type)
+        {
+            Result.VerifySuccess(NativeMethods.OgaConfigSetDecoderProviderOptionsHardwareDeviceType(_configHandle, StringUtils.ToUtf8(provider), StringUtils.ToUtf8(hardware_device_type)));
+        }
+
+        public void SetDecoderProviderOptionsHardwareDeviceId(string provider, uint hardware_device_id)
+        {
+            Result.VerifySuccess(NativeMethods.OgaConfigSetDecoderProviderOptionsHardwareDeviceId(_configHandle, StringUtils.ToUtf8(provider), hardware_device_id));
+        }
+
+        public void SetDecoderProviderOptionsHardwareVendorId(string provider, uint hardware_vendor_id)
+        {
+            Result.VerifySuccess(NativeMethods.OgaConfigSetDecoderProviderOptionsHardwareVendorId(_configHandle, StringUtils.ToUtf8(provider), hardware_vendor_id));
+        }
+
+        public void ClearDecoderProviderOptionsHardwareDeviceType(string provider)
+        {
+            Result.VerifySuccess(NativeMethods.OgaConfigClearDecoderProviderOptionsHardwareDeviceType(_configHandle, StringUtils.ToUtf8(provider)));
+        }
+
+        public void ClearDecoderProviderOptionsHardwareDeviceId(string provider)
+        {
+            Result.VerifySuccess(NativeMethods.OgaConfigClearDecoderProviderOptionsHardwareDeviceId(_configHandle, StringUtils.ToUtf8(provider)));
+        }
+
+        public void ClearDecoderProviderOptionsHardwareVendorId(string provider)
+        {
+            Result.VerifySuccess(NativeMethods.OgaConfigClearDecoderProviderOptionsHardwareVendorId(_configHandle, StringUtils.ToUtf8(provider)));
+        }
+
         ~Config()
         {
             Dispose(false);

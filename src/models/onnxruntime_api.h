@@ -425,13 +425,9 @@ std::span<TAlloc> Allocate(OrtAllocator& allocator,
   return std::span(unique_ptr.get(), size);
 }
 
-inline void RegisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name, const ORTCHAR_T* path) {
-  Ort::api->RegisterExecutionProviderLibrary(env, registration_name, path);
-}
+void RegisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name, const ORTCHAR_T* path);
 
-inline void UnregisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name) {
-  Ort::api->UnregisterExecutionProviderLibrary(env, registration_name);
-}
+void UnregisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name);
 
 }  // namespace Ort
 

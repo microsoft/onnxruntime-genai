@@ -109,6 +109,28 @@
       },
       "displayName": "macos arm64 cpu release",
       "binaryDir": "${sourceDir}/build/cpu/osx-arm64"
+    },
+    {
+      "name": "macos_arm64_cpu_relwithdebinfo",
+      "inherits": [
+        "macos_cpu_relwithdebinfo"
+      ],
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "arm64"
+      },
+      "displayName": "macos arm64 cpu relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/cpu/osx-arm64"
+    },
+    {
+      "name": "macos_x64_cpu_relwithdebinfo",
+      "inherits": [
+        "macos_cpu_relwithdebinfo"
+      ],
+      "cacheVariables": {
+        "CMAKE_OSX_ARCHITECTURES": "x86_64"
+      },
+      "displayName": "macos x64 cpu relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/cpu/osx-x64"
     }
   ]
 }

@@ -24,12 +24,12 @@ jobs:
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-A10"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: true
 # We are using the same manylinux repo as the one used in the packaging build
       - name: Checkout ManyLinux repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: pypa/manylinux
           ref: 5eda9aded5462201e6310105728d33016e637ea7
@@ -37,7 +37,7 @@ jobs:
           path: manylinux
           submodules: true
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
 

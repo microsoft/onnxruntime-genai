@@ -185,6 +185,14 @@ inline int GetCurrentGpuDeviceId() {
   return id;
 }
 
+inline void RegisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name, const ORTCHAR_T* path) {
+  ThrowOnError(Ort::api->RegisterExecutionProviderLibrary(env, registration_name, path));
+}
+
+inline void UnregisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name) {
+  ThrowOnError(Ort::api->UnregisterExecutionProviderLibrary(env, registration_name));
+}
+
 }  // namespace Ort
 
 inline std::unique_ptr<OrtStatus> OrtStatus::Create(OrtErrorCode code, const std::string& what) {

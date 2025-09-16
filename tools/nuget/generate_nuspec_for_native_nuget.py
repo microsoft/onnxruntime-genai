@@ -155,6 +155,7 @@ def generate_files(lines, args):
 
     # include
     lines.append(f'<file src="{args.sources_path}\src\ort_genai_c.h" target="build\\native\include" />')
+    lines.append(f'<file src="{args.sources_path}\src\ort_genai.h" target="build\\native\include" />')
     lines.append('</files>')
 
 

@@ -1,0 +1,182 @@
+parameters:
+  - name: nuget_version_type
+    type: string
+
+  - name: build_config
+    type: string
+ 
+  - name: ort_winml_version
+    type: string
+
+jobs:
+  - job: winml_nuget_packaging
+    displayName: "WinML NuGet Packaging"
+    pool: "onnxruntime-Win-CPU-2022"
+    variables:
+      - name: buildConfig
+        ${{ if eq(parameters.build_config, 'release') }}:
+          value: "Release"
+        ${{ elseif eq(parameters.build_config, 'relwithdebinfo') }}:
+          value: "RelWithDebInfo"
+        ${{ elseif eq(parameters.build_config, 'debug')}}:
+          value: "Debug"
+        ${{ else }}:
+          value: "MinSizeRel"
+
+    steps:
+      - template: steps/utils/flex-download-pipeline-artifact.yml
+        parameters:
+          StepName: "Download onnxruntime-genai-win-winml-arm64-capi Artifacts"
+          ArtifactName: onnxruntime-genai-win-winml-arm64-capi
+          TargetPath: "$(Build.BinariesDirectory)/artifact-downloads"
+
+      - template: steps/utils/flex-download-pipeline-artifact.yml
+        parameters:
+          StepName: "Download onnxruntime-genai-win-winml-x64-capi Artifacts"
+          ArtifactName: onnxruntime-genai-win-winml-x64-capi
+          TargetPath: "$(Build.BinariesDirectory)/artifact-downloads"
+
+      - checkout: self
+        path: onnxruntime-genai
+        clean: true
+        submodules: recursive
+
+      - template: steps/utils/set-genai-version.yml
+        parameters:
+          nuget_version_type: ${{ parameters.nuget_version_type }}
+
+      - task: NuGetAuthenticate@1
+
+      - powershell: |
+          dotnet --info
+          dotnet workload install android
+          dotnet workload install ios
+          dotnet workload install maccatalyst
+          dotnet workload install macos
+        displayName: "Install dependencies"
+        workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
+
+      - powershell: |
+          dotnet --info
+          dotnet build Microsoft.ML.OnnxRuntimeGenAI.csproj -p:Configuration="$(buildConfig)" -p:IncludeMobileTargets=true --verbosity normal
+        displayName: "Build CSharp"
+        workingDirectory: '$(Build.Repository.LocalPath)\src\csharp'
+
+      - task: BinSkim@4
+        displayName: "Run BinSkim"
+        inputs:
+          AnalyzeTargetGlob: '$(Build.Repository.LocalPath)\src\csharp\**\*.dll'
+          continueOnError: true
+
+      - template: steps/compliant/win-esrp-dll-step.yml
+        parameters:
+          FolderPath: '$(Build.Repository.LocalPath)\src\csharp\bin\$(buildConfig)\'
+          DisplayName: "ESRP - Sign C# dlls"
+          Pattern: "*OnnxRuntimeGenAI*.dll"
+
+      - powershell: |
+          $artifacts_dir = '$(Build.BinariesDirectory)/artifact-downloads'
+          Write-Host "List downloaded artifacts"
+          $artifacts = Get-ChildItem -Path $artifacts_dir/* -Include *.zip,*.tar.gz,*.aar
+          Write-Host $artifacts
+
+          Write-Host "${{ parameters.ort_winml_version }}"
+
+          $outputDir = '$(Build.BinariesDirectory)/artifact-downloads'
+          Write-Host "List extracted artifacts"
+          Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads' -Recurse
+
+          mkdir -Force $outputDir
+          foreach ($file in $artifacts) {
+            $a = $file.Name
+            Write-Host "Extracting " $a
+            if ($a -like "*win-x64*") {
+              $rid = "win-x64"
+            } elseif ($a -like "*win-arm64*") {
+              $rid = "win-arm64"
+            } else {
+              Write-Host "Unknown artifact name" $a
+              return
+            }
+
+            mkdir -Force $outputDir/$rid
+            if ($a -like "*.zip") {
+              Expand-Archive -Path $file -DestinationPath $outputDir/$rid
+            } elseif ($a -like "*.tar.gz") {
+              tar -xf $file -C $outputDir/$rid
+            }
+
+            Get-ChildItem -Path $outputDir/$rid -Recurse
+          }
+
+        displayName: "Extract Artifacts"
+        workingDirectory: "$(Build.BinariesDirectory)/artifact-downloads"
+
+      - script: |
+          dir /s /b *.dll
+        workingDirectory: "$(Build.BinariesDirectory)/artifact-downloads"
+
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: 3.10
+          addToPath: true
+
+      - powershell: |
+          # Package dependencie
+          $ort_nuget_package_name = "Microsoft.WindowsAppSDK.ML"
+          $ort_package_version = "[1.8.2001,1.8.3000]"
+
+          $genai_nuget_package_name = "Microsoft.ML.OnnxRuntimeGenAI.WinML"
+          Write-Host "##vso[task.setvariable variable=genai_nuget_package_name;]$genai_nuget_package_name"
+
+          $win_x64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads/win-x64/')[0].FullName
+          $win_arm64_artifact_path = (Get-ChildItem -Path '$(Build.BinariesDirectory)/artifact-downloads/win-arm64/')[0].FullName
+
+          Write-Host "Win x64 artifact path " $win_x64_artifact_path
+          Write-Host "Win arm64 artifact path " $win_arm64_artifact_path
+
+          Write-Host "genai_version:" $genai_version
+
+          python.exe $(Build.Repository.LocalPath)\tools\nuget\generate_nuspec_for_winml_nuget.py `
+            --package_name $genai_nuget_package_name `
+            --package_version $(genai_version) `
+            --ort_package_name $ort_nuget_package_name  `
+            --ort_package_version $ort_package_version `
+            --root_dir $(Build.Repository.LocalPath) `
+            --nuspec_path $(Build.Repository.LocalPath)/nuget/$genai_nuget_package_name.nuspec `
+            --win_x64 $win_x64_artifact_path `
+            --win_arm64 $win_arm64_artifact_path `
+            --commit_id $(Build.SourceVersion)
+
+          cat $(Build.Repository.LocalPath)\nuget\$genai_nuget_package_name.nuspec
+
+          Write-Host "##vso[task.setvariable variable=nuspec_path;]$(Build.Repository.LocalPath)/nuget/$genai_nuget_package_name.nuspec"
+
+        displayName: "Generate Nuspec for custom package"
+
+      - task: NuGetCommand@2
+        displayName: "Nuget Packaging"
+        inputs:
+          command: "pack"
+          packagesToPack: $(nuspec_path)
+          packDestination: $(Build.ArtifactStagingDirectory)\nuget
+
+      - task: NuGetCommand@2
+        displayName: "Nuget Managed Packaging"
+        inputs:
+          command: "pack"
+          packagesToPack: $(Build.Repository.LocalPath)\nuget\Microsoft.ML.OnnxRuntimeGenAI.Managed.nuspec
+          buildProperties: "version=$(genai_version);configuration=$(buildConfig)"
+          packDestination: $(Build.ArtifactStagingDirectory)\nuget
+
+      - template: steps/compliant/esrp_nuget.yml
+        parameters:
+          DisplayName: "ESRP - sign NuGet package"
+          FolderPath: '$(Build.ArtifactStagingDirectory)\nuget'
+          DoEsrp: "true"
+
+      - task: 1ES.PublishPipelineArtifact@1
+        displayName: "Publish Artifact: ONNXRuntime Genai NuGet"
+        inputs:
+          targetPath: '$(Build.ArtifactStagingDirectory)\nuget'
+          artifactName: $(genai_nuget_package_name)

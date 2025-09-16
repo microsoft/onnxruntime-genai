@@ -1,69 +1,78 @@
 parameters:
-- name: enable_post_packaging_validation
-  displayName: Whether Post Packaging validation is run
-  type: boolean
-  default: false
+  - name: enable_post_packaging_validation
+    displayName: Whether Post Packaging validation is run
+    type: boolean
+    default: false
 
-- name: enable_win_cpu
-  displayName: 'Whether Windows CPU package is built.'
-  type: boolean
-  default: true
+  - name: enable_win_cpu
+    displayName: 'Whether Windows CPU package is built.'
+    type: boolean
+    default: true
 
-- name: enable_win_cuda
-  displayName: 'Whether Windows CUDA package is built.'
-  type: boolean
-  default: true
+  - name: enable_win_cuda
+    displayName: 'Whether Windows CUDA package is built.'
+    type: boolean
+    default: true
 
-- name: enable_win_dml
-  displayName: 'Whether Windows DirectML package is built.'
-  type: boolean
-  default: true
+  - name: enable_win_dml
+    displayName: 'Whether Windows DirectML package is built.'
+    type: boolean
+    default: true
 
-- name: enable_win_arm64_cpu
-  displayName: 'Whether Windows ARM64 package is built.'
-  type: boolean
-  default: true
+  - name: enable_win_arm64_cpu
+    displayName: 'Whether Windows ARM64 CPU package is built.'
+    type: boolean
+    default: true
 
-- name: enable_linux_cpu
-  displayName: 'Whether Linux CPU package is built.'
-  type: boolean
-  default: true
+  - name: enable_linux_cpu
+    displayName: 'Whether Linux CPU package is built.'
+    type: boolean
+    default: true
 
-- name: enable_linux_cuda
-  displayName: 'Whether Linux CUDA package is built.'
-  type: boolean
-  default: true
+  - name: enable_linux_cuda
+    displayName: 'Whether Linux CUDA package is built.'
+    type: boolean
+    default: true
 
-- name: enable_linux_rocm
-  displayName: 'Whether Linux ROCm package is built.'
-  type: boolean
-  default: false
+  - name: enable_linux_rocm
+    displayName: 'Whether Linux ROCm package is built.'
+    type: boolean
+    default: false
 
-- name: enable_macos_cpu
-  displayName: 'Whether MacOS CPU package is built.'
-  type: boolean
-  default: true
+  - name: enable_macos_cpu
+    displayName: 'Whether MacOS CPU package is built.'
+    type: boolean
+    default: true
 
-- name: cuda_versions
-  displayName: 'CUDA versions'
-  type: string
-  default: '12.2'
+  - name: enable_winml
+    displayName: 'Whether Windows WinML package is built for x64 and arm64'
+    type: boolean
+    default: true
 
-- name: build_config
-  displayName: 'Build Configuration'
-  type: string
-  default: 'release'
-  values:
-  - 'release'
-  - 'relwithdebinfo'
-  - 'debug'
+  - name: ort_winml_version
+    displayName: 'Microsoft.WindowsAppSDK.ML Version (should match CMakeList.txt)'
+    type: string
+    default: '1.8.2091'
+
+  - name: cuda_versions
+    displayName: 'CUDA versions'
+    type: string
+    default: '12.2'
+
+  - name: build_config
+    displayName: 'Build Configuration'
+    type: string
+    default: 'relwithdebinfo'
+    values:
+      - 'relwithdebinfo'
+      - 'debug'
 
 resources:
   repositories:
-  - repository: 1esPipelines
-    type: git
-    name: 1ESPipelineTemplates/1ESPipelineTemplates
-    ref: refs/tags/release
+    - repository: 1esPipelines
+      type: git
+      name: 1ESPipelineTemplates/1ESPipelineTemplates
+      ref: refs/tags/release
 
 trigger: none
 extends:
@@ -74,8 +83,8 @@ extends:
   parameters:
     # Update the pool with your team's 1ES hosted pool.
     pool:
-      name: 'onnxruntime-Win-CPU-2022'  # Name of your hosted pool
-      os: windows  # OS of the image. This value cannot be a variable. Allowed values: windows, linux, macOS
+      name: 'onnxruntime-Win-CPU-2022' # Name of your hosted pool
+      os: windows # OS of the image. This value cannot be a variable. Allowed values: windows, linux, macOS
     sdl:
       policheck:
         enabled: true
@@ -85,27 +94,33 @@ extends:
         enabled: true
         configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
     stages:
-    - template: stages/py-packaging-stage.yml
-      parameters:
-        enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
-        enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
-        enable_linux_rocm: ${{ parameters.enable_linux_rocm }}
-        enable_win_cpu: ${{ parameters.enable_win_cpu }}
-        enable_win_cuda: ${{ parameters.enable_win_cuda }}
-        enable_win_dml: ${{ parameters.enable_win_dml }}
-        enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
-        enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
-        cuda_versions: ${{ parameters.cuda_versions }}
-        build_config: ${{ parameters.build_config }}
-    - ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
-      - template: stages/py-validation-stage.yml
+      - template: stages/py-packaging-stage.yml
         parameters:
           enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
           enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+          enable_linux_rocm: ${{ parameters.enable_linux_rocm }}
           enable_win_cpu: ${{ parameters.enable_win_cpu }}
           enable_win_cuda: ${{ parameters.enable_win_cuda }}
           enable_win_dml: ${{ parameters.enable_win_dml }}
           enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
           enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
           cuda_versions: ${{ parameters.cuda_versions }}
-          SpecificArtifact: false
+          build_config: ${{ parameters.build_config }}
+          enable_winml: ${{ parameters.enable_winml }}
+          ${{ if eq(parameters.enable_winml, true) }}:
+            ort_version: ${{ parameters.ort_winml_version }}
+          ${{ else }}:
+            ort_version: '' # Not used for non winml builds.
+
+      - ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
+          - template: stages/py-validation-stage.yml
+            parameters:
+              enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+              enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+              enable_win_cpu: ${{ parameters.enable_win_cpu }}
+              enable_win_cuda: ${{ parameters.enable_win_cuda }}
+              enable_win_dml: ${{ parameters.enable_win_dml }}
+              enable_win_arm64_cpu: ${{ parameters.enable_win_arm64_cpu }}
+              enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+              cuda_versions: ${{ parameters.cuda_versions }}
+              SpecificArtifact: false

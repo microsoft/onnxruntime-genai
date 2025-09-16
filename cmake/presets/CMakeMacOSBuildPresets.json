@@ -13,6 +13,14 @@
       "configurePreset": "macos_arm64_cpu_release"
     },
     {
+      "name": "macos_x64_cpu_relwithdebinfo",
+      "configurePreset": "macos_x64_cpu_relwithdebinfo"
+    },
+    {
+      "name": "macos_arm64_cpu_relwithdebinfo",
+      "configurePreset": "macos_arm64_cpu_relwithdebinfo"
+    },
+    {
       "name": "macos_cpu_debug",
       "configurePreset": "macos_cpu_debug"
     },
