@@ -115,8 +115,8 @@ void RunParityTests(const TopKTestParams& params) {
                                               params.vocab_size, params.batch_size, params.k);
   });
 
-  if ((params.batch_size <= Generators::cuda::topk_impl_details::kTopKDistributedSelectSortMaxBatchSize) && 
-      (params.k <= Generators::cuda::topk_impl_details::kTopKDistributedSelectSortMaxTopK) && 
+  if ((params.batch_size <= Generators::cuda::topk_impl_details::kTopKDistributedSelectSortMaxBatchSize) &&
+      (params.k <= Generators::cuda::topk_impl_details::kTopKDistributedSelectSortMaxTopK) &&
       (params.vocab_size >= Generators::cuda::topk_impl_details::kTopKDistributedSelectSortMinVocabSize)) {
     test_algo("DISTRIBUTION_SELECTION_SORT", [&]() {
       Generators::cuda::RunTopKViaDistributedSelectionSort(topk_data.get(), stream, scores_in_d.get(),

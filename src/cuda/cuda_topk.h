@@ -10,11 +10,11 @@ namespace Generators {
 namespace cuda {
 
 namespace topk_impl_details {
-  constexpr int kTopKDistributedSelectSortMaxShards = 32;
-  constexpr int kTopKDistributedSelectSortMaxBatchSize = 1;
-  constexpr int kTopKDistributedSelectSortMaxTopK = 64;
-  constexpr int kTopKDistributedSelectSortMinVocabSize = 100000;
-}
+constexpr int kTopKDistributedSelectSortMaxShards = 32;
+constexpr int kTopKDistributedSelectSortMaxBatchSize = 1;
+constexpr int kTopKDistributedSelectSortMaxTopK = 64;
+constexpr int kTopKDistributedSelectSortMinVocabSize = 100000;
+}  // namespace topk_impl_details
 
 // This struct holds all the device memory buffers required for Top-K operations.
 struct TopkData {
