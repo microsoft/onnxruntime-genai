@@ -85,6 +85,11 @@
       "configurePreset": "windows_x64_cuda_minsizerel"
     },
     {
+      "name": "windows_x64_winml_relwithdebinfo",
+      "configuration": "RelWithDebInfo",
+      "configurePreset": "windows_x64_winml_relwithdebinfo"
+    },
+    {
       "name": "windows_x64_trt_rtx_release",
       "configuration": "Release",
       "configurePreset": "windows_x64_trt_rtx_release"
