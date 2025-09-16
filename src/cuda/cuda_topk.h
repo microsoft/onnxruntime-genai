@@ -9,6 +9,12 @@
 namespace Generators {
 namespace cuda {
 
+namespace topk_impl_details {
+  constexpr int kTopKDistributedSelectSortMaxShards = 32;
+  constexpr int kTopKDistributedSelectSortMaxTopK = 64;
+  constexpr int kTopKDistributedSelectSortMinVocabSize = 100000;
+}
+
 // This struct holds all the device memory buffers required for Top-K operations.
 struct TopkData {
   TopkData(int batch_size, int vocab_size, cudaStream_t stream);
@@ -39,6 +45,13 @@ struct TopkData {
   // - Full sort: Stores the start offset of each batch segment for CUB's segmented sort
   cuda_unique_ptr<int> batch_offsets;
 
+  // Distributed Selection sort: Following are metadata and buffers associated
+  // with the distributed selection sort Top k implementation
+  int top_k_distributed_select_sort_shards = 0;
+  cuda_unique_ptr<int> top_k_distributed_select_sort_lock;
+  cuda_unique_ptr<int> top_k_distributed_select_sort_keys;
+  cuda_unique_ptr<float> top_k_distributed_select_sort_values;
+
   // --- Information of Final Output (Input to Sampling Stage) ---
   const float* topk_scores = nullptr;  // pointer to the top-k scores data (in either intermediate_scores_1 or intermediate_scores_2)
   const int* topk_indices = nullptr;   // pointer to the top-k indices data (in either intermediate_indices_1 or intermediate_indices_2)
@@ -64,6 +77,7 @@ void GetTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
 
 // Top-K algorithm implementations. These are exposed for testing and benchmarking.
 void RunTopKViaSelectionSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
+void RunTopKViaDistributedSelectionSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int k);
 void RunTopKViaFullSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 
 }  // namespace cuda

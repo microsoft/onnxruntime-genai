@@ -532,8 +532,8 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda_BatchSize1_LargeVocabSize) {
 
       // Next token has to be in the list of the above top_k indices
       bool found = false;
-      for (int k = 0; k < top_k; ++k) {
-        if (indices[k] == next_token) {
+      for (int i = 0; i < top_k; ++i) {
+        if (indices[i] == next_token) {
           found = true;
           break;
         }
