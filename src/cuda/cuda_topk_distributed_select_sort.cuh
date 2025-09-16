@@ -41,6 +41,8 @@ __device__ __forceinline__ TopK_Pair_Reduce reduce_topk_pair_reduce_op(TopK_Pair
                                                                            : b;
 }
 
+// TODO(hasesh): Experiment with using co-operative groups for synchronization in the following kernel
+// to see if it can give tangible perf gains
 template <int kBlockSize>
 __global__ void GetTopKKernelDistributedSelectSort(float* scores_in, float* scores_out, int* indices_out,
                                                    int vocab_size, int k,
