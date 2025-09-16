@@ -115,12 +115,20 @@ void RunParityTests(const TopKTestParams& params) {
                                               params.vocab_size, params.batch_size, params.k);
   });
 
+    // Distributed Selection sort only supports batch size of 1 and vocab_size >= kTopKDistributedSelectSortMinVocabSize
+  if (params.batch_size == 1 && params.vocab_size >= topk_impl_details::kTopKDistributedSelectSortMinVocabSize) {
+    test_algo("DISTRIBUTION_SELECTION_SORT", [&]() {
+      Generators::cuda::RunTopKViaDistributedSelectionSort(topk_data.get(), stream, scores_in_d.get(),
+                                                           params.vocab_size, params.k);
+    });
+  }
+
   CUDA_CHECK(cudaStreamDestroy(stream));
 }
 
 TEST(TopKTests, ParityTests) {
   std::vector<int> batch_sizes = {1, 4, 32};
-  std::vector<int> vocab_sizes = {200, 2000, 20000, 200000};
+  std::vector<int> vocab_sizes = {200, 2000, 20000, 150000, 200000};
   std::vector<int> ks = {1, 16, 64, 256, 512};
 
   std::vector<TopKTestParams> test_cases;
