@@ -31,7 +31,11 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   size_t num_tokens = next_tokens.size();
   const size_t chunk_size = static_cast<size_t>(model_.config_->search.chunk_size);
   
-  if (chunk_size > 0 && num_tokens > chunk_size) {
+  // Enable prefill chunking for CUDA and NvTensorRtRtx devices
+  bool is_chunking_supported_device = (model_.p_device_->GetType() == DeviceType::CUDA ||
+                                       model_.p_device_->GetType() == DeviceType::NvTensorRtRtx);
+
+  if (is_chunking_supported_device && chunk_size > 0 && num_tokens > chunk_size) {
     // Chunking logic for context phase - process in chunks based on configured chunk_size
     size_t processed_tokens = 0;
     int length = total_length - static_cast<int>(num_tokens);
@@ -55,7 +59,8 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
     // Return logits from the last chunk for potential sampling
     return logits_.Get();
   } else {
-    // Original logic for tokens <= 512 (generation phase or small context)
+    // Original logic for tokens <= chunk_size (generation phase or small context) 
+    // or chunking disabled due to unsupported device
     UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
     // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
