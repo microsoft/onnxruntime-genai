@@ -121,14 +121,15 @@ void RunBenchmarks(const BenchmarkParams& params) {
 
   // Benchmark Distributed Selection Sort
   {
-    // Distributed Selection sort only supports batch size of 1 and vocab_size >= kTopKDistributedSelectSortMinVocabSize
-    if (params.batch_size == 1 && params.vocab_size >= topk_impl_details::kTopKDistributedSelectSortMinVocabSize) {
-      auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
-        Generators::cuda::RunTopKViaDistributedSelectionSort(data.get(), stream, scores_in_d.get(),
-                                                             params.vocab_size, params.k);
-      });
-      all_results.push_back({params, "DISTRIBUTED_SELECTION_SORT", 0, mean_ms, stdev_ms, p95_ms});
-    }
+    if ((params.batch_size <= Generators::cuda::topk_impl_details::kTopKDistributedSelectSortMaxBatchSize) && 
+        (params.k <= Generators::cuda::topk_impl_details::kTopKDistributedSelectSortMaxTopK) && 
+        (params.vocab_size >= Generators::cuda::topk_impl_details::kTopKDistributedSelectSortMinVocabSize)) {
+        auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
+          Generators::cuda::RunTopKViaDistributedSelectionSort(data.get(), stream, scores_in_d.get(),
+                                                              params.vocab_size, params.k);
+        });
+        all_results.push_back({params, "DISTRIBUTED_SELECTION_SORT", 0, mean_ms, stdev_ms, p95_ms});
+      }
   }
 
   PrintSummary(all_results);

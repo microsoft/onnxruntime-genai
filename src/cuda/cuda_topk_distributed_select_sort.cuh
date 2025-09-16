@@ -41,9 +41,10 @@ __device__ __forceinline__ TopK_Pair_Reduce reduce_topk_pair_reduce_op(TopK_Pair
 }
 
 template <int kBlockSize>
-__global__ void GetTopKKernelDistributed(float* scores_in, float* scores_out, int* indices_out, 
-                                        int vocab_size, int k, 
-                                        int* top_k_distributed_lock, int* distributed_indices_out, float* distributed_scores_out) {
+__global__ void GetTopKKernelDistributedSelectSort(float* scores_in, float* scores_out, int* indices_out, 
+                                                   int vocab_size, int k, 
+                                                   int* top_k_distributed_lock, int* distributed_indices_out, 
+                                                   float* distributed_scores_out) {
   
   int top_k_shard = blockIdx.z;
   int tid = threadIdx.x;
@@ -109,9 +110,9 @@ __global__ void GetTopKKernelDistributed(float* scores_in, float* scores_out, in
       atomicExch(top_k_distributed_lock, 0);
     }
 
-    // Number of shards is atmost `kMaxShards` and top_k for this kernel is atmost `kMaxTopK`
-    __shared__ float shared_distributed_scores_out[topk_impl_details::kMaxShards * topk_impl_details::kMaxTopK];
-    __shared__ float shared_distributed_indices_out[topk_impl_details::kMaxShards * topk_impl_details::kMaxTopK];
+    // Number of shards is atmost `kTopKDistributedSelectSortMaxShards` and top_k for this kernel is atmost `kTopKDistributedSelectSortMaxTopK`
+    __shared__ float shared_distributed_scores_out[topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK];
+    __shared__ float shared_distributed_indices_out[topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK];
 
     // Load distributed results into shared memory for fast access
     for (int i = threadIdx.x; i < num_top_k_shards*k; i += kBlockSize) {
@@ -122,27 +123,27 @@ __global__ void GetTopKKernelDistributed(float* scores_in, float* scores_out, in
     __syncthreads();
 
     // Perform the reduction
-    TopK_2_Reduce reduce_partial; 
+    TopK_Pair_Reduce reduce_partial; 
     for (int ite = 0; ite < k; ite++) {
       reduce_partial.init();
   
-      for (int i = threadIdx.x; i < top_k_shards*k; i += kBlockSize) {
+      for (int i = threadIdx.x; i < num_top_k_shards*k; i += kBlockSize) {
         float score = shared_distributed_scores_out[i];
         int vocab_index = shared_distributed_indices_out[i];
         reduce_partial.insert(score, i, vocab_index);
       }
 
       // reduce in thread block
-      typedef cub::BlockReduce<TopK_2_Reduce, kBlockSize> BlockReduce;
+      typedef cub::BlockReduce<TopK_Pair_Reduce, kBlockSize> BlockReduce;
       __shared__ typename BlockReduce::TempStorage temp_storage;
-      TopK_2_Reduce top_k_sequence_reduced = BlockReduce(temp_storage).Reduce(reduce_partial, reduce_topk_pair_reduce_op);
+      TopK_Pair_Reduce top_k_sequence_reduced = BlockReduce(temp_storage).Reduce(reduce_partial, reduce_topk_pair_reduce_op);
 
       if (tid == 0) {
         int index = top_k_sequence_reduced.p;
         int vocab_index = top_k_sequence_reduced.p_indirection;
 
-        scores_out[ite + batch * k] = top_k_sequence_reduced.u;
-        indices_out[ite + batch * k] = vocab_index;
+        scores_out[ite] = top_k_sequence_reduced.u;
+        indices_out[ite] = vocab_index;
         shared_distributed_scores_out[index] = MIN_FLOAT;
 
         __threadfence_block();
@@ -154,10 +155,15 @@ __global__ void GetTopKKernelDistributed(float* scores_in, float* scores_out, in
 }
 
 void LaunchGetDistributedSelectSortTopK(cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size,
-                                        int k) {
+                                        int k, int top_k_shards, 
+                                        int* top_k_distributed_lock, int* distributed_indices_out, float* distributed_scores_out) {
+  const int block_size = 1024;
   dim3 grid(1, 1, 1);
-  dim3 block(1024, 1, 1);
-  GetTopKKernel<1024><<<grid, block, 0, stream>>>(scores_in, scores_out, indices_out, batch_size, vocab_size, k);
+  dim3 block(block_size, 1, top_k_shards);
+  GetTopKKernelDistributedSelectSort<block_size><<<grid, block, 0, stream>>>(scores_in, scores_out, indices_out, vocab_size, k,
+                                                             top_k_distributed_lock,
+                                                             distributed_indices_out,
+                                                             distributed_scores_out);
 }
 
 void RunTopKViaDistributedSelectionSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int k) {
@@ -168,7 +174,11 @@ void RunTopKViaDistributedSelectionSort(TopkData* data, cudaStream_t stream, con
   float* mutable_scores = data->intermediate_scores_2.get();
   size_t buffer_size = vocab_size * sizeof(float);
   CUDA_CHECK(cudaMemcpyAsync(mutable_scores, scores_in, buffer_size, cudaMemcpyDeviceToDevice, stream));
-  LaunchGetDistributedSelectSortTopK(stream, mutable_scores, topk_scores, topk_indices, vocab_size, k);
+  LaunchGetDistributedSelectSortTopK(stream, mutable_scores, topk_scores, topk_indices, vocab_size, k,
+                                     data->top_k_distributed_select_sort_shards,
+                                     data->top_k_distributed_select_sort_lock.get(),
+                                     data->top_k_distributed_select_sort_keys.get(),
+                                     data->top_k_distributed_select_sort_values.get());
   CUDA_CHECK_LAUNCH();
 
   data->topk_scores = topk_scores;

@@ -11,6 +11,7 @@ namespace cuda {
 
 namespace topk_impl_details {
   constexpr int kTopKDistributedSelectSortMaxShards = 32;
+  constexpr int kTopKDistributedSelectSortMaxBatchSize = 1;
   constexpr int kTopKDistributedSelectSortMaxTopK = 64;
   constexpr int kTopKDistributedSelectSortMinVocabSize = 100000;
 }

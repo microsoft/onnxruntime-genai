@@ -6,6 +6,7 @@
 #include "cuda_topk.h"
 #include "cuda_topk_full_sort.cuh"
 #include "cuda_topk_select_sort.cuh"
+#include "cuda_topk_distributed_select_sort.cuh"
 
 namespace Generators {
 namespace cuda {
@@ -32,8 +33,8 @@ TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream) {
   top_k_distributed_select_sort_lock = CudaMallocArray<int>(1);
   cudaMemset(top_k_distributed_select_sort_lock.get(), 0, sizeof(int));
 
-  top_k_distributed_select_sort_keys = CudaMallocArray<int>(top_k_distributed_select_sort_shards * topk_impl_details::kMaxTopK);
-  top_k_distributed_select_sort_values = CudaMallocArray<float>(top_k_distributed_select_sort_shards * topk_impl_details::kMaxTopK);
+  top_k_distributed_select_sort_keys = CudaMallocArray<int>(top_k_distributed_select_sort_shards * topk_impl_details::kTopKDistributedSelectSortMaxTopK);
+  top_k_distributed_select_sort_values = CudaMallocArray<float>(top_k_distributed_select_sort_shards * topk_impl_details::kTopKDistributedSelectSortMaxTopK);
 }
 
 // Kernel to compact strided data into a dense layout.
@@ -60,9 +61,10 @@ void TopkDataCompact::CompactOutput(int batch_size, int vocab_size, cudaStream_t
 void GetTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
   assert(topk_data != nullptr);
 
-  bool enable_distributed_selection_sort = ((batch_size == 1) && (k <= topk_impl_details::kTopKDistributedSelectSortMaxTopK) && 
+  bool enable_distributed_selection_sort = ((batch_size <= topk_impl_details::kTopKDistributedSelectSortMaxBatchSize) && 
+                                            (k <= topk_impl_details::kTopKDistributedSelectSortMaxTopK) && 
                                             (vocab_size >= topk_impl_details::kTopKDistributedSelectSortMinVocabSize) && 
-                                            (data->top_k_distributed_select_sort_shards > 0));
+                                            (topk_data->top_k_distributed_select_sort_shards > 0));
 
   if (enable_distributed_selection_sort) {
       RunTopKViaDistributedSelectionSort(topk_data, stream, scores_in, vocab_size, k);
