@@ -288,38 +288,6 @@ void Test_GreedySearch_Phi3_NvTensorRtRtx(const char* model_path, const char* mo
     
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
   }
-
-  // Test batch size 1 continuous case - will uncomment once NVTRT supports continuous decoding
-  // input_ids_shape = {1, 19};
-  // input_ids = {32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001};
-  // std::vector<int32_t> expected_output_continuous{32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001,  // Input tokens (19)
-  //   15043, 29991, 306, 29915, 29885, 2599};
-
-  // batch_size = static_cast<int>(input_ids_shape[0]);
-  // params->SetSearchOption("batch_size", batch_size);
-
-  // generator = OgaGenerator::Create(*model, *params);
-  // generator->AppendTokens(input_ids);
-
-  // while (!generator->IsDone()) {
-  //   generator->GenerateNextToken();
-  // }
-
-  // // Verify outputs match expected outputs
-  // auto sequence = generator->GetSequence(0);
-  // auto* expected_output_start = &expected_output_continuous[0];
-  // EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
-
-  // generator->RewindTo(3);
-  // std::vector<int32_t> next_ids{32007, 32001};
-  // generator->AppendTokens(next_ids);
-  // while (!generator->IsDone()) {
-  //   generator->GenerateNextToken();
-  // }
-
-  // // Verify outputs match expected outputs
-  // sequence = generator->GetSequence(0);
-  // EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
 }
 
 TEST(ModelTests, GreedySearchPhi3NvTensorRtRtx) {
