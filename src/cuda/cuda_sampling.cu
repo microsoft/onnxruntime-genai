@@ -41,27 +41,7 @@ SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int v
   prefix_sums_adjusted = CudaMallocArray<float>(vocab_batch_size);
   thresholds = CudaMallocArray<float>(batch_size);
   curand_states = CudaMallocArray<curandState>(batch_size);
-<<<<<<< HEAD
-
-  top_k_distributed_lock = CudaMallocArray<int>(1);
-  cudaMemset(top_k_distributed_lock.get(), 0, sizeof(int));
-
-  cudaDeviceProp deviceProp;
-  cudaGetDeviceProperties(&deviceProp, 0); // Get properties for device 0
-  top_k_shards = std::min(top_k_shards, deviceProp.multiProcessorCount);
-
-  top_k_distributed_keys = CudaMallocArray<int>(top_k_shards * 64);  // We support distributed sharding upto top_k 64
-  top_k_distributed_values = CudaMallocArray<float>(top_k_shards * 64); // We support distributed sharding upto top_k 64
-
-  temp_storage_bytes = 0;
-  cub::DeviceSegmentedRadixSort::SortPairsDescending(nullptr, temp_storage_bytes, (float*)nullptr, (float*)nullptr,
-                                                     (int*)nullptr, (int*)nullptr, vocab_size * batch_size, batch_size, (int*)nullptr, (int*)nullptr, 0, sizeof(float) * 8, stream);
-  temp_buffer = CudaMallocArray<float>(temp_storage_bytes / sizeof(float));
-
-  InitCurandStates<<<int(batch_size / 128) + 1, 128, 0, stream>>>(random_seed, curand_states.get(), batch_size);
-=======
   ReInitCurandStates(random_seed, batch_size, stream);
->>>>>>> onnxruntime-genai/main
 }
 
 // A fused kernel that performs all steps of Top-P sampling on a pre-selected set of Top-K candidates.
@@ -224,231 +204,11 @@ __global__ void CorrectPrefixSumKernel(const float* scores, float* prefix_sums, 
     if (threadIdx.x == kBlockSize - 1) {
       chunk_total = scanned_score;
     }
-<<<<<<< HEAD
-  }
-}
-
-// Get top k indices and scores from unsorted input
-struct TopK_2 {
-  float u = -FLT_MAX;
-  int p = -1;
-
-  __device__ __forceinline__ void insert(float elem, int elem_id) {
-    if (elem > u || (elem == u && elem_id < p)) {
-      u = elem;
-      p = elem_id;
-    }
-  }
-
-  __device__ __forceinline__ void init() {
-    u = -FLT_MAX;
-    p = -1;
-  }
-};
-
-__device__ __forceinline__ TopK_2 reduce_topk_op_2(TopK_2 const& a, TopK_2 const& b) {
-  return a.u > b.u ? a : (a.u == b.u && a.p < b.p) ? a
-                                                   : b;
-}
-
-struct TopK_2_Reduce {
-  float u = -FLT_MAX;
-  int p = -1;
-  int p_indirection = -1;
-
-  __device__ __forceinline__ void insert(float elem, int elem_id, int elem_id_indirection) {
-    if (elem > u || (elem == u && elem_id_indirection < p_indirection)) {
-      u = elem;
-      p = elem_id;
-      p_indirection = elem_id_indirection;
-    }
-  }
-
-  __device__ __forceinline__ void init() {
-    u = -FLT_MAX;
-    p = -1;
-    p_indirection = -1;
-  }
-};
-
-__device__ __forceinline__ TopK_2_Reduce reduce_topk_reduce_op_2(TopK_2_Reduce const& a, TopK_2_Reduce const& b) {
-  return a.u > b.u ? a : (a.u == b.u && a.p_indirection < b.p_indirection) ? a : b;
-}
-
-template <int kBlockSize>
-__global__ void GetTopKKernel(int* indices_out, float* scores_in, float* scores_out, int batch_size, int vocab_size, int k, float temperature) {
-  int batch = blockIdx.x;
-  int tid = threadIdx.x;
-  TopK_2 partial;
-
-  float const MAX_T_VAL = FLT_MAX;
-
-  for (int ite = 0; ite < k; ite++) {
-    partial.init();
-    for (auto elemId = tid; elemId < vocab_size; elemId += kBlockSize) {
-      float elem = scores_in[elemId + batch * vocab_size];
-      partial.insert(elem, elemId);
-    }
-    // reduce in thread block
-    typedef cub::BlockReduce<TopK_2, kBlockSize> BlockReduce;
-    __shared__ typename BlockReduce::TempStorage temp_storage;
-    TopK_2 top_k_sequence = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op_2);
-
-    if (tid == 0) {
-      scores_out[ite + batch * k] = top_k_sequence.u / temperature;
-      indices_out[ite + batch * k] = top_k_sequence.p;
-
-      // set the max value to -MAX_T_VAL so that the value doesn't get picked again
-      scores_in[batch * vocab_size + top_k_sequence.p] = -MAX_T_VAL;
-      __threadfence_block();
-    }
-
-=======
->>>>>>> onnxruntime-genai/main
     __syncthreads();
     running_total += chunk_total;
   }
 }
 
-<<<<<<< HEAD
-// Distributed Selection Sort based TopK kernel (multiple TB works along vocab space)
-template <int kBlockSize>
-__global__ void GetTopKKernelDistributed(int* indices_out, float* scores_in, float* scores_out, int batch_size, 
-                                        int vocab_size, int k, float temperature, int top_k_shards, 
-                                        int* top_k_distributed_lock, int* distributed_indices_out, float* distributed_scores_out) {
-  int batch = blockIdx.x;
-  int tid = threadIdx.x;
-  TopK_2 partial;
-
-  float const MAX_T_VAL = FLT_MAX;
-
-  int* distributed_indices_out_curr = distributed_indices_out + blockIdx.z * k;
-  float* distributed_scores_out_curr = distributed_scores_out + blockIdx.z * k;
-
-  int start_i = blockIdx.z * blockDim.x + tid;  
- 
-  for (int ite = 0; ite < k; ite++) {
-    partial.init();
-
-    for (auto elemId = start_i; elemId < vocab_size; elemId += kBlockSize* gridDim.z) {
-      float elem = scores_in[elemId + batch * vocab_size];
-      partial.insert(elem, elemId);
-    }
-    // reduce in thread block
-    typedef cub::BlockReduce<TopK_2, kBlockSize> BlockReduce;
-    __shared__ typename BlockReduce::TempStorage temp_storage;
-    TopK_2 top_k_sequence = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op_2);
-
-    if (tid == 0) {
-      // No temperature scaling here - we will do it after the final reduction
-      distributed_scores_out_curr[ite + batch * k] = top_k_sequence.u;
-
-      distributed_indices_out_curr[ite + batch * k] = top_k_sequence.p;
-
-      // set the max value to -MAX_T_VAL so that the value doesn't get picked again
-      scores_in[batch * vocab_size + top_k_sequence.p] = -MAX_T_VAL;
-      __threadfence_block();
-    }
-
-    __syncthreads();
-  }
-
-  // All TBs flush their data and it should be visible to every other TB
-  __threadfence();   
-  __syncthreads();
-
-  // Signal that each threadblock has done its work using elected thread
-  if (threadIdx.x == 0)
-  {
-    atomicAdd(top_k_distributed_lock, 1);
-  }
-
-  // The reduction threadblock
-  if (blockIdx.z == 0) {
-    // Elected thread spins while waiting for other TBs to complete their work
-    if (threadIdx.x == 0)
-    {
-      int count_of_completed_TBs = 0;
-
-      asm volatile("ld.volatile.global.s32 %0, [%1];" : "=r"(count_of_completed_TBs) : "l"(top_k_distributed_lock));
-      while (count_of_completed_TBs < top_k_shards)
-      {
-          asm volatile("ld.volatile.global.s32 %0, [%1];" : "=r"(count_of_completed_TBs) : "l"(top_k_distributed_lock));
-      }
-
-      // Reset the lock for next kernel call
-      atomicExch(top_k_distributed_lock, 0);
-    }
-
-    // Number of shards is atmost 32 and top_k for this kernel is atmost 64
-    __shared__ float shared_distributed_scores_out[32 * 64];
-    __shared__ float shared_distributed_indices_out[32 * 64];
-
-    // Load distributed results into shared memory for fast access
-    for (int i = threadIdx.x; i < top_k_shards*k; i += blockDim.x) {
-      shared_distributed_scores_out[i] = distributed_scores_out[i];
-      shared_distributed_indices_out[i] = distributed_indices_out[i];
-    }
-
-    __syncthreads();
-
-    // Perform the reduction
-    TopK_2_Reduce reduce_partial; 
-    for (int ite = 0; ite < k; ite++) {
-      reduce_partial.init();
-  
-      for (int i = threadIdx.x; i < top_k_shards*k; i += blockDim.x) {
-        float score = shared_distributed_scores_out[i];
-        int vocab_index = shared_distributed_indices_out[i];
-        reduce_partial.insert(score, i, vocab_index);
-      }
-
-      // reduce in thread block
-      typedef cub::BlockReduce<TopK_2_Reduce, kBlockSize> BlockReduce;
-      __shared__ typename BlockReduce::TempStorage temp_storage;
-      TopK_2_Reduce top_k_sequence_reduced = BlockReduce(temp_storage).Reduce(reduce_partial, reduce_topk_reduce_op_2);
-
-      if (tid == 0) {
-        // Do temperature scaling
-        scores_out[ite + batch * k] = top_k_sequence_reduced.u / temperature;
-        
-        int index = top_k_sequence_reduced.p;
-        int vocab_index = top_k_sequence_reduced.p_indirection;
-
-        indices_out[ite + batch * k] = vocab_index;
-        // set the max value to -MAX_T_VAL so that the value doesn't get picked again
-        shared_distributed_scores_out[index] = -MAX_T_VAL;
-
-        __threadfence_block();
-      }
-
-      __syncthreads();
-    }
-  }
-}
-
-// Gets all top K indices and scores from unsorted input
-void LaunchGetTopKSubset(cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature, SamplingData* data = nullptr) {
-  // Use "distributed" TopK only when:
-  // `batch_size` is small enough && 'k' is small enough && `vocab_size` is large enough.
-  // TODO(hasesh): Tune this and support slightly igher batch sizes. For now, only sampling is supported.
-  bool enable_distributed_selection_sort = ((batch_size == 1) && (k <= 64) && (vocab_size >= 100000) && (data->top_k_shards > 0));
-  if (enable_distributed_selection_sort) {
-    dim3 grid(1, 1, data->top_k_shards);
-
-    // use large block size for better utilization
-    dim3 block(1024, 1, 1);
-    GetTopKKernelDistributed<1024><<<grid, block, 0, stream>>>(indices_out, scores_in, 
-                            scores_out, batch_size, vocab_size, k, temperature, data->top_k_shards, 
-                            data->top_k_distributed_lock.get(), data->top_k_distributed_keys.get(), 
-                            data->top_k_distributed_values.get());
-  } else {
-    dim3 grid(batch_size, 1, 1);
-
-    // use large block size for better utilization
-    dim3 block(1024, 1, 1);
-    GetTopKKernel<1024><<<grid, block, 0, stream>>>(indices_out, scores_in, scores_out, batch_size, vocab_size, k, temperature);
-=======
 __global__ void FilterOnTopPKernel(float* filtered_logits, const float* original_logits, const float* cdf, int k,
                                    float p, float temperature, int stride) {
   const int batch_idx = blockIdx.x;
@@ -456,7 +216,6 @@ __global__ void FilterOnTopPKernel(float* filtered_logits, const float* original
     const float prev_sum = (i == 0) ? 0.0f : cdf[batch_idx * k + i - 1];
     float scaled_logit = original_logits[batch_idx * stride + i] / temperature;
     filtered_logits[batch_idx * k + i] = (prev_sum < p) ? scaled_logit : -FLT_MAX;
->>>>>>> onnxruntime-genai/main
   }
 }
 
@@ -540,34 +299,8 @@ void LaunchFusedSampleKernel(SamplingData* data, cudaStream_t stream, const floa
       next_token_out, scores, indices, k, p, temperature, stride, data->curand_states.get());
 }
 
-<<<<<<< HEAD
-void GetTopKSubset(SamplingData* data, cudaStream_t stream, float* scores_in, float* scores_out, int* indices_out, int vocab_size, int batch_size, int k, float temperature) {
-#define GetTopK                                  \
-  LaunchGetTopKSubset(stream,                    \
-                      scores_in,                 \
-                      data->scores_buffer.get(), \
-                      indices_out,               \
-                      vocab_size,                \
-                      batch_size,                \
-                      k,                         \
-                      temperature,               \
-                      data);
-
-  if (k <= 64) {
-    GetTopK;
-  } else {
-    // In this case, we need vocab_size as stride for indices_out.
-    LaunchSort(data, stream, scores_in, data->scores_buffer.get(), indices_out, vocab_size, batch_size);
-  }
-  DispatchBlockwiseSoftmaxForward<false>(stream, scores_out, const_cast<const float*>(data->scores_buffer.get()), k, k <= 64 ? k : vocab_size, k, batch_size);
-}
-
-// Kernel launcher for combined (or separate) top k and top p sampling; where k is the max number of tokens to sample and p is the probability threshold
-void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out, float* scores_in, int vocab_size, int batch_size, int k, float p, float temperature) {
-=======
 void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out, const float* scores_in,
                int vocab_size, int batch_size, int k, float p, float temperature) {
->>>>>>> onnxruntime-genai/main
   if (k <= 0 || k > vocab_size) {
     k = vocab_size;
   }
