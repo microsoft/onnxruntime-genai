@@ -155,7 +155,7 @@ TEST(TopKTests, ParityTests) {
 
   std::vector<int> batch_sizes = {1, 4, 32};
   std::vector<int> vocab_sizes = {200, 2000, 20000, 200000};
-  std::vector<int> ks = {1, 16, 64, 100, 256, 512};
+  std::vector<int> ks = {1, 16, 32, 50, 64, 100, 128, 256};
 
   for (int batch_size : batch_sizes) {
     for (int vocab_size : vocab_sizes) {

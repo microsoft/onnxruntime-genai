@@ -70,37 +70,21 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
     best_algo = TopkAlgo::SELECTION;
   }
 
-  // Candidate: Hybrid Sort
-  if (k <= kHybridSortMaxK) {
-    float hybrid_latency = TimeKernel(stream, [&]() {
-      hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+  // Candidate: LLM Sort
+  bool use_llm_sort = llm_sort::IsSupported(batch_size, vocab_size, k);
+  if (use_llm_sort) {
+    float llm_latency = TimeKernel(stream, [&]() {
+      llm_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
-    if (hybrid_latency < min_latency) {
-      min_latency = hybrid_latency;
-      best_algo = TopkAlgo::HYBRID;
-    }
-  } else {
-    float full_sort_latency = TimeKernel(stream, [&]() {
-      full_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-    });
-    if (full_sort_latency < min_latency) {
-      min_latency = full_sort_latency;
-      best_algo = TopkAlgo::FULL;
-    }
-
-    if (batch_size <= kRadixSortBenchmarkMaxBatchSize) {
-      float radix_sort_latency = TimeKernel(stream, [&]() {
-        radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-      });
-      if (radix_sort_latency < min_latency) {
-        min_latency = radix_sort_latency;
-        best_algo = TopkAlgo::RADIX;
-      }
+    if (llm_latency < min_latency) {
+      min_latency = llm_latency;
+      best_algo = TopkAlgo::LLM;
     }
   }
 
   // Candidate: Flash Sort (Cooperative Kernel)
-  if (flash_sort::IsSupported(batch_size, vocab_size, k)) {
+  bool use_flash_sort = flash_sort::IsSupported(batch_size, vocab_size, k);
+  if (use_flash_sort) {
     float flash_latency = TimeKernel(stream, [&]() {
       flash_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
@@ -110,13 +94,34 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
     }
   }
 
-  if (llm_sort::IsSupported(batch_size, vocab_size, k)) {
-    float llm_latency = TimeKernel(stream, [&]() {
-      llm_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-    });
-    if (llm_latency < min_latency) {
-      min_latency = llm_latency;
-      best_algo = TopkAlgo::LLM;
+  if (!use_flash_sort && !use_llm_sort) {
+      // Candidate: Hybrid Sort
+      if (k <= kHybridSortMaxK) {
+      float hybrid_latency = TimeKernel(stream, [&]() {
+        hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      });
+      if (hybrid_latency < min_latency) {
+        min_latency = hybrid_latency;
+        best_algo = TopkAlgo::HYBRID;
+      }
+    } else { // No fast algorithms for this k, benchmark the fallbacks.
+      float full_sort_latency = TimeKernel(stream, [&]() {
+        full_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      });
+      if (full_sort_latency < min_latency) {
+        min_latency = full_sort_latency;
+        best_algo = TopkAlgo::FULL;
+      }
+
+      if (batch_size <= kRadixSortBenchmarkMaxBatchSize) {
+        float radix_sort_latency = TimeKernel(stream, [&]() {
+          radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+        });
+        if (radix_sort_latency < min_latency) {
+          min_latency = radix_sort_latency;
+          best_algo = TopkAlgo::RADIX;
+        }
+      }
     }
   }
 

@@ -76,7 +76,7 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
         thread_values[i] = global_idx;
       } else {
         thread_keys[i] = -FLT_MAX;
-        thread_values[i] = -1;
+        thread_values[i] = INT_MAX;
       }
     }
     BlockRadixSort(smem.stage1_storage).SortDescendingBlockedToStriped(thread_keys, thread_values);
@@ -117,11 +117,11 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
           smem.stage2_storage.indices[i] = indices_in_batch[local_offset];
         } else {
           smem.stage2_storage.scores[i] = -FLT_MAX;
-          smem.stage2_storage.indices[i] = -1;
+          smem.stage2_storage.indices[i] = INT_MAX;
         }
       }
       __syncthreads();
-      bitonic_sort::SharedMemBitonicSort_SoA<kBlockSize, kSortSize>(smem.stage2_storage.scores, smem.stage2_storage.indices);
+      bitonic_sort::SharedMemBitonicSort<kBlockSize, kSortSize>(smem.stage2_storage.scores, smem.stage2_storage.indices);
 
       if (threadIdx.x < K_PADDED) {
         size_t out_offset = static_cast<size_t>(partition_idx) * K_PADDED + threadIdx.x;
@@ -138,6 +138,8 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
 
 // --- Unified Host-Side Launcher ---
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
+  assert(IsSupported(batch_size, vocab_size, k)); // caller shall check IsSupported before calling this function.
+
   constexpr int kBlockSize = 256;
   const int partition_size = data->flash_sort_partition_size;
   const int num_partitions = CeilDiv(vocab_size, partition_size);
@@ -162,7 +164,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
     data->topk_indices = data->intermediate_indices_1;
   }
 
-  int k_padded_val;
+  int k_padded_val = kFlashSortMaxK;
   if (k <= 4)
     k_padded_val = 4;
   else if (k <= 8)
@@ -173,8 +175,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
     k_padded_val = 32;
   else if (k <= 64)
     k_padded_val = 64;
-  else
-    k_padded_val = kFlashSortMaxK;
+
   data->topk_stride = k_padded_val;
 
   void* kernel_args[6];
@@ -215,7 +216,9 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   } else if (k <= 64) {
     launch_flash_sort(std::integral_constant<int, 64>());
   } else {
-    launch_flash_sort(std::integral_constant<int, kFlashSortMaxK>());
+    if constexpr (kFlashSortMaxK > 64) {
+      launch_flash_sort(std::integral_constant<int, kFlashSortMaxK>());
+    }
   }
 
   CUDA_CHECK_LAUNCH();
@@ -278,7 +281,9 @@ bool IsSupported(int batch_size, int vocab_size, int k) {
   } else if (k <= 64) {
     kernel = get_kernel(std::integral_constant<int, 64>());
   } else {
-    kernel = get_kernel(std::integral_constant<int, kFlashSortMaxK>());
+    if constexpr (kFlashSortMaxK > 64) {
+      kernel = get_kernel(std::integral_constant<int, kFlashSortMaxK>());
+    }
   }
 
   int device;
