@@ -158,8 +158,8 @@ void LaunchGetDistributedSelectSortTopK(cudaStream_t stream, float* scores_in, f
                                         int k, int top_k_shards, 
                                         int* top_k_distributed_lock, int* distributed_indices_out, float* distributed_scores_out) {
   const int block_size = 1024;
-  dim3 grid(1, 1, 1);
-  dim3 block(block_size, 1, top_k_shards);
+  dim3 grid(1, 1, top_k_shards);
+  dim3 block(block_size, 1, 1);
   GetTopKKernelDistributedSelectSort<block_size><<<grid, block, 0, stream>>>(scores_in, scores_out, indices_out, vocab_size, k,
                                                              top_k_distributed_lock,
                                                              distributed_indices_out,
