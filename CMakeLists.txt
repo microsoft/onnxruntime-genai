@@ -14,22 +14,6 @@ project(Generators LANGUAGES C CXX)
 # All Options should be defined in cmake/options.cmake This must be included before any other cmake file is included
 include(cmake/options.cmake)
 
-# Apply custom compiler flags for TRT_RTX builds to match CUDA preset
-if(USE_TRT_RTX AND WIN32)
-  # Set C flags
-  set(CMAKE_C_FLAGS "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000" CACHE STRING "" FORCE)
-  set(CMAKE_C_FLAGS_RELEASE "/O2 /Ob2 /DNDEBUG" CACHE STRING "" FORCE)
-
-  # Set CXX flags
-  set(CMAKE_CXX_FLAGS "/EHsc /Qspectre /MP /guard:cf /DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000" CACHE STRING "" FORCE)
-  set(CMAKE_CXX_FLAGS_RELEASE "/O2 /Ob2 /DNDEBUG" CACHE STRING "" FORCE)
-
-  # Set CUDA flags
-  if(CMAKE_CUDA_COMPILER)
-    set(CMAKE_CUDA_FLAGS_INIT "/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=\" /MP /guard:cf /Qspectre \" -allow-unsupported-compiler" CACHE STRING "" FORCE)
-  endif()
-endif()
-
 if("${CMAKE_C_COMPILER_ID}" STREQUAL "GNU" AND CMAKE_C_COMPILER_VERSION VERSION_LESS 11)
   message(FATAL_ERROR  "GCC version must be greater than or equal to 11")
 endif()
