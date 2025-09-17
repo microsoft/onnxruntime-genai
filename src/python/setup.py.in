@@ -37,13 +37,16 @@ def _onnxruntime_dependency() -> str:
             dependency = "onnxruntime-qnn"
     elif package_name == "onnxruntime-genai-cuda":
         dependency = "onnxruntime-gpu"
+    elif package_name == "onnxruntime-genai-trt-rtx":
+        dependency = "onnxruntime-trt-rtx"
+        ort_version = os.environ.get('ONNXRUNTIME_VERSION', '1.23.0')
     elif package_name == "onnxruntime-genai-directml":
         dependency = "onnxruntime-directml"
     elif package_name == "onnxruntime-genai-rocm":
         dependency = "onnxruntime-rocm"
     else:
         raise ValueError(f'Unable to determine the onnxruntime dependency for {package_name}.')
-
+    
     return dependency if not ort_version else dependency + ">=" + ort_version
 
 def _get_install_requires():

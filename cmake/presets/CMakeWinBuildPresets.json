@@ -90,6 +90,16 @@
       "configurePreset": "windows_x64_winml_relwithdebinfo"
     },
     {
+      "name": "windows_x64_trt_rtx_release",
+      "configuration": "Release",
+      "configurePreset": "windows_x64_trt_rtx_release"
+    },
+    {
+      "name": "windows_x64_trt_rtx_debug",
+      "configuration": "Debug",
+      "configurePreset": "windows_x64_trt_rtx_debug"
+    },
+    {
       "name": "windows_x64_directml_release_asan",
       "configuration": "Release",
       "configurePreset": "windows_x64_directml_release_asan"
