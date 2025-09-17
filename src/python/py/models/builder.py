@@ -59,6 +59,7 @@ class Model:
         self.cache_dir = cache_dir
         self.filename = extra_options.get("filename", "model.onnx")
         self.hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
+        self.hf_remote = extra_options.get("hf_remote", True)
         self.extra_options = extra_options
 
         # States for building the model
@@ -383,10 +384,10 @@ class Model:
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
-        config = AutoConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+        config = AutoConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
         try:
             # Override search attributes in config based on values in generation_config.json
-            gen_config = GenerationConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+            gen_config = GenerationConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
             defaults = {
                 "bos_token_id": None,
                 "do_sample": False,
@@ -473,7 +474,7 @@ class Model:
             json.dump(genai_config, f, indent=4)
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
@@ -2713,7 +2714,7 @@ class Model:
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
-            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
 
         if "adapter_path" in self.extra_options:
             from peft import PeftModel
@@ -4196,7 +4197,7 @@ def check_extra_options(kv_pairs):
     """
     bools = [
         "int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph",
-        "use_8bits_moe", "use_qdq", "use_webgpu_fp32", "use_cuda_bf16", "int4_tied_embeddings"
+        "use_8bits_moe", "use_qdq", "use_webgpu_fp32", "use_cuda_bf16", "int4_tied_embeddings", "hf_remote",
     ]
     for key in bools:
         if key in kv_pairs:
@@ -4297,11 +4298,12 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
     hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
+    hf_remote = extra_options.get("hf_remote", True)
 
-    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=True, **extra_kwargs)
+    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     if "adapter_path" in extra_options:
         from peft import PeftConfig
-        peft_config = PeftConfig.from_pretrained(extra_options["adapter_path"], token=hf_token, trust_remote_code=True, **extra_kwargs)
+        peft_config = PeftConfig.from_pretrained(extra_options["adapter_path"], token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
         config.update(peft_config.__dict__)
 
     # Set input/output precision of ONNX model
@@ -4497,6 +4499,8 @@ def get_args():
                     If false, authentication with Hugging Face will be disabled.
                     If token, you can provide a custom authentication token that differs from the one stored in your environment.
                     If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
+                hf_remote = Use this to manage trusting remote code in Hugging Face repos.
+                    Default behavior is set to true. If false, remote code stored in Hugging Face repos will not be used.
                 exclude_embeds = Remove embedding layer from your ONNX model.
                     Use this option when you want to remove the embedding layer from within your ONNX model.
                     Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
