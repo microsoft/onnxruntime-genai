@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#pragma once
+
 #include "cub/cub.cuh"
 #include "cub/util_type.cuh"
 #include "cub/util_allocator.cuh"

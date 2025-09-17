@@ -9,6 +9,7 @@
 #include <type_traits>  // For std::integral_constant
 #include "cuda_topk.h"
 #include "cuda_topk_bitonic_sort_helper.cuh"
+#include "cuda_topk_common.cuh"
 
 // Bitonic sort currently requires shared memory scores has size of power of 2.
 // So we disable K=50 optimization until we pad the scores to power of 2.
@@ -75,10 +76,8 @@ __global__ void LlmSortKernel(const float* __restrict__ input_scores,
   const int batch_idx = blockIdx.y;
   const int num_partitions = gridDim.x;
 
-  static_assert(kPartitionSize % kBlockSize == 0, "kPartitionSize must be a multiple of kBlockSize");
-  constexpr int ItemsPerThread = kPartitionSize / kBlockSize;
-
-  using BlockRadixSort = cub::BlockRadixSort<float, kBlockSize, ItemsPerThread, int>;
+  using CompositeKey = uint64_t;
+  using BlockRadixSort = cub::BlockRadixSort<CompositeKey, kBlockSize, kPartitionSize / kBlockSize>;
 
   // --- Shared Memory Union ---
   constexpr int kSortSize1 = K_PADDED * Factor1;
@@ -103,32 +102,9 @@ __global__ void LlmSortKernel(const float* __restrict__ input_scores,
   __shared__ SharedStorage smem;
 
   // --- Stage 1: Find Top-K within each partition ---
-  {
-    const float* batch_input_scores = input_scores + static_cast<size_t>(batch_idx) * vocab_size;
-    const size_t batch_intermediate_offset_stage1 = static_cast<size_t>(batch_idx) * num_partitions * K_PADDED;
-    int* batch_intermediate_indices_1 = intermediate_indices_1 + batch_intermediate_offset_stage1;
-    float* batch_intermediate_scores_1 = intermediate_scores_1 + batch_intermediate_offset_stage1;
+  topk_common::FindPartitionTopK_Stable<kBlockSize, kPartitionSize, K_PADDED>(
+      input_scores, intermediate_indices_1, intermediate_scores_1, vocab_size, num_partitions, smem.stage1_storage);
 
-    const int partition_start = partition_idx * kPartitionSize;
-    float thread_keys[ItemsPerThread];
-    int thread_values[ItemsPerThread];
-    for (int i = 0; i < ItemsPerThread; ++i) {
-      int global_idx = partition_start + threadIdx.x + i * kBlockSize;
-      if (global_idx < vocab_size) {
-        thread_keys[i] = batch_input_scores[global_idx];
-        thread_values[i] = global_idx;
-      } else {
-        thread_keys[i] = -FLT_MAX;
-        thread_values[i] = INT_MAX;
-      }
-    }
-    BlockRadixSort(smem.stage1_storage).SortDescendingBlockedToStriped(thread_keys, thread_values);
-    if (threadIdx.x < K_PADDED) {
-      size_t offset = static_cast<size_t>(partition_idx) * K_PADDED + threadIdx.x;
-      batch_intermediate_scores_1[offset] = thread_keys[0];
-      batch_intermediate_indices_1[offset] = thread_values[0];
-    }
-  }
   grid.sync();
 
   // --- Stage 2, Step 1: First Reduction ---
@@ -269,7 +245,7 @@ inline int EstimateBestPartitionSize(int vocab_size) {
 
 // Heuristic to select an optimal block size based on the padded k value.
 // Smaller k values benefit from smaller block sizes, which can improve occupancy.
-template<int K_PADDED>
+template <int K_PADDED>
 constexpr int GetOptimalBlockSize() {
   return (K_PADDED <= 16) ? 128 : 256;
 }
@@ -342,26 +318,10 @@ void LaunchLlmSortKernel(TopkData* data, cudaStream_t stream, const float* score
 
 // --- Unified Host-Side Launcher ---
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
-  assert(IsSupported(batch_size, vocab_size, k)); // caller shall check IsSupported before calling this function.
+  assert(IsSupported(batch_size, vocab_size, k));  // caller shall check IsSupported before calling this function.
 
   const int partition_size = data->llm_sort_partition_size;
   const int num_partitions = CeilDiv(vocab_size, partition_size);
-
-  const auto factors = GetReductionFactors(num_partitions, k);
-  const int num_reduction_steps = factors.num_reduction_steps;
-
-  if (num_reduction_steps % 2 == 1) {
-    data->topk_scores = data->intermediate_scores_2;
-    data->topk_indices = data->intermediate_indices_2;
-  } else {
-    data->topk_scores = data->intermediate_scores_1;
-    data->topk_indices = data->intermediate_indices_1;
-  }
-
-  int num_partitions_out = num_partitions;
-  if (num_reduction_steps > 0) num_partitions_out = CeilDiv(num_partitions, factors.factor1);
-  if (num_reduction_steps > 1) num_partitions_out = CeilDiv(num_partitions_out, factors.factor2);
-  if (num_reduction_steps > 2) num_partitions_out = CeilDiv(num_partitions_out, factors.factor3);
 
   // This kernel could support up to K=256 in theory, but in practice we limit it to reduce build time.
   static_assert(kLlmSortMaxK == 64 || kLlmSortMaxK == 128);
@@ -376,8 +336,6 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
     k_padded_val = 32;
   else if (k <= 64)
     k_padded_val = 64;
-
-  data->topk_stride = k_padded_val * num_partitions_out;
 
   // Dispatch to the correct templated launch helper based on k_padded_val
   if (k_padded_val == 4)
@@ -394,6 +352,23 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
     LaunchLlmSortKernel<kLlmSortMaxK>(data, stream, scores_in, vocab_size, batch_size, k);
 
   CUDA_CHECK_LAUNCH();
+
+  const auto factors = GetReductionFactors(num_partitions, k);
+  const int num_reduction_steps = factors.num_reduction_steps;
+
+  if (num_reduction_steps % 2 == 1) {
+    data->topk_scores = data->intermediate_scores_2;
+    data->topk_indices = data->intermediate_indices_2;
+  } else {
+    data->topk_scores = data->intermediate_scores_1;
+    data->topk_indices = data->intermediate_indices_1;
+  }
+
+  int num_partitions_out = num_partitions;
+  if (num_reduction_steps > 0) num_partitions_out = CeilDiv(num_partitions, factors.factor1);
+  if (num_reduction_steps > 1) num_partitions_out = CeilDiv(num_partitions_out, factors.factor2);
+  if (num_reduction_steps > 2) num_partitions_out = CeilDiv(num_partitions_out, factors.factor3);
+  data->topk_stride = k_padded_val * num_partitions_out;
 }
 
 template <int K_PADDED, int Factor1, int Factor2, int Factor3>
@@ -493,7 +468,7 @@ bool IsSupported(int batch_size, int vocab_size, int k) {
   if constexpr (kLlmSortMaxK > 64) {
     return CheckLlmSortSupport<kLlmSortMaxK>(batch_size, vocab_size, k, partition_size, num_partitions);
   } else {
-    return false; // Should be unreachable
+    return false;  // Should be unreachable
   }
 }
 

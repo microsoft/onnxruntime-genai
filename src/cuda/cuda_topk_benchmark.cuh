@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <array>
+#include <iostream>
 
 #include "cuda_topk.h"
 #include "cuda_topk_benchmark_cache.h"
@@ -43,6 +44,40 @@ static float TimeKernel(cudaStream_t stream, std::function<void()> kernel_func) 
   return ms / total_runs;
 }
 
+// Added helper to convert TopkAlgo to its string representation for printing.
+static const char* TopkAlgoToString(TopkAlgo algo) {
+  switch (algo) {
+    case TopkAlgo::SELECTION:
+      return "Selection Sort";
+    case TopkAlgo::HYBRID:
+      return "Hybrid Sort";
+    case TopkAlgo::FLASH:
+      return "Flash Sort";
+    case TopkAlgo::LLM:
+      return "LLM Sort";
+    case TopkAlgo::RADIX:
+      return "Radix Sort";
+    case TopkAlgo::FULL:
+      return "Full Sort";
+    default:
+      return "Unknown";
+  }
+}
+
+// Helper macro to benchmark a kernel, update the best algorithm, and handle exceptions.
+#define BENCHMARK_KERNEL(algo_enum, kernel_lambda)                                      \
+  try {                                                                                 \
+    float latency = TimeKernel(stream, kernel_lambda);                                  \
+    if (latency < min_latency) {                                                        \
+      min_latency = latency;                                                            \
+      best_algo = algo_enum;                                                            \
+    }                                                                                   \
+  } catch (const Generators::CudaError& e) {                                            \
+    std::cerr << "Benchmarking failed for " << TopkAlgoToString(algo_enum)              \
+              << " kernel with k=" << k << ", batch_size=" << batch_size                \
+              << ", vocab_size=" << vocab_size << ". Error: " << e.what() << std::endl; \
+  }
+
 // Performs online benchmarking for small k to select the best Top-K algorithm.
 // It times several candidate algorithms and picks the fastest one. The result
 // is cached for subsequent calls with the same k.
@@ -63,64 +98,42 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
 
   // Candidate: Selection Sort
   if (k <= kSelectionSortBenchmarkMaxK) {
-    float selection_latency = TimeKernel(stream, [&]() {
+    BENCHMARK_KERNEL(TopkAlgo::SELECTION, [&]() {
       selection_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
-    min_latency = selection_latency;
-    best_algo = TopkAlgo::SELECTION;
   }
 
   // Candidate: LLM Sort
   bool use_llm_sort = llm_sort::IsSupported(batch_size, vocab_size, k);
   if (use_llm_sort) {
-    float llm_latency = TimeKernel(stream, [&]() {
+    BENCHMARK_KERNEL(TopkAlgo::LLM, [&]() {
       llm_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
-    if (llm_latency < min_latency) {
-      min_latency = llm_latency;
-      best_algo = TopkAlgo::LLM;
-    }
   }
 
   // Candidate: Flash Sort (Cooperative Kernel)
   bool use_flash_sort = flash_sort::IsSupported(batch_size, vocab_size, k);
   if (use_flash_sort) {
-    float flash_latency = TimeKernel(stream, [&]() {
+    BENCHMARK_KERNEL(TopkAlgo::FLASH, [&]() {
       flash_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
-    if (flash_latency < min_latency) {
-      min_latency = flash_latency;
-      best_algo = TopkAlgo::FLASH;
-    }
   }
 
   if (!use_flash_sort && !use_llm_sort) {
-      // Candidate: Hybrid Sort
-      if (k <= kHybridSortMaxK) {
-      float hybrid_latency = TimeKernel(stream, [&]() {
+    // Candidate: Hybrid Sort
+    if (k <= kHybridSortMaxK) {
+      BENCHMARK_KERNEL(TopkAlgo::HYBRID, [&]() {
         hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       });
-      if (hybrid_latency < min_latency) {
-        min_latency = hybrid_latency;
-        best_algo = TopkAlgo::HYBRID;
-      }
-    } else { // No fast algorithms for this k, benchmark the fallbacks.
-      float full_sort_latency = TimeKernel(stream, [&]() {
+    } else {  // No fast algorithms for this k, benchmark the fallbacks.
+      BENCHMARK_KERNEL(TopkAlgo::FULL, [&]() {
         full_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       });
-      if (full_sort_latency < min_latency) {
-        min_latency = full_sort_latency;
-        best_algo = TopkAlgo::FULL;
-      }
 
       if (batch_size <= kRadixSortBenchmarkMaxBatchSize) {
-        float radix_sort_latency = TimeKernel(stream, [&]() {
+        BENCHMARK_KERNEL(TopkAlgo::RADIX, [&]() {
           radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
         });
-        if (radix_sort_latency < min_latency) {
-          min_latency = radix_sort_latency;
-          best_algo = TopkAlgo::RADIX;
-        }
       }
     }
   }

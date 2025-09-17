@@ -20,7 +20,7 @@ __host__ __device__ inline size_t AlignUp(size_t size, size_t alignment) {
 constexpr int kGpuBufferAlignment = 256;
 constexpr int kHybridSortMaxK = 256;         // The maximum k (up to 256) allowed for hybrid sort. Must be power of 2.
 constexpr int kFlashSortMaxK = 128;          // The maximum k (up to 256) allowed for flash sort. Must be power of 2.
-constexpr int kLlmSortMaxK = 128;            // The maximum k (up to 256) allowed for LLM sort. Must be power of 2.
+constexpr int kLlmSortMaxK = 64;             // The maximum k (up to 256) allowed for LLM sort. Must be power of 2.
 constexpr int kMaxBenchmarkLocalCache = 64;  // The maximum local cache of online benchmarking results.
 
 // Enum for the different Top-K algorithms used in online benchmarking.
