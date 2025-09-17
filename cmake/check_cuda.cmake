@@ -1,11 +1,16 @@
 # Checking if CUDA is supported
 include(CheckLanguage)
 
-if(USE_CUDA)
+if(USE_CUDA OR USE_TRT_RTX)
   # Temporary add -allow-unsupported-compiler
   # Do this before enable_cuda
   if(WIN32 AND NOT CMAKE_CUDA_FLAGS_INIT)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -allow-unsupported-compiler")
+  endif()
+
+  # For TRT_RTX, apply the CUDA flags from preset
+  if(USE_TRT_RTX AND WIN32 AND CMAKE_CUDA_FLAGS_INIT)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS_INIT}")
   endif()
 
   enable_language(CUDA)
@@ -30,7 +35,7 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_definitions(_DEBUG=1)
 endif()
 
-if(USE_CUDA AND CMAKE_CUDA_COMPILER)
+if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   # Don't let cmake set a default value for CMAKE_CUDA_ARCHITECTURES
   # cmake_policy(SET CMP0104 OLD)
   # enable_language(CUDA)

@@ -290,6 +290,48 @@ OgaResult* OGA_API_CALL OgaConfigRemoveModelData(OgaConfig* config, const char* 
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDeviceType(OgaConfig* config, const char* provider, const char* hardware_device_type) {
+  OGA_TRY
+  Generators::SetDecoderProviderOptionsHardwareDeviceType(*config, provider, hardware_device_type);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDeviceId(OgaConfig* config, const char* provider, uint32_t hardware_device_id) {
+  OGA_TRY
+  Generators::SetDecoderProviderOptionsHardwareDeviceId(*config, provider, hardware_device_id);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareVendorId(OgaConfig* config, const char* provider, uint32_t hardware_vendor_id) {
+  OGA_TRY
+  Generators::SetDecoderProviderOptionsHardwareVendorId(*config, provider, hardware_vendor_id);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareDeviceType(OgaConfig* config, const char* provider) {
+  OGA_TRY
+  Generators::ClearDecoderProviderOptionsHardwareDeviceType(*config, provider);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareDeviceId(OgaConfig* config, const char* provider) {
+  OGA_TRY
+  Generators::ClearDecoderProviderOptionsHardwareDeviceId(*config, provider);
+  return nullptr;
+  OGA_CATCH
+}
+
+OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareVendorId(OgaConfig* config, const char* provider) {
+  OGA_TRY
+  Generators::ClearDecoderProviderOptionsHardwareVendorId(*config, provider);
+  return nullptr;
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaCreateModelFromConfig(const OgaConfig* config, OgaModel** out) {
   OGA_TRY
   auto config_copy = std::make_unique<Generators::Config>(*config);

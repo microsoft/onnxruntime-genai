@@ -27,7 +27,7 @@ std::string_view NormalizeProviderName(std::string_view name) {
   } else if (lower_name == "vitisai") {
     return "VitisAI";
   } else if (lower_name == "nvtensorrtrtx") {
-    return "NvTensorRTRTX";
+    return "NvTensorRtRtx";
   }
   return name;  // Return name unchanged
 }
@@ -39,6 +39,21 @@ ONNXTensorElementDataType TranslateTensorType(std::string_view value) {
     return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
   }
   throw std::runtime_error("Invalid tensor type: " + std::string(value));
+}
+
+OrtHardwareDeviceType ParseHardwareDeviceType(std::string_view value) {
+  std::string lower_value(value);
+  std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(),
+                 [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+  if (lower_value == "cpu") {
+    return OrtHardwareDeviceType_CPU;
+  } else if (lower_value == "gpu") {
+    return OrtHardwareDeviceType_GPU;
+  } else if (lower_value == "npu") {
+    return OrtHardwareDeviceType_NPU;
+  } else {
+    throw std::runtime_error("Unsupported hardware device type: " + std::string(value));
+  }
 }
 
 struct NamedStrings_Element : JSON::Element {
@@ -63,26 +78,66 @@ struct Int_Array_Element : JSON::Element {
   std::vector<int>& v_;
 };
 
+struct DeviceFilteringOptions_Element : JSON::Element {
+  explicit DeviceFilteringOptions_Element(Config::DeviceFilteringOptions& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "hardware_device_type") {
+      v_.hardware_device_type = ParseHardwareDeviceType(JSON::Get<std::string_view>(value));
+    } else if (name == "hardware_device_id") {
+      v_.hardware_device_id = static_cast<uint32_t>(JSON::Get<double>(value));
+    } else if (name == "hardware_vendor_id") {
+      v_.hardware_vendor_id = static_cast<uint32_t>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::DeviceFilteringOptions& v_;
+};
+
+struct ProviderOptions_Element : JSON::Element {
+  explicit ProviderOptions_Element(Config::ProviderOptions& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.options.emplace_back(name, JSON::Get<std::string_view>(value));
+  }
+
+  JSON::Element& OnObject(std::string_view name) override {
+    if (name == "device_filtering_options") {
+      v_.device_filtering_options = Config::DeviceFilteringOptions{};
+      device_filtering_options_element_ = std::make_unique<DeviceFilteringOptions_Element>(*v_.device_filtering_options);
+      return *device_filtering_options_element_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::ProviderOptions& v_;
+  std::unique_ptr<DeviceFilteringOptions_Element> device_filtering_options_element_;
+};
+
 struct ProviderOptionsObject_Element : JSON::Element {
   explicit ProviderOptionsObject_Element(std::vector<Config::ProviderOptions>& v) : v_{v} {}
 
   JSON::Element& OnObject(std::string_view name) override {
     for (auto& v : v_) {
       if (v.name == name) {
-        options_element_ = std::make_unique<NamedStrings_Element>(v.options);
+        options_element_ = std::make_unique<ProviderOptions_Element>(v);
         return *options_element_;
       }
     }
 
     auto& options = v_.emplace_back();
     options.name = name;
-    options_element_ = std::make_unique<NamedStrings_Element>(options.options);
+    options_element_ = std::make_unique<ProviderOptions_Element>(options);
     return *options_element_;
   }
 
  private:
   std::vector<Config::ProviderOptions>& v_;
-  std::unique_ptr<NamedStrings_Element> options_element_;
+  std::unique_ptr<ProviderOptions_Element> options_element_;
 };
 
 struct ProviderOptionsArray_Element : JSON::Element {
@@ -717,12 +772,6 @@ struct Model_Element : JSON::Element {
       v_.decoder_start_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "sep_token_id") {
       v_.sep_token_id = static_cast<int>(JSON::Get<double>(value));
-    } else if (name == "hardware_device_type") {
-      v_.hardware_device_type = JSON::Get<std::string_view>(value);
-    } else if (name == "hardware_device_id") {
-      v_.hardware_device_id = static_cast<uint32_t>(JSON::Get<double>(value));
-    } else if (name == "hardware_vendor_id") {
-      v_.hardware_vendor_id = static_cast<uint32_t>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -918,6 +967,69 @@ bool IsMultiProfileEnabled(const Config::SessionOptions& session_options) {
     }
   }
   return false;
+}
+
+void SetDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name, std::string_view hardware_device_type) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
+  for (auto& provider_option : config.model.decoder.session_options.provider_options) {
+    if (provider_option.name == normalized_provider) {
+      if (!provider_option.device_filtering_options) {
+        provider_option.device_filtering_options = Config::DeviceFilteringOptions{};
+      }
+      provider_option.device_filtering_options->hardware_device_type = ParseHardwareDeviceType(hardware_device_type);
+    }
+  }
+}
+
+void SetDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name, uint32_t hardware_device_id) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
+  for (auto& provider_option : config.model.decoder.session_options.provider_options) {
+    if (provider_option.name == normalized_provider) {
+      if (!provider_option.device_filtering_options) {
+        provider_option.device_filtering_options = Config::DeviceFilteringOptions{};
+      }
+      provider_option.device_filtering_options->hardware_device_id = hardware_device_id;
+    }
+  }
+}
+
+void SetDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view provider_name, uint32_t hardware_vendor_id) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
+  for (auto& provider_option : config.model.decoder.session_options.provider_options) {
+    if (provider_option.name == normalized_provider) {
+      if (!provider_option.device_filtering_options) {
+        provider_option.device_filtering_options = Config::DeviceFilteringOptions{};
+      }
+      provider_option.device_filtering_options->hardware_vendor_id = hardware_vendor_id;
+    }
+  }
+}
+
+void ClearDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
+  for (auto& provider_option : config.model.decoder.session_options.provider_options) {
+    if (provider_option.name == normalized_provider && provider_option.device_filtering_options) {
+      provider_option.device_filtering_options->hardware_device_type = std::nullopt;
+    }
+  }
+}
+
+void ClearDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
+  for (auto& provider_option : config.model.decoder.session_options.provider_options) {
+    if (provider_option.name == normalized_provider && provider_option.device_filtering_options) {
+      provider_option.device_filtering_options->hardware_device_id = std::nullopt;
+    }
+  }
+}
+
+void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view provider_name) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
+  for (auto& provider_option : config.model.decoder.session_options.provider_options) {
+    if (provider_option.name == normalized_provider && provider_option.device_filtering_options) {
+      provider_option.device_filtering_options->hardware_vendor_id = std::nullopt;
+    }
+  }
 }
 
 struct Root_Element : JSON::Element {

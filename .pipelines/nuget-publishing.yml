@@ -56,7 +56,7 @@ parameters:
   - name: enable_winml
     displayName: 'Whether Windows WinML package is built.'
     type: boolean
-    default: false
+    default: true
 
   - name: ort_version
     displayName: 'OnnxRuntime version'
@@ -66,7 +66,7 @@ parameters:
   - name: ort_winml_version
     displayName: 'Microsoft.WindowsAppSDK.ML Version (should match CMakeList.txt)'
     type: string
-    default: '1.8.2088'
+    default: '1.8.2091'
 
   - name: ort_cuda_version
     displayName: 'OnnxRuntime GPU version'
@@ -91,6 +91,7 @@ parameters:
     type: string
     default: 'relwithdebinfo'
     values:
+      - 'release'
       - 'relwithdebinfo'
       - 'debug'
 
