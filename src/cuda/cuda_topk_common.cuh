@@ -16,15 +16,14 @@ namespace topk_common {
  * @brief Reusable device function for Stage 1 of Top-K sorting algorithms.
  *
  * This function is called by a kernel to find the Top-K candidates within a
- * single partition of the input data. It uses a single, fast, non-stable
- * radix sort. The output candidates will have the correct Top-K scores, but
- * tie-breaking order is not guaranteed. The final stable sort must be handled
- * in subsequent reduction stages or a finalization kernel.
+ * single partition of the input data. It uses a single, fast, stable
+ * radix sort. The output candidates will have the correct Top-K scores, and
+ * tie-breaking order is guaranteed.
  *
  * @tparam kBlockSize The number of threads in the thread block.
  * @tparam kPartitionSize The size of the data partition to sort.
  * @tparam K The number of top elements to find.
- * @tparam SharedStorage The type of the shared memory storage from the calling kernel.
+ * @tparam TempStorage The type of the shared memory storage from the calling kernel.
  * @param scores_in Pointer to the input scores in global memory.
  * @param intermediate_indices Pointer to the intermediate buffer for indices.
  * @param intermediate_scores Pointer to the intermediate buffer for scores.
@@ -104,48 +103,6 @@ __device__ void FindPartitionTopK_Stable(const float* __restrict__ scores_in,
       intermediate_scores[offset] = score;
       intermediate_indices[offset] = index;
     }
-  }
-}
-
-/**
- * @brief Kernel to perform a final, stable sort on K candidates when there is
- * only one partition.
- *
- * @tparam kBlockSize The number of threads in the thread block.
- * @tparam K_padded The padded size of K, which must be a power of two for bitonic sort.
- * @param scores_in The unsorted Top-K candidate scores.
- * @param indices_in The unsorted Top-K candidate indices.
- * @param scores_out The final, sorted Top-K scores.
- * @param indices_out The final, sorted Top-K indices.
- * @param k_final The actual value of K (the number of elements to write).
- */
-template <int kBlockSize, int K_padded>
-__global__ void SinglePartitionBitonicSort(const float* __restrict__ scores_in,
-                                           const int* __restrict__ indices_in,
-                                           float* __restrict__ scores_out,
-                                           int* __restrict__ indices_out,
-                                           int k_final) {
-  __shared__ float smem_scores[K_padded];
-  __shared__ int smem_indices[K_padded];
-
-  const int batch_idx = blockIdx.y;
-  const size_t in_offset = static_cast<size_t>(batch_idx) * K_padded;
-  const size_t out_offset = static_cast<size_t>(batch_idx) * k_final;
-
-  // Load the K_padded candidates into shared memory
-  for (int i = threadIdx.x; i < K_padded; i += kBlockSize) {
-    smem_scores[i] = scores_in[in_offset + i];
-    smem_indices[i] = indices_in[in_offset + i];
-  }
-  __syncthreads();
-
-  // Sort the K_padded candidates in shared memory
-  bitonic_sort::SharedMemBitonicSort<kBlockSize, K_padded>(smem_scores, smem_indices);
-
-  // Write out the final top-k_final results
-  if (threadIdx.x < k_final) {
-    scores_out[out_offset + threadIdx.x] = smem_scores[threadIdx.x];
-    indices_out[out_offset + threadIdx.x] = smem_indices[threadIdx.x];
   }
 }
 

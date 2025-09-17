@@ -10,98 +10,6 @@ namespace Generators {
 namespace cuda {
 namespace bitonic_sort {
 
-// Full bitonic sort implementation for cases where kBlockSize < SortSize.
-template <int kBlockSize, int SortSize>
-__device__ void SharedMemBitonicSort_Large(float* smem_scores, int* smem_indices) {
-  static_assert(SortSize > 0 && (SortSize & (SortSize - 1)) == 0,
-                "SortSize must be a power of 2");
-  static_assert(kBlockSize > 0 && (kBlockSize & (kBlockSize - 1)) == 0,
-                "kBlockSize must be a power of 2");
-  static_assert(SortSize >= kBlockSize);
-
-  const int tid = threadIdx.x;
-  constexpr int elements_per_thread = SortSize / kBlockSize;
-
-  auto compareAndSwap = [&](int i, int j, bool ascending) {
-    bool is_i_greater = (smem_scores[i] > smem_scores[j]) ||
-                        (smem_scores[i] == smem_scores[j] && smem_indices[i] < smem_indices[j]);
-
-    // For a bitonic network, we swap if the element order is contrary to the
-    // required direction of the current sub-sequence.
-    // Ascending region: swap if first element is greater.
-    // Descending region: swap if first element is smaller.
-    // This simplifies to: swap if (is_i_greater != ascending).
-    if (is_i_greater != ascending) {
-      float temp_score = smem_scores[i];
-      smem_scores[i] = smem_scores[j];
-      smem_scores[j] = temp_score;
-
-      int temp_index = smem_indices[i];
-      smem_indices[i] = smem_indices[j];
-      smem_indices[j] = temp_index;
-    }
-  };
-
-  // Phase 1: Sort local elements within each thread (descending order)
-  if constexpr (elements_per_thread > 1) {
-    int base_idx = tid * elements_per_thread;
-    for (int i = base_idx; i < base_idx + elements_per_thread; ++i) {
-      for (int j = i + 1; j < base_idx + elements_per_thread; ++j) {
-        compareAndSwap(i, j, false);  // simple bubble sort for local elements
-      }
-    }
-    __syncthreads();
-  }
-
-  // Phase 2: Bitonic merge phases
-  for (int size = 2; size <= SortSize; size <<= 1) {
-    for (int stride = size >> 1; stride > 0; stride >>= 1) {
-      if (elements_per_thread > 1) {
-        for (int t = 0; t < elements_per_thread; t++) {
-          int idx = tid * elements_per_thread + t;
-          int partner = idx ^ stride;
-
-          if (partner > idx) {
-            // A standard bitonic network sorts ascending with `(idx & size) == 0`.
-            bool ascending = ((idx & size) == 0);
-            compareAndSwap(idx, partner, ascending);
-          }
-        }
-      } else {
-        int partner = tid ^ stride;
-        if (partner > tid) {
-          // A standard bitonic network sorts ascending with `(idx & size) == 0`.
-          bool ascending = ((tid & size) == 0);
-          compareAndSwap(tid, partner, ascending);
-        }
-      }
-      __syncthreads();
-    }
-  }
-
-  // Phase 3: Final merge to create fully sorted sequence in descending order
-  // This phase is now redundant because the main loop produces a descending sort.
-  // However, running a descending merge on a descending-sorted list is harmless (a no-op).
-  // It is left here for clarity and to minimize structural code changes.
-  for (int stride = SortSize >> 1; stride > 0; stride >>= 1) {
-    if constexpr (elements_per_thread > 1) {
-      for (int t = 0; t < elements_per_thread; ++t) {
-        int idx = tid * elements_per_thread + t;
-        int partner = idx ^ stride;
-        if (partner > idx) {
-          compareAndSwap(idx, partner, false);
-        }
-      }
-    } else {  // one element per thread
-      int partner = tid ^ stride;
-      if (partner > tid) {
-        compareAndSwap(tid, partner, false);  // Always descending
-      }
-    }
-    __syncthreads();
-  }
-}
-
 /**
  * @brief Performs an in-place bitonic sort on data in shared memory.
  * This version is for kBlockSize >= SortSize.
@@ -188,113 +96,14 @@ __device__ void SharedMemBitonicSort_Big(float* smem_scores, int* smem_indices) 
   __syncthreads();
 }
 
-constexpr int NextPowerOfTwo(int n) {
-  int p = 1;
-  while (p < n) p <<= 1;
-  return p;
-}
-
-// Generic implementation for bitonic sort in shared memory (SoA).
-// Supports arbitrary SortSize by padding to next power of two.
-template <int kBlockSize, int SortSize>
-__device__ void SharedMemBitonicSort_Pad(float* smem_scores, int* smem_indices) {
-  const int tid = threadIdx.x;
-  constexpr int N = SortSize;
-
-  constexpr int Npad = NextPowerOfTwo(N);
-
-  for (int i = tid; i < Npad; i += kBlockSize) {
-    if (i >= N) {
-      smem_scores[i] = -CUDART_INF_F;
-      smem_indices[i] = INT_MAX;
-    }
-  }
-  __syncthreads();
-
-  for (int k = 2; k <= Npad; k <<= 1) {
-    for (int j = k >> 1; j > 0; j >>= 1) {
-      for (int i = tid; i < Npad; i += kBlockSize) {
-        int ixj = i ^ j;
-        if (ixj > i) {
-          float a_i = smem_scores[i];
-          float a_j = smem_scores[ixj];
-          int idx_i = smem_indices[i];
-          int idx_j = smem_indices[ixj];
-
-          // A standard bitonic network sorts ascending with `(i & k) == 0`.
-          // The swap condition is inverted to produce a descending sort.
-          bool ascending = ((i & k) == 0);
-          bool is_i_greater = (a_i > a_j) || (a_i == a_j && idx_i < idx_j);
-
-          if (is_i_greater != ascending) {
-            smem_scores[i] = a_j;
-            smem_scores[ixj] = a_i;
-            smem_indices[i] = idx_j;
-            smem_indices[ixj] = idx_i;
-          }
-        }
-      }
-      __syncthreads();
-    }
-  }
-  __syncthreads();
-}
-
 template <int kBlockSize, int SortSize>
 __device__ void SharedMemBitonicSort(float* smem_scores, int* smem_indices) {
-  if constexpr ((SortSize & (SortSize - 1)) != 0) {
-    // Non-power-of-two sizes must be padded and fully sorted.
-    SharedMemBitonicSort_Pad<kBlockSize, SortSize>(smem_scores, smem_indices);
+  if constexpr (kBlockSize >= SortSize) {
+    // With enough threads, a full sort is very fast.
+    SharedMemBitonicSort_Small<kBlockSize, SortSize>(smem_scores, smem_indices);
   } else {
-    if constexpr (kBlockSize >= SortSize) {
-      // With enough threads, a full sort is very fast.
-      SharedMemBitonicSort_Small<kBlockSize, SortSize>(smem_scores, smem_indices);
-    } else {
-      // Fewer threads than elements. Use the generic full sort for power-of-two sizes.
-      SharedMemBitonicSort_Big<kBlockSize, SortSize>(smem_scores, smem_indices);
-      // SharedMemBitonicSort_Large<kBlockSize, SortSize>(smem_scores, smem_indices);
-    }
-  }
-}
-
-template <int N>
-__device__ void RegisterBitonicSort(float scores[N], int indices[N]) {
-  for (int k = 2; k <= N; k <<= 1) {
-    for (int j = k >> 1; j > 0; j >>= 1) {
-#pragma unroll
-      for (int i = 0; i < N; ++i) {
-        int ixj = i ^ j;
-        if (ixj > i) {
-          bool ascending = ((i & k) == 0);
-          bool is_greater = (scores[i] > scores[ixj]) || (scores[i] == scores[ixj] && indices[i] < indices[ixj]);
-          if (is_greater != ascending) {
-            float temp_s = scores[i];
-            scores[i] = scores[ixj];
-            scores[ixj] = temp_s;
-            int temp_i = indices[i];
-            indices[i] = indices[ixj];
-            indices[ixj] = temp_i;
-          }
-        }
-      }
-    }
-  }
-
-  for (int j = N >> 1; j > 0; j >>= 1) {
-#pragma unroll
-    for (int i = 0; i < N; ++i) {
-      int ixj = i ^ j;
-      if (ixj > i) {
-        if ((scores[i] < scores[ixj]) || (scores[i] == scores[ixj] && indices[i] > indices[ixj])) {
-          float temp_s = scores[i];
-          scores[i] = scores[ixj];
-          scores[ixj] = temp_s;
-          int temp_i = indices[i];
-          indices[i] = indices[ixj];
-          indices[ixj] = temp_i;
-        }
-      }
-    }
+    // Fewer threads than elements. Use the generic full sort for power-of-two sizes.
+    SharedMemBitonicSort_Big<kBlockSize, SortSize>(smem_scores, smem_indices);
   }
 }
 

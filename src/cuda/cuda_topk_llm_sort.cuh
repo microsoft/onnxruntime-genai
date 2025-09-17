@@ -11,10 +11,6 @@
 #include "cuda_topk_bitonic_sort_helper.cuh"
 #include "cuda_topk_common.cuh"
 
-// Bitonic sort currently requires shared memory scores has size of power of 2.
-// So we disable K=50 optimization until we pad the scores to power of 2.
-#define OPTIMIZE_K_50 0
-
 namespace Generators {
 namespace cuda {
 namespace llm_sort {

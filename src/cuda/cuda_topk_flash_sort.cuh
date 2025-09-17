@@ -210,9 +210,6 @@ inline size_t GetIntermediateSize(int batch_size, int vocab_size, int partition_
 inline int EstimateBestPartitionSize(int vocab_size) {
   if (vocab_size <= 1024) return 1024;
   if (vocab_size <= 2048) return 2048;
-  // The kernle can support partition size up to 8192.
-  // That could help better coverage of cooperative support since num_partitions is smaller.
-  // However, it is slower for our target use case in benchmark so we exclude it for this kernel.
   return 4096;
 }
 
