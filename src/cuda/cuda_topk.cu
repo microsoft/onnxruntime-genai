@@ -39,7 +39,7 @@ size_t TopkData::CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t
   total_size += AlignUp((batch_size + 1) * sizeof(int), kGpuBufferAlignment);
 
   auto radix_sort_temp_storage_bytes = radix_sort::GetTempStorageBytes(vocab_size, stream);
-  auto full_sort_temp_storage_bytes = full_sort::GetTempStorageBytes(vocab_batch_size, batch_size, stream);
+  auto full_sort_temp_storage_bytes = full_sort::GetTempStorageBytes(static_cast<int>(vocab_batch_size), batch_size, stream);
   size_t temp_storage_bytes = std::max(radix_sort_temp_storage_bytes, full_sort_temp_storage_bytes);
   total_size += AlignUp(temp_storage_bytes, kGpuBufferAlignment);
 
@@ -70,7 +70,7 @@ void TopkData::InitializeBuffers(int batch_size, int vocab_size, cudaStream_t st
 
   size_t vocab_batch_size = static_cast<size_t>(vocab_size) * batch_size;
   auto radix_sort_temp_storage_bytes = radix_sort::GetTempStorageBytes(vocab_size, stream);
-  auto full_sort_temp_storage_bytes = full_sort::GetTempStorageBytes(vocab_batch_size, batch_size, stream);
+  auto full_sort_temp_storage_bytes = full_sort::GetTempStorageBytes(static_cast<int>(vocab_batch_size), batch_size, stream);
   cub_temp_storage_bytes = std::max(radix_sort_temp_storage_bytes, full_sort_temp_storage_bytes);
 
   cub_temp_storage = reinterpret_cast<unsigned char*>(current_ptr);

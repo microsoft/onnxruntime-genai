@@ -32,7 +32,7 @@ inline size_t GetTempStorageBytes(int vocab_size, cudaStream_t stream) {
   return temp_storage_bytes;
 }
 
-void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
+void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int /*k*/) {
   constexpr int block_size = 256;
   int blocks_per_batch = CeilDiv(vocab_size, block_size);
 

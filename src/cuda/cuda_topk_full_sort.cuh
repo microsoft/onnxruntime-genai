@@ -62,7 +62,7 @@ inline void LaunchSort(TopkData* data, cudaStream_t stream, const float* scores_
                   data->batch_offsets, stream);
 }
 
-void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
+void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int /*k*/) {
   float* topk_scores = data->intermediate_scores_1;
   int* topk_indices = data->intermediate_indices_1;
   LaunchSort(data, stream, scores_in, topk_scores, topk_indices, vocab_size, batch_size);

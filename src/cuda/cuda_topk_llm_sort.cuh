@@ -367,7 +367,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 }
 
 template <int K_PADDED, int Factor1, int Factor2, int Factor3>
-bool CheckLlmSortSupportWithFactors(int batch_size, int vocab_size, int partition_size, int num_partitions) {
+bool CheckLlmSortSupportWithFactors(int batch_size, int partition_size, int num_partitions) {
   constexpr int kBlockSize = GetOptimalBlockSize<K_PADDED>();
   const int total_blocks = num_partitions * batch_size;
   void* kernel = nullptr;
@@ -404,15 +404,15 @@ bool CheckLlmSortSupportWithFactors(int batch_size, int vocab_size, int partitio
 template <int K_PADDED>
 bool CheckLlmSortSupport(int batch_size, int vocab_size, int k, int partition_size, int num_partitions) {
   const auto factors = GetReductionFactors(num_partitions, k);
-  if (factors.factor1 == 8 && factors.factor2 == 8) return CheckLlmSortSupportWithFactors<K_PADDED, 8, 8, 1>(batch_size, vocab_size, partition_size, num_partitions);
-  if (factors.factor1 == 8 && factors.factor2 == 4) return CheckLlmSortSupportWithFactors<K_PADDED, 8, 4, 1>(batch_size, vocab_size, partition_size, num_partitions);
-  if (factors.factor1 == 8) return CheckLlmSortSupportWithFactors<K_PADDED, 8, 1, 1>(batch_size, vocab_size, partition_size, num_partitions);
-  if (factors.factor1 == 4 && factors.factor2 == 4 && factors.factor3 == 4) return CheckLlmSortSupportWithFactors<K_PADDED, 4, 4, 4>(batch_size, vocab_size, partition_size, num_partitions);
-  if (factors.factor1 == 4 && factors.factor2 == 4 && factors.factor3 == 2) return CheckLlmSortSupportWithFactors<K_PADDED, 4, 4, 2>(batch_size, vocab_size, partition_size, num_partitions);
-  if (factors.factor1 == 4 && factors.factor2 == 4) return CheckLlmSortSupportWithFactors<K_PADDED, 4, 4, 1>(batch_size, vocab_size, partition_size, num_partitions);
-  if (factors.factor1 == 4) return CheckLlmSortSupportWithFactors<K_PADDED, 4, 1, 1>(batch_size, vocab_size, partition_size, num_partitions);
-  if (factors.factor1 == 2) return CheckLlmSortSupportWithFactors<K_PADDED, 2, 1, 1>(batch_size, vocab_size, partition_size, num_partitions);
-  return CheckLlmSortSupportWithFactors<K_PADDED, 1, 1, 1>(batch_size, vocab_size, partition_size, num_partitions);
+  if (factors.factor1 == 8 && factors.factor2 == 8) return CheckLlmSortSupportWithFactors<K_PADDED, 8, 8, 1>(batch_size, partition_size, num_partitions);
+  if (factors.factor1 == 8 && factors.factor2 == 4) return CheckLlmSortSupportWithFactors<K_PADDED, 8, 4, 1>(batch_size, partition_size, num_partitions);
+  if (factors.factor1 == 8) return CheckLlmSortSupportWithFactors<K_PADDED, 8, 1, 1>(batch_size, vocab_size, num_partitions);
+  if (factors.factor1 == 4 && factors.factor2 == 4 && factors.factor3 == 4) return CheckLlmSortSupportWithFactors<K_PADDED, 4, 4, 4>(batch_size, partition_size, num_partitions);
+  if (factors.factor1 == 4 && factors.factor2 == 4 && factors.factor3 == 2) return CheckLlmSortSupportWithFactors<K_PADDED, 4, 4, 2>(batch_size, partition_size, num_partitions);
+  if (factors.factor1 == 4 && factors.factor2 == 4) return CheckLlmSortSupportWithFactors<K_PADDED, 4, 4, 1>(batch_size, partition_size, num_partitions);
+  if (factors.factor1 == 4) return CheckLlmSortSupportWithFactors<K_PADDED, 4, 1, 1>(batch_size, partition_size, num_partitions);
+  if (factors.factor1 == 2) return CheckLlmSortSupportWithFactors<K_PADDED, 2, 1, 1>(batch_size, partition_size, num_partitions);
+  return CheckLlmSortSupportWithFactors<K_PADDED, 1, 1, 1>(batch_size, partition_size, num_partitions);
 }
 
 bool IsSupported(int batch_size, int vocab_size, int k) {

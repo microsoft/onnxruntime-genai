@@ -35,7 +35,7 @@ inline int GetPartitionsPerBlock(int num_partitions) {
 
 // Stage 2 of Hybrid Sort: Iteratively reduces partitions to find the final top-K.
 template <int K>
-void HybridSort_ReducePartitions(TopkData* data, cudaStream_t stream, int num_partitions, int batch_size, int k) {
+void HybridSort_ReducePartitions(TopkData* data, cudaStream_t stream, int num_partitions, int batch_size) {
   int current_num_partitions = num_partitions;
   float* input_scores = data->intermediate_scores_1;
   float* output_scores = data->intermediate_scores_2;
@@ -99,7 +99,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
         break;
     }
     CUDA_CHECK(cudaGetLastError());
-    HybridSort_ReducePartitions<K>(data, stream, num_partitions, batch_size, k);
+    HybridSort_ReducePartitions<K>(data, stream, num_partitions, batch_size);
   };
 
   // This kernel is optimized for large vocab_size and large k since flash sort or LLM sort is preferred for smaller vocab_size and smaller k.
