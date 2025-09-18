@@ -2412,7 +2412,7 @@ class Model:
             normalize_routing_weights=self.moe_attrs["normalize_routing_weights"],
             swiglu_fusion=self.moe_attrs["swiglu_fusion"],
             use_sparse_mixer=self.moe_attrs["use_sparse_mixer"],
-            block_size=self.moe_attrs.get("actual_block_size", 0),
+            block_size=self.moe_attrs["block_size"],
             **extra_kwargs,
         )
         self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
@@ -2428,17 +2428,13 @@ class Model:
         if block_size > 0:
             try:
                 qweight, scales = self._symmetric_blockwise_quantize(weights, block_size)
-                if self.moe_attrs.get("actual_block_size") != 0:
-                    self.moe_attrs["actual_block_size"] = block_size
+                self.moe_attrs["block_size"] = block_size
                 return qweight, scales.to(torch.float16)
             except Exception as e:
-                print(f"WARNING: Block-wise quantization failed: {e}")
-                print("Falling back to tensor-level quantization")
-                self.moe_attrs["actual_block_size"] = 0
-                # Fall through to existing implementation
+                raise RuntimeError(f"Block-wise quantization failed with block_size={block_size}: {e}")
         else:
             # block_size is 0, so we're using tensor-level quantization
-            self.moe_attrs["actual_block_size"] = 0
+            self.moe_attrs["block_size"] = 0
 
         # Existing tensor-level quantization implementation (fallback)
         unsuccessful = True
@@ -2463,13 +2459,10 @@ class Model:
 
     def _symmetric_blockwise_quantize(self, weights, block_size):
         # Ensure weights are on CPU for quantization
-        original_device = weights.device
         weights = weights.cpu().contiguous()
 
         original_shape = weights.shape
         bits = self.moe_attrs["expert_weight_bits"]
-
-        block_size = original_shape[-1]
 
         qmin, qmax = (-7, 7) if bits == 4 else (-127, 127)
 
@@ -4447,6 +4440,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             extra_options["exclude_embeds"] = True
             onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GptOssForCausalLM":
+            print("WARNING: This model only supports symmetric quantization for `QMoE`.")
             delattr(config, "quantization_config")
             onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GraniteForCausalLM":
