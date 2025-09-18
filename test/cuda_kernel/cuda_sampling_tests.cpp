@@ -101,7 +101,7 @@ TEST_P(CudaSamplingTopKTopPTest, StatisticalVerification) {
 
   // 4.1. Apply temperature to the logits upfront, just like the kernel.
   std::vector<float> scaled_logits = top_k_logits;
-  if (temperature != 0.0f) {
+  if constexpr (temperature != 0.0f) {
     for (auto& logit : scaled_logits) {
       logit /= temperature;
     }

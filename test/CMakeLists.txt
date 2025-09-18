@@ -2,7 +2,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/cxx_standard.cmake)
 
 # Add an option to enable/disable CUDA kernel tests. This option is ON by default
 # if building on non-Windows platform with CUDA available, and OFF otherwise.
-cmake_dependent_option(ENABLE_CUDA_KERNEL_TESTS "Build cuda kernel tests" ON "NOT WIN32;USE_CUDA;CMAKE_CUDA_COMPILER" OFF)
+cmake_dependent_option(ENABLE_CUDA_KERNEL_TESTS "Build cuda kernel tests" ON "USE_CUDA;CMAKE_CUDA_COMPILER" OFF)
 
 # unit tests program
 add_executable(unit_tests)
