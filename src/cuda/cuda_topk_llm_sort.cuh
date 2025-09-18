@@ -72,8 +72,6 @@ __global__ void LlmSortKernel(const float* __restrict__ input_scores,
   const int batch_idx = blockIdx.y;
   const int num_partitions = gridDim.x;
 
-  using CompositeKey = uint64_t;
-  using BlockRadixSort = cub::BlockRadixSort<CompositeKey, kBlockSize, kPartitionSize / kBlockSize>;
 
   // --- Shared Memory Union ---
   constexpr int kSortSize1 = K_PADDED * Factor1;
@@ -81,7 +79,8 @@ __global__ void LlmSortKernel(const float* __restrict__ input_scores,
   constexpr int kSortSize3 = K_PADDED * Factor3;
 
   union SharedStorage {
-    typename BlockRadixSort::TempStorage stage1_storage;
+  typename Stage1TempStorage stage1_storage;
+
     struct {
       __align__(128) float scores[kSortSize1];
       __align__(128) int indices[kSortSize1];
@@ -98,7 +97,7 @@ __global__ void LlmSortKernel(const float* __restrict__ input_scores,
   __shared__ SharedStorage smem;
 
   // --- Stage 1: Find Top-K within each partition ---
-  topk_common::FindPartitionTopK_Stable<kBlockSize, kPartitionSize, K_PADDED>(
+  topk_common::FindPartitionTopK<kBlockSize, kPartitionSize, K_PADDED>(
       input_scores, intermediate_indices_1, intermediate_scores_1, vocab_size, num_partitions, smem.stage1_storage);
 
   grid.sync();

@@ -18,14 +18,9 @@ __global__ void HybridSort_Stage1_FindPartitionsTopK(const float* __restrict__ s
                                                      int* __restrict__ intermediate_indices,
                                                      float* __restrict__ intermediate_scores,
                                                      int vocab_size, int num_partitions) {
-  using CompositeKey = uint64_t;
-  using BlockRadixSort = cub::BlockRadixSort<CompositeKey, kBlockSize, kPartitionSize / kBlockSize>;
-  __shared__ typename BlockRadixSort::TempStorage smem;
-
-  topk_common::FindPartitionTopK_Stable<kBlockSize, kPartitionSize, K>(
-      scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions, smem);
+  __shared__ typename Stage1TempStorage smem;
+  topk_common::FindPartitionTopK<kBlockSize, kPartitionSize, K>(scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions, smem);
 }
-
 // Helper to calculate the size of intermediate buffers needed by hybrid sort.
 inline size_t GetIntermediateSize(int batch_size, int vocab_size, int partition_size) {
   const int num_partitions = CeilDiv(vocab_size, partition_size);

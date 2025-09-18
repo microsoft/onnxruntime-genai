@@ -28,16 +28,21 @@ struct TopKTestParams {
   int k;
 };
 
-// Function to compare final raw scores and indices
+// A single, unified function to compare results for both stable and unstable sorts.
 bool CompareResults(const std::vector<float>& reference_scores, const std::vector<int>& reference_indices,
                     const std::vector<float>& actual_scores, const std::vector<int>& actual_indices,
-                    const std::string& algo_name, int batch_size, int k) {
+                    const std::vector<float>& scores_in, int batch_size, int vocab_size, int k,
+                    const std::string& algo_name) {
   bool match = true;
   const float epsilon = 1e-4f;
 
   for (int b = 0; b < batch_size && match; ++b) {
     for (int i = 0; i < k; ++i) {
       size_t idx = static_cast<size_t>(b) * k + i;
+
+#ifdef STABLE_TOPK
+      // --- STABLE SORT CHECK ---
+      // For stable sort, both the score and the index must match the reference exactly.
       if (reference_indices[idx] != actual_indices[idx] ||
           std::abs(reference_scores[idx] - actual_scores[idx]) > epsilon) {
         std::cerr << "Parity Test Failed for " << algo_name << ": Mismatch in batch " << b << " at position " << i
@@ -47,6 +52,29 @@ bool CompareResults(const std::vector<float>& reference_scores, const std::vecto
         match = false;
         break;
       }
+#else
+      // --- UNSTABLE SORT CHECK ---
+      // 1. The score must match the reference score.
+      if (std::abs(reference_scores[idx] - actual_scores[idx]) > epsilon) {
+        std::cerr << "Parity Test Failed for " << algo_name << ": Mismatch in batch " << b << " at position " << i
+                  << ". Expected score: " << std::fixed << std::setprecision(6) << reference_scores[idx]
+                  << ", Got score: " << actual_scores[idx] << std::endl;
+        match = false;
+        break;
+      }
+
+      // 2. The returned index must be valid (i.e., its score in the original input must match the returned score).
+      //    This correctly handles tie-breaking, as different valid indices can be returned.
+      size_t original_input_idx = static_cast<size_t>(b) * vocab_size + actual_indices[idx];
+      if (std::abs(scores_in[original_input_idx] - actual_scores[idx]) > epsilon) {
+        std::cerr << "Parity Test Failed for " << algo_name << ": Mismatch in batch " << b << " at position " << i
+                  << ". Returned index " << actual_indices[idx] << " has original score "
+                  << scores_in[original_input_idx] << " but top-k score was " << actual_scores[idx]
+                  << std::endl;
+        match = false;
+        break;
+      }
+#endif
     }
   }
 
@@ -105,8 +133,9 @@ void RunParityTests(const TopKTestParams& params) {
     CUDA_CHECK(cudaMemcpy(actual_indices_h.data(), topk_data->topk_indices_compact.get(), actual_indices_h.size() * sizeof(int),
                           cudaMemcpyDeviceToHost));
 
-    ASSERT_TRUE(CompareResults(ref_scores_h, ref_indices_h, actual_scores_h, actual_indices_h, name, params.batch_size,
-                               params.k));
+    ASSERT_TRUE(CompareResults(ref_scores_h, ref_indices_h, actual_scores_h, actual_indices_h, scores_in_h,
+                               params.batch_size, params.vocab_size, params.k, name));
+
     std::cout << "  [PASS] " << name << " (Raw Scores & Indices)" << std::endl;
   };
 

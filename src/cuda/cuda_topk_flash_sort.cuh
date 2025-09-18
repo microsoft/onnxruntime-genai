@@ -48,11 +48,8 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
   // --- Shared Memory Union ---
   constexpr int kSortSize = K_PADDED * kReductionFactor;
 
-  using CompositeKey = uint64_t;
-  using BlockRadixSort = cub::BlockRadixSort<CompositeKey, kBlockSize, kPartitionSize / kBlockSize>;
-
   union SharedStorage {
-    typename BlockRadixSort::TempStorage stage1_storage;
+    typename Stage1TempStorage stage1_storage;
     struct {
       __align__(128) float scores[kSortSize];
       __align__(128) int indices[kSortSize];
@@ -61,7 +58,7 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
   __shared__ SharedStorage smem;
 
   // --- Stage 1: Find Top-K within each partition ---
-  topk_common::FindPartitionTopK_Stable<kBlockSize, kPartitionSize, K_PADDED>(
+  topk_common::FindPartitionTopK<kBlockSize, kPartitionSize, K_PADDED>(
       input_scores, intermediate_indices_1, intermediate_scores_1, vocab_size, num_partitions, smem.stage1_storage);
 
   grid.sync();

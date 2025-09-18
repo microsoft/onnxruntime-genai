@@ -12,6 +12,14 @@
 namespace Generators {
 namespace cuda {
 
+// To enable stable Top-K for kernels that support it, define STABLE_TOPK during compilation.
+// By default, a faster, unstable sort is used for the initial partitioning stage.
+#ifdef STABLE_TOPK
+constexpr bool kStableTopK = true;
+#else
+constexpr bool kStableTopK = false;
+#endif
+
 // Helper to align memory addresses.
 __host__ __device__ inline size_t AlignUp(size_t size, size_t alignment) {
   return (size + alignment - 1) & ~(alignment - 1);

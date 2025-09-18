@@ -5,6 +5,7 @@
 
 #include <float.h>           // For FLT_MAX
 #include <math_constants.h>  // For CUDART_INF_F
+#include "cuda_topk.h"       // For STABLE_TOPK
 
 namespace Generators {
 namespace cuda {
@@ -34,8 +35,14 @@ __device__ void SharedMemBitonicSort_Small(float* smem_scores, int* smem_indices
           // The swap condition is inverted to produce a descending sort.
           bool ascending = ((ix & k) == 0);
 
+#ifdef STABLE_TOPK
+          // For stable sort, include tie-breaking logic (smaller index wins).
           bool is_ix_greater = (smem_scores[ix] > smem_scores[paired_ix]) ||
                                (smem_scores[ix] == smem_scores[paired_ix] && smem_indices[ix] < smem_indices[paired_ix]);
+#else
+          // For unstable sort, no tie-breaking is needed for performance.
+          bool is_ix_greater = smem_scores[ix] > smem_scores[paired_ix];
+#endif
 
           if (is_ix_greater != ascending) {
             float temp_score = smem_scores[ix];
@@ -80,7 +87,14 @@ __device__ void SharedMemBitonicSort_Big(float* smem_scores, int* smem_indices) 
           // A standard bitonic network sorts ascending with `(i & k) == 0`.
           // The swap condition is inverted to produce a descending sort.
           bool ascending = ((i & k) == 0);
+
+#if STABLE_TOPK
+          // For stable sort, include tie-breaking logic (smaller index wins).
           bool is_i_greater = (a_i > a_j) || (a_i == a_j && idx_i < idx_j);
+#else
+          // For unstable sort, no tie-breaking is needed for performance.
+          bool is_i_greater = a_i > a_j;
+#endif
 
           if (is_i_greater != ascending) {
             smem_scores[i] = a_j;

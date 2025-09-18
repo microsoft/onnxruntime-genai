@@ -64,7 +64,13 @@ struct CsvSummaryResult {
 };
 
 void PrintSummary(const std::vector<BenchmarkResult>& results) {
-  std::cout << "\n--- TopK Cuda Kernel Benchmark Summary ---\n";
+  std::cout << "\n--- TopK Cuda Kernel Benchmark Summary";
+#ifdef STABLE_TOPK
+  std::cout << " (STABLE_TOPK enabled)";
+#else
+  std::cout << " (STABLE_TOPK disabled)";
+#endif
+  std::cout << " ---\n";
   std::cout << std::left << std::setw(12) << "Batch Size" << std::setw(12) << "Vocab Size" << std::setw(5) << "K"
             << std::setw(28) << "Algorithm" << std::setw(12) << "Latency(us)" << std::setw(12) << "Stdev(us)"
             << std::setw(12) << "P95(us)" << "\n";
@@ -223,15 +229,18 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
   }
 #endif
 
+  std::string stable_suffix = Generators::cuda::kStableTopK ? "_STABLE" : "_UNSTABLE";
   // Benchmark Hybrid Sort
   if (params.k <= Generators::cuda::kHybridSortMaxK) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
       Generators::cuda::hybrid_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
                                              params.batch_size, params.k);
     });
-    all_results.push_back({params, "HYBRID_SORT", mean_ms, stdev_ms, p95_ms});
+    std::string algo_name = "HYBRID_SORT";
+    algo_name += stable_suffix;
+    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
     current_csv_result.hybrid_sort_latency = mean_ms;
-    algo_latencies["HYBRID_SORT"] = mean_ms;
+    algo_latencies[algo_name] = mean_ms;
   }
 
   // Benchmark Flash Sort
@@ -240,9 +249,11 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
       Generators::cuda::flash_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
                                             params.batch_size, params.k);
     });
-    all_results.push_back({params, "FLASH_SORT", mean_ms, stdev_ms, p95_ms});
+    std::string algo_name = "FLASH_SORT";
+    algo_name += stable_suffix;
+    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
     current_csv_result.flash_sort_latency = mean_ms;
-    algo_latencies["FLASH_SORT"] = mean_ms;
+    algo_latencies[algo_name] = mean_ms;
   }
 
   if (Generators::cuda::llm_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
@@ -250,9 +261,11 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
       Generators::cuda::llm_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
                                           params.batch_size, params.k);
     });
-    all_results.push_back({params, "LLM_SORT", mean_ms, stdev_ms, p95_ms});
+    std::string algo_name = "LLM_SORT";
+    algo_name += stable_suffix;
+    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
     current_csv_result.llm_sort_latency = mean_ms;
-    algo_latencies["LLM_SORT"] = mean_ms;
+    algo_latencies[algo_name] = mean_ms;
   }
 
   // Find the best algorithm overall for this configuration

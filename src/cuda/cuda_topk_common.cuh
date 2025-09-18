@@ -12,32 +12,25 @@ namespace Generators {
 namespace cuda {
 namespace topk_common {
 
+#ifdef STABLE_TOPK
+#define Stage1TempStorage cub::BlockRadixSort<uint64_t, kBlockSize, kPartitionSize / kBlockSize>::TempStorage
+#define FindPartitionTopK FindPartitionTopK_StableSort
+#else
+#define Stage1TempStorage cub::BlockRadixSort<float, kBlockSize, kPartitionSize / kBlockSize, int>::TempStorage
+#define FindPartitionTopK FindPartitionTopK_UnstableSort
+#endif
+
 /**
- * @brief Reusable device function for Stage 1 of Top-K sorting algorithms.
- *
- * This function is called by a kernel to find the Top-K candidates within a
- * single partition of the input data. It uses a single, fast, stable
- * radix sort. The output candidates will have the correct Top-K scores, and
- * tie-breaking order is guaranteed.
- *
- * @tparam kBlockSize The number of threads in the thread block.
- * @tparam kPartitionSize The size of the data partition to sort.
- * @tparam K The number of top elements to find.
- * @tparam TempStorage The type of the shared memory storage from the calling kernel.
- * @param scores_in Pointer to the input scores in global memory.
- * @param intermediate_indices Pointer to the intermediate buffer for indices.
- * @param intermediate_scores Pointer to the intermediate buffer for scores.
- * @param vocab_size The total vocabulary size.
- * @param num_partitions The total number of partitions.
- * @param smem A reference to the shared memory from the calling kernel.
+ * @brief Performs a stable sort to find the Top-K candidates within a partition.
+ * It uses a 64-bit composite key (score + index) to ensure stable sorting for tie-breaking.
  */
 template <int kBlockSize, int kPartitionSize, int K, typename TempStorage>
-__device__ void FindPartitionTopK_Stable(const float* __restrict__ scores_in,
-                                         int* __restrict__ intermediate_indices,
-                                         float* __restrict__ intermediate_scores,
-                                         int vocab_size,
-                                         int num_partitions,
-                                         TempStorage& smem) {
+__device__ void FindPartitionTopK_StableSort(const float* __restrict__ scores_in,
+                                             int* __restrict__ intermediate_indices,
+                                             float* __restrict__ intermediate_scores,
+                                             int vocab_size,
+                                             int num_partitions,
+                                             TempStorage& temp_storage) {
   static_assert(kPartitionSize % kBlockSize == 0, "kPartitionSize must be a multiple of kBlockSize");
   constexpr int ItemsPerThread = kPartitionSize / kBlockSize;
 
@@ -76,33 +69,81 @@ __device__ void FindPartitionTopK_Stable(const float* __restrict__ scores_in,
     thread_keys[i] = (static_cast<uint64_t>(sortable_score) << 32) | inverted_index;
   }
 
-  // Sort in descending order by composite key
-  BlockRadixSort(smem).SortDescending(thread_keys);
+  // Sort keys from a blocked arrangement to a striped arrangement across threads.
+  BlockRadixSort(temp_storage).SortDescendingBlockedToStriped(thread_keys);
 
-  // Extract top K results from sorted data
-  for (int i = 0; i < ItemsPerThread; ++i) {
-    int rank = threadIdx.x * ItemsPerThread + i;
-    if (rank < K) {
-      CompositeKey key = thread_keys[i];
-      uint32_t sortable_score = static_cast<uint32_t>(key >> 32);
-      uint32_t inverted_index = static_cast<uint32_t>(key & 0xFFFFFFFF);
+  // The first K threads now hold the top K elements.
+  // This is highly efficient due to minimal thread divergence.
+  if (threadIdx.x < K) {
+    CompositeKey key = thread_keys[0]; // Top K keys are in the first item of the first K threads
 
-      // Reverse the score transformation
-      uint32_t score_bits;
-      if (sortable_score & 0x80000000) {
-        // Was originally a positive float
-        score_bits = sortable_score ^ 0x80000000;
-      } else {
-        // Was originally a negative float
-        score_bits = ~sortable_score;
-      }
-      float score = __uint_as_float(score_bits);
-      int index = UINT32_MAX - inverted_index;
+    // Unpack the composite key to get the original score and index
+    uint32_t sortable_score = static_cast<uint32_t>(key >> 32);
+    uint32_t inverted_index = static_cast<uint32_t>(key & 0xFFFFFFFF);
 
-      size_t offset = (static_cast<size_t>(batch_idx) * num_partitions + partition_idx) * K + rank;
-      intermediate_scores[offset] = score;
-      intermediate_indices[offset] = index;
+    // Reverse the score transformation
+    uint32_t score_bits;
+    if (sortable_score & 0x80000000) {
+      // Was originally a positive float
+      score_bits = sortable_score ^ 0x80000000;
+    } else {
+      // Was originally a negative float
+      score_bits = ~sortable_score;
     }
+    float score = __uint_as_float(score_bits);
+    int index = UINT32_MAX - inverted_index;
+
+    // Write the result to global memory
+    size_t offset = (static_cast<size_t>(batch_idx) * num_partitions + partition_idx) * K + threadIdx.x;
+    intermediate_scores[offset] = score;
+    intermediate_indices[offset] = index;
+  }
+}
+
+/**
+ * @brief Performs a faster, unstable sort to find the Top-K candidates within a partition.
+ * It sorts directly on 32-bit float scores without tie-breaking logic.
+ */
+template <int kBlockSize, int kPartitionSize, int K, typename TempStorage>
+__device__ void FindPartitionTopK_UnstableSort(const float* __restrict__ scores_in,
+                                               int* __restrict__ intermediate_indices,
+                                               float* __restrict__ intermediate_scores,
+                                               int vocab_size,
+                                               int num_partitions,
+                                               TempStorage& temp_storage) {
+  static_assert(kPartitionSize % kBlockSize == 0, "kPartitionSize must be a multiple of kBlockSize");
+  constexpr int ItemsPerThread = kPartitionSize / kBlockSize;
+
+  using BlockRadixSort = cub::BlockRadixSort<float, kBlockSize, ItemsPerThread, int>;
+
+  const int batch_idx = blockIdx.y;
+  const int partition_idx = blockIdx.x;
+  const int partition_start = partition_idx * kPartitionSize;
+
+  const float* batch_scores_in = scores_in + static_cast<size_t>(batch_idx) * vocab_size;
+
+  float thread_keys[ItemsPerThread];
+  int thread_values[ItemsPerThread];
+
+  for (int i = 0; i < ItemsPerThread; ++i) {
+    int global_idx = partition_start + threadIdx.x + i * kBlockSize;
+    if (global_idx < vocab_size) {
+      thread_keys[i] = batch_scores_in[global_idx];
+      thread_values[i] = global_idx;
+    } else {
+      thread_keys[i] = -FLT_MAX;
+      thread_values[i] = INT_MAX;
+    }
+  }
+
+  // Sort the keys and values held in registers across the entire block.
+  BlockRadixSort(temp_storage).SortDescendingBlockedToStriped(thread_keys, thread_values);
+
+  // The first K threads now hold the top K elements for this partition. Write them out.
+  if (threadIdx.x < K) {
+    size_t offset = (static_cast<size_t>(batch_idx) * num_partitions + partition_idx) * K + threadIdx.x;
+    intermediate_scores[offset] = thread_keys[0];
+    intermediate_indices[offset] = thread_values[0];
   }
 }
 
