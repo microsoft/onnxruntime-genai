@@ -65,18 +65,20 @@ class TopkBenchmarkCacheManager {
   std::unordered_map<TopkBenchmarkCacheKey, TopkAlgo, TopkBenchmarkCacheKeyHash> cache_;
 };
 
-// The single static instance of our cache.
-static TopkBenchmarkCacheManager g_topk_benchmark_cache;
+TopkBenchmarkCacheManager& GetCache() {
+  static TopkBenchmarkCacheManager g_topk_benchmark_cache;
+  return g_topk_benchmark_cache;
+}
 
 }  // namespace
 
 // Public-facing functions to access the cache.
 inline TopkAlgo GetTopkBenchmarkCache(int device_id, int batch_size, int vocab_size, int k) {
-  return g_topk_benchmark_cache.Get(device_id, batch_size, vocab_size, k);
+  return GetCache().Get(device_id, batch_size, vocab_size, k);
 }
 
 inline void SetTopkBenchmarkCache(int device_id, int batch_size, int vocab_size, int k, TopkAlgo algo) {
-  g_topk_benchmark_cache.Set(device_id, batch_size, vocab_size, k, algo);
+  GetCache().Set(device_id, batch_size, vocab_size, k, algo);
 }
 
 }  // namespace cuda
