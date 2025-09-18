@@ -221,15 +221,15 @@ void Sequences::RewindTo(size_t new_length) { return gp_genai->Sequences_RewindT
 // But memory allocation might be called before gp_genai created so gp_genai might be nullptr, which causes crash.
 // Here we just copy the implementation of HeapAllocate and HeapFree to avoid initialization order issue.
 _Ret_notnull_ _Post_writable_byte_size_(n) void* operator new(size_t n) {
-    return std::malloc(n);
-  }
-void operator delete(void* p) noexcept { 
-    return std::free(p);
-  }
+  return std::malloc(n);
+}
+void operator delete(void* p) noexcept {
+  return std::free(p);
+}
 
 void operator delete(void* p, size_t /*size*/) noexcept {
-    return std::free(p);
-  }
+  return std::free(p);
+}
 #endif
 
 extern "C" {

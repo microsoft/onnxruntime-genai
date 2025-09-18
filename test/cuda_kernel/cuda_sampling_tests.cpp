@@ -73,7 +73,7 @@ TEST_P(CudaSamplingTopKTopPTest, StatisticalVerification) {
   const int vocab_size = 512;  // Smaller vocab for faster test execution
   const int k = GetParam();
   const float p = 0.9f;
-  const float temperature = 0.7f;
+  constexpr float temperature = 0.7f;
   const int num_iter = 5000;
   const unsigned long long initial_seed = 42;
   const double tolerance = 0.015;  // Tolerance for statistical comparison

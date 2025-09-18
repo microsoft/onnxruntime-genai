@@ -75,7 +75,7 @@ __device__ void FindPartitionTopK_StableSort(const float* __restrict__ scores_in
   // The first K threads now hold the top K elements.
   // This is highly efficient due to minimal thread divergence.
   if (threadIdx.x < K) {
-    CompositeKey key = thread_keys[0]; // Top K keys are in the first item of the first K threads
+    CompositeKey key = thread_keys[0];  // Top K keys are in the first item of the first K threads
 
     // Unpack the composite key to get the original score and index
     uint32_t sortable_score = static_cast<uint32_t>(key >> 32);

@@ -72,14 +72,13 @@ __global__ void LlmSortKernel(const float* __restrict__ input_scores,
   const int batch_idx = blockIdx.y;
   const int num_partitions = gridDim.x;
 
-
   // --- Shared Memory Union ---
   constexpr int kSortSize1 = K_PADDED * Factor1;
   constexpr int kSortSize2 = K_PADDED * Factor2;
   constexpr int kSortSize3 = K_PADDED * Factor3;
 
   union SharedStorage {
-  typename Stage1TempStorage stage1_storage;
+    typename Stage1TempStorage stage1_storage;
 
     struct {
       __align__(128) float scores[kSortSize1];
