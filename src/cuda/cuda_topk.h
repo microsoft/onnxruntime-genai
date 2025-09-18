@@ -106,7 +106,7 @@ struct TopkData {
 
   // If buffer is provided externally, this unique_ptr will be null. Otherwise it will own the allocated memory.
   cuda_unique_ptr<uint8_t> memory_buffer_owner_;
-  
+
   // A view of the allocated memory buffer or the externally provided buffer.
   std::span<uint8_t> memory_buffer_span_;
 };
