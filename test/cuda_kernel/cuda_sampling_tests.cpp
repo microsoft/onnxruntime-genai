@@ -73,7 +73,7 @@ TEST_P(CudaSamplingTopKTopPTest, StatisticalVerification) {
   const int vocab_size = 512;  // Smaller vocab for faster test execution
   const int k = GetParam();
   const float p = 0.9f;
-  const float temperature = 0.7f;
+  constexpr float temperature = 0.7f;
   const int num_iter = 5000;
   const unsigned long long initial_seed = 42;
   const double tolerance = 0.015;  // Tolerance for statistical comparison
@@ -101,7 +101,7 @@ TEST_P(CudaSamplingTopKTopPTest, StatisticalVerification) {
 
   // 4.1. Apply temperature to the logits upfront, just like the kernel.
   std::vector<float> scaled_logits = top_k_logits;
-  if (temperature != 0.0f) {
+  if constexpr (temperature != 0.0f) {
     for (auto& logit : scaled_logits) {
       logit /= temperature;
     }
