@@ -3,7 +3,6 @@
 
 #include <cub/device/device_segmented_radix_sort.cuh>
 
-#include "../generators.h"
 #include "cuda_topk.h"
 #include "cuda_topk_benchmark_cache.h"
 #include "cuda_topk_benchmark.cuh"

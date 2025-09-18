@@ -10,7 +10,6 @@
 #include <iostream>
 #include <limits>
 #include <stdio.h>
-#include "../generators.h"
 #include "cuda_sampling.h"
 #include "cuda_topk.h"
 #include "cuda_topk_softmax.cuh"

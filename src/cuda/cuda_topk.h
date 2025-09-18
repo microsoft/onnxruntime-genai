@@ -26,6 +26,10 @@ __host__ __device__ inline size_t AlignUp(size_t size, size_t alignment) {
 }
 
 constexpr int kGpuBufferAlignment = 256;
+
+// Most common K value used in top-k sampling for Large Language Models typically falls in the range of 20 to 50.
+// So max k values shall be 64 or higher.
+// We enable higher k values in some algorithms for testing. The drawback is larger buffer sizes and longer compilation time.
 constexpr int kHybridSortMaxK = 256;         // The maximum k (up to 256) allowed for hybrid sort. Must be power of 2.
 constexpr int kFlashSortMaxK = 128;          // The maximum k (up to 256) allowed for flash sort. Must be power of 2.
 constexpr int kLlmSortMaxK = 64;             // The maximum k (up to 256) allowed for LLM sort. Must be power of 2.
@@ -100,9 +104,10 @@ struct TopkData {
   // Assigns pointers based on offsets into the single allocated buffer.
   virtual void InitializeBuffers(int batch_size, int vocab_size, cudaStream_t stream);
 
-  // If buffer is provided externally, this will just be a view.
-  // If not, this unique_ptr will own the allocated memory.
+  // If buffer is provided externally, this unique_ptr will be null. Otherwise it will own the allocated memory.
   cuda_unique_ptr<uint8_t> memory_buffer_owner_;
+  
+  // A view of the allocated memory buffer or the externally provided buffer.
   std::span<uint8_t> memory_buffer_span_;
 };
 
