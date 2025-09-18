@@ -154,30 +154,25 @@ extends:
           enable_winml: ${{ parameters.enable_winml }}
           ort_winml_version: ${{ parameters.ort_winml_version }}
 
-      - ${{ if parameters.enable_winml }}:
-          - template: stages/winml-nuget-packaging-stage.yml
-            parameters:
-              build_config: ${{ parameters.build_config }}
-              nuget_version_type: ${{ parameters.nuget_version_type }}
-              ort_winml_version: ${{ parameters.ort_winml_version }}
-      - ${{ else }}:
-          - template: stages/nuget-packaging-stage.yml
-            parameters:
-              enable_win_cpu: ${{ parameters.enable_win_cpu }}
-              enable_win_cuda: ${{ parameters.enable_win_cuda }}
-              enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
-              enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
-              enable_win_dml: ${{ parameters.enable_win_dml }}
-              enable_win_arm64: ${{ parameters.enable_win_arm64 }}
-              enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
-              enable_android: ${{ parameters.enable_android }}
-              enable_apple_framework: ${{ parameters.enable_apple_framework }}
-              ort_version: ${{ parameters.ort_version }}
-              ort_cuda_version: ${{ parameters.ort_cuda_version }}
-              ort_dml_version: ${{ parameters.ort_dml_version }}
-              build_config: ${{ parameters.build_config }}
-              enable_win_qnn: ${{ parameters.enable_win_qnn }}
-              nuget_version_type: ${{ parameters.nuget_version_type }}
+      - template: stages/nuget-packaging-stage.yml
+        parameters:
+          enable_win_cpu: ${{ parameters.enable_win_cpu }}
+          enable_win_cuda: ${{ parameters.enable_win_cuda }}
+          enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+          enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+          enable_win_dml: ${{ parameters.enable_win_dml }}
+          enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+          enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+          enable_android: ${{ parameters.enable_android }}
+          enable_apple_framework: ${{ parameters.enable_apple_framework }}
+          ort_version: ${{ parameters.ort_version }}
+          ort_cuda_version: ${{ parameters.ort_cuda_version }}
+          ort_dml_version: ${{ parameters.ort_dml_version }}
+          build_config: ${{ parameters.build_config }}
+          enable_win_qnn: ${{ parameters.enable_win_qnn }}
+          nuget_version_type: ${{ parameters.nuget_version_type }}
+          enable_winml: ${{ parameters.enable_winml }}
+          ort_winml_version: ${{ parameters.ort_winml_version }}
 
       - ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
           - template: stages/nuget-validation-stage.yml
