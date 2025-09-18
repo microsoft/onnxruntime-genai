@@ -217,9 +217,19 @@ void Sequences::RewindTo(size_t new_length) { return gp_genai->Sequences_RewindT
 
 #ifdef _WIN32
 // Override default new/delete so that we match the host's allocator
-_Ret_notnull_ _Post_writable_byte_size_(n) void* operator new(size_t n) { return Generators::gp_genai->HeapAllocate(n); }
-void operator delete(void* p) noexcept { Generators::gp_genai->HeapFree(p); }
-void operator delete(void* p, size_t /*size*/) noexcept { Generators::gp_genai->HeapFree(p); }
+// Previous implementation calls Generators::gp_genai->HeapAllocate(n) or HeapFree(p).
+// But memory allocation might be called before gp_genai created so gp_genai might be nullptr, which causes crash.
+// Here we just copy the implementation of HeapAllocate and HeapFree to avoid initialization order issue.
+_Ret_notnull_ _Post_writable_byte_size_(n) void* operator new(size_t n) {
+    return std::malloc(n);
+  }
+void operator delete(void* p) noexcept { 
+    return std::free(p);
+  }
+
+void operator delete(void* p, size_t /*size*/) noexcept {
+    return std::free(p);
+  }
 #endif
 
 extern "C" {
