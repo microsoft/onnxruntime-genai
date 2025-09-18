@@ -24,11 +24,12 @@ else()
   set(ONNXRUNTIME_GENAI_LIB "libonnxruntime-genai.so")
 endif()
 
-if (ORT_GENAI_LIB_DIR)
-  file (GLOB ort_genai_libs "${ORT_GENAI_LIB_DIR}/*")
-else()
-  file(GLOB ort_genai_libs "${CMAKE_SOURCE_DIR}/lib/*")
+# Set default library directory if not specified
+if(NOT ORT_GENAI_LIB_DIR)
+  set(ORT_GENAI_LIB_DIR "${CMAKE_SOURCE_DIR}/lib")
 endif()
+
+file(GLOB ort_genai_libs "${ORT_GENAI_LIB_DIR}/*")
 
 message(STATUS "ORT_GENAI_LIB_DIR: ${ORT_GENAI_LIB_DIR}")
 
