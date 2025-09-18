@@ -221,15 +221,15 @@ if(USE_WEBGPU)
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_wgsl_writer_ast_printer.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_wgsl_writer_ir_to_program.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_wgsl_writer_raise.lib"
-    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_wgsl_writer_syntax_tree_printer.lib"
+   # "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_wgsl_writer_syntax_tree_printer.lib"
 
     # Tint SPIRV support
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_intrinsic.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_ir.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader.lib"
-    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_ast_lower.lib"
-    "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_ast_parser.lib"
+  #  "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_ast_lower.lib"
+  #  "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_ast_parser.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_common.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_lower.lib"
     "${DAWN_BUILD_DIR}/src/tint/${DAWN_LIB_SUBDIR}/tint_lang_spirv_reader_parser.lib"
@@ -302,7 +302,7 @@ if(USE_WEBGPU)
     # Abseil hash libraries
     "${DAWN_BUILD_DIR}/third_party/abseil/absl/hash/${DAWN_LIB_SUBDIR}/absl_city.lib"
     "${DAWN_BUILD_DIR}/third_party/abseil/absl/hash/${DAWN_LIB_SUBDIR}/absl_hash.lib"
-    "${DAWN_BUILD_DIR}/third_party/abseil/absl/hash/${DAWN_LIB_SUBDIR}/absl_low_level_hash.lib"
+   # "${DAWN_BUILD_DIR}/third_party/abseil/absl/hash/${DAWN_LIB_SUBDIR}/absl_low_level_hash.lib"
 
     # Abseil debugging libraries
     "${DAWN_BUILD_DIR}/third_party/abseil/absl/debugging/${DAWN_LIB_SUBDIR}/absl_debugging_internal.lib"
@@ -343,9 +343,9 @@ if(USE_WEBGPU)
     "${DAWN_BUILD_DIR}/third_party/abseil/absl/numeric/${DAWN_LIB_SUBDIR}/absl_int128.lib"
 
     # Abseil types libraries
-    "${DAWN_BUILD_DIR}/third_party/abseil/absl/types/${DAWN_LIB_SUBDIR}/absl_bad_any_cast_impl.lib"
-    "${DAWN_BUILD_DIR}/third_party/abseil/absl/types/${DAWN_LIB_SUBDIR}/absl_bad_optional_access.lib"
-    "${DAWN_BUILD_DIR}/third_party/abseil/absl/types/${DAWN_LIB_SUBDIR}/absl_bad_variant_access.lib"
+  #  "${DAWN_BUILD_DIR}/third_party/abseil/absl/types/${DAWN_LIB_SUBDIR}/absl_bad_any_cast_impl.lib"
+  #  "${DAWN_BUILD_DIR}/third_party/abseil/absl/types/${DAWN_LIB_SUBDIR}/absl_bad_optional_access.lib"
+  #  "${DAWN_BUILD_DIR}/third_party/abseil/absl/types/${DAWN_LIB_SUBDIR}/absl_bad_variant_access.lib"
 
     # SPIRV-Tools libraries
     "${DAWN_BUILD_DIR}/third_party/spirv-tools/source/${DAWN_LIB_SUBDIR}/SPIRV-Tools.lib"
