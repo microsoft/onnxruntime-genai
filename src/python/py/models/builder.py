@@ -82,7 +82,7 @@ class Model:
             },
             "dml": {},
             "webgpu": {},
-            "NvTensorRtRtx": {"enable_cuda_graph": "1"}
+            "trt-rtx": {"enable_cuda_graph": "1"}
         }
 
         # Map input names to their types and shapes
@@ -357,7 +357,7 @@ class Model:
             ("dml", ir.DataType.FLOAT16),
             ("webgpu", ir.DataType.FLOAT16),
             ("webgpu", ir.DataType.FLOAT),
-            ("NvTensorRtRtx", ir.DataType.FLOAT16),
+            ("trt-rtx", ir.DataType.FLOAT16),
         }
         if (self.ep, self.io_dtype) in valid_gqa_configurations:
             # Change model settings for GroupQueryAttention
@@ -461,11 +461,12 @@ class Model:
             },
         }
 
-        if self.ep == "NvTensorRtRtx" and self.window_size is not None and self.window_size > 0:
+        if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
             genai_config["model"]["decoder"]["sliding_window"] = {"window_size": self.window_size, "slide_key_value_cache": False, "slide_inputs": False}
 
         if self.ep != "cpu":
-            ep_options = { self.ep : self.ep_attrs[self.ep] }
+            ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
+            ep_options = { ep_name : self.ep_attrs[self.ep] }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
         print(f"Saving GenAI config in {out_dir}")
@@ -1123,7 +1124,7 @@ class Model:
         self.layernorm_attrs["skip_input"] = layernorm_attrs_value
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
-        if self.ep == "NvTensorRtRtx" and (skip or simple):
+        if self.ep == "trt-rtx" and (skip or simple):
             # Fall back to primitive ops
             self._make_layernorm_op(layer_id, layernorm, skip, simple, location)
         else:
@@ -1459,8 +1460,8 @@ class Model:
         self.rope_attrs["save_caches"] = False
         cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
 
-        if self.ep in ["dml", "NvTensorRtRtx"]:
-            # Concat small and large cos/sin caches for DML and NvTensorRtRtx EPs
+        if self.ep in ["dml", "trt-rtx"]:
+            # Concat small and large cos/sin caches for DML and TRT-RTX EPs
             # These EPs don't support the If operator
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
             sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
@@ -4443,7 +4444,7 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "dml", "webgpu", "NvTensorRtRtx"],
+        choices=["cpu", "cuda", "dml", "webgpu", "trt-rtx"],
         help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU)",
     )
 
@@ -4523,7 +4524,7 @@ def get_args():
     )
 
     args = parser.parse_args()
-    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 NvTensorRtRtx, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU")
+    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU")
     return args
 
 if __name__ == '__main__':
