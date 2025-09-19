@@ -6,12 +6,29 @@
     the PlatformTarget is empty, and you don't know until runtime (i.e. which dotnet.exe)
     what processor architecture will be used.
   -->
-    <Error Condition="('$(PlatformTarget)' != 'x64' AND '$(PlatformTarget)' != 'arm64' AND '$(PlatformTarget)' != 'AnyCPU') AND
+    <Error
+      Condition="('$(PlatformTarget)' != 'x64' AND '$(PlatformTarget)' != 'arm64' AND '$(PlatformTarget)' != 'AnyCPU') AND
                       ('$(OutputType)' == 'Exe' OR '$(OutputType)'=='WinExe') AND
                       !('$(TargetFrameworkIdentifier)' == '.NETCoreApp' AND '$(PlatformTarget)' == '') AND
                       ('$(TargetFrameworkIdentifier)' != 'Xamarin.iOS' AND
                        $([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) != 'ios') AND
                       '$(SuppressOnnxRuntimePlatformCompatibilityError)' != 'true'"
-           Text="Microsoft.ML.OnnxRuntimeGenAI only supports the AnyCPU, x64 and arm64 platforms at this time."/>
+      Text="Microsoft.ML.OnnxRuntimeGenAI only supports the AnyCPU, x64 and arm64 platforms at this time." />
   </Target>
+
+  <!-- Link native library for C++ projects -->
+  <ItemDefinitionGroup Condition="'$(Language)' == 'C++' AND ('$(PlatformTarget)' == 'x64' OR ('$(PlatformTarget)' == 'AnyCPU' AND '$(Prefer32Bit)' != 'true'))">
+    <Link>
+      <AdditionalLibraryDirectories>$(MSBuildThisFileDirectory)..\..\runtimes\win-x64\native;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>onnxruntime-genai.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemDefinitionGroup Condition="'$(Language)' == 'C++' AND '$(PlatformTarget)' == 'ARM64'">
+    <Link>
+      <AdditionalLibraryDirectories>$(MSBuildThisFileDirectory)..\..\runtimes\win-arm64\native;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>onnxruntime-genai.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
 </Project>
