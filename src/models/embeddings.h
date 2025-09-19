@@ -38,4 +38,29 @@ struct Embeddings {
   size_t index_{};
 };
 
-}  // namespace Generators
+struct WindowedEmbeddings : public Embeddings {
+  WindowedEmbeddings(State& state, Embeddings::Mode mode, const std::string& name);
+  WindowedEmbeddings(const WindowedEmbeddings&) = delete;
+  WindowedEmbeddings& operator=(const WindowedEmbeddings&) = delete;
+
+  void Update(Embeddings& embeddings);
+
+ private:
+  State& state_;
+  const Model& model_{state_.model_};
+  std::array<int64_t, 3> shape_{};  // [batch_size, sequence_length, hidden_size]
+  ONNXTensorElementDataType type_;
+  const Embeddings::Mode mode_{};
+  const std::string name_;
+  std::unique_ptr<OrtValue> embeddings_;
+  size_t index_{};
+  size_t input_index_{~0U};
+  size_t window_size_{};
+  size_t num_windows_{};
+  size_t window_index_{};
+  std::unique_ptr<OrtValue> total_sequence_length_;
+  std::unique_ptr<OrtValue> past_sequence_length_;
+  int32_t initial_num_tokens_{};
+};
+
+}  // namespace Generators;
