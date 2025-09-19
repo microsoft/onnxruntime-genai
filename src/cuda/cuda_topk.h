@@ -43,6 +43,7 @@ enum class TopkAlgo { SELECTION,
                       HYBRID,
                       FLASH,
                       LLM,
+                      PARTITION,
                       RADIX,
                       FULL,
                       UNKNOWN = -1 };
@@ -63,8 +64,8 @@ struct TopkDataDetail {
   // The estimated best partition size for llm sort
   int llm_sort_partition_size = 0;
 
-  // The estimated best partition size for radix sort
-  int radix_sort_partition_size = 0;
+  // The estimated best partition size for radix partition sort
+  int partition_sort_partition_size = 0;
 
   size_t intermediate_buffer_elements = 0;
 
@@ -162,15 +163,23 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 }  // namespace full_sort
 
 /**
+ * @brief Sequentially sorts each item in the batch using CUB's device radix sort. This is an effective strategy for smaller batch sizes
+ * where launching separate, independent sorts is efficient.
+ */
+namespace radix_sort {
+void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
+}  // namespace radix_sort
+
+/**
  * @brief A high-performance two-stage, partition-and-reduce sort using block-wide radix sort (cub::BlockRadixSort).
  * In Stage 1, the input is divided into partitions, and a kernel finds the top candidates within each partition.
  * In Stage 2, a second kernel performs a final, fast reduction on these candidates, operating on data held in registers.
  * This algorithm is very efficient for small to medium k values (up to 64).
  */
-namespace radix_sort {
+namespace radix_partition_sort {
 bool IsSupported(int batch_size, int vocab_size, int k);
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
-}  // namespace radix_sort
+}  // namespace radix_partition_sort
 
 /**
  * @brief Implements a hybrid, multi-stage approach. Data is first partitioned and sorted locally within thread blocks with radix sort.

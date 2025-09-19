@@ -55,6 +55,8 @@ static const char* TopkAlgoToString(TopkAlgo algo) {
       return "Flash Sort";
     case TopkAlgo::LLM:
       return "LLM Sort";
+    case TopkAlgo::PARTITION:
+      return "Partition Sort";
     case TopkAlgo::RADIX:
       return "Radix Sort";
     case TopkAlgo::FULL:
@@ -93,7 +95,10 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
   // Selection sort helps only for small k. This threshold is based on benchmark results.
   constexpr int kSelectionSortBenchmarkMaxK = 4;
 
-  // Candidate: Selection Sort
+  // Radix sort helps only for small batch size. This threshold is based on benchmark results.
+  constexpr int kRadixSortBenchmarkMaxBatchSize = 8;
+
+  // Candidate: Selection Sort is enabled only for very small k.
   if (k <= kSelectionSortBenchmarkMaxK) {
     BENCHMARK_KERNEL(TopkAlgo::SELECTION, [&]() {
       selection_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
@@ -108,23 +113,16 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
     });
   }
 
-  // Candidate: Flash Sort (Cooperative Kernel)
+  // Candidate: Flash Sort
   bool use_flash_sort = flash_sort::IsSupported(batch_size, vocab_size, k);
   if (use_flash_sort) {
     BENCHMARK_KERNEL(TopkAlgo::FLASH, [&]() {
       flash_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
   }
-
-  bool use_radix_sort = radix_sort::IsSupported(batch_size, vocab_size, k);
-  if (use_radix_sort) {
-    BENCHMARK_KERNEL(TopkAlgo::RADIX, [&]() {
-      radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-    });
-  }
-
+  
+  // Candidate: Hybrid Sort. Only enabled when neither Flash Sort nor LLM Sort is used, or when vocab_size is small.
   if (!use_flash_sort && !use_llm_sort || vocab_size <= 4096) {
-    // Candidate: Hybrid Sort
     if (k <= kHybridSortMaxK) {
       BENCHMARK_KERNEL(TopkAlgo::HYBRID, [&]() {
         hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
@@ -132,9 +130,24 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
     }
   }
 
-  // Fall back to full sort.
+  // Candidate: Partition Sort. Only enabled when neither Flash Sort nor LLM Sort is used.
+  if (!use_flash_sort && !use_llm_sort && radix_partition_sort::IsSupported(batch_size, vocab_size, k)) {
+    BENCHMARK_KERNEL(TopkAlgo::PARTITION, [&]() {
+      radix_partition_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    });
+  }
+
+  // No fast algorithm found, fallback to Full Sort and Radix Sort.
   if (best_algo == TopkAlgo::UNKNOWN) {
-    best_algo = TopkAlgo::FULL;
+    BENCHMARK_KERNEL(TopkAlgo::FULL, [&]() {
+      full_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    });
+
+    if (batch_size <= kRadixSortBenchmarkMaxBatchSize) {
+      BENCHMARK_KERNEL(TopkAlgo::RADIX, [&]() {
+        radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      });
+    }
   }
 
   // Cache the result in the shared cache for future calls to avoid re-benchmarking.

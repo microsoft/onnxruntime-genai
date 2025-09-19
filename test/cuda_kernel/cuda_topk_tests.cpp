@@ -144,6 +144,11 @@ void RunParityTests(const TopKTestParams& params) {
                                               params.vocab_size, params.batch_size, params.k);
   });
 
+  test_algo("RADIX_SORT", [&]() {
+    Generators::cuda::radix_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                          params.vocab_size, params.batch_size, params.k);
+  });
+    
   if (params.k <= Generators::cuda::kHybridSortMaxK) {
     test_algo("HYBRID_SORT", [&]() {
       Generators::cuda::hybrid_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
@@ -165,10 +170,10 @@ void RunParityTests(const TopKTestParams& params) {
     });
   }
 
-  if (Generators::cuda::radix_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
-    test_algo("RADIX_SORT", [&]() {
-      Generators::cuda::radix_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
-                                            params.vocab_size, params.batch_size, params.k);
+  if (Generators::cuda::radix_partition_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
+    test_algo("PARTITION_SORT", [&]() {
+      Generators::cuda::radix_partition_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                                      params.vocab_size, params.batch_size, params.k);
     });
   }
 

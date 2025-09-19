@@ -8,6 +8,7 @@
 #include "cuda_topk_benchmark.cuh"
 #include "cuda_topk_full_sort.cuh"
 #include "cuda_topk_radix_sort.cuh"
+#include "cuda_topk_partition_sort.cuh"
 #include "cuda_topk_hybrid_sort.cuh"
 #include "cuda_topk_flash_sort.cuh"
 #include "cuda_topk_llm_sort.cuh"
@@ -21,7 +22,7 @@ TopkDataDetail::TopkDataDetail(int batch_size, int vocab_size, cudaStream_t stre
   hybrid_sort_partition_size = hybrid_sort::EstimateBestPartitionSize(vocab_size);
   flash_sort_partition_size = flash_sort::EstimateBestPartitionSize(vocab_size);
   llm_sort_partition_size = llm_sort::EstimateBestPartitionSize(vocab_size);
-  radix_sort_partition_size = radix_sort::EstimateBestPartitionSize(vocab_size);
+  partition_sort_partition_size = radix_partition_sort::EstimateBestPartitionSize(vocab_size);
 
   size_t vocab_batch_size = static_cast<size_t>(vocab_size) * batch_size;
   intermediate_buffer_elements = std::max(
@@ -29,9 +30,11 @@ TopkDataDetail::TopkDataDetail(int batch_size, int vocab_size, cudaStream_t stre
        hybrid_sort::GetIntermediateSize(batch_size, vocab_size, hybrid_sort_partition_size),
        flash_sort::GetIntermediateSize(batch_size, vocab_size, flash_sort_partition_size),
        llm_sort::GetIntermediateSize(batch_size, vocab_size, llm_sort_partition_size),
-       radix_sort::GetIntermediateSize(batch_size, vocab_size, radix_sort_partition_size)});
+       radix_partition_sort::GetIntermediateSize(batch_size, vocab_size, partition_sort_partition_size)});
 
-  cub_temp_storage_bytes = full_sort::GetTempStorageBytes(static_cast<int>(vocab_batch_size), batch_size, stream);
+  auto radix_sort_temp_storage_bytes = radix_sort::GetTempStorageBytes(vocab_size, stream);
+  auto full_sort_temp_storage_bytes = full_sort::GetTempStorageBytes(static_cast<int>(vocab_batch_size), batch_size, stream);
+  cub_temp_storage_bytes = std::max(radix_sort_temp_storage_bytes, full_sort_temp_storage_bytes);
 }
 
 size_t TopkData::CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t stream) {
@@ -147,6 +150,9 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
       return;
     case TopkAlgo::LLM:
       llm_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      return;
+    case TopkAlgo::PARTITION:
+      radix_partition_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       return;
     case TopkAlgo::RADIX:
       radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
