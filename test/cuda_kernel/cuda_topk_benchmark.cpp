@@ -46,7 +46,8 @@ void PrintSummary(const std::vector<BenchmarkResult>& results) {
   std::cout << "\n--- TopK Cuda Kernel Benchmark Summary ---\n";
   std::cout << std::left << std::setw(12) << "Batch Size" << std::setw(12) << "Vocab Size" << std::setw(5) << "K"
             << std::setw(28) << "Algorithm" << std::setw(12) << "Latency(us)" << std::setw(12) << "Stdev(us)"
-            << std::setw(12) << "P95(us)" << "\n";
+            << std::setw(12) << "P95(us)"
+            << "\n";
   std::cout << std::string(97, '-') << "\n";
 
   for (const auto& result : results) {
@@ -117,6 +118,19 @@ void RunBenchmarks(const BenchmarkParams& params) {
                                                 params.batch_size, params.k);
     });
     all_results.push_back({params, "SELECTION_SORT", 0, mean_ms, stdev_ms, p95_ms});
+  }
+
+  // Benchmark Distributed Selection Sort
+  {
+    if ((params.batch_size <= Generators::cuda::topk_impl_details::kTopKDistributedSelectSortMaxBatchSize) &&
+        (params.k <= Generators::cuda::topk_impl_details::kTopKDistributedSelectSortMaxTopK) &&
+        (params.vocab_size >= Generators::cuda::topk_impl_details::kTopKDistributedSelectSortMinVocabSize)) {
+      auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
+        Generators::cuda::RunTopKViaDistributedSelectionSort(data.get(), stream, scores_in_d.get(),
+                                                             params.vocab_size, params.k);
+      });
+      all_results.push_back({params, "DISTRIBUTED_SELECTION_SORT", 0, mean_ms, stdev_ms, p95_ms});
+    }
   }
 
   PrintSummary(all_results);
