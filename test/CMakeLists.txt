@@ -19,6 +19,11 @@ if(USE_CUDA AND CMAKE_CUDA_COMPILER AND ENABLE_CUDA_KERNEL_TESTS)
     "${CMAKE_CURRENT_SOURCE_DIR}/cuda_kernel/*.cpp"
   )
   target_sources(unit_tests PRIVATE ${test_srcs} ${generator_cudalib_srcs} ${cuda_kernel_test_srcs})
+  # Enable STABLE_TOPK in Windows so that we have test coverage for stable sort.
+  if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    message(STATUS "Enable STABLE_TOPK in CUDA kernel tests.")
+    target_compile_definitions(unit_tests PRIVATE STABLE_TOPK)
+  endif()
 else()
   target_sources(unit_tests PRIVATE ${test_srcs})
 endif()

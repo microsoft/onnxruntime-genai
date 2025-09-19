@@ -217,19 +217,22 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
     algo_latencies["SELECTION_SORT"] = mean_ms;
   }
 
+  std::string stable_suffix = Generators::cuda::kStableTopK ? "_STABLE" : "_UNSTABLE";
+
   // Benchmark Radix Sort
-  {
+  if (Generators::cuda::radix_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
       Generators::cuda::radix_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
                                             params.batch_size, params.k);
     });
-    all_results.push_back({params, "RADIX_SORT", mean_ms, stdev_ms, p95_ms});
+    std::string algo_name = "RADIX_SORT";
+    algo_name += stable_suffix;
+    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
     current_csv_result.radix_sort_latency = mean_ms;
-    algo_latencies["RADIX_SORT"] = mean_ms;
+    algo_latencies[algo_name] = mean_ms;
   }
 #endif
 
-  std::string stable_suffix = Generators::cuda::kStableTopK ? "_STABLE" : "_UNSTABLE";
   // Benchmark Hybrid Sort
   if (params.k <= Generators::cuda::kHybridSortMaxK) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {

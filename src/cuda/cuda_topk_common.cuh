@@ -5,8 +5,9 @@
 
 #include <cub/block/block_radix_sort.cuh>
 #include <cuda_runtime.h>
+#include <float.h>  // For FLT_MAX
 #include "cuda_topk.h"
-#include "cuda_topk_bitonic_sort_helper.cuh"
+#include "cuda_topk_stable_sort_helper.cuh"
 
 namespace Generators {
 namespace cuda {
@@ -59,14 +60,7 @@ __device__ void FindPartitionTopK_StableSort(const float* __restrict__ scores_in
       index = INT_MAX;
     }
 
-    // Transform float to sortable uint32 (for descending order)
-    uint32_t score_bits = __float_as_uint(score);
-    uint32_t sortable_score = (score_bits & 0x80000000) ? (~score_bits) : (score_bits | 0x80000000);
-
-    // Create composite key: score in upper 32 bits, inverted index in lower 32 bits
-    // Inverted index ensures smaller indices come first for ties
-    uint32_t inverted_index = UINT32_MAX - index;
-    thread_keys[i] = (static_cast<uint64_t>(sortable_score) << 32) | inverted_index;
+    thread_keys[i] = topk_common::PackStableSortKey(score, index);
   }
 
   // Sort keys from a blocked arrangement to a striped arrangement across threads.
@@ -75,23 +69,11 @@ __device__ void FindPartitionTopK_StableSort(const float* __restrict__ scores_in
   // The first K threads now hold the top K elements.
   // This is highly efficient due to minimal thread divergence.
   if (threadIdx.x < K) {
-    CompositeKey key = thread_keys[0];  // Top K keys are in the first item of the first K threads
+    uint64_t key = thread_keys[0];  // Top K keys are in the first item of the first K threads
 
     // Unpack the composite key to get the original score and index
-    uint32_t sortable_score = static_cast<uint32_t>(key >> 32);
-    uint32_t inverted_index = static_cast<uint32_t>(key & 0xFFFFFFFF);
-
-    // Reverse the score transformation
-    uint32_t score_bits;
-    if (sortable_score & 0x80000000) {
-      // Was originally a positive float
-      score_bits = sortable_score ^ 0x80000000;
-    } else {
-      // Was originally a negative float
-      score_bits = ~sortable_score;
-    }
-    float score = __uint_as_float(score_bits);
-    int index = UINT32_MAX - inverted_index;
+    float score = topk_common::UnpackStableSortScore(key);
+    int index = topk_common::UnpackStableSortIndex(key);
 
     // Write the result to global memory
     size_t offset = (static_cast<size_t>(batch_idx) * num_partitions + partition_idx) * K + threadIdx.x;

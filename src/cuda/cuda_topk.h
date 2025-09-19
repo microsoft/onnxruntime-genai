@@ -30,6 +30,9 @@ constexpr int kGpuBufferAlignment = 256;
 // Most common K value used in top-k sampling for Large Language Models typically falls in the range of 20 to 50.
 // So max k values shall be 64 or higher.
 // We enable higher k values in some algorithms for testing. The drawback is larger buffer sizes and longer compilation time.
+
+// Redix sort uses registers in stage 2 so it could support no more than 64 due to limit of registers.
+constexpr int kRadixSortMaxK = 64;           // The maximum k (up to 64) allowed for radix sort. Must be power of 2.
 constexpr int kHybridSortMaxK = 256;         // The maximum k (up to 256) allowed for hybrid sort. Must be power of 2.
 constexpr int kFlashSortMaxK = 128;          // The maximum k (up to 256) allowed for flash sort. Must be power of 2.
 constexpr int kLlmSortMaxK = 64;             // The maximum k (up to 256) allowed for LLM sort. Must be power of 2.
@@ -44,8 +47,32 @@ enum class TopkAlgo { SELECTION,
                       FULL,
                       UNKNOWN = -1 };
 
+struct TopkDataDetail {
+  TopkDataDetail(int batch_size, int vocab_size, cudaStream_t stream);
+  virtual ~TopkDataDetail() = default;
+
+  // The partition size can be used to test different parition sizes in benchmark tests.
+  // If not for that purpose, there is no need to cache the parition size here.
+
+  // The estimated best partition size for hybrid sort
+  int hybrid_sort_partition_size = 0;
+
+  // The estimated best partition size for flash sort
+  int flash_sort_partition_size = 0;
+
+  // The estimated best partition size for llm sort
+  int llm_sort_partition_size = 0;
+
+  // The estimated best partition size for radix sort
+  int radix_sort_partition_size = 0;
+
+  size_t intermediate_buffer_elements = 0;
+
+  size_t cub_temp_storage_bytes = 0;
+};
+
 // This struct holds all the device memory buffers and other data required for Top-K operations.
-struct TopkData {
+struct TopkData : public TopkDataDetail {
   TopkData(int batch_size, int vocab_size, cudaStream_t stream, void* buffer = nullptr, size_t buffer_size = 0);
   virtual ~TopkData() = default;
   TopkData(const TopkData&) = delete;
@@ -53,15 +80,6 @@ struct TopkData {
 
   // Calculates the total memory required for all buffers.
   static size_t CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t stream);
-
-  // The estimated best partition size for hybrid sort
-  int hybrid_sort_partition_size;
-
-  // The estimated best partition size for flash sort
-  int flash_sort_partition_size;
-
-  // The estimated best partition size for llm sort
-  int llm_sort_partition_size;
 
   // Caching the device_id to avoid repeated calls to cudaGetDevice
   int device_id;
@@ -88,9 +106,9 @@ struct TopkData {
   // - Selection sort: Holds a copy of input scores. Will be updated in place by selection sort kernel.
   // - Hybrid sort: A "ping-pong" buffer for raw scores during the reduction phase.
   float* intermediate_scores_2;
+
   // - Full sort: General-purpose temporary storage for CUB's DeviceSegmentedRadixSort
   unsigned char* cub_temp_storage;
-  size_t cub_temp_storage_bytes = 0;
 
   // - Full sort: Stores the start offset of each batch segment for CUB's segmented sort
   int* batch_offsets;
@@ -106,7 +124,7 @@ struct TopkData {
 
   // If buffer is provided externally, this unique_ptr will be null. Otherwise it will own the allocated memory.
   cuda_unique_ptr<uint8_t> memory_buffer_owner_;
-  
+
   // A view of the allocated memory buffer or the externally provided buffer.
   std::span<uint8_t> memory_buffer_span_;
 };
@@ -144,10 +162,13 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 }  // namespace full_sort
 
 /**
- * @brief Sequentially sorts each item in the batch using CUB's device radix sort. This is an effective strategy for smaller batch sizes
- * where launching separate, independent sorts is efficient.
+ * @brief A high-performance two-stage, partition-and-reduce sort using block-wide radix sort (cub::BlockRadixSort).
+ * In Stage 1, the input is divided into partitions, and a kernel finds the top candidates within each partition.
+ * In Stage 2, a second kernel performs a final, fast reduction on these candidates, operating on data held in registers.
+ * This algorithm is very efficient for small to medium k values (up to 64).
  */
 namespace radix_sort {
+bool IsSupported(int batch_size, int vocab_size, int k);
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 }  // namespace radix_sort
 

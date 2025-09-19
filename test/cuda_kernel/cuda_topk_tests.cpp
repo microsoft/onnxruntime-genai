@@ -165,10 +165,12 @@ void RunParityTests(const TopKTestParams& params) {
     });
   }
 
-  test_algo("RADIX_SORT", [&]() {
-    Generators::cuda::radix_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
-                                          params.vocab_size, params.batch_size, params.k);
-  });
+  if (Generators::cuda::radix_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
+    test_algo("RADIX_SORT", [&]() {
+      Generators::cuda::radix_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                            params.vocab_size, params.batch_size, params.k);
+    });
+  }
 
   // Test RunTopK (Backend can be any of the above algorithms).
   test_algo("DEFAULT", [&]() {
@@ -184,7 +186,7 @@ TEST(TopKTests, ParityTests) {
 
   std::vector<int> batch_sizes = {1, 4, 32};
   std::vector<int> vocab_sizes = {200, 2000, 20000, 200000};
-  std::vector<int> ks = {1, 16, 32, 50, 64, 100, 128, 256};
+  std::vector<int> ks = {1, 2, 4, 5, 8, 16, 32, 50, 64, 100, 128, 256};
 
   for (int batch_size : batch_sizes) {
     for (int vocab_size : vocab_sizes) {
