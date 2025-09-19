@@ -266,6 +266,23 @@ std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
   return std::make_unique<TokenizerStream>(*this);
 }
 
+void Tokenizer::UpdateOptions(const std::unordered_map<std::string, std::string>& options) const {
+  // Prepare keys/values arrays from the unordered_map
+  std::vector<const char*> keys;
+  std::vector<const char*> values;
+
+  keys.reserve(options.size());
+  values.reserve(options.size());
+
+  for (const auto& kv : options) {
+    keys.push_back(kv.first.c_str());
+    values.push_back(kv.second.c_str());
+  }
+
+  // Tap into ORT Extensions API
+  CheckResult(OrtxUpdateTokenizerOptions(tokenizer_, keys.data(), values.data(), options.size()));
+}
+
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   OrtxPtr<OrtxTokenId2DArray> ids;
   CheckResult(OrtxTokenizeWithOptions(tokenizer_, &text, 1, ids.Address(), false /* add_special_tokens */));

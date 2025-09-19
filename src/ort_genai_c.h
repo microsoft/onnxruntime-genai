@@ -573,6 +573,24 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateMultiModalProcessor(const OgaModel* 
 OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* processor);
 
 /**
+ * Updates tokenizer options for the given OgaTokenizer instance.
+ * The provided keys and values must be null-terminated C strings.
+ *
+ * @param tokenizer Pointer to the OgaTokenizer whose options will be updated.
+ * @param keys Array of option key strings.
+ * @param values Array of corresponding option value strings.
+ * @param num_options Number of key/value pairs provided.
+ *
+ * @return nullptr on success, or an OgaResult* describing the error. 
+ *         The returned OgaResult* (if not null) must be freed with OgaDestroyResult.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
+    const OgaTokenizer* tokenizer,
+    const char* keys[],
+    const char* values[],
+    size_t num_options);
+
+/**
  * Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences
  * when it is no longer needed.
  */
