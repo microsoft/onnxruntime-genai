@@ -39,7 +39,7 @@ inline int EstimateBestPartitionSize(int vocab_size) {
 
 inline size_t GetIntermediateSize(int batch_size, int vocab_size, int partition_size) {
   const int num_partitions = CeilDiv(vocab_size, partition_size);
-  return static_cast<size_t>(batch_size) * num_partitions * kRadixSortMaxK;
+  return static_cast<size_t>(batch_size) * num_partitions * kPartitionSortMaxK;
 }
 
 // --- Stage 1: Find Top-K within each vocabulary partition ---
@@ -172,7 +172,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   const int num_partitions = CeilDiv(vocab_size, partition_size);
   assert(num_partitions <= 64);
 
-  int k_padded_val = kRadixSortMaxK;
+  int k_padded_val = kPartitionSortMaxK;
   if (k <= 4)
     k_padded_val = 4;
   else if (k <= 8)
@@ -250,7 +250,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 }
 
 bool IsSupported(int batch_size, int vocab_size, int k) {
-  if (k > kRadixSortMaxK) {
+  if (k > kPartitionSortMaxK) {
     return false;
   }
   const int partition_size = EstimateBestPartitionSize(vocab_size);

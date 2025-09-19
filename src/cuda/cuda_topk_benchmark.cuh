@@ -126,7 +126,7 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
       flash_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
   }
-  
+
   // Candidate: Hybrid Sort. Only enabled when neither Flash Sort nor LLM Sort is used, or when vocab_size is small.
   if (!use_flash_sort && !use_llm_sort || vocab_size <= 4096) {
     if (k <= kHybridSortMaxK) {

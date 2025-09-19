@@ -113,7 +113,7 @@ TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream, void* bu
   // TODO: we shall cache deviceProp with inference session so that we need not query device property every time.
   cudaDeviceProp deviceProp;
   CUDA_CHECK(cudaGetDeviceProperties(&deviceProp, device_id));
-  
+
   // Initialize metadata for distributed selection sort.
   top_k_distributed_select_sort_shards = std::min(topk_impl_details::kTopKDistributedSelectSortMaxShards, deviceProp.multiProcessorCount);
   cudaMemset(top_k_distributed_select_sort_lock, 0, sizeof(int));

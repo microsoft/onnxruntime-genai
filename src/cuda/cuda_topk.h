@@ -31,8 +31,8 @@ constexpr int kGpuBufferAlignment = 256;
 // So max k values shall be 64 or higher.
 // We enable higher k values in some algorithms for testing. The drawback is larger buffer sizes and longer compilation time.
 
-// Redix sort uses registers in stage 2 so it could support no more than 64 due to limit of registers.
-constexpr int kRadixSortMaxK = 64;           // The maximum k (up to 64) allowed for radix sort. Must be power of 2.
+// Partition sort uses registers in stage 2 so it could support no more than 64 due to limit of registers.
+constexpr int kPartitionSortMaxK = 64;       // The maximum k (up to 64) allowed for partition sort. Must be power of 2.
 constexpr int kHybridSortMaxK = 256;         // The maximum k (up to 256) allowed for hybrid sort. Must be power of 2.
 constexpr int kFlashSortMaxK = 128;          // The maximum k (up to 256) allowed for flash sort. Must be power of 2.
 constexpr int kLlmSortMaxK = 64;             // The maximum k (up to 256) allowed for LLM sort. Must be power of 2.
@@ -188,7 +188,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 }  // namespace full_sort
 
 /**
- * @brief Sequentially sorts each item in the batch using CUB's device radix sort. This is an effective strategy for smaller batch sizes
+ * @brief Sequentially sorts each batch using CUB's device radix sort. This is an effective strategy for smaller batch sizes
  * where launching separate, independent sorts is efficient.
  */
 namespace radix_sort {
