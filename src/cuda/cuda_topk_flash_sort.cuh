@@ -10,6 +10,7 @@
 #include "cuda_topk.h"
 #include "cuda_topk_bitonic_sort_helper.cuh"
 #include "cuda_topk_common.cuh"
+#include "cuda_topk_warp_merge_helper.cuh"  // Use the new warp-level helper
 
 namespace Generators {
 namespace cuda {
@@ -96,7 +97,38 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
         }
       }
       __syncthreads();
-      bitonic_sort::SharedMemBitonicSort<kBlockSize, kSortSize>(smem.stage2_storage.scores, smem.stage2_storage.indices);
+
+      // --- Choose strategy based on K ---
+      if constexpr (K_PADDED <= 8) {
+        // For small K, use a warp-level sort on the first warp for maximum speed.
+        // kSortSize will be at most 32 (8 * 4).
+        if (threadIdx.x < warpSize) {
+          // Load data from shared mem into registers, padding with min values
+          // for threads outside the kSortSize range.
+          float my_score;
+          int my_index;
+          if (threadIdx.x < kSortSize) {
+            my_score = smem.stage2_storage.scores[threadIdx.x];
+            my_index = smem.stage2_storage.indices[threadIdx.x];
+          } else {
+            my_score = -FLT_MAX;
+            my_index = INT_MAX;
+          }
+
+          // Perform sort entirely in registers
+          warp_merge::WarpBitonicSort(my_score, my_index);
+
+          // Write top-K results back to shared memory
+          if (threadIdx.x < K_PADDED) {
+            smem.stage2_storage.scores[threadIdx.x] = my_score;
+            smem.stage2_storage.indices[threadIdx.x] = my_index;
+          }
+        }
+        __syncthreads();
+      } else {
+        // For larger K, the existing shared memory bitonic sort is still a robust choice.
+        bitonic_sort::SharedMemBitonicSort<kBlockSize, kSortSize>(smem.stage2_storage.scores, smem.stage2_storage.indices);
+      }
 
       if (threadIdx.x < K_PADDED) {
         size_t out_offset = static_cast<size_t>(partition_idx) * K_PADDED + threadIdx.x;
@@ -120,7 +152,9 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   const int num_partitions = CeilDiv(vocab_size, partition_size);
 
   int k_padded_val = kFlashSortMaxK;
-  if (k <= 4)
+  if (k == 1)
+    k_padded_val = 1;
+  else if (k <= 4)
     k_padded_val = 4;
   else if (k <= 8)
     k_padded_val = 8;
@@ -158,7 +192,9 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   };
 
   // Select the padded K value at runtime and call the launch logic.
-  if (k <= 4) {
+  if (k == 1) {
+    launch_flash_sort(std::integral_constant<int, 1>());
+  } else if (k <= 4) {
     launch_flash_sort(std::integral_constant<int, 4>());
   } else if (k <= 8) {
     launch_flash_sort(std::integral_constant<int, 8>());
@@ -200,7 +236,6 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 
 inline size_t GetIntermediateSize(int batch_size, int vocab_size, int partition_size) {
   const int num_partitions = CeilDiv(vocab_size, partition_size);
-  ;
   return static_cast<size_t>(batch_size) * num_partitions * kFlashSortMaxK;
 }
 
@@ -241,7 +276,9 @@ bool IsSupported(int batch_size, int vocab_size, int k) {
   };
 
   void* kernel = nullptr;
-  if (k <= 4) {
+  if (k == 1) {
+    kernel = get_kernel(std::integral_constant<int, 1>());
+  } else if (k <= 4) {
     kernel = get_kernel(std::integral_constant<int, 4>());
   } else if (k <= 8) {
     kernel = get_kernel(std::integral_constant<int, 8>());
