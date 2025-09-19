@@ -91,10 +91,7 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
   TopkAlgo best_algo = TopkAlgo::UNKNOWN;
 
   // Selection sort helps only for small k. This threshold is based on benchmark results.
-  constexpr int kSelectionSortBenchmarkMaxK = 8;
-
-  // Radix sort helps only for small batch size. This threshold is based on benchmark results.
-  constexpr int kRadixSortBenchmarkMaxBatchSize = 8;
+  constexpr int kSelectionSortBenchmarkMaxK = 4;
 
   // Candidate: Selection Sort
   if (k <= kSelectionSortBenchmarkMaxK) {
@@ -119,23 +116,25 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
     });
   }
 
-  if (!use_flash_sort && !use_llm_sort) {
+  bool use_radix_sort = radix_sort::IsSupported(batch_size, vocab_size, k);
+  if (use_radix_sort) {
+    BENCHMARK_KERNEL(TopkAlgo::RADIX, [&]() {
+      radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    });
+  }
+
+  if (!use_flash_sort && !use_llm_sort || vocab_size <= 4096) {
     // Candidate: Hybrid Sort
     if (k <= kHybridSortMaxK) {
       BENCHMARK_KERNEL(TopkAlgo::HYBRID, [&]() {
         hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       });
-    } else {  // No fast algorithms for this k, benchmark the fallbacks.
-      BENCHMARK_KERNEL(TopkAlgo::FULL, [&]() {
-        full_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-      });
-
-      if (batch_size <= kRadixSortBenchmarkMaxBatchSize) {
-        BENCHMARK_KERNEL(TopkAlgo::RADIX, [&]() {
-          radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-        });
-      }
     }
+  }
+
+  // Fall back to full sort.
+  if (best_algo == TopkAlgo::UNKNOWN) {
+    best_algo = TopkAlgo::FULL;
   }
 
   // Cache the result in the shared cache for future calls to avoid re-benchmarking.
