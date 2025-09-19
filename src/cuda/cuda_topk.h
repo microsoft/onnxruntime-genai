@@ -38,12 +38,20 @@ constexpr int kFlashSortMaxK = 128;          // The maximum k (up to 256) allowe
 constexpr int kLlmSortMaxK = 64;             // The maximum k (up to 256) allowed for LLM sort. Must be power of 2.
 constexpr int kMaxBenchmarkLocalCache = 64;  // The maximum local cache of online benchmarking results.
 
+namespace topk_impl_details {
+constexpr int kTopKDistributedSelectSortMaxShards = 32;
+constexpr int kTopKDistributedSelectSortMaxBatchSize = 1;
+constexpr int kTopKDistributedSelectSortMaxTopK = 64;
+constexpr int kTopKDistributedSelectSortMinVocabSize = 100000;
+}  // namespace topk_impl_details
+
 // Enum for the different Top-K algorithms used in online benchmarking.
 enum class TopkAlgo { SELECTION,
                       HYBRID,
                       FLASH,
                       LLM,
                       PARTITION,
+                      DISTRIBUTED,
                       RADIX,
                       FULL,
                       UNKNOWN = -1 };
@@ -114,6 +122,13 @@ struct TopkData : public TopkDataDetail {
   // - Full sort: Stores the start offset of each batch segment for CUB's segmented sort
   int* batch_offsets;
 
+  // Distributed Selection sort: Following are metadata and buffers associated
+  // with the distributed selection sort Top k implementation
+  int top_k_distributed_select_sort_shards;
+  int* top_k_distributed_select_sort_lock;
+  int* top_k_distributed_select_sort_keys;
+  float* top_k_distributed_select_sort_values;
+
   // --- Information of Final Output (Input to Sampling Stage) ---
   const float* topk_scores = nullptr;
   const int* topk_indices = nullptr;
@@ -153,6 +168,16 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
 namespace selection_sort {
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 }  // namespace selection_sort
+
+/**
+ * @brief A distributed selection sort algorithm that partitions the input data across multiple thread blocks.
+ * Each block independently finds local top-k candidates, which are then merged to determine the global top-k.
+ * This approach is particularly effective for very large vocabularies and small batch sizes.
+ */
+namespace distributed_select_sort {
+bool IsSupported(int batch_size, int vocab_size, int k);
+void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
+}  // namespace distributed_select_sort
 
 /**
  * @brief Fully sorts the entire input array using CUB's device-wide fragmented radix sort,

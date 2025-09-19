@@ -9,6 +9,7 @@
 #include "cuda_topk_full_sort.cuh"
 #include "cuda_topk_radix_sort.cuh"
 #include "cuda_topk_partition_sort.cuh"
+#include "cuda_topk_distributed_select_sort.cuh"
 #include "cuda_topk_hybrid_sort.cuh"
 #include "cuda_topk_flash_sort.cuh"
 #include "cuda_topk_llm_sort.cuh"
@@ -48,6 +49,11 @@ size_t TopkData::CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t
   total_size += AlignUp((batch_size + 1) * sizeof(int), kGpuBufferAlignment);
   total_size += AlignUp(detail.cub_temp_storage_bytes, kGpuBufferAlignment);
 
+  // Space for distributed selection sort for the lock and sorted keys/values
+  total_size += AlignUp(topk_impl_details::kTopKDistributedSelectSortMaxBatchSize * sizeof(int), kGpuBufferAlignment);
+  total_size += AlignUp(topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK * sizeof(int), kGpuBufferAlignment);
+  total_size += AlignUp(topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK * sizeof(float), kGpuBufferAlignment);
+
   return total_size;
 }
 
@@ -71,6 +77,15 @@ void TopkData::InitializeBuffers(int batch_size, int vocab_size, cudaStream_t st
 
   cub_temp_storage = reinterpret_cast<unsigned char*>(current_ptr);
   current_ptr += AlignUp(cub_temp_storage_bytes, kGpuBufferAlignment);
+
+  top_k_distributed_select_sort_lock = reinterpret_cast<int*>(current_ptr);
+  current_ptr += AlignUp(topk_impl_details::kTopKDistributedSelectSortMaxBatchSize * sizeof(int), kGpuBufferAlignment);
+
+  top_k_distributed_select_sort_keys = reinterpret_cast<int*>(current_ptr);
+  current_ptr += AlignUp(topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK * sizeof(int), kGpuBufferAlignment);
+
+  top_k_distributed_select_sort_values = reinterpret_cast<float*>(current_ptr);
+  current_ptr += AlignUp(topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK * sizeof(float), kGpuBufferAlignment);
 }
 
 TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream, void* buffer, size_t buffer_size)
@@ -94,6 +109,14 @@ TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream, void* bu
   }
 
   InitializeBuffers(batch_size, vocab_size, stream);
+
+  // TODO: we shall cache deviceProp with inference session so that we need not query device property every time.
+  cudaDeviceProp deviceProp;
+  CUDA_CHECK(cudaGetDeviceProperties(&deviceProp, device_id));
+  
+  // Initialize metadata for distributed selection sort.
+  top_k_distributed_select_sort_shards = std::min(topk_impl_details::kTopKDistributedSelectSortMaxShards, deviceProp.multiProcessorCount);
+  cudaMemset(top_k_distributed_select_sort_lock, 0, sizeof(int));
 }
 
 template <typename T>
@@ -153,6 +176,9 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
       return;
     case TopkAlgo::PARTITION:
       radix_partition_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      return;
+    case TopkAlgo::DISTRIBUTED:
+      distributed_select_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       return;
     case TopkAlgo::RADIX:
       radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);

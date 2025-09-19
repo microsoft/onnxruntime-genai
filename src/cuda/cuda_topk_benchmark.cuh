@@ -103,6 +103,12 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
     BENCHMARK_KERNEL(TopkAlgo::SELECTION, [&]() {
       selection_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
+
+    if (distributed_select_sort::IsSupported(batch_size, vocab_size, k)) {
+      BENCHMARK_KERNEL(TopkAlgo::DISTRIBUTED, [&]() {
+        distributed_select_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      });
+    }
   }
 
   // Candidate: LLM Sort
