@@ -59,6 +59,7 @@ class Model:
         self.cache_dir = cache_dir
         self.filename = extra_options.get("filename", "model.onnx")
         self.hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
+        self.hf_remote = extra_options.get("hf_remote", True)
         self.extra_options = extra_options
 
         # States for building the model
@@ -82,7 +83,7 @@ class Model:
             },
             "dml": {},
             "webgpu": {},
-            "NvTensorRtRtx": {"enable_cuda_graph": "1"}
+            "trt-rtx": {"enable_cuda_graph": "1"}
         }
 
         # Map input names to their types and shapes
@@ -357,7 +358,7 @@ class Model:
             ("dml", ir.DataType.FLOAT16),
             ("webgpu", ir.DataType.FLOAT16),
             ("webgpu", ir.DataType.FLOAT),
-            ("NvTensorRtRtx", ir.DataType.FLOAT16),
+            ("trt-rtx", ir.DataType.FLOAT16),
         }
         if (self.ep, self.io_dtype) in valid_gqa_configurations:
             # Change model settings for GroupQueryAttention
@@ -383,10 +384,10 @@ class Model:
 
     def make_genai_config(self, model_name_or_path, extra_kwargs, out_dir):
         # Create config with attributes from config.json and generation_config.json (if latter file exists)
-        config = AutoConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+        config = AutoConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
         try:
             # Override search attributes in config based on values in generation_config.json
-            gen_config = GenerationConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+            gen_config = GenerationConfig.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
             defaults = {
                 "bos_token_id": None,
                 "do_sample": False,
@@ -461,11 +462,12 @@ class Model:
             },
         }
 
-        if self.ep == "NvTensorRtRtx" and self.window_size is not None and self.window_size > 0:
+        if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
             genai_config["model"]["decoder"]["sliding_window"] = {"window_size": self.window_size, "slide_key_value_cache": False, "slide_inputs": False}
 
         if self.ep != "cpu":
-            ep_options = { self.ep : self.ep_attrs[self.ep] }
+            ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
+            ep_options = { ep_name : self.ep_attrs[self.ep] }
             genai_config["model"]["decoder"]["session_options"]["provider_options"].append(ep_options)
 
         print(f"Saving GenAI config in {out_dir}")
@@ -473,7 +475,7 @@ class Model:
             json.dump(genai_config, f, indent=4)
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
-        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
         print(f"Saving processing files in {out_dir} for GenAI")
         tokenizer.save_pretrained(out_dir)
 
@@ -1123,7 +1125,7 @@ class Model:
         self.layernorm_attrs["skip_input"] = layernorm_attrs_value
 
     def make_layernorm(self, layer_id, layernorm, skip, simple, location):
-        if self.ep == "NvTensorRtRtx" and (skip or simple):
+        if self.ep == "trt-rtx" and (skip or simple):
             # Fall back to primitive ops
             self._make_layernorm_op(layer_id, layernorm, skip, simple, location)
         else:
@@ -1459,8 +1461,8 @@ class Model:
         self.rope_attrs["save_caches"] = False
         cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
 
-        if self.ep in ["dml", "NvTensorRtRtx"]:
-            # Concat small and large cos/sin caches for DML and NvTensorRtRtx EPs
+        if self.ep in ["dml", "trt-rtx"]:
+            # Concat small and large cos/sin caches for DML and TRT-RTX EPs
             # These EPs don't support the If operator
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
             sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
@@ -2412,6 +2414,7 @@ class Model:
             normalize_routing_weights=self.moe_attrs["normalize_routing_weights"],
             swiglu_fusion=self.moe_attrs["swiglu_fusion"],
             use_sparse_mixer=self.moe_attrs["use_sparse_mixer"],
+            block_size=self.moe_attrs["block_size"],
             **extra_kwargs,
         )
         self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
@@ -2420,6 +2423,22 @@ class Model:
         dtype = torch.quint4x2 if self.moe_attrs["expert_weight_bits"] == 4 else torch.int8
         qweight, scales = None, None
 
+        # Get block size from quantization attributes
+        block_size = self.quant_attrs["int4"]["block_size"]
+
+        # Use block-wise quantization if block_size > 0
+        if block_size > 0:
+            try:
+                qweight, scales = self._symmetric_blockwise_quantize(weights, block_size)
+                self.moe_attrs["block_size"] = block_size
+                return qweight, scales.to(torch.float16)
+            except Exception as e:
+                raise RuntimeError(f"Block-wise quantization failed with block_size={block_size}: {e}")
+        else:
+            # block_size is 0, so we're using tensor-level quantization
+            self.moe_attrs["block_size"] = 0
+
+        # Existing tensor-level quantization implementation (fallback)
         unsuccessful = True
         try:
             import tensorrt_llm
@@ -2439,6 +2458,81 @@ class Model:
                 raise RuntimeError("Failed to quantize MoE weights with TensorRT-LLM. Please ensure TensorRT-LLM installs and runs successfully in your environment.")
 
         return qweight, scales.to(torch.float16)
+
+    def _symmetric_blockwise_quantize(self, weights, block_size):
+        # Ensure weights are on CPU for quantization
+        weights = weights.cpu().contiguous()
+
+        original_shape = weights.shape
+        bits = self.moe_attrs["expert_weight_bits"]
+
+        qmin, qmax = (-7, 7) if bits == 4 else (-127, 127)
+
+        # Reshape weights to process the last dimension in blocks
+        # weights shape: [..., hidden_size] -> [..., num_blocks, block_size]
+        last_dim = original_shape[-1]
+        num_blocks = (last_dim + block_size - 1) // block_size
+
+        # Pad the last dimension if necessary
+        pad_size = num_blocks * block_size - last_dim
+        if pad_size > 0:
+            pad_shape = list(original_shape)
+            pad_shape[-1] = pad_size
+            padding = torch.zeros(pad_shape, dtype=weights.dtype, device=weights.device)
+            weights_padded = torch.cat([weights, padding], dim=-1)
+        else:
+            weights_padded = weights
+
+        reshaped_weights = weights_padded.view(*original_shape[:-1], num_blocks, block_size)
+        block_max_abs = torch.max(torch.abs(reshaped_weights), dim=-1)[0]
+        scales = block_max_abs / qmax
+
+        # Avoid division by zero - set minimum scale
+        min_scale = 1e-8
+        scales = torch.where(scales < min_scale, torch.tensor(min_scale, dtype=scales.dtype, device=scales.device), scales)
+
+        # Expand scales for broadcasting: [..., num_blocks, 1]
+        scales_expanded = scales.unsqueeze(-1)
+
+        # Quantize: q = round(w / scale), then clamp to valid range
+        quantized = torch.round(reshaped_weights / scales_expanded)
+        quantized = torch.clamp(quantized, qmin, qmax)
+
+        if bits == 4:
+            quantized_int8 = quantized.to(torch.int8)
+
+            quantized_flat = quantized_int8.view(*original_shape[:-1], num_blocks * block_size)
+
+            if pad_size > 0:
+                quantized_flat = quantized_flat[..., :-pad_size]
+
+            quantized_uint4 = (quantized_flat + 8).to(torch.uint8)
+
+            packed_shape = list(original_shape)
+            packed_shape[-1] = (original_shape[-1] + 1) // 2
+            qweight = torch.zeros(packed_shape, dtype=torch.uint8, device=weights.device)
+
+            # Pack two 4-bit values per byte
+            for i in range(0, quantized_uint4.shape[-1], 2):
+                val1 = quantized_uint4[..., i]
+                if i + 1 < quantized_uint4.shape[-1]:
+                    val2 = quantized_uint4[..., i + 1]
+                    packed_val = (val1 & 0xF) | ((val2 & 0xF) << 4)
+                else:
+                    # Odd number of values - pack only lower 4 bits
+                    packed_val = val1 & 0xF
+                qweight[..., i // 2] = packed_val
+
+        else:  # 8-bit
+            quantized_int8 = quantized.to(torch.int8)
+
+            qweight = quantized_int8.view(*original_shape[:-1], num_blocks * block_size)
+            if pad_size > 0:
+                qweight = qweight[..., :-pad_size]
+            else:
+                qweight = qweight.view(original_shape)
+
+        return qweight.cpu(), scales.cpu()
 
     def make_block_sparse_moe(self, layer_id, bsm, root_input):
         # Make nodes for the QMoE block-sparse subgraph
@@ -2713,7 +2807,7 @@ class Model:
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
-            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=True, **extra_kwargs)
+            model = AutoModelForCausalLM.from_pretrained(self.model_name_or_path, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
 
         if "adapter_path" in self.extra_options:
             from peft import PeftModel
@@ -4147,20 +4241,24 @@ class GPTOSSModel(Model):
         down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
 
+        # Apply transpose once for both branches
+        gate_up_proj_transposed = mlp.experts.gate_up_proj.transpose(-1, -2)
+        down_proj_transposed = mlp.experts.down_proj.transpose(-1, -2)
+
         if op_type == "MoE":
             # Save non-quantized MoE weights as initializers
-            self.make_initializer(mlp.experts.gate_up_proj.transpose(-1, -2).view(self.moe_attrs["num_experts"], -1, self.hidden_size), gate_up_proj_weight, to=self.io_dtype)
-            self.make_initializer(mlp.experts.down_proj.transpose(-1, -2).view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size), down_proj_weight, to=self.io_dtype)
+            self.make_initializer(gate_up_proj_transposed.view(self.moe_attrs["num_experts"], -1, self.hidden_size), gate_up_proj_weight, to=self.io_dtype)
+            self.make_initializer(down_proj_transposed.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size), down_proj_weight, to=self.io_dtype)
         else:
             # Create and save quantized MoE weights as initializers
             gate_up_proj_qweight_list, gate_up_proj_scales_list = [], []
             down_proj_qweight_list, down_proj_scales_list = [], []
 
             for i in range(self.moe_attrs["num_experts"]):
-                qweight1, scales1 = self.make_qmoe_weights(mlp.experts.gate_up_proj[i])
+                qweight1, scales1 = self.make_qmoe_weights(gate_up_proj_transposed[i])
                 gate_up_proj_qweight_list.append(qweight1)
                 gate_up_proj_scales_list.append(scales1)
-                qweight2, scales2 = self.make_qmoe_weights(mlp.experts.down_proj[i])
+                qweight2, scales2 = self.make_qmoe_weights(down_proj_transposed[i])
                 down_proj_qweight_list.append(qweight2)
                 down_proj_scales_list.append(scales2)
 
@@ -4169,10 +4267,13 @@ class GPTOSSModel(Model):
             down_proj_qweight_tensor = torch.stack(down_proj_qweight_list, dim=0).to(torch.uint8)
             down_proj_scales_tensor = torch.stack(down_proj_scales_list, dim=0)
 
+            # qweight tensors always use the same shape regardless of quantization method
             pack_size = 8 // self.moe_attrs["expert_weight_bits"]
             self.make_initializer(gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, self.hidden_size // pack_size), gate_up_proj_weight)
-            self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
             self.make_initializer(down_proj_qweight_tensor.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size // pack_size), down_proj_weight)
+            
+            # scales tensors have different shapes depending on quantization method
+            self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
             self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)
 
         # Save MoE biases as initializers
@@ -4196,7 +4297,7 @@ def check_extra_options(kv_pairs):
     """
     bools = [
         "int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph",
-        "use_8bits_moe", "use_qdq", "use_webgpu_fp32", "use_cuda_bf16", "int4_tied_embeddings"
+        "use_8bits_moe", "use_qdq", "use_webgpu_fp32", "use_cuda_bf16", "int4_tied_embeddings", "hf_remote",
     ]
     for key in bools:
         if key in kv_pairs:
@@ -4297,11 +4398,12 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     extra_kwargs = {} if os.path.isdir(input_path) else {"cache_dir": cache_dir}
     hf_name = input_path if os.path.isdir(input_path) else model_name
     hf_token = parse_hf_token(extra_options.get("hf_token", "true"))
+    hf_remote = extra_options.get("hf_remote", True)
 
-    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=True, **extra_kwargs)
+    config = AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
     if "adapter_path" in extra_options:
         from peft import PeftConfig
-        peft_config = PeftConfig.from_pretrained(extra_options["adapter_path"], token=hf_token, trust_remote_code=True, **extra_kwargs)
+        peft_config = PeftConfig.from_pretrained(extra_options["adapter_path"], token=hf_token, trust_remote_code=hf_remote, **extra_kwargs)
         config.update(peft_config.__dict__)
 
     # Set input/output precision of ONNX model
@@ -4314,6 +4416,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             config.bos_token_id = 1
             config.hidden_act = "swiglu"
             onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+            onnx_model.model_type = "chatglm"
         elif config.architectures[0] == "Ernie4_5_ForCausalLM":
             onnx_model = ErnieModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GemmaForCausalLM":
@@ -4341,6 +4444,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             extra_options["exclude_embeds"] = True
             onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GptOssForCausalLM":
+            print("WARNING: This model only supports symmetric quantization for `QMoE`.")
             delattr(config, "quantization_config")
             onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "GraniteForCausalLM":
@@ -4443,7 +4547,7 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "dml", "webgpu", "NvTensorRtRtx"],
+        choices=["cpu", "cuda", "dml", "webgpu", "trt-rtx"],
         help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU)",
     )
 
@@ -4497,6 +4601,8 @@ def get_args():
                     If false, authentication with Hugging Face will be disabled.
                     If token, you can provide a custom authentication token that differs from the one stored in your environment.
                     If you have already authenticated via `huggingface-cli login`, you do not need to use this flag because Hugging Face has already stored your authentication token for you.
+                hf_remote = Use this to manage trusting remote code in Hugging Face repos.
+                    Default behavior is set to true. If false, remote code stored in Hugging Face repos will not be used.
                 exclude_embeds = Remove embedding layer from your ONNX model.
                     Use this option when you want to remove the embedding layer from within your ONNX model.
                     Instead of `input_ids`, you will have `inputs_embeds` as the input to your ONNX model.
@@ -4523,7 +4629,7 @@ def get_args():
     )
 
     args = parser.parse_args()
-    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 NvTensorRtRtx, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU")
+    print("Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU")
     return args
 
 if __name__ == '__main__':

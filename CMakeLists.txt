@@ -42,13 +42,21 @@ if(MSVC)
   add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/guard:cf>")
   add_link_options(/guard:cf /DYNAMICBASE)
 
-  # Enable CET shadow stack unless building for ARM64 (not supported there)
-  message(STATUS "Processor: ${CMAKE_SYSTEM_PROCESSOR}")
-  if(NOT CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
-    message(STATUS "CET shadow stack enabled (/CETCOMPAT)")
-    add_link_options(/CETCOMPAT)
+  # Determine the target platform (from MSBuild generator)
+  if (CMAKE_VS_PLATFORM_NAME)
+    set(onnxruntime_target_platform ${CMAKE_VS_PLATFORM_NAME})
   else()
-    message(STATUS "CET shadow stack skipped for ARM64 build")
+    set(onnxruntime_target_platform ${CMAKE_SYSTEM_PROCESSOR})
+  endif()
+
+  # Enable CET shadow stack unless building for ARM64 (not supported there)
+  if (onnxruntime_target_platform STREQUAL "x64" OR
+      onnxruntime_target_platform STREQUAL "Win32" OR
+      onnxruntime_target_platform STREQUAL "x86")
+    add_link_options("/CETCOMPAT")
+    message(STATUS "CET shadow stack enabled (/CETCOMPAT).")
+  else()
+    message(STATUS "CET shadow stack skipped.")
   endif()
 
   # Enable Spectre mitigations for C and C++ compilations only (avoid CUDA nvcc that is not supported there)
@@ -209,7 +217,6 @@ if(USE_GUIDANCE)
 endif()
 
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
-  target_link_options(onnxruntime-genai PRIVATE "/CETCOMPAT")
   target_compile_options(onnxruntime-genai PRIVATE "/sdl")
 endif()
 

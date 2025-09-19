@@ -252,7 +252,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
   if (Generators::cuda::radix_partition_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
       Generators::cuda::radix_partition_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
-                                            params.batch_size, params.k);
+                                                      params.batch_size, params.k);
     });
     std::string algo_name = "PARTITION_SORT";
     algo_name += stable_suffix;
