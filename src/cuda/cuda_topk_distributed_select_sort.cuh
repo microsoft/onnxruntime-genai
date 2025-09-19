@@ -10,6 +10,8 @@
 
 namespace Generators {
 namespace cuda {
+namespace distributed_select_sort {
+using TopK_Pair = selection_sort::TopK_Pair;
 
 // A simple struct to hold a key-value pair for inter-TB reduction.
 // Has an indirection element id (`elem_id_indirection`) to point to
@@ -64,17 +66,17 @@ __global__ void GetTopKKernelDistributedSelectSort(float* scores_in, float* scor
   int start_i = kBlockSize * top_k_shard + tid;
 
   for (int ite = 0; ite < k; ite++) {
-    partial.init();
+    partial.Init();
 
     for (auto elemId = start_i; elemId < vocab_size; elemId += kBlockSize * num_top_k_shards) {
       float elem = scores_in[elemId];
-      partial.insert(elem, elemId);
+      partial.Insert(elem, elemId);
     }
 
     // reduce in thread block
     typedef cub::BlockReduce<TopK_Pair, kBlockSize> BlockReduce;
     __shared__ typename BlockReduce::TempStorage temp_storage;
-    TopK_Pair top_k_sequence = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op);
+    TopK_Pair top_k_sequence = BlockReduce(temp_storage).Reduce(partial, selection_sort::reduce_topk_op);
 
     if (tid == 0) {
       distributed_scores_out_curr[ite] = top_k_sequence.u;
@@ -169,19 +171,19 @@ void LaunchGetDistributedSelectSortTopK(cudaStream_t stream, float* scores_in, f
                                                                              distributed_scores_out);
 }
 
-void RunTopKViaDistributedSelectionSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int k) {
-  float* topk_scores = data->intermediate_scores_1.get();
-  int* topk_indices = data->intermediate_indices_1.get();
+void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
+  float* topk_scores = data->intermediate_scores_1;
+  int* topk_indices = data->intermediate_indices_1;
 
   // Use the "copy-on-write" strategy as the input scores will be mutated
-  float* mutable_scores = data->intermediate_scores_2.get();
+  float* mutable_scores = data->intermediate_scores_2;
   size_t buffer_size = vocab_size * sizeof(float);
   CUDA_CHECK(cudaMemcpyAsync(mutable_scores, scores_in, buffer_size, cudaMemcpyDeviceToDevice, stream));
   LaunchGetDistributedSelectSortTopK(stream, mutable_scores, topk_scores, topk_indices, vocab_size, k,
                                      data->top_k_distributed_select_sort_shards,
-                                     data->top_k_distributed_select_sort_lock.get(),
-                                     data->top_k_distributed_select_sort_keys.get(),
-                                     data->top_k_distributed_select_sort_values.get());
+                                     data->top_k_distributed_select_sort_lock,
+                                     data->top_k_distributed_select_sort_keys,
+                                     data->top_k_distributed_select_sort_values);
   CUDA_CHECK_LAUNCH();
 
   data->topk_scores = topk_scores;
@@ -189,5 +191,12 @@ void RunTopKViaDistributedSelectionSort(TopkData* data, cudaStream_t stream, con
   data->topk_stride = k;
 }
 
+bool IsSupported(int batch_size, int vocab_size, int k) {
+  return (batch_size <= topk_impl_details::kTopKDistributedSelectSortMaxBatchSize) &&
+         (k <= topk_impl_details::kTopKDistributedSelectSortMaxTopK) &&
+         (vocab_size >= topk_impl_details::kTopKDistributedSelectSortMinVocabSize);
+}
+
+}  // namespace distributed_select_sort
 }  // namespace cuda
 }  // namespace Generators
