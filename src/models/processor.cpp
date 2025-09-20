@@ -105,6 +105,26 @@ std::unique_ptr<OrtValue> ProcessTensor<Ort::Float16_t>(OrtxTensor* tensor, Ort:
 }
 
 template <>
+std::unique_ptr<OrtValue> ProcessTensor<Ort::BFloat16_t>(OrtxTensor* tensor, Ort::Allocator& allocator) {
+  const float* tensor_data{};
+  const int64_t* tensor_shape{};
+  size_t tensor_num_dims;
+  CheckResult(OrtxGetTensorData(tensor, reinterpret_cast<const void**>(&tensor_data),
+                                &tensor_shape, &tensor_num_dims));
+  const int64_t tensor_num_elements = std::accumulate(tensor_shape,
+                                                      tensor_shape + tensor_num_dims,
+                                                      1LL, std::multiplies<int64_t>());
+  auto tensor_value = OrtValue::CreateTensor<Ort::BFloat16_t>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
+  auto tensor_value_fp32 = OrtValue::CreateTensor<float>(
+      allocator.GetInfo(),
+      std::span<float>(const_cast<float*>(tensor_data), tensor_num_elements),
+      std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
+  auto p_device = GetDeviceInterface(DeviceType::CPU);
+  Cast(*tensor_value_fp32, tensor_value, *p_device, Ort::TypeToTensorType<Ort::BFloat16_t>);
+  return tensor_value;
+}
+
+template <>
 std::unique_ptr<OrtValue> ProcessTensor<int64_t, float>(OrtxTensor* tensor, Ort::Allocator& allocator) {
   const int64_t* tensor_data{};
   const int64_t* tensor_shape{};
@@ -138,6 +158,26 @@ std::unique_ptr<OrtValue> ProcessTensor<int64_t, Ort::Float16_t>(OrtxTensor* ten
                  [](int64_t value) { return static_cast<float>(value); });
   auto p_device = GetDeviceInterface(DeviceType::CPU);
   Cast(*tensor_value_fp32, tensor_value, *p_device, Ort::TypeToTensorType<Ort::Float16_t>);
+  return tensor_value;
+}
+
+template <>
+std::unique_ptr<OrtValue> ProcessTensor<int64_t, Ort::BFloat16_t>(OrtxTensor* tensor, Ort::Allocator& allocator) {
+  const int64_t* tensor_data{};
+  const int64_t* tensor_shape{};
+  size_t tensor_num_dims;
+  CheckResult(OrtxGetTensorData(tensor, reinterpret_cast<const void**>(&tensor_data),
+                                &tensor_shape, &tensor_num_dims));
+  const int64_t tensor_num_elements = std::accumulate(tensor_shape,
+                                                      tensor_shape + tensor_num_dims,
+                                                      1LL, std::multiplies<int64_t>());
+  auto tensor_value = OrtValue::CreateTensor<Ort::BFloat16_t>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
+  auto tensor_value_fp32 = OrtValue::CreateTensor<float>(allocator, std::span<int64_t>(const_cast<int64_t*>(tensor_shape), tensor_num_dims));
+  std::transform(tensor_data, tensor_data + tensor_num_elements,
+                 tensor_value_fp32->GetTensorMutableData<float>(),
+                 [](int64_t value) { return static_cast<float>(value); });
+  auto p_device = GetDeviceInterface(DeviceType::CPU);
+  Cast(*tensor_value_fp32, tensor_value, *p_device, Ort::TypeToTensorType<Ort::BFloat16_t>);
   return tensor_value;
 }
 

@@ -29,6 +29,7 @@ int64_t ElementCountFromShape(std::span<const int64_t> shape);
 // Slower fp16 to fp32 conversion that handles NaN and Inf (useful for debugging vs runtime conversion)
 float Float16ToFloat32(uint16_t v);
 float BFloat16ToFloat32(uint16_t v);
+uint16_t Float32ToBFloat16(float v);
 
 inline float ToFloat32(Ort::Float16_t v) { return Float16ToFloat32(v); }
 inline float ToFloat32(Ort::BFloat16_t v) { return BFloat16ToFloat32(v); }
