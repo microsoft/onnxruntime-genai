@@ -186,8 +186,8 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
       named_tensors->emplace(std::string(Config::Defaults::AudioEmbedsName),
                              std::make_shared<Tensor>(ProcessTensor<float>(audio_embeds, allocator)));
     } else if (audio_features_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
-          named_tensors->emplace(std::string(Config::Defaults::AudioEmbedsName),
-                                std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(audio_embeds, allocator)));
+      named_tensors->emplace(std::string(Config::Defaults::AudioEmbedsName),
+                             std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(audio_embeds, allocator)));
     } else {
       named_tensors->emplace(std::string(Config::Defaults::AudioEmbedsName),
                              std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(audio_embeds, allocator)));
