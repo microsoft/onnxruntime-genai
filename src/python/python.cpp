@@ -361,6 +361,17 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<OgaTokenizer>(m, "Tokenizer")
       .def(pybind11::init([](const OgaModel& model) { return OgaTokenizer::Create(model); }))
+      .def("update_options", [](OgaTokenizer& t, std::map<std::string, std::string> options) {
+        std::vector<const char*> keys;
+        std::vector<const char*> values;
+        keys.reserve(options.size());
+        values.reserve(options.size());
+        for (const auto& [k, v] : options) {
+          keys.push_back(k.c_str());
+          values.push_back(v.c_str());
+        }
+        t.UpdateOptions(keys.data(), values.data(), options.size());
+      })
       .def("encode", [](const OgaTokenizer& t, std::string s) -> pybind11::array_t<int32_t> {
         auto sequences = OgaSequences::Create();
         t.Encode(s.c_str(), *sequences);

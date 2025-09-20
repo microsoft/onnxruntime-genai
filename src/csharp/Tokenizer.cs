@@ -45,6 +45,31 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return result;
         }
 
+        public void UpdateOptions(Dictionary<string, string> options)
+        {
+            if (options == null)
+                throw new ArgumentNullException(nameof(options));
+
+            // Prepare native arrays
+            string[] keys = new string[options.Count];
+            string[] values = new string[options.Count];
+            int i = 0;
+            foreach (var kvp in options)
+            {
+                keys[i] = kvp.Key;
+                values[i] = kvp.Value;
+                i++;
+            }
+
+            // Call native function
+            Result.VerifySuccess(
+                NativeMethods.OgaUpdateTokenizerOptions(
+                    _tokenizerHandle,
+                    keys,
+                    values,
+                    (UIntPtr)options.Count));
+        }
+
         public Sequences Encode(string str)
         {
             Result.VerifySuccess(NativeMethods.OgaCreateSequences(out IntPtr nativeSequences));
