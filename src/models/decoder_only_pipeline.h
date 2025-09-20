@@ -67,7 +67,7 @@ struct DecoderOnlyPipelineState : State {
   OrtValue* GetOutput(const char* name) override;
 
   void RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
-                   DeviceSpan<int32_t> next_indices);
+                   DeviceSpan<int32_t> next_indices, bool is_last_chunk);
 
  private:
   void UpdateKeyValueCache(DeviceSpan<int32_t> beam_indices, int total_length);

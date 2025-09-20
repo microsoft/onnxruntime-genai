@@ -192,9 +192,11 @@ void DecoderOnlyPipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
 }
 
 void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
-                                           DeviceSpan<int32_t> next_indices) {
+                                           DeviceSpan<int32_t> next_indices, bool is_last_chunk) {
   for (auto& pipeline_state : pipeline_states_) {
     if (first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_prompt) {
+      continue;
+    } else if (first_run_ && model_.config_->model.decoder.pipeline[pipeline_state->id_].is_lm_head && !is_last_chunk) {
       continue;
     } else if (!first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
       continue;
@@ -350,7 +352,7 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
   }
 
   for (size_t i = 0; i < num_chunks; ++i) {
-    RunPipeline(total_length, next_tokens, next_indices);
+    RunPipeline(total_length, next_tokens, next_indices, (i == num_chunks - 1));
 
     if (model_.config_->model.decoder.sliding_window.has_value() && i < num_chunks - 1) {
       // Sliding the window over the input_ids, key_cache, and value_cache, position_ids, and attention_mask
