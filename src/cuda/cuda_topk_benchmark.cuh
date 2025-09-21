@@ -127,20 +127,21 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
     });
   }
 
-  // Candidate: Hybrid Sort. Only enabled when neither Flash Sort nor LLM Sort is used, or when vocab_size is small.
-  if (!use_flash_sort && !use_llm_sort || vocab_size <= 4096) {
+  // Candidate: Partition Sort.
+  bool use_partition_sort = radix_partition_sort::IsSupported(batch_size, vocab_size, k);
+  if (use_partition_sort) {
+    BENCHMARK_KERNEL(TopkAlgo::PARTITION, [&]() {
+      radix_partition_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    });
+  }
+
+  // Candidate: Hybrid Sort. Only enabled when cooperative kernels (Flash Sort, LLM Sort or Partition Sort) not supported, or when vocab_size is small.
+  if (!use_flash_sort && !use_llm_sort &&!use_partition_sort || vocab_size <= 4096) {
     if (k <= kHybridSortMaxK) {
       BENCHMARK_KERNEL(TopkAlgo::HYBRID, [&]() {
         hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       });
     }
-  }
-
-  // Candidate: Partition Sort. Only enabled when neither Flash Sort nor LLM Sort is used.
-  if (!use_flash_sort && !use_llm_sort && radix_partition_sort::IsSupported(batch_size, vocab_size, k)) {
-    BENCHMARK_KERNEL(TopkAlgo::PARTITION, [&]() {
-      radix_partition_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
-    });
   }
 
   // No fast algorithm found, fallback to Full Sort and Radix Sort.

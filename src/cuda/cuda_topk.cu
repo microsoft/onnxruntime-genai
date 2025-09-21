@@ -25,13 +25,16 @@ TopkDataDetail::TopkDataDetail(int batch_size, int vocab_size, cudaStream_t stre
   llm_sort_partition_size = llm_sort::EstimateBestPartitionSize(vocab_size);
   partition_sort_partition_size = radix_partition_sort::EstimateBestPartitionSize(vocab_size);
 
+  // The intermediate size is batch_size * CeilDiv(vocab_size, partition_size) * MaxK.
+  constexpr int kFastSortMaxK = std::max({kHybridSortMaxK, kFlashSortMaxK, kLlmSortMaxK, kPartitionSortMaxK});
+  int max_fast_sort_intermedidate_size = batch_size * CeilDiv(vocab_size, kFastSortMinPartitionSize) * kFastSortMaxK;
+  assert(hybrid_sort_partition_size <= max_fast_sort_intermedidate_size);
+  assert(flash_sort_partition_size <= max_fast_sort_intermedidate_size);
+  assert(llm_sort_partition_size <= max_fast_sort_intermedidate_size);
+  assert(partition_sort_partition_size <= max_fast_sort_intermedidate_size);
+
   size_t vocab_batch_size = static_cast<size_t>(vocab_size) * batch_size;
-  intermediate_buffer_elements = std::max(
-      {vocab_batch_size,
-       hybrid_sort::GetIntermediateSize(batch_size, vocab_size, hybrid_sort_partition_size),
-       flash_sort::GetIntermediateSize(batch_size, vocab_size, flash_sort_partition_size),
-       llm_sort::GetIntermediateSize(batch_size, vocab_size, llm_sort_partition_size),
-       radix_partition_sort::GetIntermediateSize(batch_size, vocab_size, partition_sort_partition_size)});
+  intermediate_buffer_elements = std::max(vocab_batch_size, static_cast<size_t>(max_fast_sort_intermedidate_size));
 
   auto radix_sort_temp_storage_bytes = radix_sort::GetTempStorageBytes(vocab_size, stream);
   auto full_sort_temp_storage_bytes = full_sort::GetTempStorageBytes(static_cast<int>(vocab_batch_size), batch_size, stream);

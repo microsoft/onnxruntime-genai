@@ -5,6 +5,7 @@
 #include <curand_kernel.h>
 #include <memory>
 #include <array>
+#include <algorithm>
 
 #include "cuda_common.h"
 #include "../smartptrs.h"
@@ -13,7 +14,7 @@ namespace Generators {
 namespace cuda {
 
 // To enable stable Top-K for kernels that support it, define STABLE_TOPK during compilation.
-// By default, a faster, unstable sort is used for the initial partitioning stage.
+// By default, a faster, unstable sort is used if STABLE_TOPK is not defined.
 #ifdef STABLE_TOPK
 constexpr bool kStableTopK = true;
 #else
@@ -29,13 +30,15 @@ constexpr int kGpuBufferAlignment = 256;
 
 // Most common K value used in top-k sampling for Large Language Models typically falls in the range of 20 to 50.
 // So max k values shall be 64 or higher.
+// Partition sort uses registers in stage 2, it is hard to extend to 128 due to limit of registers.
 // We enable higher k values in some algorithms for testing. The drawback is larger buffer sizes and longer compilation time.
+constexpr int kHybridSortMaxK = 256;    // The maximum k (up to 256) allowed for hybrid sort. Must be power of 2.
+constexpr int kFlashSortMaxK = 128;     // The maximum k (up to 256) allowed for flash sort. Must be power of 2.
+constexpr int kLlmSortMaxK = 64;        // The maximum k (up to 256) allowed for LLM sort. Must be power of 2.
+constexpr int kPartitionSortMaxK = 64;  // The maximum k (up to 64) allowed for Partition sort. Must be power of 2.
 
-// Partition sort uses registers in stage 2 so it could support no more than 64 due to limit of registers.
-constexpr int kPartitionSortMaxK = 64;       // The maximum k (up to 64) allowed for partition sort. Must be power of 2.
-constexpr int kHybridSortMaxK = 256;         // The maximum k (up to 256) allowed for hybrid sort. Must be power of 2.
-constexpr int kFlashSortMaxK = 128;          // The maximum k (up to 256) allowed for flash sort. Must be power of 2.
-constexpr int kLlmSortMaxK = 64;             // The maximum k (up to 256) allowed for LLM sort. Must be power of 2.
+constexpr int kFastSortMinPartitionSize = 1024;  // The minimum partition size for fast sort including hybrid, flash, LLM and partition sort.
+
 constexpr int kMaxBenchmarkLocalCache = 64;  // The maximum local cache of online benchmarking results.
 
 namespace topk_impl_details {

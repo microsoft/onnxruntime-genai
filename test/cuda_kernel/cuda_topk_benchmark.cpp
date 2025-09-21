@@ -54,8 +54,8 @@ struct CsvSummaryResult {
   float full_sort_latency = -1.0f;
   float radix_sort_latency = -1.0f;
   float selection_sort_latency = -1.0f;
-  float distributed_sort_latency = -1.0f;
 #endif
+  float distributed_sort_latency = -1.0f;
   float partition_sort_latency = -1.0f;
   float hybrid_sort_latency = -1.0f;
   float flash_sort_latency = -1.0f;
@@ -106,7 +106,7 @@ void PrintCsvSummary(const std::vector<CsvSummaryResult>& results) {
 #if TEST_FAST_ALGO_ONLY == 0
   summary_file << "batch_size,vocab_size,k,full_sort,radix_sort,selection_sort,distributed_sort,partition_sort,hybrid_sort,flash_sort,llm_sort,best_algorithm,best_latency,default\n";
 #else
-  summary_file << "batch_size,vocab_size,k,partition_sort,hybrid_sort,flash_sort,llm_sort,best_algorithm,best_latency\n";
+  summary_file << "batch_size,vocab_size,k,distributed_sort,partition_sort,hybrid_sort,flash_sort,llm_sort,best_algorithm,best_latency\n";
 #endif
 
   for (const auto& result : results) {
@@ -130,9 +130,9 @@ void PrintCsvSummary(const std::vector<CsvSummaryResult>& results) {
     summary_file << ",";
     print_latency(summary_file, result.selection_sort_latency);
     summary_file << ",";
+#endif
     print_latency(summary_file, result.distributed_sort_latency);
     summary_file << ",";
-#endif
     print_latency(summary_file, result.partition_sort_latency);
     summary_file << ",";
     print_latency(summary_file, result.hybrid_sort_latency);
@@ -248,6 +248,19 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
 
   std::string stable_suffix = Generators::cuda::kStableTopK ? "_STABLE" : "_UNSTABLE";
 
+    // Benchmark Hybrid Sort
+  if (params.k <= Generators::cuda::kHybridSortMaxK) {
+    auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
+      Generators::cuda::hybrid_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
+                                             params.batch_size, params.k);
+    });
+    std::string algo_name = "HYBRID_SORT";
+    algo_name += stable_suffix;
+    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
+    current_csv_result.hybrid_sort_latency = mean_ms;
+    algo_latencies[algo_name] = mean_ms;
+  }
+
   // Benchmark Radix Partition Sort
   if (Generators::cuda::radix_partition_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
@@ -258,19 +271,6 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
     algo_name += stable_suffix;
     all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
     current_csv_result.partition_sort_latency = mean_ms;
-    algo_latencies[algo_name] = mean_ms;
-  }
-
-  // Benchmark Hybrid Sort
-  if (params.k <= Generators::cuda::kHybridSortMaxK) {
-    auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
-      Generators::cuda::hybrid_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
-                                             params.batch_size, params.k);
-    });
-    std::string algo_name = "HYBRID_SORT";
-    algo_name += stable_suffix;
-    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
-    current_csv_result.hybrid_sort_latency = mean_ms;
     algo_latencies[algo_name] = mean_ms;
   }
 
@@ -330,9 +330,9 @@ TEST(TopKBenchmarks, PerformanceTests) {
 
   constexpr bool is_build_pipeline = true;
   if constexpr (is_build_pipeline) {
-    std::vector<int> batch_sizes = {1, 4};
-    std::vector<int> vocab_sizes = {201088};
-    std::vector<int> ks = {1, 2, 4, 8, 16, 32, 50, 64, 128};
+    std::vector<int> batch_sizes = {1};
+    std::vector<int> vocab_sizes = {262400, 201088, 152064, 128256, 32256};
+    std::vector<int> ks = {1, 4, 5, 8, 16, 32, 50, 64};
 
     std::vector<BenchmarkParams> test_cases;
     for (int batch_size : batch_sizes) {

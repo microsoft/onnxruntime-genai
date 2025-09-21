@@ -4,37 +4,204 @@
 #pragma once
 
 #include <cub/block/block_radix_sort.cuh>
-#include <cub/util_type.cuh>  // Required for cub::Traits
+#include <cub/util_type.cuh>
 #include <cuda_runtime.h>
-#include <float.h>  // For FLT_MAX
+#include <float.h>
 #include "cuda_topk.h"
 #include "cuda_topk_common.cuh"
 #include "cuda_topk_stable_sort_helper.cuh"
+#include "cuda_topk_bitonic_sort_helper.cuh"
+#include <cooperative_groups.h>
 
 namespace Generators {
 namespace cuda {
 namespace radix_partition_sort {
 
+namespace cg = cooperative_groups;
+
+// The primary reason for the kMaxPartitions = 64 limit is the use of cooperative groups, which requires that
+// the entire grid of thread blocks can be resident on the GPU's Streaming Multiprocessors at the same time.
+// Also, the number of registers each thread needs is directly proportional to this threshold,
+// Current setting need CeilDiv(K_PADDED * kMaxPartitions, kBlockSize) = 16 registers per thread.
 constexpr int kMaxPartitions = 64;
 
-// These are the partition sizes for which the Stage 1 kernel has template specializations.
+// This partition sizes are optimized for LLM usage. See comments in LLM sort for more details.
 constexpr std::array<int, 4> kSupportedPartitionSizes = {2048, 3328, 4352, 4864};
 
-// Flexible heuristic for radix_partition_sort partition size.
-inline int EstimateBestPartitionSize(int vocab_size) {
-  // 1. Calculate the absolute minimum partition size required to stay under the 64-partition limit.
-  const int min_required_size = CeilDiv(vocab_size, kMaxPartitions);
+// --- Helper to find the next power of two ---
+__device__ __forceinline__ int NextPowerOfTwo(int n) {
+  if (n == 0) return 1;
+  n--;
+  n |= n >> 1;
+  n |= n >> 2;
+  n |= n >> 4;
+  n |= n >> 8;
+  n |= n >> 16;
+  n++;
+  return n;
+}
 
-  // 2. Find the smallest supported size that is >= the minimum required size.
-  for (int supported_size : kSupportedPartitionSizes) {
-    if (supported_size >= min_required_size) {
-      return supported_size;
+// --- Kernel Implementation ---
+template <int kBlockSize, int kPartitionSize, int K_PADDED, int kMaxPartitionsForKernel>
+__global__ void PartitionSortCooperativeKernelOptimized(const float* __restrict__ scores_in,
+                                                        float* __restrict__ intermediate_scores,
+                                                        int* __restrict__ intermediate_indices,
+                                                        float* __restrict__ scores_out,
+                                                        int* __restrict__ indices_out,
+                                                        int vocab_size,
+                                                        int num_partitions,
+                                                        int k_actual) {  // Pass the real k
+  cg::grid_group grid = cg::this_grid();
+
+  constexpr int kSortSizeStage2 = K_PADDED * kMaxPartitionsForKernel;
+  constexpr int kItemsPerThreadStage2 = CeilDiv(kSortSizeStage2, kBlockSize);
+  constexpr int kMaxBitonicSortSize = 256;  // bitonic sort is slow for larger size.
+  constexpr bool kUseSmallSort = (kSortSizeStage2 <= kMaxBitonicSortSize);
+
+  union SharedStorage {
+    typename Stage1TempStorage stage1_storage;
+#ifdef STABLE_TOPK
+    typename cub::BlockRadixSort<uint64_t, kBlockSize, kItemsPerThreadStage2>::TempStorage stage2_radix_storage;
+#else
+    typename cub::BlockRadixSort<float, kBlockSize, kItemsPerThreadStage2, int>::TempStorage stage2_radix_storage;
+#endif
+    struct {
+      float scores[kMaxBitonicSortSize];
+      int indices[kMaxBitonicSortSize];
+    } stage2_bitonic_storage;
+  };
+  __shared__ SharedStorage smem;
+
+  // --- Stage 1: Parallel Partition Sort ---
+  topk_common::FindPartitionTopK<kBlockSize, kPartitionSize, K_PADDED>(
+      scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions, smem.stage1_storage);
+
+  grid.sync();
+
+  // --- Stage 2: Per-Batch Reduction with Adaptive Sort Strategy ---
+  if (blockIdx.x == 0) {
+    const int batch_idx = blockIdx.y;
+    const int num_elements_to_sort = num_partitions * K_PADDED;
+
+    if constexpr (kUseSmallSort) {
+      // --- Strategy A: Block-wide Bitonic Sort for small workloads ---
+      const int sort_size_pow2 = NextPowerOfTwo(num_elements_to_sort);
+
+      for (int i = threadIdx.x; i < sort_size_pow2; i += kBlockSize) {
+        if (i < num_elements_to_sort) {
+          smem.stage2_bitonic_storage.scores[i] = intermediate_scores[(size_t)batch_idx * num_elements_to_sort + i];
+          smem.stage2_bitonic_storage.indices[i] = intermediate_indices[(size_t)batch_idx * num_elements_to_sort + i];
+        } else {
+          smem.stage2_bitonic_storage.scores[i] = -FLT_MAX;
+          smem.stage2_bitonic_storage.indices[i] = INT_MAX;
+        }
+      }
+      __syncthreads();
+
+      // Dispatch to the correctly instantiated bitonic sort template.
+      if (sort_size_pow2 <= 32)
+        bitonic_sort::SharedMemBitonicSort<kBlockSize, 32>(smem.stage2_bitonic_storage.scores, smem.stage2_bitonic_storage.indices);
+      else if (sort_size_pow2 <= 64)
+        bitonic_sort::SharedMemBitonicSort<kBlockSize, 64>(smem.stage2_bitonic_storage.scores, smem.stage2_bitonic_storage.indices);
+      else if (sort_size_pow2 <= 128)
+        bitonic_sort::SharedMemBitonicSort<kBlockSize, 128>(smem.stage2_bitonic_storage.scores, smem.stage2_bitonic_storage.indices);
+      else
+        bitonic_sort::SharedMemBitonicSort<kBlockSize, 256>(smem.stage2_bitonic_storage.scores, smem.stage2_bitonic_storage.indices);
+
+      if (threadIdx.x < k_actual) {
+        size_t out_offset = static_cast<size_t>(batch_idx) * k_actual + threadIdx.x;
+        scores_out[out_offset] = smem.stage2_bitonic_storage.scores[threadIdx.x];
+        indices_out[out_offset] = smem.stage2_bitonic_storage.indices[threadIdx.x];
+      }
+    } else {
+      // --- Strategy B: CUB Block Radix Sort for Larger K ---
+#ifdef STABLE_TOPK
+      uint64_t thread_keys[kItemsPerThreadStage2];
+      for (int i = 0; i < kItemsPerThreadStage2; ++i) {
+        int load_idx = threadIdx.x * kItemsPerThreadStage2 + i;
+        if (load_idx < num_elements_to_sort) {
+          size_t offset = (size_t)batch_idx * num_elements_to_sort + load_idx;
+          thread_keys[i] = topk_common::PackStableSortKey(intermediate_scores[offset], intermediate_indices[offset]);
+        } else {
+          thread_keys[i] = topk_common::PackStableSortKey(-FLT_MAX, INT_MAX);
+        }
+      }
+      cub::BlockRadixSort<uint64_t, kBlockSize, kItemsPerThreadStage2>(smem.stage2_radix_storage).SortDescendingBlockedToStriped(thread_keys);
+      if (threadIdx.x < k_actual) {
+        size_t out_offset = static_cast<size_t>(batch_idx) * k_actual + threadIdx.x;
+        scores_out[out_offset] = topk_common::UnpackStableSortScore(thread_keys[0]);
+        indices_out[out_offset] = topk_common::UnpackStableSortIndex(thread_keys[0]);
+      }
+#else
+      float thread_scores[kItemsPerThreadStage2];
+      int thread_indices[kItemsPerThreadStage2];
+      for (int i = 0; i < kItemsPerThreadStage2; ++i) {
+        int load_idx = threadIdx.x * kItemsPerThreadStage2 + i;
+        if (load_idx < num_elements_to_sort) {
+          size_t offset = (size_t)batch_idx * num_elements_to_sort + load_idx;
+          thread_scores[i] = intermediate_scores[offset];
+          thread_indices[i] = intermediate_indices[offset];
+        } else {
+          thread_scores[i] = -FLT_MAX;
+          thread_indices[i] = INT_MAX;
+        }
+      }
+      cub::BlockRadixSort<float, kBlockSize, kItemsPerThreadStage2, int>(smem.stage2_radix_storage).SortDescendingBlockedToStriped(thread_scores, thread_indices);
+      if (threadIdx.x < k_actual) {
+        size_t out_offset = static_cast<size_t>(batch_idx) * k_actual + threadIdx.x;
+        scores_out[out_offset] = thread_scores[0];
+        indices_out[out_offset] = thread_indices[0];
+      }
+#endif
+    }
+  }
+}
+
+// --- Host-side Launcher ---
+
+inline int EstimateBestPartitionSize(int vocab_size) {
+  constexpr std::array<int, 4> kPartitionTargets = {8, 16, 32, 64};
+  int best_partition_size = 0;
+  // Use a large initial cost. Cost is a measure of how far away the number of partitions is
+  // from an ideal target (16, 32, 64), plus a penalty for a less balanced workload.
+  double min_cost = std::numeric_limits<double>::max();
+
+  for (int p_size : kSupportedPartitionSizes) {
+    const int num_partitions = CeilDiv(vocab_size, p_size);
+    if (num_partitions > kMaxPartitions) {
+      continue;
+    }
+
+    // Find the smallest target that is >= num_partitions
+    auto it = std::lower_bound(kPartitionTargets.begin(), kPartitionTargets.end(), num_partitions);
+    if (it != kPartitionTargets.end()) {
+      int target_partitions = *it;
+      // Cost is the distance to the target. A perfect match has a cost of 0.
+      double cost = target_partitions - num_partitions;
+
+      // Add a small penalty for larger partition sizes to favor more balanced workloads
+      // where Stage 1 and Stage 2 sizes are closer.
+      // The following optimizes most common use case of k = 50.
+      // Note that we can use online benchmark to find best parition size for small k value in the future.
+      constexpr int default_padded_k = 52;
+      int stage2_size = target_partitions * default_padded_k;
+      if (stage2_size > p_size) {
+        cost += static_cast<double>((stage2_size - p_size)) / p_size;
+      }
+
+      if (cost < min_cost) {
+        min_cost = cost;
+        best_partition_size = p_size;
+      }
     }
   }
 
-  // 3. If no supported size is large enough, return the largest one.
-  //    The assert in RunTopK will catch if this results in too many partitions.
-  return kSupportedPartitionSizes.back();
+  if (best_partition_size == 0) {
+    // This vocab_size is too large. Returns a dummy value here. Note that IsSupported will reject it later.
+    best_partition_size = kSupportedPartitionSizes[0];
+  }
+
+  return best_partition_size;
 }
 
 inline size_t GetIntermediateSize(int batch_size, int vocab_size, int partition_size) {
@@ -42,137 +209,50 @@ inline size_t GetIntermediateSize(int batch_size, int vocab_size, int partition_
   return static_cast<size_t>(batch_size) * num_partitions * kPartitionSortMaxK;
 }
 
-// --- Stage 1: Find Top-K within each vocabulary partition ---
-// This stage is identical in function to the first stage of llm_sort and flash_sort.
-template <int kBlockSize, int kPartitionSize, int K_PADDED>
-__global__ void Stage1_FindPartitionsTopK(const float* __restrict__ scores_in,
-                                          int* __restrict__ intermediate_indices,
-                                          float* __restrict__ intermediate_scores,
-                                          int vocab_size, int num_partitions) {
-  __shared__ typename Stage1TempStorage smem;
-  topk_common::FindPartitionTopK<kBlockSize, kPartitionSize, K_PADDED>(
-      scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions, smem);
+template <int K_PADDED, int kMaxPartitionsForKernel>
+bool CheckPartitionSortSupport(int batch_size, int num_partitions, int partition_size) {
+  constexpr int kBlockSize = 256;
+  const int total_blocks = num_partitions * batch_size;
+  void* kernel;
+  if (partition_size == kSupportedPartitionSizes[0])
+    kernel = (void*)PartitionSortCooperativeKernelOptimized<kBlockSize, kSupportedPartitionSizes[0], K_PADDED, kMaxPartitionsForKernel>;
+  else if (partition_size == kSupportedPartitionSizes[1])
+    kernel = (void*)PartitionSortCooperativeKernelOptimized<kBlockSize, kSupportedPartitionSizes[1], K_PADDED, kMaxPartitionsForKernel>;
+  else if (partition_size == kSupportedPartitionSizes[2])
+    kernel = (void*)PartitionSortCooperativeKernelOptimized<kBlockSize, kSupportedPartitionSizes[2], K_PADDED, kMaxPartitionsForKernel>;
+  else
+    kernel = (void*)PartitionSortCooperativeKernelOptimized<kBlockSize, kSupportedPartitionSizes[3], K_PADDED, kMaxPartitionsForKernel>;
+
+  int device, num_sm, max_blocks_per_sm;
+  CUDA_CHECK(cudaGetDevice(&device));
+  CUDA_CHECK(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, device));
+  CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&max_blocks_per_sm, kernel, kBlockSize, 0));
+  return total_blocks <= (num_sm * max_blocks_per_sm);
 }
 
-// --- Stage 2: One-Step Reduction Kernel ---
-// A single thread block is launched per batch item. It loads ALL candidates from
-// Stage 1 into registers, sorts them using a striped layout, and writes the final top-k.
-template <int kBlockSize, int K_PADDED, int kMaxPartitions>
-__global__ void Stage2_ReduceKernel(const float* __restrict__ scores_in,
-                                    const int* __restrict__ indices_in,
-                                    float* __restrict__ scores_out,
-                                    int* __restrict__ indices_out,
-                                    int num_partitions) {
-  const int batch_idx = blockIdx.x;
-  constexpr int kSortSize = K_PADDED * kMaxPartitions;
-  constexpr int kItemsPerThread = CeilDiv(kSortSize, kBlockSize);
-
-#ifdef STABLE_TOPK
-  // --- STABLE SORT IMPLEMENTATION ---
-  // For stable sort, we combine the score and index into a single 64-bit key.
-  // This allows CUB to perform a single, stable sort.
-  union SharedStorage {
-    struct {
-      __align__(128) float scores[K_PADDED];
-      __align__(128) int indices[K_PADDED];
-    } final_topk;
-    typename cub::BlockRadixSort<uint64_t, kBlockSize, kItemsPerThread>::TempStorage cub_temp_storage;
-  };
-  __shared__ SharedStorage smem;
-
-  // --- 1. Load data and create combined 64-bit keys ---
-  uint64_t thread_keys[kItemsPerThread];
-  const size_t in_base_offset = static_cast<size_t>(batch_idx) * num_partitions * K_PADDED;
-  const int num_elements_to_load = num_partitions * K_PADDED;
-
-  for (int i = 0; i < kItemsPerThread; ++i) {
-    int load_idx = threadIdx.x * kItemsPerThread + i;
-    if (load_idx < num_elements_to_load) {
-      float score = scores_in[in_base_offset + load_idx];
-      int index = indices_in[in_base_offset + load_idx];
-      thread_keys[i] = topk_common::PackStableSortKey(score, index);
-    } else {
-      // Corresponds to -FLT_MAX, INT_MAX
-      thread_keys[i] = topk_common::PackStableSortKey(-FLT_MAX, INT_MAX);
-    }
+template <int K_PADDED>
+bool IsSupportedDispatch(int batch_size, int vocab_size, int k, int partition_size, int num_partitions) {
+  if (num_partitions <= 8) {
+    return CheckPartitionSortSupport<K_PADDED, 8>(batch_size, num_partitions, partition_size);
+  } else if (num_partitions <= 16) {
+    return CheckPartitionSortSupport<K_PADDED, 16>(batch_size, num_partitions, partition_size);
+  } else if (num_partitions <= 32) {
+    return CheckPartitionSortSupport<K_PADDED, 32>(batch_size, num_partitions, partition_size);
   }
-
-  // --- 2. Sort the combined keys (descending) ---
-  // Sorting these combined keys descending achieves a descending sort by score
-  // with a stable, ascending tie-breaker on the index.
-  cub::BlockRadixSort<uint64_t, kBlockSize, kItemsPerThread>(smem.cub_temp_storage)
-      .SortDescendingBlockedToStriped(thread_keys);
-
-  __syncthreads();
-
-  // --- 3. Write top-K results to shared memory ---
-  if (threadIdx.x < K_PADDED) {
-    // Unpack the 64-bit key to get the original score and index.
-    uint64_t key = thread_keys[0];
-    smem.final_topk.scores[threadIdx.x] = topk_common::UnpackStableSortScore(key);
-    smem.final_topk.indices[threadIdx.x] = topk_common::UnpackStableSortIndex(key);
-  }
-
-#else
-  // --- UNSTABLE SORT IMPLEMENTATION (Original) ---
-  union SharedStorage {
-    struct {
-      __align__(128) float scores[K_PADDED];
-      __align__(128) int indices[K_PADDED];
-    } final_topk;
-    typename cub::BlockRadixSort<float, kBlockSize, kItemsPerThread, int>::TempStorage cub_temp_storage;
-  };
-  __shared__ SharedStorage smem;
-
-  // --- 1. Load data from Global into Registers (Blocked arrangement) ---
-  float thread_scores[kItemsPerThread];
-  int thread_indices[kItemsPerThread];
-  const size_t in_base_offset = static_cast<size_t>(batch_idx) * num_partitions * K_PADDED;
-  const int num_elements_to_load = num_partitions * K_PADDED;
-
-  for (int i = 0; i < kItemsPerThread; ++i) {
-    int load_idx = threadIdx.x * kItemsPerThread + i;
-    if (load_idx < num_elements_to_load) {
-      thread_scores[i] = scores_in[in_base_offset + load_idx];
-      thread_indices[i] = indices_in[in_base_offset + load_idx];
-    } else {
-      thread_scores[i] = -FLT_MAX;
-      thread_indices[i] = INT_MAX;
-    }
-  }
-
-  // --- 2. Sort data held in registers ---
-  cub::BlockRadixSort<float, kBlockSize, kItemsPerThread, int>(smem.cub_temp_storage)
-      .SortDescendingBlockedToStriped(thread_scores, thread_indices);
-
-  __syncthreads();
-
-  // --- 3. Write top-K results from registers to shared memory ---
-  // After the striped sort, the top K_PADDED elements are in the first item slot
-  // of the first K_PADDED threads.
-  if (threadIdx.x < K_PADDED) {
-    smem.final_topk.scores[threadIdx.x] = thread_scores[0];
-    smem.final_topk.indices[threadIdx.x] = thread_indices[0];
-  }
-#endif
-
-  __syncthreads();
-
-  // --- 4. Write final top-k results from shared memory to global memory ---
-  const size_t out_base_offset = static_cast<size_t>(batch_idx) * K_PADDED;
-  if (threadIdx.x < K_PADDED) {
-    scores_out[out_base_offset + threadIdx.x] = smem.final_topk.scores[threadIdx.x];
-    indices_out[out_base_offset + threadIdx.x] = smem.final_topk.indices[threadIdx.x];
-  }
+  return CheckPartitionSortSupport<K_PADDED, 64>(batch_size, num_partitions, partition_size);
 }
 
-// --- Host-Side Launcher ---
-void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
+bool IsSupported(int batch_size, int vocab_size, int k) {
+  if (k > kPartitionSortMaxK) return false;
+  int coop_support = 0;
+  cudaDeviceGetAttribute(&coop_support, cudaDevAttrCooperativeLaunch, 0);
+  if (!coop_support) return false;
   const int partition_size = EstimateBestPartitionSize(vocab_size);
+  if (partition_size == 0) return false;
   const int num_partitions = CeilDiv(vocab_size, partition_size);
-  assert(num_partitions <= 64);
+  if (num_partitions > kMaxPartitions) return false;
 
-  int k_padded_val = kPartitionSortMaxK;
+  int k_padded_val;
   if (k <= 4)
     k_padded_val = 4;
   else if (k <= 8)
@@ -181,87 +261,92 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
     k_padded_val = 16;
   else if (k <= 32)
     k_padded_val = 32;
-  else if (k <= 64)
+  else if (k <= 52)
+    k_padded_val = 52;
+  else
     k_padded_val = 64;
 
-  auto launch_stage1 = [&](auto k_padded) {
+  if (k_padded_val == 4) return IsSupportedDispatch<4>(batch_size, vocab_size, k, partition_size, num_partitions);
+  if (k_padded_val == 8) return IsSupportedDispatch<8>(batch_size, vocab_size, k, partition_size, num_partitions);
+  if (k_padded_val == 16) return IsSupportedDispatch<16>(batch_size, vocab_size, k, partition_size, num_partitions);
+  if (k_padded_val == 32) return IsSupportedDispatch<32>(batch_size, vocab_size, k, partition_size, num_partitions);
+  if (k_padded_val == 52) return IsSupportedDispatch<52>(batch_size, vocab_size, k, partition_size, num_partitions);
+  return IsSupportedDispatch<64>(batch_size, vocab_size, k, partition_size, num_partitions);
+}
+
+void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
+  assert(IsSupported(batch_size, vocab_size, k));
+
+  const int partition_size = data->partition_sort_partition_size;
+  const int num_partitions = CeilDiv(vocab_size, partition_size);
+
+  int k_padded_val;
+  if (k <= 4)
+    k_padded_val = 4;
+  else if (k <= 8)
+    k_padded_val = 8;
+  else if (k <= 16)
+    k_padded_val = 16;
+  else if (k <= 32)
+    k_padded_val = 32;
+  else if (k <= 52)
+    k_padded_val = 52;
+  else
+    k_padded_val = 64;
+
+  auto launch_cooperative_kernel = [&](auto k_padded) {
     constexpr int K_PADDED = decltype(k_padded)::value;
     constexpr int kBlockSize = 256;
     dim3 grid(num_partitions, batch_size);
     dim3 block(kBlockSize);
 
-    // Dispatch to the correctly templated kernel based on the calculated partition_size.
-    if (partition_size == kSupportedPartitionSizes[0]) {
-      Stage1_FindPartitionsTopK<kBlockSize, kSupportedPartitionSizes[0], K_PADDED><<<grid, block, 0, stream>>>(
-          scores_in, data->intermediate_indices_1, data->intermediate_scores_1, vocab_size, num_partitions);
-    } else if (partition_size == kSupportedPartitionSizes[1]) {
-      Stage1_FindPartitionsTopK<kBlockSize, kSupportedPartitionSizes[1], K_PADDED><<<grid, block, 0, stream>>>(
-          scores_in, data->intermediate_indices_1, data->intermediate_scores_1, vocab_size, num_partitions);
-    } else if (partition_size == kSupportedPartitionSizes[2]) {
-      Stage1_FindPartitionsTopK<kBlockSize, kSupportedPartitionSizes[2], K_PADDED><<<grid, block, 0, stream>>>(
-          scores_in, data->intermediate_indices_1, data->intermediate_scores_1, vocab_size, num_partitions);
-    } else {
-      Stage1_FindPartitionsTopK<kBlockSize, kSupportedPartitionSizes[3], K_PADDED><<<grid, block, 0, stream>>>(
-          scores_in, data->intermediate_indices_1, data->intermediate_scores_1, vocab_size, num_partitions);
-    }
-  };
+    auto launch_with_partition_size_args = [&](auto p_size) {
+      constexpr int P_SIZE = decltype(p_size)::value;
+      void* kernel;
+      if (num_partitions <= 8) {
+        kernel = (void*)PartitionSortCooperativeKernelOptimized<kBlockSize, P_SIZE, K_PADDED, 8>;
+      } else if (num_partitions <= 16) {
+        kernel = (void*)PartitionSortCooperativeKernelOptimized<kBlockSize, P_SIZE, K_PADDED, 16>;
+      } else if (num_partitions <= 32) {
+        kernel = (void*)PartitionSortCooperativeKernelOptimized<kBlockSize, P_SIZE, K_PADDED, 32>;
+      } else {
+        kernel = (void*)PartitionSortCooperativeKernelOptimized<kBlockSize, P_SIZE, K_PADDED, 64>;
+      }
 
-  auto dispatch_k = [&](auto dispatcher) {
-    if (k_padded_val == 4)
-      dispatcher(std::integral_constant<int, 4>());
-    else if (k_padded_val == 8)
-      dispatcher(std::integral_constant<int, 8>());
-    else if (k_padded_val == 16)
-      dispatcher(std::integral_constant<int, 16>());
-    else if (k_padded_val == 32)
-      dispatcher(std::integral_constant<int, 32>());
-    else
-      dispatcher(std::integral_constant<int, 64>());
-  };
-
-  if (num_partitions == 1) {
-    dispatch_k(launch_stage1);
-    CUDA_CHECK_LAUNCH();
-    data->topk_scores = data->intermediate_scores_1;
-    data->topk_indices = data->intermediate_indices_1;
-    data->topk_stride = k_padded_val;
-  } else {
-    auto launch_stage2 = [&](auto k_padded) {
-      constexpr int K_PADDED = decltype(k_padded)::value;
-      constexpr int kBlockSize = 1024;
-      dim3 grid(batch_size);
-      dim3 block(kBlockSize);
-      Stage2_ReduceKernel<kBlockSize, K_PADDED, 64><<<grid, block, 0, stream>>>(
-          data->intermediate_scores_1, data->intermediate_indices_1,
-          data->intermediate_scores_2, data->intermediate_indices_2, num_partitions);
+      void* kernel_args[] = {(void*)&scores_in, (void*)&data->intermediate_scores_1, (void*)&data->intermediate_indices_1,
+                             (void*)&data->intermediate_scores_2, (void*)&data->intermediate_indices_2,
+                             (void*)&vocab_size, (void*)&num_partitions, (void*)&k};
+      CUDA_CHECK(cudaLaunchCooperativeKernel(kernel, grid, block, kernel_args, 0, stream));
     };
 
-    dispatch_k([&](auto k_padded) {
-      launch_stage1(k_padded);
-      CUDA_CHECK_LAUNCH();
-      launch_stage2(k_padded);
-    });
-    CUDA_CHECK_LAUNCH();
+    if (partition_size == kSupportedPartitionSizes[0])
+      launch_with_partition_size_args(std::integral_constant<int, kSupportedPartitionSizes[0]>());
+    else if (partition_size == kSupportedPartitionSizes[1])
+      launch_with_partition_size_args(std::integral_constant<int, kSupportedPartitionSizes[1]>());
+    else if (partition_size == kSupportedPartitionSizes[2])
+      launch_with_partition_size_args(std::integral_constant<int, kSupportedPartitionSizes[2]>());
+    else
+      launch_with_partition_size_args(std::integral_constant<int, kSupportedPartitionSizes[3]>());
+  };
 
-    data->topk_scores = data->intermediate_scores_2;
-    data->topk_indices = data->intermediate_indices_2;
-    data->topk_stride = k_padded_val;
-  }
-}
+  if (k_padded_val == 4)
+    launch_cooperative_kernel(std::integral_constant<int, 4>());
+  else if (k_padded_val == 8)
+    launch_cooperative_kernel(std::integral_constant<int, 8>());
+  else if (k_padded_val == 16)
+    launch_cooperative_kernel(std::integral_constant<int, 16>());
+  else if (k_padded_val == 32)
+    launch_cooperative_kernel(std::integral_constant<int, 32>());
+  else if (k_padded_val == 52)
+    launch_cooperative_kernel(std::integral_constant<int, 52>());
+  else
+    launch_cooperative_kernel(std::integral_constant<int, 64>());
 
-bool IsSupported(int batch_size, int vocab_size, int k) {
-  if (k > kPartitionSortMaxK) {
-    return false;
-  }
-  const int partition_size = EstimateBestPartitionSize(vocab_size);
-  if (partition_size == 0) {
-    return false;
-  }
-  const int num_partitions = CeilDiv(vocab_size, partition_size);
-  if (num_partitions > 64) {
-    return false;
-  }
-  return true;
+  CUDA_CHECK_LAUNCH();
+
+  data->topk_scores = data->intermediate_scores_2;
+  data->topk_indices = data->intermediate_indices_2;
+  data->topk_stride = k;
 }
 
 }  // namespace radix_partition_sort
