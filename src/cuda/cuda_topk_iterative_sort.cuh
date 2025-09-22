@@ -13,14 +13,37 @@
 
 namespace Generators {
 namespace cuda {
-namespace flash_sort {
+namespace iterative_sort {
+
+/**
+ * @brief A high-performance, single-kernel cooperative Top-K algorithm.
+ *
+ * Algorithm Overview:
+ * 1.  **Stage 1 (Partition Top-K)**: The input is partitioned, and `topk_common::FindPartitionTopK`
+ * is used to find the top `K_PADDED` candidates within each partition in parallel.
+ *
+ * 2.  **Stage 2 (Iterative Reduction)**: The kernel then enters a loop to perform a tree-based reduction
+ * on the candidates from Stage 1. It uses `cg::grid_group::sync()` to ensure all blocks have
+ * completed a reduction level before starting the next.
+ * -   In each iteration, `kReductionFactor` (fixed at 4) sets of candidates are merged by a single thread block.
+ * -   This process repeats until only one set of candidates (the final Top-K) remains.
+ * -   Two intermediate buffers are used in a "ping-pong" fashion to pass data between reduction levels.
+ *
+ * Performance Characteristics:
+ * -   **Strengths**: By encapsulating all logic in a single kernel, it minimizes kernel launch overhead,
+ * which is a significant advantage over multi-kernel approaches. It also has a specialized,
+ * fast path for small `k` (<= 8) that uses a highly efficient warp-level bitonic sort for the reduction step.
+ * -   **Weaknesses**: Requires a GPU that supports `cudaLaunchCooperativeKernel`. The fixed reduction
+ * factor is less adaptive than the strategies used in `cascaded_sort` or `hybrid_sort`.
+ */
 
 namespace cg = cooperative_groups;
 
-// A fixed reduction factor is used for simplicity and performance.
+// A fixed reduction factor is used for simplicity and performance. Each reduction
+// step merges 4 partitions of candidates.
 constexpr int kReductionFactor = 4;
 
-// Utility to swap pointers, used during the reduction phase.
+// Utility to swap pointers, used for ping-ponging between intermediate buffers during reduction.
 __host__ __device__ inline void swap_ptr(float*& a, float*& b) {
   float* tmp = a;
   a = b;
@@ -34,18 +57,19 @@ __host__ __device__ inline void swap_ptr(int*& a, int*& b) {
 }
 
 template <int K_PADDED, int kBlockSize, int kPartitionSize>
-__global__ void FlashSortKernel(const float* __restrict__ input_scores,
-                                int* __restrict__ intermediate_indices_1,
-                                float* __restrict__ intermediate_scores_1,
-                                int* __restrict__ intermediate_indices_2,
-                                float* __restrict__ intermediate_scores_2,
-                                int vocab_size) {
+__global__ void IterativeSortKernel(const float* __restrict__ input_scores,
+                                    int* __restrict__ intermediate_indices_1,
+                                    float* __restrict__ intermediate_scores_1,
+                                    int* __restrict__ intermediate_indices_2,
+                                    float* __restrict__ intermediate_scores_2,
+                                    int vocab_size) {
   cg::grid_group grid = cg::this_grid();
   const int partition_idx = blockIdx.x;
   const int batch_idx = blockIdx.y;
   const int num_partitions = gridDim.x;
 
   // --- Shared Memory Union ---
+  // A union is used to efficiently reuse shared memory across different stages of the kernel.
   constexpr int kSortSize = K_PADDED * kReductionFactor;
 
   using Stage1TempStorageType = typename topk_common::Stage1TempStorage<kBlockSize, kPartitionSize>;
@@ -62,6 +86,7 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
   topk_common::FindPartitionTopK<kBlockSize, kPartitionSize, K_PADDED, Stage1TempStorageType>(
       input_scores, intermediate_indices_1, intermediate_scores_1, vocab_size, num_partitions, smem.stage1_storage);
 
+  // Grid-wide synchronization to ensure all partitions are processed before starting reduction.
   grid.sync();
 
   // --- Stage 2: Iterative Tree Reduction ---
@@ -73,6 +98,7 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
   int partitions_remaining = num_partitions;
   while (partitions_remaining > 1) {
     int num_active_blocks = (partitions_remaining + kReductionFactor - 1) / kReductionFactor;
+    // Only the first `num_active_blocks` are responsible for merging in this iteration.
     if (partition_idx < num_active_blocks) {
       const size_t in_batch_offset = static_cast<size_t>(batch_idx) * partitions_remaining * K_PADDED;
       const size_t out_batch_offset = static_cast<size_t>(batch_idx) * num_active_blocks * K_PADDED;
@@ -81,6 +107,7 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
       int* indices_out_batch = p_indices_out + out_batch_offset;
       float* scores_out_batch = p_scores_out + out_batch_offset;
 
+      // Each active block loads candidates from `kReductionFactor` partitions into its shared memory.
       int first_child_partition = partition_idx * kReductionFactor;
       int num_partitions_to_process = min(kReductionFactor, partitions_remaining - first_child_partition);
 
@@ -92,19 +119,19 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
           smem.stage2_storage.scores[i] = scores_in_batch[local_offset];
           smem.stage2_storage.indices[i] = indices_in_batch[local_offset];
         } else {
+          // Pad with sentinel values for a clean sort.
           smem.stage2_storage.scores[i] = -FLT_MAX;
           smem.stage2_storage.indices[i] = INT_MAX;
         }
       }
       __syncthreads();
 
-      // --- Choose strategy based on K ---
+      // --- Choose sorting strategy based on K ---
       if constexpr (K_PADDED <= 8) {
-        // For small K, use a warp-level sort on the first warp for maximum speed.
-        // kSortSize will be at most 32 (8 * 4).
+        // For small K, the total number of items to sort (kSortSize) is at most 32.
+        // A warp-level bitonic sort is extremely fast as it operates entirely in registers
+        // without needing shared memory for the sort itself.
         if (threadIdx.x < warpSize) {
-          // Load data from shared mem into registers, padding with min values
-          // for threads outside the kSortSize range.
           float my_score;
           int my_index;
           if (threadIdx.x < kSortSize) {
@@ -114,11 +141,7 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
             my_score = -FLT_MAX;
             my_index = INT_MAX;
           }
-
-          // Perform sort entirely in registers
           bitonic_sort::WarpBitonicSort(my_score, my_index);
-
-          // Write top-K results back to shared memory
           if (threadIdx.x < K_PADDED) {
             smem.stage2_storage.scores[threadIdx.x] = my_score;
             smem.stage2_storage.indices[threadIdx.x] = my_index;
@@ -126,10 +149,11 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
         }
         __syncthreads();
       } else {
-        // For larger K, the existing shared memory bitonic sort is still a robust choice.
+        // For larger K, a shared-memory bitonic sort is a robust choice.
         bitonic_sort::SharedMemBitonicSort<kBlockSize, kSortSize>(smem.stage2_storage.scores, smem.stage2_storage.indices);
       }
 
+      // Write the top K results for this merged group to the output buffer.
       if (threadIdx.x < K_PADDED) {
         size_t out_offset = static_cast<size_t>(partition_idx) * K_PADDED + threadIdx.x;
         scores_out_batch[out_offset] = smem.stage2_storage.scores[threadIdx.x];
@@ -137,21 +161,24 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
       }
     }
     partitions_remaining = num_active_blocks;
+    // Swap input/output pointers for the next iteration (ping-pong).
     swap_ptr(p_scores_in, p_scores_out);
     swap_ptr(p_indices_in, p_indices_out);
     grid.sync();
   }
 }
 
-// --- Unified Host-Side Launcher ---
+// Host-side launcher that selects the correct kernel template instantiation based on runtime parameters.
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
-  assert(IsSupported(batch_size, vocab_size, k));  // caller shall check IsSupported before calling this function.
+  assert(IsSupported(batch_size, vocab_size, k));
 
   constexpr int kBlockSize = 256;
-  const int partition_size = data->flash_sort_partition_size;
+  const int partition_size = data->iterative_sort_partition_size;
   const int num_partitions = CeilDiv(vocab_size, partition_size);
 
-  int k_padded_val = kFlashSortMaxK;
+  // Pad `k` to the next power of two or a supported value. This is necessary because
+  // the templated kernels must have a compile-time constant for K.
+  int k_padded_val = kIterativeSortMaxK;
   if (k == 1)
     k_padded_val = 1;
   else if (k <= 4)
@@ -173,57 +200,57 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   kernel_args[4] = (void*)&data->intermediate_scores_2;
   kernel_args[5] = (void*)&vocab_size;
 
-  // This lambda handles selecting the kernel and launching it with the correct K_PADDED value.
-  auto launch_flash_sort = [&](auto k_padded) {
+  // This lambda dispatches to the correct kernel based on the compile-time K_PADDED value.
+  auto launch_iterative_sort = [&](auto k_padded) {
     constexpr int K_PADDED = decltype(k_padded)::value;
     dim3 block(kBlockSize);
     dim3 grid(num_partitions, batch_size);
     switch (partition_size) {
       case 1024:
-        CUDA_CHECK(cudaLaunchCooperativeKernel((void*)FlashSortKernel<K_PADDED, kBlockSize, 1024>, grid, block, kernel_args, 0, stream));
+        CUDA_CHECK(cudaLaunchCooperativeKernel((void*)IterativeSortKernel<K_PADDED, kBlockSize, 1024>, grid, block, kernel_args, 0, stream));
         break;
       case 2048:
-        CUDA_CHECK(cudaLaunchCooperativeKernel((void*)FlashSortKernel<K_PADDED, kBlockSize, 2048>, grid, block, kernel_args, 0, stream));
+        CUDA_CHECK(cudaLaunchCooperativeKernel((void*)IterativeSortKernel<K_PADDED, kBlockSize, 2048>, grid, block, kernel_args, 0, stream));
         break;
       default:
-        CUDA_CHECK(cudaLaunchCooperativeKernel((void*)FlashSortKernel<K_PADDED, kBlockSize, 4096>, grid, block, kernel_args, 0, stream));
+        CUDA_CHECK(cudaLaunchCooperativeKernel((void*)IterativeSortKernel<K_PADDED, kBlockSize, 4096>, grid, block, kernel_args, 0, stream));
         break;
     }
   };
 
   // Select the padded K value at runtime and call the launch logic.
   if (k == 1) {
-    launch_flash_sort(std::integral_constant<int, 1>());
+    launch_iterative_sort(std::integral_constant<int, 1>());
   } else if (k <= 4) {
-    launch_flash_sort(std::integral_constant<int, 4>());
+    launch_iterative_sort(std::integral_constant<int, 4>());
   } else if (k <= 8) {
-    launch_flash_sort(std::integral_constant<int, 8>());
+    launch_iterative_sort(std::integral_constant<int, 8>());
   } else if (k <= 16) {
-    launch_flash_sort(std::integral_constant<int, 16>());
+    launch_iterative_sort(std::integral_constant<int, 16>());
   } else if (k <= 32) {
-    launch_flash_sort(std::integral_constant<int, 32>());
+    launch_iterative_sort(std::integral_constant<int, 32>());
   } else if (k <= 64) {
-    launch_flash_sort(std::integral_constant<int, 64>());
+    launch_iterative_sort(std::integral_constant<int, 64>());
   } else {
-    if constexpr (kFlashSortMaxK > 64) {
-      launch_flash_sort(std::integral_constant<int, kFlashSortMaxK>());
+    if constexpr (kIterativeSortMaxK > 64) {
+      launch_iterative_sort(std::integral_constant<int, kIterativeSortMaxK>());
     }
   }
 
   CUDA_CHECK_LAUNCH();
 
-  // Determine the number of reduction loops to find the final output buffer
+  // Determine the final output buffer based on the number of reduction loops.
   int num_reduction_loops = 0;
-  int partitions_remaining = num_partitions;
-  if (partitions_remaining > 1) {
+  if (num_partitions > 1) {
+    int partitions_remaining = num_partitions;
     while (partitions_remaining > 1) {
       partitions_remaining = (partitions_remaining + kReductionFactor - 1) / kReductionFactor;
       num_reduction_loops++;
     }
   }
 
-  // Stage 1 writes to buffer 1 (data->intermediate_..._1)
-  // After odd loops, result is in buffer 2. After even loops, result is in buffer 1.
+  // Stage 1 writes to buffer 1. After an odd number of loops, the result is in buffer 2.
+  // After an even number of loops, the result is back in buffer 1.
   if (num_reduction_loops % 2 == 1) {
     data->topk_scores = data->intermediate_scores_2;
     data->topk_indices = data->intermediate_indices_2;
@@ -236,7 +263,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 
 inline size_t GetIntermediateSize(int batch_size, int vocab_size, int partition_size) {
   const int num_partitions = CeilDiv(vocab_size, partition_size);
-  return static_cast<size_t>(batch_size) * num_partitions * kFlashSortMaxK;
+  return static_cast<size_t>(batch_size) * num_partitions * kIterativeSortMaxK;
 }
 
 inline int EstimateBestPartitionSize(int vocab_size) {
@@ -246,7 +273,7 @@ inline int EstimateBestPartitionSize(int vocab_size) {
 }
 
 bool IsSupported(int batch_size, int vocab_size, int k) {
-  if (k > kFlashSortMaxK) {
+  if (k > kIterativeSortMaxK) {
     return false;
   }
 
@@ -267,11 +294,11 @@ bool IsSupported(int batch_size, int vocab_size, int k) {
     constexpr int K_PADDED = decltype(k_padded)::value;
     switch (partition_size) {
       case 1024:
-        return (void*)FlashSortKernel<K_PADDED, kBlockSize, 1024>;
+        return (void*)IterativeSortKernel<K_PADDED, kBlockSize, 1024>;
       case 2048:
-        return (void*)FlashSortKernel<K_PADDED, kBlockSize, 2048>;
+        return (void*)IterativeSortKernel<K_PADDED, kBlockSize, 2048>;
       default:
-        return (void*)FlashSortKernel<K_PADDED, kBlockSize, 4096>;
+        return (void*)IterativeSortKernel<K_PADDED, kBlockSize, 4096>;
     }
   };
 
@@ -289,8 +316,8 @@ bool IsSupported(int batch_size, int vocab_size, int k) {
   } else if (k <= 64) {
     kernel = get_kernel(std::integral_constant<int, 64>());
   } else {
-    if constexpr (kFlashSortMaxK > 64) {
-      kernel = get_kernel(std::integral_constant<int, kFlashSortMaxK>());
+    if constexpr (kIterativeSortMaxK > 64) {
+      kernel = get_kernel(std::integral_constant<int, kIterativeSortMaxK>());
     }
   }
 
@@ -316,6 +343,6 @@ bool IsSupported(int batch_size, int vocab_size, int k) {
   return true;
 }
 
-}  // namespace flash_sort
+}  // namespace iterative_sort
 }  // namespace cuda
 }  // namespace Generators

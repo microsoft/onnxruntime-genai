@@ -8,9 +8,14 @@
 namespace Generators {
 namespace cuda {
 
+// This file implements a singleton-based, thread-safe, persistent cache for Top-K benchmark results.
+// When the online benchmark determines the fastest algorithm for a specific problem size
+// (device, batch, vocab, k), the result is stored here. Subsequent calls with the same
+// parameters can retrieve the best algorithm directly without re-benchmarking.
+
 namespace {  // Anonymous namespace to hide implementation details
 
-// A key to uniquely identify a benchmark configuration.
+// A key to uniquely identify a benchmark configuration in the cache map.
 struct TopkBenchmarkCacheKey {
   int device_id;
   int batch_size;
@@ -25,7 +30,7 @@ struct TopkBenchmarkCacheKey {
   }
 };
 
-// Hasher for the custom key struct, required for std::unordered_map.
+// Custom hasher for the key struct, required for use with `std::unordered_map`.
 struct TopkBenchmarkCacheKeyHash {
   std::size_t operator()(const TopkBenchmarkCacheKey& key) const {
     // A simple hash combination function.
@@ -37,10 +42,11 @@ struct TopkBenchmarkCacheKeyHash {
   }
 };
 
-// The global cache manager.
+// The global cache manager class, implemented as a singleton.
 class TopkBenchmarkCacheManager {
  public:
   // Gets the cached algorithm for a specific configuration.
+  // Returns TopkAlgo::UNKNOWN if not found.
   TopkAlgo Get(int device_id, int batch_size, int vocab_size, int k) {
     std::lock_guard<std::mutex> lock(mutex_);
     TopkBenchmarkCacheKey key{device_id, batch_size, vocab_size, k};
@@ -53,7 +59,7 @@ class TopkBenchmarkCacheManager {
     return TopkAlgo::UNKNOWN;
   }
 
-  // Sets the algorithm for a specific configuration.
+  // Sets (or updates) the algorithm for a specific configuration.
   void Set(int device_id, int batch_size, int vocab_size, int k, TopkAlgo algo) {
     std::lock_guard<std::mutex> lock(mutex_);
     TopkBenchmarkCacheKey key{device_id, batch_size, vocab_size, k};
@@ -61,10 +67,11 @@ class TopkBenchmarkCacheManager {
   }
 
  private:
-  std::mutex mutex_;
+  std::mutex mutex_;  // Protects cache access from multiple host threads.
   std::unordered_map<TopkBenchmarkCacheKey, TopkAlgo, TopkBenchmarkCacheKeyHash> cache_;
 };
 
+// Provides access to the singleton instance of the cache manager.
 TopkBenchmarkCacheManager& GetCache() {
   static TopkBenchmarkCacheManager g_topk_benchmark_cache;
   return g_topk_benchmark_cache;
@@ -72,7 +79,7 @@ TopkBenchmarkCacheManager& GetCache() {
 
 }  // namespace
 
-// Public-facing functions to access the cache.
+// Public-facing functions to access the global cache.
 inline TopkAlgo GetTopkBenchmarkCache(int device_id, int batch_size, int vocab_size, int k) {
   return GetCache().Get(device_id, batch_size, vocab_size, k);
 }

@@ -4,37 +4,58 @@
 #pragma once
 
 #include <cub/block/block_radix_sort.cuh>
-#include <cub/util_type.cuh>
 #include <cuda_runtime.h>
-#include <float.h>
 #include "cuda_topk.h"
 #include "cuda_topk_common.cuh"
-#include "cuda_topk_stable_sort_helper.cuh"
 #include "cuda_topk_bitonic_sort_helper.cuh"
 #include <cooperative_groups.h>
-#include <array>
-#include <limits>
-#include <algorithm>
 
 namespace Generators {
 namespace cuda {
-namespace radix_partition_sort {
+namespace flash_convergent {
 
+/**
+ * @brief A two-stage cooperative algorithm with a single-step reduction phase.
+ *
+ * Algorithm Overview:
+ * This algorithm uses cooperative groups to perform the entire Top-K operation in
+ * a single kernel launch, but with a different reduction strategy than `iterative_sort`.
+ *
+ * 1.  **Stage 1 (Partition Top-K)**: All thread blocks work in parallel to find the
+ * top `K_PADDED` candidates from their assigned vocabulary partitions using
+ * `topk_common::FindPartitionTopK`. The results are written to a global
+ * intermediate buffer.
+ *
+ * 2.  **Grid-Wide Sync**: A `cg::grid_group::sync()` ensures all partitions are processed.
+ *
+ * 3.  **Stage 2 (Single-Step Reduction)**: A single, specialized thread block (`blockIdx.x == 0`)
+ * is responsible for the final merge. It loads all candidates from the intermediate
+ * buffer and performs a final, large sort to find the global Top-K.
+ *
+ * Performance Characteristics:
+ * -   **Strengths**: By performing the final reduction in a single step, it avoids the overhead of
+ * iterative loops and multiple grid-wide synchronizations found in other cooperative methods.
+ * It intelligently switches its internal sorting method: for smaller total candidate sets
+ * (`<= kMaxSmallSortSize`), it uses a fast shared-memory bitonic sort; for larger sets,
+ * it uses the more powerful `cub::BlockRadixSort`.
+ * -   **Weaknesses**: Requires cooperative launch support. Its primary limitation is the total
+ * number of partitions (`kMaxPartitions`), as a single block must be able to load and sort
+ * all candidates. This makes it less scalable for extremely large vocabularies that would
+ * require many partitions.
+ */
 namespace cg = cooperative_groups;
 
-// The primary reason for the kMaxPartitions = 64 limit is the use of cooperative groups, which requires that
-// the entire grid of thread blocks can be resident on the GPU's Streaming Multiprocessors at the same time.
-// Also, the number of registers each thread needs is directly proportional to this threshold,
-// Current setting need CeilDiv(K_PADDED * kMaxPartitions, kBlockSize) = 16 registers per thread.
+// The limit on partitions is due to cooperative group residency requirements and the
+// fact that a single block must sort all `k * num_partitions` candidates in Stage 2.
 constexpr int kMaxPartitions = 64;
 
-// Threshold of sort size to choose small kernel (bitonic sort in stage 2).
+// Threshold for switching between bitonic sort and CUB radix sort in Stage 2.
 constexpr int kMaxSmallSortSize = 256;
 
 // This partition sizes select as {11, 13, 16, 19} * 256.
 constexpr std::array<int, 4> kSupportedPartitionSizes = {2816, 3328, 4096, 4864};
 
-// --- Kernel for small sort size in stage 2 ---
+// --- Kernel for small Stage 2 sort size (using Bitonic Sort) ---
 template <int kBlockSize, int kPartitionSize, int K_PADDED, int kMaxPartitionsForKernel>
 __global__ void PartitionSortSmallKernel(const float* __restrict__ scores_in,
                                          float* __restrict__ intermediate_scores,
@@ -66,7 +87,7 @@ __global__ void PartitionSortSmallKernel(const float* __restrict__ scores_in,
 
   grid.sync();
 
-  // --- Stage 2: Shared Memory Bitonic Sort for Smaller K ---
+  // --- Stage 2: One block performs the final merge ---
   if (blockIdx.x == 0) {
     const int batch_idx = blockIdx.y;
     const int num_elements_to_sort = num_partitions * K_PADDED;
@@ -85,6 +106,7 @@ __global__ void PartitionSortSmallKernel(const float* __restrict__ scores_in,
 
     bitonic_sort::SharedMemBitonicSort<kBlockSize, kSortSize>(smem.stage2_bitonic_storage.scores, smem.stage2_bitonic_storage.indices);
 
+    // Write the final top-k results to global memory.
     if (threadIdx.x < k_actual) {
       size_t out_offset = static_cast<size_t>(batch_idx) * k_actual + threadIdx.x;
       scores_out[out_offset] = smem.stage2_bitonic_storage.scores[threadIdx.x];
@@ -93,7 +115,7 @@ __global__ void PartitionSortSmallKernel(const float* __restrict__ scores_in,
   }
 }
 
-// --- Kernel for large sort size in stage 2 ---
+// --- Kernel for large Stage 2 sort size (using CUB Radix Sort) ---
 template <int kBlockSize, int kPartitionSize, int K_PADDED, int kMaxPartitionsForKernel>
 __global__ void PartitionSortLargeKernel(const float* __restrict__ scores_in,
                                          float* __restrict__ intermediate_scores,
@@ -125,7 +147,7 @@ __global__ void PartitionSortLargeKernel(const float* __restrict__ scores_in,
 
   grid.sync();
 
-  // --- Stage 2: CUB Block Radix Sort for Larger K  ---
+  // --- Stage 2: One block performs the final merge ---
   if (blockIdx.x == 0) {
     const int batch_idx = blockIdx.y;
     const int num_elements_to_sort = num_partitions * K_PADDED;
@@ -193,15 +215,7 @@ inline int EstimateBestPartitionSize(int vocab_size) {
       // Cost is the distance to the target. A perfect match has a cost of 0.
       double cost = target_partitions - num_partitions;
 
-      // Add a small penalty for larger partition sizes to favor more balanced workloads
-      // where Stage 1 and Stage 2 sizes are closer.
-      // The following optimizes most common use case of k = 50.
-      // Note that we can use online benchmark to find best parition size for small k value in the future.
-      constexpr int default_padded_k = 52;
-      int stage2_size = target_partitions * default_padded_k;
-      if (stage2_size > p_size) {
-        cost += static_cast<double>((stage2_size - p_size)) / p_size;
-      }
+      // TODO: Run experiment to add a small penalty for larger partition sizes to favor more balanced workloads
 
       if (cost < min_cost) {
         min_cost = cost;
@@ -220,7 +234,7 @@ inline int EstimateBestPartitionSize(int vocab_size) {
 
 inline size_t GetIntermediateSize(int batch_size, int vocab_size, int partition_size) {
   const int num_partitions = CeilDiv(vocab_size, partition_size);
-  return static_cast<size_t>(batch_size) * num_partitions * kPartitionSortMaxK;
+  return static_cast<size_t>(batch_size) * num_partitions * kConvergentSortMaxK;
 }
 
 template <int kBlockSize, int kPartitionSize, int K_PADDED, int kMaxPartitionsForKernel>
@@ -251,7 +265,7 @@ void* GetPartitionSortKernel(int num_partitions) {
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
   assert(IsSupported(batch_size, vocab_size, k));
 
-  const int partition_size = data->partition_sort_partition_size;
+  const int partition_size = data->flash_convergent_partition_size;
   const int num_partitions = CeilDiv(vocab_size, partition_size);
 
   auto launch_cooperative_kernel = [&](auto k_padded) {
@@ -334,7 +348,7 @@ bool IsSupportedDispatch(int batch_size, int vocab_size, int k, int partition_si
 }
 
 bool IsSupported(int batch_size, int vocab_size, int k) {
-  if (k > kPartitionSortMaxK) return false;
+  if (k > kConvergentSortMaxK) return false;
   int coop_support = 0;
   cudaDeviceGetAttribute(&coop_support, cudaDevAttrCooperativeLaunch, 0);
   if (!coop_support) return false;
@@ -351,6 +365,6 @@ bool IsSupported(int batch_size, int vocab_size, int k) {
   return IsSupportedDispatch<64>(batch_size, vocab_size, k, partition_size, num_partitions);
 }
 
-}  // namespace radix_partition_sort
+}  // namespace flash_convergent
 }  // namespace cuda
 }  // namespace Generators

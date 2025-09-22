@@ -15,22 +15,27 @@
 namespace Generators {
 namespace cuda {
 
-// Measures the average execution time of a CUDA kernel over several runs.
-// This is a lightweight version for online benchmarking, using fewer iterations
-// than an offline profiler to minimize runtime overhead.
+/**
+ * @brief Measures the average execution time of a CUDA kernel over several runs.
+ * This is a lightweight version for online benchmarking, using fewer iterations
+ * than an offline profiler to minimize runtime overhead.
+ * @param stream The CUDA stream to run the kernel on.
+ * @param kernel_func A lambda function that launches the kernel.
+ * @return The average execution time in milliseconds.
+ */
 static float TimeKernel(cudaStream_t stream, std::function<void()> kernel_func) {
   const int warm_up_runs = 2;
   const int total_runs = 5;
 
   cuda_event_holder start_event, stop_event;
 
-  // Warm-up runs to handle any one-time kernel loading costs.
+  // Warm-up runs to handle any one-time kernel loading costs or JIT compilation.
   for (int i = 0; i < warm_up_runs; ++i) {
     kernel_func();
   }
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
-  // Timed runs
+  // Timed runs.
   CUDA_CHECK(cudaEventRecord(start_event, stream));
   for (int i = 0; i < total_runs; ++i) {
     kernel_func();
@@ -44,29 +49,31 @@ static float TimeKernel(cudaStream_t stream, std::function<void()> kernel_func) 
   return ms / total_runs;
 }
 
-// Added helper to convert TopkAlgo to its string representation for printing.
+// Helper to convert TopkAlgo enum to its string representation for printing.
 static const char* TopkAlgoToString(TopkAlgo algo) {
   switch (algo) {
     case TopkAlgo::SELECTION:
-      return "Selection Sort";
+      return select_sort::kAlgorithmName;
     case TopkAlgo::HYBRID:
-      return "Hybrid Sort";
-    case TopkAlgo::FLASH:
-      return "Flash Sort";
-    case TopkAlgo::LLM:
-      return "LLM Sort";
-    case TopkAlgo::PARTITION:
-      return "Partition Sort";
-    case TopkAlgo::RADIX:
-      return "Radix Sort";
+      return hybrid_sort::kAlgorithmName;
+    case TopkAlgo::ITERATIVE:
+      return iterative_sort::kAlgorithmName;
+    case TopkAlgo::CASCADED:
+      return cascaded_sort::kAlgorithmName;
+    case TopkAlgo::CONVERGENT:
+      return flash_convergent::kAlgorithmName;
+    case TopkAlgo::DISTRIBUTED_SELECT:
+      return distributed_select_sort::kAlgorithmName;
+    case TopkAlgo::PER_BATCH_RADIX:
+      return per_batch_radix_sort::kAlgorithmName;
     case TopkAlgo::FULL:
-      return "Full Sort";
+      return full_sort::kAlgorithmName;
     default:
       return "Unknown";
   }
 }
 
-// Helper macro to benchmark a kernel, update the best algorithm, and handle exceptions.
+// Helper macro to benchmark a kernel, update the best algorithm, and handle potential CUDA errors.
 #define BENCHMARK_KERNEL(algo_enum, kernel_lambda)                                      \
   try {                                                                                 \
     float latency = TimeKernel(stream, kernel_lambda);                                  \
@@ -80,9 +87,17 @@ static const char* TopkAlgoToString(TopkAlgo algo) {
               << ", vocab_size=" << vocab_size << ". Error: " << e.what() << std::endl; \
   }
 
-// Performs online benchmarking for small k to select the best Top-K algorithm.
-// It times several candidate algorithms and picks the fastest one. The result
-// is cached for subsequent calls with the same k.
+/**
+ * @brief Performs online benchmarking to select the best Top-K algorithm for the current problem size and hardware.
+ *
+ * It times several candidate algorithms and picks the fastest one. The selection logic is heuristic-based,
+ * prioritizing specialized, high-performance kernels (`cascaded_sort`, `iterative_sort`, `flash_convergent`) when supported.
+ * If these are not applicable, or for certain problem sizes, it considers more general-purpose algorithms
+ * like `hybrid_sort`. If no specialized algorithm is faster or supported, it falls back to robust baseline
+ * implementations like `full_sort`. The result is cached for subsequent calls.
+ *
+ * @return The `TopkAlgo` enum corresponding to the fastest measured algorithm.
+ */
 static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
                                            cudaStream_t stream,
                                            const float* scores_in,
@@ -92,73 +107,74 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
   float min_latency = std::numeric_limits<float>::max();
   TopkAlgo best_algo = TopkAlgo::UNKNOWN;
 
-  // Selection sort helps only for small k. This threshold is based on benchmark results.
+  // Heuristic: Selection sort is only competitive for extremely small k.
   constexpr int kSelectionSortBenchmarkMaxK = 4;
 
-  // Radix sort helps only for small batch size. This threshold is based on benchmark results.
+  // Heuristic: Radix sort is typically best for small batch sizes.
   constexpr int kRadixSortBenchmarkMaxBatchSize = 8;
 
-  // Candidate: Selection Sort is enabled only for very small k.
+  // Candidate: Selection Sort (only for very small k).
   if (k <= kSelectionSortBenchmarkMaxK) {
     BENCHMARK_KERNEL(TopkAlgo::SELECTION, [&]() {
-      selection_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      select_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
 
     if (distributed_select_sort::IsSupported(batch_size, vocab_size, k)) {
-      BENCHMARK_KERNEL(TopkAlgo::DISTRIBUTED, [&]() {
+      BENCHMARK_KERNEL(TopkAlgo::DISTRIBUTED_SELECT, [&]() {
         distributed_select_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       });
     }
   }
 
-  // Candidate: LLM Sort
-  bool use_llm_sort = llm_sort::IsSupported(batch_size, vocab_size, k);
-  if (use_llm_sort) {
-    BENCHMARK_KERNEL(TopkAlgo::LLM, [&]() {
-      llm_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+  // Candidate: CASCADED Sort (high-performance cooperative kernel).
+  bool use_cascaded_sort = cascaded_sort::IsSupported(batch_size, vocab_size, k);
+  if (use_cascaded_sort) {
+    BENCHMARK_KERNEL(TopkAlgo::CASCADED, [&]() {
+      cascaded_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
   }
 
-  // Candidate: Flash Sort
-  bool use_flash_sort = flash_sort::IsSupported(batch_size, vocab_size, k);
-  if (use_flash_sort) {
-    BENCHMARK_KERNEL(TopkAlgo::FLASH, [&]() {
-      flash_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+  // Candidate: Flash Sort (high-performance cooperative kernel).
+  bool use_iterative_sort = iterative_sort::IsSupported(batch_size, vocab_size, k);
+  if (use_iterative_sort) {
+    BENCHMARK_KERNEL(TopkAlgo::ITERATIVE, [&]() {
+      iterative_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
   }
 
-  // Candidate: Partition Sort.
-  bool use_partition_sort = radix_partition_sort::IsSupported(batch_size, vocab_size, k);
-  if (use_partition_sort) {
-    BENCHMARK_KERNEL(TopkAlgo::PARTITION, [&]() {
-      radix_partition_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+  // Candidate: Partition Sort (high-performance cooperative kernel).
+  bool use_flash_convergent = flash_convergent::IsSupported(batch_size, vocab_size, k);
+  if (use_flash_convergent) {
+    BENCHMARK_KERNEL(TopkAlgo::CONVERGENT, [&]() {
+      flash_convergent::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
   }
 
-  // Candidate: Hybrid Sort. Only enabled when cooperative kernels (Flash Sort, LLM Sort or Partition Sort) not supported, or when vocab_size is small.
-  if (!use_flash_sort && !use_llm_sort && !use_partition_sort || vocab_size <= 4096) {
-    bool use_hybrid_sort = hybrid_sort::IsSupported(batch_size, vocab_size, k);
-    if (use_hybrid_sort) {
+  // Candidate: Hybrid Sort. This is a robust fallback. We benchmark it if either the cooperative
+  // kernels are not supported, or if the vocab size is small, where hybrid can sometimes be faster.
+  if (!use_iterative_sort && !use_cascaded_sort && !use_flash_convergent || vocab_size <= 4096) {
+    if (k <= kHybridSortMaxK) {
       BENCHMARK_KERNEL(TopkAlgo::HYBRID, [&]() {
         hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       });
     }
   }
 
-  // No fast algorithm found, fallback to Full Sort and Radix Sort.
+  // If no fast algorithm has been selected yet, it means either they were not supported or not faster.
+  // We now benchmark the baseline fallbacks.
   if (best_algo == TopkAlgo::UNKNOWN) {
     BENCHMARK_KERNEL(TopkAlgo::FULL, [&]() {
       full_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
     });
 
     if (batch_size <= kRadixSortBenchmarkMaxBatchSize) {
-      BENCHMARK_KERNEL(TopkAlgo::RADIX, [&]() {
-        radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      BENCHMARK_KERNEL(TopkAlgo::PER_BATCH_RADIX, [&]() {
+        per_batch_radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       });
     }
   }
 
-  // Cache the result in the shared cache for future calls to avoid re-benchmarking.
+  // Cache the result in the shared cache for future runs to avoid re-benchmarking.
   int device_id = topk_data->device_id;
   SetTopkBenchmarkCache(device_id, batch_size, vocab_size, k, best_algo);
 

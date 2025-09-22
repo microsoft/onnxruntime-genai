@@ -5,7 +5,7 @@
 
 #include <cub/block/block_radix_sort.cuh>
 #include <cuda_runtime.h>
-#include <float.h>  // For FLT_MAX
+#include <float.h>
 #include "cuda_topk.h"
 #include "cuda_topk_stable_sort_helper.cuh"
 
@@ -14,8 +14,29 @@ namespace cuda {
 namespace topk_common {
 
 /**
+ * @brief Finds the Top-K candidates within a single data partition using `cub::BlockRadixSort`.
+ * This is the core workhorse for Stage 1 of all partition-based algorithms.
+ * It dispatches to a stable or unstable version at compile time based on the `kStableTopK` flag.
+ *
+ * @param scores_in Pointer to the start of the input scores for the entire batch.
+ * @param intermediate_indices Output buffer for the indices of the top candidates.
+ * @param intermediate_scores Output buffer for the scores of the top candidates.
+ * @param vocab_size The total vocabulary size.
+ * @param num_partitions The total number of partitions the vocabulary is divided into.
+ * @param temp_storage Shared memory allocated for CUB's internal use.
+ */
+template <int kBlockSize, int kPartitionSize, int K, typename TempStorage>
+__device__ void FindPartitionTopK(const float* __restrict__ scores_in,
+                                  int* __restrict__ intermediate_indices,
+                                  float* __restrict__ intermediate_scores,
+                                  int vocab_size,
+                                  int num_partitions,
+                                  TempStorage& temp_storage);
+
+/**
  * @brief Performs a stable sort to find the Top-K candidates within a partition.
- * It uses a 64-bit composite key (score + index) to ensure stable sorting for tie-breaking.
+ * It uses a 64-bit composite key, packing the float score and its integer index together.
+ * This ensures that when scores are tied, the element with the original smaller index is ranked higher.
  */
 template <int kBlockSize, int kPartitionSize, int K, typename TempStorage>
 __device__ void FindPartitionTopK_StableSort(const float* __restrict__ scores_in,
@@ -76,7 +97,8 @@ __device__ void FindPartitionTopK_StableSort(const float* __restrict__ scores_in
 
 /**
  * @brief Performs a faster, unstable sort to find the Top-K candidates within a partition.
- * It sorts directly on 32-bit float scores without tie-breaking logic.
+ * It sorts directly on 32-bit float scores and their associated indices as key-value pairs.
+ * This is generally faster as it involves less data manipulation than the stable version.
  */
 template <int kBlockSize, int kPartitionSize, int K, typename TempStorage>
 __device__ void FindPartitionTopK_UnstableSort(const float* __restrict__ scores_in,
@@ -121,6 +143,8 @@ __device__ void FindPartitionTopK_UnstableSort(const float* __restrict__ scores_
   }
 }
 
+// --- Template metaprogramming to select CUB storage type based on stability ---
+
 // Type alias for stage1 temporary storage depending on stable/unstable
 template <int kBlockSize, int kPartitionSize, bool Stable = kStableTopK>
 struct Stage1StorageSelector;
@@ -141,7 +165,7 @@ template <int kBlockSize, int kPartitionSize>
 using Stage1TempStorage =
     typename Stage1StorageSelector<kBlockSize, kPartitionSize>::type;
 
-// Unified API wrapper — dispatches at compile time
+// Unified API wrapper that dispatches to the correct sort implementation at compile time.
 template <int kBlockSize, int kPartitionSize, int K, typename TempStorage>
 __device__ void FindPartitionTopK(const float* __restrict__ scores_in,
                                   int* __restrict__ intermediate_indices,
@@ -160,7 +184,10 @@ __device__ void FindPartitionTopK(const float* __restrict__ scores_in,
   }
 }
 
-// --- Helper to find the next power of two ---
+/**
+ * @brief Host/device helper to compute the next power of two for a given integer.
+ * This is useful for bitonic sort, which requires a power-of-two input size.
+ */
 __device__ __host__ __forceinline__ constexpr int NextPowerOfTwo(int n) {
   if (n == 0) return 1;
   n--;

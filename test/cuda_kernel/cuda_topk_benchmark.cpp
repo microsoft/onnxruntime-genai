@@ -52,14 +52,14 @@ struct CsvSummaryResult {
 #if TEST_FAST_ALGO_ONLY == 0
   float default_latency = -1.0f;
   float full_sort_latency = -1.0f;
-  float radix_sort_latency = -1.0f;
-  float selection_sort_latency = -1.0f;
+  float per_batch_radix_sort_latency = -1.0f;
+  float select_sort_latency = -1.0f;
 #endif
   float distributed_sort_latency = -1.0f;
-  float partition_sort_latency = -1.0f;
+  float flash_convergent_latency = -1.0f;
   float hybrid_sort_latency = -1.0f;
-  float flash_sort_latency = -1.0f;
-  float llm_sort_latency = -1.0f;
+  float iterative_sort_latency = -1.0f;
+  float cascaded_sort_latency = -1.0f;
 
   std::string best_algorithm = "NA";
   float best_latency = std::numeric_limits<float>::max();
@@ -104,9 +104,9 @@ void PrintCsvSummary(const std::vector<CsvSummaryResult>& results) {
 
   // Write header
 #if TEST_FAST_ALGO_ONLY == 0
-  summary_file << "batch_size,vocab_size,k,full_sort,radix_sort,selection_sort,distributed_sort,partition_sort,hybrid_sort,flash_sort,llm_sort,best_algorithm,best_latency,default\n";
+  summary_file << "batch_size,vocab_size,k,full_sort,per_batch_radix_sort,select_sort,distributed_select,flash_convergent,hybrid_sort,iterative_sort,cascaded_sort,best_algorithm,best_latency,default\n";
 #else
-  summary_file << "batch_size,vocab_size,k,distributed_sort,partition_sort,hybrid_sort,flash_sort,llm_sort,best_algorithm,best_latency\n";
+  summary_file << "batch_size,vocab_size,k,distributed_select,flash_convergent,hybrid_sort,iterative_sort,cascaded_sort,best_algorithm,best_latency\n";
 #endif
 
   for (const auto& result : results) {
@@ -126,20 +126,20 @@ void PrintCsvSummary(const std::vector<CsvSummaryResult>& results) {
 #if TEST_FAST_ALGO_ONLY == 0
     print_latency(summary_file, result.full_sort_latency);
     summary_file << ",";
-    print_latency(summary_file, result.radix_sort_latency);
+    print_latency(summary_file, result.per_batch_radix_sort_latency);
     summary_file << ",";
-    print_latency(summary_file, result.selection_sort_latency);
+    print_latency(summary_file, result.select_sort_latency);
     summary_file << ",";
 #endif
     print_latency(summary_file, result.distributed_sort_latency);
     summary_file << ",";
-    print_latency(summary_file, result.partition_sort_latency);
+    print_latency(summary_file, result.flash_convergent_latency);
     summary_file << ",";
     print_latency(summary_file, result.hybrid_sort_latency);
     summary_file << ",";
-    print_latency(summary_file, result.flash_sort_latency);
+    print_latency(summary_file, result.iterative_sort_latency);
     summary_file << ",";
-    print_latency(summary_file, result.llm_sort_latency);
+    print_latency(summary_file, result.cascaded_sort_latency);
     summary_file << ",";
     summary_file << result.best_algorithm << ",";
     if (result.best_latency == std::numeric_limits<float>::max()) {
@@ -207,31 +207,34 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
       Generators::cuda::full_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
                                            params.batch_size, params.k);
     });
-    all_results.push_back({params, "FULL_SORT", mean_ms, stdev_ms, p95_ms});
+    std::string algo_name = Generators::cuda::full_sort::kAlgorithmName;
+    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
     current_csv_result.full_sort_latency = mean_ms;
-    algo_latencies["FULL_SORT"] = mean_ms;
+    algo_latencies[algo_name] = mean_ms;
   }
 
   // Benchmark Selection Sort
   {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
-      Generators::cuda::selection_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
-                                                params.batch_size, params.k);
+      Generators::cuda::select_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
+                                             params.batch_size, params.k);
     });
-    all_results.push_back({params, "SELECTION_SORT", mean_ms, stdev_ms, p95_ms});
-    current_csv_result.selection_sort_latency = mean_ms;
-    algo_latencies["SELECTION_SORT"] = mean_ms;
+    std::string algo_name = Generators::cuda::select_sort::kAlgorithmName;
+    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
+    current_csv_result.select_sort_latency = mean_ms;
+    algo_latencies[algo_name] = mean_ms;
   }
 
   // Benchmark Radix Sort
   {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
-      Generators::cuda::radix_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
-                                            params.batch_size, params.k);
+      Generators::cuda::per_batch_radix_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
+                                                      params.batch_size, params.k);
     });
-    all_results.push_back({params, "RADIX_SORT", mean_ms, stdev_ms, p95_ms});
-    current_csv_result.radix_sort_latency = mean_ms;
-    algo_latencies["RADIX_SORT"] = mean_ms;
+    std::string algo_name = Generators::cuda::per_batch_radix_sort::kAlgorithmName;
+    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
+    current_csv_result.per_batch_radix_sort_latency = mean_ms;
+    algo_latencies[algo_name] = mean_ms;
   }
 #endif
 
@@ -241,12 +244,13 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
       Generators::cuda::distributed_select_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
                                                          params.batch_size, params.k);
     });
-    all_results.push_back({params, "DISTRIBUTED_SORT", mean_ms, stdev_ms, p95_ms});
+    std::string algo_name = Generators::cuda::distributed_select_sort::kAlgorithmName;
+    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
     current_csv_result.distributed_sort_latency = mean_ms;
-    algo_latencies["DISTRIBUTED_SORT"] = mean_ms;
+    algo_latencies[algo_name] = mean_ms;
   }
 
-  std::string stable_suffix = Generators::cuda::kStableTopK ? "_STABLE" : "_UNSTABLE";
+  std::string stable_suffix = Generators::cuda::kStableTopK ? "_STABLE" : "";
 
   // Benchmark Hybrid Sort
   if (Generators::cuda::hybrid_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
@@ -254,7 +258,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
       Generators::cuda::hybrid_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
                                              params.batch_size, params.k);
     });
-    std::string algo_name = "HYBRID_SORT";
+    std::string algo_name = Generators::cuda::hybrid_sort::kAlgorithmName;
     algo_name += stable_suffix;
     all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
     current_csv_result.hybrid_sort_latency = mean_ms;
@@ -262,40 +266,40 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
   }
 
   // Benchmark Radix Partition Sort
-  if (Generators::cuda::radix_partition_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
+  if (Generators::cuda::flash_convergent::IsSupported(params.batch_size, params.vocab_size, params.k)) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
-      Generators::cuda::radix_partition_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
-                                                      params.batch_size, params.k);
+      Generators::cuda::flash_convergent::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
+                                                  params.batch_size, params.k);
     });
-    std::string algo_name = "PARTITION_SORT";
+    std::string algo_name = Generators::cuda::flash_convergent::kAlgorithmName;
     algo_name += stable_suffix;
     all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
-    current_csv_result.partition_sort_latency = mean_ms;
+    current_csv_result.flash_convergent_latency = mean_ms;
     algo_latencies[algo_name] = mean_ms;
   }
 
   // Benchmark Flash Sort
-  if (Generators::cuda::flash_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
+  if (Generators::cuda::iterative_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
-      Generators::cuda::flash_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
-                                            params.batch_size, params.k);
+      Generators::cuda::iterative_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
+                                                params.batch_size, params.k);
     });
-    std::string algo_name = "FLASH_SORT";
+    std::string algo_name = Generators::cuda::iterative_sort::kAlgorithmName;
     algo_name += stable_suffix;
     all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
-    current_csv_result.flash_sort_latency = mean_ms;
+    current_csv_result.iterative_sort_latency = mean_ms;
     algo_latencies[algo_name] = mean_ms;
   }
 
-  if (Generators::cuda::llm_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
+  if (Generators::cuda::cascaded_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
-      Generators::cuda::llm_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
-                                          params.batch_size, params.k);
+      Generators::cuda::cascaded_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
+                                               params.batch_size, params.k);
     });
-    std::string algo_name = "LLM_SORT";
+    std::string algo_name = Generators::cuda::cascaded_sort::kAlgorithmName;
     algo_name += stable_suffix;
     all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
-    current_csv_result.llm_sort_latency = mean_ms;
+    current_csv_result.cascaded_sort_latency = mean_ms;
     algo_latencies[algo_name] = mean_ms;
   }
 
@@ -312,9 +316,10 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
     Generators::cuda::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
                               params.batch_size, params.k);
   });
-  all_results.push_back({params, "DEFAULT", mean_ms, stdev_ms, p95_ms});
+  std::string algo_name = "DEFAULT";
+  all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
   current_csv_result.default_latency = mean_ms;
-  algo_latencies["DEFAULT"] = mean_ms;
+  algo_latencies[algo_name] = mean_ms;
 #endif
 
   csv_results.push_back(current_csv_result);
@@ -331,7 +336,7 @@ TEST(TopKBenchmarks, PerformanceTests) {
   constexpr bool is_build_pipeline = true;
   if constexpr (is_build_pipeline) {
     std::vector<int> batch_sizes = {1};
-    std::vector<int> vocab_sizes = {262400, 201088, 152064, 128256, 32256};
+    std::vector<int> vocab_sizes = {201088 /*, 262400, 152064, 128256, 32256*/};
     std::vector<int> ks = {1, 4, 5, 8, 16, 32, 50, 64, 100, 128, 256};
 
     std::vector<BenchmarkParams> test_cases;

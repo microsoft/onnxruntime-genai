@@ -3,9 +3,9 @@
 
 #pragma once
 
-#include <float.h>           // For FLT_MAX
-#include <math_constants.h>  // For CUDART_INF_F
-#include "cuda_topk.h"       // For STABLE_TOPK
+#include <float.h>
+#include <math_constants.h>
+#include "cuda_topk.h"
 
 namespace Generators {
 namespace cuda {
@@ -13,7 +13,9 @@ namespace bitonic_sort {
 
 /**
  * @brief Performs an in-place bitonic sort on data in shared memory.
- * This version is for kBlockSize >= SortSize.
+ * This specialized version is for when the number of threads (`kBlockSize`)
+ * is greater than or equal to the number of items to sort (`SortSize`).
+ * Each element is handled by a dedicated thread, leading to high parallelism.
  */
 template <int kBlockSize, int SortSize>
 __device__ void SharedMemBitonicSort_Small(float* smem_scores, int* smem_indices) {
@@ -60,11 +62,11 @@ __device__ void SharedMemBitonicSort_Small(float* smem_scores, int* smem_indices
   __syncthreads();
 }
 
-// Generic implementation for bitonic sort in shared memory.
-// Operating on separate score and index arrays (SoA).
-// - SortSize must be a power of two.
-// - All threads in the block must call this function.
-// - Result: sorted in-place by score descending, tie-breaker index ascending.
+/**
+ * @brief A generic, in-place bitonic sort on data in shared memory.
+ * This version handles cases where there are fewer threads than elements to sort.
+ * Threads loop to cover all necessary comparisons in the sort network.
+ */
 template <int kBlockSize, int SortSize>
 __device__ void SharedMemBitonicSort_Big(float* smem_scores, int* smem_indices) {
   static_assert(SortSize > 0 && (SortSize & (SortSize - 1)) == 0, "SortSize must be power of two");
@@ -110,13 +112,16 @@ __device__ void SharedMemBitonicSort_Big(float* smem_scores, int* smem_indices) 
   __syncthreads();
 }
 
+/**
+ * @brief A dispatch wrapper for shared memory bitonic sort.
+ * At compile time, it selects the optimal implementation (`_Small` or `_Big`)
+ * based on the relationship between block size and sort size.
+ */
 template <int kBlockSize, int SortSize>
 __device__ void SharedMemBitonicSort(float* smem_scores, int* smem_indices) {
   if constexpr (kBlockSize >= SortSize) {
-    // With enough threads, a full sort is very fast.
     SharedMemBitonicSort_Small<kBlockSize, SortSize>(smem_scores, smem_indices);
   } else {
-    // Fewer threads than elements. Use the generic full sort for power-of-two sizes.
     SharedMemBitonicSort_Big<kBlockSize, SortSize>(smem_scores, smem_indices);
   }
 }
@@ -161,10 +166,12 @@ __global__ void BlockReduceTopK(const float* __restrict__ scores_in, const int* 
 }
 
 /**
- * @brief Performs an in-place, warp-wide bitonic sort on data held in registers.
- * Sorts `warpSize` elements distributed across the threads of a single warp.
- * The result is sorted in descending order by score.
- * Note that the limitation is no more than 32 elements to be sorted in a warp.
+ * @brief Performs an in-place, warp-wide bitonic sort on data held entirely in registers.
+ *
+ * This function sorts `warpSize` (typically 32) score/index pairs distributed across the
+ * threads of a single warp. It uses `__shfl_sync` instructions for extremely fast
+ * data exchange between threads in the same warp, avoiding shared memory latency entirely.
+ * This is highly effective for the reduction phase of algorithms like `iterative_sort` when `k` is small.
  */
 __device__ inline void WarpBitonicSort(float& score, int& index) {
   const int lane_id = threadIdx.x % warpSize;
@@ -172,33 +179,33 @@ __device__ inline void WarpBitonicSort(float& score, int& index) {
   // The bitonic sort network is constructed in stages.
   for (int k = 2; k <= warpSize; k <<= 1) {
     for (int j = k >> 1; j > 0; j >>= 1) {
+      // Exchange data with a paired lane using a warp shuffle instruction.
       int paired_lane = lane_id ^ j;
       float paired_score = __shfl_sync(0xFFFFFFFF, score, paired_lane);
       int paired_index = __shfl_sync(0xFFFFFFFF, index, paired_lane);
 
-      // Determine the sort direction for this stage of the bitonic network.
+      // A standard bitonic network sorts ascending with `(lane_id & k) == 0`.
+      // The swap condition is inverted as needed to produce an overall descending sort.
       bool direction = ((lane_id & k) == 0);
 
 #ifdef STABLE_TOPK
       // For stable sort, include tie-breaking logic (smaller index wins for equal scores).
       bool is_mine_greater = (score > paired_score) || (score == paired_score && index < paired_index);
 #else
-      // For unstable sort, no tie-breaking is needed for performance.
       bool is_mine_greater = score > paired_score;
 #endif
 
-      // Determine the min and max values of the pair.
+      // In-register min/max calculation.
       float s_max = is_mine_greater ? score : paired_score;
       int i_max = is_mine_greater ? index : paired_index;
       float s_min = is_mine_greater ? paired_score : score;
       int i_min = is_mine_greater ? paired_index : index;
 
-      // Redistribute the min/max values based on the sort direction for this stage
-      // to achieve an overall descending sort.
-      if (direction) {  // "Descending" part of the bitonic sequence
+      // Redistribute the min/max values based on the sort direction for this stage.
+      if (direction) {
         score = (lane_id < paired_lane) ? s_max : s_min;
         index = (lane_id < paired_lane) ? i_max : i_min;
-      } else {  // "Ascending" part of the bitonic sequence
+      } else {
         score = (lane_id < paired_lane) ? s_min : s_max;
         index = (lane_id < paired_lane) ? i_min : i_max;
       }

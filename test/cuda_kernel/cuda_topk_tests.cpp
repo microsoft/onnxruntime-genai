@@ -139,46 +139,46 @@ void RunParityTests(const TopKTestParams& params) {
     std::cout << "  [PASS] " << name << " (Raw Scores & Indices)" << std::endl;
   };
 
-  test_algo("SELECTION_SORT", [&]() {
-    Generators::cuda::selection_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
-                                              params.vocab_size, params.batch_size, params.k);
+  test_algo(Generators::cuda::select_sort::kAlgorithmName, [&]() {
+    Generators::cuda::select_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                           params.vocab_size, params.batch_size, params.k);
   });
 
-  test_algo("RADIX_SORT", [&]() {
-    Generators::cuda::radix_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
-                                          params.vocab_size, params.batch_size, params.k);
+  test_algo(Generators::cuda::per_batch_radix_sort::kAlgorithmName, [&]() {
+    Generators::cuda::per_batch_radix_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                                    params.vocab_size, params.batch_size, params.k);
   });
 
   if (Generators::cuda::hybrid_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
-    test_algo("HYBRID_SORT", [&]() {
+    test_algo(Generators::cuda::hybrid_sort::kAlgorithmName, [&]() {
       Generators::cuda::hybrid_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
                                              params.vocab_size, params.batch_size, params.k);
     });
   }
 
-  if (Generators::cuda::flash_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
-    test_algo("FLASH_SORT", [&]() {
-      Generators::cuda::flash_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
-                                            params.vocab_size, params.batch_size, params.k);
+  if (Generators::cuda::iterative_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
+    test_algo(Generators::cuda::iterative_sort::kAlgorithmName, [&]() {
+      Generators::cuda::iterative_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                                params.vocab_size, params.batch_size, params.k);
     });
   }
 
-  if (Generators::cuda::llm_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
-    test_algo("LLM_SORT", [&]() {
-      Generators::cuda::llm_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
-                                          params.vocab_size, params.batch_size, params.k);
+  if (Generators::cuda::cascaded_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
+    test_algo(Generators::cuda::cascaded_sort::kAlgorithmName, [&]() {
+      Generators::cuda::cascaded_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                               params.vocab_size, params.batch_size, params.k);
     });
   }
 
-  if (Generators::cuda::radix_partition_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
-    test_algo("PARTITION_SORT", [&]() {
-      Generators::cuda::radix_partition_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
-                                                      params.vocab_size, params.batch_size, params.k);
+  if (Generators::cuda::flash_convergent::IsSupported(params.batch_size, params.vocab_size, params.k)) {
+    test_algo(Generators::cuda::flash_convergent::kAlgorithmName, [&]() {
+      Generators::cuda::flash_convergent::RunTopK(topk_data.get(), stream, scores_in_d.get(),
+                                                  params.vocab_size, params.batch_size, params.k);
     });
   }
 
   if (Generators::cuda::distributed_select_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
-    test_algo("DISTRIBUTED_SORT", [&]() {
+    test_algo(Generators::cuda::distributed_select_sort::kAlgorithmName, [&]() {
       Generators::cuda::distributed_select_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
                                                          params.vocab_size, params.batch_size, params.k);
     });

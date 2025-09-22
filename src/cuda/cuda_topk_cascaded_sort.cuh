@@ -6,18 +6,42 @@
 #include <cuda_runtime.h>
 #include <cooperative_groups.h>
 #include <cub/block/block_radix_sort.cuh>
-#include <type_traits>  // For std::integral_constant
+#include <type_traits>
 #include "cuda_topk.h"
 #include "cuda_topk_bitonic_sort_helper.cuh"
 #include "cuda_topk_common.cuh"
 
 namespace Generators {
 namespace cuda {
-namespace llm_sort {
+namespace cascaded_sort {
+
+/**
+ * @brief A high-performance, single-kernel cooperative "cascaded" sort, specifically
+ * optimized for common Large Language Model (LLM) workloads.
+ *
+ * Algorithm Overview:
+ * This algorithm is an evolution of `iterative_sort`, designed to be more adaptive.
+ *
+ * 1.  **Stage 1 (Partition Top-K)**: The input is partitioned, and `topk_common::FindPartitionTopK`
+ * finds the top `K_PADDED` candidates within each partition.
+ *
+ * 2.  **Stage 2 (Cascaded Reduction)**: Instead of a fixed reduction factor, this algorithm uses a
+ * host-side planner (`GetReductionFactors`) to determine an optimal sequence of up to three
+ * reduction factors (e.g., merge 8 sets, then merge 4 sets). This "cascaded" approach,
+ * where each reduction step is a separate, grid-synchronized phase within the *same kernel*,
+ * allows it to adapt more effectively to the number of partitions.
+ *
+ * Performance Characteristics:
+ * -   **Strengths**: Offers the highest performance for its target workloads by combining the low
+ * launch overhead of a single cooperative kernel with a more intelligent, adaptive reduction
+ * strategy than `iterative_sort`. The planner is tuned for vocabulary sizes and partition counts
+ * commonly found in LLMs.
+ * -   **Weaknesses**: Requires a GPU that supports `cudaLaunchCooperativeKernel`. Its performance
+ * gains are most pronounced in the specific scenarios it was tuned for.
+ */
 
 namespace cg = cooperative_groups;
 
-// A helper struct to hold the reduction factors.
 struct ReductionFactors {
   int factor1 = 1;
   int factor2 = 1;
@@ -25,8 +49,11 @@ struct ReductionFactors {
   int num_reduction_steps = 0;
 };
 
-// Computes the optimal reduction factors based on partition count and k.
-// For large k, it will favor a 3-step reduction with smaller factors.
+/**
+ * @brief Computes the optimal reduction factors based on the number of partitions and `k`.
+ * It uses a more complex 3-step reduction for larger `k` values and falls back to
+ * an aggressive 1 or 2-step plan for smaller `k`.
+ */
 constexpr ReductionFactors GetReductionFactors(int num_partitions, int k) {
   constexpr int k_large_threshold = 32;
 
@@ -58,21 +85,23 @@ constexpr ReductionFactors GetReductionFactors(int num_partitions, int k) {
   return {8, 8, 1, 2};
 }
 
-// Multi-Step Reduction kernel supporting up to 3 reduction steps.
-// Factors are template parameters again to allow for optimal shared memory allocation and compiler optimizations.
+/**
+ * @brief The main kernel for LLM Sort. It performs the initial partition sort
+ * followed by up to three cascaded reduction steps, all within a single launch.
+ */
 template <int K_PADDED, int kBlockSize, int kPartitionSize, int Factor1, int Factor2, int Factor3>
-__global__ void LlmSortKernel(const float* __restrict__ input_scores,
-                              int* __restrict__ intermediate_indices_1,
-                              float* __restrict__ intermediate_scores_1,
-                              int* __restrict__ intermediate_indices_2,
-                              float* __restrict__ intermediate_scores_2,
-                              int vocab_size) {
+__global__ void CascadedSortKernel(const float* __restrict__ input_scores,
+                                   int* __restrict__ intermediate_indices_1,
+                                   float* __restrict__ intermediate_scores_1,
+                                   int* __restrict__ intermediate_indices_2,
+                                   float* __restrict__ intermediate_scores_2,
+                                   int vocab_size) {
   auto grid = cg::this_grid();
   const int partition_idx = blockIdx.x;
   const int batch_idx = blockIdx.y;
   const int num_partitions = gridDim.x;
 
-  // --- Shared Memory Union ---
+  // --- Shared Memory Union for efficiency ---
   constexpr int kSortSize1 = K_PADDED * Factor1;
   constexpr int kSortSize2 = K_PADDED * Factor2;
   constexpr int kSortSize3 = K_PADDED * Factor3;
@@ -103,6 +132,8 @@ __global__ void LlmSortKernel(const float* __restrict__ input_scores,
   grid.sync();
 
   // --- Stage 2, Step 1: First Reduction ---
+  // This block executes if the plan includes at least one reduction step.
+  // It reads from buffer 1, merges `Factor1` partitions, and writes the result to buffer 2.
   int partitions_after_step1 = num_partitions;
   if (Factor1 > 1) {
     partitions_after_step1 = CeilDiv(num_partitions, Factor1);
@@ -136,6 +167,8 @@ __global__ void LlmSortKernel(const float* __restrict__ input_scores,
   }
 
   // --- Stage 2, Step 2: Second Reduction ---
+  // This block executes if the plan includes a second reduction step.
+  // It reads from buffer 2, merges `Factor2` partitions, and writes the result to buffer 1.
   int partitions_after_step2 = partitions_after_step1;
   if (Factor2 > 1) {
     partitions_after_step2 = CeilDiv(partitions_after_step1, Factor2);
@@ -169,6 +202,8 @@ __global__ void LlmSortKernel(const float* __restrict__ input_scores,
   }
 
   // --- Stage 2, Step 3: Third Reduction ---
+  // This block executes if the plan includes a third reduction step.
+  // It reads from buffer 1, merges `Factor3` partitions, and writes the result to buffer 2.
   if (Factor3 > 1) {
     int partitions_after_step3 = CeilDiv(partitions_after_step2, Factor3);
     if (partition_idx < partitions_after_step3) {
@@ -202,7 +237,7 @@ __global__ void LlmSortKernel(const float* __restrict__ input_scores,
 
 inline size_t GetIntermediateSize(int batch_size, int vocab_size, int partition_size) {
   const int num_partitions = CeilDiv(vocab_size, partition_size);
-  return static_cast<size_t>(batch_size) * num_partitions * kLlmSortMaxK;
+  return static_cast<size_t>(batch_size) * num_partitions * kCascadedSortMaxK;
 }
 
 // Parition sizes are optimized for common vocab_size (padded to multiple of 256) used in open source LLM:
@@ -247,10 +282,10 @@ constexpr int GetOptimalBlockSize() {
 
 // Templated helper to launch the kernel with a constexpr block size and reduction factors.
 template <int K_PADDED, int Factor1, int Factor2, int Factor3>
-void LaunchLlmSortKernelWithFactors(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size) {
+void LaunchKernelWithFactors(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size) {
   constexpr int kBlockSize = GetOptimalBlockSize<K_PADDED>();
 
-  const int partition_size = data->llm_sort_partition_size;
+  const int partition_size = data->cascaded_sort_partition_size;
   const int num_partitions = CeilDiv(vocab_size, partition_size);
 
   void* kernel_args[6];
@@ -266,16 +301,16 @@ void LaunchLlmSortKernelWithFactors(TopkData* data, cudaStream_t stream, const f
 
   switch (partition_size) {
     case kAllowedPartitionSizes[0]:
-      CUDA_CHECK(cudaLaunchCooperativeKernel((void*)LlmSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[0], Factor1, Factor2, Factor3>, grid, block, kernel_args, 0, stream));
+      CUDA_CHECK(cudaLaunchCooperativeKernel((void*)CascadedSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[0], Factor1, Factor2, Factor3>, grid, block, kernel_args, 0, stream));
       break;
     case kAllowedPartitionSizes[1]:
-      CUDA_CHECK(cudaLaunchCooperativeKernel((void*)LlmSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[1], Factor1, Factor2, Factor3>, grid, block, kernel_args, 0, stream));
+      CUDA_CHECK(cudaLaunchCooperativeKernel((void*)CascadedSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[1], Factor1, Factor2, Factor3>, grid, block, kernel_args, 0, stream));
       break;
     case kAllowedPartitionSizes[2]:
-      CUDA_CHECK(cudaLaunchCooperativeKernel((void*)LlmSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[2], Factor1, Factor2, Factor3>, grid, block, kernel_args, 0, stream));
+      CUDA_CHECK(cudaLaunchCooperativeKernel((void*)CascadedSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[2], Factor1, Factor2, Factor3>, grid, block, kernel_args, 0, stream));
       break;
     case kAllowedPartitionSizes[3]:
-      CUDA_CHECK(cudaLaunchCooperativeKernel((void*)LlmSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[3], Factor1, Factor2, Factor3>, grid, block, kernel_args, 0, stream));
+      CUDA_CHECK(cudaLaunchCooperativeKernel((void*)CascadedSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[3], Factor1, Factor2, Factor3>, grid, block, kernel_args, 0, stream));
       break;
     default:
       assert(false);  // Should be unreachable
@@ -285,42 +320,42 @@ void LaunchLlmSortKernelWithFactors(TopkData* data, cudaStream_t stream, const f
 
 // Templated helper to dispatch to the correct kernel based on reduction factors.
 template <int K_PADDED>
-void LaunchLlmSortKernel(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
-  const int num_partitions = CeilDiv(vocab_size, data->llm_sort_partition_size);
+void LaunchKernel(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
+  const int num_partitions = CeilDiv(vocab_size, data->cascaded_sort_partition_size);
   const auto factors = GetReductionFactors(num_partitions, k);
 
   // This dispatch logic is verbose, but it ensures only the necessary kernel variants are instantiated,
   // balancing performance with build time.
   if (factors.factor1 == 8 && factors.factor2 == 8)
-    LaunchLlmSortKernelWithFactors<K_PADDED, 8, 8, 1>(data, stream, scores_in, vocab_size, batch_size);
+    LaunchKernelWithFactors<K_PADDED, 8, 8, 1>(data, stream, scores_in, vocab_size, batch_size);
   else if (factors.factor1 == 8 && factors.factor2 == 4)
-    LaunchLlmSortKernelWithFactors<K_PADDED, 8, 4, 1>(data, stream, scores_in, vocab_size, batch_size);
+    LaunchKernelWithFactors<K_PADDED, 8, 4, 1>(data, stream, scores_in, vocab_size, batch_size);
   else if (factors.factor1 == 8)
-    LaunchLlmSortKernelWithFactors<K_PADDED, 8, 1, 1>(data, stream, scores_in, vocab_size, batch_size);
+    LaunchKernelWithFactors<K_PADDED, 8, 1, 1>(data, stream, scores_in, vocab_size, batch_size);
   else if (factors.factor1 == 4 && factors.factor2 == 4 && factors.factor3 == 4)
-    LaunchLlmSortKernelWithFactors<K_PADDED, 4, 4, 4>(data, stream, scores_in, vocab_size, batch_size);
+    LaunchKernelWithFactors<K_PADDED, 4, 4, 4>(data, stream, scores_in, vocab_size, batch_size);
   else if (factors.factor1 == 4 && factors.factor2 == 4 && factors.factor3 == 2)
-    LaunchLlmSortKernelWithFactors<K_PADDED, 4, 4, 2>(data, stream, scores_in, vocab_size, batch_size);
+    LaunchKernelWithFactors<K_PADDED, 4, 4, 2>(data, stream, scores_in, vocab_size, batch_size);
   else if (factors.factor1 == 4 && factors.factor2 == 4)
-    LaunchLlmSortKernelWithFactors<K_PADDED, 4, 4, 1>(data, stream, scores_in, vocab_size, batch_size);
+    LaunchKernelWithFactors<K_PADDED, 4, 4, 1>(data, stream, scores_in, vocab_size, batch_size);
   else if (factors.factor1 == 4)
-    LaunchLlmSortKernelWithFactors<K_PADDED, 4, 1, 1>(data, stream, scores_in, vocab_size, batch_size);
+    LaunchKernelWithFactors<K_PADDED, 4, 1, 1>(data, stream, scores_in, vocab_size, batch_size);
   else if (factors.factor1 == 2)
-    LaunchLlmSortKernelWithFactors<K_PADDED, 2, 1, 1>(data, stream, scores_in, vocab_size, batch_size);
+    LaunchKernelWithFactors<K_PADDED, 2, 1, 1>(data, stream, scores_in, vocab_size, batch_size);
   else
-    LaunchLlmSortKernelWithFactors<K_PADDED, 1, 1, 1>(data, stream, scores_in, vocab_size, batch_size);
+    LaunchKernelWithFactors<K_PADDED, 1, 1, 1>(data, stream, scores_in, vocab_size, batch_size);
 }
 
 // --- Unified Host-Side Launcher ---
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
   assert(IsSupported(batch_size, vocab_size, k));  // caller shall check IsSupported before calling this function.
 
-  const int partition_size = data->llm_sort_partition_size;
+  const int partition_size = data->cascaded_sort_partition_size;
   const int num_partitions = CeilDiv(vocab_size, partition_size);
 
   // This kernel could support up to K=256 in theory, but in practice we limit it to reduce build time.
-  static_assert(kLlmSortMaxK == 64 || kLlmSortMaxK == 128);
-  int k_padded_val = kLlmSortMaxK;
+  static_assert(kCascadedSortMaxK == 64 || kCascadedSortMaxK == 128);
+  int k_padded_val = kCascadedSortMaxK;
   if (k <= 4)
     k_padded_val = 4;
   else if (k <= 8)
@@ -334,17 +369,17 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 
   // Dispatch to the correct templated launch helper based on k_padded_val
   if (k_padded_val == 4)
-    LaunchLlmSortKernel<4>(data, stream, scores_in, vocab_size, batch_size, k);
+    LaunchKernel<4>(data, stream, scores_in, vocab_size, batch_size, k);
   else if (k_padded_val == 8)
-    LaunchLlmSortKernel<8>(data, stream, scores_in, vocab_size, batch_size, k);
+    LaunchKernel<8>(data, stream, scores_in, vocab_size, batch_size, k);
   else if (k_padded_val == 16)
-    LaunchLlmSortKernel<16>(data, stream, scores_in, vocab_size, batch_size, k);
+    LaunchKernel<16>(data, stream, scores_in, vocab_size, batch_size, k);
   else if (k_padded_val == 32)
-    LaunchLlmSortKernel<32>(data, stream, scores_in, vocab_size, batch_size, k);
+    LaunchKernel<32>(data, stream, scores_in, vocab_size, batch_size, k);
   else if (k_padded_val == 64)
-    LaunchLlmSortKernel<64>(data, stream, scores_in, vocab_size, batch_size, k);
-  else if constexpr (kLlmSortMaxK > 64)
-    LaunchLlmSortKernel<kLlmSortMaxK>(data, stream, scores_in, vocab_size, batch_size, k);
+    LaunchKernel<64>(data, stream, scores_in, vocab_size, batch_size, k);
+  else if constexpr (kCascadedSortMaxK > 64)
+    LaunchKernel<kCascadedSortMaxK>(data, stream, scores_in, vocab_size, batch_size, k);
 
   CUDA_CHECK_LAUNCH();
 
@@ -367,23 +402,23 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 }
 
 template <int K_PADDED, int Factor1, int Factor2, int Factor3>
-bool CheckLlmSortSupportWithFactors(int batch_size, int partition_size, int num_partitions) {
+bool CheckSupportWithFactors(int batch_size, int partition_size, int num_partitions) {
   constexpr int kBlockSize = GetOptimalBlockSize<K_PADDED>();
   const int total_blocks = num_partitions * batch_size;
   void* kernel = nullptr;
 
   switch (partition_size) {
     case kAllowedPartitionSizes[0]:
-      kernel = (void*)LlmSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[0], Factor1, Factor2, Factor3>;
+      kernel = (void*)CascadedSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[0], Factor1, Factor2, Factor3>;
       break;
     case kAllowedPartitionSizes[1]:
-      kernel = (void*)LlmSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[1], Factor1, Factor2, Factor3>;
+      kernel = (void*)CascadedSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[1], Factor1, Factor2, Factor3>;
       break;
     case kAllowedPartitionSizes[2]:
-      kernel = (void*)LlmSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[2], Factor1, Factor2, Factor3>;
+      kernel = (void*)CascadedSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[2], Factor1, Factor2, Factor3>;
       break;
     case kAllowedPartitionSizes[3]:
-      kernel = (void*)LlmSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[3], Factor1, Factor2, Factor3>;
+      kernel = (void*)CascadedSortKernel<K_PADDED, kBlockSize, kAllowedPartitionSizes[3], Factor1, Factor2, Factor3>;
       break;
     default:
       return false;  // Should be unreachable
@@ -402,21 +437,21 @@ bool CheckLlmSortSupportWithFactors(int batch_size, int partition_size, int num_
 
 // Templated helper to check for support with a constexpr block size.
 template <int K_PADDED>
-bool CheckLlmSortSupport(int batch_size, int vocab_size, int k, int partition_size, int num_partitions) {
+bool CheckSupport(int batch_size, int vocab_size, int k, int partition_size, int num_partitions) {
   const auto factors = GetReductionFactors(num_partitions, k);
-  if (factors.factor1 == 8 && factors.factor2 == 8) return CheckLlmSortSupportWithFactors<K_PADDED, 8, 8, 1>(batch_size, partition_size, num_partitions);
-  if (factors.factor1 == 8 && factors.factor2 == 4) return CheckLlmSortSupportWithFactors<K_PADDED, 8, 4, 1>(batch_size, partition_size, num_partitions);
-  if (factors.factor1 == 8) return CheckLlmSortSupportWithFactors<K_PADDED, 8, 1, 1>(batch_size, vocab_size, num_partitions);
-  if (factors.factor1 == 4 && factors.factor2 == 4 && factors.factor3 == 4) return CheckLlmSortSupportWithFactors<K_PADDED, 4, 4, 4>(batch_size, partition_size, num_partitions);
-  if (factors.factor1 == 4 && factors.factor2 == 4 && factors.factor3 == 2) return CheckLlmSortSupportWithFactors<K_PADDED, 4, 4, 2>(batch_size, partition_size, num_partitions);
-  if (factors.factor1 == 4 && factors.factor2 == 4) return CheckLlmSortSupportWithFactors<K_PADDED, 4, 4, 1>(batch_size, partition_size, num_partitions);
-  if (factors.factor1 == 4) return CheckLlmSortSupportWithFactors<K_PADDED, 4, 1, 1>(batch_size, partition_size, num_partitions);
-  if (factors.factor1 == 2) return CheckLlmSortSupportWithFactors<K_PADDED, 2, 1, 1>(batch_size, partition_size, num_partitions);
-  return CheckLlmSortSupportWithFactors<K_PADDED, 1, 1, 1>(batch_size, partition_size, num_partitions);
+  if (factors.factor1 == 8 && factors.factor2 == 8) return CheckSupportWithFactors<K_PADDED, 8, 8, 1>(batch_size, partition_size, num_partitions);
+  if (factors.factor1 == 8 && factors.factor2 == 4) return CheckSupportWithFactors<K_PADDED, 8, 4, 1>(batch_size, partition_size, num_partitions);
+  if (factors.factor1 == 8) return CheckSupportWithFactors<K_PADDED, 8, 1, 1>(batch_size, vocab_size, num_partitions);
+  if (factors.factor1 == 4 && factors.factor2 == 4 && factors.factor3 == 4) return CheckSupportWithFactors<K_PADDED, 4, 4, 4>(batch_size, partition_size, num_partitions);
+  if (factors.factor1 == 4 && factors.factor2 == 4 && factors.factor3 == 2) return CheckSupportWithFactors<K_PADDED, 4, 4, 2>(batch_size, partition_size, num_partitions);
+  if (factors.factor1 == 4 && factors.factor2 == 4) return CheckSupportWithFactors<K_PADDED, 4, 4, 1>(batch_size, partition_size, num_partitions);
+  if (factors.factor1 == 4) return CheckSupportWithFactors<K_PADDED, 4, 1, 1>(batch_size, partition_size, num_partitions);
+  if (factors.factor1 == 2) return CheckSupportWithFactors<K_PADDED, 2, 1, 1>(batch_size, partition_size, num_partitions);
+  return CheckSupportWithFactors<K_PADDED, 1, 1, 1>(batch_size, partition_size, num_partitions);
 }
 
 bool IsSupported(int batch_size, int vocab_size, int k) {
-  if (k > kLlmSortMaxK) {
+  if (k > kCascadedSortMaxK) {
     return false;
   }
   const int partition_size = EstimateBestPartitionSize(vocab_size);
@@ -446,27 +481,27 @@ bool IsSupported(int batch_size, int vocab_size, int k) {
   else if (k <= 64)
     k_padded_val = 64;
   else
-    k_padded_val = kLlmSortMaxK;
+    k_padded_val = kCascadedSortMaxK;
 
   // Dispatch to the correct templated support checker based on k_padded_val
   if (k_padded_val == 4)
-    return CheckLlmSortSupport<4>(batch_size, vocab_size, k, partition_size, num_partitions);
+    return CheckSupport<4>(batch_size, vocab_size, k, partition_size, num_partitions);
   if (k_padded_val == 8)
-    return CheckLlmSortSupport<8>(batch_size, vocab_size, k, partition_size, num_partitions);
+    return CheckSupport<8>(batch_size, vocab_size, k, partition_size, num_partitions);
   if (k_padded_val == 16)
-    return CheckLlmSortSupport<16>(batch_size, vocab_size, k, partition_size, num_partitions);
+    return CheckSupport<16>(batch_size, vocab_size, k, partition_size, num_partitions);
   if (k_padded_val == 32)
-    return CheckLlmSortSupport<32>(batch_size, vocab_size, k, partition_size, num_partitions);
+    return CheckSupport<32>(batch_size, vocab_size, k, partition_size, num_partitions);
   if (k_padded_val == 64)
-    return CheckLlmSortSupport<64>(batch_size, vocab_size, k, partition_size, num_partitions);
+    return CheckSupport<64>(batch_size, vocab_size, k, partition_size, num_partitions);
 
-  if constexpr (kLlmSortMaxK > 64) {
-    return CheckLlmSortSupport<kLlmSortMaxK>(batch_size, vocab_size, k, partition_size, num_partitions);
+  if constexpr (kCascadedSortMaxK > 64) {
+    return CheckSupport<kCascadedSortMaxK>(batch_size, vocab_size, k, partition_size, num_partitions);
   } else {
     return false;  // Should be unreachable
   }
 }
 
-}  // namespace llm_sort
+}  // namespace cascaded_sort
 }  // namespace cuda
 }  // namespace Generators

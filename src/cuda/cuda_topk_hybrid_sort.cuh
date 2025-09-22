@@ -15,39 +15,65 @@
 namespace Generators {
 namespace cuda {
 namespace hybrid_sort {
-// --- Configuration & Planning Structs ---
 
-// The sorting algorithm to be used inside the reduction kernel, chosen by the host-side planner.
+/**
+ * @brief A portable, multi-kernel, host-planned hybrid Top-K algorithm.
+ *
+ * Algorithm Overview:
+ * This algorithm is designed for portability and does not require cooperative launch.
+ * It uses a host-side planner to orchestrate a multi-stage reduction process.
+ *
+ * 1.  **Host-Side Planning (`GetReductionPlan`)**: Before launching any kernels, the host
+ * determines an optimal multi-step reduction plan. It greedily decides how many partitions
+ * to merge in each step, aiming to minimize the number of kernel launches. It also selects
+ * the best internal sorting algorithm for each step based on the number of items to sort.
+ *
+ * 2.  **Stage 1 (Partition Top-K)**: A standard kernel (`Stage1_FindPartitionsTopK`) is launched to
+ * find the top `K_PADDED` candidates from each vocabulary partition, similar to other algorithms.
+ *
+ * 3.  **Stage 2 (Planned Reduction)**: A series of reduction kernels (`AdvancedBlockReduceTopK`)
+ * are launched according to the plan from step 1. Each launch merges a group of candidate
+ * sets from the previous stage.
+ *
+ * Performance Characteristics:
+ * -   **Strengths**: Its main advantage is portability, as it runs on GPUs that do not support
+ * cooperative kernels. The host-side planner can make intelligent decisions to create an
+ * efficient reduction strategy.
+ * -   **"Hybrid" Nature**: The `AdvancedBlockReduceTopK` kernel is a "hybrid" because it uses
+ * a compile-time dispatch (`ReductionAlgorithm` enum) to select the most efficient internal
+ * sorting method (Warp Bitonic, Block Bitonic, or CUB Radix Sort) based on the number of
+ * elements being sorted in that specific reduction step. This provides fine-grained optimization.
+ * -   **Weaknesses**: The use of multiple kernel launches can introduce higher overhead compared to
+ * single-kernel cooperative approaches like `iterative_sort` or `cascaded_sort`.
+ */
+
+// The internal sorting algorithm to be used inside the reduction kernel, chosen by the host-side planner.
 enum class ReductionAlgorithm {
-  WARP_BITONIC,   // For k_padded * partitions_per_block <= 32
-  BLOCK_BITONIC,  // For 32 < k_padded * partitions_per_block <= 256
-  CUB_RADIX_SORT  // For k_padded * partitions_per_block > 256
+  WARP_BITONIC,   // For very small sorts (<= 32 items), uses a register-based warp sort.
+  BLOCK_BITONIC,  // For small sorts (33-256 items), uses a shared memory bitonic sort.
+  CUB_RADIX_SORT  // For larger sorts (> 256 items), uses the powerful CUB block-wide radix sort.
 };
 
 // Contains the parameters for a single reduction kernel launch.
 struct ReductionStep {
-  int partitions_per_block;
-  int block_size;
-  ReductionAlgorithm algorithm;
+  int partitions_per_block;      // How many candidate sets to merge in this step.
+  int block_size;                // The thread block size for the kernel launch.
+  ReductionAlgorithm algorithm;  // The internal sort algorithm to use.
 };
 
 using ReductionPlan = std::vector<ReductionStep>;
 constexpr int kMaxPartitions = 256;
-constexpr int kMaxItemsToSortPerBlock = 4096;  // Based on ~64KB shared memory budget
+constexpr int kMaxItemsToSortPerBlock = 4096;  // Budget based on ~64KB of shared memory.
 
-// A set of well-spaced partition sizes, all multiples of 256.
-// We purposely use different strategy to choose parition size:
-// 2048, 2048*1.3, 2048*1.3*1.3, 2048*1.3*1.3*1.3, then padded to mutliple of 256.
-// constexpr std::array<int, 4> kCandidatePartitionSizes = {2048, 2816, 3584, 4608};
+// A set of well-spaced candidate partition sizes.
 constexpr std::array<int, 4> kCandidatePartitionSizes = {2816, 3328, 4096, 4864};
 
 // --- Host-Side Planning Logic ---
 
 /**
  * @brief Estimates the best partition size for the given vocabulary size.
- * The goal is to select a partition size that results in a total number of partitions
- * that is close to (but not over) a power of two, which is ideal for reduction stages.
- * This logic is inspired by the optimizations in `llm_sort`.
+ * The goal is to select a size that results in a total number of partitions
+ * close to a power of two, which is ideal for reduction stages.
  */
 inline int EstimateBestPartitionSize(int vocab_size) {
   constexpr std::array<int, 8> kPowerOfTwoTargets = {2, 4, 8, 16, 32, 64, 128, 256};
@@ -82,8 +108,9 @@ inline int EstimateBestPartitionSize(int vocab_size) {
 }
 
 /**
- * @brief Creates a deterministic, multi-step reduction plan with an aggressive strategy.
- * This function determines how many partitions to merge in each step to minimize kernel launches.
+ * @brief Creates a deterministic, multi-step reduction plan.
+ * This function determines how many partitions to merge in each step to minimize
+ * kernel launches, and which internal sort algorithm is best for each step.
  */
 inline ReductionPlan GetReductionPlan(int num_partitions, int k_padded) {
   ReductionPlan plan;
@@ -128,7 +155,7 @@ inline ReductionPlan GetReductionPlan(int num_partitions, int k_padded) {
 }
 
 // --- Stage 1 Kernel ---
-// Wrapper kernel to handle shared memory allocation for FindPartitionTopK
+// Finds the Top-K within each partition of the vocabulary.
 template <int kBlockSize, int kPartitionSize, int K>
 __global__ void Stage1_FindPartitionsTopK(const float* __restrict__ scores_in,
                                           int* __restrict__ intermediate_indices,
@@ -139,8 +166,10 @@ __global__ void Stage1_FindPartitionsTopK(const float* __restrict__ scores_in,
   topk_common::FindPartitionTopK<kBlockSize, kPartitionSize, K, Stage1TempStorageType>(scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions, smem);
 }
 
-// --- Unified Reduction Kernel ---
-
+/**
+ * @brief The unified reduction kernel. This single kernel can perform any of the reduction
+ * algorithms by using compile-time template parameters.
+ */
 template <int kBlockSize, int K_PADDED, int PartitionsPerBlock, ReductionAlgorithm Algorithm>
 __global__ void AdvancedBlockReduceTopK(const float* __restrict__ scores_in, const int* __restrict__ indices_in,
                                         float* __restrict__ scores_out, int* __restrict__ indices_out, int num_partitions_in) {
@@ -359,6 +388,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   const int partition_size = data->hybrid_sort_partition_size;
   const int num_partitions = CeilDiv(vocab_size, partition_size);
 
+  // Pad k to a supported value for template instantiation.
   int k_padded;
   if (k <= 4)
     k_padded = 4;
@@ -375,22 +405,26 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   else
     k_padded = 256;
 
-  // 3. Create the reduction plan based on the actual K used in the template.
+  // Create the reduction plan based on the padded k value.
   const ReductionPlan plan = GetReductionPlan(num_partitions, k_padded);
 
+  // This lambda captures the launch logic to be called by the k-dispatch below.
   auto launch_kernels = [&](auto k_padded_const) {
     constexpr int K_PADDED = k_padded_const.value;
+    // --- Stage 1: Find Partition Top-K ---
     LaunchStage1<K_PADDED>(stream, partition_size, num_partitions, batch_size, scores_in, data, vocab_size);
     CUDA_CHECK(cudaGetLastError());
 
     // --- Stage 2: Planned Reduction ---
     if (num_partitions > 1 && !plan.empty()) {
       int current_num_partitions = num_partitions;
+      // Setup ping-pong pointers for reduction inputs/outputs.
       float* scores_in_ptr = data->intermediate_scores_1;
       int* indices_in_ptr = data->intermediate_indices_1;
       float* scores_out_ptr = data->intermediate_scores_2;
       int* indices_out_ptr = data->intermediate_indices_2;
 
+      // Execute each step in the reduction plan.
       for (const auto& step : plan) {
         LaunchReductionStep<K_PADDED>(step, stream, scores_in_ptr, indices_in_ptr, scores_out_ptr, indices_out_ptr, current_num_partitions, batch_size);
         CUDA_CHECK(cudaGetLastError());
@@ -398,9 +432,11 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
         std::swap(scores_in_ptr, scores_out_ptr);
         std::swap(indices_in_ptr, indices_out_ptr);
       }
+      // The final result is in the last "in" pointer after the swaps.
       data->topk_scores = scores_in_ptr;
       data->topk_indices = indices_in_ptr;
     } else {
+      // No reduction was needed.
       data->topk_scores = data->intermediate_scores_1;
       data->topk_indices = data->intermediate_indices_1;
     }

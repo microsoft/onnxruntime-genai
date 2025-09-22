@@ -2,57 +2,68 @@
 // Licensed under the MIT License.
 
 #include <cub/device/device_segmented_radix_sort.cuh>
+#include <algorithm>  // For std::max
+#include <cassert>
 
 #include "cuda_topk.h"
 #include "cuda_topk_benchmark_cache.h"
 #include "cuda_topk_benchmark.cuh"
+#include "cuda_topk_common.cuh"
 #include "cuda_topk_full_sort.cuh"
-#include "cuda_topk_radix_sort.cuh"
-#include "cuda_topk_partition_sort.cuh"
+#include "cuda_topk_per_batch_radix_sort.cuh"
+#include "cuda_topk_flash_convergent.cuh"
 #include "cuda_topk_distributed_select_sort.cuh"
 #include "cuda_topk_hybrid_sort.cuh"
-#include "cuda_topk_flash_sort.cuh"
-#include "cuda_topk_llm_sort.cuh"
+#include "cuda_topk_iterative_sort.cuh"
+#include "cuda_topk_cascaded_sort.cuh"
 #include "cuda_topk_select_sort.cuh"
-#include <cassert>
 
 namespace Generators {
 namespace cuda {
 
+// Constructor for the host-side parameter planning struct.
 TopkDataDetail::TopkDataDetail(int batch_size, int vocab_size, cudaStream_t stream) {
+  // Estimate the best partition size for each partition-based algorithm.
+  // This is a crucial heuristic that balances the amount of work done in the
+  // initial partitioning stage vs. the final reduction stage.
   hybrid_sort_partition_size = hybrid_sort::EstimateBestPartitionSize(vocab_size);
-  flash_sort_partition_size = flash_sort::EstimateBestPartitionSize(vocab_size);
-  llm_sort_partition_size = llm_sort::EstimateBestPartitionSize(vocab_size);
-  partition_sort_partition_size = radix_partition_sort::EstimateBestPartitionSize(vocab_size);
+  iterative_sort_partition_size = iterative_sort::EstimateBestPartitionSize(vocab_size);
+  cascaded_sort_partition_size = cascaded_sort::EstimateBestPartitionSize(vocab_size);
+  flash_convergent_partition_size = flash_convergent::EstimateBestPartitionSize(vocab_size);
 
-  // The intermediate size is batch_size * CeilDiv(vocab_size, partition_size) * MaxK.
-  constexpr int kFastSortMaxK = std::max({kHybridSortMaxK, kFlashSortMaxK, kLlmSortMaxK, kPartitionSortMaxK});
-  int max_fast_sort_intermedidate_size = batch_size * CeilDiv(vocab_size, kFastSortMinPartitionSize) * kFastSortMaxK;
-  assert(hybrid_sort_partition_size <= max_fast_sort_intermedidate_size);
-  assert(flash_sort_partition_size <= max_fast_sort_intermedidate_size);
-  assert(llm_sort_partition_size <= max_fast_sort_intermedidate_size);
-  assert(partition_sort_partition_size <= max_fast_sort_intermedidate_size);
+  // Calculate the maximum possible size for intermediate buffers. This is determined
+  // by the algorithm that requires the most space. The formula is:
+  // batch_size * CeilDiv(vocab_size, min_partition_size) * max_k
+  constexpr int kFastSortMaxK = std::max({kHybridSortMaxK, kIterativeSortMaxK, kCascadedSortMaxK, kConvergentSortMaxK});
+  int max_fast_sort_intermediate_size = batch_size * CeilDiv(vocab_size, kFastSortMinPartitionSize) * kFastSortMaxK;
 
+  // The intermediate buffer must be large enough to hold either the full vocabulary (for full_sort)
+  // or the maximum number of candidates from the partition-based sorts.
   size_t vocab_batch_size = static_cast<size_t>(vocab_size) * batch_size;
-  intermediate_buffer_elements = std::max(vocab_batch_size, static_cast<size_t>(max_fast_sort_intermedidate_size));
+  intermediate_buffer_elements = std::max(vocab_batch_size, static_cast<size_t>(max_fast_sort_intermediate_size));
 
-  auto radix_sort_temp_storage_bytes = radix_sort::GetTempStorageBytes(vocab_size, stream);
+  // Determine the CUB temporary storage size, which is the maximum required by either
+  // the batched radix sort or the full segmented sort.
+  auto per_batch_radix_sort_temp_storage_bytes = per_batch_radix_sort::GetTempStorageBytes(vocab_size, stream);
   auto full_sort_temp_storage_bytes = full_sort::GetTempStorageBytes(static_cast<int>(vocab_batch_size), batch_size, stream);
-  cub_temp_storage_bytes = std::max(radix_sort_temp_storage_bytes, full_sort_temp_storage_bytes);
+  cub_temp_storage_bytes = std::max(per_batch_radix_sort_temp_storage_bytes, full_sort_temp_storage_bytes);
 }
 
+// Calculates the total size of the single device memory buffer needed.
 size_t TopkData::CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t stream) {
   TopkDataDetail detail(batch_size, vocab_size, stream);
 
   size_t total_size = 0;
+  // Two pairs of ping-pong buffers for scores and indices.
   total_size += AlignUp(detail.intermediate_buffer_elements * sizeof(int), kGpuBufferAlignment);
   total_size += AlignUp(detail.intermediate_buffer_elements * sizeof(int), kGpuBufferAlignment);
   total_size += AlignUp(detail.intermediate_buffer_elements * sizeof(float), kGpuBufferAlignment);
   total_size += AlignUp(detail.intermediate_buffer_elements * sizeof(float), kGpuBufferAlignment);
+  // Buffer for batch offsets for CUB's segmented sort.
   total_size += AlignUp((batch_size + 1) * sizeof(int), kGpuBufferAlignment);
+  // Temporary storage for CUB.
   total_size += AlignUp(detail.cub_temp_storage_bytes, kGpuBufferAlignment);
-
-  // Space for distributed selection sort for the lock and sorted keys/values
+  // Buffers for distributed selection sort.
   total_size += AlignUp(topk_impl_details::kTopKDistributedSelectSortMaxBatchSize * sizeof(int), kGpuBufferAlignment);
   total_size += AlignUp(topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK * sizeof(int), kGpuBufferAlignment);
   total_size += AlignUp(topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK * sizeof(float), kGpuBufferAlignment);
@@ -60,6 +71,7 @@ size_t TopkData::CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t
   return total_size;
 }
 
+// Partitions the single memory buffer into individual pointers.
 void TopkData::InitializeBuffers(int batch_size, int vocab_size, cudaStream_t stream) {
   uint8_t* current_ptr = memory_buffer_span_.data();
 
@@ -91,16 +103,15 @@ void TopkData::InitializeBuffers(int batch_size, int vocab_size, cudaStream_t st
   current_ptr += AlignUp(topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK * sizeof(float), kGpuBufferAlignment);
 }
 
+// Constructor for the main data management struct.
 TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream, void* buffer, size_t buffer_size)
     : TopkDataDetail(batch_size, vocab_size, stream) {
-  // Get and cache the device ID once during initialization.
   CUDA_CHECK(cudaGetDevice(&device_id));
 
-  // Initialize the local cache.
   local_algo_cache_.fill(TopkAlgo::UNKNOWN);
 
   if (buffer) {
-    // Wrap an externally provided buffer. The caller is responsible for the size.
+    // Wrap an externally provided buffer. The caller is responsible for ensuring the size is sufficient.
     assert(buffer_size >= CalculateTotalSize(batch_size, vocab_size, stream));
     memory_buffer_span_ = std::span<uint8_t>(static_cast<uint8_t*>(buffer), buffer_size);
   } else {
@@ -119,15 +130,17 @@ TopkData::TopkData(int batch_size, int vocab_size, cudaStream_t stream, void* bu
 
   // Initialize metadata for distributed selection sort.
   top_k_distributed_select_sort_shards = std::min(topk_impl_details::kTopKDistributedSelectSortMaxShards, deviceProp.multiProcessorCount);
-  cudaMemset(top_k_distributed_select_sort_lock, 0, sizeof(int));
+  CUDA_CHECK(cudaMemsetAsync(top_k_distributed_select_sort_lock, 0, sizeof(int), stream));
 }
 
+// A kernel to compact output data from a strided layout to a contiguous one.
+// This is useful for testing when an algorithm produces a non-contiguous output.
 template <typename T>
 __global__ void CompactStridedData(const T* input, T* output, int k, int batch_size, int input_stride) {
   const int batch_idx = blockIdx.x;
   for (int i = threadIdx.x; i < k; i += blockDim.x) {
-    int in_idx = batch_idx * input_stride + i;
-    int out_idx = batch_idx * k + i;
+    size_t in_idx = static_cast<size_t>(batch_idx) * input_stride + i;
+    size_t out_idx = static_cast<size_t>(batch_idx) * k + i;
     output[out_idx] = input[in_idx];
   }
 }
@@ -141,50 +154,53 @@ void TopkDataCompact::CompactOutput(int batch_size, int k, cudaStream_t stream) 
   CompactStridedData<int><<<grid, block, 0, stream>>>(topk_indices, topk_indices_compact.get(), k, batch_size, topk_stride);
 }
 
+// Main dispatcher for Top-K. It implements the caching and benchmarking logic to select and run the best algorithm.
 void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
   assert(topk_data != nullptr);
   assert(vocab_size > 0);
   assert(batch_size > 0);
   assert(k > 0 && k <= vocab_size);
 
-  // Check the local cache first.
-  TopkAlgo algo = (k <= kMaxBenchmarkLocalCache) ? topk_data->local_algo_cache_.at(k) : TopkAlgo::UNKNOWN;
+  // 1. Check the fast, local cache first.
+  TopkAlgo algo = (k <= kMaxBenchmarkLocalCache) ? topk_data->local_algo_cache_[k] : TopkAlgo::UNKNOWN;
+
   if (algo == TopkAlgo::UNKNOWN) {
-    // Local cache miss, check the global persistent cache.
+    // 2. Local cache miss, check the persistent global cache.
     algo = GetTopkBenchmarkCache(topk_data->device_id, batch_size, vocab_size, k);
 
     if (algo == TopkAlgo::UNKNOWN) {
-      // Global cache also miss, run benchmark.
+      // 3. Global cache also misses, run the online benchmark to find the best algorithm.
       algo = BenchmarkAndSelectBestAlgo(topk_data, stream, scores_in, vocab_size, batch_size, k);
     }
 
-    // Update the local cache for subsequent calls.
+    // Update the local cache for subsequent calls within this session.
     if (k <= kMaxBenchmarkLocalCache) {
       topk_data->local_algo_cache_[k] = algo;
     }
   }
 
+  // Dispatch to the selected algorithm.
   switch (algo) {
     case TopkAlgo::SELECTION:
-      selection_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+      select_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       return;
     case TopkAlgo::HYBRID:
       hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       return;
-    case TopkAlgo::FLASH:
-      flash_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    case TopkAlgo::ITERATIVE:
+      iterative_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       return;
-    case TopkAlgo::LLM:
-      llm_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    case TopkAlgo::CASCADED:
+      cascaded_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       return;
-    case TopkAlgo::PARTITION:
-      radix_partition_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    case TopkAlgo::CONVERGENT:
+      flash_convergent::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       return;
-    case TopkAlgo::DISTRIBUTED:
+    case TopkAlgo::DISTRIBUTED_SELECT:
       distributed_select_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       return;
-    case TopkAlgo::RADIX:
-      radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
+    case TopkAlgo::PER_BATCH_RADIX:
+      per_batch_radix_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       return;
     case TopkAlgo::FULL:
       full_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
@@ -194,7 +210,7 @@ void RunTopK(TopkData* topk_data, cudaStream_t stream, const float* scores_in, i
       break;
   }
 
-  // Full sort is the fallback.
+  // `full_sort` is the ultimate fallback to guarantee correctness.
   full_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
 }
 
