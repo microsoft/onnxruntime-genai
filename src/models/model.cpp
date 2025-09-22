@@ -144,6 +144,10 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
     ep_dynamic_options_next_run_.clear();
   }
 
+  if (model_.p_device_ && model_.p_device_->GetType() == DeviceType::NvTensorRtRtx) {
+    run_options_->AddConfigEntry("disable_synchronize_execution_providers", "1");
+  }
+
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
 
@@ -275,7 +279,7 @@ std::vector<int32_t> Tokenizer::Encode(const char* text) const {
 
 std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   OrtxPtr<OrtxStringArray> ortx_string_array;
-  CheckResult(OrtxDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address()));
+  CheckResult(OrtxDetokenize1DWithOptions(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address(), true /* skip_special_tokens */));
 
   const char* string;
   CheckResult(OrtxStringArrayGetItem(ortx_string_array, 0, &string));
@@ -598,14 +602,147 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
           session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.enable_cuda_graph", "1");
         }
         p_device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
+
+        if (is_primary_session_options && p_device) {
+          void* stream_ptr = p_device->GetCudaStream();
+          std::stringstream stream_value;
+          stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
+          std::string stream_value_str = stream_value.str();
+          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.user_compute_stream", stream_value_str.c_str());
+        }
       }
 
+#if USE_WINML
+      // Get device filtering config
+      Config::DeviceFilteringOptions resolved_device_filtering;
+      if (provider_options.device_filtering_options.has_value()) {
+        resolved_device_filtering = provider_options.device_filtering_options.value();
+      }
+
+      std::optional<uint32_t> config_device_id = resolved_device_filtering.hardware_device_id;
+      std::optional<uint32_t> config_vendor_id = resolved_device_filtering.hardware_vendor_id;
+      std::optional<OrtHardwareDeviceType> config_device_type_enum = resolved_device_filtering.hardware_device_type;
+      // for OpenVINO, use "device_type" in provider_options exclusively if it's provided
+      std::optional<std::string> config_ov_device_type = std::nullopt;
+      if (provider_options.name == "OpenVINO") {
+        for (auto& option : provider_options.options) {
+          if (option.first == "device_type") {
+            config_ov_device_type = option.second;
+          }
+        }
+        if (config_ov_device_type.has_value()) {
+          config_device_id = std::nullopt;
+          config_vendor_id = std::nullopt;
+          config_device_type_enum = std::nullopt;
+        } else if (!(config_device_id.has_value() || config_vendor_id.has_value() || config_device_type_enum.has_value())) {
+          config_ov_device_type = "CPU";
+        }
+      }
+
+      // Match EP device with EP name in provider options and model device config
+      // include\onnxruntime\core\graph\constants.h
+      const static std::unordered_map<std::string, std::string> s_providerNameToExecutionProvider{
+          {"QNN", "QNNExecutionProvider"},
+          {"WebGPU", "WebGpuExecutionProvider"},
+          {"OpenVINO", "OpenVINOExecutionProvider"},
+          {"VitisAI", "VitisAIExecutionProvider"},
+          {"NvTensorRtRtx", "NvTensorRTRTXExecutionProvider"},
+      };
+      std::string ep_name{};
+      if (auto search = s_providerNameToExecutionProvider.find(provider_options.name); search != s_providerNameToExecutionProvider.end()) {
+        ep_name = search->second;
+      }
+
+      size_t num_devices = 0;
+      const OrtEpDevice* const* device_ptrs = nullptr;
+      Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
+
+      std::vector<const OrtEpDevice*> ep_devices_ptrs;
+      ep_devices_ptrs.reserve(num_devices);
+
+      for (size_t i = 0; i < num_devices; ++i) {
+        const OrtHardwareDevice* hardware_device = Ort::api->EpDevice_Device(device_ptrs[i]);
+        const uint32_t hardware_device_id = Ort::api->HardwareDevice_DeviceId(hardware_device);
+        const uint32_t hardware_vendor_id = Ort::api->HardwareDevice_VendorId(hardware_device);
+        const OrtHardwareDeviceType hardware_device_type = Ort::api->HardwareDevice_Type(hardware_device);
+
+        auto check_ov_device_type = [&config_ov_device_type, &provider_options](const OrtEpDevice* device_ptr) -> bool {
+          if (provider_options.name != "OpenVINO") {
+            return true;
+          } else if (!config_ov_device_type.has_value()) {
+            return true;
+          } else {
+            const OrtKeyValuePairs* keyvals = Ort::api->EpDevice_EpMetadata(device_ptr);
+            size_t num_entries;
+            const char* const* keys = nullptr;
+            const char* const* values = nullptr;
+            Ort::api->GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
+            for (int kvi = 0; kvi < num_entries; kvi++) {
+              const std::string key = keys[kvi];
+              const std::string val = values[kvi];
+              if (key == "ov_device" && val == config_ov_device_type) {
+                return true;
+              }
+            }
+            return false;
+          }
+        };
+        bool hardware_device_id_matched = (!config_device_id.has_value()) || config_device_id.value() == hardware_device_id;
+        bool hardware_vendor_id_matched = (!config_vendor_id.has_value()) || config_vendor_id.value() == hardware_vendor_id;
+        bool hardware_device_type_matched = (!config_device_type_enum.has_value()) ||
+                                            config_device_type_enum.value() == hardware_device_type;
+        bool hardware_ov_device_type_matched = check_ov_device_type(device_ptrs[i]);
+
+        // Append matched EP device
+        if (Ort::api->EpDevice_EpName(device_ptrs[i]) == ep_name &&
+            hardware_device_id_matched &&
+            hardware_vendor_id_matched &&
+            hardware_device_type_matched &&
+            hardware_ov_device_type_matched) {
+          ep_devices_ptrs.push_back(device_ptrs[i]);
+          // WinML Hotfix: DML and WebGPU EP factories currently only support one device at a time
+          // OpenVINO also supports only one device at a time
+          if (provider_options.name == "DML" || provider_options.name == "WebGPU" || provider_options.name == "OpenVINO") {
+            break;
+          }
+        }
+      }
+
+      // No need to append if we can't find a device.
+      if (!ep_devices_ptrs.empty()) {
+        std::vector<const char*> keys, values;
+        for (auto& option : provider_options.options) {
+          // WinML Hotfix: remove backend_type and backend_path from QNN provider options
+          static const std::set<std::string> qnn_options_to_remove{"backend_type", "backend_path"};
+          if (provider_options.name == "QNN" &&
+              qnn_options_to_remove.find(option.first) != qnn_options_to_remove.end()) {
+            continue;
+          }
+
+          // 'device_type' is not a supported option for OpenVINO when SessionOptionsAppendExecutionProvider_V2 is used.
+          if (provider_options.name == "OpenVINO" && option.first == "device_type") {
+            continue;
+          }
+          keys.emplace_back(option.first.c_str());
+          values.emplace_back(option.second.c_str());
+        }
+
+        Ort::api->SessionOptionsAppendExecutionProvider_V2(
+            &session_options,
+            &GetOrtEnv(),
+            ep_devices_ptrs.data(), ep_devices_ptrs.size(),
+            keys.data(), values.data(), keys.size());
+      }
+#else
       std::vector<const char*> keys, values;
+
       for (auto& option : provider_options.options) {
         keys.emplace_back(option.first.c_str());
         values.emplace_back(option.second.c_str());
       }
       session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
+
+#endif
     }
   }
   return p_device;
@@ -860,9 +997,70 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
   }
 
+  // Register custom ops libraries only if explicitly configured
   if (config_session_options.custom_ops_library.has_value()) {
-    fs::path custom_library_file_prefix{config_session_options.custom_ops_library.value()};
-    session_options.RegisterCustomOpsLibrary(custom_library_file_prefix.c_str());
+    // From include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
+    constexpr const char* const library_path_metadata_key_name = "library_path";
+
+    std::string custom_library_file_prefix = config_session_options.custom_ops_library.value();
+
+    // If relative path, try to resolve using multiple search locations
+    fs::path custom_library_path{custom_library_file_prefix};
+    if (custom_library_path.is_relative()) {
+      bool resolved = false;
+
+      // First try: resolve relative to GenAI model folder (most intuitive for users)
+      fs::path model_relative_path = config_->config_path / custom_library_path;
+      if (fs::exists(model_relative_path)) {
+        custom_library_file_prefix = model_relative_path.string();
+        resolved = true;
+      }
+
+      // Second try: resolve relative to EP library directory (for system-wide installations)
+      if (!resolved) {
+        size_t num_devices = 0;
+        const OrtEpDevice* const* device_ptrs = nullptr;
+        Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
+
+        for (size_t i = 0; i < num_devices && !resolved; ++i) {
+          const OrtKeyValuePairs* keyvals = Ort::GetEpDeviceMetadata(device_ptrs[i]);
+          size_t num_entries = 0;
+          const char* const* keys = nullptr;
+          const char* const* values = nullptr;
+          Ort::GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
+
+          for (size_t kvi = 0; kvi < num_entries; kvi++) {
+            const std::string key = keys[kvi];
+            const std::string val = values[kvi];
+            if (key == library_path_metadata_key_name) {
+              fs::path ep_library_dir = fs::path(val).parent_path();
+              fs::path resolved_path = ep_library_dir / custom_library_path;
+              if (fs::exists(resolved_path)) {
+                custom_library_file_prefix = resolved_path.string();
+                resolved = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // Third try: resolve relative to current working directory (for development/portable apps)
+      if (!resolved) {
+        char cwd_buffer[PATH_MAX];
+        if (GETCWD(cwd_buffer, sizeof(cwd_buffer))) {
+          fs::path cwd_relative_path = fs::path(cwd_buffer) / custom_library_path;
+          if (fs::exists(cwd_relative_path)) {
+            custom_library_file_prefix = cwd_relative_path.string();
+            resolved = true;
+          }
+        }
+      }
+    }
+
+    // Convert to fs::path for proper wide string handling on Windows
+    fs::path custom_ops_lib_path(custom_library_file_prefix);
+    session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
   }
 
   if (config_session_options.graph_optimization_level.has_value()) {

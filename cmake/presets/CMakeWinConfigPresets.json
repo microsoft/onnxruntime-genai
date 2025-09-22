@@ -29,6 +29,15 @@
       }
     },
     {
+      "name": "windows_trt_rtx_default",
+      "inherits": "windows_cpu_default",
+      "cacheVariables": {
+        "USE_TRT_RTX": "ON",
+        "CMAKE_CUDA_ARCHITECTURES": "80;86;89;120",
+        "CMAKE_CUDA_FLAGS_INIT": "/DWIN32 /D_WINDOWS /DWINAPI_FAMILY=100 /DWINVER=0x0A00 /D_WIN32_WINNT=0x0A00 /DNTDDI_VERSION=0x0A000000 -Xcompiler=\" /MP /guard:cf /Qspectre \" -allow-unsupported-compiler"
+      }
+    },
+    {
       "name": "windows_directml_default",
       "inherits": "windows_cpu_default",
       "cacheVariables": {
@@ -244,6 +253,30 @@
       }
     },
     {
+      "name": "windows_x64_trt_rtx_release",
+      "inherits": [
+        "windows_release_default",
+        "windows_trt_rtx_default"
+      ],
+      "displayName": "windows x64 trt_rtx release",
+      "binaryDir": "${sourceDir}/build/trt_rtx/win-x64",
+      "cacheVariables": {
+        "USE_TRT_RTX": "ON"
+      }
+    },
+    {
+      "name": "windows_x64_trt_rtx_debug",
+      "inherits": [
+        "windows_debug_default",
+        "windows_trt_rtx_default"
+      ],
+      "displayName": "windows x64 trt_rtx debug",
+      "binaryDir": "${sourceDir}/build/trt_rtx/win-x64",
+      "cacheVariables": {
+        "USE_TRT_RTX": "ON"
+      }
+    },
+    {
       "name": "windows_x64_cuda_relwithdebinfo",
       "inherits": [
         "windows_relwithdebinfo_default",
@@ -253,6 +286,19 @@
       "binaryDir": "${sourceDir}/build/cuda/win-x64",
       "cacheVariables": {
         "USE_CUDA": "ON"
+      }
+    },
+    {
+      "name": "windows_x64_winml_relwithdebinfo",
+      "inherits": [
+        "windows_relwithdebinfo_default",
+        "windows_cuda_default",
+        "windows_directml_default"
+      ],
+      "displayName": "windows x64 winml relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/winml/win-x64",
+      "cacheVariables": {
+        "USE_WINML": "ON"
       }
     },
     {
@@ -368,6 +414,17 @@
       "displayName": "windows arm64 directml relwithdebinfo",
       "binaryDir": "${sourceDir}/build/directml/win-arm64",
       "architecture": "arm64"
+    },
+    {
+      "name": "windows_arm64_winml_relwithdebinfo",
+      "inherits": [
+        "windows_arm64_directml_relwithdebinfo"
+      ],
+      "displayName": "windows arm64 winml relwithdebinfo",
+      "binaryDir": "${sourceDir}/build/winml/win-arm64",
+      "cacheVariables": {
+        "USE_WINML": "ON"
+      }
     },
     {
       "name": "windows_arm64_directml_release",

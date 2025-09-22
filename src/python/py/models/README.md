@@ -15,6 +15,7 @@ This folder contains the model builder for quickly creating optimized and quanti
   - [Extra Options](#extra-options)
     - [Config Only](#config-only)
     - [Hugging Face Authentication](#hugging-face-authentication)
+    - [Hugging Face Remote Code](#hugging-face-remote-code)
     - [Exclude Embedding Layer](#exclude-embedding-layer)
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
     - [Include Last Hidden States Output](#include-last-hidden-states-output)
@@ -159,6 +160,18 @@ python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_fold
 
 # From source:
 python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_token=false
+```
+
+#### Hugging Face Remote Code
+
+This scenario is for when you need to disable trusting remote code from a Hugging Face repo.
+
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=false
+
+# From source:
+python3 builder.py -m model_name -o path_to_output_folder -p precision -e execution_provider -c cache_dir_for_hf_files --extra_options hf_remote=false
 ```
 
 #### Exclude Embedding Layer

@@ -197,6 +197,30 @@ struct OgaConfig : OgaAbstract {
     OgaCheckResult(OgaConfigRemoveModelData(this, model_filename.c_str()));
   }
 
+  void SetDecoderProviderOptionsHardwareDeviceType(const char* provider, const char* hardware_device_type) {
+    OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareDeviceType(this, provider, hardware_device_type));
+  }
+
+  void SetDecoderProviderOptionsHardwareDeviceId(const char* provider, uint32_t hardware_device_id) {
+    OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareDeviceId(this, provider, hardware_device_id));
+  }
+
+  void SetDecoderProviderOptionsHardwareVendorId(const char* provider, uint32_t hardware_vendor_id) {
+    OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareVendorId(this, provider, hardware_vendor_id));
+  }
+
+  void ClearDecoderProviderOptionsHardwareDeviceType(const char* provider) {
+    OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareDeviceType(this, provider));
+  }
+
+  void ClearDecoderProviderOptionsHardwareDeviceId(const char* provider) {
+    OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareDeviceId(this, provider));
+  }
+
+  void ClearDecoderProviderOptionsHardwareVendorId(const char* provider) {
+    OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareVendorId(this, provider));
+  }
+
   static void operator delete(void* p) { OgaDestroyConfig(reinterpret_cast<OgaConfig*>(p)); }
 };
 
@@ -368,7 +392,7 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetSearchBool(this, name, value));
   }
 
-  void TryGraphCaptureWithMaxBatchSize(int max_batch_size) {
+  void TryGraphCaptureWithMaxBatchSize(int /*max_batch_size*/) {
     printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
   }
 

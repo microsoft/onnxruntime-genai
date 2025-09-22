@@ -21,11 +21,11 @@ jobs:
     runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2004-ARM-CPU"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: 'true'
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: '8.0.x'
 
@@ -51,7 +51,6 @@ jobs:
         run: |
           dotnet new console
           dotnet add package ${{ env.ORT_PACKAGE_NAME }} --version ${{ env.ORT_NIGHTLY_VERSION }} --source ${{ env.ORT_NIGHTLY_SOURCE }} --package-directory .
-          dotnet build
         continue-on-error: true
 
       - name: list files

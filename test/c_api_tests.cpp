@@ -46,6 +46,16 @@ TEST(CAPITests, Config) {
   config->ClearProviders();
   config->AppendProvider("cuda");
   config->AppendProvider("dml");
+  config->SetDecoderProviderOptionsHardwareDeviceType("OpenVINO", "npu");
+  config->ClearDecoderProviderOptionsHardwareDeviceType("OpenVINO");
+  config->SetDecoderProviderOptionsHardwareDeviceId("OpenVINO", 1);
+  config->ClearDecoderProviderOptionsHardwareDeviceId("OpenVINO");
+  config->SetDecoderProviderOptionsHardwareVendorId("OpenVINO", 2);
+  config->ClearDecoderProviderOptionsHardwareVendorId("OpenVINO");
+  config->SetDecoderProviderOptionsHardwareDeviceType("OpenVINO", "cpu");
+  config->SetDecoderProviderOptionsHardwareDeviceType("DML", "gpu");
+  config->SetDecoderProviderOptionsHardwareDeviceId("DML", 2);
+  config->SetDecoderProviderOptionsHardwareVendorId("DML", 1);
 #endif
 }
 
@@ -450,6 +460,45 @@ TEST(CAPITests, EndToEndPhi) {
       1212, 318, 257, 1332, 13, 198, 50280, 2, 16926, 1330, 1635, 10412, 6617, 278,
       6335, 32994, 21857, 13849, 38665, 82, 21815, 1108, 9557, 40755, 27446, 2417,
       6381, 6, 7131, 6, 14870, 31314, 21411, 46009, 3974, 82, 1039, 889, 263, 3684};
+
+  const auto sequence_length = generator->GetSequenceCount(0);
+  const auto* sequence_data = generator->GetSequenceData(0);
+
+  ASSERT_LE(sequence_length, 40);
+
+  const auto* expected_output_start = &expected_output[0];
+  EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence_data, sequence_length * sizeof(int32_t)));
+#endif
+}
+
+TEST(CAPITests, EndToEndPhiEOSPAD) {
+#if TEST_PHI2
+  auto model = OgaModel::Create(PHI2_PATH);
+  auto tokenizer = OgaTokenizer::Create(*model);
+
+  const char* input_string = "This is a test.<|endoftext|>";
+  auto input_sequence = OgaSequences::Create();
+  tokenizer->Encode(input_string, *input_sequence);
+
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 40);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->AppendTokenSequences(*input_sequence);
+
+  while (!generator->IsDone()) {
+    generator->GenerateNextToken();
+  }
+
+  // Decode The Batch
+  auto out_string = tokenizer->Decode(generator->GetSequenceData(0), generator->GetSequenceCount(0));
+  std::cout << "Decoded string:" << out_string << std::endl;
+
+  // Verify outputs match expected outputs
+  std::vector<int32_t> expected_output{
+      1212, 318, 257, 1332, 13, 50256, 198, 198, 198, 198, 4010, 4420, 43168, 15666,
+      10503, 82, 26268, 11451, 12735, 82, 19445, 427, 278, 49292, 3087, 26762, 5101,
+      14453, 5421, 278, 829, 319, 8378, 8378, 10257, 82, 1028, 1028, 16219, 263};
 
   const auto sequence_length = generator->GetSequenceCount(0);
   const auto* sequence_data = generator->GetSequenceData(0);

@@ -6,6 +6,7 @@
 #include <queue>
 #include <algorithm>
 #include <limits>
+#include <unordered_set>
 
 namespace Generators {
 
@@ -24,7 +25,7 @@ GreedySearch_Cpu::GreedySearch_Cpu(const GeneratorParams& params)
   else {
     std::random_device rd;
     std::array<uint32_t, decltype(gen_)::state_size> data;
-    std::generate(std::begin(data), std::end(data), std::ref(rd));
+    std::generate(data.begin(), data.end(), std::ref(rd));
     std::seed_seq seq(data.begin(), data.end());
     gen_.seed(seq);
   }
@@ -159,6 +160,9 @@ void GreedySearch_Cpu::SelectTop() {
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
+    if (PadIfAlreadyEOS(batch_id)) {
+      continue;
+    }
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
     // Find the top K scores
     std::vector<int> indices(scores.size());
@@ -176,77 +180,97 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
 }
 
 void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
-  std::uniform_real_distribution<float> dis(0, p);
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
     if (PadIfAlreadyEOS(batch_id)) {
       continue;
     }
-    std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
+
+    std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
+
+    // 1. Apply temperature and softmax to get probabilities
     Softmax(scores, temperature);
-    // Sort an array of indices into the scores
+
+    // 2. Sort indices by probability
     std::vector<int32_t> indices(scores.size());
     std::iota(indices.begin(), indices.end(), 0);
-    std::sort(indices.begin(), indices.end(), [scores = scores.data()](int32_t i, int32_t j) { return scores[i] > scores[j]; });
-    // Sample a probability threshold
-    float threshold = dis(gen_);
-    int32_t token = 0;
-    // Find the first token where the cumulative probability exceeds the threshold
-    for (int i = 0; i < scores.size(); i++) {
-      threshold -= scores[indices[i]];
-      if (threshold > 0) {
-        continue;
+    std::sort(indices.begin(), indices.end(),
+              [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
+
+    // 3. Find nucleus and mute probabilities of tokens outside it
+    float cumulative_prob = 0.0f;
+    for (size_t i = 0; i < indices.size(); ++i) {
+      cumulative_prob += scores[indices[i]];
+      if (cumulative_prob >= p) {
+        for (size_t j = i + 1; j < indices.size(); ++j) {
+          scores[indices[j]] = 0.0f;
+        }
+        break;
       }
-      token = indices[i];
-      break;
     }
+
+    // 4. Sample
+    std::discrete_distribution<> dist(scores.begin(), scores.end());
+    int32_t token = dist(gen_);
+
     SetNextToken(batch_id, token);
   }
   AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
-  // For numerical stability, we use 0.9999999f not 1.0f to avoid zero probabilities.
-  std::uniform_real_distribution<float> dis(0, 0.999999f);
+  assert(temperature > 0.0f);
+
+  // --- Buffers allocated once to avoid re-allocations in the batch loop ---
+  std::vector<int32_t> indices(params_->config.model.vocab_size);
+
+  // Buffer for the top-k logits
+  std::vector<float> top_k_logits;
+  top_k_logits.reserve(k);
+
+  // Buffer for probabilities used in Top-P filtering
+  std::vector<float> temp_probs;
+  temp_probs.reserve(k);
+
   for (size_t batch_id = 0; batch_id < params_->search.batch_size; batch_id++) {
-    if (PadIfAlreadyEOS(batch_id))
+    if (PadIfAlreadyEOS(batch_id)) {
       continue;
-    std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    // Find the top K scores
-    std::vector<int> indices(scores.size());
-    std::iota(indices.begin(), indices.end(), 0);
-    std::partial_sort(indices.begin(), indices.begin() + k, indices.end(), [scores = scores.data()](int i, int j) { return scores[i] > scores[j]; });
-    std::vector<float> scores_top_k(k, 0.0f);
-    std::vector<float> scores_top_k_old(k, 0.0f);
-    for (int i = 0; i < k; i++) {
-      scores_top_k[i] = scores[indices[i]];
-      scores_top_k_old[i] = scores[indices[i]];
     }
-    SoftmaxWithMax(scores_top_k, temperature, scores_top_k[0]);
-    float saferNegative = std::numeric_limits<float>::lowest() / 1000.0f;
-    std::vector<float> scores_top_k_filtering(k, saferNegative);
-    scores_top_k_filtering[0] = scores_top_k_old[0];
-    float threshold = p;
-    for (int i = 1; i < k; i++) {
-      threshold -= scores_top_k[i - 1];
-      if (threshold > 0) {
-        scores_top_k_filtering[i] = scores_top_k_old[i];
-      } else {
+
+    std::span<float> scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
+
+    std::iota(indices.begin(), indices.end(), 0);
+    std::partial_sort(indices.begin(), indices.begin() + k, indices.end(),
+                      [&scores](int32_t i, int32_t j) { return scores[i] > scores[j]; });
+
+    // 2. Populate top K logits, applying temperature.
+    top_k_logits.clear();
+    for (int i = 0; i < k; ++i) {
+      top_k_logits.push_back(scores[indices[i]] / temperature);
+    }
+
+    // 3. Top-p (nucleus) filtering.
+    temp_probs.assign(top_k_logits.begin(), top_k_logits.end());
+    Softmax(temp_probs, 1.0f);  // Temperature is already baked into top_k_logits
+
+    float cumulative_prob = 0.0f;
+    int cutoff_index = k;  // Default to keeping all top-k tokens
+    for (int i = 0; i < k; ++i) {
+      cumulative_prob += temp_probs[i];
+      if (cumulative_prob >= p) {
+        cutoff_index = i + 1;
         break;
       }
     }
-    SoftmaxWithMax(scores_top_k_filtering, temperature, scores_top_k_filtering[0]);
-    // Sample a probability threshold
-    threshold = dis(gen_);
-    int32_t token = indices[k - 1];
-    // Find the first token where the cumulative probability exceeds the threshold
-    for (int i = 0; i < k - 1; i++) {
-      threshold -= scores_top_k_filtering[i];
-      if (threshold > 0) {
-        continue;
-      }
-      token = indices[i];
-      break;
-    }
+
+    // 4. Resize logits to the nucleus, re-normalize, and sample.
+    top_k_logits.resize(cutoff_index);
+    Softmax(top_k_logits, 1.0f);
+
+    std::discrete_distribution<> dist(top_k_logits.begin(), top_k_logits.end());
+    int32_t sampled_k_index = dist(gen_);
+
+    // The final token is the one from the original vocab indices.
+    int32_t token = indices[sampled_k_index];
     SetNextToken(batch_id, token);
   }
   AppendNextTokensToSequences();

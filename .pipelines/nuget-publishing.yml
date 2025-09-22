@@ -1,109 +1,119 @@
 parameters:
-- name: enable_post_packaging_validation
-  displayName: Whether Post Packaging validation is run
-  type: boolean
-  default: false
-- name: enable_win_cpu
-  displayName: 'Whether Windows CPU package is built.'
-  type: boolean
-  default: true
+  - name: enable_post_packaging_validation
+    displayName: Whether Post Packaging validation is run
+    type: boolean
+    default: false
+  - name: enable_win_cpu
+    displayName: 'Whether Windows CPU package is built.'
+    type: boolean
+    default: true
 
-- name: enable_win_cuda
-  displayName: 'Whether Windows CUDA package is built.'
-  type: boolean
-  default: true
+  - name: enable_win_cuda
+    displayName: 'Whether Windows CUDA package is built.'
+    type: boolean
+    default: true
 
-- name: enable_linux_cpu
-  displayName: 'Whether Linux CPU package is built.'
-  type: boolean
-  default: true
+  - name: enable_linux_cpu
+    displayName: 'Whether Linux CPU package is built.'
+    type: boolean
+    default: true
 
-- name: enable_linux_cuda
-  displayName: 'Whether Linux CUDA package is built.'
-  type: boolean
-  default: true
+  - name: enable_linux_cuda
+    displayName: 'Whether Linux CUDA package is built.'
+    type: boolean
+    default: true
 
-- name: enable_win_dml
-  displayName: 'Whether Windows DirectML package is built.'
-  type: boolean
-  default: true
+  - name: enable_win_dml
+    displayName: 'Whether Windows DirectML package is built.'
+    type: boolean
+    default: true
 
-- name: enable_win_arm64
-  displayName: 'Whether Windows ARM64 package is built.'
-  type: boolean
-  default: true
+  - name: enable_win_arm64
+    displayName: 'Whether Windows ARM64 package is built.'
+    type: boolean
+    default: true
 
-- name: enable_macos_cpu
-  displayName: 'Whether MacOS CPU package is built.'
-  type: boolean
-  default: true
+  - name: enable_macos_cpu
+    displayName: 'Whether MacOS CPU package is built.'
+    type: boolean
+    default: true
 
-- name: enable_android
-  displayName: 'Whether Android AAR package is built.'
-  type: boolean
-  default: true
+  - name: enable_android
+    displayName: 'Whether Android AAR package is built.'
+    type: boolean
+    default: true
 
-- name: enable_apple_framework
-  displayName: 'Whether Apple framework for iOS & MacCatalyst is built.'
-  type: boolean
-  default: true
+  - name: enable_apple_framework
+    displayName: 'Whether Apple framework for iOS & MacCatalyst is built.'
+    type: boolean
+    default: true
 
-- name: enable_win_qnn
-  displayName: 'Whether QNN nuget package should be built.'
-  type: boolean
-  default: true
+  - name: enable_win_qnn
+    displayName: 'Whether QNN nuget package should be built.'
+    type: boolean
+    default: true
 
-- name: ort_version
-  displayName: 'OnnxRuntime version'
-  type: string
-  default: '1.22.0'
+  - name: enable_winml
+    displayName: 'Whether Windows WinML package is built.'
+    type: boolean
+    default: true
 
-- name: ort_cuda_version
-  displayName: 'OnnxRuntime GPU version'
-  type: string
-  default: '1.22.0'
+  - name: ort_version
+    displayName: 'OnnxRuntime version'
+    type: string
+    default: '1.22.0'
 
-- name: ort_dml_version
-  displayName: 'OnnxRuntime DML version'
-  type: string
-  default: '1.22.0'
+  - name: ort_winml_version
+    displayName: 'Microsoft.WindowsAppSDK.ML Version (should match CMakeList.txt)'
+    type: string
+    default: '1.8.2091'
 
-- name: cuda_version
-  displayName: 'CUDA version'
-  type: string
-  values:
-  - '11.8'
-  - '12.2'
-  default: '12.2'
+  - name: ort_cuda_version
+    displayName: 'OnnxRuntime GPU version'
+    type: string
+    default: '1.22.0'
 
-- name: build_config
-  displayName: 'Build Configuration'
-  type: string
-  default: 'release'
-  values:
-  - 'release'
-  - 'relwithdebinfo'
-  - 'debug'
+  - name: ort_dml_version
+    displayName: 'OnnxRuntime DML version'
+    type: string
+    default: '1.22.0'
 
-- name: 'nuget_version_type'
-  displayName: 'Nuget version - stable uses VERSION_INFO, dev appends date, build_id and commit-ish, e.g. 1.21.0-dev-20250205-1932-8f6ddf3bd5'
-  type: string
-  default: dev
-  values:
-  - dev
-  - stable
+  - name: cuda_version
+    displayName: 'CUDA version'
+    type: string
+    values:
+      - '11.8'
+      - '12.2'
+    default: '12.2'
 
-- name: custom_ort_package_versioned_name
-  displayName: 'Versioned name of ort nuget package. Must follow Microsoft.ML.OnnxRuntime.*.version.nupkg. Keep None to disable building'
-  type: string
-  default: 'Microsoft.ML.OnnxRuntime.Foundry.1.23.0-dev-20250617-0934-76952334d2.nupkg'
+  - name: build_config
+    displayName: 'Build Configuration'
+    type: string
+    default: 'relwithdebinfo'
+    values:
+      - 'release'
+      - 'relwithdebinfo'
+      - 'debug'
+
+  - name: 'nuget_version_type'
+    displayName: 'Nuget version - stable uses VERSION_INFO, dev appends date, build_id and commit-ish, e.g. 1.21.0-dev-20250205-1932-8f6ddf3bd5'
+    type: string
+    default: dev
+    values:
+      - dev
+      - stable
+
+  - name: custom_ort_package_versioned_name
+    displayName: 'Versioned name of ort nuget package. Must follow Microsoft.ML.OnnxRuntime.*.version.nupkg. Keep None to disable building'
+    type: string
+    default: 'Microsoft.ML.OnnxRuntime.Foundry.1.23.0-dev-20250617-0934-76952334d2.nupkg'
 
 resources:
   repositories:
-  - repository: 1esPipelines
-    type: git
-    name: 1ESPipelineTemplates/1ESPipelineTemplates
-    ref: refs/tags/release
+    - repository: 1esPipelines
+      type: git
+      name: 1ESPipelineTemplates/1ESPipelineTemplates
+      ref: refs/tags/release
 
 trigger: none
 extends:
@@ -114,8 +124,8 @@ extends:
   parameters:
     # Update the pool with your team's 1ES hosted pool.
     pool:
-      name: 'onnxruntime-Win-CPU-2022'  # Name of your hosted pool
-      os: windows  # OS of the image. This value cannot be a variable. Allowed values: windows, linux, macOS
+      name: 'onnxruntime-Win-CPU-2022' # Name of your hosted pool
+      os: windows # OS of the image. This value cannot be a variable. Allowed values: windows, linux, macOS
     sdl:
       policheck:
         enabled: true
@@ -125,43 +135,7 @@ extends:
         enabled: true
         configFile: '$(Build.SourcesDirectory)\.config\tsaoptions.json'
     stages:
-    - template: stages/capi-packaging-stage.yml
-      parameters:
-        enable_win_cpu: ${{ parameters.enable_win_cpu }}
-        enable_win_cuda: ${{ parameters.enable_win_cuda }}
-        enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
-        enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
-        enable_win_dml: ${{ parameters.enable_win_dml }}
-        enable_win_arm64: ${{ parameters.enable_win_arm64 }}
-        enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
-        enable_android: ${{ parameters.enable_android }}
-        enable_apple_framework: ${{ parameters.enable_apple_framework }}
-        ort_version: ${{ parameters.ort_version }}
-        ort_cuda_version: ${{ parameters.ort_cuda_version }}
-        ort_dml_version: ${{ parameters.ort_dml_version }}
-        cuda_version: ${{ parameters.cuda_version }}
-        build_config: ${{ parameters.build_config }}
-
-    - template: stages/nuget-packaging-stage.yml
-      parameters:
-        enable_win_cpu: ${{ parameters.enable_win_cpu }}
-        enable_win_cuda: ${{ parameters.enable_win_cuda }}
-        enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
-        enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
-        enable_win_dml: ${{ parameters.enable_win_dml }}
-        enable_win_arm64: ${{ parameters.enable_win_arm64 }}
-        enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
-        enable_android: ${{ parameters.enable_android }}
-        enable_apple_framework: ${{ parameters.enable_apple_framework }}
-        ort_version: ${{ parameters.ort_version }}
-        ort_cuda_version: ${{ parameters.ort_cuda_version }}
-        ort_dml_version: ${{ parameters.ort_dml_version }}
-        build_config: ${{ parameters.build_config }}
-        enable_win_qnn: ${{ parameters.enable_win_qnn }}
-        nuget_version_type: ${{ parameters.nuget_version_type }}
-
-    - ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
-      - template: stages/nuget-validation-stage.yml
+      - template: stages/capi-packaging-stage.yml
         parameters:
           enable_win_cpu: ${{ parameters.enable_win_cpu }}
           enable_win_cuda: ${{ parameters.enable_win_cuda }}
@@ -170,14 +144,54 @@ extends:
           enable_win_dml: ${{ parameters.enable_win_dml }}
           enable_win_arm64: ${{ parameters.enable_win_arm64 }}
           enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+          enable_android: ${{ parameters.enable_android }}
+          enable_apple_framework: ${{ parameters.enable_apple_framework }}
           ort_version: ${{ parameters.ort_version }}
           ort_cuda_version: ${{ parameters.ort_cuda_version }}
           ort_dml_version: ${{ parameters.ort_dml_version }}
           cuda_version: ${{ parameters.cuda_version }}
-          SpecificArtifact: false
+          build_config: ${{ parameters.build_config }}
+          enable_winml: ${{ parameters.enable_winml }}
+          ort_winml_version: ${{ parameters.ort_winml_version }}
 
-    - ${{ if and(and(and(ne(parameters.custom_ort_package_versioned_name, 'None'), eq(parameters.enable_win_arm64, true)), eq(parameters.enable_win_cuda, true)), eq(parameters.enable_macos_cpu, true)) }}:
-      - template: stages/custom-nuget-packaging-stage.yml
+      - template: stages/nuget-packaging-stage.yml
         parameters:
-          custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
+          enable_win_cpu: ${{ parameters.enable_win_cpu }}
+          enable_win_cuda: ${{ parameters.enable_win_cuda }}
+          enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+          enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+          enable_win_dml: ${{ parameters.enable_win_dml }}
+          enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+          enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+          enable_android: ${{ parameters.enable_android }}
+          enable_apple_framework: ${{ parameters.enable_apple_framework }}
+          ort_version: ${{ parameters.ort_version }}
+          ort_cuda_version: ${{ parameters.ort_cuda_version }}
+          ort_dml_version: ${{ parameters.ort_dml_version }}
+          build_config: ${{ parameters.build_config }}
+          enable_win_qnn: ${{ parameters.enable_win_qnn }}
           nuget_version_type: ${{ parameters.nuget_version_type }}
+          enable_winml: ${{ parameters.enable_winml }}
+          ort_winml_version: ${{ parameters.ort_winml_version }}
+
+      - ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
+          - template: stages/nuget-validation-stage.yml
+            parameters:
+              enable_win_cpu: ${{ parameters.enable_win_cpu }}
+              enable_win_cuda: ${{ parameters.enable_win_cuda }}
+              enable_linux_cpu: ${{ parameters.enable_linux_cpu }}
+              enable_linux_cuda: ${{ parameters.enable_linux_cuda }}
+              enable_win_dml: ${{ parameters.enable_win_dml }}
+              enable_win_arm64: ${{ parameters.enable_win_arm64 }}
+              enable_macos_cpu: ${{ parameters.enable_macos_cpu }}
+              ort_version: ${{ parameters.ort_version }}
+              ort_cuda_version: ${{ parameters.ort_cuda_version }}
+              ort_dml_version: ${{ parameters.ort_dml_version }}
+              cuda_version: ${{ parameters.cuda_version }}
+              SpecificArtifact: false
+
+      - ${{ if and(and(and(ne(parameters.custom_ort_package_versioned_name, 'None'), eq(parameters.enable_win_arm64, true)), eq(parameters.enable_win_cuda, true)), eq(parameters.enable_macos_cpu, true)) }}:
+          - template: stages/custom-nuget-packaging-stage.yml
+            parameters:
+              custom_ort_package_versioned_name: ${{ parameters.custom_ort_package_versioned_name }}
+              nuget_version_type: ${{ parameters.nuget_version_type }}
