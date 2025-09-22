@@ -149,7 +149,7 @@ void RunParityTests(const TopKTestParams& params) {
                                           params.vocab_size, params.batch_size, params.k);
   });
 
-  if (params.k <= Generators::cuda::kHybridSortMaxK) {
+  if (Generators::cuda::hybrid_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
     test_algo("HYBRID_SORT", [&]() {
       Generators::cuda::hybrid_sort::RunTopK(topk_data.get(), stream, scores_in_d.get(),
                                              params.vocab_size, params.batch_size, params.k);

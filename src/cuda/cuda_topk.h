@@ -29,15 +29,13 @@ __host__ __device__ inline size_t AlignUp(size_t size, size_t alignment) {
 constexpr int kGpuBufferAlignment = 256;
 
 // Most common K value used in top-k sampling for Large Language Models typically falls in the range of 20 to 50.
-// So max k values shall be 64 or higher.
-// Partition sort uses registers in stage 2, it is hard to extend to 128 due to limit of registers.
-// We enable higher k values in some algorithms for testing. The drawback is larger buffer sizes and longer compilation time.
+// So max k values shall be 64 or higher. Current setting is based on benchmark results.
 constexpr int kHybridSortMaxK = 256;    // The maximum k (up to 256) allowed for hybrid sort. Must be power of 2.
-constexpr int kFlashSortMaxK = 128;     // The maximum k (up to 256) allowed for flash sort. Must be power of 2.
+constexpr int kFlashSortMaxK = 64;      // The maximum k (up to 256) allowed for flash sort. Must be power of 2.
 constexpr int kLlmSortMaxK = 64;        // The maximum k (up to 256) allowed for LLM sort. Must be power of 2.
 constexpr int kPartitionSortMaxK = 64;  // The maximum k (up to 64) allowed for Partition sort. Must be power of 2.
 
-constexpr int kFastSortMinPartitionSize = 1024;  // The minimum partition size for fast sort including hybrid, flash, LLM and partition sort.
+constexpr int kFastSortMinPartitionSize = 1024;  // The minimum partition size for fast sort: flash 1024, hybrid 2048, LLM 2048 and partition 2048.
 
 constexpr int kMaxBenchmarkLocalCache = 64;  // The maximum local cache of online benchmarking results.
 
@@ -214,6 +212,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
  * A final reduction stage using bitonic sort merges these partitions to find the global top-k.
  */
 namespace hybrid_sort {
+bool IsSupported(int batch_size, int vocab_size, int k);
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 }  // namespace hybrid_sort
 

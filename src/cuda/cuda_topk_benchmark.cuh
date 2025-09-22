@@ -136,8 +136,9 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
   }
 
   // Candidate: Hybrid Sort. Only enabled when cooperative kernels (Flash Sort, LLM Sort or Partition Sort) not supported, or when vocab_size is small.
-  if (!use_flash_sort && !use_llm_sort &&!use_partition_sort || vocab_size <= 4096) {
-    if (k <= kHybridSortMaxK) {
+  if (!use_flash_sort && !use_llm_sort && !use_partition_sort || vocab_size <= 4096) {
+    bool use_hybrid_sort = hybrid_sort::IsSupported(batch_size, vocab_size, k);
+    if (use_hybrid_sort) {
       BENCHMARK_KERNEL(TopkAlgo::HYBRID, [&]() {
         hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       });

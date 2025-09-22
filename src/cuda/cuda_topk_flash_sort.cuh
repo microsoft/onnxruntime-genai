@@ -10,7 +10,6 @@
 #include "cuda_topk.h"
 #include "cuda_topk_bitonic_sort_helper.cuh"
 #include "cuda_topk_common.cuh"
-#include "cuda_topk_warp_merge_helper.cuh"  // Use the new warp-level helper
 
 namespace Generators {
 namespace cuda {
@@ -49,8 +48,9 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
   // --- Shared Memory Union ---
   constexpr int kSortSize = K_PADDED * kReductionFactor;
 
+  using Stage1TempStorageType = typename topk_common::Stage1TempStorage<kBlockSize, kPartitionSize>;
   union SharedStorage {
-    typename Stage1TempStorage stage1_storage;
+    Stage1TempStorageType stage1_storage;
     struct {
       __align__(128) float scores[kSortSize];
       __align__(128) int indices[kSortSize];
@@ -59,7 +59,7 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
   __shared__ SharedStorage smem;
 
   // --- Stage 1: Find Top-K within each partition ---
-  topk_common::FindPartitionTopK<kBlockSize, kPartitionSize, K_PADDED>(
+  topk_common::FindPartitionTopK<kBlockSize, kPartitionSize, K_PADDED, Stage1TempStorageType>(
       input_scores, intermediate_indices_1, intermediate_scores_1, vocab_size, num_partitions, smem.stage1_storage);
 
   grid.sync();
@@ -116,7 +116,7 @@ __global__ void FlashSortKernel(const float* __restrict__ input_scores,
           }
 
           // Perform sort entirely in registers
-          warp_merge::WarpBitonicSort(my_score, my_index);
+          bitonic_sort::WarpBitonicSort(my_score, my_index);
 
           // Write top-K results back to shared memory
           if (threadIdx.x < K_PADDED) {

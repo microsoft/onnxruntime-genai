@@ -77,8 +77,9 @@ __global__ void LlmSortKernel(const float* __restrict__ input_scores,
   constexpr int kSortSize2 = K_PADDED * Factor2;
   constexpr int kSortSize3 = K_PADDED * Factor3;
 
+  using Stage1TempStorageType = typename topk_common::Stage1TempStorage<kBlockSize, kPartitionSize>;
   union SharedStorage {
-    typename Stage1TempStorage stage1_storage;
+    Stage1TempStorageType stage1_storage;
 
     struct {
       __align__(128) float scores[kSortSize1];
@@ -96,7 +97,7 @@ __global__ void LlmSortKernel(const float* __restrict__ input_scores,
   __shared__ SharedStorage smem;
 
   // --- Stage 1: Find Top-K within each partition ---
-  topk_common::FindPartitionTopK<kBlockSize, kPartitionSize, K_PADDED>(
+  topk_common::FindPartitionTopK<kBlockSize, kPartitionSize, K_PADDED, Stage1TempStorageType>(
       input_scores, intermediate_indices_1, intermediate_scores_1, vocab_size, num_partitions, smem.stage1_storage);
 
   grid.sync();

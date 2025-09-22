@@ -13,14 +13,6 @@ namespace Generators {
 namespace cuda {
 namespace topk_common {
 
-#ifdef STABLE_TOPK
-#define Stage1TempStorage cub::BlockRadixSort<uint64_t, kBlockSize, kPartitionSize / kBlockSize>::TempStorage
-#define FindPartitionTopK FindPartitionTopK_StableSort
-#else
-#define Stage1TempStorage cub::BlockRadixSort<float, kBlockSize, kPartitionSize / kBlockSize, int>::TempStorage
-#define FindPartitionTopK FindPartitionTopK_UnstableSort
-#endif
-
 /**
  * @brief Performs a stable sort to find the Top-K candidates within a partition.
  * It uses a 64-bit composite key (score + index) to ensure stable sorting for tie-breaking.
@@ -127,6 +119,58 @@ __device__ void FindPartitionTopK_UnstableSort(const float* __restrict__ scores_
     intermediate_scores[offset] = thread_keys[0];
     intermediate_indices[offset] = thread_values[0];
   }
+}
+
+// Type alias for stage1 temporary storage depending on stable/unstable
+template <int kBlockSize, int kPartitionSize, bool Stable = kStableTopK>
+struct Stage1StorageSelector;
+
+template <int kBlockSize, int kPartitionSize>
+struct Stage1StorageSelector<kBlockSize, kPartitionSize, true> {
+  using type = typename cub::BlockRadixSort<
+      uint64_t, kBlockSize, kPartitionSize / kBlockSize>::TempStorage;
+};
+
+template <int kBlockSize, int kPartitionSize>
+struct Stage1StorageSelector<kBlockSize, kPartitionSize, false> {
+  using type = typename cub::BlockRadixSort<
+      float, kBlockSize, kPartitionSize / kBlockSize, int>::TempStorage;
+};
+
+template <int kBlockSize, int kPartitionSize>
+using Stage1TempStorage =
+    typename Stage1StorageSelector<kBlockSize, kPartitionSize>::type;
+
+// Unified API wrapper — dispatches at compile time
+template <int kBlockSize, int kPartitionSize, int K, typename TempStorage>
+__device__ void FindPartitionTopK(const float* __restrict__ scores_in,
+                                  int* __restrict__ intermediate_indices,
+                                  float* __restrict__ intermediate_scores,
+                                  int vocab_size,
+                                  int num_partitions,
+                                  TempStorage& temp_storage) {
+  if constexpr (kStableTopK) {
+    topk_common::FindPartitionTopK_StableSort<kBlockSize, kPartitionSize, K>(
+        scores_in, intermediate_indices, intermediate_scores,
+        vocab_size, num_partitions, temp_storage);
+  } else {
+    topk_common::FindPartitionTopK_UnstableSort<kBlockSize, kPartitionSize, K>(
+        scores_in, intermediate_indices, intermediate_scores,
+        vocab_size, num_partitions, temp_storage);
+  }
+}
+
+// --- Helper to find the next power of two ---
+__device__ __host__ __forceinline__ constexpr int NextPowerOfTwo(int n) {
+  if (n == 0) return 1;
+  n--;
+  n |= n >> 1;
+  n |= n >> 2;
+  n |= n >> 4;
+  n |= n >> 8;
+  n |= n >> 16;
+  n++;
+  return n;
 }
 
 }  // namespace topk_common

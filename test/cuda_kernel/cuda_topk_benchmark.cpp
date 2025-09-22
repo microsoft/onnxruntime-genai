@@ -248,8 +248,8 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
 
   std::string stable_suffix = Generators::cuda::kStableTopK ? "_STABLE" : "_UNSTABLE";
 
-    // Benchmark Hybrid Sort
-  if (params.k <= Generators::cuda::kHybridSortMaxK) {
+  // Benchmark Hybrid Sort
+  if (Generators::cuda::hybrid_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
       Generators::cuda::hybrid_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
                                              params.batch_size, params.k);
@@ -332,7 +332,7 @@ TEST(TopKBenchmarks, PerformanceTests) {
   if constexpr (is_build_pipeline) {
     std::vector<int> batch_sizes = {1};
     std::vector<int> vocab_sizes = {262400, 201088, 152064, 128256, 32256};
-    std::vector<int> ks = {1, 4, 5, 8, 16, 32, 50, 64};
+    std::vector<int> ks = {1, 4, 5, 8, 16, 32, 50, 64, 100, 128, 256};
 
     std::vector<BenchmarkParams> test_cases;
     for (int batch_size : batch_sizes) {
@@ -347,7 +347,7 @@ TEST(TopKBenchmarks, PerformanceTests) {
     }
   } else {
     // Run comprehensive tests when it is not in CI pipeline.
-    std::vector<int> batch_sizes = {1, 2, 4, 8};
+    std::vector<int> batch_sizes = {1, 4, 8};
     std::vector<int> vocab_sizes = {512, 1024, 2048, 4096};
     for (int v = 8 * 1024; v < 64 * 1024; v += 8 * 1024) {
       vocab_sizes.push_back(v);
@@ -355,7 +355,7 @@ TEST(TopKBenchmarks, PerformanceTests) {
     for (int v = 64 * 1024; v <= 256 * 1024; v += 16 * 1024) {
       vocab_sizes.push_back(v);
     }
-    std::vector<int> ks = {1, 2, 4, 8, 16, 32, 64};
+    std::vector<int> ks = {1, 2, 4, 8, 16, 32, 64, 128};
 
     std::vector<BenchmarkParams> test_cases;
     for (int batch_size : batch_sizes) {
