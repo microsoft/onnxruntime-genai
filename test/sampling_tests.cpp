@@ -487,6 +487,7 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda) {
 #endif
 #endif
 
+#if USE_TRT_RTX
 TEST(SamplingTests, BatchedSamplingTopPNvTensorRtRtx) {
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<int32_t> expected_output{1, 2, 3, 4};
@@ -850,3 +851,4 @@ TEST(SamplingTests, RandomizedSamplingSelectTopNvTensorRtRtx) {
     }
   }
 }
+#endif

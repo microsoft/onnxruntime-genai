@@ -249,6 +249,7 @@ TEST(ModelTests, BeamSearchGptCuda) {
 }
 #endif
 
+#if USE_TRT_RTX
 // NvTensorRT test cases using Phi3 models
 static const std::pair<const char*, const char*> c_phi3_nvtrt_model_paths[] = {
     {MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt", "fp16"},
@@ -420,6 +421,7 @@ TEST(ModelTests, OutOfPlaceKvCachePhi3NvTensorRtRtx) {
   for (auto model_path : c_phi3_nvtrt_model_paths)
     Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(model_path.first, model_path.second);
 }
+#endif
 
 #if TEST_PHI2 && (USE_CUDA || USE_DML)
 TEST(ModelTests, TestApiDevice) {
