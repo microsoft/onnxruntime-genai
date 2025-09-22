@@ -459,7 +459,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
     launch_kernels(std::integral_constant<int, 256>());
 }
 
-bool IsSupported(int batch_size, int vocab_size, int k) {
+bool IsSupported(int /*batch_size*/, int vocab_size, int k) {
   if (k > kHybridSortMaxK) {
     return false;
   }

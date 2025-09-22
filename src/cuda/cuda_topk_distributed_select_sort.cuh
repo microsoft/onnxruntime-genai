@@ -204,7 +204,7 @@ void LaunchGetDistributedSelectSortTopK(cudaStream_t stream, float* scores_in, f
                                                                              distributed_scores_out);
 }
 
-void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
+void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int /*batch_size*/, int k) {
   float* topk_scores = data->intermediate_scores_1;
   int* topk_indices = data->intermediate_indices_1;
 

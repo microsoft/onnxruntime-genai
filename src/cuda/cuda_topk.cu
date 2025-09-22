@@ -72,7 +72,7 @@ size_t TopkData::CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t
 }
 
 // Partitions the single memory buffer into individual pointers.
-void TopkData::InitializeBuffers(int batch_size, int vocab_size, cudaStream_t stream) {
+void TopkData::InitializeBuffers(int batch_size, int /*vocab_size*/, cudaStream_t /*stream*/) {
   uint8_t* current_ptr = memory_buffer_span_.data();
 
   intermediate_indices_1 = reinterpret_cast<int*>(current_ptr);
