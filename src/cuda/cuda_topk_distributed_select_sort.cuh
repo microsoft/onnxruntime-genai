@@ -115,7 +115,7 @@ __global__ void GetTopKKernelDistributedSelectSort(float* scores_in, float* scor
 
     // Number of shards is atmost `kTopKDistributedSelectSortMaxShards` and top_k for this kernel is atmost `kTopKDistributedSelectSortMaxTopK`
     __shared__ float shared_distributed_scores_out[topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK];
-    __shared__ float shared_distributed_indices_out[topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK];
+    __shared__ int shared_distributed_indices_out[topk_impl_details::kTopKDistributedSelectSortMaxShards * topk_impl_details::kTopKDistributedSelectSortMaxTopK];
 
     // Load distributed results into shared memory for fast access
     for (int i = threadIdx.x; i < num_top_k_shards * k; i += kBlockSize) {
