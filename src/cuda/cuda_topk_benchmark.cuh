@@ -134,7 +134,7 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
     });
   }
 
-  // Candidate: Flash Sort (high-performance cooperative kernel).
+  // Candidate: Iterative Sort (high-performance cooperative kernel).
   bool use_iterative_sort = iterative_sort::IsSupported(batch_size, vocab_size, k);
   if (use_iterative_sort) {
     BENCHMARK_KERNEL(TopkAlgo::ITERATIVE, [&]() {
@@ -142,7 +142,7 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
     });
   }
 
-  // Candidate: Partition Sort (high-performance cooperative kernel).
+  // Candidate: Flash Convergent Sort (high-performance cooperative kernel).
   bool use_flash_convergent = flash_convergent::IsSupported(batch_size, vocab_size, k);
   if (use_flash_convergent) {
     BENCHMARK_KERNEL(TopkAlgo::CONVERGENT, [&]() {

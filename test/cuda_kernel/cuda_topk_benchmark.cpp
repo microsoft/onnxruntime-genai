@@ -72,9 +72,10 @@ void PrintSummary(const std::vector<BenchmarkResult>& results) {
 #else
   std::cout << " (STABLE_TOPK disabled)";
 #endif
+  int algo_length = Generators::cuda::kStableTopK ? 35 : 28;  // Adjust length for _STABLE suffix.
   std::cout << " ---\n";
   std::cout << std::left << std::setw(12) << "Batch Size" << std::setw(12) << "Vocab Size" << std::setw(5) << "K"
-            << std::setw(28) << "Algorithm" << std::setw(12) << "Latency(us)" << std::setw(12) << "Stdev(us)"
+            << std::setw(algo_length) << "Algorithm" << std::setw(12) << "Latency(us)" << std::setw(12) << "Stdev(us)"
             << std::setw(12) << "P95(us)" << "\n";
   std::cout << std::string(97, '-') << "\n";
 
@@ -82,7 +83,7 @@ void PrintSummary(const std::vector<BenchmarkResult>& results) {
     std::string full_algo_name = result.algo_name;
 
     std::cout << std::left << std::setw(12) << result.params.batch_size << std::setw(12) << result.params.vocab_size
-              << std::setw(5) << result.params.k << std::setw(28) << full_algo_name << std::fixed
+              << std::setw(5) << result.params.k << std::setw(algo_length) << full_algo_name << std::fixed
               << std::setprecision(2) << std::setw(12) << result.latency_ms * 1000.0f << std::setw(12)
               << result.latency_ms_stdev * 1000.0f << std::setw(12) << result.latency_ms_95_percentile * 1000.0f
               << "\n";
@@ -225,7 +226,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
     algo_latencies[algo_name] = mean_ms;
   }
 
-  // Benchmark Radix Sort
+  // Benchmark Per Batch Radix Sort
   {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
       Generators::cuda::per_batch_radix_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
@@ -265,7 +266,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
     algo_latencies[algo_name] = mean_ms;
   }
 
-  // Benchmark Radix Partition Sort
+  // Benchmark Flash Convergent Sort
   if (Generators::cuda::flash_convergent::IsSupported(params.batch_size, params.vocab_size, params.k)) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
       Generators::cuda::flash_convergent::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
@@ -278,7 +279,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
     algo_latencies[algo_name] = mean_ms;
   }
 
-  // Benchmark Flash Sort
+  // Benchmark Iterative Sort
   if (Generators::cuda::iterative_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
       Generators::cuda::iterative_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
@@ -291,6 +292,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
     algo_latencies[algo_name] = mean_ms;
   }
 
+  // Benchmark Cascaded Sort
   if (Generators::cuda::cascaded_sort::IsSupported(params.batch_size, params.vocab_size, params.k)) {
     auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {
       Generators::cuda::cascaded_sort::RunTopK(data.get(), stream, scores_in_d.get(), params.vocab_size,
@@ -310,6 +312,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
       current_csv_result.best_algorithm = pair.first;
     }
   }
+
 #if TEST_FAST_ALGO_ONLY == 0
   // Benchmark RunTopK (Backend can be any of the above algorithms)
   auto [mean_ms, stdev_ms, p95_ms] = bench_algo([&]() {

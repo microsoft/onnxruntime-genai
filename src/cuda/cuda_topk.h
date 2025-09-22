@@ -217,7 +217,7 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
  * Does not require cooperative launch, making it highly portable.
  */
 namespace hybrid_sort {
-constexpr const char* kAlgorithmName = "Multi_Kernel_Reduce_Sort";
+constexpr const char* kAlgorithmName = "Multi_Kernel_Hybrid_Sort";
 bool IsSupported(int batch_size, int vocab_size, int k);
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k);
 }  // namespace hybrid_sort

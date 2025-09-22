@@ -86,7 +86,7 @@ constexpr ReductionFactors GetReductionFactors(int num_partitions, int k) {
 }
 
 /**
- * @brief The main kernel for LLM Sort. It performs the initial partition sort
+ * @brief The main kernel for Cascaded Sort. It performs the initial partition sort
  * followed by up to three cascaded reduction steps, all within a single launch.
  */
 template <int K_PADDED, int kBlockSize, int kPartitionSize, int Factor1, int Factor2, int Factor3>
