@@ -3,13 +3,46 @@
 
 #pragma once
 
-#include <float.h>  // For FLT_MAX
+#include <float.h>
 #include "cuda_topk.h"
 #include <cub/cub.cuh>
 #include "cuda_topk_select_sort.cuh"
 
 namespace Generators {
 namespace cuda {
+namespace distributed_select_sort {
+
+/**
+ * @brief A distributed selection sort that partitions the vocabulary across Streaming Multiprocessors (SMs).
+ *
+ * Algorithm Overview:
+ * This is a highly specialized two-stage algorithm designed for extremely large vocabularies
+ * where `batch_size` is small (typically 1).
+ *
+ * 1.  **Stage 1 (SM-Level Selection)**: The kernel is launched with a grid of thread blocks
+ * where each block corresponds to a "shard" and is intended to run on a separate SM.
+ * Each block independently performs a full selection sort (`select_sort::GetTopKKernel`) on its
+ * assigned partition of the vocabulary. The local Top-K results from each block are written
+ * to a shared global buffer.
+ *
+ * 2.  **Synchronization**: After completing its work, each block atomically increments a global lock counter.
+ * A designated "reducer" block (`blockIdx.z == 0`) spins on this counter, waiting for all
+ * other blocks to finish Stage 1. This is a form of manual grid-wide synchronization.
+ *
+ * 3.  **Stage 2 (Final Reduction)**: Once all blocks are done, the reducer block loads all the
+ * intermediate Top-K candidates (`num_shards * k`) from the global buffer into its own shared memory.
+ * It then performs a final, small selection sort on these candidates to find the true global Top-K.
+ *
+ * Performance Characteristics:
+ * -   **Strengths**: Can be very effective for its niche: extremely large vocabularies
+ * where partitioning the work at the SM level reduces the search space for each block significantly.
+ * -   **Weaknesses**: Highly specialized. Its performance is poor outside of its target scenario
+ * (massive vocabulary, small k, batch_size=1). The manual spin-wait synchronization can be
+ * inefficient on some architectures.
+ * -   **Use Case**: A niche algorithm for memory-bound scenarios with huge vocabularies.
+ */
+
+using TopK_Pair = select_sort::TopK_Pair;
 
 // A simple struct to hold a key-value pair for inter-TB reduction.
 // Has an indirection element id (`elem_id_indirection`) to point to
@@ -48,6 +81,7 @@ __global__ void GetTopKKernelDistributedSelectSort(float* scores_in, float* scor
                                                    int vocab_size, int k,
                                                    int* top_k_distributed_lock, int* distributed_indices_out,
                                                    float* distributed_scores_out) {
+  // Each block processes a different shard of the vocabulary.
   int top_k_shard = blockIdx.z;
   int tid = threadIdx.x;
 
@@ -64,17 +98,17 @@ __global__ void GetTopKKernelDistributedSelectSort(float* scores_in, float* scor
   int start_i = kBlockSize * top_k_shard + tid;
 
   for (int ite = 0; ite < k; ite++) {
-    partial.init();
+    partial.Init();
 
     for (auto elemId = start_i; elemId < vocab_size; elemId += kBlockSize * num_top_k_shards) {
       float elem = scores_in[elemId];
-      partial.insert(elem, elemId);
+      partial.Insert(elem, elemId);
     }
 
     // reduce in thread block
     typedef cub::BlockReduce<TopK_Pair, kBlockSize> BlockReduce;
     __shared__ typename BlockReduce::TempStorage temp_storage;
-    TopK_Pair top_k_sequence = BlockReduce(temp_storage).Reduce(partial, reduce_topk_op);
+    TopK_Pair top_k_sequence = BlockReduce(temp_storage).Reduce(partial, select_sort::reduce_topk_op);
 
     if (tid == 0) {
       distributed_scores_out_curr[ite] = top_k_sequence.u;
@@ -85,18 +119,19 @@ __global__ void GetTopKKernelDistributedSelectSort(float* scores_in, float* scor
     __syncthreads();
   }
 
-  // All TBs flush their data and it should be visible to every other TB
+  // --- Synchronization ---
+  // Ensure all global writes from Stage 1 are visible.
   __threadfence();
   __syncthreads();
 
-  // Signal that each threadblock has done its work using elected thread
+  // Signal completion by incrementing the atomic lock.
   if (threadIdx.x == 0) {
     atomicAdd(top_k_distributed_lock, 1);
   }
 
-  // The reduction threadblock
+  // --- Stage 2: Final Reduction by a single block ---
   if (blockIdx.z == 0) {
-    // Elected thread spins while waiting for other TBs to complete their work
+    // The reducer block spins until the lock indicates all other blocks are done.
     if (threadIdx.x == 0) {
       int count_of_completed_TBs = 0;
 
@@ -169,19 +204,20 @@ void LaunchGetDistributedSelectSortTopK(cudaStream_t stream, float* scores_in, f
                                                                              distributed_scores_out);
 }
 
-void RunTopKViaDistributedSelectionSort(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int k) {
-  float* topk_scores = data->intermediate_scores_1.get();
-  int* topk_indices = data->intermediate_indices_1.get();
+void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int /*batch_size*/, int k) {
+  float* topk_scores = data->intermediate_scores_1;
+  int* topk_indices = data->intermediate_indices_1;
 
-  // Use the "copy-on-write" strategy as the input scores will be mutated
-  float* mutable_scores = data->intermediate_scores_2.get();
-  size_t buffer_size = vocab_size * sizeof(float);
+  // This algorithm modifies the input scores, so a copy is required.
+  float* mutable_scores = data->intermediate_scores_2;
+  size_t buffer_size = static_cast<size_t>(vocab_size) * sizeof(float);
   CUDA_CHECK(cudaMemcpyAsync(mutable_scores, scores_in, buffer_size, cudaMemcpyDeviceToDevice, stream));
+
   LaunchGetDistributedSelectSortTopK(stream, mutable_scores, topk_scores, topk_indices, vocab_size, k,
                                      data->top_k_distributed_select_sort_shards,
-                                     data->top_k_distributed_select_sort_lock.get(),
-                                     data->top_k_distributed_select_sort_keys.get(),
-                                     data->top_k_distributed_select_sort_values.get());
+                                     data->top_k_distributed_select_sort_lock,
+                                     data->top_k_distributed_select_sort_keys,
+                                     data->top_k_distributed_select_sort_values);
   CUDA_CHECK_LAUNCH();
 
   data->topk_scores = topk_scores;
@@ -189,5 +225,13 @@ void RunTopKViaDistributedSelectionSort(TopkData* data, cudaStream_t stream, con
   data->topk_stride = k;
 }
 
+// This algorithm is only supported for a specific set of problem dimensions.
+bool IsSupported(int batch_size, int vocab_size, int k) {
+  return (batch_size <= topk_impl_details::kTopKDistributedSelectSortMaxBatchSize) &&
+         (k <= topk_impl_details::kTopKDistributedSelectSortMaxTopK) &&
+         (vocab_size >= topk_impl_details::kTopKDistributedSelectSortMinVocabSize);
+}
+
+}  // namespace distributed_select_sort
 }  // namespace cuda
 }  // namespace Generators

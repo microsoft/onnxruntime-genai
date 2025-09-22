@@ -177,8 +177,15 @@ endif()
 
 # Build all source files using CUDA as a separate shared library we dynamically load at runtime
 if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
-  # Suppress nvcc warning 1650 (result of call is not used) and deprecated GPU targets warning for cuda 12.8 or later.
-  add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress;1650;-Wno-deprecated-gpu-targets>")
+  # Suppress nvcc warnings:
+  # 1650 = "result of call is not used"
+  # 221  = "floating-point value does not fit in required floating-point type"
+  # Also suppress deprecated GPU targets warnings for CUDA 12.8+
+  add_compile_options(
+    $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=1650>
+    $<$<COMPILE_LANGUAGE:CUDA>:-diag-suppress=221>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Wno-deprecated-gpu-targets>
+  )
   
   add_library(onnxruntime-genai-cuda SHARED ${generator_cudalib_srcs})
   target_include_directories(onnxruntime-genai-cuda PRIVATE ${ORT_HEADER_DIR})

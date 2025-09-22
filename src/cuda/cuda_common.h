@@ -105,7 +105,7 @@ cuda_unique_ptr<T> CudaMallocArray(size_t count, std::span<T>* p_span = nullptr)
   return cuda_unique_ptr<T>{p};
 }
 
-inline int CeilDiv(int a, int b) { return (a + (b - 1)) / b; }
+#define CeilDiv(a, b) ((a + (b - 1)) / b)
 
 class CudaError : public std::runtime_error {
  public:

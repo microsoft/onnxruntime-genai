@@ -41,12 +41,17 @@ GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
   next_tokens_buffer_.Zero();
   next_tokens_ = gpu_span<int32_t>(next_tokens_buffer_.Span());
 
-  unsigned long long random_seed;
-  if (params_->search.random_seed != -1)
-    random_seed = params_->search.random_seed;
-  else
-    random_seed = std::random_device{}();
-  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params_->search.batch_size, params_->config.model.vocab_size, GetStream());
+  unsigned long long random_seed = (params_->search.random_seed != -1)
+                                       ? params_->search.random_seed
+                                       : std::random_device{}();
+
+  // Allocate a single buffer for all sampling data
+  size_t sampling_buffer_size = cuda::SamplingData::CalculateTotalSize(params.search.batch_size, params.config.model.vocab_size, GetStream());
+  sampling_buffer_ = params.p_device->Allocate<uint8_t>(sampling_buffer_size);
+
+  // Create SamplingData with the externally allocated buffer
+  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params.search.batch_size, params.config.model.vocab_size, GetStream(),
+                                                       sampling_buffer_.Span().data(), sampling_buffer_size);
 }
 
 BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
