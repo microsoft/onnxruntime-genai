@@ -103,7 +103,7 @@ void WebGPUUpdateMaskKernel<T>::InitializePipeline(wgpu::Device device) {
 
   // Create bind group layout for static shader: mask buffer (read_write) + constants buffer (uniform)
   wgpu::BindGroupLayoutEntry bind_group_layout_entries[2];
-  
+
   // mask buffer (read_write)
   bind_group_layout_entries[0].binding = 0;
   bind_group_layout_entries[0].visibility = wgpu::ShaderStage::Compute;
@@ -157,12 +157,11 @@ void WebGPUUpdateMaskKernel<T>::UpdateMask(
     int total_length,
     int max_length,
     bool update_only) {
-  
   // Only handle static mask updates (update_only = true)
   if (!update_only) {
     throw std::runtime_error("Dynamic mask handling not supported in WebGPU implementation");
   }
-  
+
   // Initialize the pipeline and cached resources
   InitializePipeline(device);
 

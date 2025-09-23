@@ -87,7 +87,7 @@ void WebGPUUpdatePositionIdsKernel<T>::InitializePipeline(wgpu::Device device) {
 
   // Create bind group layout: positions buffer (read_write) + constants buffer (uniform)
   wgpu::BindGroupLayoutEntry bind_group_layout_entries[2];
-  
+
   // positions buffer (read_write)
   bind_group_layout_entries[0].binding = 0;
   bind_group_layout_entries[0].visibility = wgpu::ShaderStage::Compute;
@@ -138,12 +138,11 @@ void WebGPUUpdatePositionIdsKernel<T>::UpdatePositionIds(
     int batch_beam_size,
     int total_length,
     int new_kv_length) {
-  
   // Only support batch_beam_size == 1 for graph capture (continuous decoding)
   if (batch_beam_size != 1) {
     throw std::runtime_error("WebGPU UpdatePositionIds only supports batch_beam_size == 1");
   }
-  
+
   // Initialize the pipeline and cached resources
   InitializePipeline(device);
 

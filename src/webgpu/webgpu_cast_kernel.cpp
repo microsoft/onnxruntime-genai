@@ -74,21 +74,21 @@ void CastKernel::CreateInt32ToInt64Pipeline() {
   // Create shader module
   wgpu::ShaderModuleWGSLDescriptor wgsl_desc{};
   wgsl_desc.code = kInt32ToInt64Shader;
-  
+
   wgpu::ShaderModuleDescriptor shader_desc{};
   shader_desc.nextInChain = &wgsl_desc;
   shader_desc.label = "Int32ToInt64 Cast Shader";
-  
+
   auto shader_module = device_.CreateShaderModule(&shader_desc);
-  
+
   // Create compute pipeline
   wgpu::ComputePipelineDescriptor pipeline_desc{};
   pipeline_desc.compute.module = shader_module;
   pipeline_desc.compute.entryPoint = "main";
   pipeline_desc.label = "Int32ToInt64 Cast Pipeline";
-  
+
   int32_to_int64_pipeline_ = device_.CreateComputePipeline(&pipeline_desc);
-  
+
   // Create constants buffer
   wgpu::BufferDescriptor constants_desc{};
   constants_desc.size = 16;  // Align to 16 bytes for uniform buffer
@@ -101,19 +101,19 @@ void CastKernel::CreateFloat16ToFloat32Pipeline() {
   // Create shader module
   wgpu::ShaderModuleWGSLDescriptor wgsl_desc{};
   wgsl_desc.code = kFloat16ToFloat32Shader;
-  
+
   wgpu::ShaderModuleDescriptor shader_desc{};
   shader_desc.nextInChain = &wgsl_desc;
   shader_desc.label = "Float16ToFloat32 Cast Shader";
-  
+
   auto shader_module = device_.CreateShaderModule(&shader_desc);
-  
+
   // Create compute pipeline
   wgpu::ComputePipelineDescriptor pipeline_desc{};
   pipeline_desc.compute.module = shader_module;
   pipeline_desc.compute.entryPoint = "main";
   pipeline_desc.label = "Float16ToFloat32 Cast Pipeline";
-  
+
   float16_to_float32_pipeline_ = device_.CreateComputePipeline(&pipeline_desc);
 }
 
@@ -121,81 +121,81 @@ bool CastKernel::CastInt32ToInt64(void* input_data, void* output_data, size_t el
   if (!initialized_) {
     return false;
   }
-  
+
   try {
     // Create non-owning buffer wrappers
     WGPUBuffer input_raw = reinterpret_cast<WGPUBuffer>(input_data);
     WGPUBuffer output_raw = reinterpret_cast<WGPUBuffer>(output_data);
     wgpu::Buffer input_buffer(input_raw);
     wgpu::Buffer output_buffer(output_raw);
-    
+
     // Update constants
     uint32_t constants_data = static_cast<uint32_t>(element_count);
     queue_.WriteBuffer(constants_buffer_, 0, &constants_data, sizeof(constants_data));
-    
+
     // Create or reuse cached bind group
     if (!int32_to_int64_bind_group_initialized_) {
       // Create bind group layout
       std::vector<wgpu::BindGroupLayoutEntry> entries(3);
-      
+
       // Input buffer (storage, read)
       entries[0].binding = 0;
       entries[0].visibility = wgpu::ShaderStage::Compute;
       entries[0].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-      
+
       // Output buffer (storage, read_write)
       entries[1].binding = 1;
       entries[1].visibility = wgpu::ShaderStage::Compute;
       entries[1].buffer.type = wgpu::BufferBindingType::Storage;
-      
+
       // Constants buffer (uniform)
       entries[2].binding = 2;
       entries[2].visibility = wgpu::ShaderStage::Compute;
       entries[2].buffer.type = wgpu::BufferBindingType::Uniform;
-      
+
       wgpu::BindGroupLayoutDescriptor layout_desc{};
       layout_desc.entryCount = entries.size();
       layout_desc.entries = entries.data();
       auto bind_group_layout = device_.CreateBindGroupLayout(&layout_desc);
-      
+
       // Create bind group
       std::vector<wgpu::BindGroupEntry> bind_entries(3);
-      
+
       bind_entries[0].binding = 0;
       bind_entries[0].buffer = input_buffer;
       bind_entries[0].size = wgpu::kWholeSize;
-      
+
       bind_entries[1].binding = 1;
       bind_entries[1].buffer = output_buffer;
       bind_entries[1].size = wgpu::kWholeSize;
-      
+
       bind_entries[2].binding = 2;
       bind_entries[2].buffer = constants_buffer_;
       bind_entries[2].size = sizeof(uint32_t);
-      
+
       wgpu::BindGroupDescriptor bind_group_desc{};
       bind_group_desc.layout = bind_group_layout;
       bind_group_desc.entryCount = bind_entries.size();
       bind_group_desc.entries = bind_entries.data();
       int32_to_int64_bind_group_ = device_.CreateBindGroup(&bind_group_desc);
-      
-     // int32_to_int64_bind_group_initialized_ = true;
+
+      // int32_to_int64_bind_group_initialized_ = true;
     }
-    
+
     // Dispatch compute
     auto encoder = device_.CreateCommandEncoder();
     auto compute_pass = encoder.BeginComputePass();
-    
+
     compute_pass.SetPipeline(int32_to_int64_pipeline_);
     compute_pass.SetBindGroup(0, int32_to_int64_bind_group_);
-    
+
     uint32_t workgroups = (static_cast<uint32_t>(element_count) + 255) / 256;
     compute_pass.DispatchWorkgroups(workgroups);
     compute_pass.End();
-    
+
     auto command_buffer = encoder.Finish();
     queue_.Submit(1, &command_buffer);
-    
+
     return true;
   } catch (const std::exception& e) {
     std::cerr << "CastKernel::CastInt32ToInt64 error: " << e.what() << std::endl;
@@ -207,81 +207,81 @@ bool CastKernel::CastFloat16ToFloat32(void* input_data, void* output_data, size_
   if (!initialized_) {
     return false;
   }
-  
+
   try {
     // Create non-owning buffer wrappers
     WGPUBuffer input_raw = reinterpret_cast<WGPUBuffer>(input_data);
     WGPUBuffer output_raw = reinterpret_cast<WGPUBuffer>(output_data);
     wgpu::Buffer input_buffer(input_raw);
     wgpu::Buffer output_buffer(output_raw);
-    
+
     // Update constants
     uint32_t constants_data = static_cast<uint32_t>(element_count);
     queue_.WriteBuffer(constants_buffer_, 0, &constants_data, sizeof(constants_data));
-    
+
     // Create or reuse cached bind group
     if (!float16_to_float32_bind_group_initialized_) {
       // Create bind group layout
       std::vector<wgpu::BindGroupLayoutEntry> entries(3);
-      
+
       // Input buffer (storage, read) - f16 data directly
       entries[0].binding = 0;
       entries[0].visibility = wgpu::ShaderStage::Compute;
       entries[0].buffer.type = wgpu::BufferBindingType::ReadOnlyStorage;
-      
+
       // Output buffer (storage, read_write) - f32 data
       entries[1].binding = 1;
       entries[1].visibility = wgpu::ShaderStage::Compute;
       entries[1].buffer.type = wgpu::BufferBindingType::Storage;
-      
+
       // Constants buffer (uniform)
       entries[2].binding = 2;
       entries[2].visibility = wgpu::ShaderStage::Compute;
       entries[2].buffer.type = wgpu::BufferBindingType::Uniform;
-      
+
       wgpu::BindGroupLayoutDescriptor layout_desc{};
       layout_desc.entryCount = entries.size();
       layout_desc.entries = entries.data();
       auto bind_group_layout = device_.CreateBindGroupLayout(&layout_desc);
-      
+
       // Create bind group
       std::vector<wgpu::BindGroupEntry> bind_entries(3);
-      
+
       bind_entries[0].binding = 0;
       bind_entries[0].buffer = input_buffer;
       bind_entries[0].size = wgpu::kWholeSize;
-      
+
       bind_entries[1].binding = 1;
       bind_entries[1].buffer = output_buffer;
       bind_entries[1].size = wgpu::kWholeSize;
-      
+
       bind_entries[2].binding = 2;
       bind_entries[2].buffer = constants_buffer_;
       bind_entries[2].size = sizeof(uint32_t);
-      
+
       wgpu::BindGroupDescriptor bind_group_desc{};
       bind_group_desc.layout = bind_group_layout;
       bind_group_desc.entryCount = bind_entries.size();
       bind_group_desc.entries = bind_entries.data();
       float16_to_float32_bind_group_ = device_.CreateBindGroup(&bind_group_desc);
-      
-    //  float16_to_float32_bind_group_initialized_ = true;
+
+      //  float16_to_float32_bind_group_initialized_ = true;
     }
-    
+
     // Dispatch compute
     auto encoder = device_.CreateCommandEncoder();
     auto compute_pass = encoder.BeginComputePass();
-    
+
     compute_pass.SetPipeline(float16_to_float32_pipeline_);
     compute_pass.SetBindGroup(0, float16_to_float32_bind_group_);
-    
+
     uint32_t workgroups = (static_cast<uint32_t>(element_count) + 255) / 256;
     compute_pass.DispatchWorkgroups(workgroups);
     compute_pass.End();
-    
+
     auto command_buffer = encoder.Finish();
     queue_.Submit(1, &command_buffer);
-    
+
     return true;
   } catch (const std::exception& e) {
     std::cerr << "CastKernel::CastFloat16ToFloat32 error: " << e.what() << std::endl;

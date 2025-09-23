@@ -588,9 +588,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
         // Use the new SetWebGPUProvider function for enhanced provider setup
         SetWebGPUProvider(session_options, webgpu_options);
-        continue; // Skip the generic AppendExecutionProvider below
-      }
-      else if (provider_options.name == "OpenVINO")
+        continue;  // Skip the generic AppendExecutionProvider below
+      } else if (provider_options.name == "OpenVINO")
         p_device = GetDeviceInterface(DeviceType::OpenVINO);
       else if (provider_options.name == "VitisAI") {
         session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");

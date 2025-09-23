@@ -225,13 +225,13 @@ struct InterfaceImpl : DeviceInterface {
       // Handle supported type conversions
       if (input_type == Ort::TypeToTensorType<int32_t> && output_type == Ort::TypeToTensorType<int64_t>) {
         return webgpu_cast_kernel_.CastInt32ToInt64(
-            input_data, 
-            output_data, 
+            input_data,
+            output_data,
             element_count);
       } else if (input_type == Ort::TypeToTensorType<Ort::Float16_t> && output_type == Ort::TypeToTensorType<float>) {
         return webgpu_cast_kernel_.CastFloat16ToFloat32(
-            input_data, 
-            output_data, 
+            input_data,
+            output_data,
             element_count);
       } else {
         // Unsupported type conversion, fall back to CPU
@@ -256,12 +256,12 @@ struct InterfaceImpl : DeviceInterface {
       if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
         webgpu_update_position_ids_kernel_int32_.UpdatePositionIds(
             device_, queue_,
-            static_cast<int32_t*>(position_ids), 
+            static_cast<int32_t*>(position_ids),
             batch_beam_size, total_length, new_kv_length);
       } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
         webgpu_update_position_ids_kernel_int64_.UpdatePositionIds(
             device_, queue_,
-            static_cast<int64_t*>(position_ids), 
+            static_cast<int64_t*>(position_ids),
             batch_beam_size, total_length, new_kv_length);
       } else {
         return false;  // Unsupported data type
@@ -415,8 +415,7 @@ struct InterfaceImpl : DeviceInterface {
     std::vector<const char*> enabledDeviceToggles = {
         "skip_validation",  // only use "skip_validation" when ValidationMode is set to "Disabled"
         "disable_robustness",
-        "d3d_disable_ieee_strictness"
-    };
+        "d3d_disable_ieee_strictness"};
 
     std::vector<const char*> disabledDeviceToggles = {
         "lazy_clear_resource_on_first_use",
