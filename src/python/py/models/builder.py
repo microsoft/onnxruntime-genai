@@ -4325,6 +4325,10 @@ def check_extra_options(kv_pairs):
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
         raise ValueError("Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
+    # force use_qdq for trt-rtx
+    if args.execution_provider == "trt-rtx":
+        kv_pairs["use_qdq"] = True
+
 
 def parse_extra_options(kv_items):
     """
@@ -4547,7 +4551,7 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "dml", "webgpu", "trt-rtx"],
+        choices=["cpu", "cuda", "dml", "webgpu", "trt-rtx", "NvTensorRtRtx"],
         help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU)",
     )
 
@@ -4635,4 +4639,10 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
     extra_options = parse_extra_options(args.extra_options)
-    create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
+
+    # Normalize execution provider name: both "NvTensorRtRtx" and "trt-rtx" should be treated as "trt-rtx" internally
+    execution_provider = args.execution_provider
+    if execution_provider.lower() == "nvtensorrtrtx":
+        execution_provider = "trt-rtx"
+
+    create_model(args.model_name, args.input, args.output, args.precision, execution_provider, args.cache_dir, **extra_options)
