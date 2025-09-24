@@ -72,6 +72,10 @@ DeviceSpan<float> IntermediatePipelineState::Run(int total_length, DeviceSpan<in
         OrtSession::Create(model_.ort_env_, (model_.config_->config_path / fs::path(model_.config_->model.decoder.pipeline[id_].filename)).c_str(),
                            model_.GetSessionOptions(model_.config_->model.decoder.pipeline[id_].model_id));
   }
+  
+  if (model_.config_->model.decoder.pipeline[id_].run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.pipeline[id_].run_options.value());
+  }
   State::Run(*model_.sessions_[id_]);
   return {};
 }

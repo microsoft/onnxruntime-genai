@@ -8,9 +8,9 @@ namespace Generators {
 WhisperModel::WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)} {
   // If provider options were explicitly added for the encoder, create session options from this config.
-  if (!config_->model.encoder.session_options.provider_options.empty()) {
+  if (config_->model.encoder.session_options.has_value() && !config_->model.encoder.session_options->provider_options.empty()) {
     encoder_session_options_ = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(config_->model.encoder.session_options, *encoder_session_options_, true, false);
+    CreateSessionOptionsFromConfig(config_->model.encoder.session_options.value(), *encoder_session_options_, true, false);
   }
 
   session_encoder_ = CreateSession(ort_env, config_->model.encoder.filename,
@@ -48,6 +48,9 @@ void AudioEncoderState::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
 }
 
 DeviceSpan<float> AudioEncoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  if (model_.config_->model.encoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.encoder.run_options.value());
+  }
   State::Run(*model_.session_encoder_);
   return {};
 }
@@ -104,6 +107,9 @@ DeviceSpan<float> WhisperDecoderState::Run(int current_length, DeviceSpan<int32_
     }
   }
 
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
   State::Run(*model_.session_decoder_);
   return logits_.Get();
 }

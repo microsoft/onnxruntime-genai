@@ -93,12 +93,27 @@ struct Config {
     std::optional<std::string> custom_ops_library;
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
     //                     Identify the reason for the crash to enable allocator sharing by default.
-    bool use_env_allocators{};
+    std::optional<bool> use_env_allocators;
     std::vector<NamedString> config_entries;  // Entries go into OrtSessionOptions::AddConfigEntry
 
     std::vector<ProviderOptions> provider_options;
     std::vector<std::string> providers;  // List of providers to use at runtime, not persisted in the json currently
     std::optional<GraphOptimizationLevel> graph_optimization_level;
+  };
+
+  struct RunOptions {
+    std::optional<std::string> gpu_graph_id;
+    std::optional<std::string> enable_memory_arena_shrinkage;
+    std::optional<std::string> disable_synchronize_execution_providers;
+
+    // QNN options
+    std::optional<std::string> qnn_htp_perf_mode;
+    std::optional<std::string> qnn_htp_perf_mode_post_run;
+    std::optional<std::string> qnn_rpc_control_latency;
+    std::optional<std::string> qnn_lora_config;
+
+    // TRT-RTX options
+    std::optional<std::string> nv_profile_index;
   };
 
   struct Model {
@@ -114,7 +129,8 @@ struct Config {
 
     struct Encoder {
       std::string filename;
-      SessionOptions session_options;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
 
       int hidden_size{};
       int num_attention_heads{};
@@ -139,6 +155,8 @@ struct Config {
 
     struct Embedding {
       std::string filename;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
 
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
@@ -153,6 +171,9 @@ struct Config {
 
     struct Vision {
       std::string filename;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
 
@@ -169,6 +190,9 @@ struct Config {
 
     struct Speech {
       std::string filename;
+      std::optional<SessionOptions> session_options;
+      std::optional<RunOptions> run_options;
+
       std::string config_filename{"audio_processor_config.json"};
       std::optional<std::string> adapter_filename{};
 
@@ -187,6 +211,7 @@ struct Config {
     struct Decoder {
       std::string filename;
       SessionOptions session_options;
+      std::optional<RunOptions> run_options;
 
       int hidden_size{};          // Not currently used, potentially useful for embeddings in the future
       int num_attention_heads{};  // Not currently used, potentially useful if num_key_value_heads isn't set
@@ -235,10 +260,11 @@ struct Config {
       } outputs;
 
       struct PipelineModel {
-        std::string model_id;
         std::string filename;
         std::optional<SessionOptions> session_options;
+        std::optional<RunOptions> run_options;
 
+        std::string model_id;
         std::vector<std::string> inputs;
         std::vector<std::string> outputs;
         std::unordered_map<std::string, std::string> output_names_forwarder;

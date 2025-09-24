@@ -130,6 +130,9 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
     output_names_.push_back(model_.config_->model.encoder.outputs.encoder_outputs.c_str());
     outputs_.push_back(encoder_outputs_.get());
 
+    if (model_.config_->model.encoder.run_options.has_value()) {
+      State::SetRunOptions(model_.config_->model.encoder.run_options.value());
+    }
     State::Run(*model_.session_encoder_);
 
     // Clear inputs and outputs for the decoder
@@ -185,6 +188,9 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
 
     logits_.Update(next_tokens.subspan(next_tokens.size() - 1, 1), 1);
 
+    if (model_.config_->model.decoder.run_options.has_value()) {
+      State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+    }
     State::Run(*model_.session_decoder_);
     first_run_ = false;
     return logits_.Get();
@@ -204,6 +210,9 @@ DeviceSpan<float> MarianState::Run(int current_length, DeviceSpan<int32_t>& next
   logits_.Update(next_tokens, 1);
 
   // Run the decoder
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
   State::Run(*model_.session_decoder_);
   return logits_.Get();
 }

@@ -264,6 +264,10 @@ struct PyGenerator {
     generator_->SetActiveAdapter(adapters, adapter_name.c_str());
   }
 
+  void SetRuntimeOption(const std::string& key, const std::string& value) {
+    generator_->SetRuntimeOption(key.c_str(), value.c_str());
+  }
+
  private:
   std::unique_ptr<OgaGenerator> generator_;
 };
@@ -442,7 +446,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("rewind_to", &PyGenerator::RewindTo)
       .def("get_next_tokens", &PyGenerator::GetNextTokens)
       .def("get_sequence", &PyGenerator::GetSequence)
-      .def("set_active_adapter", &PyGenerator::SetActiveAdapter);
+      .def("set_active_adapter", &PyGenerator::SetActiveAdapter)
+      .def("set_runtime_option", &PyGenerator::SetRuntimeOption);
 
   pybind11::class_<OgaImages>(m, "Images")
       .def_static("open", [](pybind11::args image_paths) {

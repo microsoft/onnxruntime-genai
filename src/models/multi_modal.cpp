@@ -110,6 +110,9 @@ void VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, co
 }
 
 DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  if (model_.config_->model.vision.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.vision.run_options.value());
+  }
   State::Run(*model_.vision_session_);
   return {};
 }
@@ -129,6 +132,9 @@ void SpeechState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, co
 }
 
 DeviceSpan<float> SpeechState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  if (model_.config_->model.speech.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.speech.run_options.value());
+  }
   State::Run(*model_.speech_session_);
   return {};
 }
@@ -165,6 +171,9 @@ void EmbeddingState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, bool 
 }
 
 DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  if (model_.config_->model.embedding.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.embedding.run_options.value());
+  }
   State::Run(*model_.embedding_session_);
   return {};
 }
@@ -180,6 +189,10 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
 }
 
 DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
+
   bool graph_capture_this_run = params_->use_graph_capture && inputs_embeds_.GetShape()[1] == 1;
   State::Run(*model_.decoder_session_, graph_capture_this_run);
   return logits_.Get();
