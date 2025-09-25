@@ -129,6 +129,11 @@ $ python3 builder.py --input ./pytorch --output ./cuda --precision fp16 --execut
 ```
 
 ```bash
+# Build INT4 components with BF16 inputs/outputs for CUDA
+$ python3 builder.py --input ./pytorch --output ./cuda --precision bf16 --execution_provider cuda
+```
+
+```bash
 # Build INT4 components with FP16 inputs/outputs for DirectML
 $ python3 builder.py --input ./pytorch --output ./dml --precision fp16 --execution_provider dml
 ```
