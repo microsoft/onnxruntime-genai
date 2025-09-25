@@ -17,12 +17,12 @@ Please ensure you have the following Python packages installed to create the ONN
 - `onnx`
 - `onnxruntime` and `onnxruntime-genai`
   - ONNX Runtime: Please install the latest nightly version. To ensure the right version is installed, please install ONNX Runtime GenAI first. Then you can uninstall the stable version of ONNX Runtime that gets auto-installed as a dependency.
-  - ONNX Runtime GenAI: Please install the latest stable release package.
+  - ONNX Runtime GenAI: Please install the latest nightly version.
 
     - For CPU:
     ```bash
-    # 1. Install ONNX Runtime GenAI wheel
-    pip install onnxruntime-genai
+    # 1. Install nightly version of ONNX Runtime GenAI
+    pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime-genai
 
     # 2. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
     pip uninstall -y onnxruntime
@@ -33,8 +33,8 @@ Please ensure you have the following Python packages installed to create the ONN
 
     - For CUDA:
     ```bash
-    # 1. Install ONNX Runtime GenAI wheel
-    pip install onnxruntime-genai-cuda
+    # 1. Install nightly version of ONNX Runtime GenAI
+    pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime-genai-cuda
 
     # 2. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
     pip uninstall -y onnxruntime-gpu
@@ -45,8 +45,8 @@ Please ensure you have the following Python packages installed to create the ONN
 
     - For DirectML:
     ```bash
-    # 1. Install ONNX Runtime GenAI wheel
-    pip install onnxruntime-genai-directml
+    # 1. Install nightly version of ONNX Runtime GenAI
+    pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime-genai-directml
 
     # 2. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
     pip uninstall -y onnxruntime-directml
@@ -146,13 +146,18 @@ Currently, both JSON files needed to run with ONNX Runtime GenAI are created by 
 
 [Here](https://github.com/microsoft/onnxruntime-genai/blob/main/examples/python/model-vision.py) is an example of how you can run your Gemma-3 vision model with ONNX Runtime GenAI.
 
+### CPU
+```bash
+$ python model-vision.py -m ./gemma3-vision-it/cpu -e cpu
+```
+
 ### CUDA
 ```bash
-$ python .\model-vision.py -m .\gemma3-vision-it\cuda -e cuda
+$ python model-vision.py -m ./gemma3-vision-it/cuda -e cuda
 ```
 
 ### DirectML
 
 ```bash
-$ python .\model-vision.py -m .\gemma3-vision-it\dml -e dml
+$ python model-vision.py -m ./gemma3-vision-it/dml -e dml
 ```
