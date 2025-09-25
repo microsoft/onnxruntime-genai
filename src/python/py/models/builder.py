@@ -4641,5 +4641,4 @@ if __name__ == '__main__':
     if args.execution_provider == "NvTensorRtRtx":
         args.execution_provider = "trt-rtx"
     extra_options = parse_extra_options(args.extra_options)
-
     create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
