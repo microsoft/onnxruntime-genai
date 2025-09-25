@@ -4551,7 +4551,7 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "dml", "webgpu", "trt-rtx", "NvTensorRtRtx"],
+        choices=["cpu", "cuda", "dml", "webgpu", "NvTensorRtRtx"],
         help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU)",
     )
 
@@ -4638,11 +4638,8 @@ def get_args():
 
 if __name__ == '__main__':
     args = get_args()
+    if args.execution_provider == "NvTensorRtRtx":
+        args.execution_provider = "trt-rtx"
     extra_options = parse_extra_options(args.extra_options)
 
-    # Normalize execution provider name: both "NvTensorRtRtx" and "trt-rtx" should be treated as "trt-rtx" internally
-    execution_provider = args.execution_provider
-    if execution_provider.lower() == "nvtensorrtrtx":
-        execution_provider = "trt-rtx"
-
-    create_model(args.model_name, args.input, args.output, args.precision, execution_provider, args.cache_dir, **extra_options)
+    create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
