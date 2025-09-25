@@ -271,7 +271,7 @@ struct Config {
     int no_repeat_ngram_size{};        // Unused param
     float diversity_penalty{};         // Unused param
     float length_penalty{1.0f};        // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
-    bool past_present_share_buffer{};  // The past/present kv tensors are shared and  allocated once to max_length (cuda only)
+    bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
   } search;
 

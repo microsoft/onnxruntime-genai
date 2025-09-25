@@ -17,8 +17,8 @@ namespace Generators {
  * This class handles the preparation of the following input and output tensors:
  * Inputs:
  * - Input IDs - int64[batch_size, sequence_length]
- * - Attention Mask - int32[batch_size, sequence_length]
- * - Position IDs - int32[batch_size, sequence_length]
+ * - Attention Mask - int64[batch_size, sequence_length]
+ * - Position IDs - int64[batch_size, sequence_length]
  * Outputs:
  * - Logits - float16/float32[batch_size, sequence_length, vocab_size]
  *

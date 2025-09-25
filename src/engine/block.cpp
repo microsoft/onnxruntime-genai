@@ -61,7 +61,9 @@ std::vector<std::shared_ptr<Block>> BlockPool::AllocateBlocks(size_t num_slots) 
   };
 
   if (BlocksNeeded(num_slots) > AvailableBlocks()) {
-    throw std::runtime_error("Not enough blocks available in the pool.");
+    throw std::runtime_error("Requested number of blocks " + std::to_string(BlocksNeeded(num_slots)) +
+                             " for number of slots " + std::to_string(num_slots) +
+                             " exceeds available blocks " + std::to_string(AvailableBlocks()) + ".");
   }
 
   std::vector<std::shared_ptr<Block>> allocated_blocks;

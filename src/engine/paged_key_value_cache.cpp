@@ -3,8 +3,6 @@
 
 #include "cache_manager.h"
 
-#include <iostream>
-
 namespace Generators {
 
 namespace {
