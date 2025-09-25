@@ -4325,9 +4325,6 @@ def check_extra_options(kv_pairs):
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
         raise ValueError("Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
-    # force use_qdq for trt-rtx
-    if args.execution_provider == "trt-rtx":
-        kv_pairs["use_qdq"] = True
 
 
 def parse_extra_options(kv_items):
@@ -4394,6 +4391,11 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
 
 @torch.no_grad
 def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
+
+    if execution_provider == "NvTensorRtRtx":
+        execution_provider = "trt-rtx"
+        extra_options["use_qdq"] = True
+
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
@@ -4638,7 +4640,5 @@ def get_args():
 
 if __name__ == '__main__':
     args = get_args()
-    if args.execution_provider == "NvTensorRtRtx":
-        args.execution_provider = "trt-rtx"
     extra_options = parse_extra_options(args.extra_options)
     create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
