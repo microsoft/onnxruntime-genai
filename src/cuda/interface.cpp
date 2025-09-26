@@ -172,6 +172,10 @@ struct CudaInterfaceImplBase : DeviceInterface {
   void LaunchAddLogitsMask(float* batch_logits, int batch_beam_size, int vocab_size, const uint32_t* logits_mask) override {
     cuda::LaunchAddLogitsMask(batch_logits, batch_beam_size, vocab_size, logits_mask, GetStream());
   }
+
+  void GetAvailableMemory(size_t& free_bytes, size_t& total_bytes) override {
+    cudaMemGetInfo(&free_bytes, &total_bytes);
+  }
 };
 
 struct CudaInterfaceImpl final : CudaInterfaceImplBase {

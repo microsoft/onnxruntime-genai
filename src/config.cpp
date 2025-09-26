@@ -313,6 +313,12 @@ struct DecoderInputs_Element : JSON::Element {
       v_.past_key_values_length = JSON::Get<std::string_view>(value);
     } else if (name == "cache_indirection") {
       v_.cache_indirection = JSON::Get<std::string_view>(value);
+    } else if (name == "cumulative_sequence_lengths") {
+      v_.cumulative_sequence_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "past_sequence_lengths") {
+      v_.past_sequence_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "block_table") {
+      v_.block_table = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -885,6 +891,67 @@ struct Search_Element : JSON::Element {
   Config::Search& v_;
 };
 
+struct DynamicBatching_Element : JSON::Element {
+  explicit DynamicBatching_Element(std::optional<Config::Engine::DynamicBatching>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (!v_)
+      v_ = Config::Engine::DynamicBatching{};
+
+    if (name == "block_size") {
+      v_->block_size = static_cast<size_t>(JSON::Get<double>(value));
+    } else if (name == "num_blocks") {
+      v_->num_blocks = static_cast<size_t>(JSON::Get<double>(value));
+    } else if (name == "gpu_utilization_factor") {
+      v_->gpu_utilization_factor = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "max_batch_size") {
+      v_->max_batch_size = static_cast<size_t>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  std::optional<Config::Engine::DynamicBatching>& v_;
+};
+
+struct StaticBatching_Element : JSON::Element {
+  explicit StaticBatching_Element(std::optional<Config::Engine::StaticBatching>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "max_batch_size") {
+      v_->max_batch_size = static_cast<size_t>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  std::optional<Config::Engine::StaticBatching>& v_;
+};
+
+struct Engine_Element : JSON::Element {
+  explicit Engine_Element(Config::Engine& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "dynamic_batching") {
+      if (v_.static_batching)
+        v_.static_batching.reset();
+      return dynamic_batching_;
+    } else if (name == "static_batching") {
+      if (v_.dynamic_batching)
+        v_.dynamic_batching.reset();
+      return static_batching_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Engine& v_;
+  DynamicBatching_Element dynamic_batching_{v_.dynamic_batching};
+  StaticBatching_Element static_batching_{v_.static_batching};
+};
+
 void SetSearchNumber(Config::Search& search, std::string_view name, double value) {
   try {
     Search_Element(search).OnValue(name, value);
@@ -1047,12 +1114,16 @@ struct Root_Element : JSON::Element {
     if (name == "search") {
       return search_element_;
     }
+    if (name == "engine") {
+      return engine_element_;
+    }
     throw JSON::unknown_value_error{};
   }
 
   Config& config_;
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
+  Engine_Element engine_element_{config_.engine};
 };
 
 struct RootObject_Element : JSON::Element {

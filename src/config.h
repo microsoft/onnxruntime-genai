@@ -276,6 +276,21 @@ struct Config {
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
   } search;
 
+  struct Engine {
+    struct DynamicBatching {
+      size_t block_size{256};                       // Total number of slots per block.
+      std::optional<size_t> num_blocks;             // Total number of blocks per layer.
+      std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
+      size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
+    };
+    std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
+
+    struct StaticBatching {
+      size_t max_batch_size{4};  // Maximum batch size for static batching
+    };
+    std::optional<StaticBatching> static_batching;  // Static batching settings
+  } engine;                                         // Engine settings
+
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping
   // otherwise returns the nominal name and false
