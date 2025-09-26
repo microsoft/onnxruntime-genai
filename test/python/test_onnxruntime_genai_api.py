@@ -563,7 +563,7 @@ def test_set_runtime_option(device, phi2_for):
     params.set_search_options(max_length=20, batch_size=len(prompts))  # To run faster
 
     generator = og.Generator(model, params)
-    generator.set_runtime_option("memory.enable_memory_arena_shrinkage", "cpu:0;gpu:0" if "cuda" in devices else "cpu:0")
+    generator.set_runtime_option("memory.enable_memory_arena_shrinkage", "cpu:0")
     generator.append_tokens(tokenizer.encode_batch(prompts))
     while not generator.is_done():
         generator.generate_next_token()
