@@ -552,6 +552,9 @@ def test_get_output(test_data_path, relative_model_path):
 )
 @pytest.mark.parametrize("device", devices)
 def test_set_runtime_option(device, phi2_for):
+    if device == "dml":
+        pytest.skip("DML EP does not support setting runtime options")
+
     model = og.Model(phi2_for(device))
     tokenizer = og.Tokenizer(model)
 
