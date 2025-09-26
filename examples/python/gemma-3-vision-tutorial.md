@@ -140,7 +140,7 @@ $ python3 builder.py --input ./pytorch --output ./dml --precision fp16 --executi
 
 ## 3. Build `genai_config.json` and `processor_config.json`
 
-Currently, both JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Gemma-3 vision model. [Here](https://huggingface.co/onnxruntime/Gemma-3-ONNX/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json` and [here](https://huggingface.co/onnxruntime/Gemma-3-ONNX/blob/main/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/processor_config.json) is an example for `processor_config.json`.
+Currently, both JSON files needed to run with ONNX Runtime GenAI are created by hand. Because the fields have been hand-crafted, it is recommended that you copy the already-uploaded JSON files and modify the fields as needed for your fine-tuned Gemma-3 vision model. [Here](https://huggingface.co/onnxruntime/Gemma-3-ONNX/blob/main/gemma-3-4b-it/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/genai_config.json) is an example for `genai_config.json` and [here](https://huggingface.co/onnxruntime/Gemma-3-ONNX/blob/main/gemma-3-4b-it/cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/processor_config.json) is an example for `processor_config.json`.
 
 ## 4. Run Gemma-3 vision ONNX models
 
