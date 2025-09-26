@@ -59,6 +59,13 @@ struct State {
 
   std::unique_ptr<OrtRunOptions> run_options_;
 
+  // Virtual methods for prefill chunking support
+  virtual bool IsChunkingSupported() const { return false; }
+  virtual DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
+                                             DeviceSpan<int32_t> next_indices, size_t chunk_size) {
+    return DeviceSpan<float>{};
+  }
+
  private:
   std::string graph_id_{};
   std::shared_ptr<Adapters> adapters_;

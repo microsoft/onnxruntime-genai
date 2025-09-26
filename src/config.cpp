@@ -869,6 +869,7 @@ struct Search_Element : JSON::Element {
     } else if (name == "random_seed") {
       v_.random_seed = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "chunk_size") {
+      // Optional: defaults to 0 (disabled) if not specified
       v_.chunk_size = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "do_sample") {
       v_.do_sample = JSON::Get<bool>(value);

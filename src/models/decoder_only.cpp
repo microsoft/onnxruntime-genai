@@ -31,36 +31,10 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
   size_t num_tokens = next_tokens.size();
   const size_t chunk_size = static_cast<size_t>(model_.config_->search.chunk_size);
   
-  // Enable prefill chunking for CUDA and NvTensorRtRtx devices
-  bool is_chunking_supported_device = (model_.p_device_->GetType() == DeviceType::CUDA ||
-                                       model_.p_device_->GetType() == DeviceType::NvTensorRtRtx);
-
-  if (is_chunking_supported_device && chunk_size > 0 && num_tokens > chunk_size) {
-    // Chunking logic for context phase - process in chunks based on configured chunk_size
-    size_t processed_tokens = 0;
-    int length = total_length - static_cast<int>(num_tokens);
-    while (processed_tokens < num_tokens) {
-      size_t current_chunk_size = std::min(chunk_size, num_tokens - processed_tokens);
-      
-      // Create subspans for current chunk
-      auto chunk_tokens = next_tokens.subspan(processed_tokens, current_chunk_size);
-      //auto chunk_indices = next_indices.subspan(processed_tokens, current_chunk_size);
-      length = length + static_cast<int>(current_chunk_size);
-      // Process this chunk - fills KV cache progressively
-      UpdateInputsOutputs(chunk_tokens, next_indices, length);
-      
-      // Graph capture is typically disabled during context phase chunking
-      bool graph_capture_this_run = false; // Disable graph capture during chunking
-      State::Run(*model_.session_decoder_, graph_capture_this_run);
-      
-      processed_tokens += current_chunk_size;
-    }
-    
-    // Return logits from the last chunk for potential sampling
-    return logits_.Get();
+  if (IsChunkingSupported() && chunk_size > 0 && num_tokens > chunk_size) {
+    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size);
   } else {
-    // Original logic for tokens <= chunk_size (generation phase or small context) 
-    // or chunking disabled due to unsupported device
+
     UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
     // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
@@ -69,6 +43,34 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
 
     return logits_.Get();
   }
+}
+
+DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
+    DeviceSpan<int32_t> next_indices, size_t chunk_size) {
+    // Chunking logic for context phase - process in chunks based on configured chunk_size
+    size_t num_tokens = next_tokens.size();
+    size_t processed_tokens = 0;
+    int length = total_length - static_cast<int>(num_tokens);
+
+    while (processed_tokens < num_tokens) {
+        size_t current_chunk_size = std::min(chunk_size, num_tokens - processed_tokens);
+
+        // Create subspans for current chunk
+        auto chunk_tokens = next_tokens.subspan(processed_tokens, current_chunk_size);
+        length = length + static_cast<int>(current_chunk_size);
+
+        // Process this chunk - fills KV cache progressively
+        UpdateInputsOutputs(chunk_tokens, next_indices, length);
+
+        // Graph capture is typically disabled during context phase chunking
+        bool graph_capture_this_run = false; // Disable graph capture during chunking
+        State::Run(*model_.session_decoder_, graph_capture_this_run);
+
+        processed_tokens += current_chunk_size;
+    }
+
+    // Return logits from the last chunk for potential sampling
+    return logits_.Get();
 }
 
 void DecoderOnly_State::RewindTo(size_t index) {
@@ -82,6 +84,12 @@ void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, De
   position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
   kv_cache_->Update(beam_indices, total_length);
   logits_.Update(next_tokens, new_length);
+}
+
+bool DecoderOnly_State::IsChunkingSupported() const {
+  // Enable prefill chunking for CUDA and NvTensorRtRtx devices
+  return (model_.p_device_->GetType() == DeviceType::CUDA ||
+          model_.p_device_->GetType() == DeviceType::NvTensorRtRtx);
 }
 
 }  // namespace Generators
