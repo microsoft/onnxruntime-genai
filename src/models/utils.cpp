@@ -85,6 +85,13 @@ float BFloat16ToFloat32(uint16_t v) {
   return TFloatToFloat32<8, 7>(v);
 }
 
+// Get most significant 16 bits
+uint16_t Float32ToBFloat16(float v) {
+  uint32_t bits;
+  std::memcpy(&bits, &v, sizeof(bits));
+  return static_cast<uint16_t>(bits >> 16);
+}
+
 // C++17 compatible version of bit_cast for the code below
 template <typename TTo, typename TFrom>
 TTo bit_cast(TFrom x) {

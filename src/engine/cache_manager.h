@@ -5,6 +5,7 @@
 
 #include "request.h"
 #include "../models/kv_cache.h"
+#include "paged_key_value_cache.h"
 
 namespace Generators {
 
@@ -20,6 +21,8 @@ struct KeyValueCacheState : State {
 
 struct CacheManager {
   CacheManager(std::shared_ptr<Model> model) : model_{model} {}
+
+  static std::unique_ptr<CacheManager> Create(std::shared_ptr<Model> model);
 
   virtual bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const = 0;
 
@@ -41,8 +44,6 @@ struct CacheManager {
   std::shared_ptr<Model> model_;
   std::unique_ptr<KeyValueCacheState> key_value_cache_state_;
 };
-
-std::unique_ptr<CacheManager> CreateCacheManager(std::shared_ptr<Model> model);
 
 struct StaticCacheManager : CacheManager {
   StaticCacheManager(std::shared_ptr<Model> model);
@@ -66,7 +67,7 @@ struct StaticCacheManager : CacheManager {
 };
 
 struct PagedCacheManager : CacheManager {
-  PagedCacheManager(std::shared_ptr<Model> model) : CacheManager(model) {}
+  PagedCacheManager(std::shared_ptr<Model> model);
 
   bool CanAllocate(const std::vector<std::shared_ptr<Request>>& requests) const override;
 
@@ -79,6 +80,11 @@ struct PagedCacheManager : CacheManager {
   bool SupportsDynamicBatching() const override;
 
   std::vector<std::shared_ptr<Request>> AllocatedRequests() const override;
+
+ private:
+  std::shared_ptr<GeneratorParams> params_;
+  std::unique_ptr<PagedKeyValueCache> key_value_cache_;
+  std::vector<std::shared_ptr<Request>> cache_allocated_requests_;
 };
 
 }  // namespace Generators
