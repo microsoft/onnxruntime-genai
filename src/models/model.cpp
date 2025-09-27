@@ -110,10 +110,11 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
-    if (graph_capture_this_run)
+    if (graph_capture_this_run) {
       run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
-    else
+    } else {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
+    }
   }
 
   if (first_run_) {
@@ -155,14 +156,47 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   DumpOutputs();
 }
 
-void State::SetTerminate() {
-  session_terminated_ = true;
-  run_options_->SetTerminate();
+void State::SetRunOption(const char* key, const char* value) {
+  if (strcmp(key, "terminate_session") == 0) {
+    if (strcmp(value, "0") == 0) {
+      session_terminated_ = false;
+      run_options_->UnsetTerminate();
+    } else if (strcmp(value, "1") == 0) {
+      session_terminated_ = true;
+      run_options_->SetTerminate();
+    } else {
+      // Value not expected
+      throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
+    }
+  }
+  run_options_->AddConfigEntry(key, value);
 }
 
-void State::UnsetTerminate() {
-  session_terminated_ = false;
-  run_options_->UnsetTerminate();
+void State::SetRunOptions(const Config::RunOptions& config_run_options) {
+  if (config_run_options.gpu_graph_id.has_value()) {
+    run_options_->AddConfigEntry("gpu_graph_id", config_run_options.gpu_graph_id.value().c_str());
+  }
+  if (config_run_options.enable_memory_arena_shrinkage.has_value()) {
+    run_options_->AddConfigEntry("memory.enable_memory_arena_shrinkage", config_run_options.enable_memory_arena_shrinkage.value().c_str());
+  }
+  if (config_run_options.disable_synchronize_execution_providers.has_value()) {
+    run_options_->AddConfigEntry("disable_synchronize_execution_providers", config_run_options.disable_synchronize_execution_providers.value().c_str());
+  }
+  if (config_run_options.qnn_htp_perf_mode.has_value()) {
+    run_options_->AddConfigEntry("qnn.htp_perf_mode", config_run_options.qnn_htp_perf_mode.value().c_str());
+  }
+  if (config_run_options.qnn_htp_perf_mode_post_run.has_value()) {
+    run_options_->AddConfigEntry("qnn.htp_perf_mode_post_run", config_run_options.qnn_htp_perf_mode_post_run.value().c_str());
+  }
+  if (config_run_options.qnn_rpc_control_latency.has_value()) {
+    run_options_->AddConfigEntry("qnn.rpc_control_latency", config_run_options.qnn_rpc_control_latency.value().c_str());
+  }
+  if (config_run_options.qnn_lora_config.has_value()) {
+    run_options_->AddConfigEntry("qnn.lora_config", config_run_options.qnn_lora_config.value().c_str());
+  }
+  if (config_run_options.nv_profile_index.has_value()) {
+    run_options_->AddConfigEntry("nv_profile_index", config_run_options.nv_profile_index.value().c_str());
+  }
 }
 
 OrtValue* State::GetInput(const char* name) {
@@ -351,7 +385,7 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
  * If multi-profile is disabled, it creates a single profile with simple shapes.
  *
  */
-void ConfigureNvTensorRtRTxProfile(const Config& config, OrtSessionOptions& session_options, bool is_multi_profile_enabled) {
+void ConfigureNvTensorRtRtxProfile(const Config& config, OrtSessionOptions& session_options, bool is_multi_profile_enabled) {
   // Get model parameters from decoder config
   const int num_layers = config.model.decoder.num_hidden_layers;
   const int num_kv_heads = config.model.decoder.num_key_value_heads;
@@ -586,7 +620,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
       } else if (provider_options.name == "NvTensorRtRtx") {
         bool is_multi_profile_enabled = IsMultiProfileEnabled(config.model.decoder.session_options);
-        ConfigureNvTensorRtRTxProfile(config, session_options, is_multi_profile_enabled);
+        ConfigureNvTensorRtRtxProfile(config, session_options, is_multi_profile_enabled);
         if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
           session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.enable_cuda_graph", "1");
         }
@@ -975,7 +1009,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetEpContextFilePath(config_session_options.ep_context_file_path.value().c_str());
   }
 
-  if (config_session_options.provider_options.empty() && config_session_options.use_env_allocators) {
+  if (config_session_options.provider_options.empty() && config_session_options.use_env_allocators.has_value()) {
     // Share env allocators across sessions that only use the CPU provider
     session_options.AddConfigEntry("session.use_env_allocators", "1");
   }
