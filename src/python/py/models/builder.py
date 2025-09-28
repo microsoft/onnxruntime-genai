@@ -15,6 +15,7 @@ import ast
 import json
 import os
 import textwrap
+import warnings
 from typing import Any, Literal, Sequence
 
 import numpy as np
@@ -75,6 +76,17 @@ class Model:
 
         # EP-specific variables
         self.ep = ep
+
+        # Validate enable_webgpu_graph option
+        if extra_options.get("enable_webgpu_graph", False) and self.ep != "webgpu":
+            warnings.warn(
+                f"enable_webgpu_graph is only supported with WebGPU execution provider, "
+                f"but current EP is '{self.ep}'. Disabling enable_webgpu_graph.",
+                UserWarning,
+                stacklevel=2
+            )
+            extra_options["enable_webgpu_graph"] = False
+
         self.ep_attrs = {
             "cpu": {},
             "cuda": {
@@ -2885,7 +2897,7 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
-        if self.extra_options.get("enable_cuda_graph", False) or self.ep == "dml":
+        if self.extra_options.get("enable_cuda_graph", False) or self.extra_options.get("enable_webgpu_graph", False) or self.ep == "dml":
             # ORT does not allow nodes to be placed on mulitple execution providers
             # with cuda graph enabled. We've only verified it works with GQA and with
             # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded
@@ -3388,18 +3400,25 @@ class LlamaModel(Model):
 class MistralModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        position_ids_result = self.make_position_ids_reformatting()
-        # For WebGPU graph mode, position_ids_result is already "position_ids", so don't append /output_0
-        if not self.attention_attrs["use_rope_in_attn"]:
+
+        # Only call make_position_ids_reformatting if position_ids is available as an input
+        if "position_ids" in self.input_names:
+            position_ids_result = self.make_position_ids_reformatting()
+            # For WebGPU graph mode, position_ids_result is already "position_ids", so don't append /output_0
             if position_ids_result == "position_ids":
                 self.position_ids_name = "position_ids"
             else:
                 self.position_ids_name = f"{position_ids_result}/output_0"
         else:
-            self.position_ids_name = "position_ids"
+            # When position_ids is not an input (use_rope_in_attn is True),
+            # position_ids won't be used since rotary embeddings are handled in GQA
+            self.position_ids_name = None
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
-        super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
+        if self.position_ids_name is not None:
+            super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
+        else:
+            super().make_attention(layer_id, attention, root_input, **kwargs)
 
 
 class QwenModel(MistralModel):
