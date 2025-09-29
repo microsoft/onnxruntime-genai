@@ -44,7 +44,7 @@ struct SortBenchmarkResults {
   SortBenchmarkResults() : latencies(static_cast<int>(SortAlgo::COUNT)) {}
 
   // Gets the latency for a given algo and sort size using the nearest benchmarked point.
-  float GetLatency(SortAlgo algo, int sort_size) const{
+  float GetLatency(SortAlgo algo, int sort_size) const {
     if (sort_sizes.empty() || algo >= SortAlgo::COUNT) {
       return std::numeric_limits<float>::max();
     }
@@ -90,8 +90,6 @@ void CacheSortBenchmark(SortBenchmarkResults& results) {
   results.latencies[static_cast<int>(SortAlgo::CUB_BLOCK_MERGE)] = {-1.f, 4.077f, 4.098f, 4.183f, 4.937f, 6.363f, 9.606f, 19.547f, 48.835f};
   results.latencies[static_cast<int>(SortAlgo::CUB_BLOCK_RADIX)] = {-1.f, 5.445f, 5.430f, 5.452f, 5.697f, 6.649f, 9.391f, 14.504f, 30.836f};
 }
-
-
 
 class SortBenchmarkCacheManager {
  public:

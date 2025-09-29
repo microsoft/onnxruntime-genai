@@ -240,32 +240,43 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   const int num_partitions = CeilDiv(vocab_size, partition_size);
 
   int k_padded;
-  if (k <= 4) k_padded = 4;
-  else if (k <= 8) k_padded = 8;
-  else if (k <= 16) k_padded = 16;
-  else if (k <= 32) k_padded = 32;
-  else if (k <= 64) k_padded = 64;
-  else if (k <= 128) k_padded = 128;
-  else k_padded = 256;
+  if (k <= 4)
+    k_padded = 4;
+  else if (k <= 8)
+    k_padded = 8;
+  else if (k <= 16)
+    k_padded = 16;
+  else if (k <= 32)
+    k_padded = 32;
+  else if (k <= 64)
+    k_padded = 64;
+  else if (k <= 128)
+    k_padded = 128;
+  else
+    k_padded = 256;
 
   const auto factors = GetReductionFactors(num_partitions);
 
   auto launch = [&](auto k_padded_const) {
     constexpr int K_PADDED = k_padded_const.value;
     constexpr int kBlockSize = GetOptimalBlockSize<K_PADDED>();
-    constexpr bool kUseMergeSortS1 = false; // Radix is generally better for large partitions
+    constexpr bool kUseMergeSortS1 = false;  // Radix is generally better for large partitions
 
     // --- Stage 1 Launch ---
     dim3 grid_stage1(num_partitions, batch_size);
     dim3 block_stage1(256);
-#define LAUNCH_STAGE1_KERNEL(P_SIZE) \
-    Stage1_FindPartitionsTopK<256, P_SIZE, K_PADDED, kUseMergeSortS1><<<grid_stage1, block_stage1, 0, stream>>>( \
-        scores_in, data->intermediate_indices_1, data->intermediate_scores_1, vocab_size, num_partitions)
+#define LAUNCH_STAGE1_KERNEL(P_SIZE)                                                                           \
+  Stage1_FindPartitionsTopK<256, P_SIZE, K_PADDED, kUseMergeSortS1><<<grid_stage1, block_stage1, 0, stream>>>( \
+      scores_in, data->intermediate_indices_1, data->intermediate_scores_1, vocab_size, num_partitions)
 
-    if (partition_size == kCandidatePartitionSizes[0]) LAUNCH_STAGE1_KERNEL(kCandidatePartitionSizes[0]);
-    else if (partition_size == kCandidatePartitionSizes[1]) LAUNCH_STAGE1_KERNEL(kCandidatePartitionSizes[1]);
-    else if (partition_size == kCandidatePartitionSizes[2]) LAUNCH_STAGE1_KERNEL(kCandidatePartitionSizes[2]);
-    else LAUNCH_STAGE1_KERNEL(kCandidatePartitionSizes[3]);
+    if (partition_size == kCandidatePartitionSizes[0])
+      LAUNCH_STAGE1_KERNEL(kCandidatePartitionSizes[0]);
+    else if (partition_size == kCandidatePartitionSizes[1])
+      LAUNCH_STAGE1_KERNEL(kCandidatePartitionSizes[1]);
+    else if (partition_size == kCandidatePartitionSizes[2])
+      LAUNCH_STAGE1_KERNEL(kCandidatePartitionSizes[2]);
+    else
+      LAUNCH_STAGE1_KERNEL(kCandidatePartitionSizes[3]);
     CUDA_CHECK_LAUNCH();
 #undef LAUNCH_STAGE1_KERNEL
 
@@ -283,31 +294,46 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
       kernel_args[3] = (void*)&data->intermediate_scores_2;
       kernel_args[4] = (void*)&num_partitions;
 
-#define LAUNCH_STAGE2_KERNEL(F1, F2, F3) \
-    CUDA_CHECK(cudaLaunchCooperativeKernel((void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, F1, F2, F3>, \
-        grid_stage2, block_stage2, kernel_args, 0, stream))
+#define LAUNCH_STAGE2_KERNEL(F1, F2, F3)                                                                    \
+  CUDA_CHECK(cudaLaunchCooperativeKernel((void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, F1, F2, F3>, \
+                                         grid_stage2, block_stage2, kernel_args, 0, stream))
 
-      if (factors.factor1 == 8 && factors.factor2 == 8 && factors.factor3 == 4) LAUNCH_STAGE2_KERNEL(8, 8, 4);
-      else if (factors.factor1 == 8 && factors.factor2 == 8 && factors.factor3 == 2) LAUNCH_STAGE2_KERNEL(8, 8, 2);
-      else if (factors.factor1 == 8 && factors.factor2 == 8) LAUNCH_STAGE2_KERNEL(8, 8, 1);
-      else if (factors.factor1 == 8 && factors.factor2 == 4) LAUNCH_STAGE2_KERNEL(8, 4, 1);
-      else if (factors.factor1 == 8) LAUNCH_STAGE2_KERNEL(8, 1, 1);
-      else if (factors.factor1 == 16) LAUNCH_STAGE2_KERNEL(16, 1, 1);
-      else if (factors.factor1 == 4) LAUNCH_STAGE2_KERNEL(4, 1, 1);
-      else LAUNCH_STAGE2_KERNEL(1, 1, 1);
+      if (factors.factor1 == 8 && factors.factor2 == 8 && factors.factor3 == 4)
+        LAUNCH_STAGE2_KERNEL(8, 8, 4);
+      else if (factors.factor1 == 8 && factors.factor2 == 8 && factors.factor3 == 2)
+        LAUNCH_STAGE2_KERNEL(8, 8, 2);
+      else if (factors.factor1 == 8 && factors.factor2 == 8)
+        LAUNCH_STAGE2_KERNEL(8, 8, 1);
+      else if (factors.factor1 == 8 && factors.factor2 == 4)
+        LAUNCH_STAGE2_KERNEL(8, 4, 1);
+      else if (factors.factor1 == 8)
+        LAUNCH_STAGE2_KERNEL(8, 1, 1);
+      else if (factors.factor1 == 16)
+        LAUNCH_STAGE2_KERNEL(16, 1, 1);
+      else if (factors.factor1 == 4)
+        LAUNCH_STAGE2_KERNEL(4, 1, 1);
+      else
+        LAUNCH_STAGE2_KERNEL(1, 1, 1);
       CUDA_CHECK_LAUNCH();
 #undef LAUNCH_STAGE2_KERNEL
     }
   };
 
   // Dispatch based on k_padded
-  if (k_padded == 4) launch(std::integral_constant<int, 4>());
-  else if (k_padded == 8) launch(std::integral_constant<int, 8>());
-  else if (k_padded == 16) launch(std::integral_constant<int, 16>());
-  else if (k_padded == 32) launch(std::integral_constant<int, 32>());
-  else if (k_padded == 64) launch(std::integral_constant<int, 64>());
-  else if (k_padded == 128) launch(std::integral_constant<int, 128>());
-  else launch(std::integral_constant<int, 256>());
+  if (k_padded == 4)
+    launch(std::integral_constant<int, 4>());
+  else if (k_padded == 8)
+    launch(std::integral_constant<int, 8>());
+  else if (k_padded == 16)
+    launch(std::integral_constant<int, 16>());
+  else if (k_padded == 32)
+    launch(std::integral_constant<int, 32>());
+  else if (k_padded == 64)
+    launch(std::integral_constant<int, 64>());
+  else if (k_padded == 128)
+    launch(std::integral_constant<int, 128>());
+  else
+    launch(std::integral_constant<int, 256>());
 
   // Determine final output pointers
   if (factors.num_reduction_steps == 1 || factors.num_reduction_steps == 3) {
@@ -321,24 +347,32 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 }
 
 // Check if the cooperative kernel can be launched with the required grid size.
-template<int K_PADDED>
+template <int K_PADDED>
 bool CheckSupportCooperative(int batch_size, int num_partitions) {
-    const auto factors = GetReductionFactors(num_partitions);
-    constexpr int kBlockSize = GetOptimalBlockSize<K_PADDED>();
-    int grid_x = CeilDiv(num_partitions, factors.factor1);
-    int total_blocks = grid_x * batch_size;
+  const auto factors = GetReductionFactors(num_partitions);
+  constexpr int kBlockSize = GetOptimalBlockSize<K_PADDED>();
+  int grid_x = CeilDiv(num_partitions, factors.factor1);
+  int total_blocks = grid_x * batch_size;
 
-    void* kernel = nullptr;
-    if (factors.factor1 == 8 && factors.factor2 == 8 && factors.factor3 == 4) kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 8, 8, 4>;
-    else if (factors.factor1 == 8 && factors.factor2 == 8 && factors.factor3 == 2) kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 8, 8, 2>;
-    else if (factors.factor1 == 8 && factors.factor2 == 8) kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 8, 8, 1>;
-    else if (factors.factor1 == 8 && factors.factor2 == 4) kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 8, 4, 1>;
-    else if (factors.factor1 == 8) kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 8, 1, 1>;
-    else if (factors.factor1 == 16) kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 16, 1, 1>;
-    else if (factors.factor1 == 4) kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 4, 1, 1>;
-    else kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 1, 1, 1>;
+  void* kernel = nullptr;
+  if (factors.factor1 == 8 && factors.factor2 == 8 && factors.factor3 == 4)
+    kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 8, 8, 4>;
+  else if (factors.factor1 == 8 && factors.factor2 == 8 && factors.factor3 == 2)
+    kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 8, 8, 2>;
+  else if (factors.factor1 == 8 && factors.factor2 == 8)
+    kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 8, 8, 1>;
+  else if (factors.factor1 == 8 && factors.factor2 == 4)
+    kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 8, 4, 1>;
+  else if (factors.factor1 == 8)
+    kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 8, 1, 1>;
+  else if (factors.factor1 == 16)
+    kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 16, 1, 1>;
+  else if (factors.factor1 == 4)
+    kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 4, 1, 1>;
+  else
+    kernel = (void*)Stage2_CooperativeReduce<K_PADDED, kBlockSize, 1, 1, 1>;
 
-    return topk_common::IsSupportedCooperative(kernel, total_blocks, kBlockSize);
+  return topk_common::IsSupportedCooperative(kernel, total_blocks, kBlockSize);
 }
 
 bool IsSupported(int batch_size, int vocab_size, int k) {
@@ -348,13 +382,20 @@ bool IsSupported(int batch_size, int vocab_size, int k) {
   if (num_partitions > kMaxPartitions) return false;
 
   int k_padded;
-  if (k <= 4) k_padded = 4;
-  else if (k <= 8) k_padded = 8;
-  else if (k <= 16) k_padded = 16;
-  else if (k <= 32) k_padded = 32;
-  else if (k <= 64) k_padded = 64;
-  else if (k <= 128) k_padded = 128;
-  else k_padded = 256;
+  if (k <= 4)
+    k_padded = 4;
+  else if (k <= 8)
+    k_padded = 8;
+  else if (k <= 16)
+    k_padded = 16;
+  else if (k <= 32)
+    k_padded = 32;
+  else if (k <= 64)
+    k_padded = 64;
+  else if (k <= 128)
+    k_padded = 128;
+  else
+    k_padded = 256;
 
   if (k_padded == 4) return CheckSupportCooperative<4>(batch_size, num_partitions);
   if (k_padded == 8) return CheckSupportCooperative<8>(batch_size, num_partitions);
@@ -370,4 +411,3 @@ bool IsSupported(int batch_size, int vocab_size, int k) {
 }  // namespace hybrid_sort
 }  // namespace cuda
 }  // namespace Generators
-

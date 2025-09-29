@@ -325,10 +325,10 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
   const auto factors = GetReductionFactors(num_partitions);
   const int num_reduction_steps = factors.num_reduction_steps;
 
-  if (num_reduction_steps == 1) { // After 1 step, results are in buffer 2
+  if (num_reduction_steps == 1) {  // After 1 step, results are in buffer 2
     data->topk_scores = data->intermediate_scores_2;
     data->topk_indices = data->intermediate_indices_2;
-  } else { // After 0 or 2 steps, results are in buffer 1
+  } else {  // After 0 or 2 steps, results are in buffer 1
     data->topk_scores = data->intermediate_scores_1;
     data->topk_indices = data->intermediate_indices_1;
   }
@@ -431,4 +431,3 @@ bool IsSupported(int batch_size, int vocab_size, int k) {
 }  // namespace cascaded_sort
 }  // namespace cuda
 }  // namespace Generators
-

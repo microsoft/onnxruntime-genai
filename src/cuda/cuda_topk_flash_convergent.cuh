@@ -231,10 +231,14 @@ void LaunchKernel(TopkData* data, cudaStream_t stream, const float* scores_in, i
 
 template <int K_PADDED>
 void LaunchKernelByPartitionSize(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k, int partition_size) {
-  if (partition_size == kPartitionSizes[0]) LaunchKernel<kPartitionSizes[0], K_PADDED>(data, stream, scores_in, vocab_size, batch_size, k);
-  else if (partition_size == kPartitionSizes[1]) LaunchKernel<kPartitionSizes[1], K_PADDED>(data, stream, scores_in, vocab_size, batch_size, k);
-  else if (partition_size == kPartitionSizes[2]) LaunchKernel<kPartitionSizes[2], K_PADDED>(data, stream, scores_in, vocab_size, batch_size, k);
-  else LaunchKernel<kPartitionSizes[3], K_PADDED>(data, stream, scores_in, vocab_size, batch_size, k);
+  if (partition_size == kPartitionSizes[0])
+    LaunchKernel<kPartitionSizes[0], K_PADDED>(data, stream, scores_in, vocab_size, batch_size, k);
+  else if (partition_size == kPartitionSizes[1])
+    LaunchKernel<kPartitionSizes[1], K_PADDED>(data, stream, scores_in, vocab_size, batch_size, k);
+  else if (partition_size == kPartitionSizes[2])
+    LaunchKernel<kPartitionSizes[2], K_PADDED>(data, stream, scores_in, vocab_size, batch_size, k);
+  else
+    LaunchKernel<kPartitionSizes[3], K_PADDED>(data, stream, scores_in, vocab_size, batch_size, k);
 }
 
 void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vocab_size, int batch_size, int k) {
@@ -244,12 +248,18 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
     data->flash_convergent_partition_size = EstimateBestPartitionSize(vocab_size, k);
   }
   const int partition_size = data->flash_convergent_partition_size;
-  if (k <= 4) LaunchKernelByPartitionSize<4>(data, stream, scores_in, vocab_size, batch_size, k, partition_size);
-  else if (k <= 8) LaunchKernelByPartitionSize<8>(data, stream, scores_in, vocab_size, batch_size, k, partition_size);
-  else if (k <= 16) LaunchKernelByPartitionSize<16>(data, stream, scores_in, vocab_size, batch_size, k, partition_size);
-  else if (k <= 32) LaunchKernelByPartitionSize<32>(data, stream, scores_in, vocab_size, batch_size, k, partition_size);
-  else if (k <= 52) LaunchKernelByPartitionSize<52>(data, stream, scores_in, vocab_size, batch_size, k, partition_size);
-  else LaunchKernelByPartitionSize<64>(data, stream, scores_in, vocab_size, batch_size, k, partition_size);
+  if (k <= 4)
+    LaunchKernelByPartitionSize<4>(data, stream, scores_in, vocab_size, batch_size, k, partition_size);
+  else if (k <= 8)
+    LaunchKernelByPartitionSize<8>(data, stream, scores_in, vocab_size, batch_size, k, partition_size);
+  else if (k <= 16)
+    LaunchKernelByPartitionSize<16>(data, stream, scores_in, vocab_size, batch_size, k, partition_size);
+  else if (k <= 32)
+    LaunchKernelByPartitionSize<32>(data, stream, scores_in, vocab_size, batch_size, k, partition_size);
+  else if (k <= 52)
+    LaunchKernelByPartitionSize<52>(data, stream, scores_in, vocab_size, batch_size, k, partition_size);
+  else
+    LaunchKernelByPartitionSize<64>(data, stream, scores_in, vocab_size, batch_size, k, partition_size);
   CUDA_CHECK_LAUNCH();
   data->topk_scores = data->intermediate_scores_2;
   data->topk_indices = data->intermediate_indices_2;
@@ -261,10 +271,14 @@ bool CheckSupport(int batch_size, int num_partitions, int partition_size) {
   constexpr int kBlockSize = 256;
   const int total_blocks = num_partitions * batch_size;
   void* kernel;
-  if (partition_size == kPartitionSizes[0]) kernel = GetKernel<kBlockSize, kPartitionSizes[0], K_PADDED, kMaxPartitionsForKernel>();
-  else if (partition_size == kPartitionSizes[1]) kernel = GetKernel<kBlockSize, kPartitionSizes[1], K_PADDED, kMaxPartitionsForKernel>();
-  else if (partition_size == kPartitionSizes[2]) kernel = GetKernel<kBlockSize, kPartitionSizes[2], K_PADDED, kMaxPartitionsForKernel>();
-  else kernel = GetKernel<kBlockSize, kPartitionSizes[3], K_PADDED, kMaxPartitionsForKernel>();
+  if (partition_size == kPartitionSizes[0])
+    kernel = GetKernel<kBlockSize, kPartitionSizes[0], K_PADDED, kMaxPartitionsForKernel>();
+  else if (partition_size == kPartitionSizes[1])
+    kernel = GetKernel<kBlockSize, kPartitionSizes[1], K_PADDED, kMaxPartitionsForKernel>();
+  else if (partition_size == kPartitionSizes[2])
+    kernel = GetKernel<kBlockSize, kPartitionSizes[2], K_PADDED, kMaxPartitionsForKernel>();
+  else
+    kernel = GetKernel<kBlockSize, kPartitionSizes[3], K_PADDED, kMaxPartitionsForKernel>();
   return topk_common::IsSupportedCooperative(kernel, total_blocks, kBlockSize);
 }
 
@@ -292,4 +306,3 @@ bool IsSupported(int batch_size, int vocab_size, int k) {
 }  // namespace flash_convergent
 }  // namespace cuda
 }  // namespace Generators
-

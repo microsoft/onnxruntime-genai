@@ -389,7 +389,7 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
   }
 }
 
-inline bool IsSupportedCooperative(void* kernel, int total_blocks, int block_size=256, int device_id = -1) {
+inline bool IsSupportedCooperative(void* kernel, int total_blocks, int block_size = 256, int device_id = -1) {
   if (device_id < 0) {
     CUDA_CHECK(cudaGetDevice(&device_id));
   }
