@@ -39,6 +39,8 @@ struct BenchmarkResult {
   BenchmarkParams params;
   std::string algo_name;
 
+  int parameter;
+
   float latency_ms;
   float latency_ms_stdev;
   float latency_ms_95_percentile;
@@ -75,7 +77,7 @@ void PrintSummary(const std::vector<BenchmarkResult>& results) {
   int algo_length = Generators::cuda::kStableTopK ? 35 : 28;  // Adjust length for _STABLE suffix.
   std::cout << " ---\n";
   std::cout << std::left << std::setw(12) << "Batch Size" << std::setw(12) << "Vocab Size" << std::setw(5) << "K"
-            << std::setw(algo_length) << "Algorithm" << std::setw(12) << "Latency(us)" << std::setw(12) << "Stdev(us)"
+            << std::setw(algo_length) << "Algorithm" << std::setw(12) << "Parameter" << std::setw(12) << "Latency(us)" << std::setw(12) << "Stdev(us)"
             << std::setw(12) << "P95(us)" << "\n";
   std::cout << std::string(97, '-') << "\n";
 
@@ -84,7 +86,7 @@ void PrintSummary(const std::vector<BenchmarkResult>& results) {
 
     std::cout << std::left << std::setw(12) << result.params.batch_size << std::setw(12) << result.params.vocab_size
               << std::setw(5) << result.params.k << std::setw(algo_length) << full_algo_name << std::fixed
-              << std::setprecision(2) << std::setw(12) << result.latency_ms * 1000.0f << std::setw(12)
+              << std::setw(12) << result.parameter << std::setprecision(2) << std::setw(12) << result.latency_ms * 1000.0f << std::setw(12)
               << result.latency_ms_stdev * 1000.0f << std::setw(12) << result.latency_ms_95_percentile * 1000.0f
               << "\n";
   }
@@ -209,7 +211,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
                                            params.batch_size, params.k);
     });
     std::string algo_name = Generators::cuda::full_sort::kAlgorithmName;
-    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
+    all_results.push_back({params, algo_name, -1, mean_ms, stdev_ms, p95_ms});
     current_csv_result.full_sort_latency = mean_ms;
     algo_latencies[algo_name] = mean_ms;
   }
@@ -221,7 +223,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
                                              params.batch_size, params.k);
     });
     std::string algo_name = Generators::cuda::select_sort::kAlgorithmName;
-    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
+    all_results.push_back({params, algo_name, -1, mean_ms, stdev_ms, p95_ms});
     current_csv_result.select_sort_latency = mean_ms;
     algo_latencies[algo_name] = mean_ms;
   }
@@ -233,7 +235,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
                                                       params.batch_size, params.k);
     });
     std::string algo_name = Generators::cuda::per_batch_radix_sort::kAlgorithmName;
-    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
+    all_results.push_back({params, algo_name, -1, mean_ms, stdev_ms, p95_ms});
     current_csv_result.per_batch_radix_sort_latency = mean_ms;
     algo_latencies[algo_name] = mean_ms;
   }
@@ -246,7 +248,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
                                                          params.batch_size, params.k);
     });
     std::string algo_name = Generators::cuda::distributed_select_sort::kAlgorithmName;
-    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
+    all_results.push_back({params, algo_name, data.get()->top_k_distributed_select_sort_shards, mean_ms, stdev_ms, p95_ms});
     current_csv_result.distributed_sort_latency = mean_ms;
     algo_latencies[algo_name] = mean_ms;
   }
@@ -261,7 +263,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
     });
     std::string algo_name = Generators::cuda::hybrid_sort::kAlgorithmName;
     algo_name += stable_suffix;
-    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
+    all_results.push_back({params, algo_name, data.get()->hybrid_sort_partition_size, mean_ms, stdev_ms, p95_ms});
     current_csv_result.hybrid_sort_latency = mean_ms;
     algo_latencies[algo_name] = mean_ms;
   }
@@ -274,7 +276,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
     });
     std::string algo_name = Generators::cuda::flash_convergent::kAlgorithmName;
     algo_name += stable_suffix;
-    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
+    all_results.push_back({params, algo_name, data.get()->flash_convergent_partition_size, mean_ms, stdev_ms, p95_ms});
     current_csv_result.flash_convergent_latency = mean_ms;
     algo_latencies[algo_name] = mean_ms;
   }
@@ -287,7 +289,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
     });
     std::string algo_name = Generators::cuda::iterative_sort::kAlgorithmName;
     algo_name += stable_suffix;
-    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
+    all_results.push_back({params, algo_name, data.get()->iterative_sort_partition_size, mean_ms, stdev_ms, p95_ms});
     current_csv_result.iterative_sort_latency = mean_ms;
     algo_latencies[algo_name] = mean_ms;
   }
@@ -300,7 +302,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
     });
     std::string algo_name = Generators::cuda::cascaded_sort::kAlgorithmName;
     algo_name += stable_suffix;
-    all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
+    all_results.push_back({params, algo_name, data.get()->cascaded_sort_partition_size, mean_ms, stdev_ms, p95_ms});
     current_csv_result.cascaded_sort_latency = mean_ms;
     algo_latencies[algo_name] = mean_ms;
   }
@@ -320,7 +322,7 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
                               params.batch_size, params.k);
   });
   std::string algo_name = "DEFAULT";
-  all_results.push_back({params, algo_name, mean_ms, stdev_ms, p95_ms});
+  all_results.push_back({params, algo_name, -1, mean_ms, stdev_ms, p95_ms});
   current_csv_result.default_latency = mean_ms;
   algo_latencies[algo_name] = mean_ms;
 #endif

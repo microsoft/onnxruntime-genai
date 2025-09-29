@@ -23,10 +23,7 @@ namespace cuda {
  * @param kernel_func A lambda function that launches the kernel.
  * @return The average execution time in milliseconds.
  */
-static float TimeKernel(cudaStream_t stream, std::function<void()> kernel_func) {
-  const int warm_up_runs = 2;
-  const int total_runs = 5;
-
+static float TimeKernel(cudaStream_t stream, std::function<void()> kernel_func, int warm_up_runs = 2, int total_runs = 5) {
   cuda_event_holder start_event, stop_event;
 
   // Warm-up runs to handle any one-time kernel loading costs or JIT compilation.
@@ -153,7 +150,7 @@ static TopkAlgo BenchmarkAndSelectBestAlgo(TopkData* topk_data,
   // Candidate: Hybrid Sort. This is a robust fallback. We benchmark it if either the cooperative
   // kernels are not supported, or if the vocab size is small, where hybrid can sometimes be faster.
   if (!use_iterative_sort && !use_cascaded_sort && !use_flash_convergent || vocab_size <= 4096) {
-    if (k <= kHybridSortMaxK) {
+    if (hybrid_sort::IsSupported(batch_size, vocab_size, k)) {
       BENCHMARK_KERNEL(TopkAlgo::HYBRID, [&]() {
         hybrid_sort::RunTopK(topk_data, stream, scores_in, vocab_size, batch_size, k);
       });
