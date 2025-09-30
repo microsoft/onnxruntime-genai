@@ -184,6 +184,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.ep_context_embed_mode = JSON::Get<std::string_view>(value);
     } else if (name == "ep_context_file_path") {
       v_.ep_context_file_path = JSON::Get<std::string_view>(value);
+    } else if (name == "use_device_allocator_for_initializers") {
+      v_.use_device_allocator_for_initializers = JSON::Get<bool>(value);
     } else if (name == "intra_op_num_threads") {
       v_.intra_op_num_threads = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "inter_op_num_threads") {

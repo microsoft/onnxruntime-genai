@@ -77,6 +77,7 @@ struct Config {
   };
 
   struct SessionOptions {
+    std::optional<bool> use_device_allocator_for_initializers;
     std::optional<int> intra_op_num_threads;
     std::optional<int> inter_op_num_threads;
     std::optional<bool> enable_cpu_mem_arena;

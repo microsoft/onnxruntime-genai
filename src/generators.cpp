@@ -55,7 +55,9 @@ static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
 
 OrtGlobals::OrtGlobals()
     : env_{OrtEnv::Create(GetDefaultOrtLoggingLevel())} {
-  auto arena_config = OrtArenaCfg::Create(0, -1, -1, -1);
+  const char* keys[] = {"max_mem", "arena_extend_strategy", "initial_chunk_size_bytes", "max_dead_bytes_per_chunk"};
+  const size_t values[] = {static_cast<size_t>(0), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1)};
+  auto arena_config = OrtArenaCfg::Create(keys, values, 4);
   Ort::Allocator& allocator_cpu{Ort::Allocator::GetWithDefaultOptions()};
   env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
 

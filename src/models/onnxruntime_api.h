@@ -1243,13 +1243,19 @@ struct OrtIoBinding {
 struct OrtArenaCfg {
   /**
    * Wraps OrtApi::CreateArenaCfg
-   * \param max_mem - use 0 to allow ORT to choose the default
-   * \param arena_extend_strategy -  use -1 to allow ORT to choose the default, 0 = kNextPowerOfTwo, 1 = kSameAsRequested
-   * \param initial_chunk_size_bytes - use -1 to allow ORT to choose the default
-   * \param max_dead_bytes_per_chunk - use -1 to allow ORT to choose the default
+   * \param keys - arena config names to set
+   * \param values - arena config values to set
+   * \param count - number of arena config settings
+   *
+   * List of valid arena config options:
+   * max_mem - use 0 to allow ORT to choose the default
+   * arena_extend_strategy - use -1 to allow ORT to choose the default, 0 = kNextPowerOfTwo, 1 = kSameAsRequested
+   * initial_chunk_size_bytes - use -1 to allow ORT to choose the default
+   * max_dead_bytes_per_chunk - use -1 to allow ORT to choose the default
+   * initial_growth_chunk_size_bytes - use -1 to allow ORT to choose the default
    * See docs/C_API.md for details on what the following parameters mean and how to choose these values
    */
-  static std::unique_ptr<OrtArenaCfg> Create(size_t max_mem, int arena_extend_strategy, int initial_chunk_size_bytes, int max_dead_bytes_per_chunk);
+  static std::unique_ptr<OrtArenaCfg> Create(const char* const* keys, const size_t* values, size_t count);
 
   static void operator delete(void* p) { Ort::api->ReleaseArenaCfg(reinterpret_cast<OrtArenaCfg*>(p)); }
   Ort::Abstract make_abstract;
