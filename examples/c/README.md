@@ -34,6 +34,9 @@ For other options to download models, read through [our download options](https:
       - CPU / QNN execution provider: `onnxruntime-genai-<version>-<platform>.zip/tar.gz`
       - CUDA execution provider: `onnxruntime-genai-<version>-<platform>-cuda.zip/tar.gz`
       - DirectML execution provider: `onnxruntime-genai-<version>-<platform>-dml.zip/tar.gz`
+      - TRT-RTX execution provider: `onnxruntime-genai-trt-rtx-win-x64-<version>.zip` 
+        - **Note**: TRT-RTX packages are distributed separately from [NVIDIA's onnxruntime-genai repository](https://github.com/NVIDIA/onnxruntime-genai/releases)
+        - Download [onnxruntime-genai-trt-rtx-win-x64-0.10.0.zip](https://github.com/NVIDIA/onnxruntime-genai/releases/download/v0.10.0/onnxruntime-genai-trt-rtx-win-x64-0.10.0.zip) for v0.10.0 
    - Extract the zip and copy over all the files from `<package>\lib` to `examples\c\lib`
    - Copy over the header files from `<package>\include` to `examples\c\include`
 5. Build using cmake
