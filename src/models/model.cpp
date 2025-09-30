@@ -542,7 +542,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
       // Memory management settings
       const char* arena_keys[] = {"max_mem", "arena_extend_strategy", "initial_chunk_size_bytes", "max_dead_bytes_per_chunk", "initial_growth_chunk_size_bytes"};
-      size_t arena_values[] = {0 /*let ORT pick default max memory*/, 0, 1024, 0, 256};
+      size_t arena_values[] = {static_cast<size_t>(0), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1)};
       bool use_arena_management = false;
 
       for (auto& option : provider_options.options) {
