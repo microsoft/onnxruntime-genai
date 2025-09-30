@@ -152,7 +152,8 @@ __global__ void Stage2_CooperativeReduce(int* __restrict__ intermediate_indices_
   union SharedStorage {
     typename cub::WarpMergeSort<uint64_t, (kMaxSortSize + 31) / 32, 32>::TempStorage cub_warp_storage;
 #ifdef STABLE_TOPK
-    typename cub::BlockMergeSort<uint64_t, kBlockSize, kItemsPerThread, cub::NullType>::TempStorage cub_block_merge_storage;
+    typename cub::BlockMergeSort<uint64_t, kBlockSize, kItemsPerThread, cub::NullType>::TempStorage
+        cub_block_merge_storage;
 #else
     typename cub::BlockMergeSort<float, kBlockSize, kItemsPerThread, int>::TempStorage cub_block_merge_storage;
 #endif
@@ -170,16 +171,18 @@ __global__ void Stage2_CooperativeReduce(int* __restrict__ intermediate_indices_
     if (partition_idx < partitions_after_step1) {
       const float* scores_in_batch = intermediate_scores_1 + static_cast<size_t>(batch_idx) * num_partitions * K_PADDED;
       const int* indices_in_batch = intermediate_indices_1 + static_cast<size_t>(batch_idx) * num_partitions * K_PADDED;
-      float* scores_out_batch = intermediate_scores_2 + static_cast<size_t>(batch_idx) * partitions_after_step1 * K_PADDED;
-      int* indices_out_batch = intermediate_indices_2 + static_cast<size_t>(batch_idx) * partitions_after_step1 * K_PADDED;
+      float* scores_out_batch =
+          intermediate_scores_2 + static_cast<size_t>(batch_idx) * partitions_after_step1 * K_PADDED;
+      int* indices_out_batch =
+          intermediate_indices_2 + static_cast<size_t>(batch_idx) * partitions_after_step1 * K_PADDED;
 
       int first_child = partition_idx * Factor1;
       int num_to_process = min(Factor1, num_partitions - first_child);
       const int num_elements_to_sort = K_PADDED * num_to_process;
 
       topk_common::BlockReduceTopK<kBlockSize, kSortSize1, K_PADDED, kItemsPerThread>(
-          scores_in_batch, indices_in_batch, scores_out_batch, indices_out_batch,
-          num_elements_to_sort, first_child, partition_idx, smem);
+          scores_in_batch, indices_in_batch, scores_out_batch, indices_out_batch, num_elements_to_sort, first_child,
+          partition_idx, smem);
     }
     grid.sync();
   }
@@ -189,19 +192,23 @@ __global__ void Stage2_CooperativeReduce(int* __restrict__ intermediate_indices_
   if (Factor2 > 1) {
     partitions_after_step2 = CeilDiv(partitions_after_step1, Factor2);
     if (partition_idx < partitions_after_step2) {
-      const float* scores_in_batch = intermediate_scores_2 + static_cast<size_t>(batch_idx) * partitions_after_step1 * K_PADDED;
-      const int* indices_in_batch = intermediate_indices_2 + static_cast<size_t>(batch_idx) * partitions_after_step1 * K_PADDED;
+      const float* scores_in_batch =
+          intermediate_scores_2 + static_cast<size_t>(batch_idx) * partitions_after_step1 * K_PADDED;
+      const int* indices_in_batch =
+          intermediate_indices_2 + static_cast<size_t>(batch_idx) * partitions_after_step1 * K_PADDED;
       // Note: The output of the second step (if it's not the last) goes back to buffer 1 to be read by the third step.
-      float* scores_out_batch = intermediate_scores_1 + static_cast<size_t>(batch_idx) * partitions_after_step2 * K_PADDED;
-      int* indices_out_batch = intermediate_indices_1 + static_cast<size_t>(batch_idx) * partitions_after_step2 * K_PADDED;
+      float* scores_out_batch =
+          intermediate_scores_1 + static_cast<size_t>(batch_idx) * partitions_after_step2 * K_PADDED;
+      int* indices_out_batch =
+          intermediate_indices_1 + static_cast<size_t>(batch_idx) * partitions_after_step2 * K_PADDED;
 
       int first_child = partition_idx * Factor2;
       int num_to_process = min(Factor2, partitions_after_step1 - first_child);
       const int num_elements_to_sort = K_PADDED * num_to_process;
 
       topk_common::BlockReduceTopK<kBlockSize, kSortSize2, K_PADDED, kItemsPerThread>(
-          scores_in_batch, indices_in_batch, scores_out_batch, indices_out_batch,
-          num_elements_to_sort, first_child, partition_idx, smem);
+          scores_in_batch, indices_in_batch, scores_out_batch, indices_out_batch, num_elements_to_sort, first_child,
+          partition_idx, smem);
     }
     grid.sync();
   }
@@ -211,19 +218,23 @@ __global__ void Stage2_CooperativeReduce(int* __restrict__ intermediate_indices_
     int partitions_after_step3 = CeilDiv(partitions_after_step2, Factor3);
     if (partition_idx < partitions_after_step3) {
       // The input comes from buffer 1, where step 2 wrote its output.
-      const float* scores_in_batch = intermediate_scores_1 + static_cast<size_t>(batch_idx) * partitions_after_step2 * K_PADDED;
-      const int* indices_in_batch = intermediate_indices_1 + static_cast<size_t>(batch_idx) * partitions_after_step2 * K_PADDED;
+      const float* scores_in_batch =
+          intermediate_scores_1 + static_cast<size_t>(batch_idx) * partitions_after_step2 * K_PADDED;
+      const int* indices_in_batch =
+          intermediate_indices_1 + static_cast<size_t>(batch_idx) * partitions_after_step2 * K_PADDED;
       // Final output goes to buffer 2.
-      float* scores_out_batch = intermediate_scores_2 + static_cast<size_t>(batch_idx) * partitions_after_step3 * K_PADDED;
-      int* indices_out_batch = intermediate_indices_2 + static_cast<size_t>(batch_idx) * partitions_after_step3 * K_PADDED;
+      float* scores_out_batch =
+          intermediate_scores_2 + static_cast<size_t>(batch_idx) * partitions_after_step3 * K_PADDED;
+      int* indices_out_batch =
+          intermediate_indices_2 + static_cast<size_t>(batch_idx) * partitions_after_step3 * K_PADDED;
 
       int first_child = partition_idx * Factor3;
       int num_to_process = min(Factor3, partitions_after_step2 - first_child);
       const int num_elements_to_sort = K_PADDED * num_to_process;
 
       topk_common::BlockReduceTopK<kBlockSize, kSortSize3, K_PADDED, kItemsPerThread>(
-          scores_in_batch, indices_in_batch, scores_out_batch, indices_out_batch,
-          num_elements_to_sort, first_child, partition_idx, smem);
+          scores_in_batch, indices_in_batch, scores_out_batch, indices_out_batch, num_elements_to_sort, first_child,
+          partition_idx, smem);
     }
   }
 }

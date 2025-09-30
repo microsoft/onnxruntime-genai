@@ -77,8 +77,8 @@ void PrintSummary(const std::vector<BenchmarkResult>& results) {
   int algo_length = Generators::cuda::kStableTopK ? 35 : 28;  // Adjust length for _STABLE suffix.
   std::cout << " ---\n";
   std::cout << std::left << std::setw(12) << "Batch Size" << std::setw(12) << "Vocab Size" << std::setw(5) << "K"
-            << std::setw(algo_length) << "Algorithm" << std::setw(12) << "Parameter" << std::setw(12) << "Latency(us)" << std::setw(12) << "Stdev(us)"
-            << std::setw(12) << "P95(us)" << "\n";
+            << std::setw(algo_length) << "Algorithm" << std::setw(12) << "Parameter" << std::setw(12) << "Latency(us)"
+            << std::setw(12) << "Stdev(us)" << std::setw(12) << "P95(us)" << "\n";
   std::cout << std::string(97, '-') << "\n";
 
   for (const auto& result : results) {
@@ -86,9 +86,9 @@ void PrintSummary(const std::vector<BenchmarkResult>& results) {
 
     std::cout << std::left << std::setw(12) << result.params.batch_size << std::setw(12) << result.params.vocab_size
               << std::setw(5) << result.params.k << std::setw(algo_length) << full_algo_name << std::fixed
-              << std::setw(12) << result.parameter << std::setprecision(2) << std::setw(12) << result.latency_ms * 1000.0f << std::setw(12)
-              << result.latency_ms_stdev * 1000.0f << std::setw(12) << result.latency_ms_95_percentile * 1000.0f
-              << "\n";
+              << std::setw(12) << result.parameter << std::setprecision(2) << std::setw(12)
+              << result.latency_ms * 1000.0f << std::setw(12) << result.latency_ms_stdev * 1000.0f << std::setw(12)
+              << result.latency_ms_95_percentile * 1000.0f << "\n";
   }
 }
 
@@ -248,7 +248,8 @@ void RunBenchmarks(const BenchmarkParams& params, std::vector<CsvSummaryResult>&
                                                          params.batch_size, params.k);
     });
     std::string algo_name = Generators::cuda::distributed_select_sort::kAlgorithmName;
-    all_results.push_back({params, algo_name, data.get()->top_k_distributed_select_sort_shards, mean_ms, stdev_ms, p95_ms});
+    all_results.push_back(
+        {params, algo_name, data.get()->top_k_distributed_select_sort_shards, mean_ms, stdev_ms, p95_ms});
     current_csv_result.distributed_sort_latency = mean_ms;
     algo_latencies[algo_name] = mean_ms;
   }

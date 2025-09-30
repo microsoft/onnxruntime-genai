@@ -98,9 +98,7 @@ class SortBenchmarkCacheManager {
     CacheSortBenchmark(*results_);
   }
 
-  const SortBenchmarkResults& Get() const {
-    return *results_;
-  }
+  const SortBenchmarkResults& Get() const { return *results_; }
 
  private:
   // We only have one set of benchmark results even though multiple devices may exist,
@@ -121,9 +119,7 @@ SortBenchmarkCacheManager& GetSortCache() {
  * @return A const reference to the benchmark results.
  * @throws std::runtime_error if the benchmark has not yet been run for the current device.
  */
-inline const SortBenchmarkResults& GetSortBenchmarkResults() {
-  return GetSortCache().Get();
-}
+inline const SortBenchmarkResults& GetSortBenchmarkResults() { return GetSortCache().Get(); }
 
 }  // namespace cuda
 }  // namespace Generators

@@ -91,13 +91,13 @@ __global__ void FlashConvergentKernel(const float* __restrict__ scores_in,
   cg::grid_group grid = cg::this_grid();
   constexpr int kSortSize = K_PADDED * kMaxPartitionsForKernel;
 
-  // For the sort sizes handled by this kernel's final reduction, the best algorithm
-  // will always be a block-level one, not a warp-level one.
-  constexpr SortAlgo kSortAlgo = (GetBestAlgo(kSortSize) == SortAlgo::WARP_BITONIC || GetBestAlgo(kSortSize) == SortAlgo::CUB_WARP_MERGE)
-                                     ? SortAlgo::CUB_BLOCK_MERGE
-                                     : GetBestAlgo(kSortSize);
+  // Use block-level sorting only for now. To improve small vocabulary size and small k, warp-level sorting can be added.
+  constexpr SortAlgo kBestAlgo = GetBestAlgo(kSortSize);
+  constexpr SortAlgo kSortAlgo =
+      (kBestAlgo == SortAlgo::WARP_BITONIC || kBestAlgo == SortAlgo::CUB_WARP_MERGE) ? SortAlgo::CUB_BLOCK_MERGE : kBestAlgo;
 
-  using SharedStorage = typename SharedStorageSelector<kBlockSize, kPartitionSize, K_PADDED, kMaxPartitionsForKernel, kSortAlgo>::type;
+  using SharedStorage =
+      typename SharedStorageSelector<kBlockSize, kPartitionSize, K_PADDED, kMaxPartitionsForKernel, kSortAlgo>::type;
   __shared__ SharedStorage smem;
 
   // --- Stage 1: Parallel Partition Sort ---
@@ -126,14 +126,16 @@ __global__ void FlashConvergentKernel(const float* __restrict__ scores_in,
       }
     }
     if constexpr (kSortAlgo == SortAlgo::CUB_BLOCK_RADIX) {
-      cub::BlockRadixSort<SortKeyT, kBlockSize, kItemsPerThread>(smem.radix_storage).SortDescendingBlockedToStriped(thread_keys);
+      cub::BlockRadixSort<SortKeyT, kBlockSize, kItemsPerThread>(smem.radix_storage)
+          .SortDescendingBlockedToStriped(thread_keys);
       if (threadIdx.x < k_actual) {
         size_t out_offset = static_cast<size_t>(batch_idx) * k_actual + threadIdx.x;
         scores_out[out_offset] = topk_common::UnpackStableSortScore(thread_keys[0]);
         indices_out[out_offset] = topk_common::UnpackStableSortIndex(thread_keys[0]);
       }
     } else {  // CUB_BLOCK_MERGE
-      cub::BlockMergeSort<SortKeyT, kBlockSize, kItemsPerThread, cub::NullType>(smem.merge_storage).Sort(thread_keys, topk_common::DescendingOp());
+      cub::BlockMergeSort<SortKeyT, kBlockSize, kItemsPerThread, cub::NullType>(smem.merge_storage)
+          .Sort(thread_keys, topk_common::DescendingOp());
       float thread_scores_out[kItemsPerThread];
       int thread_indices_out[kItemsPerThread];
       for (int i = 0; i < kItemsPerThread; ++i) {
@@ -160,14 +162,16 @@ __global__ void FlashConvergentKernel(const float* __restrict__ scores_in,
       }
     }
     if constexpr (kSortAlgo == SortAlgo::CUB_BLOCK_RADIX) {
-      cub::BlockRadixSort<SortKeyT, kBlockSize, kItemsPerThread, SortValueT>(smem.radix_storage).SortDescendingBlockedToStriped(thread_keys, thread_values);
+      cub::BlockRadixSort<SortKeyT, kBlockSize, kItemsPerThread, SortValueT>(smem.radix_storage)
+          .SortDescendingBlockedToStriped(thread_keys, thread_values);
       if (threadIdx.x < k_actual) {
         size_t out_offset = static_cast<size_t>(batch_idx) * k_actual + threadIdx.x;
         scores_out[out_offset] = thread_keys[0];
         indices_out[out_offset] = thread_values[0];
       }
     } else {  // CUB_BLOCK_MERGE
-      cub::BlockMergeSort<SortKeyT, kBlockSize, kItemsPerThread, SortValueT>(smem.merge_storage).Sort(thread_keys, thread_values, topk_common::DescendingOp());
+      cub::BlockMergeSort<SortKeyT, kBlockSize, kItemsPerThread, SortValueT>(smem.merge_storage)
+          .Sort(thread_keys, thread_values, topk_common::DescendingOp());
       cub::StoreDirectBlocked(threadIdx.x, scores_out + (size_t)batch_idx * k_actual, thread_keys, k_actual);
       cub::StoreDirectBlocked(threadIdx.x, indices_out + (size_t)batch_idx * k_actual, thread_values, k_actual);
     }
@@ -177,7 +181,7 @@ __global__ void FlashConvergentKernel(const float* __restrict__ scores_in,
 
 // --- Host-side Launcher ---
 
-inline int EstimateBestPartitionSize(int vocab_size, int k) {
+inline int EstimateBestPartitionSize(int vocab_size, int /*k*/) {
   const auto& benchmarks = GetSortBenchmarkResults();
   double min_total_latency = std::numeric_limits<double>::max();
   int best_partition_size = 0;

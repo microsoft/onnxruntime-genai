@@ -219,10 +219,10 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 }  // namespace flash_convergent
 
 /**
- * @brief A two-kernel "cooperative hybrid" sort, the champion for **very large k (>64)** or **very large vocabularies**.
- * Stage 1: A standard, highly scalable kernel finds top candidates in partitions.
- * Stage 2: A single cooperative kernel performs an efficient, multi-step reduction cascade based on a pre-computed optimal plan.
- * This design combines scalability with low reduction overhead.
+ * @brief A two-kernel "cooperative hybrid" sort, the champion for **very large k (>64)** or **very large
+ * vocabularies**. Stage 1: A standard, highly scalable kernel finds top candidates in partitions. Stage 2: A single
+ * cooperative kernel performs an efficient, multi-step reduction cascade based on a pre-computed optimal plan. This
+ * design combines scalability with low reduction overhead.
  */
 namespace hybrid_sort {
 constexpr const char* kAlgorithmName = "Hybrid_Sort";
@@ -244,8 +244,8 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
 }  // namespace iterative_sort
 
 /**
- * @brief A high-performance, single-kernel cooperative "cascaded" sort, the all-around champion for **mid-range k (16-64)**.
- * It uses an adaptive, two-step reduction strategy based on a pre-computed optimal plan from H200
+ * @brief A high-performance, single-kernel cooperative "cascaded" sort, the all-around champion for **mid-range k
+ * (16-64)**. It uses an adaptive, two-step reduction strategy based on a pre-computed optimal plan from H200
  * benchmarks, providing the best performance for the most common LLM workloads.
  */
 namespace cascaded_sort {

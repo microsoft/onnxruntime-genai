@@ -198,7 +198,8 @@ struct Stage1StorageSelector;
 template <int kBlockSize, int kPartitionSize>
 struct Stage1StorageSelector<kBlockSize, kPartitionSize, true> {
   using RadixStorage = typename cub::BlockRadixSort<uint64_t, kBlockSize, kPartitionSize / kBlockSize>::TempStorage;
-  using MergeStorage = typename cub::BlockMergeSort<uint64_t, kBlockSize, kPartitionSize / kBlockSize, cub::NullType>::TempStorage;
+  using MergeStorage =
+      typename cub::BlockMergeSort<uint64_t, kBlockSize, kPartitionSize / kBlockSize, cub::NullType>::TempStorage;
   union type {
     RadixStorage radix_storage;
     MergeStorage merge_storage;
@@ -227,15 +228,19 @@ __device__ void FindPartitionTopK(const float* __restrict__ scores_in,
                                   TempStorage& temp_storage) {
   if constexpr (UseMergeSort) {
     if constexpr (kStableTopK) {
-      FindPartitionTopK_StableSort_Merge<kBlockSize, kPartitionSize, K>(scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions, temp_storage);
+      FindPartitionTopK_StableSort_Merge<kBlockSize, kPartitionSize, K>(
+          scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions, temp_storage);
     } else {
-      FindPartitionTopK_UnstableSort_Merge<kBlockSize, kPartitionSize, K>(scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions, temp_storage);
+      FindPartitionTopK_UnstableSort_Merge<kBlockSize, kPartitionSize, K>(
+          scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions, temp_storage);
     }
   } else {
     if constexpr (kStableTopK) {
-      FindPartitionTopK_StableSort_Radix<kBlockSize, kPartitionSize, K>(scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions, temp_storage);
+      FindPartitionTopK_StableSort_Radix<kBlockSize, kPartitionSize, K>(
+          scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions, temp_storage);
     } else {
-      FindPartitionTopK_UnstableSort_Radix<kBlockSize, kPartitionSize, K>(scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions, temp_storage);
+      FindPartitionTopK_UnstableSort_Radix<kBlockSize, kPartitionSize, K>(
+          scores_in, intermediate_indices, intermediate_scores, vocab_size, num_partitions, temp_storage);
     }
   }
 }
@@ -325,7 +330,8 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
       }
     }
     __syncthreads();
-    topk_common::WarpMergeSort<kSortSizePo2>(smem.stage2_storage.scores, smem.stage2_storage.indices, &smem.cub_warp_storage, num_elements_to_sort);
+    topk_common::WarpMergeSort<kSortSizePo2>(smem.stage2_storage.scores, smem.stage2_storage.indices,
+                                             &smem.cub_warp_storage, num_elements_to_sort);
   } else {
     // --- 3. CUB Block Merge Sort ---
 #ifdef STABLE_TOPK
@@ -342,7 +348,8 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
         thread_keys[i] = topk_common::PackStableSortKey(-FLT_MAX, INT_MAX);
       }
     }
-    cub::BlockMergeSort<SortKeyT, kBlockSize, kItemsPerThread, cub::NullType>(smem.cub_block_merge_storage).Sort(thread_keys, topk_common::DescendingOp());
+    cub::BlockMergeSort<SortKeyT, kBlockSize, kItemsPerThread, cub::NullType>(smem.cub_block_merge_storage)
+        .Sort(thread_keys, topk_common::DescendingOp());
 
     // Unpack keys and use StoreDirectBlocked for correct write-back
     float thread_scores_out[kItemsPerThread];
@@ -351,8 +358,10 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
       thread_scores_out[i] = topk_common::UnpackStableSortScore(thread_keys[i]);
       thread_indices_out[i] = topk_common::UnpackStableSortIndex(thread_keys[i]);
     }
-    cub::StoreDirectBlocked(threadIdx.x, scores_out_batch + static_cast<size_t>(partition_idx) * K_PADDED, thread_scores_out, K_PADDED);
-    cub::StoreDirectBlocked(threadIdx.x, indices_out_batch + static_cast<size_t>(partition_idx) * K_PADDED, thread_indices_out, K_PADDED);
+    cub::StoreDirectBlocked(threadIdx.x, scores_out_batch + static_cast<size_t>(partition_idx) * K_PADDED,
+                            thread_scores_out, K_PADDED);
+    cub::StoreDirectBlocked(threadIdx.x, indices_out_batch + static_cast<size_t>(partition_idx) * K_PADDED,
+                            thread_indices_out, K_PADDED);
 #else
     float thread_keys[kItemsPerThread];
     int thread_values[kItemsPerThread];
@@ -369,9 +378,12 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
         thread_values[i] = INT_MAX;
       }
     }
-    cub::BlockMergeSort<float, kBlockSize, kItemsPerThread, int>(smem.cub_block_merge_storage).Sort(thread_keys, thread_values, topk_common::DescendingOp());
-    cub::StoreDirectBlocked(threadIdx.x, scores_out_batch + static_cast<size_t>(partition_idx) * K_PADDED, thread_keys, K_PADDED);
-    cub::StoreDirectBlocked(threadIdx.x, indices_out_batch + static_cast<size_t>(partition_idx) * K_PADDED, thread_values, K_PADDED);
+    cub::BlockMergeSort<float, kBlockSize, kItemsPerThread, int>(smem.cub_block_merge_storage)
+        .Sort(thread_keys, thread_values, topk_common::DescendingOp());
+    cub::StoreDirectBlocked(threadIdx.x, scores_out_batch + static_cast<size_t>(partition_idx) * K_PADDED, thread_keys,
+                            K_PADDED);
+    cub::StoreDirectBlocked(threadIdx.x, indices_out_batch + static_cast<size_t>(partition_idx) * K_PADDED,
+                            thread_values, K_PADDED);
 #endif
     return;  // Early exit to avoid double-write for both BlockMergeSort paths
   }

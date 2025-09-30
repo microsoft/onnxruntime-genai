@@ -74,7 +74,8 @@ __global__ void AdaptiveIterativeSortKernel(const float* __restrict__ input_scor
     Stage1TempStorageType stage1_storage;
     typename cub::WarpMergeSort<uint64_t, (kSortSize + 31) / 32, 32>::TempStorage cub_warp_storage;
 #ifdef STABLE_TOPK
-    typename cub::BlockMergeSort<uint64_t, kBlockSize, kItemsPerThread, cub::NullType>::TempStorage cub_block_merge_storage;
+    typename cub::BlockMergeSort<uint64_t, kBlockSize, kItemsPerThread, cub::NullType>::TempStorage
+        cub_block_merge_storage;
 #else
     typename cub::BlockMergeSort<float, kBlockSize, kItemsPerThread, int>::TempStorage cub_block_merge_storage;
 #endif
@@ -106,9 +107,8 @@ __global__ void AdaptiveIterativeSortKernel(const float* __restrict__ input_scor
       const int num_elements_to_sort = K_PADDED * num_to_process;
 
       topk_common::BlockReduceTopK<kBlockSize, kSortSize, K_PADDED, kItemsPerThread>(
-          p_scores_in + in_batch_offset, p_indices_in + in_batch_offset,
-          p_scores_out + out_batch_offset, p_indices_out + out_batch_offset,
-          num_elements_to_sort, first_child, partition_idx, smem);
+          p_scores_in + in_batch_offset, p_indices_in + in_batch_offset, p_scores_out + out_batch_offset,
+          p_indices_out + out_batch_offset, num_elements_to_sort, first_child, partition_idx, smem);
     }
     partitions_remaining = num_active_blocks;
     swap_ptr(p_scores_in, p_scores_out);
@@ -218,7 +218,9 @@ void RunTopK(TopkData* data, cudaStream_t stream, const float* scores_in, int vo
     dim3 grid(num_partitions, batch_size);
     dim3 block(kBlockSize);
 
-#define LAUNCH_KERNEL_P(P_SIZE) CUDA_CHECK((cudaLaunchCooperativeKernel((void*)AdaptiveIterativeSortKernel<K_PADDED, kBlockSize, P_SIZE, R_FACTOR>, grid, block, kernel_args, 0, stream)))
+#define LAUNCH_KERNEL_P(P_SIZE)                                                                                       \
+  CUDA_CHECK((cudaLaunchCooperativeKernel((void*)AdaptiveIterativeSortKernel<K_PADDED, kBlockSize, P_SIZE, R_FACTOR>, \
+                                          grid, block, kernel_args, 0, stream)))
     if (partition_size == 1024) {
       LAUNCH_KERNEL_P(1024);
     } else if (partition_size == 1280) {

@@ -64,9 +64,7 @@ __device__ inline void WarpBitonicSort(float& score, int& index) {
 // Functor for descending sort comparison.
 template <typename T>
 struct Greater {
-  __device__ __host__ __forceinline__ bool operator()(const T& a, const T& b) const {
-    return a > b;
-  }
+  __device__ __host__ __forceinline__ bool operator()(const T& a, const T& b) const { return a > b; }
 };
 
 /**
