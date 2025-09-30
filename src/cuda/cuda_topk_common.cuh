@@ -283,9 +283,6 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
                                 int first_child_partition,
                                 int partition_idx,
                                 TempStorage& smem) {
-  // constexpr int kItemsPerThread = CeilDiv(kSortSize, kBlockSize);
-  constexpr int kSortSizePo2 = NextPowerOfTwo(kSortSize);
-
   // This unified helper selects the sort algorithm based on the compile-time kSortSize,
   // consistent with the constraints applied in hybrid_sort and the micro-benchmark.
   if constexpr (kSortSize <= BestAlgoThresholds::kWarpBitonic_MaxSize) {
@@ -313,6 +310,7 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
       }
     }
   } else if constexpr (kSortSize <= BestAlgoThresholds::kCubWarpMerge_MaxSize) {
+    constexpr int kSortSizePo2 = NextPowerOfTwo(kSortSize);
     // --- 2. CUB Warp Merge Sort ---
     for (int i = threadIdx.x; i < kSortSizePo2; i += kBlockSize) {
       if (i < num_elements_to_sort) {
@@ -346,15 +344,15 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
     }
     cub::BlockMergeSort<SortKeyT, kBlockSize, kItemsPerThread, cub::NullType>(smem.cub_block_merge_storage).Sort(thread_keys, topk_common::DescendingOp());
 
+    // Unpack keys and use StoreDirectBlocked for correct write-back
+    float thread_scores_out[kItemsPerThread];
+    int thread_indices_out[kItemsPerThread];
     for (int i = 0; i < kItemsPerThread; ++i) {
-      int item_idx = threadIdx.x + i * kBlockSize;
-      if (item_idx < K_PADDED) {
-        size_t out_offset = static_cast<size_t>(partition_idx) * K_PADDED + item_idx;
-        scores_out_batch[out_offset] = topk_common::UnpackStableSortScore(thread_keys[i]);
-        indices_out_batch[out_offset] = topk_common::UnpackStableSortIndex(thread_keys[i]);
-      }
+      thread_scores_out[i] = topk_common::UnpackStableSortScore(thread_keys[i]);
+      thread_indices_out[i] = topk_common::UnpackStableSortIndex(thread_keys[i]);
     }
-    return;  // Early exit to avoid double-write
+    cub::StoreDirectBlocked(threadIdx.x, scores_out_batch + static_cast<size_t>(partition_idx) * K_PADDED, thread_scores_out, K_PADDED);
+    cub::StoreDirectBlocked(threadIdx.x, indices_out_batch + static_cast<size_t>(partition_idx) * K_PADDED, thread_indices_out, K_PADDED);
 #else
     float thread_keys[kItemsPerThread];
     int thread_values[kItemsPerThread];
@@ -374,8 +372,8 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
     cub::BlockMergeSort<float, kBlockSize, kItemsPerThread, int>(smem.cub_block_merge_storage).Sort(thread_keys, thread_values, topk_common::DescendingOp());
     cub::StoreDirectBlocked(threadIdx.x, scores_out_batch + static_cast<size_t>(partition_idx) * K_PADDED, thread_keys, K_PADDED);
     cub::StoreDirectBlocked(threadIdx.x, indices_out_batch + static_cast<size_t>(partition_idx) * K_PADDED, thread_values, K_PADDED);
-    return;  // Early exit to avoid double-write
 #endif
+    return;  // Early exit to avoid double-write for both BlockMergeSort paths
   }
   __syncthreads();
 
