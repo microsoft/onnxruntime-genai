@@ -873,7 +873,7 @@ struct Search_Element : JSON::Element {
       if (chunk_value > 0) {
         v_.chunk_size = static_cast<size_t>(chunk_value);
       } else {
-        v_.chunk_size = std::nullopt;  // Explicitly disable if <= 0
+        v_.chunk_size = std::nullopt;
       }
     } else if (name == "do_sample") {
       v_.do_sample = JSON::Get<bool>(value);
