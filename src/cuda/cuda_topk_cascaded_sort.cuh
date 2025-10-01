@@ -67,12 +67,6 @@ constexpr int kMaxPartitions = 64;
 // 4096 * 64 = 262,144).
 constexpr std::array<int, 4> kAllowedPartitionSizes = {1792, 2048, 2560, 3328};
 
-// Helper to compute the max of two values at compile time.
-template <typename T>
-__host__ __device__ __forceinline__ constexpr T Max(T a, T b) {
-  return a > b ? a : b;
-}
-
 struct ReductionFactors {
   int factor1 = 1;
   int factor2 = 1;
@@ -126,18 +120,20 @@ __global__ void CascadedSortKernel(const float* __restrict__ input_scores,
   // --- Shared Memory Union for efficiency ---
   constexpr int kSortSize1 = K_PADDED * Factor1;
   constexpr int kSortSize2 = K_PADDED * Factor2;
-  constexpr int kMaxSortSize = Max(kSortSize1, kSortSize2);
-  constexpr int kItemsPerThread = CeilDiv(kMaxSortSize, kBlockSize);
+  constexpr int kMaxSortSize = topk_common::Max(kSortSize1, kSortSize2);
+
+  // kMaxItemsPerThread is for shared memory allocation to handle the largest reduction step's temp storage.
+  constexpr int kMaxItemsPerThread = CeilDiv(kMaxSortSize, kBlockSize);
 
   using Stage1TempStorageType = typename topk_common::Stage1TempStorage<kBlockSize, kPartitionSize>;
   union SharedStorage {
     Stage1TempStorageType stage1_storage;
     typename cub::WarpMergeSort<uint64_t, (kMaxSortSize + 31) / 32, 32>::TempStorage cub_warp_storage;
 #ifdef STABLE_TOPK
-    typename cub::BlockMergeSort<uint64_t, kBlockSize, kItemsPerThread, cub::NullType>::TempStorage
+    typename cub::BlockMergeSort<uint64_t, kBlockSize, kMaxItemsPerThread, cub::NullType>::TempStorage
         cub_block_merge_storage;
 #else
-    typename cub::BlockMergeSort<float, kBlockSize, kItemsPerThread, int>::TempStorage cub_block_merge_storage;
+    typename cub::BlockMergeSort<float, kBlockSize, kMaxItemsPerThread, int>::TempStorage cub_block_merge_storage;
 #endif
     struct {
       __align__(128) float scores[kMaxSortSize];
@@ -168,7 +164,7 @@ __global__ void CascadedSortKernel(const float* __restrict__ input_scores,
       int num_to_process = min(Factor1, num_partitions - first_child);
       const int num_elements_to_sort = K_PADDED * num_to_process;
 
-      topk_common::BlockReduceTopK<kBlockSize, kSortSize1, K_PADDED, kItemsPerThread>(
+      topk_common::BlockReduceTopK<kBlockSize, kSortSize1, K_PADDED>(
           scores_in_batch, indices_in_batch, scores_out_batch, indices_out_batch, num_elements_to_sort, first_child,
           partition_idx, smem);
     }
@@ -188,7 +184,7 @@ __global__ void CascadedSortKernel(const float* __restrict__ input_scores,
       int num_to_process = min(Factor2, partitions_after_step1 - first_child);
       const int num_elements_to_sort = K_PADDED * num_to_process;
 
-      topk_common::BlockReduceTopK<kBlockSize, kSortSize2, K_PADDED, kItemsPerThread>(
+      topk_common::BlockReduceTopK<kBlockSize, kSortSize2, K_PADDED>(
           scores_in_batch, indices_in_batch, scores_out_batch, indices_out_batch, num_elements_to_sort, first_child,
           partition_idx, smem);
     }

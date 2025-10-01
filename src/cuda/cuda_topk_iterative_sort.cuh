@@ -42,17 +42,6 @@ namespace iterative_sort {
 
 namespace cg = cooperative_groups;
 
-__host__ __device__ inline void swap_ptr(float*& a, float*& b) {
-  float* tmp = a;
-  a = b;
-  b = tmp;
-}
-__host__ __device__ inline void swap_ptr(int*& a, int*& b) {
-  int* tmp = a;
-  a = b;
-  b = tmp;
-}
-
 template <int K_PADDED, int kBlockSize, int kPartitionSize, int kReductionFactor>
 __global__ void AdaptiveIterativeSortKernel(const float* __restrict__ input_scores,
                                             int* __restrict__ intermediate_indices_1,
@@ -106,13 +95,13 @@ __global__ void AdaptiveIterativeSortKernel(const float* __restrict__ input_scor
       int num_to_process = min(kReductionFactor, partitions_remaining - first_child);
       const int num_elements_to_sort = K_PADDED * num_to_process;
 
-      topk_common::BlockReduceTopK<kBlockSize, kSortSize, K_PADDED, kItemsPerThread>(
+      topk_common::BlockReduceTopK<kBlockSize, kSortSize, K_PADDED>(
           p_scores_in + in_batch_offset, p_indices_in + in_batch_offset, p_scores_out + out_batch_offset,
           p_indices_out + out_batch_offset, num_elements_to_sort, first_child, partition_idx, smem);
     }
     partitions_remaining = num_active_blocks;
-    swap_ptr(p_scores_in, p_scores_out);
-    swap_ptr(p_indices_in, p_indices_out);
+    topk_common::SwapPtr(p_scores_in, p_scores_out);
+    topk_common::SwapPtr(p_indices_in, p_indices_out);
     grid.sync();
   }
 }

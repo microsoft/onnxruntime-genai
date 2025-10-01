@@ -13,19 +13,21 @@ namespace Generators {
 namespace cuda {
 namespace topk_common {
 
+constexpr int kThreadsInWarp = 32;
+
 /**
  * @brief Performs an in-place, warp-wide bitonic sort on data held entirely in registers.
  *
- * This function sorts `warpSize` (typically 32) score/index pairs distributed across the
+ * This function sorts `kThreadsInWarp` (typically 32) score/index pairs distributed across the
  * threads of a single warp. It uses `__shfl_sync` instructions for extremely fast
  * data exchange between threads in the same warp, avoiding shared memory latency entirely.
  * This is highly effective for the reduction phase of algorithms like `iterative_sort` when `k` is small.
  */
 __device__ inline void WarpBitonicSort(float& score, int& index) {
-  const int lane_id = threadIdx.x % warpSize;
+  const int lane_id = threadIdx.x % kThreadsInWarp;
 
   // The bitonic sort network is constructed in stages.
-  for (int k = 2; k <= warpSize; k <<= 1) {
+  for (int k = 2; k <= kThreadsInWarp; k <<= 1) {
     for (int j = k >> 1; j > 0; j >>= 1) {
       // Exchange data with a paired lane using a warp shuffle instruction.
       int paired_lane = lane_id ^ j;
@@ -79,7 +81,6 @@ struct Greater {
 template <int BufferSize>
 __device__ void WarpMergeSort(float* smem_scores, int* smem_indices, void* temp_storage_ptr, int num_valid_items) {
   static_assert(BufferSize <= 256, "BufferSize must be less than or equal to 256");
-  constexpr int kThreadsInWarp = 32;
 
   // This sort is performed entirely by the first warp in the block.
   if (threadIdx.x >= kThreadsInWarp) {

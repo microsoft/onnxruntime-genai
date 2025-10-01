@@ -54,18 +54,6 @@ constexpr int kMaxPartitions = 256;
 constexpr std::array<int, 4> kCandidatePartitionSizes = {1792, 2304, 2816, 3328};
 
 // --- Host-Side Planning Logic ---
-
-// Helper to compute the max of three values at compile time.
-template <typename T>
-__host__ __device__ __forceinline__ constexpr T Max(T a, T b) {
-  return a > b ? a : b;
-}
-
-template <typename T>
-__host__ __device__ __forceinline__ constexpr T Max(T a, T b, T c) {
-  return Max(a, Max(b, c));
-}
-
 struct ReductionFactors {
   int factor1 = 1;
   int factor2 = 1;
@@ -146,16 +134,18 @@ __global__ void Stage2_CooperativeReduce(int* __restrict__ intermediate_indices_
   constexpr int kSortSize1 = K_PADDED * Factor1;
   constexpr int kSortSize2 = K_PADDED * Factor2;
   constexpr int kSortSize3 = K_PADDED * Factor3;
-  constexpr int kMaxSortSize = Max(kSortSize1, kSortSize2, kSortSize3);
-  constexpr int kItemsPerThread = CeilDiv(kMaxSortSize, kBlockSize);
+  constexpr int kMaxSortSize = topk_common::Max(kSortSize1, kSortSize2, kSortSize3);
+
+  // kMaxItemsPerThread is for shared memory allocation to handle the largest reduction step's temp storage.
+  constexpr int kMaxItemsPerThread = CeilDiv(kMaxSortSize, kBlockSize);
 
   union SharedStorage {
     typename cub::WarpMergeSort<uint64_t, (kMaxSortSize + 31) / 32, 32>::TempStorage cub_warp_storage;
 #ifdef STABLE_TOPK
-    typename cub::BlockMergeSort<uint64_t, kBlockSize, kItemsPerThread, cub::NullType>::TempStorage
+    typename cub::BlockMergeSort<uint64_t, kBlockSize, kMaxItemsPerThread, cub::NullType>::TempStorage
         cub_block_merge_storage;
 #else
-    typename cub::BlockMergeSort<float, kBlockSize, kItemsPerThread, int>::TempStorage cub_block_merge_storage;
+    typename cub::BlockMergeSort<float, kBlockSize, kMaxItemsPerThread, int>::TempStorage cub_block_merge_storage;
 #endif
     struct {
       __align__(128) float scores[kMaxSortSize];
@@ -180,7 +170,7 @@ __global__ void Stage2_CooperativeReduce(int* __restrict__ intermediate_indices_
       int num_to_process = min(Factor1, num_partitions - first_child);
       const int num_elements_to_sort = K_PADDED * num_to_process;
 
-      topk_common::BlockReduceTopK<kBlockSize, kSortSize1, K_PADDED, kItemsPerThread>(
+      topk_common::BlockReduceTopK<kBlockSize, kSortSize1, K_PADDED>(
           scores_in_batch, indices_in_batch, scores_out_batch, indices_out_batch, num_elements_to_sort, first_child,
           partition_idx, smem);
     }
@@ -206,7 +196,7 @@ __global__ void Stage2_CooperativeReduce(int* __restrict__ intermediate_indices_
       int num_to_process = min(Factor2, partitions_after_step1 - first_child);
       const int num_elements_to_sort = K_PADDED * num_to_process;
 
-      topk_common::BlockReduceTopK<kBlockSize, kSortSize2, K_PADDED, kItemsPerThread>(
+      topk_common::BlockReduceTopK<kBlockSize, kSortSize2, K_PADDED>(
           scores_in_batch, indices_in_batch, scores_out_batch, indices_out_batch, num_elements_to_sort, first_child,
           partition_idx, smem);
     }
@@ -232,7 +222,7 @@ __global__ void Stage2_CooperativeReduce(int* __restrict__ intermediate_indices_
       int num_to_process = min(Factor3, partitions_after_step2 - first_child);
       const int num_elements_to_sort = K_PADDED * num_to_process;
 
-      topk_common::BlockReduceTopK<kBlockSize, kSortSize3, K_PADDED, kItemsPerThread>(
+      topk_common::BlockReduceTopK<kBlockSize, kSortSize3, K_PADDED>(
           scores_in_batch, indices_in_batch, scores_out_batch, indices_out_batch, num_elements_to_sort, first_child,
           partition_idx, smem);
     }

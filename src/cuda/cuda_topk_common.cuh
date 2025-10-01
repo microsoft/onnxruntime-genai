@@ -16,6 +16,57 @@ namespace Generators {
 namespace cuda {
 namespace topk_common {
 
+// Helper to compute the max of three values at compile time.
+template <typename T>
+__host__ __device__ __forceinline__ constexpr T Max(T a, T b) {
+  return a > b ? a : b;
+}
+
+template <typename T>
+__host__ __device__ __forceinline__ constexpr T Max(T a, T b, T c) {
+  return Max(a, Max(b, c));
+}
+
+__host__ __device__ __forceinline__ void SwapPtr(float*& a, float*& b) {
+  float* tmp = a;
+  a = b;
+  b = tmp;
+}
+__host__ __device__ __forceinline__ void SwapPtr(int*& a, int*& b) {
+  int* tmp = a;
+  a = b;
+  b = tmp;
+}
+
+/**
+ * @brief Host/device helper to compute the next power of two for a given integer.
+ * This is useful for bitonic sort, which requires a power-of-two input size.
+ */
+__device__ __host__ __forceinline__ constexpr int NextPowerOfTwo(int n) {
+  if (n == 0) return 1;
+  n--;
+  n |= n >> 1;
+  n |= n >> 2;
+  n |= n >> 4;
+  n |= n >> 8;
+  n |= n >> 16;
+  n++;
+  return n;
+}
+
+__device__ __host__ __forceinline__ constexpr int Log2NextPowerOfTwo(int n) {
+  if (n <= 1) return 0;
+#if defined(__CUDA_ARCH__)
+  int x = NextPowerOfTwo(n);
+  return 31 - __clz(x);
+#else
+  int x = NextPowerOfTwo(n);
+  int log2 = 0;
+  while (x >>= 1) ++log2;
+  return log2;
+#endif
+}
+
 // A simple greater-than comparator for descending sort
 struct DescendingOp {
   template <typename T>
@@ -246,40 +297,11 @@ __device__ void FindPartitionTopK(const float* __restrict__ scores_in,
 }
 
 /**
- * @brief Host/device helper to compute the next power of two for a given integer.
- * This is useful for bitonic sort, which requires a power-of-two input size.
- */
-__device__ __host__ __forceinline__ constexpr int NextPowerOfTwo(int n) {
-  if (n == 0) return 1;
-  n--;
-  n |= n >> 1;
-  n |= n >> 2;
-  n |= n >> 4;
-  n |= n >> 8;
-  n |= n >> 16;
-  n++;
-  return n;
-}
-
-__device__ __host__ __forceinline__ constexpr int Log2NextPowerOfTwo(int n) {
-  if (n <= 1) return 0;
-#if defined(__CUDA_ARCH__)
-  int x = NextPowerOfTwo(n);
-  return 31 - __clz(x);
-#else
-  int x = NextPowerOfTwo(n);
-  int log2 = 0;
-  while (x >>= 1) ++log2;
-  return log2;
-#endif
-}
-
-/**
  * @brief A unified, benchmark-driven helper for performing a reduction (merge) step.
  * It loads candidate data from N partitions, sorts them, and writes the top K back to global memory.
  * The internal sorting algorithm is selected at compile time based on kSortSize.
  */
-template <int kBlockSize, int kSortSize, int K_PADDED, int kItemsPerThread, typename TempStorage>
+template <int kBlockSize, int kSortSize, int K_PADDED, typename TempStorage>
 __device__ void BlockReduceTopK(const float* scores_in_batch,
                                 const int* indices_in_batch,
                                 float* scores_out_batch,
@@ -288,6 +310,10 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
                                 int first_child_partition,
                                 int partition_idx,
                                 TempStorage& smem) {
+  // --- REFACTOR ---
+  // kItemsPerThread is now an internal implementation detail, derived from the template parameters.
+  constexpr int kItemsPerThread = CeilDiv(kSortSize, kBlockSize);
+
   // This unified helper selects the sort algorithm based on the compile-time kSortSize,
   // consistent with the constraints applied in hybrid_sort and the micro-benchmark.
   if constexpr (kSortSize <= BestAlgoThresholds::kWarpBitonic_MaxSize) {
@@ -305,7 +331,7 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
     __syncthreads();
 
     // Have the first warp sort from shared memory using registers
-    if (threadIdx.x < warpSize) {
+    if (threadIdx.x < kThreadsInWarp) {
       float my_score = (threadIdx.x < num_elements_to_sort) ? smem.stage2_storage.scores[threadIdx.x] : -FLT_MAX;
       int my_index = (threadIdx.x < num_elements_to_sort) ? smem.stage2_storage.indices[threadIdx.x] : INT_MAX;
       topk_common::WarpBitonicSort(my_score, my_index);
@@ -336,6 +362,7 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
     // --- 3. CUB Block Merge Sort ---
 #ifdef STABLE_TOPK
     using SortKeyT = uint64_t;
+    using BlockMergeSortT = cub::BlockMergeSort<SortKeyT, kBlockSize, kItemsPerThread, cub::NullType>;
     SortKeyT thread_keys[kItemsPerThread];
     for (int i = 0; i < kItemsPerThread; ++i) {
       int item_idx = threadIdx.x + i * kBlockSize;
@@ -348,7 +375,9 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
         thread_keys[i] = topk_common::PackStableSortKey(-FLT_MAX, INT_MAX);
       }
     }
-    cub::BlockMergeSort<SortKeyT, kBlockSize, kItemsPerThread, cub::NullType>(smem.cub_block_merge_storage)
+    // Create the sort object by casting the generic shared memory to the specific TempStorage type required.
+    // This is safe because the union in the calling kernel was sized for the largest possible kItemsPerThread.
+    BlockMergeSortT(reinterpret_cast<typename BlockMergeSortT::TempStorage&>(smem.cub_block_merge_storage))
         .Sort(thread_keys, topk_common::DescendingOp());
 
     // Unpack keys and use StoreDirectBlocked for correct write-back
@@ -363,6 +392,7 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
     cub::StoreDirectBlocked(threadIdx.x, indices_out_batch + static_cast<size_t>(partition_idx) * K_PADDED,
                             thread_indices_out, K_PADDED);
 #else
+    using BlockMergeSortT = cub::BlockMergeSort<float, kBlockSize, kItemsPerThread, int>;
     float thread_keys[kItemsPerThread];
     int thread_values[kItemsPerThread];
     for (int i = 0; i < kItemsPerThread; ++i) {
@@ -378,7 +408,9 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
         thread_values[i] = INT_MAX;
       }
     }
-    cub::BlockMergeSort<float, kBlockSize, kItemsPerThread, int>(smem.cub_block_merge_storage)
+    // Create the sort object by casting the generic shared memory to the specific TempStorage type required.
+    // This is safe because the union in the calling kernel was sized for the largest possible kItemsPerThread.
+    BlockMergeSortT(reinterpret_cast<typename BlockMergeSortT::TempStorage&>(smem.cub_block_merge_storage))
         .Sort(thread_keys, thread_values, topk_common::DescendingOp());
     cub::StoreDirectBlocked(threadIdx.x, scores_out_batch + static_cast<size_t>(partition_idx) * K_PADDED, thread_keys,
                             K_PADDED);

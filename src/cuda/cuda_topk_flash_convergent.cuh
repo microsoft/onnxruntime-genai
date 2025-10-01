@@ -31,6 +31,10 @@ namespace flash_convergent {
  * It loads all candidates and sorts them in one go using the fastest CUB block-level
  * algorithm (Merge or Radix) as determined by pre-computed benchmarks for the total sort size.
  *
+ * The key difference from `iterative_sort`, `hybrid_sort` and `casceded_sort` is that reduction
+ * of flash sort can use block radix sort so sort size can be large (up to 4096). Other algorithms only use
+ * warp bitonic, cub warp merge sort or block merge sort so sort size is limited to 1024.
+ *
  * Performance Characteristics:
  * -   **Strengths**: High performance for small and medium `k` where the total number of
  * candidates (`k * num_partitions`) is less than ~1024, as it avoids iterative overhead.
@@ -91,8 +95,9 @@ __global__ void FlashConvergentKernel(const float* __restrict__ scores_in,
   cg::grid_group grid = cg::this_grid();
   constexpr int kSortSize = K_PADDED * kMaxPartitionsForKernel;
 
-  // Use block-level sorting only for now. To improve small vocabulary size and small k, warp-level sorting can be added.
   constexpr SortAlgo kBestAlgo = GetBestAlgo(kSortSize);
+
+  // Use block-level sorting algorithm only since we use one block to do the final merge.
   constexpr SortAlgo kSortAlgo =
       (kBestAlgo == SortAlgo::WARP_BITONIC || kBestAlgo == SortAlgo::CUB_WARP_MERGE) ? SortAlgo::CUB_BLOCK_MERGE : kBestAlgo;
 
