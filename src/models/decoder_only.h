@@ -27,7 +27,6 @@ struct DecoderOnly_State : State {
 
  protected:
   // Override chunking support methods
-  bool IsChunkingSupported() const override;
   DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
                                     DeviceSpan<int32_t> next_indices, size_t chunk_size) override;
 
