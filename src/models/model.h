@@ -62,7 +62,7 @@ struct State {
   // Virtual methods for prefill chunking support
   virtual DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
                                             DeviceSpan<int32_t> next_indices, size_t chunk_size) {
-    return DeviceSpan<float>{};
+    throw std::runtime_error("RunWithChunking not implemented for this model type");
   }
 
  private:
