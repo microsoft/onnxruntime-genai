@@ -90,6 +90,7 @@ struct Config {
     std::optional<std::string> ep_context_file_path;
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
+    std::optional<int> log_verbosity_level;
     std::optional<std::string> enable_profiling;
     std::optional<std::string> custom_ops_library;
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.

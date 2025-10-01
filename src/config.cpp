@@ -192,6 +192,8 @@ struct SessionOptions_Element : JSON::Element {
       v_.inter_op_num_threads = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "log_severity_level") {
       v_.log_severity_level = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "log_verbosity_level") {
+      v_.log_verbosity_level = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "enable_cpu_mem_arena") {
       v_.enable_cpu_mem_arena = JSON::Get<bool>(value);
     } else if (name == "enable_mem_pattern") {

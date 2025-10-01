@@ -623,6 +623,11 @@ inline OrtSessionOptions& OrtSessionOptions::SetLogSeverityLevel(int level) {
   return *this;
 }
 
+inline OrtSessionOptions& OrtSessionOptions::SetLogVerbosityLevel(int level) {
+  Ort::ThrowOnError(Ort::api->SetSessionLogVerbosityLevel(this, level));
+  return *this;
+}
+
 inline OrtSessionOptions& OrtSessionOptions::Add(OrtCustomOpDomain& custom_op_domain) {
   Ort::ThrowOnError(Ort::api->AddCustomOpDomain(this, &custom_op_domain));
   return *this;

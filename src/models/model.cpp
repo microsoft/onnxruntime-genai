@@ -998,6 +998,10 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetLogSeverityLevel(config_session_options.log_severity_level.value());
   }
 
+  if (config_session_options.log_verbosity_level.has_value()) {
+    session_options.SetLogVerbosityLevel(config_session_options.log_verbosity_level.value());
+  }
+
   if (config_session_options.enable_profiling.has_value()) {
     fs::path profile_file_prefix{config_session_options.enable_profiling.value()};
     session_options.EnableProfiling(profile_file_prefix.c_str());
