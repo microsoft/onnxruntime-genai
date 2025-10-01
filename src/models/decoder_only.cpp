@@ -29,10 +29,10 @@ void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   size_t num_tokens = next_tokens.size();
-  const size_t chunk_size = static_cast<size_t>(model_.config_->search.chunk_size);
+  const auto& chunk_size_opt = model_.config_->search.chunk_size;
 
-  if (IsChunkingSupported() && chunk_size > 0 && num_tokens > chunk_size) {
-    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size);
+  if (IsChunkingSupported() && chunk_size_opt.has_value() && num_tokens > chunk_size_opt.value()) {
+    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value());
   } else {
     UpdateInputsOutputs(next_tokens, next_indices, total_length);
 

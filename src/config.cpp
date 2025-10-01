@@ -869,8 +869,12 @@ struct Search_Element : JSON::Element {
     } else if (name == "random_seed") {
       v_.random_seed = SafeDoubleToInt(JSON::Get<double>(value), name);
     } else if (name == "chunk_size") {
-      // Optional: defaults to -1 (disabled) if not specified
-      v_.chunk_size = static_cast<int>(JSON::Get<double>(value));
+      double chunk_value = JSON::Get<double>(value);
+      if (chunk_value > 0) {
+        v_.chunk_size = static_cast<size_t>(chunk_value);
+      } else {
+        v_.chunk_size = std::nullopt;  // Explicitly disable if <= 0
+      }
     } else if (name == "do_sample") {
       v_.do_sample = JSON::Get<bool>(value);
     } else if (name == "past_present_share_buffer") {
