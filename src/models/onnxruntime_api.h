@@ -594,8 +594,8 @@ struct OrtSessionOptions {
 
   OrtSessionOptions& SetExecutionMode(ExecutionMode execution_mode);  ///< Wraps OrtApi::SetSessionExecutionMode
 
-  OrtSessionOptions& SetLogId(const char* logid);     ///< Wraps OrtApi::SetSessionLogId
-  OrtSessionOptions& SetLogSeverityLevel(int level);  ///< Wraps OrtApi::SetSessionLogSeverityLevel
+  OrtSessionOptions& SetLogId(const char* logid);      ///< Wraps OrtApi::SetSessionLogId
+  OrtSessionOptions& SetLogSeverityLevel(int level);   ///< Wraps OrtApi::SetSessionLogSeverityLevel
   OrtSessionOptions& SetLogVerbosityLevel(int level);  ///< Wraps OrtApi::SetSessionLogVerbosityLevel
 
   OrtSessionOptions& Add(OrtCustomOpDomain& custom_op_domain);  ///< Wraps OrtApi::AddCustomOpDomain
