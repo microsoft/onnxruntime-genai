@@ -15,6 +15,7 @@ import ast
 import json
 import os
 import textwrap
+import warnings
 from typing import Any, Literal, Sequence
 
 import numpy as np
@@ -75,6 +76,17 @@ class Model:
 
         # EP-specific variables
         self.ep = ep
+
+        # Validate enable_webgpu_graph option
+        if extra_options.get("enable_webgpu_graph", False) and self.ep != "webgpu":
+            warnings.warn(
+                f"enable_webgpu_graph is only supported with WebGPU execution provider, "
+                f"but current EP is '{self.ep}'. Disabling enable_webgpu_graph.",
+                UserWarning,
+                stacklevel=2
+            )
+            extra_options["enable_webgpu_graph"] = False
+
         self.ep_attrs = {
             "cpu": {},
             "cuda": {
@@ -82,6 +94,7 @@ class Model:
                 "enable_skip_layer_norm_strict_mode": "1"
             },
             "dml": {},
+            # TODO: Enable graph capture for webgpu once supported both in onnxruntime-genai and onnxruntime.
             "webgpu": {},
             "trt-rtx": {"enable_cuda_graph": "1"}
         }
@@ -1461,8 +1474,13 @@ class Model:
         self.rope_attrs["save_caches"] = False
         cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
 
-        if self.ep in ["dml", "trt-rtx"]:
-            # Concat small and large cos/sin caches for DML and TRT-RTX EPs
+        # Determine which EPs don't support the If operator
+        eps_without_if_support = ["dml", "trt-rtx"]
+        if self.extra_options.get("enable_webgpu_graph", False):
+            eps_without_if_support.append("webgpu")
+
+        if self.ep in eps_without_if_support:
+            # Concat small and large cos/sin caches for DML, TRT-RTX, and WebGPU (when graph enabled) EPs
             # These EPs don't support the If operator
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
             sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
@@ -2879,7 +2897,7 @@ class Model:
         # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
-        if self.extra_options.get("enable_cuda_graph", False) or self.ep == "dml":
+        if self.extra_options.get("enable_cuda_graph", False) or self.extra_options.get("enable_webgpu_graph", False) or self.ep == "dml":
             # ORT does not allow nodes to be placed on mulitple execution providers
             # with cuda graph enabled. We've only verified it works with GQA and with
             # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded
@@ -3205,41 +3223,87 @@ class Model:
     def make_attention_mask_reformatting_for_gqa(self):
         # Make nodes for the attention mask subgraph that calculates
         # attributes about the 2D attention mask to use in GroupQueryAttention
-        #
-        #                attention_mask
-        #               /              \
-        #          ReduceSum          Shape
-        #              |                |
-        #             Sub             Gather
-        #              |                |
-        #        Cast to int32    Cast to int32
-        #              |                |
-        #          seqlens_k      total_seq_len
-        #            (1D)             (int)
         basename = "/model/attn_mask_reformat"
         attn_mask_basename = f"{basename}/attn_mask_subgraph"
 
-        # Left path
-        reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
-        reduce_sum_inputs = ["attention_mask", "/model/constants/INT64/[1]"]
-        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
-        sub_name = f"{attn_mask_basename}/Sub"
-        sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/[1]"]
-        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
-        cast_1_name = f"{attn_mask_basename}/Sub/Cast"
-        self.make_cast(cast_1_name, f"{sub_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        if self.extra_options.get("enable_webgpu_graph", False):
+            # WebGPU graph mode: Remove right path, calculate total_seq_len from seqlens_k
+            #
+            #          attention_mask
+            #               |
+            #         Cast to int32
+            #               |
+            #           ReduceSum
+            #               |
+            #              Sub
+            #               |
+            #           seqlens_k
+            #             (1D)
+            #               |
+            #              Add (seqlens_k + 1)
+            #               |
+            #            Squeeze
+            #               |
+            #         total_seq_len
+            #             (int)
 
-        # Right path
-        shape_name = f"{attn_mask_basename}/Shape"
-        self.make_shape(shape_name, "attention_mask", shape=[2])
-        gather_name = f"{attn_mask_basename}/Gather"
-        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/1"]
-        self.make_gather(gather_name, gather_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
-        cast_2_name = f"{attn_mask_basename}/Gather/Cast"
-        self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=ir.DataType.INT32, shape=None)
+            # Left path - calculate seqlens_k
+            cast_1_name = f"{attn_mask_basename}/Cast"
+            self.make_cast(cast_1_name, "attention_mask", dtype=ir.DataType.INT32, shape=["batch_size", "total_sequence_length"])
+            reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
+            reduce_sum_inputs = [f"{cast_1_name}/output_0", "/model/constants/INT64/[1]"]
+            self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+            sub_name = f"{attn_mask_basename}/Sub"
+            sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT32/[1]"]
+            self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
 
-        self.mask_attrs["seqlens_k"] = cast_1_name
-        self.mask_attrs["total_seq_len"] = cast_2_name
+            # Calculate total_seq_len = seqlens_k + 1
+            add_name = f"{attn_mask_basename}/Add"
+            add_inputs = [f"{sub_name}/output_0", "/model/constants/INT32/[1]"]
+            self.make_add(add_name, add_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+
+            # Squeeze to get int value
+            squeeze_name = f"{attn_mask_basename}/Squeeze"
+            squeeze_inputs = [f"{add_name}/output_0", "/model/constants/INT64/[0]"]
+            self.make_squeeze(squeeze_name, squeeze_inputs, dtype=ir.DataType.INT32, shape=[])
+
+            self.mask_attrs["seqlens_k"] = sub_name
+            self.mask_attrs["total_seq_len"] = squeeze_name
+        else:
+            # Standard mode: Both left and right paths
+            #
+            #                attention_mask
+            #               /              \
+            #          ReduceSum          Shape
+            #              |                |
+            #             Sub             Gather
+            #              |                |
+            #        Cast to int32    Cast to int32
+            #              |                |
+            #          seqlens_k      total_seq_len
+            #            (1D)             (int)
+
+            # Left path
+            reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
+            reduce_sum_inputs = ["attention_mask", "/model/constants/INT64/[1]"]
+            self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
+            sub_name = f"{attn_mask_basename}/Sub"
+            sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/[1]"]
+            self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
+            cast_1_name = f"{attn_mask_basename}/Sub/Cast"
+            self.make_cast(cast_1_name, f"{sub_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size", 1])
+
+            # Right path
+            shape_name = f"{attn_mask_basename}/Shape"
+            self.make_shape(shape_name, "attention_mask", shape=[2])
+            gather_name = f"{attn_mask_basename}/Gather"
+            gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/1"]
+            self.make_gather(gather_name, gather_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
+            cast_2_name = f"{attn_mask_basename}/Gather/Cast"
+            self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=ir.DataType.INT32, shape=None)
+
+            self.mask_attrs["seqlens_k"] = cast_1_name
+            self.mask_attrs["total_seq_len"] = cast_2_name
 
     def make_attention_mask_reformatting_for_sparse_attn(self):
         # Make nodes for the attention mask subgraph that calculates
@@ -3279,7 +3343,18 @@ class Model:
         self.mask_attrs["total_seq_len"] = cast_2_name
 
     def make_position_ids_reformatting(self):
-        # Make nodes for the position ids reformatting subgraph
+        if self.extra_options.get("enable_webgpu_graph", False):
+            # WebGPU graph mode: Check position_ids type and handle accordingly
+            proto_dtype = self.input_types["position_ids"]
+
+            if proto_dtype == ir.DataType.INT64:
+                # If position_ids is int64, return it directly
+                return "position_ids"
+            else:
+                # If position_ids is not int64 (e.g., int32), throw NotImplementedError
+                raise NotImplementedError(f"enable_webgpu_graph is not supported with position_ids type {proto_dtype}. Only INT64 is supported.")
+
+        # Standard mode: Make nodes for the position ids reformatting subgraph
         #
         #          input_ids   position_ids
         #              |            |
@@ -3325,10 +3400,25 @@ class LlamaModel(Model):
 class MistralModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.position_ids_name = f"{self.make_position_ids_reformatting()}/output_0" if not self.attention_attrs["use_rope_in_attn"] else "position_ids"
+
+        # Only call make_position_ids_reformatting if position_ids is available as an input
+        if "position_ids" in self.input_names:
+            position_ids_result = self.make_position_ids_reformatting()
+            # For WebGPU graph mode, position_ids_result is already "position_ids", so don't append /output_0
+            if position_ids_result == "position_ids":
+                self.position_ids_name = "position_ids"
+            else:
+                self.position_ids_name = f"{position_ids_result}/output_0"
+        else:
+            # When position_ids is not an input (use_rope_in_attn is True),
+            # position_ids won't be used since rotary embeddings are handled in GQA
+            self.position_ids_name = None
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
-        super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
+        if self.position_ids_name is not None:
+            super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
+        else:
+            super().make_attention(layer_id, attention, root_input, **kwargs)
 
 
 class QwenModel(MistralModel):
@@ -4296,7 +4386,7 @@ def check_extra_options(kv_pairs):
     Check key-value pairs and set values correctly
     """
     bools = [
-        "int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph",
+        "int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "enable_webgpu_graph",
         "use_8bits_moe", "use_qdq", "use_webgpu_fp32", "use_cuda_bf16", "int4_tied_embeddings", "hf_remote",
     ]
     for key in bools:
@@ -4609,6 +4699,9 @@ def get_args():
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
+                enable_webgpu_graph = Enable WebGPU graph capture during inference. Default is false.
+                    If enabled, the model structure will be optimized for WebGPU graph execution.
+                    This affects attention mask reformatting and position IDs handling.
                 use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
                 use_qdq = Use the QDQ decomposition for ops.
