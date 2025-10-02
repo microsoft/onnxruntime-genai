@@ -305,6 +305,10 @@ struct OgaTokenizer : OgaAbstract {
     return std::unique_ptr<OgaTokenizer>(p);
   }
 
+  void UpdateOptions(const char* keys[], const char* values[], size_t num_options) const {
+      OgaCheckResult(OgaUpdateTokenizerOptions(this, keys, values, num_options));
+  }
+
   void Encode(const char* str, OgaSequences& sequences) const {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }

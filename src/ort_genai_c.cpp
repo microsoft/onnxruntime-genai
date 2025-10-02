@@ -581,6 +581,33 @@ OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer**
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
+    const OgaTokenizer* tokenizer,
+    const char* keys[],
+    const char* values[],
+    size_t num_options) 
+{
+  OGA_TRY
+
+  if (!tokenizer)
+    throw std::runtime_error("Tokenizer pointer is null");
+
+  // Build std::unordered_map from the arrays
+  std::unordered_map<std::string, std::string> options;
+  for (size_t i = 0; i < num_options; ++i) {
+    if (keys[i] && values[i]) {
+      options[keys[i]] = values[i];
+    }
+  }
+
+  // Update via C++ Tokenizer method
+  tokenizer->UpdateOptions(options);
+
+  return nullptr;
+
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const char* str, OgaSequences* sequences) {
   OGA_TRY
   sequences->emplace_back(tokenizer->Encode(str));
