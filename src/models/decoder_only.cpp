@@ -28,12 +28,47 @@ void DecoderOnly_State::SetExtraInputs(const std::vector<ExtraInput>& extra_inpu
 }
 
 DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  UpdateInputsOutputs(next_tokens, next_indices, total_length);
+  size_t num_tokens = next_tokens.size();
+  const auto& chunk_size_opt = model_.config_->search.chunk_size;
 
-  // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
-  bool graph_capture_this_run = params_->use_graph_capture && input_ids_.GetShape()[1] == 1;
-  State::Run(*model_.session_decoder_, graph_capture_this_run);
+  if (chunk_size_opt.has_value() && chunk_size_opt.value() > 0 && num_tokens > chunk_size_opt.value()) {
+    return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value());
+  } else {
+    UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
+    // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
+    bool graph_capture_this_run = params_->use_graph_capture && input_ids_.GetShape()[1] == 1;
+    State::Run(*model_.session_decoder_, graph_capture_this_run);
+
+    return logits_.Get();
+  }
+}
+
+DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
+                                                     DeviceSpan<int32_t> next_indices, size_t chunk_size) {
+  // Chunking logic for context phase - process in chunks based on configured chunk_size
+  size_t num_tokens = next_tokens.size();
+  size_t processed_tokens = 0;
+  int length = total_length - static_cast<int>(num_tokens);
+
+  while (processed_tokens < num_tokens) {
+    size_t current_chunk_size = std::min(chunk_size, num_tokens - processed_tokens);
+
+    // Create subspans for current chunk
+    auto chunk_tokens = next_tokens.subspan(processed_tokens, current_chunk_size);
+    length = length + static_cast<int>(current_chunk_size);
+
+    // Process this chunk - fills KV cache progressively
+    UpdateInputsOutputs(chunk_tokens, next_indices, length);
+
+    // Graph capture is typically disabled during context phase chunking
+    bool graph_capture_this_run = false;  // Disable graph capture during chunking
+    State::Run(*model_.session_decoder_, graph_capture_this_run);
+
+    processed_tokens += current_chunk_size;
+  }
+
+  // Return logits from the last chunk for potential sampling
   return logits_.Get();
 }
 
