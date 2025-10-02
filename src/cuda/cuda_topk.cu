@@ -17,19 +17,20 @@
 #include "cuda_topk_iterative_sort.cuh"
 #include "cuda_topk_cascaded_sort.cuh"
 #include "cuda_topk_select_sort.cuh"
+#include "cuda_topk_sort_benchmark_cache.h"
 
 namespace Generators {
 namespace cuda {
 
 // Constructor for the host-side parameter planning struct.
 TopkDataDetail::TopkDataDetail(int batch_size, int vocab_size, cudaStream_t stream) {
-  // Estimate the best partition size for each partition-based algorithm.
-  // This is a crucial heuristic that balances the amount of work done in the
-  // initial partitioning stage vs. the final reduction stage.
-  hybrid_sort_partition_size = hybrid_sort::EstimateBestPartitionSize(vocab_size);
-  iterative_sort_partition_size = iterative_sort::EstimateBestPartitionSize(vocab_size);
-  cascaded_sort_partition_size = cascaded_sort::EstimateBestPartitionSize(vocab_size);
-  flash_convergent_partition_size = flash_convergent::EstimateBestPartitionSize(vocab_size);
+  // Partition sizes are now calculated just-in-time in the benchmark/run functions
+  // based on the specific `k` value for the operation.
+  hybrid_sort_partition_size = 0;
+  iterative_sort_partition_size = 0;
+  cascaded_sort_partition_size = 0;
+  flash_convergent_partition_size = 0;
+  flash_convergent_partition_size_k = 0;
 
   // Calculate the maximum possible size for intermediate buffers. This is determined
   // by the algorithm that requires the most space. The formula is:
