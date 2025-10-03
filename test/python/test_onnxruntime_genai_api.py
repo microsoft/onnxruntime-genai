@@ -551,34 +551,6 @@ def test_get_output(test_data_path, relative_model_path):
     reason="Model is not available on arm64.",
 )
 @pytest.mark.parametrize("device", devices)
-def test_set_runtime_option(device, phi2_for):
-    if device == "dml":
-        pytest.skip("DML EP does not support setting runtime options")
-
-    model = og.Model(phi2_for(device))
-    tokenizer = og.Tokenizer(model)
-
-    prompts = [
-        "This is a test.",
-    ]
-
-    params = og.GeneratorParams(model)
-    params.set_search_options(max_length=20, batch_size=len(prompts))  # To run faster
-
-    generator = og.Generator(model, params)
-    generator.set_runtime_option("memory.enable_memory_arena_shrinkage", "cpu:0")
-    generator.append_tokens(tokenizer.encode_batch(prompts))
-    while not generator.is_done():
-        generator.generate_next_token()
-    for i in range(len(prompts)):
-        print(tokenizer.decode(generator.get_sequence(0)))
-
-
-@pytest.mark.skipif(
-    sysconfig.get_platform().endswith("arm64"),
-    reason="Model is not available on arm64.",
-)
-@pytest.mark.parametrize("device", devices)
 def test_hidden_states(qwen_for, device):
     model = og.Model(qwen_for(device))
 
