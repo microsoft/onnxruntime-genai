@@ -31,6 +31,7 @@ std::string_view NormalizeProviderName(std::string_view name) {
   }
   return name;  // Return name unchanged
 }
+
 ONNXTensorElementDataType TranslateTensorType(std::string_view value) {
   if (value == "float32") {
     return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
@@ -183,12 +184,16 @@ struct SessionOptions_Element : JSON::Element {
       v_.ep_context_embed_mode = JSON::Get<std::string_view>(value);
     } else if (name == "ep_context_file_path") {
       v_.ep_context_file_path = JSON::Get<std::string_view>(value);
+    } else if (name == "use_device_allocator_for_initializers") {
+      v_.use_device_allocator_for_initializers = JSON::Get<bool>(value);
     } else if (name == "intra_op_num_threads") {
       v_.intra_op_num_threads = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "inter_op_num_threads") {
       v_.inter_op_num_threads = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "log_severity_level") {
       v_.log_severity_level = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "log_verbosity_level") {
+      v_.log_verbosity_level = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "enable_cpu_mem_arena") {
       v_.enable_cpu_mem_arena = JSON::Get<bool>(value);
     } else if (name == "enable_mem_pattern") {
@@ -229,6 +234,35 @@ struct SessionOptions_Element : JSON::Element {
   Config::SessionOptions& v_;
   ProviderOptionsArray_Element provider_options_{v_.provider_options};
   NamedStrings_Element config_entries_{v_.config_entries};
+};
+
+struct RunOptions_Element : JSON::Element {
+  explicit RunOptions_Element(Config::RunOptions& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "gpu_graph_id") {
+      v_.gpu_graph_id = JSON::Get<std::string_view>(value);
+    } else if (name == "memory.enable_memory_arena_shrinkage" || name == "enable_memory_arena_shrinkage") {
+      v_.enable_memory_arena_shrinkage = JSON::Get<std::string_view>(value);
+    } else if (name == "disable_synchronize_execution_providers") {
+      v_.disable_synchronize_execution_providers = JSON::Get<std::string_view>(value);
+    } else if (name == "qnn.htp_perf_mode" || name == "htp_perf_mode") {
+      v_.qnn_htp_perf_mode = JSON::Get<std::string_view>(value);
+    } else if (name == "qnn.htp_perf_mode_post_run" || name == "htp_perf_mode_post_run") {
+      v_.qnn_htp_perf_mode_post_run = JSON::Get<std::string_view>(value);
+    } else if (name == "qnn.rpc_control_latency" || name == "rpc_control_latency") {
+      v_.qnn_rpc_control_latency = JSON::Get<std::string_view>(value);
+    } else if (name == "qnn.lora_config") {
+      v_.qnn_lora_config = JSON::Get<std::string_view>(value);
+    } else if (name == "nv_profile_index") {
+      v_.nv_profile_index = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::RunOptions& v_;
 };
 
 struct EncoderInputs_Element : JSON::Element {
@@ -399,7 +433,13 @@ struct PipelineModel_Element : JSON::Element {
       v_.session_options = Config::SessionOptions{};
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
-    } else if (name == "output_names_forwarder") {
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    if (name == "output_names_forwarder") {
       return output_names_forwarder_;
     }
     throw JSON::unknown_value_error{};
@@ -417,6 +457,7 @@ struct PipelineModel_Element : JSON::Element {
  private:
   Config::Model::Decoder::PipelineModel& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
   StringArray_Element inputs_{v_.inputs};
   StringArray_Element outputs_{v_.outputs};
   StringStringMap_Element output_names_forwarder_{v_.output_names_forwarder};
@@ -495,7 +536,14 @@ struct Encoder_Element : JSON::Element {
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
-      return session_options_;
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
     }
     if (name == "inputs") {
       return inputs_;
@@ -508,7 +556,8 @@ struct Encoder_Element : JSON::Element {
 
  private:
   Config::Model::Encoder& v_;
-  SessionOptions_Element session_options_{v_.session_options};
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
   EncoderInputs_Element inputs_{v_.inputs};
   EncoderOutputs_Element outputs_{v_.outputs};
 };
@@ -538,6 +587,11 @@ struct Decoder_Element : JSON::Element {
     if (name == "session_options") {
       return session_options_;
     }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
     if (name == "inputs") {
       return inputs_;
     }
@@ -561,6 +615,7 @@ struct Decoder_Element : JSON::Element {
  private:
   Config::Model::Decoder& v_;
   SessionOptions_Element session_options_{v_.session_options};
+  std::unique_ptr<RunOptions_Element> run_options_;
   DecoderInputs_Element inputs_{v_.inputs};
   DecoderOutputs_Element outputs_{v_.outputs};
   Pipeline_Element pipeline_{v_.pipeline};
@@ -617,17 +672,29 @@ struct Vision_Element : JSON::Element {
   }
 
   Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
     if (name == "inputs") {
       return inputs_;
-    } else if (name == "outputs") {
-      return outputs_;
-    } else {
-      throw JSON::unknown_value_error{};
     }
+    if (name == "outputs") {
+      return outputs_;
+    }
+    throw JSON::unknown_value_error{};
   }
 
  private:
   Config::Model::Vision& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
   VisionInputs_Element inputs_{v_.inputs};
   VisionOutputs_Element outputs_{v_.outputs};
 };
@@ -684,17 +751,29 @@ struct Speech_Element : JSON::Element {
   }
 
   Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
     if (name == "inputs") {
       return inputs_;
-    } else if (name == "outputs") {
-      return outputs_;
-    } else {
-      throw JSON::unknown_value_error{};
     }
+    if (name == "outputs") {
+      return outputs_;
+    }
+    throw JSON::unknown_value_error{};
   }
 
  private:
   Config::Model::Speech& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
   SpeechInputs_Element inputs_{v_.inputs};
   SpeechOutputs_Element outputs_{v_.outputs};
 };
@@ -745,17 +824,29 @@ struct Embedding_Element : JSON::Element {
   }
 
   Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
     if (name == "inputs") {
       return inputs_;
-    } else if (name == "outputs") {
-      return outputs_;
-    } else {
-      throw JSON::unknown_value_error{};
     }
+    if (name == "outputs") {
+      return outputs_;
+    }
+    throw JSON::unknown_value_error{};
   }
 
  private:
   Config::Model::Embedding& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
   EmbeddingInputs_Element inputs_{v_.inputs};
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
@@ -1196,8 +1287,28 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
     model.decoder.session_options.providers.push_back(provider_option.name);
   }
 
-  for (const auto& provider_option : model.encoder.session_options.provider_options) {
-    model.encoder.session_options.providers.push_back(provider_option.name);
+  if (model.encoder.session_options.has_value()) {
+    for (const auto& provider_option : model.encoder.session_options->provider_options) {
+      model.encoder.session_options->providers.push_back(provider_option.name);
+    }
+  }
+
+  if (model.vision.session_options.has_value()) {
+    for (const auto& provider_option : model.vision.session_options->provider_options) {
+      model.vision.session_options->providers.push_back(provider_option.name);
+    }
+  }
+
+  if (model.speech.session_options.has_value()) {
+    for (const auto& provider_option : model.speech.session_options->provider_options) {
+      model.speech.session_options->providers.push_back(provider_option.name);
+    }
+  }
+
+  if (model.embedding.session_options.has_value()) {
+    for (const auto& provider_option : model.embedding.session_options->provider_options) {
+      model.embedding.session_options->providers.push_back(provider_option.name);
+    }
   }
 }
 

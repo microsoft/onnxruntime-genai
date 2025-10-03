@@ -330,9 +330,9 @@ inline void OrtIoBinding::SynchronizeOutputs() {
   Ort::ThrowOnError(Ort::api->SynchronizeBoundOutputs(this));
 }
 
-inline std::unique_ptr<OrtArenaCfg> OrtArenaCfg::Create(size_t max_mem, int arena_extend_strategy, int initial_chunk_size_bytes, int max_dead_bytes_per_chunk) {
+inline std::unique_ptr<OrtArenaCfg> OrtArenaCfg::Create(const char* const* keys, const size_t* values, size_t count) {
   OrtArenaCfg* p;
-  Ort::ThrowOnError(Ort::api->CreateArenaCfg(max_mem, arena_extend_strategy, initial_chunk_size_bytes, max_dead_bytes_per_chunk, &p));
+  Ort::ThrowOnError(Ort::api->CreateArenaCfgV2(keys, values, count, &p));
   return std::unique_ptr<OrtArenaCfg>{p};
 }
 
@@ -620,6 +620,11 @@ inline OrtSessionOptions& OrtSessionOptions::SetLogId(const char* logid) {
 
 inline OrtSessionOptions& OrtSessionOptions::SetLogSeverityLevel(int level) {
   Ort::ThrowOnError(Ort::api->SetSessionLogSeverityLevel(this, level));
+  return *this;
+}
+
+inline OrtSessionOptions& OrtSessionOptions::SetLogVerbosityLevel(int level) {
+  Ort::ThrowOnError(Ort::api->SetSessionLogVerbosityLevel(this, level));
   return *this;
 }
 

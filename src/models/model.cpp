@@ -110,10 +110,11 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   DurationTrace trace{"State::Run"};
 
   if (params_->use_graph_capture) {
-    if (graph_capture_this_run)
+    if (graph_capture_this_run) {
       run_options_->AddConfigEntry("gpu_graph_id", graph_id_.c_str());
-    else
+    } else {
       run_options_->AddConfigEntry("gpu_graph_id", "-1");
+    }
   }
 
   if (first_run_) {
@@ -155,14 +156,47 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   DumpOutputs();
 }
 
-void State::SetTerminate() {
-  session_terminated_ = true;
-  run_options_->SetTerminate();
+void State::SetRunOption(const char* key, const char* value) {
+  if (strcmp(key, "terminate_session") == 0) {
+    if (strcmp(value, "0") == 0) {
+      session_terminated_ = false;
+      run_options_->UnsetTerminate();
+    } else if (strcmp(value, "1") == 0) {
+      session_terminated_ = true;
+      run_options_->SetTerminate();
+    } else {
+      // Value not expected
+      throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
+    }
+  }
+  run_options_->AddConfigEntry(key, value);
 }
 
-void State::UnsetTerminate() {
-  session_terminated_ = false;
-  run_options_->UnsetTerminate();
+void State::SetRunOptions(const Config::RunOptions& config_run_options) {
+  if (config_run_options.gpu_graph_id.has_value()) {
+    run_options_->AddConfigEntry("gpu_graph_id", config_run_options.gpu_graph_id.value().c_str());
+  }
+  if (config_run_options.enable_memory_arena_shrinkage.has_value()) {
+    run_options_->AddConfigEntry("memory.enable_memory_arena_shrinkage", config_run_options.enable_memory_arena_shrinkage.value().c_str());
+  }
+  if (config_run_options.disable_synchronize_execution_providers.has_value()) {
+    run_options_->AddConfigEntry("disable_synchronize_execution_providers", config_run_options.disable_synchronize_execution_providers.value().c_str());
+  }
+  if (config_run_options.qnn_htp_perf_mode.has_value()) {
+    run_options_->AddConfigEntry("qnn.htp_perf_mode", config_run_options.qnn_htp_perf_mode.value().c_str());
+  }
+  if (config_run_options.qnn_htp_perf_mode_post_run.has_value()) {
+    run_options_->AddConfigEntry("qnn.htp_perf_mode_post_run", config_run_options.qnn_htp_perf_mode_post_run.value().c_str());
+  }
+  if (config_run_options.qnn_rpc_control_latency.has_value()) {
+    run_options_->AddConfigEntry("qnn.rpc_control_latency", config_run_options.qnn_rpc_control_latency.value().c_str());
+  }
+  if (config_run_options.qnn_lora_config.has_value()) {
+    run_options_->AddConfigEntry("qnn.lora_config", config_run_options.qnn_lora_config.value().c_str());
+  }
+  if (config_run_options.nv_profile_index.has_value()) {
+    run_options_->AddConfigEntry("nv_profile_index", config_run_options.nv_profile_index.value().c_str());
+  }
 }
 
 OrtValue* State::GetInput(const char* name) {
@@ -351,7 +385,7 @@ int32_t Tokenizer::TokenToTokenId(const char* token) const {
  * If multi-profile is disabled, it creates a single profile with simple shapes.
  *
  */
-void ConfigureNvTensorRtRTxProfile(const Config& config, OrtSessionOptions& session_options, bool is_multi_profile_enabled) {
+void ConfigureNvTensorRtRtxProfile(const Config& config, OrtSessionOptions& session_options, bool is_multi_profile_enabled) {
   // Get model parameters from decoder config
   const int num_layers = config.model.decoder.num_hidden_layers;
   const int num_kv_heads = config.model.decoder.num_key_value_heads;
@@ -480,7 +514,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                            const std::vector<Config::ProviderOptions>& provider_options_list,
                                            bool is_primary_session_options,
                                            bool disable_graph_capture,
-                                           const Config& config) {
+                                           const Config& config,
+                                           std::unique_ptr<OrtArenaCfg>& arena_cfg) {
   DeviceInterface* p_device{};
 
   auto providers_list = providers;
@@ -504,9 +539,23 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
     if (provider_options.name == "cuda") {
       auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
       std::vector<const char*> keys, values;
+
+      // Memory management settings
+      const char* arena_keys[] = {"max_mem", "arena_extend_strategy", "initial_chunk_size_bytes", "max_dead_bytes_per_chunk", "initial_growth_chunk_size_bytes"};
+      size_t arena_values[] = {static_cast<size_t>(0), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1)};
+      bool use_arena_management = false;
+
       for (auto& option : provider_options.options) {
-        keys.emplace_back(option.first.c_str());
-        values.emplace_back(option.second.c_str());
+        auto it = std::find(std::begin(arena_keys), std::end(arena_keys), option.first);
+
+        if (it == std::end(arena_keys)) {
+          keys.emplace_back(option.first.c_str());
+          values.emplace_back(option.second.c_str());
+        } else {
+          size_t idx = std::distance(std::begin(arena_keys), it);
+          arena_values[idx] = static_cast<size_t>(std::stoull(option.second));
+          use_arena_management = true;
+        }
       }
       ort_provider_options->Update(keys.data(), values.data(), keys.size());
 
@@ -517,6 +566,12 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
         // Create and set our cudaStream_t
         ort_provider_options->UpdateValue("user_compute_stream", p_device->GetCudaStream());
+      }
+
+      // Use fine-grained memory management of BFC Arena
+      if (use_arena_management) {
+        if (arena_cfg == nullptr) arena_cfg = OrtArenaCfg::Create(arena_keys, arena_values, 5);
+        ort_provider_options->UpdateValue("default_memory_arena_cfg", arena_cfg.get());
       }
 
       session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
@@ -586,7 +641,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
       } else if (provider_options.name == "NvTensorRtRtx") {
         bool is_multi_profile_enabled = IsMultiProfileEnabled(config.model.decoder.session_options);
-        ConfigureNvTensorRtRTxProfile(config, session_options, is_multi_profile_enabled);
+        ConfigureNvTensorRtRtxProfile(config, session_options, is_multi_profile_enabled);
         if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
           session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.enable_cuda_graph", "1");
         }
@@ -750,9 +805,9 @@ static const uint8_t g_trivial_model[] = {
 
 // Since Python/Others can and will hold onto a generator object past the model object's lifetime we need to ensure
 // the allocator used is not destroyed until last. This keeps the allocator around until exit, after all other memory
-// has been destroyed. Without this, we will crash in the Onnxruntime BFCArena code when deleting tensors due to the
+// has been destroyed. Without this, we will crash in the OnnxRuntime BFCArena code when deleting tensors due to the
 // arena already being destroyed.
-void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
+void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::unique_ptr<OrtArenaCfg>& arena_cfg) {
   // CPU Allocator is a special case, it's not in the owned 'allocator_device_' table below so we handle it separately
   // OpenVINO delegates to the CPU device allocator
   auto type = device.GetType();
@@ -782,7 +837,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config) {
     provider_options_list.back().options.emplace_back("enable_htp_shared_memory_allocator", "1");
   }
   const std::vector<std::string> providers{device_type_names[static_cast<int>(type)]};
-  SetProviderSessionOptions(*session_options, providers, provider_options_list, true, false, config);
+  SetProviderSessionOptions(*session_options, providers, provider_options_list, true, false, config, arena_cfg);
   session_options->SetLogSeverityLevel(ORT_LOGGING_LEVEL_ERROR);  // Errors only here, as warnings are not useful to the user
 
   allocator.session_ = OrtSession::Create(GetOrtEnv(), g_trivial_model, sizeof(g_trivial_model), session_options.get());
@@ -868,7 +923,7 @@ std::vector<const char*> SessionInfo::GetOutputSymbolicShape(const std::string& 
 
 Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   CreateSessionOptions();
-  EnsureDeviceOrtInit(*p_device_, *config_);
+  EnsureDeviceOrtInit(*p_device_, *config_, arena_cfg_);
 
   // Only CUDA, TRT-RTX and DML does every input on the device
   if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx)
@@ -887,6 +942,7 @@ Model::~Model() {
     allocator.session_.reset();
     allocator.allocator_.reset();
     session_options_.reset();
+    arena_cfg_.reset();
     // DML objects are globally scoped and launch background threads that retain hardware resources.
     // These threads persist beyond the lifetime of a Model, preventing proper cleanup and potentially causing deadlocks.
     // To avoid blocking driver threads, we explicitly destroy DML objects when the Model is destroyed.
@@ -905,6 +961,12 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   constexpr int max_thread_nums = 16;
   int num_of_cores = std::max(min_thread_nums, static_cast<int>(std::thread::hardware_concurrency() / 2));
   session_options.SetIntraOpNumThreads(std::min(num_of_cores, max_thread_nums));
+
+  if (config_session_options.use_device_allocator_for_initializers.has_value()) {
+    // Enable using device allocator for allocating initialized tensor memory.
+    // Using device allocators means the memory allocation is made using malloc/new.
+    session_options.AddConfigEntry("session.use_device_allocator_for_initializers", "1");
+  }
 
   if (config_session_options.intra_op_num_threads.has_value()) {
     session_options.SetIntraOpNumThreads(config_session_options.intra_op_num_threads.value());
@@ -934,6 +996,10 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
   if (config_session_options.log_severity_level.has_value()) {
     session_options.SetLogSeverityLevel(config_session_options.log_severity_level.value());
+  }
+
+  if (config_session_options.log_verbosity_level.has_value()) {
+    session_options.SetLogVerbosityLevel(config_session_options.log_verbosity_level.value());
   }
 
   if (config_session_options.enable_profiling.has_value()) {
@@ -975,7 +1041,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.SetEpContextFilePath(config_session_options.ep_context_file_path.value().c_str());
   }
 
-  if (config_session_options.provider_options.empty() && config_session_options.use_env_allocators) {
+  if (config_session_options.provider_options.empty() && config_session_options.use_env_allocators.has_value()) {
     // Share env allocators across sessions that only use the CPU provider
     session_options.AddConfigEntry("session.use_env_allocators", "1");
   }
@@ -1056,7 +1122,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
 
   auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
                                                   config_session_options.provider_options, is_primary_session_options,
-                                                  disable_graph_capture, *config_);
+                                                  disable_graph_capture, *config_, arena_cfg_);
 
   if (!p_device_) {
     p_device_ = session_device;

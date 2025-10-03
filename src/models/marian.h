@@ -57,6 +57,7 @@ struct MarianModel : Model {
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
+  std::unique_ptr<OrtSessionOptions> encoder_session_options_;
   std::unique_ptr<OrtSession> session_encoder_;  // encoder_decoder_init.onnx
   std::unique_ptr<OrtSession> session_decoder_;  // decoder.onnx
 };
