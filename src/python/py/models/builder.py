@@ -4326,6 +4326,7 @@ def check_extra_options(kv_pairs):
         raise ValueError("Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
 
+
 def parse_extra_options(kv_items):
     """
     Parse key-value pairs that are separated by '='
@@ -4390,6 +4391,11 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
 
 @torch.no_grad
 def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
+
+    if execution_provider == "NvTensorRtRtx":
+        execution_provider = "trt-rtx"
+        extra_options["use_qdq"] = True
+
     # Create cache and output directories
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(cache_dir, exist_ok=True)
@@ -4541,7 +4547,7 @@ def get_args():
         "-e",
         "--execution_provider",
         required=True,
-        choices=["cpu", "cuda", "dml", "webgpu", "trt-rtx"],
+        choices=["cpu", "cuda", "dml", "webgpu", "NvTensorRtRtx"],
         help="Execution provider to target with precision of model (e.g. FP16 CUDA, INT4 CPU, INT4 WebGPU)",
     )
 
