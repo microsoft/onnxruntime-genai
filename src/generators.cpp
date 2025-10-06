@@ -280,6 +280,10 @@ bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_t
          (search.num_beams == 1 || model_type == "whisper");
 }
 
+void GeneratorParams::SetGuidanceFFTokens(bool enabled) {
+  guidance_ff_tokens_enabled = enabled;
+}
+
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }
@@ -403,6 +407,7 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
+
 
   if (last_action_ == Action::generated && guidance_logits_processor_) {
     auto next_tokens_span = next_tokens.CopyDeviceToCpu();
