@@ -25,12 +25,10 @@ struct DecoderOnly_State : State {
 
   void RewindTo(size_t index) override;
 
- protected:
-  // Override chunking support methods
-  DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
-                                    DeviceSpan<int32_t> next_indices, size_t chunk_size) override;
-
  private:
+  DeviceSpan<float> RunWithChunking(int total_length, DeviceSpan<int32_t>& next_tokens,
+                                    DeviceSpan<int32_t> next_indices, size_t chunk_size);
+
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length);
 
   const DecoderOnly_Model& model_;
