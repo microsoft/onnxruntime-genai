@@ -400,6 +400,10 @@ struct OgaGeneratorParams : OgaAbstract {
     OgaCheckResult(OgaGeneratorParamsSetGuidance(this, type, data));
   }
 
+  void SetGuidanceFFTokens(bool enabled) {
+    OgaCheckResult(OgaGeneratorParamsSetGuidanceFFTokens(this, enabled));
+  }
+
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
 };
 

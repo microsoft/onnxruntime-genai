@@ -200,6 +200,10 @@ struct PyGeneratorParams {
     params_->SetGuidance(type.c_str(), data.c_str());
   }
 
+  void SetGuidanceFFTokens(bool enabled) {
+    params_->SetGuidanceFFTokens(enabled);
+  }
+
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
 };
 
@@ -337,7 +341,8 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init<const OgaModel&>())
       .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
-      .def("set_guidance", &PyGeneratorParams::SetGuidance);
+      .def("set_guidance", &PyGeneratorParams::SetGuidance)
+      .def("set_guidance_ff_tokens", &PyGeneratorParams::SetGuidanceFFTokens);
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
