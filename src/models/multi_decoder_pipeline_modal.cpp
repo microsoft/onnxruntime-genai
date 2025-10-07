@@ -15,7 +15,7 @@ int64_t GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) {
   for (size_t i = 0; i < extra_inputs.size(); ++i) {
     if (extra_inputs[i].name == Config::Defaults::NumImageTokens) {
       assert(extra_inputs[i].tensor->ort_tensor_);
-      const int64_t* num_image_tokens_data = extra_inputs[i].tensor->ort_tensor_->GetTensorData<int64_t>();
+      const int32_t* num_image_tokens_data = extra_inputs[i].tensor->ort_tensor_->GetTensorData<int32_t>();
       return std::accumulate(num_image_tokens_data,
                              num_image_tokens_data + extra_inputs[i].tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetElementCount(),
                              0LL);
@@ -612,8 +612,7 @@ MultiModalDecoderPipelineState::MultiModalDecoderPipelineState(const MultiModalP
 }
 
 void MultiModalDecoderPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  //num_image_tokens_ = GetNumImageTokens(extra_inputs);
-  num_image_tokens_ = 256;
+  num_image_tokens_ = GetNumImageTokens(extra_inputs);
   num_audio_tokens_ = GetNumAudioTokens(extra_inputs, model_.config_->model.speech.inputs.audio_sizes);
   num_images_ = GetImageFeatureBatchSize(extra_inputs);
 
@@ -663,8 +662,8 @@ DeviceSpan<float> MultiModalDecoderPipelineState::Run(int current_length, Device
     return logits;
   }
 
-  //embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_pipeline_state_->full_inputs_embeds_);
-  //embedding_state_->Run(current_length, next_tokens, next_indices);
+  embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_pipeline_state_->full_inputs_embeds_);
+  embedding_state_->Run(current_length, next_tokens, next_indices);
   return decoder_pipeline_state_->Run(current_length, next_tokens, next_indices);
 }
 

@@ -45,14 +45,14 @@ void Embeddings::Add() {
 }
 
 void Embeddings::UpdateSequenceLength(size_t new_length) {
-  if (static_cast<size_t>(shape_[1]) != new_length) {
+  //if (static_cast<size_t>(shape_[1]) != new_length) {
     shape_[1] = new_length;
 
     if (mode_ == Embeddings::Mode::Input) {
       embeddings_ = OrtValue::CreateTensor(model_.p_device_->GetAllocator(), shape_, type_);
       state_.inputs_[index_] = embeddings_.get();
     }
-  }
+  //}
 }
 
 void Embeddings::ReuseEmbeddingsBuffer(const Embeddings& other) {
