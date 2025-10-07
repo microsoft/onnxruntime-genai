@@ -585,8 +585,7 @@ OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
     const OgaTokenizer* tokenizer,
     const char* keys[],
     const char* values[],
-    size_t num_options) 
-{
+    size_t num_options) {
   OGA_TRY
 
   if (!tokenizer)

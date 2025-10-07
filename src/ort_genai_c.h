@@ -581,7 +581,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
  * @param values Array of corresponding option value strings.
  * @param num_options Number of key/value pairs provided.
  *
- * @return nullptr on success, or an OgaResult* describing the error. 
+ * @return nullptr on success, or an OgaResult* describing the error.
  *         The returned OgaResult* (if not null) must be freed with OgaDestroyResult.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
