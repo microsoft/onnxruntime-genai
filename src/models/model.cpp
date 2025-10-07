@@ -280,12 +280,12 @@ void Tokenizer::UpdateOptions(const std::unordered_map<std::string, std::string>
   }
 
   // Tap into ORT Extensions API
-  CheckResult(OrtxUpdateTokenizerOptions(tokenizer_, keys.data(), values.data(), options.size()));
+  CheckResult(OrtxUpdateTokenizerOptions(const_cast<OrtxTokenizer*>(tokenizer_.Get()), keys.data(), values.data(), options.size()));
 }
 
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   OrtxPtr<OrtxTokenId2DArray> ids;
-  CheckResult(OrtxTokenizeWithOptions(tokenizer_, &text, 1, ids.Address(), false /* add_special_tokens */));
+  CheckResult(OrtxTokenize(tokenizer_.Get(), &text, 1, ids.Address()));
 
   const extTokenId_t* tokens;
   size_t count;
@@ -295,7 +295,7 @@ std::vector<int32_t> Tokenizer::Encode(const char* text) const {
 
 std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   OrtxPtr<OrtxStringArray> ortx_string_array;
-  CheckResult(OrtxDetokenize1DWithOptions(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address(), true /* skip_special_tokens */));
+  CheckResult(OrtxDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address()));
 
   const char* string;
   CheckResult(OrtxStringArrayGetItem(ortx_string_array, 0, &string));
