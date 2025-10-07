@@ -280,7 +280,7 @@ void Tokenizer::UpdateOptions(const std::unordered_map<std::string, std::string>
   }
 
   // Tap into ORT Extensions API
-  CheckResult(OrtxUpdateTokenizerOptions(const_cast<OrtxTokenizer*>(tokenizer_), keys.data(), values.data(), options.size()));
+  CheckResult(OrtxUpdateTokenizerOptions(const_cast<OrtxTokenizer*>(static_cast<const OrtxTokenizer*>(tokenizer_)), keys.data(), values.data(), options.size()));
 }
 
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {
