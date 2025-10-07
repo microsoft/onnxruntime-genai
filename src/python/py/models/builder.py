@@ -294,7 +294,7 @@ class Model:
 
     def make_outputs_init(self):
         # Always use float32 logits to improve accuracy in the case of bf16 models.
-        if self.onnx_dtype == ir.DataType.BFLOAT16:
+        if self.io_dtype == ir.DataType.BFLOAT16:
             self.output_types["logits"] = ir.DataType.FLOAT
 
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
@@ -4422,14 +4422,10 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         elif config.architectures[0] == "GemmaForCausalLM":
             onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma2ForCausalLM":
-            if precision == "fp16":
-                print("WARNING: This model loses accuracy with float16 precision. Setting `--precision bf16` by default.")
-                onnx_dtype = ir.DataType.BFLOAT16
+            print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
             onnx_model = Gemma2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
         elif config.architectures[0] == "Gemma3ForCausalLM":
-            if precision == "fp16":
-                print("WARNING: This model loses accuracy with float16 precision. Setting `--precision bf16` by default.")
-                onnx_dtype = ir.DataType.BFLOAT16
+            print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
             onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
             onnx_model.model_type = "gemma3_text"
         elif config.architectures[0] == "Gemma3ForConditionalGeneration":
@@ -4437,9 +4433,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
             for key in text_config:
                 if not hasattr(config, key):
                     setattr(config, key, getattr(text_config, key))
-            if precision == "fp16":
-                print("WARNING: This model loses accuracy with float16 precision. Setting `--precision bf16` by default.")
-                onnx_dtype = ir.DataType.BFLOAT16
+            print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
             print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
             extra_options["exclude_embeds"] = True
             onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)

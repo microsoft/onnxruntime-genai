@@ -484,4 +484,63 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda) {
     }
   }
 }
+
+TEST(SamplingTests, RandomizedSamplingSelectTopCuda_BatchSize1_LargeVocabSize) {
+  // This combination of `batch_size` + `vocab_size` + `top_k` will use the Sort + TopK
+  // algorithm to optimally use the hardware.
+  int batch_size = 1;
+  int vocab_size = 100001;
+  int top_k = 25;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  config->Overlay(R"({ "model": { "vocab_size" : 100001 } })");
+  config->ClearProviders();
+  config->AppendProvider("cuda");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_k", top_k);
+  params->SetSearchOption("batch_size", batch_size);
+
+  std::vector<float> logits_cpu(batch_size * vocab_size);
+  std::random_device rd;
+  std::mt19937 engine(rd());
+  std::uniform_int_distribution<> dist(top_k, 25);
+  int num_iter = 5000;
+  for (int i = 0; i < num_iter; i++) {
+    int num_large = dist(engine);
+    CreateRandomLogits(logits_cpu.data(), num_large, vocab_size, batch_size, engine);
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{batch_size, vocab_size}));
+    generator->GenerateNextToken();
+    auto next_tokens = generator->GetNextTokens();
+
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      // Generated next token
+      auto next_token = next_tokens[b];
+
+      // Our top_k sorted tokens (the generated token has to be one from these)
+      std::vector<size_t> indices(logits_cpu.size());
+      std::iota(indices.begin(), indices.end(), 0);
+      std::partial_sort(
+          indices.begin(), indices.begin() + top_k, indices.end(),
+          [&](size_t A, size_t B) { return logits_cpu[A] > logits_cpu[B]; });
+
+      // Next token has to be in the list of the above top_k indices
+      bool found = false;
+      for (int k = 0; k < top_k; ++k) {
+        if (indices[k] == next_token) {
+          found = true;
+          break;
+        }
+      }
+
+      EXPECT_TRUE(found);
+    }
+  }
+}
 #endif

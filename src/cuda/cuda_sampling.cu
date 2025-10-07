@@ -28,19 +28,54 @@ __global__ void InitCurandStates(unsigned long long seed, curandState* states, i
 
 void SamplingData::ReInitCurandStates(unsigned long long random_seed, int batch_size, cudaStream_t stream) {
   random_seed_ = random_seed;
-  InitCurandStates<<<CeilDiv(batch_size, 128), 128, 0, stream>>>(random_seed, curand_states.get(), batch_size);
+  InitCurandStates<<<CeilDiv(batch_size, 128), 128, 0, stream>>>(random_seed, curand_states, batch_size);
   CUDA_CHECK_LAUNCH();
 }
 
-SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int vocab_size, cudaStream_t stream)
-    : TopkData(batch_size, vocab_size, stream) {
-  // Allocate buffers. These are sized for the largest possible k (vocab_size)
+size_t SamplingData::CalculateTotalSize(int batch_size, int vocab_size, cudaStream_t stream) {
+  // Get size from base class and add our own buffer sizes
+  size_t total_size = TopkData::CalculateTotalSize(batch_size, vocab_size, stream);
   size_t vocab_batch_size = static_cast<size_t>(vocab_size) * batch_size;
-  prefix_sums = CudaMallocArray<float>(vocab_batch_size);
-  scores_adjusted = CudaMallocArray<float>(vocab_batch_size);
-  prefix_sums_adjusted = CudaMallocArray<float>(vocab_batch_size);
-  thresholds = CudaMallocArray<float>(batch_size);
-  curand_states = CudaMallocArray<curandState>(batch_size);
+
+  total_size += AlignUp(vocab_batch_size * sizeof(float), kGpuBufferAlignment);  // prefix_sums
+  total_size += AlignUp(vocab_batch_size * sizeof(float), kGpuBufferAlignment);  // scores_adjusted
+  total_size += AlignUp(vocab_batch_size * sizeof(float), kGpuBufferAlignment);  // prefix_sums_adjusted
+  total_size += AlignUp(batch_size * sizeof(float), kGpuBufferAlignment);        // thresholds
+  total_size += AlignUp(batch_size * sizeof(curandState), kGpuBufferAlignment);  // curand_states
+
+  return total_size;
+}
+
+void SamplingData::InitializeBuffers(int batch_size, int vocab_size, cudaStream_t stream) {
+  // The base class constructor has already called TopkData::InitializeBuffers.
+  // This override is only responsible for initializing the members of the derived class.
+
+  // Calculate the starting offset for the derived class members by getting the total size of the base class.
+  uint8_t* current_ptr = memory_buffer_span_.data() + TopkData::CalculateTotalSize(batch_size, vocab_size, stream);
+
+  size_t vocab_batch_size = static_cast<size_t>(vocab_size) * batch_size;
+
+  prefix_sums = reinterpret_cast<float*>(current_ptr);
+  current_ptr += AlignUp(vocab_batch_size * sizeof(float), kGpuBufferAlignment);
+
+  scores_adjusted = reinterpret_cast<float*>(current_ptr);
+  current_ptr += AlignUp(vocab_batch_size * sizeof(float), kGpuBufferAlignment);
+
+  prefix_sums_adjusted = reinterpret_cast<float*>(current_ptr);
+  current_ptr += AlignUp(vocab_batch_size * sizeof(float), kGpuBufferAlignment);
+
+  thresholds = reinterpret_cast<float*>(current_ptr);
+  current_ptr += AlignUp(batch_size * sizeof(float), kGpuBufferAlignment);
+
+  curand_states = reinterpret_cast<curandState*>(current_ptr);
+}
+
+SamplingData::SamplingData(unsigned long long random_seed, int batch_size, int vocab_size, cudaStream_t stream, void* buffer, size_t buffer_size)
+    : TopkData(batch_size, vocab_size, stream, buffer,
+               buffer ? buffer_size : CalculateTotalSize(batch_size, vocab_size, stream)) {
+  // The base constructor handles buffer allocation/wrapping.
+  // We just need to re-initialize the pointers for the derived class members.
+  InitializeBuffers(batch_size, vocab_size, stream);
   ReInitCurandStates(random_seed, batch_size, stream);
 }
 
@@ -81,7 +116,13 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   for (int i = threadIdx.x; i < k; i += kBlockSize) {
     thread_val += expf(temp_scaled_logits[i] - block_max_val);
   }
+
+#if CUDART_VERSION >= 12090
+  float reduced_sum = BlockReduce(reduce_temp_storage).Reduce(thread_val, ::cuda::std::plus());
+#else
   float reduced_sum = BlockReduce(reduce_temp_storage).Reduce(thread_val, cub::Sum());
+#endif
+
   if (threadIdx.x == 0) block_sum_exp = reduced_sum;
   __syncthreads();
 
@@ -122,7 +163,13 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   for (int i = threadIdx.x; i < k; i += kBlockSize) {
     thread_val = max(thread_val, filtered_logits[i]);
   }
+
+#if CUDART_VERSION >= 12090
+  float reduced_max = BlockReduce(reduce_temp_storage).Reduce(thread_val, ::cuda::maximum());
+#else
   float reduced_max = BlockReduce(reduce_temp_storage).Reduce(thread_val, cub::Max());
+#endif
+
   if (threadIdx.x == 0) block_max_val = reduced_max;
   __syncthreads();
 
@@ -130,7 +177,13 @@ __global__ void FusedSamplingKernel(int32_t* next_token_out, const float* scores
   for (int i = threadIdx.x; i < k; i += kBlockSize) {
     thread_val += expf(filtered_logits[i] - block_max_val);
   }
+
+#if CUDART_VERSION >= 12090
+  reduced_sum = BlockReduce(reduce_temp_storage).Reduce(thread_val, ::cuda::std::plus());
+#else
   reduced_sum = BlockReduce(reduce_temp_storage).Reduce(thread_val, cub::Sum());
+#endif
+
   if (threadIdx.x == 0) block_sum_exp = reduced_sum;
   __syncthreads();
 
@@ -259,30 +312,30 @@ void LaunchMultiStageSampleKernel(SamplingData* data, cudaStream_t stream, const
   dim3 block(256);
 
   // Stage 1: Initial Softmax with Temperature.
-  ApplySoftmaxToSortedTopK<false>(stream, data->prefix_sums_adjusted.get(), nullptr, scores, nullptr, k, batch_size,
+  ApplySoftmaxToSortedTopK<false>(stream, data->prefix_sums_adjusted, nullptr, scores, nullptr, k, batch_size,
                                   stride, temperature);
 
   // Stage 2: Compute Initial CDF.
-  CorrectPrefixSumKernel<256><<<grid, block, 0, stream>>>(data->prefix_sums_adjusted.get(), data->prefix_sums.get(), k);
+  CorrectPrefixSumKernel<256><<<grid, block, 0, stream>>>(data->prefix_sums_adjusted, data->prefix_sums, k);
 
   // Stage 3: Filter scaled logits.
-  FilterOnTopPKernel<<<grid, block, 0, stream>>>(data->scores_adjusted.get(), scores, data->prefix_sums.get(), k, p,
+  FilterOnTopPKernel<<<grid, block, 0, stream>>>(data->scores_adjusted, scores, data->prefix_sums, k, p,
                                                  temperature, stride);
 
   // Stage 4: Re-normalize filtered logits (temperature is already baked in).
-  ApplySoftmaxToSortedTopK<false>(stream, data->prefix_sums_adjusted.get(), nullptr, data->scores_adjusted.get(),
+  ApplySoftmaxToSortedTopK<false>(stream, data->prefix_sums_adjusted, nullptr, data->scores_adjusted,
                                   nullptr, k, batch_size, k, 1.0f);
 
   // Stage 5: Compute Final CDF.
-  CorrectPrefixSumKernel<256><<<grid, block, 0, stream>>>(data->prefix_sums_adjusted.get(), data->prefix_sums.get(), k);
+  CorrectPrefixSumKernel<256><<<grid, block, 0, stream>>>(data->prefix_sums_adjusted, data->prefix_sums, k);
 
   // Stage 6: Generate random thresholds.
-  RandomThresholdKernel<<<CeilDiv(batch_size, 256), block, 0, stream>>>(data->curand_states.get(),
-                                                                        data->thresholds.get(), batch_size);
+  RandomThresholdKernel<<<CeilDiv(batch_size, 256), block, 0, stream>>>(data->curand_states,
+                                                                        data->thresholds, batch_size);
 
   // Stage 7: Sample via Parallel Search.
-  SampleKernel<256><<<grid, block, 0, stream>>>(next_token_out, indices, data->prefix_sums.get(), k, stride,
-                                                data->thresholds.get());
+  SampleKernel<256><<<grid, block, 0, stream>>>(next_token_out, indices, data->prefix_sums, k, stride,
+                                                data->thresholds);
 }
 
 void LaunchFusedSampleKernel(SamplingData* data, cudaStream_t stream, const float* scores, const int* indices,
@@ -296,7 +349,7 @@ void LaunchFusedSampleKernel(SamplingData* data, cudaStream_t stream, const floa
   constexpr size_t shared_mem_bytes = 2 * block_size * sizeof(float);
 
   FusedSamplingKernel<block_size><<<grid, block, shared_mem_bytes, stream>>>(
-      next_token_out, scores, indices, k, p, temperature, stride, data->curand_states.get());
+      next_token_out, scores, indices, k, p, temperature, stride, data->curand_states);
 }
 
 void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out, const float* scores_in,
@@ -305,7 +358,7 @@ void GetSample(SamplingData* data, cudaStream_t stream, int32_t* next_token_out,
     k = vocab_size;
   }
 
-  GetTopK(data, stream, scores_in, vocab_size, batch_size, k);
+  RunTopK(data, stream, scores_in, vocab_size, batch_size, k);
   const float* topk_scores = data->topk_scores;
   const int* topk_indices = data->topk_indices;
   int topk_stride = data->topk_stride;
@@ -340,7 +393,13 @@ __global__ void BlockwiseSoftmaxKernel(float* output, const float* input, int so
   for (int i = threadIdx.x; i < softmax_elements; i += kBlockSize) {
     thread_max = max(thread_max, batch_input[i]);
   }
+
+#if CUDART_VERSION >= 12090
+  float block_max = BlockReduce(temp_storage).Reduce(thread_max, ::cuda::maximum());
+#else
   float block_max = BlockReduce(temp_storage).Reduce(thread_max, cub::Max());
+#endif
+
   if (threadIdx.x == 0) {
     max_val = block_max;
   }
@@ -351,7 +410,13 @@ __global__ void BlockwiseSoftmaxKernel(float* output, const float* input, int so
   for (int i = threadIdx.x; i < softmax_elements; i += kBlockSize) {
     thread_sum_exp += expf(batch_input[i] - max_val);
   }
+
+#if CUDART_VERSION >= 12090
+  float block_sum = BlockReduce(temp_storage).Reduce(thread_sum_exp, ::cuda::std::plus());
+#else
   float block_sum = BlockReduce(temp_storage).Reduce(thread_sum_exp, cub::Sum());
+#endif
+
   if (threadIdx.x == 0) {
     sum_exp = block_sum;
   }
