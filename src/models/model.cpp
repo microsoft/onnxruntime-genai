@@ -168,6 +168,7 @@ void State::SetRunOption(const char* key, const char* value) {
       // Value not expected
       throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
     }
+    return;
   }
   run_options_->AddConfigEntry(key, value);
 }
