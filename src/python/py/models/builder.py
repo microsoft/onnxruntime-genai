@@ -4326,7 +4326,6 @@ def check_extra_options(kv_pairs):
         raise ValueError("Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
 
-
 def parse_extra_options(kv_items):
     """
     Parse key-value pairs that are separated by '='
