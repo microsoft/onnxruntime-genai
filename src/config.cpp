@@ -180,12 +180,6 @@ struct SessionOptions_Element : JSON::Element {
       v_.log_id = JSON::Get<std::string_view>(value);
     } else if (name == "enable_profiling") {
       v_.enable_profiling = JSON::Get<std::string_view>(value);
-    } else if (name == "ep_context_embed_mode") {
-      v_.ep_context_embed_mode = JSON::Get<std::string_view>(value);
-    } else if (name == "ep_context_file_path") {
-      v_.ep_context_file_path = JSON::Get<std::string_view>(value);
-    } else if (name == "use_device_allocator_for_initializers") {
-      v_.use_device_allocator_for_initializers = JSON::Get<bool>(value);
     } else if (name == "intra_op_num_threads") {
       v_.intra_op_num_threads = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "inter_op_num_threads") {
@@ -198,22 +192,13 @@ struct SessionOptions_Element : JSON::Element {
       v_.enable_cpu_mem_arena = JSON::Get<bool>(value);
     } else if (name == "enable_mem_pattern") {
       v_.enable_mem_pattern = JSON::Get<bool>(value);
-    } else if (name == "disable_cpu_ep_fallback") {
-      v_.disable_cpu_ep_fallback = JSON::Get<bool>(value);
-    } else if (name == "disable_quant_qdq") {
-      v_.disable_quant_qdq = JSON::Get<bool>(value);
-    } else if (name == "enable_quant_qdq_cleanup") {
-      v_.enable_quant_qdq_cleanup = JSON::Get<bool>(value);
-    } else if (name == "ep_context_enable") {
-      v_.ep_context_enable = JSON::Get<bool>(value);
-    } else if (name == "use_env_allocators") {
-      v_.use_env_allocators = JSON::Get<bool>(value);
     } else if (name == "graph_optimization_level") {
       v_.graph_optimization_level = GetGraphOptimizationLevel(JSON::Get<std::string_view>(value));
     } else if (name == "custom_ops_library") {
       v_.custom_ops_library = JSON::Get<std::string_view>(value);
     } else {
-      throw JSON::unknown_value_error{};
+      // Session options that are set with AddConfigEntry
+      v_.config_entries.emplace_back(name, JSON::Get<std::string_view>(value));
     }
   }
 
@@ -240,29 +225,19 @@ struct RunOptions_Element : JSON::Element {
   explicit RunOptions_Element(Config::RunOptions& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "gpu_graph_id") {
-      v_.gpu_graph_id = JSON::Get<std::string_view>(value);
-    } else if (name == "memory.enable_memory_arena_shrinkage" || name == "enable_memory_arena_shrinkage") {
-      v_.enable_memory_arena_shrinkage = JSON::Get<std::string_view>(value);
-    } else if (name == "disable_synchronize_execution_providers") {
-      v_.disable_synchronize_execution_providers = JSON::Get<std::string_view>(value);
-    } else if (name == "qnn.htp_perf_mode" || name == "htp_perf_mode") {
-      v_.qnn_htp_perf_mode = JSON::Get<std::string_view>(value);
-    } else if (name == "qnn.htp_perf_mode_post_run" || name == "htp_perf_mode_post_run") {
-      v_.qnn_htp_perf_mode_post_run = JSON::Get<std::string_view>(value);
-    } else if (name == "qnn.rpc_control_latency" || name == "rpc_control_latency") {
-      v_.qnn_rpc_control_latency = JSON::Get<std::string_view>(value);
-    } else if (name == "qnn.lora_config") {
-      v_.qnn_lora_config = JSON::Get<std::string_view>(value);
-    } else if (name == "nv_profile_index") {
-      v_.nv_profile_index = JSON::Get<std::string_view>(value);
-    } else {
-      throw JSON::unknown_value_error{};
-    }
+    // Run options that are set with AddConfigEntry
+    v_.config_entries.emplace_back(name, JSON::Get<std::string_view>(value));
+  }
+
+  JSON::Element& OnObject(std::string_view name) override {
+    if (name == "config_entries")
+      return config_entries_;
+    throw JSON::unknown_value_error{};
   }
 
  private:
   Config::RunOptions& v_;
+  NamedStrings_Element config_entries_{v_.config_entries};
 };
 
 struct EncoderInputs_Element : JSON::Element {

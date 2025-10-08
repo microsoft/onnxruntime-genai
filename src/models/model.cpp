@@ -173,30 +173,13 @@ void State::SetRunOption(const char* key, const char* value) {
   run_options_->AddConfigEntry(key, value);
 }
 
+/*
+ * Set all run options that are key-value pairs of strings.
+ * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_run_options_config_keys.h
+ */
 void State::SetRunOptions(const Config::RunOptions& config_run_options) {
-  if (config_run_options.gpu_graph_id.has_value()) {
-    run_options_->AddConfigEntry("gpu_graph_id", config_run_options.gpu_graph_id.value().c_str());
-  }
-  if (config_run_options.enable_memory_arena_shrinkage.has_value()) {
-    run_options_->AddConfigEntry("memory.enable_memory_arena_shrinkage", config_run_options.enable_memory_arena_shrinkage.value().c_str());
-  }
-  if (config_run_options.disable_synchronize_execution_providers.has_value()) {
-    run_options_->AddConfigEntry("disable_synchronize_execution_providers", config_run_options.disable_synchronize_execution_providers.value().c_str());
-  }
-  if (config_run_options.qnn_htp_perf_mode.has_value()) {
-    run_options_->AddConfigEntry("qnn.htp_perf_mode", config_run_options.qnn_htp_perf_mode.value().c_str());
-  }
-  if (config_run_options.qnn_htp_perf_mode_post_run.has_value()) {
-    run_options_->AddConfigEntry("qnn.htp_perf_mode_post_run", config_run_options.qnn_htp_perf_mode_post_run.value().c_str());
-  }
-  if (config_run_options.qnn_rpc_control_latency.has_value()) {
-    run_options_->AddConfigEntry("qnn.rpc_control_latency", config_run_options.qnn_rpc_control_latency.value().c_str());
-  }
-  if (config_run_options.qnn_lora_config.has_value()) {
-    run_options_->AddConfigEntry("qnn.lora_config", config_run_options.qnn_lora_config.value().c_str());
-  }
-  if (config_run_options.nv_profile_index.has_value()) {
-    run_options_->AddConfigEntry("nv_profile_index", config_run_options.nv_profile_index.value().c_str());
+  for (auto& config_entry : config_run_options.config_entries) {
+    run_options_->AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
   }
 }
 
@@ -963,12 +946,6 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   int num_of_cores = std::max(min_thread_nums, static_cast<int>(std::thread::hardware_concurrency() / 2));
   session_options.SetIntraOpNumThreads(std::min(num_of_cores, max_thread_nums));
 
-  if (config_session_options.use_device_allocator_for_initializers.has_value()) {
-    // Enable using device allocator for allocating initialized tensor memory.
-    // Using device allocators means the memory allocation is made using malloc/new.
-    session_options.AddConfigEntry("session.use_device_allocator_for_initializers", "1");
-  }
-
   if (config_session_options.intra_op_num_threads.has_value()) {
     session_options.SetIntraOpNumThreads(config_session_options.intra_op_num_threads.value());
   }
@@ -1008,52 +985,17 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
     session_options.EnableProfiling(profile_file_prefix.c_str());
   }
 
-  if (config_session_options.disable_cpu_ep_fallback.has_value()) {
-    if (config_session_options.disable_cpu_ep_fallback.value())
-      session_options.DisableCpuEpFallback();
-    else
-      session_options.EnableCpuEpFallback();
-  }
-
-  if (config_session_options.disable_quant_qdq.has_value()) {
-    if (config_session_options.disable_quant_qdq.value())
-      session_options.DisableQuantQdq();
-    else
-      session_options.EnableQuantQdq();
-  }
-
-  if (config_session_options.enable_quant_qdq_cleanup.has_value()) {
-    if (config_session_options.enable_quant_qdq_cleanup.value())
-      session_options.EnableQuantQdqCleanup();
-    else
-      session_options.DisableQuantQdqCleanup();
-  }
-
-  if (config_session_options.ep_context_enable.has_value()) {
-    if (config_session_options.ep_context_enable.value())
-      session_options.SetEpContextEnable();
-  }
-
-  if (config_session_options.ep_context_embed_mode.has_value()) {
-    session_options.SetEpContextEmbedMode(config_session_options.ep_context_embed_mode.value().c_str());
-  }
-
-  if (config_session_options.ep_context_file_path.has_value()) {
-    session_options.SetEpContextFilePath(config_session_options.ep_context_file_path.value().c_str());
-  }
-
-  if (config_session_options.provider_options.empty() && config_session_options.use_env_allocators.has_value()) {
-    // Share env allocators across sessions that only use the CPU provider
-    session_options.AddConfigEntry("session.use_env_allocators", "1");
-  }
-
+  /*
+   * Set all session options that are key-value pairs of strings.
+   * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h
+   */
   for (auto& config_entry : config_session_options.config_entries) {
     session_options.AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
   }
 
   // Register custom ops libraries only if explicitly configured
   if (config_session_options.custom_ops_library.has_value()) {
-    // From include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
+    // Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_ep_device_ep_metadata_keys.h
     constexpr const char* const library_path_metadata_key_name = "library_path";
 
     std::string custom_library_file_prefix = config_session_options.custom_ops_library.value();

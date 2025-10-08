@@ -77,45 +77,27 @@ struct Config {
   };
 
   struct SessionOptions {
-    std::optional<bool> use_device_allocator_for_initializers;
     std::optional<int> intra_op_num_threads;
     std::optional<int> inter_op_num_threads;
     std::optional<bool> enable_cpu_mem_arena;
     std::optional<bool> enable_mem_pattern;
-    std::optional<bool> disable_cpu_ep_fallback;
-    std::optional<bool> disable_quant_qdq;
-    std::optional<bool> enable_quant_qdq_cleanup;
-    std::optional<bool> ep_context_enable;
-    std::optional<std::string> ep_context_embed_mode;
-    std::optional<std::string> ep_context_file_path;
     std::optional<std::string> log_id;
     std::optional<int> log_severity_level;
     std::optional<int> log_verbosity_level;
     std::optional<std::string> enable_profiling;
     std::optional<std::string> custom_ops_library;
+    std::optional<GraphOptimizationLevel> graph_optimization_level;
+
     // TODO(baijumeswani): Sharing env allocators across sessions leads to crashes on windows and iOS.
     //                     Identify the reason for the crash to enable allocator sharing by default.
-    std::optional<bool> use_env_allocators;
-    std::vector<NamedString> config_entries;  // Entries go into OrtSessionOptions::AddConfigEntry
 
+    std::vector<NamedString> config_entries;  // Entries go into OrtSessionOptions::AddConfigEntry
     std::vector<ProviderOptions> provider_options;
     std::vector<std::string> providers;  // List of providers to use at runtime, not persisted in the json currently
-    std::optional<GraphOptimizationLevel> graph_optimization_level;
   };
 
   struct RunOptions {
-    std::optional<std::string> gpu_graph_id;
-    std::optional<std::string> enable_memory_arena_shrinkage;
-    std::optional<std::string> disable_synchronize_execution_providers;
-
-    // QNN options
-    std::optional<std::string> qnn_htp_perf_mode;
-    std::optional<std::string> qnn_htp_perf_mode_post_run;
-    std::optional<std::string> qnn_rpc_control_latency;
-    std::optional<std::string> qnn_lora_config;
-
-    // TRT-RTX options
-    std::optional<std::string> nv_profile_index;
+    std::vector<NamedString> config_entries;  // Entries go into OrtRunOptions::AddConfigEntry
   };
 
   struct Model {
