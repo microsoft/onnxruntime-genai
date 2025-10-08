@@ -4391,7 +4391,6 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
 
 @torch.no_grad
 def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
-
     if execution_provider == "NvTensorRtRtx":
         execution_provider = "trt-rtx"
         extra_options["use_qdq"] = True
