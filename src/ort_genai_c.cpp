@@ -591,16 +591,7 @@ OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
   if (!tokenizer)
     throw std::runtime_error("Tokenizer pointer is null");
 
-  // Build std::unordered_map from the arrays
-  std::unordered_map<std::string, std::string> options;
-  for (size_t i = 0; i < num_options; ++i) {
-    if (keys[i] && values[i]) {
-      options[keys[i]] = values[i];
-    }
-  }
-
-  // Update via C++ Tokenizer method
-  tokenizer->UpdateOptions(options);
+  tokenizer->UpdateOptions(keys, values, num_options);
 
   return nullptr;
 

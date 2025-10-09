@@ -65,6 +65,14 @@ TEST(CAPITests, TokenizerCAPI) {
   auto model = OgaModel::Create(*config);
   auto tokenizer = OgaTokenizer::Create(*model);
 
+  // Update tokenizer options
+  {
+    const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+    const char* values[] = {"false", "true"};
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer, keys, values, 2);
+    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+  }
+
   // Encode single decode single
   {
     const char* input_string = "She sells sea shells by the sea shore.";
@@ -162,6 +170,14 @@ TEST(CAPITests, AppendTokensToSequence) {
   auto sequences = OgaSequences::Create();
   auto appended_sequences = OgaSequences::Create();
 
+  // Update tokenizer options
+  {
+    const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+    const char* values[] = {"false", "true"};
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer, keys, values, 2);
+    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+  }
+
   // Encode all strings
   {
     for (auto& string : input_strings)
@@ -252,6 +268,14 @@ TEST(CAPITests, EndToEndPhiBatch) {
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
 
+  // Update tokenizer options
+  {
+    const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+    const char* values[] = {"false", "true"};
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer, keys, values, 2);
+    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+  }
+
   const char* input_strings[] = {
       "This is a test.",
       "Rats are awesome pets!",
@@ -302,6 +326,14 @@ TEST(CAPIEngineTests, EndToEndPhiBatch) {
   auto model = OgaModel::Create(PHI2_PATH);
   auto engine = OgaEngine::Create(*model);
   auto tokenizer = OgaTokenizer::Create(*model);
+
+  // Update tokenizer options
+  {
+    const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+    const char* values[] = {"false", "true"};
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer, keys, values, 2);
+    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+  }
 
   constexpr size_t batch_size = 3;
   const char* input_strings[] = {
@@ -365,6 +397,14 @@ TEST(CAPIEngineTests, EndToEndPhiStaggeredBatch) {
   auto model = OgaModel::Create(PHI2_PATH);
   auto engine = OgaEngine::Create(*model);
   auto tokenizer = OgaTokenizer::Create(*model);
+
+  // Update tokenizer options
+  {
+    const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+    const char* values[] = {"false", "true"};
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer, keys, values, 2);
+    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+  }
 
   constexpr size_t batch_size = 3;
   const char* input_strings[] = {
@@ -437,6 +477,14 @@ TEST(CAPITests, EndToEndPhi) {
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
 
+  // Update tokenizer options
+  {
+    const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+    const char* values[] = {"false", "true"};
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer, keys, values, 2);
+    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+  }
+
   const char* input_string = "This is a test.";
   auto input_sequence = OgaSequences::Create();
   tokenizer->Encode(input_string, *input_sequence);
@@ -475,6 +523,14 @@ TEST(CAPITests, EndToEndPhiEOSPAD) {
 #if TEST_PHI2
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
+
+  // Update tokenizer options
+  {
+    const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+    const char* values[] = {"false", "true"};
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer, keys, values, 2);
+    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+  }
 
   const char* input_string = "This is a test.<|endoftext|>";
   auto input_sequence = OgaSequences::Create();
@@ -516,6 +572,14 @@ TEST(CAPIEngineTests, EndToEndPhi) {
   auto engine = OgaEngine::Create(*model);
   auto tokenizer = OgaTokenizer::Create(*model);
   auto streaming_tokenizer = OgaTokenizerStream::Create(*tokenizer);
+
+  // Update tokenizer options
+  {
+    const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+    const char* values[] = {"false", "true"};
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer, keys, values, 2);
+    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+  }
 
   const char* input_string = "This is a test.";
   auto input_sequence = OgaSequences::Create();
@@ -569,6 +633,14 @@ TEST(CAPITests, LoadModelFromMemory) {
   auto model = OgaModel::Create(*config);
   config->RemoveModelData("model.onnx");
   auto tokenizer = OgaTokenizer::Create(*model);
+
+  // Update tokenizer options
+  {
+    const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+    const char* values[] = {"false", "true"};
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer, keys, values, 2);
+    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+  }
 
   const char* input_string = "This is a test.";
   auto input_sequence = OgaSequences::Create();
@@ -828,6 +900,14 @@ TEST(CAPITests, SetTerminate) {
   auto tokenizer = OgaTokenizer::Create(*model);
   auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
 
+  // Update tokenizer options
+  {
+    const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+    const char* values[] = {"false", "true"};
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer, keys, values, 2);
+    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+  }
+
   const char* input_string = "She sells sea shells by the sea shore.";
   auto input_sequences = OgaSequences::Create();
   tokenizer->Encode(input_string, *input_sequences);
@@ -858,6 +938,14 @@ struct Phi2Test {
   Phi2Test() {
     model_ = OgaModel::Create(PHI2_PATH);
     tokenizer_ = OgaTokenizer::Create(*model_);
+
+    // Update tokenizer options
+    {
+      const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+      const char* values[] = {"false", "true"};
+      OgaResult* result = OgaUpdateTokenizerOptions(tokenizer_, keys, values, 2);
+      ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+    }
 
     input_sequences_ = OgaSequences::Create();
 
@@ -1018,6 +1106,14 @@ TEST(CAPITests, AdaptersTest) {
 
   auto tokenizer = OgaTokenizer::Create(*model);
 
+  // Update tokenizer options
+  {
+    const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+    const char* values[] = {"false", "true"};
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer, keys, values, 2);
+    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+  }
+
   const char* input_strings[] = {
       "This is a test.",
       "Rats are awesome pets!",
@@ -1093,6 +1189,14 @@ TEST(CAPITests, AdaptersTestMultipleAdapters) {
   adapters->LoadAdapter(MODEL_PATH "multiple_adapters/adapter_1.onnx_adapter", "adapter_b");
 
   auto tokenizer = OgaTokenizer::Create(*model);
+
+  // Update tokenizer options
+  {
+    const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+    const char* values[] = {"false", "true"};
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer, keys, values, 2);
+    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+  }
 
   const char* input_strings[] = {
       "This is a test.",
@@ -1262,6 +1366,14 @@ TEST(CAPITests, SetGuidance) {
   auto model = OgaModel::Create(PHI2_PATH);
   auto tokenizer = OgaTokenizer::Create(*model);
   auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+
+  // Update tokenizer options
+  {
+    const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+    const char* values[] = {"false", "true"};
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer_, keys, values, 2);
+    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+  }
 
   const char* input_string = "who are you?";
   auto input_sequences = OgaSequences::Create();
