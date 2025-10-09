@@ -2884,7 +2884,6 @@ class Model:
 
     def make_preprocessing_nodes(self):
         self.make_attention_mask_reformatting()
-        # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
         if self.extra_options.get("enable_cuda_graph", False) or self.extra_options.get("enable_webgpu_graph", False) or self.ep == "dml":
@@ -3332,54 +3331,7 @@ class Model:
         self.mask_attrs["key_total_seq_lens"] = cast_1_name
         self.mask_attrs["total_seq_len"] = cast_2_name
 
-    def make_position_ids_reformatting(self):
-        if self.extra_options.get("enable_webgpu_graph", False):
-            # WebGPU graph mode: Check position_ids type and handle accordingly
-            proto_dtype = self.input_types["position_ids"]
 
-            if proto_dtype == ir.DataType.INT64:
-                # If position_ids is int64, return it directly
-                return "position_ids"
-            else:
-                # If position_ids is not int64 (e.g., int32), throw NotImplementedError
-                raise NotImplementedError(f"enable_webgpu_graph is not supported with position_ids type {proto_dtype}. Only INT64 is supported.")
-
-        # Standard mode: Make nodes for the position ids reformatting subgraph
-        #
-        #          input_ids   position_ids
-        #              |            |
-        #            Shape          |
-        #              |            |
-        #            Gather         |
-        #              |            |
-        #          Unsqueeze        |
-        #              |            |
-        #            Concat         |
-        #                  \       /
-        #                   Reshape
-        #                      |
-        #      position_ids input for RotaryEmbedding
-
-        basename = "/model/pos_ids_reformat"
-        proto_dtype = self.input_types["position_ids"]
-        str_dtype = self.to_str_dtype(proto_dtype)
-
-        shape_name = f"{basename}/Shape"
-        self.make_shape(shape_name, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", shape=[2] if not self.exclude_embeds else [3])
-        gather_name = f"{basename}/Gather"
-        gather_inputs = [f"{shape_name}/output_0", f"/model/constants/{str_dtype}/1"]
-        self.make_gather(gather_name, gather_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
-        unsqueeze_name = f"{basename}/Unsqueeze"
-        unsqueeze_inputs = [f"{gather_name}/output_0", f"/model/constants/{str_dtype}/[0]"]
-        self.make_unsqueeze(unsqueeze_name, unsqueeze_inputs, dtype=proto_dtype, shape=[1])
-        concat_name = f"{basename}/Concat"
-        concat_inputs = [f"/model/constants/{str_dtype}/[-1]", f"{unsqueeze_name}/output_0"]
-        self.make_concat(concat_name, concat_inputs, dtype=proto_dtype, shape=[2], axis=0)
-        reshape_name = f"{basename}/Reshape"
-        reshape_inputs = ["position_ids", f"{concat_name}/output_0"]
-        self.make_reshape(reshape_name, reshape_inputs, dtype=proto_dtype, shape=None)
-
-        return reshape_name
 
 
 class LlamaModel(Model):
@@ -3391,14 +3343,9 @@ class MistralModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # Only call make_position_ids_reformatting if position_ids is available as an input
+        # Set position_ids_name based on whether position_ids is available as an input
         if "position_ids" in self.input_names:
-            position_ids_result = self.make_position_ids_reformatting()
-            # For WebGPU graph mode, position_ids_result is already "position_ids", so don't append /output_0
-            if position_ids_result == "position_ids":
-                self.position_ids_name = "position_ids"
-            else:
-                self.position_ids_name = f"{position_ids_result}/output_0"
+            self.position_ids_name = "position_ids"
         else:
             # When position_ids is not an input (use_rope_in_attn is True),
             # position_ids won't be used since rotary embeddings are handled in GQA
@@ -3545,33 +3492,6 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
-
-    def make_position_ids_reformatting(self):
-        if self.ep != "dml":
-            position_ids_input_to_rotemb = super().make_position_ids_reformatting()
-            return position_ids_input_to_rotemb
-
-        basename = "/model/pos_ids_reformat"
-        proto_dtype = self.input_types["position_ids"]
-        str_dtype = self.to_str_dtype(proto_dtype)
-
-        reduce_max_name = f"{basename}/ReduceMax"
-        reduce_max_inputs = ["position_ids"]
-        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=proto_dtype, shape=[1])
-        greater_or_equal_name = f"{basename}/GreaterOrEqual"
-        greater_or_equal_inputs = [f"{reduce_max_name}/output_0", f"/model/constants/{str_dtype}/{self.original_context_length}"]
-        self.make_greater_or_equal(greater_or_equal_name, greater_or_equal_inputs, shape=[])
-        cast_name = f"{basename}/Cast"
-        self.make_cast(cast_name, f"{greater_or_equal_name}/output_0", dtype=proto_dtype, shape=None)
-        mul_name = f"{basename}/Mul"
-        mul_inputs = [f"{cast_name}/output_0", f"/model/constants/{str_dtype}/{self.original_context_length}"]
-        self.make_mul(mul_name, mul_inputs, dtype=proto_dtype, shape=None)
-        add_1_name = f"{basename}/Add_1"
-        add_1_inputs = [f"{mul_name}/output_0", "position_ids"]
-        self.make_add(add_1_name, add_1_inputs, dtype=proto_dtype, shape=["batch_size", "sequence_length"])
-
-        return add_1_name
-
 
 class Phi3SmallModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
