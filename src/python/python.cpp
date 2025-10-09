@@ -393,7 +393,7 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
           values.push_back(value.c_str());
         }
 
-        t.UpdateOptions(keys.data(), values.data(), kwargs.size()); }, pybind11::kw_only())
+        t.UpdateOptions(keys.data(), values.data(), kwargs.size()); })
       .def("encode", [](const OgaTokenizer& t, std::string s) -> pybind11::array_t<int32_t> {
         auto sequences = OgaSequences::Create();
         t.Encode(s.c_str(), *sequences);
