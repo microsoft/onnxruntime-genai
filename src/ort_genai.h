@@ -306,7 +306,7 @@ struct OgaTokenizer : OgaAbstract {
   }
 
   void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) const {
-    OgaCheckResult(OgaUpdateTokenizerOptions(this, keys, values, num_options));
+    OgaCheckResult(OgaUpdateTokenizerOptions(const_cast<OgaTokenizer*>(this), keys, values, num_options));
   }
 
   void Encode(const char* str, OgaSequences& sequences) const {
