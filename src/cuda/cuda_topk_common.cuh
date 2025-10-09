@@ -99,6 +99,8 @@ __device__ void FindPartitionTopK_StableSort_Merge(const float* __restrict__ sco
                                                    int num_partitions,
                                                    TempStorage& temp_storage) {
   constexpr int ItemsPerThread = kPartitionSize / kBlockSize;
+  static_assert(ItemsPerThread * kBlockSize == kPartitionSize);
+
   using SortKeyT = uint64_t;
   using SortValueT = cub::NullType;
   using BlockMergeSort = cub::BlockMergeSort<SortKeyT, kBlockSize, ItemsPerThread, SortValueT>;
@@ -140,6 +142,8 @@ __device__ void FindPartitionTopK_UnstableSort_Merge(const float* __restrict__ s
                                                      int num_partitions,
                                                      TempStorage& temp_storage) {
   constexpr int ItemsPerThread = kPartitionSize / kBlockSize;
+  static_assert(ItemsPerThread * kBlockSize == kPartitionSize);
+
   using BlockMergeSort = cub::BlockMergeSort<float, kBlockSize, ItemsPerThread, int>;
 
   const int batch_idx = blockIdx.y;
@@ -177,6 +181,8 @@ __device__ void FindPartitionTopK_StableSort_Radix(const float* __restrict__ sco
                                                    int num_partitions,
                                                    TempStorage& temp_storage) {
   constexpr int ItemsPerThread = kPartitionSize / kBlockSize;
+  static_assert(ItemsPerThread * kBlockSize == kPartitionSize);
+
   using CompositeKey = uint64_t;
   using BlockRadixSort = cub::BlockRadixSort<CompositeKey, kBlockSize, ItemsPerThread>;
 
@@ -212,6 +218,8 @@ __device__ void FindPartitionTopK_UnstableSort_Radix(const float* __restrict__ s
                                                      int num_partitions,
                                                      TempStorage& temp_storage) {
   constexpr int ItemsPerThread = kPartitionSize / kBlockSize;
+  static_assert(ItemsPerThread * kBlockSize == kPartitionSize);
+
   using BlockRadixSort = cub::BlockRadixSort<float, kBlockSize, ItemsPerThread, int>;
 
   const int batch_idx = blockIdx.y;
@@ -310,9 +318,8 @@ __device__ void BlockReduceTopK(const float* scores_in_batch,
                                 int first_child_partition,
                                 int partition_idx,
                                 TempStorage& smem) {
-  // --- REFACTOR ---
-  // kItemsPerThread is now an internal implementation detail, derived from the template parameters.
   constexpr int kItemsPerThread = CeilDiv(kSortSize, kBlockSize);
+  static_assert(kItemsPerThread > 0);
 
   // This unified helper selects the sort algorithm based on the compile-time kSortSize,
   // consistent with the constraints applied in hybrid_sort and the micro-benchmark.
