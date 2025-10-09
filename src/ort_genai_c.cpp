@@ -582,9 +582,9 @@ OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer**
 }
 
 OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
-    const OgaTokenizer* tokenizer,
-    const char* keys[],
-    const char* values[],
+    OgaTokenizer* tokenizer,
+    const char* const* keys,
+    const char* const* values,
     size_t num_options) {
   OGA_TRY
 

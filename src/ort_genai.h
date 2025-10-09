@@ -305,7 +305,7 @@ struct OgaTokenizer : OgaAbstract {
     return std::unique_ptr<OgaTokenizer>(p);
   }
 
-  void UpdateOptions(const char* keys[], const char* values[], size_t num_options) const {
+  void UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) const {
     OgaCheckResult(OgaUpdateTokenizerOptions(this, keys, values, num_options));
   }
 
