@@ -163,6 +163,7 @@ void WindowedInputIDs::Add() {
 void WindowedInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   if (new_tokens.size() > 1 && window_index_ == 0) {
     num_windows_ = (new_tokens.size() + window_size_ - 1) / window_size_;
+    shape_ = {1, static_cast<int64_t>(window_size_)};
 
     const auto get_unpadded_sequence_length = [](std::span<const int32_t> tokens,
                                                  int32_t pad_token_id) {
@@ -223,9 +224,8 @@ void WindowedInputIDs::Update(DeviceSpan<int32_t> new_tokens) {
   }
 
   if (window_index_ == num_windows_) {
-    window_index_ = 0;
+    window_index_ = 0;  // Reset for continuous decoding
     num_windows_ = 0;
-    shape_ = {1, static_cast<int64_t>(window_size_)};
   }
 
   state_.inputs_[input_index_] = value_.get();
