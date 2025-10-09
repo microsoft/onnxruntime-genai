@@ -266,10 +266,9 @@ std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
   return std::make_unique<TokenizerStream>(*this);
 }
 
-void Tokenizer::UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) const {
+void Tokenizer::UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) {
   // Tap into ORT Extensions API
-  auto* raw = static_cast<const OrtxObject*>(tokenizer_);
-  CheckResult(OrtxUpdateTokenizerOptions(const_cast<OrtxTokenizer*>(reinterpret_cast<const OrtxTokenizer*>(raw)), const_cast<const char**>(keys), const_cast<const char**>(values), num_options));
+  CheckResult(OrtxUpdateTokenizerOptions(tokenizer_, const_cast<const char**>(keys), const_cast<const char**>(values), num_options));
 }
 
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {

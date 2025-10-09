@@ -381,16 +381,21 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<OgaTokenizer>(m, "Tokenizer")
       .def(pybind11::init([](const OgaModel& model) { return OgaTokenizer::Create(model); }))
       .def("update_options", [](OgaTokenizer& t, pybind11::kwargs kwargs) {
+        std::vector<std::string> key_storage;
+        std::vector<std::string> value_storage;
+        key_storage.reserve(kwargs.size());
+        value_storage.reserve(kwargs.size());
+
         std::vector<const char*> keys;
         std::vector<const char*> values;
         keys.reserve(kwargs.size());
         values.reserve(kwargs.size());
 
         for (auto& item : kwargs) {
-          const std::string key = pybind11::str(item.first);
-          const std::string value = pybind11::str(item.second);
-          keys.push_back(key.c_str());
-          values.push_back(value.c_str());
+            key_storage.emplace_back(pybind11::str(item.first));
+            value_storage.emplace_back(pybind11::str(item.second));
+            keys.push_back(key_storage.back().c_str());
+            values.push_back(value_storage.back().c_str());
         }
 
         t.UpdateOptions(keys.data(), values.data(), kwargs.size()); })
