@@ -77,16 +77,6 @@ class Model:
         # EP-specific variables
         self.ep = ep
 
-        # Validate enable_webgpu_graph option
-        if extra_options.get("enable_webgpu_graph", False) and self.ep != "webgpu":
-            warnings.warn(
-                f"enable_webgpu_graph is only supported with WebGPU execution provider, "
-                f"but current EP is '{self.ep}'. Disabling enable_webgpu_graph.",
-                UserWarning,
-                stacklevel=2
-            )
-            extra_options["enable_webgpu_graph"] = False
-
         self.ep_attrs = {
             "cpu": {},
             "cuda": {
@@ -4381,7 +4371,7 @@ class GPTOSSModel(Model):
         self.layernorm_attrs["skip_input"] = f"{moe_name}/output_0"
 
 
-def check_extra_options(kv_pairs):
+def check_extra_options(kv_pairs, execution_provider):
     """
     Check key-value pairs and set values correctly
     """
@@ -4415,8 +4405,18 @@ def check_extra_options(kv_pairs):
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
         raise ValueError("Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
+    # Validate enable_webgpu_graph option
+    if kv_pairs.get("enable_webgpu_graph", False) and execution_provider != "webgpu":
+        warnings.warn(
+            f"enable_webgpu_graph is only supported with WebGPU execution provider, "
+            f"but current EP is '{execution_provider}'. Disabling enable_webgpu_graph.",
+            UserWarning,
+            stacklevel=3  # Adjusted stacklevel since we're now called from parse_extra_options
+        )
+        kv_pairs["enable_webgpu_graph"] = False
 
-def parse_extra_options(kv_items):
+
+def parse_extra_options(kv_items, execution_provider):
     """
     Parse key-value pairs that are separated by '='
     """
@@ -4428,7 +4428,7 @@ def parse_extra_options(kv_items):
             kv_pairs[kv[0].strip()] = kv[1].strip()
 
     print(f"Extra options: {kv_pairs}")
-    check_extra_options(kv_pairs)
+    check_extra_options(kv_pairs, execution_provider)
     return kv_pairs
 
 
@@ -4727,5 +4727,5 @@ def get_args():
 
 if __name__ == '__main__':
     args = get_args()
-    extra_options = parse_extra_options(args.extra_options)
+    extra_options = parse_extra_options(args.extra_options, args.execution_provider)
     create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
