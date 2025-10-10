@@ -59,7 +59,7 @@ android {
 
 	defaultConfig {
 		minSdkVersion minSdkVer
-		targetSdkVersion 34
+		targetSdkVersion targetSdkVer
 		versionCode = getVersionCode(project.version)
 		versionName = project.version
 
