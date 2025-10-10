@@ -120,12 +120,11 @@ TEST(CAPITests, TokenizerUpdateOptions) {
   auto tokenizer = OgaTokenizer::Create(*model);
 
   // Update tokenizer options
-  // Note: This simply tests the OgaUpdateTokenizerOptions API; these options are already set as default.
+  // Note: This simply tests the UpdateOptions API; these options are already set as default.
   {
     const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
     const char* values[] = {"false", "true"};
-    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer.get(), keys, values, 2);
-    ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
+    tokenizer->UpdateOptions(keys, values, 2);
   }
 
   // Encode single decode single
