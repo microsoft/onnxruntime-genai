@@ -581,6 +581,43 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateMultiModalProcessor(const OgaModel* 
 OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* processor);
 
 /**
+ * Updates tokenizer options for the given OgaTokenizer instance.
+ * The provided keys and values must be null-terminated UTF-8 strings.
+ *
+ * This function allows updating tokenizer behavior at runtime by passing
+ * key/value string pairs. Each key corresponds to a configurable tokenizer
+ * option. Both keys and values must remain valid for the duration of this call.
+ *
+ * @param tokenizer Pointer to the OgaTokenizer whose options will be updated.
+ * @param keys Array of option key strings.
+ * @param values Array of corresponding option value strings (same length as keys).
+ * @param num_options Number of key/value pairs provided.
+ *
+ * @return nullptr on success, or an OgaResult* describing the error.
+ *         The returned OgaResult* (if not null) must be freed with OgaDestroyResult.
+ *
+ * Supported options:
+ *
+ * - `add_special_tokens`
+ *   - Purpose: Controls whether to add special tokens (e.g., BOS/EOS) during tokenization.
+ *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
+ *   - Default: `"false"`. This is the default value set by ORT GenAI prior to any options updating.
+ *
+ * - `skip_special_tokens`
+ *   - Purpose: Controls whether to remove special tokens during detokenization.
+ *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
+ *   - Default: `"true"`. This is the default value set by ORT GenAI prior to any options updating.
+ *
+ * Future tokenizer options may be added without changing this API signature.
+ * Passing unknown keys will result in an error.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
+    OgaTokenizer* tokenizer,
+    const char* const* keys,
+    const char* const* values,
+    size_t num_options);
+
+/**
  * Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences
  * when it is no longer needed.
  */
