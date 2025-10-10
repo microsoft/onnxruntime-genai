@@ -92,6 +92,12 @@ if(MSVC)
   )
 endif()
 
+# Build shared libraries with support for 16 KB page size on Android
+# https://source.android.com/docs/core/architecture/16kb-page-size/16kb#build-lib-16kb-alignment
+if(ANDROID)
+  set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,max-page-size=16384")
+endif()
+
 include(cmake/ortlib.cmake)
 
 
