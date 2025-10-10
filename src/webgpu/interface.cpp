@@ -20,9 +20,9 @@
 
 // Forward declare the C API functions to avoid header conflicts
 extern "C" {
-  const void* OrtWebGpuGetDawnProcTable(int context_id);
-  void* OrtWebGpuGetInstance(int context_id);
-  void* OrtWebGpuGetDevice(int context_id);
+const void* OrtWebGpuGetDawnProcTable(int context_id);
+void* OrtWebGpuGetInstance(int context_id);
+void* OrtWebGpuGetDevice(int context_id);
 }
 
 #include "webgpu_update_mask_kernel.h"
@@ -212,7 +212,7 @@ struct InterfaceImpl : DeviceInterface {
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
-  
+
   // WebGPU-accelerated operations (available in both USE_WEBGPU=ON and OFF modes)
   bool UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
     if (!device_) {
@@ -258,11 +258,13 @@ struct InterfaceImpl : DeviceInterface {
       // Handle supported type conversions
       if (input_type == Ort::TypeToTensorType<int32_t> && output_type == Ort::TypeToTensorType<int64_t>) {
         return webgpu_cast_kernel_.CastInt32ToInt64(
+            device_, queue_,
             input_data,
             output_data,
             element_count);
       } else if (input_type == Ort::TypeToTensorType<Ort::Float16_t> && output_type == Ort::TypeToTensorType<float>) {
         return webgpu_cast_kernel_.CastFloat16ToFloat32(
+            device_, queue_,
             input_data,
             output_data,
             element_count);
@@ -316,9 +318,9 @@ struct InterfaceImpl : DeviceInterface {
   // USE_WEBGPU=OFF: Retrieve and wrap WebGPU EP's Dawn objects
   int webgpu_ep_context_id_;
   bool dawn_initialized_from_ep_;
-  wgpu::Device device_;        // Wrapped WebGPU EP device
-  wgpu::Instance instance_;    // Wrapped WebGPU EP instance
-  wgpu::Queue queue_;          // Wrapped WebGPU EP queue
+  wgpu::Device device_;      // Wrapped WebGPU EP device
+  wgpu::Instance instance_;  // Wrapped WebGPU EP instance
+  wgpu::Queue queue_;        // Wrapped WebGPU EP queue
 
   void InitializeDawnFromWebGpuEP() {
     // Retrieve Dawn objects from WebGPU EP
@@ -350,11 +352,8 @@ struct InterfaceImpl : DeviceInterface {
     webgpu_queue_ = &queue_;
     webgpu_instance_ = &instance_;
 
-    // Initialize kernels using the WebGPU EP's Dawn
-    webgpu_cast_kernel_.Initialize(device_, queue_);
-
     dawn_initialized_from_ep_ = true;
-    
+
     std::cout << "Successfully initialized from WebGPU EP context " << webgpu_ep_context_id_ << std::endl;
     std::cout << "  Device: " << device_ptr << std::endl;
     std::cout << "  Instance: " << instance_ptr << std::endl;
@@ -543,9 +542,6 @@ struct InterfaceImpl : DeviceInterface {
     device_.SetLoggingCallback([](wgpu::LoggingType type, struct wgpu::StringView message) {
       std::cerr << message.data;
     });
-
-    // Initialize kernels
-    webgpu_cast_kernel_.Initialize(device_, queue_);
 
     std::cout << "WebGPU device initialized successfully!" << std::endl;
     return true;
