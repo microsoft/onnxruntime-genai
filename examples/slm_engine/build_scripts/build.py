@@ -20,6 +20,7 @@ def cmake_options_android(ndk_dir):
             f"-DCMAKE_TOOLCHAIN_FILE={ndk_dir}/build/cmake/android.toolchain.cmake",
             "-DANDROID_PLATFORM=android-33",
             "-DANDROID_ABI=arm64-v8a",
+            "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
         ]
         return cmake_option
 
