@@ -345,6 +345,9 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
 
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
 
+  // first_run_ should be thought of as prompt_processing_run_.
+  // It is true only for the prompt processing part when the provided tokens are more than 1.
+  first_run_ = next_tokens.size() > 1;
   size_t num_chunks{1};
   if (first_run_ && model_.config_->model.decoder.sliding_window.has_value()) {
     int window_size = model_.config_->model.decoder.sliding_window->window_size;
