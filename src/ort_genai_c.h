@@ -593,12 +593,12 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcesso
  * - `add_special_tokens`
  *   - Purpose: Controls whether to add special tokens (e.g., BOS/EOS) during tokenization.
  *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
- *   - Default: `"true"`.
+ *   - Default: `"false"`. This is the default value set by ORT GenAI prior to any options updating.
  *
  * - `skip_special_tokens`
  *   - Purpose: Controls whether to remove special tokens during detokenization.
  *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
- *   - Default: `"true"`.
+ *   - Default: `"true"`. This is the default value set by ORT GenAI prior to any options updating.
  *
  * Future tokenizer options may be added without changing this API signature.
  * Passing unknown keys will result in an error.
