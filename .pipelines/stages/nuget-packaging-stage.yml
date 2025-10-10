@@ -73,6 +73,9 @@ parameters:
 - name: ort_winml_version
   type: string
 
+- name: ort_nuget_winml_package_reference_version
+  type: string
+
 stages:
 - stage: nuget_packaging
   jobs:
@@ -82,6 +85,7 @@ stages:
           nuget_version_type: ${{ parameters.nuget_version_type }}
           ort_winml_version: ${{ parameters.ort_winml_version }}
           build_config: ${{ parameters.build_config }}
+          ort_nuget_winml_package_reference_version: ${{ parameters.ort_nuget_winml_package_reference_version }}
 
     - ${{ if or(eq(parameters.enable_linux_cpu, true), eq(parameters.enable_win_cpu, true), eq(parameters.enable_macos_cpu, true)) }}:
       - template: jobs/nuget-packaging-job.yml
