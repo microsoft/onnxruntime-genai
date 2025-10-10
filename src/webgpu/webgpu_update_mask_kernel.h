@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 #pragma once
 
-#ifdef USE_WEBGPU
 #include <dawn/webgpu_cpp.h>
 #include <memory>
 #include <stdexcept>
@@ -10,6 +9,7 @@
 #include "../models/onnxruntime_api.h"
 
 // WebGPU kernel for updating attention masks efficiently on GPU
+// Available in both USE_WEBGPU=ON and OFF modes
 template <typename T>
 class WebGPUUpdateMaskKernel {
  public:
@@ -45,5 +45,3 @@ class WebGPUUpdateMaskKernel {
   void InitializePipeline(wgpu::Device device);
   std::string GetShaderSource();
 };
-
-#endif  // USE_WEBGPU

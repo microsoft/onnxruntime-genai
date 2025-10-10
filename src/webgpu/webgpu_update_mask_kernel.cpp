@@ -3,11 +3,7 @@
 
 #include "webgpu_update_mask_kernel.h"
 
-#ifdef USE_WEBGPU
 #include <dawn/webgpu_cpp.h>
-#include <dawn/dawn_proc.h>
-#include <dawn/native/DawnNative.h>
-#include <dawn/webgpu.h>
 #include <stdexcept>
 #include <cassert>
 #include <string>
@@ -227,5 +223,3 @@ std::string WebGPUUpdateMaskKernel<T>::GetShaderSource() {
 // Explicit template instantiations
 template class WebGPUUpdateMaskKernel<int32_t>;
 template class WebGPUUpdateMaskKernel<int64_t>;
-
-#endif  // USE_WEBGPU

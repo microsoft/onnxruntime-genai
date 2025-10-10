@@ -3,7 +3,6 @@
 
 #include "webgpu_cast_kernel.h"
 
-#ifdef USE_WEBGPU
 #include <iostream>
 #include <stdexcept>
 
@@ -291,5 +290,3 @@ bool CastKernel::CastFloat16ToFloat32(void* input_data, void* output_data, size_
 
 }  // namespace WebGPU
 }  // namespace Generators
-
-#endif  // USE_WEBGPU

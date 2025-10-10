@@ -6,6 +6,7 @@
 #include "interface.h"
 
 #ifdef USE_WEBGPU
+// USE_WEBGPU path: Build our own Dawn (legacy mode, will be deprecated)
 #include "webgpu_update_mask_kernel.h"
 #include "webgpu_update_position_ids_kernel.h"
 #include "webgpu_cast_kernel.h"
@@ -13,6 +14,23 @@
 #include <dawn/webgpu_cpp.h>
 #include <dawn/dawn_proc.h>
 #include <dawn/native/DawnNative.h>
+#else
+// Preferred path: Use WebGPU EP's Dawn instance
+// This enables graph capture and other WebGPU features without building Dawn twice
+
+// Forward declare the C API functions to avoid header conflicts
+extern "C" {
+  const void* OrtWebGpuGetDawnProcTable(int context_id);
+  void* OrtWebGpuGetInstance(int context_id);
+  void* OrtWebGpuGetDevice(int context_id);
+}
+
+#include "webgpu_update_mask_kernel.h"
+#include "webgpu_update_position_ids_kernel.h"
+#include "webgpu_cast_kernel.h"
+
+#include <dawn/webgpu_cpp.h>
+#include <dawn/dawn_proc.h>
 #endif
 
 #include <memory>
@@ -30,11 +48,11 @@ constexpr size_t NormalizeBufferSize(size_t size) {
 }
 }  // namespace
 static Ort::Allocator* ort_allocator_{};
-#ifdef USE_WEBGPU
+// These pointers will be initialized from WebGPU EP's Dawn when USE_WEBGPU=OFF
+// or from our own Dawn when USE_WEBGPU=ON
 static wgpu::Device* webgpu_device_{};
 static wgpu::Queue* webgpu_queue_{};
 static wgpu::Instance* webgpu_instance_{};
-#endif
 const char* device_label = "WebGPU";
 
 struct WebGPUMemory final : DeviceBuffer {
@@ -64,6 +82,16 @@ struct WebGPUMemory final : DeviceBuffer {
 
   void CopyDeviceToCpu() override {
 #ifdef USE_WEBGPU
+    // USE_WEBGPU=ON: webgpu_device_ points to our own Dawn device
+    if (!webgpu_device_) {
+      throw std::runtime_error("WebGPU device not initialized");
+    }
+#else
+    // USE_WEBGPU=OFF: webgpu_device_ points to WebGPU EP's Dawn device
+    if (!webgpu_device_) {
+      throw std::runtime_error("WebGPU device not initialized. Ensure WebGPU EP is enabled and InitOrt() was called.");
+    }
+#endif
     AllocateCpu();
     WGPUBuffer src_buf = reinterpret_cast<WGPUBuffer>(p_device_);
     wgpu::BufferDescriptor desc{};
@@ -94,22 +122,20 @@ struct WebGPUMemory final : DeviceBuffer {
         UINT64_MAX);
     staging_buffer.Unmap();
     staging_buffer.Destroy();
-#else
-    throw std::runtime_error("CPU can't access WebGPU memory");
-#endif
   }
 
   void CopyCpuToDevice() override {
-#ifdef USE_WEBGPU
+    if (!webgpu_queue_) {
+      throw std::runtime_error("WebGPU queue not initialized");
+    }
     WGPUBuffer dst_buf = reinterpret_cast<WGPUBuffer>(p_device_);
     webgpu_queue_->WriteBuffer(dst_buf, 0, p_cpu_, size_in_bytes_);
-#else
-    throw std::runtime_error("CPU can't access WebGPU memory");
-#endif
   }
 
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
-#ifdef USE_WEBGPU
+    if (!webgpu_device_) {
+      throw std::runtime_error("WebGPU device not initialized");
+    }
     if (source.GetType() == device_label) {
       // WebGPU buffer-to-buffer copy
       WGPUBuffer src_buf = reinterpret_cast<WGPUBuffer>(source.p_device_);
@@ -122,20 +148,16 @@ struct WebGPUMemory final : DeviceBuffer {
     } else {
       CopyThroughCpu(*this, begin_dest, source, begin_source, size_in_bytes);
     }
-#else
-    throw std::runtime_error("CPU can't access WebGPU memory");
-#endif
   }
 
   void Zero() override {
-#ifdef USE_WEBGPU
+    if (!webgpu_queue_) {
+      throw std::runtime_error("WebGPU queue not initialized");
+    }
     // Clear buffer by writing zeros
     WGPUBuffer dst_buf = reinterpret_cast<WGPUBuffer>(p_device_);
     std::vector<uint8_t> zero_data(size_in_bytes_, 0);
     webgpu_queue_->WriteBuffer(dst_buf, 0, zero_data.data(), size_in_bytes_);
-#else
-    throw std::runtime_error("CPU can't access WebGPU memory");
-#endif
   }
 
   bool owned_;
@@ -144,8 +166,12 @@ struct WebGPUMemory final : DeviceBuffer {
 struct InterfaceImpl : DeviceInterface {
   InterfaceImpl() {
 #ifdef USE_WEBGPU
-    // Initialize Dawn proc table for native API access
+    // USE_WEBGPU=ON: Initialize our own Dawn (legacy mode)
     InitializeDawn();
+#else
+    // USE_WEBGPU=OFF: Will retrieve Dawn from WebGPU EP later
+    webgpu_ep_context_id_ = 0;  // Default WebGPU EP context
+    dawn_initialized_from_ep_ = false;
 #endif
   }
 
@@ -155,9 +181,15 @@ struct InterfaceImpl : DeviceInterface {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
 #ifdef USE_WEBGPU
+    // USE_WEBGPU=ON: Use our own Dawn objects
     webgpu_device_ = &device_;
     webgpu_queue_ = &queue_;
     webgpu_instance_ = &instance_;
+#else
+    // USE_WEBGPU=OFF: Retrieve Dawn from WebGPU EP and initialize static pointers
+    if (!dawn_initialized_from_ep_) {
+      InitializeDawnFromWebGpuEP();
+    }
 #endif
   }
 
@@ -180,7 +212,8 @@ struct InterfaceImpl : DeviceInterface {
 
   std::unique_ptr<Search> CreateGreedy(const GeneratorParams& params) override { return std::make_unique<GreedySearch_Cpu>(params); }
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
-#ifdef USE_WEBGPU
+  
+  // WebGPU-accelerated operations (available in both USE_WEBGPU=ON and OFF modes)
   bool UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
     if (!device_) {
       // Fall back to CPU implementation if WebGPU context is not initialized
@@ -271,20 +304,72 @@ struct InterfaceImpl : DeviceInterface {
       return false;  // Fall back to CPU on any error
     }
   }
-#endif
   void Synchronize() override {}  // Nothing to do
 
  private:
 #ifdef USE_WEBGPU
+  // USE_WEBGPU=ON: Own Dawn objects (legacy mode)
   wgpu::Device device_;
   wgpu::Instance instance_;
   wgpu::Queue queue_;
+#else
+  // USE_WEBGPU=OFF: Retrieve and wrap WebGPU EP's Dawn objects
+  int webgpu_ep_context_id_;
+  bool dawn_initialized_from_ep_;
+  wgpu::Device device_;        // Wrapped WebGPU EP device
+  wgpu::Instance instance_;    // Wrapped WebGPU EP instance
+  wgpu::Queue queue_;          // Wrapped WebGPU EP queue
+
+  void InitializeDawnFromWebGpuEP() {
+    // Retrieve Dawn objects from WebGPU EP
+    const void* dawn_proc_table_ptr = OrtWebGpuGetDawnProcTable(webgpu_ep_context_id_);
+    void* instance_ptr = OrtWebGpuGetInstance(webgpu_ep_context_id_);
+    void* device_ptr = OrtWebGpuGetDevice(webgpu_ep_context_id_);
+
+    if (!device_ptr || !instance_ptr) {
+      throw std::runtime_error(
+          "Failed to retrieve Dawn objects from WebGPU EP. "
+          "Make sure WebGPU EP is initialized first by calling SetWebGPUProvider.");
+    }
+
+    // Initialize Dawn proc table if available
+    if (dawn_proc_table_ptr) {
+      const DawnProcTable* dawn_procs = reinterpret_cast<const DawnProcTable*>(dawn_proc_table_ptr);
+      dawnProcSetProcs(dawn_procs);
+      std::cout << "Initialized Dawn proc table from WebGPU EP" << std::endl;
+    }
+
+    // Wrap the C handles in C++ objects
+    // Note: We use Acquire() to wrap existing handles without taking ownership
+    device_ = wgpu::Device::Acquire(static_cast<WGPUDevice>(device_ptr));
+    instance_ = wgpu::Instance::Acquire(static_cast<WGPUInstance>(instance_ptr));
+    queue_ = device_.GetQueue();
+
+    // Set up the static pointers for WebGPUMemory and other classes
+    webgpu_device_ = &device_;
+    webgpu_queue_ = &queue_;
+    webgpu_instance_ = &instance_;
+
+    // Initialize kernels using the WebGPU EP's Dawn
+    webgpu_cast_kernel_.Initialize(device_, queue_);
+
+    dawn_initialized_from_ep_ = true;
+    
+    std::cout << "Successfully initialized from WebGPU EP context " << webgpu_ep_context_id_ << std::endl;
+    std::cout << "  Device: " << device_ptr << std::endl;
+    std::cout << "  Instance: " << instance_ptr << std::endl;
+    std::cout << "  Graph capture and WebGPU operations are now enabled" << std::endl;
+  }
+#endif
+
+  // WebGPU kernels (available in both modes)
   WebGPUUpdateMaskKernel<int32_t> webgpu_update_mask_kernel_int32_;
   WebGPUUpdateMaskKernel<int64_t> webgpu_update_mask_kernel_int64_;
   WebGPUUpdatePositionIdsKernel<int32_t> webgpu_update_position_ids_kernel_int32_;
   WebGPUUpdatePositionIdsKernel<int64_t> webgpu_update_position_ids_kernel_int64_;
   CastKernel webgpu_cast_kernel_;
 
+#ifdef USE_WEBGPU
   std::vector<wgpu::FeatureName> GetAvailableRequiredFeatures(const wgpu::Adapter& adapter) const {
     std::vector<wgpu::FeatureName> required_features;
     constexpr wgpu::FeatureName features[]{
@@ -482,14 +567,6 @@ void CloseWebGPUInterface() {
 }
 
 void SetWebGPUProvider(OrtSessionOptions& session_options, const std::unordered_map<std::string, std::string>& provider_options) {
-#ifdef USE_WEBGPU
-  // Get the WebGPU interface to access device and instance
-  auto* webgpu_interface = static_cast<WebGPU::InterfaceImpl*>(g_webgpu_device.get());
-  if (!webgpu_interface) {
-    throw std::runtime_error("WebGPU interface not initialized");
-  }
-
-  // Create provider options with WebGPU device information
   std::vector<const char*> keys, values;
   std::vector<std::string> key_strings, value_strings;
 
@@ -499,7 +576,13 @@ void SetWebGPUProvider(OrtSessionOptions& session_options, const std::unordered_
     value_strings.push_back(option.second);
   }
 
-  // Add WebGPU-specific options with Dawn proc table, instance, and device
+#ifdef USE_WEBGPU
+  // USE_WEBGPU=ON: Pass our own Dawn objects to WebGPU EP
+  auto* webgpu_interface = static_cast<WebGPU::InterfaceImpl*>(g_webgpu_device.get());
+  if (!webgpu_interface) {
+    throw std::runtime_error("WebGPU interface not initialized");
+  }
+
   key_strings.push_back("dawnProcTable");
   value_strings.push_back(std::to_string(reinterpret_cast<size_t>(&dawn::native::GetProcs())));
 
@@ -511,8 +594,13 @@ void SetWebGPUProvider(OrtSessionOptions& session_options, const std::unordered_
 
   key_strings.push_back("deviceId");
   value_strings.push_back("1");
+#else
+  // USE_WEBGPU=OFF: Let WebGPU EP initialize its own Dawn
+  // We'll retrieve it later in InitOrt() via the exposed APIs
+  std::cout << "Using WebGPU EP's internal Dawn (shared mode)" << std::endl;
+#endif
 
-  // Convert to C-style arrays for ONNX Runtime API
+  // Convert to C-style arrays
   for (const auto& key : key_strings) {
     keys.push_back(key.c_str());
   }
@@ -520,18 +608,9 @@ void SetWebGPUProvider(OrtSessionOptions& session_options, const std::unordered_
     values.push_back(value.c_str());
   }
 
-  // Append the WebGPU provider with the enhanced options
-  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider(&session_options, "WebGPU", keys.data(), values.data(), keys.size()));
-#else
-  // If WebGPU support is not enabled, use the standard provider options
-  std::vector<const char*> keys, values;
-  for (const auto& option : provider_options) {
-    keys.push_back(option.first.c_str());
-    values.push_back(option.second.c_str());
-  }
-
-  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider(&session_options, "WebGPU", keys.data(), values.data(), keys.size()));
-#endif
+  // Append the WebGPU provider
+  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider(
+      &session_options, "WebGPU", keys.data(), values.data(), keys.size()));
 }
 
 DeviceInterface* GetWebGPUInterface() {

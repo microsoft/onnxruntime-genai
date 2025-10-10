@@ -2,13 +2,14 @@
 // Licensed under the MIT License.
 #pragma once
 
-#ifdef USE_WEBGPU
 #include <dawn/webgpu_cpp.h>
 #include <memory>
 
 namespace Generators {
 namespace WebGPU {
 
+// WebGPU kernel for casting between different data types
+// Available in both USE_WEBGPU=ON and OFF modes
 class CastKernel {
  public:
   CastKernel() = default;
@@ -46,5 +47,3 @@ class CastKernel {
 
 }  // namespace WebGPU
 }  // namespace Generators
-
-#endif  // USE_WEBGPU

@@ -3,11 +3,7 @@
 
 #include "webgpu_update_position_ids_kernel.h"
 
-#ifdef USE_WEBGPU
 #include <dawn/webgpu_cpp.h>
-#include <dawn/dawn_proc.h>
-#include <dawn/native/DawnNative.h>
-#include <dawn/webgpu.h>
 #include <stdexcept>
 #include <cassert>
 #include <string>
@@ -206,5 +202,3 @@ std::string WebGPUUpdatePositionIdsKernel<T>::GetShaderSource() {
 // Explicit template instantiations
 template class WebGPUUpdatePositionIdsKernel<int32_t>;
 template class WebGPUUpdatePositionIdsKernel<int64_t>;
-
-#endif  // USE_WEBGPU

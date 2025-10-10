@@ -437,7 +437,69 @@ if(USE_WEBGPU)
   message(STATUS "WebGPU support configured with ${NUM_LIBRARIES} Dawn/Tint/Abseil libraries")
 
 else()
-  message(STATUS "WebGPU support disabled")
+  # USE_WEBGPU=OFF: Use ONNX Runtime's internal Dawn (shared mode)
+  # We need Dawn headers AND dawn_proc.lib to resolve wgpu* function symbols
+  message(STATUS "WebGPU support enabled (using ONNX Runtime's internal Dawn)")
+  
+  # Dawn WebGPU library paths
+  set(DAWN_ROOT "C:/Users/jiajiaqin/workspace/dawn")
+  
+  # Set build directory based on CMAKE_BUILD_TYPE
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(DAWN_BUILD_DIR "${DAWN_ROOT}/out/Debug")
+    set(DAWN_LIB_SUBDIR "Debug")
+    message(STATUS "Using Dawn Debug libraries")
+  else()
+    set(DAWN_BUILD_DIR "${DAWN_ROOT}/out/Release")
+    set(DAWN_LIB_SUBDIR "Release")
+    message(STATUS "Using Dawn Release libraries")
+  endif()
+  
+  # Check if Dawn is available
+  if(NOT EXISTS "${DAWN_ROOT}/include")
+    message(FATAL_ERROR "Dawn header directory not found at ${DAWN_ROOT}/include. Please ensure Dawn source is available.")
+  endif()
+  if(NOT EXISTS "${DAWN_BUILD_DIR}")
+    message(FATAL_ERROR "Dawn build directory not found at ${DAWN_BUILD_DIR}. Please build Dawn first.")
+  endif()
+  
+  # Dawn include directories
+  target_include_directories(onnxruntime-genai PRIVATE
+    "${DAWN_ROOT}/include"
+    "${DAWN_BUILD_DIR}/gen/include"
+  )
+  
+  # Link dawn_proc.lib and dawn_common.lib
+  # - dawn_proc.lib: provides the wgpu* C function implementations
+  # - dawn_common.lib: provides Dawn logging utilities required by dawn_proc
+  # The DawnProcTable from ONNX Runtime will redirect these to ONNX Runtime's Dawn at runtime
+  set(DAWN_PROC_LIB "${DAWN_BUILD_DIR}/src/dawn/${DAWN_LIB_SUBDIR}/dawn_proc.lib")
+  set(DAWN_COMMON_LIB "${DAWN_BUILD_DIR}/src/dawn/common/${DAWN_LIB_SUBDIR}/dawn_common.lib")
+  
+  if(NOT EXISTS "${DAWN_PROC_LIB}")
+    message(FATAL_ERROR "dawn_proc.lib not found at ${DAWN_PROC_LIB}")
+  endif()
+  if(NOT EXISTS "${DAWN_COMMON_LIB}")
+    message(FATAL_ERROR "dawn_common.lib not found at ${DAWN_COMMON_LIB}")
+  endif()
+  
+  target_link_libraries(onnxruntime-genai PRIVATE 
+    "${DAWN_PROC_LIB}"
+    "${DAWN_COMMON_LIB}"
+  )
+  
+  # On Windows, also explicitly link onnxruntime.lib to resolve OrtWebGpuGet* symbols
+  # (ONNXRUNTIME_LIB is set to "onnxruntime.dll" which can't be used for linking)
+  if(WIN32)
+    set(ONNXRUNTIME_IMPORT_LIB "${ORT_LIB_DIR}/onnxruntime.lib")
+    if(NOT EXISTS "${ONNXRUNTIME_IMPORT_LIB}")
+      message(FATAL_ERROR "onnxruntime.lib not found at ${ONNXRUNTIME_IMPORT_LIB}")
+    endif()
+    target_link_libraries(onnxruntime-genai PRIVATE "${ONNXRUNTIME_IMPORT_LIB}")
+    message(STATUS "Linked onnxruntime.lib for OrtWebGpuGet* symbols: ${ONNXRUNTIME_IMPORT_LIB}")
+  endif()
+  
+  message(STATUS "WebGPU configured with dawn_proc.lib and dawn_common.lib (using ONNX Runtime's internal Dawn)")
 endif()
 
 # The genai library itself is always embedded in the shared library
