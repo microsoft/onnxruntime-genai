@@ -124,7 +124,7 @@ TEST(CAPITests, TokenizerUpdateOptions) {
   {
     const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
     const char* values[] = {"false", "true"};
-    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer, keys, values, 2);
+    OgaResult* result = OgaUpdateTokenizerOptions(tokenizer.get(), keys, values, 2);
     ASSERT_EQ(result, nullptr) << "Failed to update tokenizer options";
   }
 
