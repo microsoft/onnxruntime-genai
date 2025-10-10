@@ -244,6 +244,7 @@ struct Config {
         std::unordered_map<std::string, std::string> output_names_forwarder;
         bool run_on_prompt{true};
         bool run_on_token_gen{true};
+        bool is_lm_head{false};
         int reset_session_idx{-1};  // Some models cannot keep all the ort sessions in memory at once due to memory constraints.
                                     // This is the index of the session that needs to be reset during the execution of the current session.
                                     // This is a temporary solution until the QNN driver updates are available.
@@ -273,7 +274,23 @@ struct Config {
     float length_penalty{1.0f};        // Exponential penalty to the length that is used with beam-based generation. length_penalty > 0.0 promotes longer sequences, while length_penalty < 0.0 encourages shorter sequences.
     bool past_present_share_buffer{};  // The past/present kv tensors are shared and allocated once to max_length (cuda only)
     int random_seed{-1};               // -1 = Seed with random device, otherwise use value to seed RNG
+    std::optional<size_t> chunk_size;  // Chunk size for prefill chunking during context processing. If present, chunking is enabled with the chunk size > 0.
   } search;
+
+  struct Engine {
+    struct DynamicBatching {
+      size_t block_size{256};                       // Total number of slots per block.
+      std::optional<size_t> num_blocks;             // Total number of blocks per layer.
+      std::optional<float> gpu_utilization_factor;  // Fraction of free GPU memory to use for key-value cache.
+      size_t max_batch_size{16};                    // Maximum batch size for dynamically batching requests.
+    };
+    std::optional<DynamicBatching> dynamic_batching;  // Dynamic batching settings
+
+    struct StaticBatching {
+      size_t max_batch_size{4};  // Maximum batch size for static batching
+    };
+    std::optional<StaticBatching> static_batching;  // Static batching settings
+  } engine;                                         // Engine settings
 
   void AddMapping(const std::string& nominal_name, const std::string& graph_name);
   // Returns graph name and true if the nominal name is found in the mapping
