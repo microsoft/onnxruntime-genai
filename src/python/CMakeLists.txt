@@ -37,12 +37,8 @@ if(BUILD_WHEEL)
   endif()
   set(PACKAGE_DIR_NAME "onnxruntime_genai")
   set(WHEEL_TARGET_NAME "${WHEEL_FILES_DIR}/${PACKAGE_DIR_NAME}")
-  set(GENERATE_TYPE_DIR_NAME "onnxruntime_genai-generate-type")
-  set(GENERATE_TYPE_DIR "${WHEEL_FILES_DIR}/${GENERATE_TYPE_DIR_NAME}")
-  file(MAKE_DIRECTORY ${GENERATE_TYPE_DIR})
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/__init__.py.in ${WHEEL_TARGET_NAME}/__init__.py @ONLY)
-  configure_file(${CMAKE_CURRENT_SOURCE_DIR}/__init__.pyi.in ${WHEEL_TARGET_NAME}/__init__.pyi @ONLY)
 
   # Copy over any additional python files
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_TARGET_NAME}/)
@@ -56,14 +52,16 @@ if(BUILD_WHEEL)
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
   add_custom_command(TARGET python POST_BUILD
-    # Use a new directory to fix the onnxruntime_genai runtime dependency and avoid contamination
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${WHEEL_TARGET_NAME} ${GENERATE_TYPE_DIR}
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${ORT_LIB_DIR} ${GENERATE_TYPE_DIR}
     # Be compatible with both system-wide but unprivileged env and virtual env where --user is not available
-    COMMAND ${PYTHON_EXECUTABLE} -m pip install --user pybind11-stubgen numpy || ${PYTHON_EXECUTABLE} -m pip install pybind11-stubgen numpy
-    COMMAND ${PYTHON_EXECUTABLE} -m pybind11_stubgen $<TARGET_FILE_BASE_NAME:python> --output-dir ${WHEEL_TARGET_NAME}
+    COMMAND ${PYTHON_EXECUTABLE} -m pip install --user mypy onnxruntime || ${PYTHON_EXECUTABLE} -m pip install mypy onnxruntime
+    # The stubgen executable might have been installed to somewhere not in PATH. So we let python find it.
+    COMMAND ${PYTHON_EXECUTABLE} -c "from mypy.stubgen import main; main(['-p', '${PACKAGE_DIR_NAME}', '-o', '${WHEEL_FILES_DIR}'])"
+    # The stubgen process generates __pycache__ folders.
+    COMMAND ${CMAKE_COMMAND} -E remove_directory ${WHEEL_TARGET_NAME}/__pycache__
     COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/fix_pyi.py -i ${WHEEL_TARGET_NAME}/$<TARGET_FILE_BASE_NAME:python>.pyi
-    WORKING_DIRECTORY ${GENERATE_TYPE_DIR}
+    # Clean up the installed packages.
+    COMMAND ${PYTHON_EXECUTABLE} -m pip uninstall -y mypy onnxruntime
+    WORKING_DIRECTORY ${WHEEL_FILES_DIR}
     COMMENT "Generate type stubs for onnxruntime_genai"
   )
   set(auditwheel_exclude_list
