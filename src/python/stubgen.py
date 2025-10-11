@@ -4,10 +4,11 @@ Use this script to leverage python to find the stubgen installation.
 
 from pathlib import Path
 from argparse import ArgumentParser
+import subprocess
+import sys
+import shutil
 
 def install_package(package_name: str, version: str | None = None) -> bool:
-    import subprocess
-    import sys
     # Check if the package is already installed, is so, return False, meaning we did not install it.
     try:
         __import__(package_name)
@@ -24,16 +25,14 @@ def install_package(package_name: str, version: str | None = None) -> bool:
     return True
 
 def try_uninstall_package(package_name: str) -> None:
-    import subprocess
-    import sys
     try:
         subprocess.check_call([sys.executable, '-m', 'pip', 'uninstall', '-y', package_name])
     except subprocess.CalledProcessError:
         pass
 
 def generate_stubs(package: str, output: Path) -> None:
-    from mypy.stubgen import main as stubgen_main
-    stubgen_main(['-p', package, '-o', str(output)])
+    # Call in a subprocess to update sys.path correctly.
+    subprocess.check_call([sys.executable, '-c', f'from mypy.stubgen import main; main(["-p", "{package}", "-o", "{output.as_posix()}"])'])
 
 def fix_stubs(root: Path) -> None:
     # Try fix all .pyi files, though only the one generated from the native library needs fixing.
@@ -44,7 +43,6 @@ def fix_stubs(root: Path) -> None:
         stub_file.write_text(fixed_content)
 
 def clean_up_pycache(root: Path) -> None:
-    import shutil
     pycache_dirs = root.rglob('__pycache__')
     for pycache_dir in pycache_dirs:
         shutil.rmtree(pycache_dir, ignore_errors=True)
