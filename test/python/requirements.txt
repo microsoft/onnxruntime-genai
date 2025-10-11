@@ -6,6 +6,6 @@ protobuf==5.29.5
 sympy
 pytest
 onnx
-onnx_ir>=0.1.3
+onnx_ir @ git+https://github.com/onnx/ir-py@main
 transformers
 huggingface_hub[cli]
