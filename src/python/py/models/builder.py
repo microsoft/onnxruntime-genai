@@ -15,7 +15,6 @@ import ast
 import json
 import os
 import textwrap
-import warnings
 from typing import Any, Literal, Sequence
 
 import numpy as np
@@ -1465,11 +1464,11 @@ class Model:
         cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
 
         # Determine which EPs don't support the If operator
-        eps_without_if_support = ["dml", "trt-rtx"]
+        self.eps_without_if_support = ["dml", "trt-rtx"]
         if self.extra_options.get("enable_webgpu_graph", False):
-            eps_without_if_support.append("webgpu")
+            self.eps_without_if_support.append("webgpu")
 
-        if self.ep in eps_without_if_support:
+        if self.ep in self.eps_without_if_support:
             # Concat small and large cos/sin caches for DML, TRT-RTX, and WebGPU (when graph enabled) EPs
             # These EPs don't support the If operator
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
@@ -2888,7 +2887,7 @@ class Model:
     def make_attention_mask_reformatting(self):
         if self.extra_options.get("enable_cuda_graph", False) or self.extra_options.get("enable_webgpu_graph", False) or self.ep == "dml":
             # ORT does not allow nodes to be placed on mulitple execution providers
-            # with cuda graph enabled. We've only verified it works with GQA and with
+            # with graph capture enabled. We've only verified it works with GQA and with
             # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded
             # to a fixed value by logic).
             # For other models, we need to check if it works and update the logic here.
@@ -3215,8 +3214,9 @@ class Model:
         basename = "/model/attn_mask_reformat"
         attn_mask_basename = f"{basename}/attn_mask_subgraph"
 
-        if self.extra_options.get("enable_webgpu_graph", False):
-            # WebGPU graph mode: Remove right path, calculate total_seq_len from seqlens_k
+        if self.extra_options.get("enable_webgpu_graph", False) or self.extra_options.get("enable_cuda_graph", False) or self.ep == "dml":
+            # Graph capture mode: Remove right path, calculate total_seq_len from seqlens_k
+            # This optimized path is used for WebGPU graph capture, CUDA graph capture, and DML execution provider
             #
             #          attention_mask
             #               |
@@ -3331,7 +3331,10 @@ class Model:
         self.mask_attrs["key_total_seq_lens"] = cast_1_name
         self.mask_attrs["total_seq_len"] = cast_2_name
 
-
+    def make_position_ids_reformatting(self):
+        # For most cases, position_ids are already properly formatted as 2D tensors
+        # with int64 values matching input_ids shape, so we can use them directly
+        return "position_ids"
 
 
 class LlamaModel(Model):
@@ -3343,19 +3346,8 @@ class MistralModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-        # Set position_ids_name based on whether position_ids is available as an input
-        if "position_ids" in self.input_names:
-            self.position_ids_name = "position_ids"
-        else:
-            # When position_ids is not an input (use_rope_in_attn is True),
-            # position_ids won't be used since rotary embeddings are handled in GQA
-            self.position_ids_name = None
-
     def make_attention(self, layer_id, attention, root_input, **kwargs):
-        if self.position_ids_name is not None:
-            super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
-        else:
-            super().make_attention(layer_id, attention, root_input, **kwargs)
+        super().make_attention(layer_id, attention, root_input, **kwargs)
 
 
 class QwenModel(MistralModel):
@@ -3492,6 +3484,47 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
+
+        # Set position_ids_name based on whether position_ids is available as an input
+        if "position_ids" in self.input_names:
+            position_ids_result = self.make_position_ids_reformatting()
+            self.position_ids_name = f"{position_ids_result}/output_0" if position_ids_result != "position_ids" else "position_ids"
+        else:
+            # When position_ids is not an input (use_rope_in_attn is True),
+            # position_ids won't be used since rotary embeddings are handled in GQA
+            self.position_ids_name = None
+
+    def make_position_ids_reformatting(self):
+        if self.ep != "dml":
+            position_ids_input_to_rotemb = super().make_position_ids_reformatting()
+            return position_ids_input_to_rotemb
+
+        basename = "/model/pos_ids_reformat"
+        proto_dtype = self.input_types["position_ids"]
+        str_dtype = self.to_str_dtype(proto_dtype)
+
+        reduce_max_name = f"{basename}/ReduceMax"
+        reduce_max_inputs = ["position_ids"]
+        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=proto_dtype, shape=[1])
+        greater_or_equal_name = f"{basename}/GreaterOrEqual"
+        greater_or_equal_inputs = [f"{reduce_max_name}/output_0", f"/model/constants/{str_dtype}/{self.original_context_length}"]
+        self.make_greater_or_equal(greater_or_equal_name, greater_or_equal_inputs, shape=[])
+        cast_name = f"{basename}/Cast"
+        self.make_cast(cast_name, f"{greater_or_equal_name}/output_0", dtype=proto_dtype, shape=None)
+        mul_name = f"{basename}/Mul"
+        mul_inputs = [f"{cast_name}/output_0", f"/model/constants/{str_dtype}/{self.original_context_length}"]
+        self.make_mul(mul_name, mul_inputs, dtype=proto_dtype, shape=None)
+        add_1_name = f"{basename}/Add_1"
+        add_1_inputs = [f"{mul_name}/output_0", "position_ids"]
+        self.make_add(add_1_name, add_1_inputs, dtype=proto_dtype, shape=["batch_size", "sequence_length"])
+
+        return add_1_name
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        if self.position_ids_name is not None:
+            super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
+        else:
+            super().make_attention(layer_id, attention, root_input, **kwargs)
 
 class Phi3SmallModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -4325,14 +4358,8 @@ def check_extra_options(kv_pairs, execution_provider):
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
         raise ValueError("Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
-    # Validate enable_webgpu_graph option
     if kv_pairs.get("enable_webgpu_graph", False) and execution_provider != "webgpu":
-        warnings.warn(
-            f"enable_webgpu_graph is only supported with WebGPU execution provider, "
-            f"but current EP is '{execution_provider}'. Disabling enable_webgpu_graph.",
-            UserWarning,
-            stacklevel=3  # Adjusted stacklevel since we're now called from parse_extra_options
-        )
+        print("WARNING: enable_webgpu_graph is only supported with WebGPU execution provider. Disabling enable_webgpu_graph.")
         kv_pairs["enable_webgpu_graph"] = False
 
 
