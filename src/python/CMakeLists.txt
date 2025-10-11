@@ -55,7 +55,7 @@ if(BUILD_WHEEL)
     # Be compatible with both system-wide but unprivileged env and virtual env where --user is not available
     COMMAND ${PYTHON_EXECUTABLE} -m pip install --user mypy onnxruntime || ${PYTHON_EXECUTABLE} -m pip install mypy onnxruntime
     # The stubgen executable might have been installed to somewhere not in PATH. So we let python find it.
-    COMMAND ${PYTHON_EXECUTABLE} -c "from mypy.stubgen import main; main(['-p', '${PACKAGE_DIR_NAME}', '-o', '${WHEEL_FILES_DIR}'])"
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_pyi.py -p ${PACKAGE_DIR_NAME} -o ${WHEEL_FILES_DIR}
     # The stubgen process generates __pycache__ folders.
     COMMAND ${CMAKE_COMMAND} -E remove_directory ${WHEEL_TARGET_NAME}/__pycache__
     COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/fix_pyi.py -i ${WHEEL_TARGET_NAME}/$<TARGET_FILE_BASE_NAME:python>.pyi
