@@ -3214,9 +3214,8 @@ class Model:
         basename = "/model/attn_mask_reformat"
         attn_mask_basename = f"{basename}/attn_mask_subgraph"
 
-        if self.extra_options.get("enable_webgpu_graph", False) or self.extra_options.get("enable_cuda_graph", False) or self.ep == "dml":
-            # Graph capture mode: Remove right path, calculate total_seq_len from seqlens_k
-            # This optimized path is used for WebGPU graph capture, CUDA graph capture, and DML execution provider
+        if self.extra_options.get("enable_webgpu_graph", False):
+            # WebGPU graph mode: Remove right path, calculate total_seq_len from seqlens_k
             #
             #          attention_mask
             #               |
