@@ -28,6 +28,7 @@ def try_uninstall_package(package_name: str) -> None:
     try:
         subprocess.check_call([sys.executable, '-m', 'pip', 'uninstall', '-y', package_name])
     except subprocess.CalledProcessError:
+        # Ignore any error.
         pass
 
 def generate_stubs(package: str, output: Path) -> None:
