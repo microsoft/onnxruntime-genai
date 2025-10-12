@@ -277,16 +277,25 @@ const std::string& TokenizerStream::Decode(int32_t token) {
 }
 
 Tokenizer::Tokenizer(Config& config) : pad_token_id_{config.model.pad_token_id} {
-  CheckResult(OrtxCreateTokenizer(tokenizer_.Address(), config.config_path.string().c_str()));
+  // Default tokenizer options
+  const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
+  const char* values[] = {"false", "true"};
+
+  CheckResult(OrtxCreateTokenizerWithOptions(tokenizer_.Address(), config.config_path.string().c_str(), keys, values, 2));
 }
 
 std::unique_ptr<TokenizerStream> Tokenizer::CreateStream() const {
   return std::make_unique<TokenizerStream>(*this);
 }
 
+void Tokenizer::UpdateOptions(const char* const* keys, const char* const* values, size_t num_options) {
+  // Tap into ORT Extensions API
+  CheckResult(OrtxUpdateTokenizerOptions(tokenizer_, const_cast<const char**>(keys), const_cast<const char**>(values), num_options));
+}
+
 std::vector<int32_t> Tokenizer::Encode(const char* text) const {
   OrtxPtr<OrtxTokenId2DArray> ids;
-  CheckResult(OrtxTokenizeWithOptions(tokenizer_, &text, 1, ids.Address(), false /* add_special_tokens */));
+  CheckResult(OrtxTokenize(tokenizer_, &text, 1, ids.Address()));
 
   const extTokenId_t* tokens;
   size_t count;
@@ -296,7 +305,7 @@ std::vector<int32_t> Tokenizer::Encode(const char* text) const {
 
 std::string Tokenizer::Decode(std::span<const int32_t> tokens) const {
   OrtxPtr<OrtxStringArray> ortx_string_array;
-  CheckResult(OrtxDetokenize1DWithOptions(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address(), true /* skip_special_tokens */));
+  CheckResult(OrtxDetokenize1D(tokenizer_, reinterpret_cast<const uint32_t*>(tokens.data()), tokens.size(), ortx_string_array.Address()));
 
   const char* string;
   CheckResult(OrtxStringArrayGetItem(ortx_string_array, 0, &string));

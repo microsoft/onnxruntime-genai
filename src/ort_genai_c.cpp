@@ -581,6 +581,23 @@ OgaResult* OGA_API_CALL OgaCreateTokenizer(const OgaModel* model, OgaTokenizer**
   OGA_CATCH
 }
 
+OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
+    OgaTokenizer* tokenizer,
+    const char* const* keys,
+    const char* const* values,
+    size_t num_options) {
+  OGA_TRY
+
+  if (!tokenizer)
+    throw std::runtime_error("Tokenizer pointer is null");
+
+  tokenizer->UpdateOptions(keys, values, num_options);
+
+  return nullptr;
+
+  OGA_CATCH
+}
+
 OgaResult* OGA_API_CALL OgaTokenizerEncode(const OgaTokenizer* tokenizer, const char* str, OgaSequences* sequences) {
   OGA_TRY
   sequences->emplace_back(tokenizer->Encode(str));

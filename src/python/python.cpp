@@ -314,25 +314,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       });
   m.add_object("_cleanup", cleanup);
 
-  pybind11::enum_<OgaElementType>(m, "ElementType")
-      .value("undefined", OgaElementType_undefined)
-      .value("float32", OgaElementType_float32)
-      .value("uint8", OgaElementType_uint8)
-      .value("int8", OgaElementType_int8)
-      .value("uint16", OgaElementType_uint16)
-      .value("int16", OgaElementType_int16)
-      .value("int32", OgaElementType_int32)
-      .value("int64", OgaElementType_int64)
-      .value("string", OgaElementType_string)
-      .value("bool", OgaElementType_bool)
-      .value("float16", OgaElementType_float16)
-      .value("float64", OgaElementType_float64)
-      .value("uint32", OgaElementType_uint32)
-      .value("uint64", OgaElementType_uint64)
-      .value("complex64", OgaElementType_complex64)
-      .value("complex128", OgaElementType_complex128)
-      .value("bfloat16", OgaElementType_bfloat16);
-
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
       .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
@@ -380,11 +361,29 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<OgaTokenizer>(m, "Tokenizer")
       .def(pybind11::init([](const OgaModel& model) { return OgaTokenizer::Create(model); }))
+      .def("update_options", [](OgaTokenizer& t, pybind11::kwargs kwargs) {
+        std::vector<std::string> key_storage;
+        std::vector<std::string> value_storage;
+        key_storage.reserve(kwargs.size());
+        value_storage.reserve(kwargs.size());
+
+        std::vector<const char*> keys;
+        std::vector<const char*> values;
+        keys.reserve(kwargs.size());
+        values.reserve(kwargs.size());
+
+        for (auto& item : kwargs) {
+            key_storage.emplace_back(pybind11::str(item.first));
+            value_storage.emplace_back(pybind11::str(item.second));
+            keys.push_back(key_storage.back().c_str());
+            values.push_back(value_storage.back().c_str());
+        }
+
+        t.UpdateOptions(keys.data(), values.data(), kwargs.size()); })
       .def("encode", [](const OgaTokenizer& t, std::string s) -> pybind11::array_t<int32_t> {
         auto sequences = OgaSequences::Create();
         t.Encode(s.c_str(), *sequences);
-        return ToPython(sequences->Get(0));
-      })
+        return ToPython(sequences->Get(0)); })
       .def("to_token_id", &OgaTokenizer::ToTokenId)
       .def("decode", [](const OgaTokenizer& t, pybind11::array_t<int32_t> tokens) -> std::string { return t.Decode(ToSpan(tokens)).p_; })
       .def("apply_chat_template", [](const OgaTokenizer& t, const char* messages, const char* template_str, const char* tools, bool add_generation_prompt) -> std::string { return t.ApplyChatTemplate(template_str, messages, tools, add_generation_prompt).p_; }, pybind11::arg("messages"), pybind11::kw_only(), pybind11::arg("template_str") = nullptr, pybind11::arg("tools") = nullptr, pybind11::arg("add_generation_prompt") = true)
