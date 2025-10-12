@@ -202,12 +202,6 @@ struct SessionOptions_Element : JSON::Element {
     }
   }
 
-  JSON::Element& OnObject(std::string_view name) override {
-    if (name == "config_entries")
-      return config_entries_;
-    throw JSON::unknown_value_error{};
-  }
-
   JSON::Element& OnArray(std::string_view name) override {
     if (name == "provider_options") {
       return provider_options_;
@@ -218,7 +212,6 @@ struct SessionOptions_Element : JSON::Element {
  private:
   Config::SessionOptions& v_;
   ProviderOptionsArray_Element provider_options_{v_.provider_options};
-  NamedStrings_Element config_entries_{v_.config_entries};
 };
 
 struct RunOptions_Element : JSON::Element {
@@ -226,18 +219,11 @@ struct RunOptions_Element : JSON::Element {
 
   void OnValue(std::string_view name, JSON::Value value) override {
     // Run options that are set with AddConfigEntry
-    v_.config_entries.emplace_back(name, JSON::Get<std::string_view>(value));
-  }
-
-  JSON::Element& OnObject(std::string_view name) override {
-    if (name == "config_entries")
-      return config_entries_;
-    throw JSON::unknown_value_error{};
+    v_.emplace_back(name, JSON::Get<std::string_view>(value));
   }
 
  private:
   Config::RunOptions& v_;
-  NamedStrings_Element config_entries_{v_.config_entries};
 };
 
 struct EncoderInputs_Element : JSON::Element {

@@ -178,7 +178,7 @@ void State::SetRunOption(const char* key, const char* value) {
  * Reference: https://github.com/microsoft/onnxruntime/blob/main/include/onnxruntime/core/session/onnxruntime_run_options_config_keys.h
  */
 void State::SetRunOptions(const Config::RunOptions& config_run_options) {
-  for (auto& config_entry : config_run_options.config_entries) {
+  for (auto& config_entry : config_run_options) {
     run_options_->AddConfigEntry(config_entry.first.c_str(), config_entry.second.c_str());
   }
 }

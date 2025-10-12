@@ -96,9 +96,7 @@ struct Config {
     std::vector<std::string> providers;  // List of providers to use at runtime, not persisted in the json currently
   };
 
-  struct RunOptions {
-    std::vector<NamedString> config_entries;  // Entries go into OrtRunOptions::AddConfigEntry
-  };
+  using RunOptions = std::vector<NamedString>;  // Entries go into OrtRunOptions::AddConfigEntry
 
   struct Model {
     std::string type;
