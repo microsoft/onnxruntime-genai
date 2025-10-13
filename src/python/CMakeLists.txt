@@ -52,7 +52,7 @@ if(BUILD_WHEEL)
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
   add_custom_command(TARGET python POST_BUILD
-    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/stubgen.py -r ${PACKAGE_DIR_NAME} -v ${ORT_VERSION} || (exit 0)
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/stubgen.py -r ${PACKAGE_DIR_NAME} -v ${ORT_VERSION}
     WORKING_DIRECTORY ${WHEEL_FILES_DIR}
     COMMENT "Generate type stubs for onnxruntime_genai"
   )

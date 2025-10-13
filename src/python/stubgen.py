@@ -6,6 +6,7 @@ from pathlib import Path
 from argparse import ArgumentParser
 import subprocess
 import sys
+import platform
 import shutil
 
 def install_package(package_name: str, version: str | None = None) -> bool:
@@ -60,7 +61,6 @@ def main():
     except subprocess.CalledProcessError as e:
         print(f"Failed to install dependencies on this platform:\n{e}")
         print("Skipping type stub generation.")
-        sys.exit(0)
         return
 
     wheel_root = Path(args.wheel_root).resolve()
@@ -72,7 +72,12 @@ def main():
         try_uninstall_package('onnxruntime')
     if mypy_installed_by_us:
         try_uninstall_package('mypy')
-    sys.exit(0)
 
 if __name__ == '__main__':
+    # Explicitly skip windows ARM64. 
+    # There is a cmake + MSVC issue causing the build to fail if the pip install subprocess fails.
+    # Even if we handled the exception and exited 0.
+    if sys.platform == 'win32' and platform.machine().lower() == 'arm64':
+        print('Stub generation is not supported on Windows ARM64 due to lack of onnxruntime package.')
+        exit(0)
     main()
