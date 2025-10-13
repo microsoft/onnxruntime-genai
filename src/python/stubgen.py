@@ -60,6 +60,7 @@ def main():
     except Exception as e:
         print(f"Failed to install dependencies on this platform:\n{e}")
         print("Skipping type stub generation.")
+        sys.exit(0)
         return
 
     wheel_root = Path(args.wheel_root).resolve()
@@ -71,6 +72,7 @@ def main():
         try_uninstall_package('onnxruntime')
     if mypy_installed_by_us:
         try_uninstall_package('mypy')
+    sys.exit(0)
 
 if __name__ == '__main__':
     main()
