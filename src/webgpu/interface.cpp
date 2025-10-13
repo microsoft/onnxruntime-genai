@@ -43,11 +43,15 @@ namespace Generators {
 namespace WebGPU {
 
 Ort::Allocator* ort_allocator_{};
+
 // Global Dawn objects shared across all WebGPU operations
-// Initialized from WebGPU EP's Dawn when USE_WEBGPU=OFF or from our own Dawn when USE_WEBGPU=ON
+// USE_WEBGPU=ON: We own these objects completely (created by us, destroyed by us)
+// USE_WEBGPU=OFF: We hold BORROWED references to WebGPU EP's objects
+//                 We use MoveToCHandle() in destructor to release WITHOUT decrementing refcount
 wgpu::Device webgpu_device_;
 wgpu::Queue webgpu_queue_;
 wgpu::Instance webgpu_instance_;
+
 const char* device_label = "WebGPU";
 
 struct WebGPUMemory final : DeviceBuffer {
@@ -167,6 +171,25 @@ struct InterfaceImpl : DeviceInterface {
     // USE_WEBGPU=OFF: Will retrieve Dawn from WebGPU EP later
     webgpu_ep_context_id_ = 0;  // Default WebGPU EP context
     dawn_initialized_from_ep_ = false;
+#endif
+  }
+
+  ~InterfaceImpl() override {
+#ifndef USE_WEBGPU
+    // USE_WEBGPU=OFF: Release borrowed references from WebGPU EP
+    // CRITICAL: Call MoveToCHandle() to prevent destructors from calling Release()
+    // during static destruction (which happens AFTER ORT's WebGPU EP cleanup)
+    if (webgpu_device_) {
+      webgpu_device_.MoveToCHandle();
+    }
+    if (webgpu_queue_) {
+      webgpu_queue_.MoveToCHandle();
+    }
+    if (webgpu_instance_) {
+      webgpu_instance_.MoveToCHandle();
+    }
+#else
+    // USE_WEBGPU=ON: We own the objects, let their destructors clean up normally
 #endif
   }
 
@@ -328,11 +351,12 @@ struct InterfaceImpl : DeviceInterface {
       std::cout << "Initialized Dawn proc table from WebGPU EP" << std::endl;
     }
 
-    // Wrap the C handles in C++ objects and assign to global variables
-    // Note: Acquire() increments the reference count, so the device will remain valid
-    // until both WebGPU EP AND these global objects are destroyed (whichever is last)
-    webgpu_device_ = wgpu::Device::Acquire(static_cast<WGPUDevice>(device_ptr));
-    webgpu_instance_ = wgpu::Instance::Acquire(static_cast<WGPUInstance>(instance_ptr));
+    // Wrap WebGPU EP's objects in C++ wrappers WITHOUT incrementing reference count
+    // We're borrowing these references - WebGPU EP owns them
+    // In destructor, we'll use MoveToCHandle() to release wrapper without calling Release()
+    // This ensures reference count stays unchanged: WebGPU EP is the sole owner
+    webgpu_device_ = wgpu::Device(static_cast<WGPUDevice>(device_ptr));
+    webgpu_instance_ = wgpu::Instance(static_cast<WGPUInstance>(instance_ptr));
     webgpu_queue_ = webgpu_device_.GetQueue();
 
     dawn_initialized_from_ep_ = true;
@@ -340,6 +364,7 @@ struct InterfaceImpl : DeviceInterface {
     std::cout << "Successfully initialized from WebGPU EP context " << webgpu_ep_context_id_ << std::endl;
     std::cout << "  Device: " << device_ptr << std::endl;
     std::cout << "  Instance: " << instance_ptr << std::endl;
+    std::cout << "  Using borrowed references (WebGPU EP owns lifecycle)" << std::endl;
     std::cout << "  Graph capture and WebGPU operations are now enabled" << std::endl;
   }
 #endif
@@ -531,7 +556,6 @@ struct InterfaceImpl : DeviceInterface {
   }
 #endif
 };
-
 }  // namespace WebGPU
 
 std::unique_ptr<WebGPU::InterfaceImpl> g_webgpu_device;
@@ -539,11 +563,6 @@ std::unique_ptr<WebGPU::InterfaceImpl> g_webgpu_device;
 void InitWebGPUInterface() {
   if (!g_webgpu_device)
     g_webgpu_device = std::make_unique<WebGPU::InterfaceImpl>();
-}
-
-void CloseWebGPUInterface() {
-  
-  g_webgpu_device.reset();
 }
 
 void SetWebGPUProvider(OrtSessionOptions& session_options, const std::unordered_map<std::string, std::string>& provider_options) {

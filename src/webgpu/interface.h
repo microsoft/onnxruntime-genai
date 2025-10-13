@@ -19,7 +19,6 @@ namespace Generators {
 
 DeviceInterface* GetWebGPUInterface();
 void InitWebGPUInterface();
-void CloseWebGPUInterface();
 void SetWebGPUProvider(OrtSessionOptions& session_options, const std::unordered_map<std::string, std::string>& provider_options);
 
 }  // namespace Generators
