@@ -42,17 +42,12 @@ void* OrtWebGpuGetDevice(int context_id);
 namespace Generators {
 namespace WebGPU {
 
-namespace {
-constexpr size_t NormalizeBufferSize(size_t size) {
-  return (size + 15) / 16 * 16;
-}
-}  // namespace
-static Ort::Allocator* ort_allocator_{};
-// These pointers will be initialized from WebGPU EP's Dawn when USE_WEBGPU=OFF
-// or from our own Dawn when USE_WEBGPU=ON
-static wgpu::Device* webgpu_device_{};
-static wgpu::Queue* webgpu_queue_{};
-static wgpu::Instance* webgpu_instance_{};
+Ort::Allocator* ort_allocator_{};
+// Global Dawn objects shared across all WebGPU operations
+// Initialized from WebGPU EP's Dawn when USE_WEBGPU=OFF or from our own Dawn when USE_WEBGPU=ON
+wgpu::Device webgpu_device_;
+wgpu::Queue webgpu_queue_;
+wgpu::Instance webgpu_instance_;
 const char* device_label = "WebGPU";
 
 struct WebGPUMemory final : DeviceBuffer {
@@ -98,13 +93,13 @@ struct WebGPUMemory final : DeviceBuffer {
     desc.size = size_in_bytes_;
     desc.usage = wgpu::BufferUsage::CopyDst | wgpu::BufferUsage::MapRead;
 
-    auto staging_buffer = webgpu_device_->CreateBuffer(&desc);
-    auto command_encoder = webgpu_device_->CreateCommandEncoder();
+    auto staging_buffer = webgpu_device_.CreateBuffer(&desc);
+    auto command_encoder = webgpu_device_.CreateCommandEncoder();
     command_encoder.CopyBufferToBuffer(src_buf, 0, staging_buffer, 0, size_in_bytes_);
     wgpu::CommandBuffer command_buffer1 = command_encoder.Finish();
-    webgpu_queue_->Submit(1, &command_buffer1);
+    webgpu_queue_.Submit(1, &command_buffer1);
 
-    webgpu_instance_->WaitAny(
+    webgpu_instance_.WaitAny(
         staging_buffer.MapAsync(
             wgpu::MapMode::Read,
             0, size_in_bytes_,
@@ -129,7 +124,7 @@ struct WebGPUMemory final : DeviceBuffer {
       throw std::runtime_error("WebGPU queue not initialized");
     }
     WGPUBuffer dst_buf = reinterpret_cast<WGPUBuffer>(p_device_);
-    webgpu_queue_->WriteBuffer(dst_buf, 0, p_cpu_, size_in_bytes_);
+    webgpu_queue_.WriteBuffer(dst_buf, 0, p_cpu_, size_in_bytes_);
   }
 
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
@@ -141,10 +136,10 @@ struct WebGPUMemory final : DeviceBuffer {
       WGPUBuffer src_buf = reinterpret_cast<WGPUBuffer>(source.p_device_);
       WGPUBuffer dst_buf = reinterpret_cast<WGPUBuffer>(p_device_);
 
-      auto command_encoder = webgpu_device_->CreateCommandEncoder();
+      auto command_encoder = webgpu_device_.CreateCommandEncoder();
       command_encoder.CopyBufferToBuffer(src_buf, begin_source, dst_buf, begin_dest, size_in_bytes);
       wgpu::CommandBuffer command_buffer = command_encoder.Finish();
-      webgpu_queue_->Submit(1, &command_buffer);
+      webgpu_queue_.Submit(1, &command_buffer);
     } else {
       CopyThroughCpu(*this, begin_dest, source, begin_source, size_in_bytes);
     }
@@ -157,7 +152,7 @@ struct WebGPUMemory final : DeviceBuffer {
     // Clear buffer by writing zeros
     WGPUBuffer dst_buf = reinterpret_cast<WGPUBuffer>(p_device_);
     std::vector<uint8_t> zero_data(size_in_bytes_, 0);
-    webgpu_queue_->WriteBuffer(dst_buf, 0, zero_data.data(), size_in_bytes_);
+    webgpu_queue_.WriteBuffer(dst_buf, 0, zero_data.data(), size_in_bytes_);
   }
 
   bool owned_;
@@ -181,12 +176,10 @@ struct InterfaceImpl : DeviceInterface {
     assert(!ort_allocator_);
     ort_allocator_ = &allocator;
 #ifdef USE_WEBGPU
-    // USE_WEBGPU=ON: Use our own Dawn objects
-    webgpu_device_ = &device_;
-    webgpu_queue_ = &queue_;
-    webgpu_instance_ = &instance_;
+    // USE_WEBGPU=ON: Global objects already initialized in InitializeDawn()
+    // Nothing additional needed here
 #else
-    // USE_WEBGPU=OFF: Retrieve Dawn from WebGPU EP and initialize static pointers
+    // USE_WEBGPU=OFF: Retrieve Dawn from WebGPU EP and initialize global objects
     if (!dawn_initialized_from_ep_) {
       InitializeDawnFromWebGpuEP();
     }
@@ -194,8 +187,8 @@ struct InterfaceImpl : DeviceInterface {
   }
 
 #ifdef USE_WEBGPU
-  wgpu::Device GetDevice() const { return device_; }
-  wgpu::Instance GetInstance() const { return instance_; }
+  wgpu::Device GetDevice() const { return webgpu_device_; }
+  wgpu::Instance GetInstance() const { return webgpu_instance_; }
 #endif
 
   Ort::Allocator& GetAllocator() override {
@@ -215,7 +208,7 @@ struct InterfaceImpl : DeviceInterface {
 
   // WebGPU-accelerated operations (available in both USE_WEBGPU=ON and OFF modes)
   bool UpdateAttentionMask(void* next_mask_data, void* mask_data, int batch_beam_size, int new_kv_length, int total_length, int max_length, bool update_only, ONNXTensorElementDataType type) override {
-    if (!device_) {
+    if (!webgpu_device_) {
       // Fall back to CPU implementation if WebGPU context is not initialized
       return false;
     }
@@ -228,12 +221,12 @@ struct InterfaceImpl : DeviceInterface {
     try {
       if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
         webgpu_update_mask_kernel_int32_.UpdateMask(
-            device_, queue_,
+            webgpu_device_, webgpu_queue_,
             static_cast<int32_t*>(next_mask_data), static_cast<int32_t*>(mask_data),
             batch_beam_size, new_kv_length, total_length, max_length, update_only);
       } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
         webgpu_update_mask_kernel_int64_.UpdateMask(
-            device_, queue_,
+            webgpu_device_, webgpu_queue_,
             static_cast<int64_t*>(next_mask_data), static_cast<int64_t*>(mask_data),
             batch_beam_size, new_kv_length, total_length, max_length, update_only);
       } else {
@@ -246,7 +239,7 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   bool Cast(void* input_data, void* output_data, ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type, size_t element_count) override {
-    if (!device_) {
+    if (!webgpu_device_) {
       return false;  // Fall back to CPU if WebGPU context is not initialized
     }
 
@@ -258,13 +251,13 @@ struct InterfaceImpl : DeviceInterface {
       // Handle supported type conversions
       if (input_type == Ort::TypeToTensorType<int32_t> && output_type == Ort::TypeToTensorType<int64_t>) {
         return webgpu_cast_kernel_.CastInt32ToInt64(
-            device_, queue_,
+            webgpu_device_, webgpu_queue_,
             input_data,
             output_data,
             element_count);
       } else if (input_type == Ort::TypeToTensorType<Ort::Float16_t> && output_type == Ort::TypeToTensorType<float>) {
         return webgpu_cast_kernel_.CastFloat16ToFloat32(
-            device_, queue_,
+            webgpu_device_, webgpu_queue_,
             input_data,
             output_data,
             element_count);
@@ -278,7 +271,7 @@ struct InterfaceImpl : DeviceInterface {
   }
 
   bool UpdatePositionIds(void* position_ids, int batch_beam_size, int total_length, int new_kv_length, ONNXTensorElementDataType type) override {
-    if (!device_) {
+    if (!webgpu_device_) {
       return false;  // Fall back to CPU if WebGPU context is not initialized
     }
 
@@ -290,12 +283,12 @@ struct InterfaceImpl : DeviceInterface {
     try {
       if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
         webgpu_update_position_ids_kernel_int32_.UpdatePositionIds(
-            device_, queue_,
+            webgpu_device_, webgpu_queue_,
             static_cast<int32_t*>(position_ids),
             batch_beam_size, total_length, new_kv_length);
       } else if (type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
         webgpu_update_position_ids_kernel_int64_.UpdatePositionIds(
-            device_, queue_,
+            webgpu_device_, webgpu_queue_,
             static_cast<int64_t*>(position_ids),
             batch_beam_size, total_length, new_kv_length);
       } else {
@@ -310,17 +303,11 @@ struct InterfaceImpl : DeviceInterface {
 
  private:
 #ifdef USE_WEBGPU
-  // USE_WEBGPU=ON: Own Dawn objects (legacy mode)
-  wgpu::Device device_;
-  wgpu::Instance instance_;
-  wgpu::Queue queue_;
+  // USE_WEBGPU=ON: No additional members needed (global objects used directly)
 #else
-  // USE_WEBGPU=OFF: Retrieve and wrap WebGPU EP's Dawn objects
+  // USE_WEBGPU=OFF: Track initialization state
   int webgpu_ep_context_id_;
   bool dawn_initialized_from_ep_;
-  wgpu::Device device_;      // Wrapped WebGPU EP device
-  wgpu::Instance instance_;  // Wrapped WebGPU EP instance
-  wgpu::Queue queue_;        // Wrapped WebGPU EP queue
 
   void InitializeDawnFromWebGpuEP() {
     // Retrieve Dawn objects from WebGPU EP
@@ -341,16 +328,12 @@ struct InterfaceImpl : DeviceInterface {
       std::cout << "Initialized Dawn proc table from WebGPU EP" << std::endl;
     }
 
-    // Wrap the C handles in C++ objects
-    // Note: We use Acquire() to wrap existing handles without taking ownership
-    device_ = wgpu::Device::Acquire(static_cast<WGPUDevice>(device_ptr));
-    instance_ = wgpu::Instance::Acquire(static_cast<WGPUInstance>(instance_ptr));
-    queue_ = device_.GetQueue();
-
-    // Set up the static pointers for WebGPUMemory and other classes
-    webgpu_device_ = &device_;
-    webgpu_queue_ = &queue_;
-    webgpu_instance_ = &instance_;
+    // Wrap the C handles in C++ objects and assign to global variables
+    // Note: Acquire() increments the reference count, so the device will remain valid
+    // until both WebGPU EP AND these global objects are destroyed (whichever is last)
+    webgpu_device_ = wgpu::Device::Acquire(static_cast<WGPUDevice>(device_ptr));
+    webgpu_instance_ = wgpu::Instance::Acquire(static_cast<WGPUInstance>(instance_ptr));
+    webgpu_queue_ = webgpu_device_.GetQueue();
 
     dawn_initialized_from_ep_ = true;
 
@@ -414,7 +397,7 @@ struct InterfaceImpl : DeviceInterface {
     wgpu::InstanceDescriptor instance_desc{};
     instance_desc.requiredFeatures = required_instance_features;
     instance_desc.requiredFeatureCount = sizeof(required_instance_features) / sizeof(required_instance_features[0]);
-    instance_ = wgpu::CreateInstance(&instance_desc);
+    webgpu_instance_ = wgpu::CreateInstance(&instance_desc);
 
     wgpu::RequestAdapterOptions adapter_options = {};
     adapter_options.backendType = wgpu::BackendType::D3D12;
@@ -435,8 +418,8 @@ struct InterfaceImpl : DeviceInterface {
 
     // Synchronously create the adapter
     wgpu::Adapter w_adapter;
-    instance_.WaitAny(
-        instance_.RequestAdapter(
+    webgpu_instance_.WaitAny(
+        webgpu_instance_.RequestAdapter(
             &adapter_options, wgpu::CallbackMode::WaitAnyOnly,
             [&](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, const char* message) {
               if (status != wgpu::RequestAdapterStatus::Success) {
@@ -522,24 +505,24 @@ struct InterfaceImpl : DeviceInterface {
     device_desc.requiredLimits = &required_limits;
 
     // Synchronously create the device
-    instance_.WaitAny(
+    webgpu_instance_.WaitAny(
         w_adapter.RequestDevice(
             &device_desc, wgpu::CallbackMode::WaitAnyOnly,
             [&](wgpu::RequestDeviceStatus status, wgpu::Device device, const char* message) {
               if (status != wgpu::RequestDeviceStatus::Success) {
                 return false;
               }
-              device_ = std::move(device);
-              queue_ = device_.GetQueue();
+              webgpu_device_ = std::move(device);
+              webgpu_queue_ = webgpu_device_.GetQueue();
               return true;
             }),
         UINT64_MAX);
-    if (device_ == nullptr) {
+    if (webgpu_device_ == nullptr) {
       return false;
     }
 
     // Set up device lost callback
-    device_.SetLoggingCallback([](wgpu::LoggingType type, struct wgpu::StringView message) {
+    webgpu_device_.SetLoggingCallback([](wgpu::LoggingType type, struct wgpu::StringView message) {
       std::cerr << message.data;
     });
 
@@ -559,6 +542,7 @@ void InitWebGPUInterface() {
 }
 
 void CloseWebGPUInterface() {
+  
   g_webgpu_device.reset();
 }
 
