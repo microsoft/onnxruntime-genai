@@ -57,7 +57,7 @@ def main():
     try:
         onnxruntime_installed_by_us = install_package('onnxruntime', args.ort_version)
         mypy_installed_by_us = install_package('mypy')
-    except Exception as e:
+    except subprocess.CalledProcessError as e:
         print(f"Failed to install dependencies on this platform:\n{e}")
         print("Skipping type stub generation.")
         sys.exit(0)

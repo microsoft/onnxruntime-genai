@@ -52,8 +52,7 @@ if(BUILD_WHEEL)
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
   add_custom_command(TARGET python POST_BUILD
-    # The stubgen executable might have been installed to somewhere not in PATH. So we let python find it.
-    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/stubgen.py -r ${PACKAGE_DIR_NAME} -v ${ORT_VERSION}
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/stubgen.py -r ${PACKAGE_DIR_NAME} -v ${ORT_VERSION} || (exit 0)
     WORKING_DIRECTORY ${WHEEL_FILES_DIR}
     COMMENT "Generate type stubs for onnxruntime_genai"
   )
