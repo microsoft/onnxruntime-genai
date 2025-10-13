@@ -17,6 +17,7 @@
 #include "decoder_only.h"
 #include "whisper.h"
 #include "multi_modal.h"
+#include "multi_decoder_pipeline_modal.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "../dml/interface.h"
@@ -491,7 +492,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
                                            bool disable_graph_capture,
                                            const Config& config) {
   DeviceInterface* p_device{};
-
   auto providers_list = providers;
   if (!is_primary_session_options) {
     // Providers specified in a non-primary provider options list are added
@@ -1066,7 +1066,7 @@ void Model::CreateSessionOptionsFromConfig(const Config::SessionOptions& config_
   auto session_device = SetProviderSessionOptions(session_options, config_session_options.providers,
                                                   config_session_options.provider_options, is_primary_session_options,
                                                   disable_graph_capture, *config_);
-
+  
   if (!p_device_) {
     p_device_ = session_device;
   } else if (session_device != nullptr && session_device->GetType() != p_device_->GetType()) {
@@ -1154,6 +1154,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> conf
     return std::make_shared<DecoderOnly_Model>(std::move(config), ort_env);
   if (ModelType::IsALM(config->model.type))
     return std::make_shared<WhisperModel>(std::move(config), ort_env);
+  if (ModelType::IsVLM(config->model.type))
+    return std::make_shared<MultiModalPipelineLanguageModel>(std::move(config), ort_env, true, false);
   if (ModelType::IsVLM(config->model.type))
     return std::make_shared<MultiModalLanguageModel>(std::move(config), ort_env, true, false);
   if (ModelType::IsPipe(config->model.type))

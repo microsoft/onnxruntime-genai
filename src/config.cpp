@@ -621,6 +621,8 @@ struct Vision_Element : JSON::Element {
       return inputs_;
     } else if (name == "outputs") {
       return outputs_;
+    } else if (name == "session_options") {
+      return session_options_;
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -630,6 +632,7 @@ struct Vision_Element : JSON::Element {
   Config::Model::Vision& v_;
   VisionInputs_Element inputs_{v_.inputs};
   VisionOutputs_Element outputs_{v_.outputs};
+  SessionOptions_Element session_options_{v_.session_options};
 };
 
 struct SpeechInputs_Element : JSON::Element {
@@ -1201,6 +1204,10 @@ Config::Config(const fs::path& path, std::string_view json_overlay) : config_pat
 
   for (const auto& provider_option : model.decoder.session_options.provider_options) {
     model.decoder.session_options.providers.push_back(provider_option.name);
+  }
+
+  for (const auto& provider_option : model.vision.session_options.provider_options) {
+    model.vision.session_options.providers.push_back(provider_option.name);
   }
 
   for (const auto& provider_option : model.encoder.session_options.provider_options) {
