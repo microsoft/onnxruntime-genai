@@ -225,6 +225,30 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                              UIntPtr /* size_t */ numOptions);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerGetBosToken(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                             out IntPtr /* const char** */ outStr);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerGetEosTokens(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                              out IntPtr /* const OgaStringArray* */ outStr);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerGetPadToken(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                             out IntPtr /* const char** */ outStr);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerGetBosTokenId(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                               out int /* const int32_t* */ outStr);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerGetEosTokenIds(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                                IntPtr /* const OgaSequences* */ outStr);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaTokenizerGetPadTokenId(IntPtr /* const OgaTokenizer* */ tokenizer,
+                                                                               out int /* const int32_t* */ outStr);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaTokenizerEncode(IntPtr /* const OgaTokenizer* */ tokenizer,
                                                                         byte[] /* const char* */ strings,
                                                                         IntPtr /* OgaSequences* */ sequences);

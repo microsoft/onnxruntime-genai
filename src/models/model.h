@@ -96,9 +96,27 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
 
   int32_t TokenToTokenId(const char* token) const;
 
+  std::string GetBosToken() const {
+    std::vector<int32_t> bos_token_id = {bos_token_id_};
+    return Decode(bos_token_id);
+  }
+  // std::string GetBosToken() const { return Decode({bos_token_id_, 1}); }
+  std::vector<std::string> GetEosTokens() const { return DecodeBatch(eos_token_id_, eos_token_id_.size()); }
+  // std::string GetPadToken() const { return Decode({pad_token_id_, 1}); }
+  std::string GetPadToken() const {
+    std::vector<int32_t> pad_token_id = {pad_token_id_};
+    return Decode(pad_token_id);
+  }
+
+  int32_t GetBosTokenId() const { return bos_token_id_; }
+  std::vector<int32_t> GetEosTokenIds() const { return eos_token_id_; }
+  int32_t GetPadTokenId() const { return pad_token_id_; }
+
   OrtxPtr<OrtxTokenizer> tokenizer_;
 
  private:
+  int32_t bos_token_id_;
+  std::vector<int32_t> eos_token_id_;
   int32_t pad_token_id_;
 };
 

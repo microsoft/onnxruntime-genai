@@ -120,13 +120,81 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        public string GetBosToken()
+        {
+            IntPtr outStr = IntPtr.Zero;
+            try
+            {
+                Result.VerifySuccess(NativeMethods.OgaTokenizerGetBosToken(_tokenizerHandle, out outStr));
+                return StringUtils.FromUtf8(outStr);
+            }
+            finally
+            {
+                NativeMethods.OgaDestroyString(outStr);
+            }
+        }
+
+        public Sequences GetEosTokens()
+        {
+            Result.VerifySuccess(NativeMethods.OgaCreateSequences(out IntPtr nativeSequences));
+            try
+            {
+                Result.VerifySuccess(NativeMethods.OgaTokenizerGetEosTokens(_tokenizerHandle, nativeSequences));
+                return new Sequences(nativeSequences);
+            }
+            catch
+            {
+                NativeMethods.OgaDestroySequences(nativeSequences);
+                throw;
+            }
+        }
+
+        public string GetPadToken()
+        {
+            IntPtr outStr = IntPtr.Zero;
+            try
+            {
+                Result.VerifySuccess(NativeMethods.OgaTokenizerGetPadToken(_tokenizerHandle, out outStr));
+                return StringUtils.FromUtf8(outStr);
+            }
+            finally
+            {
+                NativeMethods.OgaDestroyString(outStr);
+            }
+        }
+
+        public int GetBosTokenId()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerGetBosTokenId(_tokenizerHandle, out int bosTokenId));
+            return bosTokenId;
+        }
+
+        public Tensor GetEosTokenIds()
+        {
+            IntPtr outStr = IntPtr.Zero;
+            try
+            {
+                Result.VerifySuccess(NativeMethods.OgaTokenizerGetEosTokenIds(_tokenizerHandle, out outStr));
+                return new Tensor(outStr);
+            }
+            finally
+            {
+                NativeMethods.OgaDestroyTensor(outStr);
+            }
+        }
+
+        public int GetPadTokenId()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerGetPadTokenId(_tokenizerHandle, out int padTokenId));
+            return padTokenId;
+        }
+
         public TokenizerStream CreateStream()
         {
             IntPtr tokenizerStreamHandle = IntPtr.Zero;
             Result.VerifySuccess(NativeMethods.OgaCreateTokenizerStream(_tokenizerHandle, out tokenizerStreamHandle));
             return new TokenizerStream(tokenizerStreamHandle);
         }
-
 
         ~Tokenizer()
         {
