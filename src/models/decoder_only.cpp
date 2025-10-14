@@ -54,6 +54,9 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
   size_t processed_tokens = 0;
   int length = total_length - static_cast<int>(num_tokens);
 
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
   while (processed_tokens < num_tokens) {
     size_t current_chunk_size = std::min(chunk_size, num_tokens - processed_tokens);
 
@@ -63,9 +66,6 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
 
     // Process this chunk - fills KV cache progressively
     UpdateInputsOutputs(chunk_tokens, next_indices, length);
-    if (model_.config_->model.decoder.run_options.has_value()) {
-      State::SetRunOptions(model_.config_->model.decoder.run_options.value());
-    }
 
     // Graph capture is typically disabled during context phase chunking
     bool graph_capture_this_run = false;  // Disable graph capture during chunking
