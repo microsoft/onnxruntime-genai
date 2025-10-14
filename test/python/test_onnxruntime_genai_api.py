@@ -417,8 +417,8 @@ def test_e2e(device, phi2_for):
 
     assert tokenizer.get_bos_token_id() == 50256
     assert tokenizer.get_pad_token_id() == 50256
-    assert len(tokenizer.get_eos_token_id()) == 1
-    assert tokenizer.get_eos_token_id()[0] == 50256
+    assert len(tokenizer.get_eos_token_ids()) == 1
+    assert tokenizer.get_eos_token_ids()[0] == 50256
 
     assert tokenizer.get_bos_token() == "<|endoftext|>"
     assert tokenizer.get_pad_token() == "<|endoftext|>"

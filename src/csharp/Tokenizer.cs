@@ -139,7 +139,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaCreateSequences(out IntPtr nativeSequences));
             try
             {
-                Result.VerifySuccess(NativeMethods.OgaTokenizerGetEosTokens(_tokenizerHandle, nativeSequences));
+                Result.VerifySuccess(NativeMethods.OgaTokenizerGetEosTokens(_tokenizerHandle, out nativeSequences));
                 return new Sequences(nativeSequences);
             }
             catch
@@ -174,7 +174,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             IntPtr outStr = IntPtr.Zero;
             try
             {
-                Result.VerifySuccess(NativeMethods.OgaTokenizerGetEosTokenIds(_tokenizerHandle, out outStr));
+                Result.VerifySuccess(NativeMethods.OgaTokenizerGetEosTokenIds(_tokenizerHandle, outStr));
                 return new Tensor(outStr);
             }
             finally
