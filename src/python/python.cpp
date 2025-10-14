@@ -361,6 +361,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<OgaTokenizer>(m, "Tokenizer")
       .def(pybind11::init([](const OgaModel& model) { return OgaTokenizer::Create(model); }))
+      .def_property_readonly("bos_token_id", &OgaTokenizer::GetBosTokenId)
+      .def_property_readonly("eos_token_ids", [](const OgaTokenizer& t) {
+        auto sequences = OgaSequences::Create();
+        t.GetEosTokenIds(*sequences);
+        return ToPython(sequences->Get(0)); })
+      .def_property_readonly("pad_token_id", &OgaTokenizer::GetPadTokenId)
       .def("update_options", [](OgaTokenizer& t, pybind11::kwargs kwargs) {
         std::vector<std::string> key_storage;
         std::vector<std::string> value_storage;
@@ -380,20 +386,6 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
         }
 
         t.UpdateOptions(keys.data(), values.data(), kwargs.size()); })
-      .def("get_bos_token", [](const OgaTokenizer& t) { return t.GetBosToken().p_; })
-      .def("get_eos_tokens", [](const OgaTokenizer& t) {
-        std::vector<std::string> eos_tokens;
-        auto tokens = t.GetEosTokens();
-        for (size_t i = 0; i < tokens->Count(); i++)
-          eos_tokens.push_back(tokens->Get(i));
-        return eos_tokens; })
-      .def("get_pad_token", [](const OgaTokenizer& t) { return t.GetPadToken().p_; })
-      .def("get_bos_token_id", &OgaTokenizer::GetBosTokenId)
-      .def("get_eos_token_ids", [](const OgaTokenizer& t) {
-        auto sequences = OgaSequences::Create();
-        t.GetEosTokenIds(*sequences);
-        return ToPython(sequences->Get(0)); })
-      .def("get_pad_token_id", &OgaTokenizer::GetPadTokenId)
       .def("encode", [](const OgaTokenizer& t, std::string s) -> pybind11::array_t<int32_t> {
         auto sequences = OgaSequences::Create();
         t.Encode(s.c_str(), *sequences);

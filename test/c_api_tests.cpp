@@ -70,11 +70,6 @@ TEST(CAPITests, TokenizerCAPI) {
   ASSERT_EQ(tokenizer->GetEosTokenIds()->Count(), 1);
   ASSERT_EQ(tokenizer->GetEosTokenIds()->Get(0)[0], 50256);
 
-  ASSERT_STREQ(tokenizer->GetBosToken(), "<|endoftext|>");
-  ASSERT_STREQ(tokenizer->GetPadToken(), "<|endoftext|>");
-  ASSERT_EQ(tokenizer->GetEosTokens()->Count(), 1);
-  ASSERT_STREQ(tokenizer->GetEosTokens()->Get(0), "<|endoftext|>");
-
   // Encode single decode single
   {
     const char* input_string = "She sells sea shells by the sea shore.";

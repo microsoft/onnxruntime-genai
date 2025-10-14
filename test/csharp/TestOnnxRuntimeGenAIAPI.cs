@@ -587,15 +587,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 {
                     Assert.NotNull(tokenizer);
 
-                    Assert.Equal(tokenizer.GetBosTokenId(), 50256);
-                    Assert.Equal(tokenizer.GetPadTokenId(), 50256);
-                    Assert.Equal(tokenizer.GetEosTokenIds().NumElements(), 1);
-                    Assert.Equal(tokenizer.GetEosTokenIds().GetData<int>().ToArray()[0], 50256);
-
-                    Assert.Equal(tokenizer.GetBosToken(), "<|endoftext|>");
-                    Assert.Equal(tokenizer.GetPadTokenId(), "<|endoftext|>");
-                    Assert.Equal(tokenizer.GetEosTokens().NumSequences, 1);
-                    Assert.Equal(tokenizer.GetEosTokens()[0][0], "<|endoftext|>");
+                    Assert.Equal(50256, tokenizer.GetBosTokenId());
+                    Assert.Equal(50256, tokenizer.GetPadTokenId());
+                    Assert.Equal(1, tokenizer.GetEosTokenIds().NumElements());
+                    Assert.Equal(50256, tokenizer.GetEosTokenIds().GetData<int>().ToArray()[0]);
 
                     var strings = new string[] {
                         "This is a test.",

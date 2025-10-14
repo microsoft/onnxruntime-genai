@@ -598,28 +598,6 @@ OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaTokenizerGetBosToken(const OgaTokenizer* tokenizer, const char** out) {
-  OGA_TRY
-  *out = AllocOgaString(tokenizer->GetBosToken());
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaTokenizerGetEosTokens(const OgaTokenizer* tokenizer, OgaStringArray** out) {
-  OGA_TRY
-  auto strings = tokenizer->GetEosTokens();
-  *out = ReturnUnique<OgaStringArray>(std::make_unique<std::vector<std::string>>(std::move(strings)));
-  return nullptr;
-  OGA_CATCH
-}
-
-OgaResult* OGA_API_CALL OgaTokenizerGetPadToken(const OgaTokenizer* tokenizer, const char** out) {
-  OGA_TRY
-  *out = AllocOgaString(tokenizer->GetPadToken());
-  return nullptr;
-  OGA_CATCH
-}
-
 OgaResult* OGA_API_CALL OgaTokenizerGetBosTokenId(const OgaTokenizer* tokenizer, int32_t* out) {
   OGA_TRY
   *out = tokenizer->GetBosTokenId();

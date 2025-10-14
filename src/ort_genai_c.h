@@ -610,27 +610,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
     size_t num_options);
 
 /**
- * Return the string representation of the BOS token
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBosToken(const OgaTokenizer* tokenizer, const char** out);
-
-/**
- * Return a list containing the string representations of the EOS tokens
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEosTokens(const OgaTokenizer* tokenizer, OgaStringArray** out);
-
-/**
- * Return the string representation of the PAD token
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetPadToken(const OgaTokenizer* tokenizer, const char** out);
-
-/**
  * Return the int representation of the BOS token
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBosTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 
 /**
- * Return a list containing the int representations of the EOS tokens
+ * Return a sequence containing the int representations of the EOS tokens
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer, OgaSequences* sequences);
 

@@ -95,17 +95,6 @@ struct Tokenizer : std::enable_shared_from_this<Tokenizer>, LeakChecked<Tokenize
   std::vector<std::string> DecodeBatch(std::span<const int32_t> sequences, size_t count) const;
 
   int32_t TokenToTokenId(const char* token) const;
-
-  std::string GetBosToken() const {
-    std::vector<int32_t> bos_token_id = {bos_token_id_};
-    return Decode(bos_token_id);
-  }
-  std::vector<std::string> GetEosTokens() const { return DecodeBatch(eos_token_id_, eos_token_id_.size()); }
-  std::string GetPadToken() const {
-    std::vector<int32_t> pad_token_id = {pad_token_id_};
-    return Decode(pad_token_id);
-  }
-
   int32_t GetBosTokenId() const { return bos_token_id_; }
   std::vector<int32_t> GetEosTokenIds() const { return eos_token_id_; }
   int32_t GetPadTokenId() const { return pad_token_id_; }
