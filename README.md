@@ -70,7 +70,7 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
    text = input("Input: ")
    if not text:
       print("Error, input cannot be empty")
-      exit
+      exit()
 
    prompt = f'{chat_template.format(input=text)}'
 
