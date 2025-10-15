@@ -120,13 +120,39 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
         }
 
+        public int GetBosTokenId()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerGetBosTokenId(_tokenizerHandle, out int bosTokenId));
+            return bosTokenId;
+        }
+
+        public Sequences GetEosTokenIds()
+        {
+            Result.VerifySuccess(NativeMethods.OgaCreateSequences(out IntPtr nativeSequences));
+            try
+            {
+                Result.VerifySuccess(NativeMethods.OgaTokenizerGetEosTokenIds(_tokenizerHandle, nativeSequences));
+                return new Sequences(nativeSequences);
+            }
+            catch
+            {
+                NativeMethods.OgaDestroySequences(nativeSequences);
+                throw;
+            }
+        }
+
+        public int GetPadTokenId()
+        {
+            Result.VerifySuccess(NativeMethods.OgaTokenizerGetPadTokenId(_tokenizerHandle, out int padTokenId));
+            return padTokenId;
+        }
+
         public TokenizerStream CreateStream()
         {
             IntPtr tokenizerStreamHandle = IntPtr.Zero;
             Result.VerifySuccess(NativeMethods.OgaCreateTokenizerStream(_tokenizerHandle, out tokenizerStreamHandle));
             return new TokenizerStream(tokenizerStreamHandle);
         }
-
 
         ~Tokenizer()
         {

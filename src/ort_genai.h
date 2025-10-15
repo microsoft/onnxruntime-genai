@@ -309,6 +309,22 @@ struct OgaTokenizer : OgaAbstract {
     OgaCheckResult(OgaUpdateTokenizerOptions(this, keys, values, num_options));
   }
 
+  int32_t GetBosTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetBosTokenId(this, &token_id));
+    return token_id;
+  }
+
+  void GetEosTokenIds(OgaSequences& sequences) const {
+    OgaCheckResult(OgaTokenizerGetEosTokenIds(this, &sequences));
+  }
+
+  int32_t GetPadTokenId() const {
+    int32_t token_id;
+    OgaCheckResult(OgaTokenizerGetPadTokenId(this, &token_id));
+    return token_id;
+  }
+
   void Encode(const char* str, OgaSequences& sequences) const {
     OgaCheckResult(OgaTokenizerEncode(this, str, &sequences));
   }

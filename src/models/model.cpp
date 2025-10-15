@@ -258,7 +258,9 @@ const std::string& TokenizerStream::Decode(int32_t token) {
   return chunk_;
 }
 
-Tokenizer::Tokenizer(Config& config) : pad_token_id_{config.model.pad_token_id} {
+Tokenizer::Tokenizer(Config& config) : bos_token_id_{config.model.bos_token_id},
+                                       eos_token_id_{config.model.eos_token_id},
+                                       pad_token_id_{config.model.pad_token_id} {
   // Default tokenizer options
   const char* keys[] = {"add_special_tokens", "skip_special_tokens"};
   const char* values[] = {"false", "true"};

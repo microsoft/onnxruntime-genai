@@ -618,6 +618,21 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
     size_t num_options);
 
 /**
+ * Return the int representation of the BOS token
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBosTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
+ * Return a sequence containing the int representations of the EOS tokens
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer, OgaSequences* sequences);
+
+/**
+ * Return the int representation of the BOS token
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
  * Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences
  * when it is no longer needed.
  */

@@ -587,6 +587,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 {
                     Assert.NotNull(tokenizer);
 
+                    Assert.Equal(50256, tokenizer.GetBosTokenId());
+                    Assert.Equal(50256, tokenizer.GetPadTokenId());
+                    Assert.Equal((ulong)1, tokenizer.GetEosTokenIds().NumSequences);
+                    Assert.Equal(50256, tokenizer.GetEosTokenIds()[0][0]);
+
                     var strings = new string[] {
                         "This is a test.",
                         "Rats are awesome pets!",
