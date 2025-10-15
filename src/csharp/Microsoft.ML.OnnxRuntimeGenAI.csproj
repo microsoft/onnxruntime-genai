@@ -6,7 +6,7 @@
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(IncludeMobileTargets)' == 'true'">
-    <MobileTargets>net8.0-android;net8.0-ios;net8.0-maccatalyst</MobileTargets>
+    <MobileTargets>net9.0-android;net9.0-ios;net9.0-maccatalyst</MobileTargets>
   </PropertyGroup>
 
   <PropertyGroup>
