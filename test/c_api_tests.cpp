@@ -65,6 +65,14 @@ TEST(CAPITests, TokenizerCAPI) {
   auto model = OgaModel::Create(*config);
   auto tokenizer = OgaTokenizer::Create(*model);
 
+  auto eos_token_ids = OgaSequences::Create();
+  tokenizer->GetEosTokenIds(*eos_token_ids);
+
+  ASSERT_EQ(tokenizer->GetBosTokenId(), 50256);
+  ASSERT_EQ(tokenizer->GetPadTokenId(), 50256);
+  ASSERT_EQ(eos_token_ids->Count(), 1);
+  ASSERT_EQ(eos_token_ids->Get(0)[0], 50256);
+
   // Encode single decode single
   {
     const char* input_string = "She sells sea shells by the sea shore.";

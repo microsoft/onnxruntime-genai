@@ -415,6 +415,11 @@ def test_e2e(device, phi2_for):
     model = og.Model(phi2_for(device))
     tokenizer = og.Tokenizer(model)
 
+    assert tokenizer.bos_token_id == 50256
+    assert tokenizer.pad_token_id == 50256
+    assert len(tokenizer.eos_token_ids) == 1
+    assert tokenizer.eos_token_ids[0] == 50256
+
     prompts = [
         "This is a test.",
     ]
