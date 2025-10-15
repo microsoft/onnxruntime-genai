@@ -468,8 +468,16 @@ struct SlidingWindow_Element : JSON::Element {
     }
   }
 
+  Element& OnArray(std::string_view name) override {
+    if (name == "layer_types") {
+      return layer_types_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
  private:
   std::optional<Config::Model::Decoder::SlidingWindow>& v_;
+  StringArray_Element layer_types_{v_->layer_types};
 };
 
 struct Encoder_Element : JSON::Element {

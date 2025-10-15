@@ -464,6 +464,11 @@ class Model:
 
         if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
             genai_config["model"]["decoder"]["sliding_window"] = {"window_size": self.window_size, "slide_key_value_cache": False, "slide_inputs": False}
+            
+            # Add layer-specific attention types if model has alternating attention patterns
+            layer_types = self.get_layer_types()
+            if layer_types is not None:
+                genai_config["model"]["decoder"]["sliding_window"]["layer_types"] = layer_types
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
@@ -473,6 +478,25 @@ class Model:
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
+
+    def get_layer_types(self):
+        """
+        Returns a list of attention types for each layer.
+        Override in subclasses to provide layer-specific attention patterns.
+        Returns None for models with uniform attention across all layers.
+        """
+        return None
+
+    def use_alternating_kv_dimensions(self):
+        """
+        Returns True if this model needs alternating KV cache dimension names.
+        This is needed for models with alternating attention patterns when using TensorRT.
+        """
+        # Enable for models with layer_types when using TensorRT EP
+        if self.ep == "trt-rtx" and hasattr(self, 'get_layer_types'):
+            layer_types = self.get_layer_types()
+            return layer_types is not None
+        return False
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
@@ -650,17 +674,39 @@ class Model:
 
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
+            # Use alternating dimension names if needed (for TensorRT with alternating attention)
+            if self.use_alternating_kv_dimensions():
+                layer_types = self.get_layer_types()
+                layer_type = layer_types[i] if layer_types and i < len(layer_types) else "full_attention"
+                
+                # Use dimension name based on attention type
+                if layer_type == "sliding_attention":
+                    dim_suffix = "_sliding"
+                else:  # "full_attention"
+                    dim_suffix = "_full"
+                
+                past_key_shape = ["batch_size", self.num_kv_heads, f"past_sequence_length{dim_suffix}", self.head_size]
+                past_value_shape = ["batch_size", self.num_kv_heads, f"past_sequence_length{dim_suffix}", self.head_size]
+                present_key_shape = ["batch_size", self.num_kv_heads, f"total_sequence_length{dim_suffix}", self.head_size]
+                present_value_shape = ["batch_size", self.num_kv_heads, f"total_sequence_length{dim_suffix}", self.head_size]
+            else:
+                # Use standard dimension names (current behavior)
+                past_key_shape = self.input_shapes["past_key_values.key"]
+                past_value_shape = self.input_shapes["past_key_values.value"]
+                present_key_shape = self.output_shapes["present.key"]
+                present_value_shape = self.output_shapes["present.value"]
+            
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
+            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=past_key_shape))
             value_name = f"past_key_values.{i}.value"
-            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
+            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=past_value_shape))
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"]))
+            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=present_key_shape))
             value_name = f"present.{i}.value"
-            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"]))
+            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=present_value_shape))
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
@@ -3454,6 +3500,20 @@ class Gemma2Model(GemmaModel):
         self.window_size = original_window_size if self.is_local(layer_id) else -1  # default is -1 in GroupQueryAttention kernel
         super().make_attention(layer_id, attention, root_input, **kwargs)
         self.window_size = original_window_size
+
+    def get_layer_types(self):
+        """
+        Gemma2 uses alternating attention patterns:
+        - Even layers (0, 2, 4, ...): full_attention
+        - Odd layers (1, 3, 5, ...): sliding_attention
+        """
+        layer_types = []
+        for layer_id in range(self.num_layers):
+            if self.is_local(layer_id):
+                layer_types.append("sliding_attention")
+            else:
+                layer_types.append("full_attention")
+        return layer_types
 
 
 class Phi3MiniModel(MistralModel):

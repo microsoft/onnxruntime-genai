@@ -175,9 +175,32 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   // Set the size after empty_past_ has been created with 0 for this field
+  // Check if we need to use per-layer allocation for models with alternating attention patterns
   if (state.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx &&
       model_.config_->model.decoder.sliding_window.has_value() &&
-      model_.config_->model.decoder.sliding_window->window_size > 0) {
+      model_.config_->model.decoder.sliding_window->window_size > 0 &&
+      !model_.config_->model.decoder.sliding_window->layer_types.empty()) {
+    // Use per-layer allocation based on layer_types
+    use_layer_types_ = true;
+    layer_shapes_.resize(layer_count_);
+    
+    int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
+    int max_length = state_.params_->search.max_length;
+    
+    for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+      layer_shapes_[layer_idx] = shape_;  // Copy base shape
+      
+      const std::string& layer_type = model_.config_->model.decoder.sliding_window->layer_types[layer_idx];
+      if (layer_type == "sliding_attention") {
+        layer_shapes_[layer_idx][2] = std::min(max_length, sliding_window_size);
+      } else {  // "full_attention"
+        layer_shapes_[layer_idx][2] = max_length;
+      }
+    }
+  } else if (state.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx &&
+             model_.config_->model.decoder.sliding_window.has_value() &&
+             model_.config_->model.decoder.sliding_window->window_size > 0) {
+    // Uniform sliding window allocation (backward compatibility)
     shape_[2] = std::min(state_.params_->search.max_length,
                          model_.config_->model.decoder.sliding_window->window_size);
   } else if (past_present_share_buffer_) {
@@ -185,13 +208,31 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   try {
-    for (int i = 0; i < layer_count_ * 2; ++i) {
-      presents_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
+    if (use_layer_types_) {
+      // Allocate per-layer with different shapes
+      for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+        // Key tensor
+        presents_.push_back(OrtValue::CreateTensor(Allocator(), layer_shapes_[layer_idx], type_));
+        if (Device().GetType() != DeviceType::WEBGPU) {
+          ByteWrapTensor(Device(), *presents_.back()).Zero();
+        }
+        
+        // Value tensor
+        presents_.push_back(OrtValue::CreateTensor(Allocator(), layer_shapes_[layer_idx], type_));
+        if (Device().GetType() != DeviceType::WEBGPU) {
+          ByteWrapTensor(Device(), *presents_.back()).Zero();
+        }
+      }
+    } else {
+      // Uniform allocation (existing behavior)
+      for (int i = 0; i < layer_count_ * 2; ++i) {
+        presents_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
 
-      // Zero the memory so we don't leak any data from the previous run
-      // WebGPU device has no Zero() implementation yet. Since this zeroing is optional we disable it for WebGPU for now
-      if (Device().GetType() != DeviceType::WEBGPU) {
-        ByteWrapTensor(Device(), *presents_.back()).Zero();
+        // Zero the memory so we don't leak any data from the previous run
+        // WebGPU device has no Zero() implementation yet. Since this zeroing is optional we disable it for WebGPU for now
+        if (Device().GetType() != DeviceType::WEBGPU) {
+          ByteWrapTensor(Device(), *presents_.back()).Zero();
+        }
       }
     }
   } catch (const Ort::Exception&) {
@@ -240,10 +281,30 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
     }
   }
 
-  shape_[2] = total_length;
-  for (int i = 0; i < layer_count_ * 2; i++) {
-    presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
-    state_.outputs_[output_index_ + i] = presents_[i].get();
+  if (use_layer_types_) {
+    // Update per-layer shapes based on total_length, but respect max allocations
+    for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+      int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
+      int actual_length = std::min(total_length, max_cache_length);
+      
+      std::array<int64_t, 4> current_shape = layer_shapes_[layer_idx];
+      current_shape[2] = actual_length;
+      
+      // Key tensor
+      presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
+      state_.outputs_[output_index_ + layer_idx * 2] = presents_[layer_idx * 2].get();
+      
+      // Value tensor
+      presents_[layer_idx * 2 + 1] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
+      state_.outputs_[output_index_ + layer_idx * 2 + 1] = presents_[layer_idx * 2 + 1].get();
+    }
+  } else {
+    // Uniform shape update (existing behavior)
+    shape_[2] = total_length;
+    for (int i = 0; i < layer_count_ * 2; i++) {
+      presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
+      state_.outputs_[output_index_ + i] = presents_[i].get();
+    }
   }
 
   is_first_update_ = false;
@@ -271,28 +332,66 @@ void DefaultKeyValueCache::RewindTo(size_t index) {
 
 template <typename T>
 void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
-  assert(index > 0 && shape_[2] >= static_cast<int64_t>(index) && !past_present_share_buffer_);
-  std::array<int64_t, 4> new_shape = shape_;
-  new_shape[2] = static_cast<int>(index);
-  auto batch_x_num_heads = new_shape[0] * new_shape[1];
-  auto new_length_x_head_size = new_shape[2] * new_shape[3];
-  auto old_length_x_head_size = shape_[2] * new_shape[3];
-  shape_[2] = new_shape[2];
+  assert(index > 0 && !past_present_share_buffer_);
+  
+  if (use_layer_types_) {
+    // Handle per-layer shapes
+    for (int i = 0; i < layer_count_ * 2; i++) {
+      int layer_idx = i / 2;
+      std::array<int64_t, 4> layer_shape = layer_shapes_[layer_idx];
+      int max_cache_length = static_cast<int>(layer_shape[2]);
+      
+      // Ensure we don't rewind beyond what's available
+      if (static_cast<int>(index) > max_cache_length) {
+        throw std::runtime_error("Requested rewind length is greater than the layer's cache length.");
+      }
+      
+      std::array<int64_t, 4> new_shape = layer_shape;
+      new_shape[2] = static_cast<int>(index);
+      auto batch_x_num_heads = new_shape[0] * new_shape[1];
+      auto new_length_x_head_size = new_shape[2] * new_shape[3];
+      
+      OrtValue& present = *presents_[i];
+      auto present_shape = present.GetTensorTypeAndShapeInfo()->GetShape();
+      auto old_length_x_head_size = present_shape[2] * new_shape[3];
+      
+      std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), new_shape, type_);
+      auto past_span = WrapTensor<T>(Device(), *past);
+      auto present_span = WrapTensor<T>(Device(), present);
 
-  for (int i = 0; i < layer_count_ * 2; i++) {
-    OrtValue& present = *presents_[i];
-    std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
-
-    auto past_span = WrapTensor<T>(Device(), *past);
-    auto present_span = WrapTensor<T>(Device(), present);
-
-    for (int j = 0; j < batch_x_num_heads; j++) {
-      auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
-      auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
-      past_data.CopyFrom(present_data);
+      for (int j = 0; j < batch_x_num_heads; j++) {
+        auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
+        auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
+        past_data.CopyFrom(present_data);
+      }
+      pasts_[i] = std::move(past);
+      state_.inputs_[input_index_ + i] = pasts_[i].get();
     }
-    pasts_[i] = std::move(past);
-    state_.inputs_[input_index_ + i] = pasts_[i].get();
+  } else {
+    // Uniform shape handling (existing behavior)
+    assert(shape_[2] >= static_cast<int64_t>(index));
+    std::array<int64_t, 4> new_shape = shape_;
+    new_shape[2] = static_cast<int>(index);
+    auto batch_x_num_heads = new_shape[0] * new_shape[1];
+    auto new_length_x_head_size = new_shape[2] * new_shape[3];
+    auto old_length_x_head_size = shape_[2] * new_shape[3];
+    shape_[2] = new_shape[2];
+
+    for (int i = 0; i < layer_count_ * 2; i++) {
+      OrtValue& present = *presents_[i];
+      std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
+
+      auto past_span = WrapTensor<T>(Device(), *past);
+      auto present_span = WrapTensor<T>(Device(), present);
+
+      for (int j = 0; j < batch_x_num_heads; j++) {
+        auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
+        auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
+        past_data.CopyFrom(present_data);
+      }
+      pasts_[i] = std::move(past);
+      state_.inputs_[input_index_ + i] = pasts_[i].get();
+    }
   }
 }
 
@@ -300,10 +399,23 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
 template <typename ScoreType>
 void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
   std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
-  auto block_size_per_beam = shape_[1] * shape_[2] * shape_[3];
+  
+  std::array<int64_t, 4> tensor_shape;
+  if (use_layer_types_) {
+    // Get shape from the actual tensor for per-layer allocation
+    OrtValue& present_value = *presents_[index];
+    auto present_shape = present_value.GetTensorTypeAndShapeInfo()->GetShape();
+    for (size_t i = 0; i < 4; i++) {
+      tensor_shape[i] = present_shape[i];
+    }
+  } else {
+    tensor_shape = shape_;
+  }
+  
+  auto block_size_per_beam = tensor_shape[1] * tensor_shape[2] * tensor_shape[3];
 
   OrtValue& present_value = *presents_[index];
-  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(Allocator(), shape_);
+  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(Allocator(), tensor_shape);
 
   auto past_span = WrapTensor<ScoreType>(Device(), *past_value);
   auto present_span = WrapTensor<ScoreType>(Device(), present_value);
