@@ -4413,88 +4413,91 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     # Set input/output precision of ONNX model
     io_dtype = set_io_dtype(precision, execution_provider, extra_options)
     onnx_dtype = set_onnx_dtype(precision, extra_options)
-    if "config_only" not in extra_options:
-        # List architecture options in alphabetical order
-        if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
-            # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
-            config.bos_token_id = 1
-            config.hidden_act = "swiglu"
-            onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-            onnx_model.model_type = "chatglm"
-        elif config.architectures[0] == "Ernie4_5_ForCausalLM":
-            onnx_model = ErnieModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "GemmaForCausalLM":
-            onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Gemma2ForCausalLM":
-            print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
-            onnx_model = Gemma2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Gemma3ForCausalLM":
-            print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
-            onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-            onnx_model.model_type = "gemma3_text"
-        elif config.architectures[0] == "Gemma3ForConditionalGeneration":
-            text_config = config.text_config
-            for key in text_config:
-                if not hasattr(config, key):
-                    setattr(config, key, getattr(text_config, key))
-            print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
-            print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-            extra_options["exclude_embeds"] = True
-            onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "GptOssForCausalLM":
-            print("WARNING: This model only supports symmetric quantization for `QMoE`.")
-            delattr(config, "quantization_config")
-            onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "GraniteForCausalLM":
-            onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "LlamaForCausalLM":
-            onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "MistralForCausalLM":
-            onnx_model = MistralModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "NemotronForCausalLM":
-            onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "OlmoForCausalLM":
-            onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "PhiForCausalLM":
-            onnx_model = PhiModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
-            onnx_model = Phi3MiniModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
-            onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
-            print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
-            print("WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default.")
-            execution_provider = "cuda"
-            onnx_dtype = set_onnx_dtype("int4", extra_options)
-            onnx_model = Phi3MoELongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
-            onnx_model = Phi3SmallModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
-            onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Phi3VForCausalLM":
-            print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-            extra_options["exclude_embeds"] = True
-            onnx_model = Phi3VModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Phi4MMForCausalLM":
-            print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
-            extra_options["exclude_embeds"] = True
-            onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Qwen2ForCausalLM":
-            onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "Qwen3ForCausalLM":
-            onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        elif config.architectures[0] == "SmolLM3ForCausalLM":
-            onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
-        else:
-            raise NotImplementedError(f"The {hf_name} model is not currently supported.")
+    config_only = "config_only" in extra_options
+    
+    # List architecture options in alphabetical order
+    if config.architectures[0] == "ChatGLMForConditionalGeneration" or config.architectures[0] == "ChatGLMModel":
+        # Quantized ChatGLM model has ChatGLMForConditionalGeneration as architecture whereas HF model as the latter
+        config.bos_token_id = 1
+        config.hidden_act = "swiglu"
+        onnx_model = ChatGLMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "chatglm"
+    elif config.architectures[0] == "Ernie4_5_ForCausalLM":
+        onnx_model = ErnieModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "GemmaForCausalLM":
+        onnx_model = GemmaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Gemma2ForCausalLM":
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        onnx_model = Gemma2Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Gemma3ForCausalLM":
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+        onnx_model.model_type = "gemma3_text"
+    elif config.architectures[0] == "Gemma3ForConditionalGeneration":
+        text_config = config.text_config
+        for key in text_config:
+            if not hasattr(config, key):
+                setattr(config, key, getattr(text_config, key))
+        print("WARNING: This model loses accuracy with float16 precision. It is recommended to set `--precision bf16` or `--precision int4 --extra_options use_cuda_bf16=true` by default.")
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        extra_options["exclude_embeds"] = True
+        onnx_model = Gemma3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "GptOssForCausalLM":
+        print("WARNING: This model only supports symmetric quantization for `QMoE`.")
+        delattr(config, "quantization_config")
+        onnx_model = GPTOSSModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "GraniteForCausalLM":
+        onnx_model = GraniteModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "LlamaForCausalLM":
+        onnx_model = LlamaModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "MistralForCausalLM":
+        onnx_model = MistralModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "NemotronForCausalLM":
+        onnx_model = NemotronModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "OlmoForCausalLM":
+        onnx_model = OLMoModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "PhiForCausalLM":
+        onnx_model = PhiModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+        onnx_model = Phi3MiniModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Phi3ForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+        onnx_model = Phi3MiniLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "PhiMoEForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+        print("WARNING: This model only works for CUDA currently because `MoE` is only supported for CUDA in ONNX Runtime. Setting `--execution_provider cuda` by default.")
+        print("WARNING: This model currently only supports the quantized version. Setting `--precision int4` by default.")
+        execution_provider = "cuda"
+        onnx_dtype = set_onnx_dtype("int4", extra_options)
+        onnx_model = Phi3MoELongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings == config.original_max_position_embeddings:
+        onnx_model = Phi3SmallModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Phi3SmallForCausalLM" and config.max_position_embeddings != config.original_max_position_embeddings:
+        onnx_model = Phi3SmallLongRoPEModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Phi3VForCausalLM":
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        extra_options["exclude_embeds"] = True
+        onnx_model = Phi3VModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Phi4MMForCausalLM":
+        print("WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default.")
+        extra_options["exclude_embeds"] = True
+        onnx_model = Phi4MMModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen2ForCausalLM":
+        onnx_model = QwenModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen3ForCausalLM":
+        onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "SmolLM3ForCausalLM":
+        onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config_only:
+        # Create base Model class to guess model attributes
+        onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    else:
+        raise NotImplementedError(f"The {hf_name} model is not currently supported.")
 
+    if not config_only:
         # Make ONNX model
         onnx_model.make_model(input_path)
 
         # Save ONNX model
         onnx_model.save_model(output_dir)
-    else:
-        onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
 
     # Make GenAI config
     onnx_model.make_genai_config(hf_name, extra_kwargs, output_dir)
