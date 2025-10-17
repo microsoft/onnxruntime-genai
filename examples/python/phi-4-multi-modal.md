@@ -18,50 +18,41 @@ Please ensure you have the following Python packages installed to create the ONN
 - `onnx`
 - `onnxruntime` and `onnxruntime-genai`
     - ONNX Runtime: Please install the latest nightly version. To ensure the right version is installed, please install ONNX Runtime GenAI first. Then you can uninstall the stable version of ONNX Runtime that gets auto-installed as a dependency.
-    - ONNX Runtime GenAI: Please build from source until the latest changes are published in a stable release package. The build instructions can be found [here](https://onnxruntime.ai/docs/genai/howto/build-from-source.html).
-    
+    - ONNX Runtime GenAI: Please install the latest stable release package.
+
     - For CPU:
     ```bash
-    # 1. Build ONNX Runtime GenAI from source for CPU
-    # Instructions: https://onnxruntime.ai/docs/genai/howto/build-from-source.html
+    # 1. Install ONNX Runtime GenAI wheel
+    pip install onnxruntime-genai
 
-    # 2. Install ONNX Runtime GenAI wheel produced by build.py
-    pip install build/wheel/*.whl
-
-    # 3. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
+    # 2. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
     pip uninstall -y onnxruntime
 
-    # 4. Install nightly version of ONNX Runtime
+    # 3. Install nightly version of ONNX Runtime
     pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime
     ```
 
     - For CUDA:
     ```bash
-    # 1. Build ONNX Runtime GenAI from source for CUDA
-    # Instructions: https://onnxruntime.ai/docs/genai/howto/build-from-source.html
+    # 1. Install ONNX Runtime GenAI wheel
+    pip install onnxruntime-genai-cuda
 
-    # 2. Install ONNX Runtime GenAI wheel produced by build.py
-    pip install build/wheel/*.whl
-
-    # 3. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
+    # 2. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
     pip uninstall -y onnxruntime-gpu
 
-    # 4. Install nightly version of ONNX Runtime
+    # 3. Install nightly version of ONNX Runtime
     pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime-gpu
     ```
 
     - For DirectML: 
     ```bash
-    # 1. Build ONNX Runtime GenAI from source for DirectML
-    # Instructions: https://onnxruntime.ai/docs/genai/howto/build-from-source.html
+    # 1. Install ONNX Runtime GenAI wheel
+    pip install onnxruntime-genai-directml
 
-    # 2. Install ONNX Runtime GenAI wheel produced by build.py
-    pip install build/wheel/*.whl
-
-    # 3. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
+    # 2. Uninstall stable version of ONNX Runtime that is auto-installed by ONNX Runtime GenAI
     pip uninstall -y onnxruntime-directml
 
-    # 4. Install nightly version of ONNX Runtime
+    # 3. Install nightly version of ONNX Runtime
     pip install -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/ --pre onnxruntime-directml
     ```
 - `onnxscript`
@@ -71,34 +62,34 @@ Please ensure you have the following Python packages installed to create the ONN
 - `scipy`
 - `soundfile`
 - `torch`
-    - Please install the Jan 25, 2025 nightly version. You can install torch by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torch with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
+    - Please install the latest nightly version. You can install torch by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torch with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
     - For CPU:
     ```bash
-    pip install torch==2.7.0.dev20250125
+    pip install torch
     ```
     - For CUDA:
     ```bash
-    pip install torch==2.7.0.dev20250125+cu124 --index-url https://download.pytorch.org/whl/nightly/cu124
+    pip install torch --index-url https://download.pytorch.org/whl/nightly/cu124
     ```
 - `torchaudio`
-    - Please install the Jan 25, 2025 nightly version. You can install torchaudio by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torchaudio with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
+    - Please install the latest nightly version. You can install torchaudio by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torchaudio with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
     - For CPU:
     ```bash
-    pip install torchaudio==2.6.0.dev20250125+cu124
+    pip install torchaudio
     ```
     - For CUDA:
     ```bash
-    pip install torchaudio==2.6.0.dev20250125+cu124 --index-url https://download.pytorch.org/whl/nightly/cu124
+    pip install torchaudio --index-url https://download.pytorch.org/whl/nightly/cu124
     ```
 - `torchvision` 
-    - Please install the Jan 25, 2025 nightly version. You can install torchvision by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torchvision with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
+    - Please install the latest nightly version. You can install torchvision by following the [instructions](https://pytorch.org/get-started/locally/). For getting ONNX models that can run on CUDA or DirectML, please install torchvision with CUDA and ensure the CUDA version you choose in the instructions is the one you have installed.
     - For CPU:
     ```bash
-    pip install torchvision==0.22.0.dev20250125+cu124
+    pip install torchvision
     ```
     - For CUDA:
     ```bash
-    pip install torchvision==0.22.0.dev20250125+cu124 --index-url https://download.pytorch.org/whl/nightly/cu124
+    pip install torchvision --index-url https://download.pytorch.org/whl/nightly/cu124
     ```
 - `transformers`
 
