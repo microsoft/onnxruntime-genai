@@ -612,9 +612,11 @@ OgaResult* OGA_API_CALL OgaTokenizerGetBosTokenId(const OgaTokenizer* tokenizer,
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer, OgaSequences* sequences) {
+OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer, const int32_t** eos_token_ids, size_t* token_count) {
   OGA_TRY
-  sequences->emplace_back(tokenizer->GetEosTokenIds());
+  auto& eos_ids = tokenizer->GetEosTokenIds();
+  *eos_token_ids = eos_ids.data();
+  *token_count = eos_ids.size();
   return nullptr;
   OGA_CATCH
 }

@@ -126,18 +126,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return bosTokenId;
         }
 
-        public Sequences GetEosTokenIds()
+        public ReadOnlySpan<int> GetEosTokenIds()
         {
-            Result.VerifySuccess(NativeMethods.OgaCreateSequences(out IntPtr nativeSequences));
-            try
+            Result.VerifySuccess(NativeMethods.OgaTokenizerGetEosTokenIds(_tokenizerHandle, out IntPtr eosTokenIds, out UIntPtr tokenCount));
+            unsafe
             {
-                Result.VerifySuccess(NativeMethods.OgaTokenizerGetEosTokenIds(_tokenizerHandle, nativeSequences));
-                return new Sequences(nativeSequences);
-            }
-            catch
-            {
-                NativeMethods.OgaDestroySequences(nativeSequences);
-                throw;
+                return new ReadOnlySpan<int>(eosTokenIds.ToPointer(), (int)tokenCount.ToUInt64());
             }
         }
 
