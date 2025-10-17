@@ -7,6 +7,7 @@
 #include "ort_genai_c.h"
 #include "utils.h"
 #include <vector>
+#include <optional>
 
 using namespace Helpers;
 
