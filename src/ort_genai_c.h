@@ -615,9 +615,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBosTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
 
 /**
- * Return a sequence containing the int representations of the EOS tokens
+ * Return an array containing the int representations of the EOS tokens. The array is owned by the tokenizer and will be freed when the tokenizer is destroyed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer, OgaSequences* sequences);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer, const int32_t** eos_token_ids, size_t* token_count);
 
 /**
  * Return the int representation of the BOS token
