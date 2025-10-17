@@ -54,7 +54,9 @@ jobs:
         shell: pwsh
         run: |
           $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
-          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+          # $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+          $ORT_NIGHTLY_VERSION = "1.23.0"
+
           Write-Host "$ORT_NIGHTLY_VERSION"
           "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
           nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
