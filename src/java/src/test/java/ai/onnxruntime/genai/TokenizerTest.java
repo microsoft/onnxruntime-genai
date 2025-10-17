@@ -105,8 +105,9 @@ public class TokenizerTest {
               + "{{ '<|assistant|>' }}{% else %}{{ eos_token }}{% endif %}";
 
       // From HuggingFace Python output for 'microsoft/Phi-4-multimodal-instruct'
-      String expectedOutput = "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>"
-          + "How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
+      String expectedOutput =
+          "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>"
+              + "How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
 
       String result = tokenizer.applyChatTemplate(chatTemplate, messagesJson, null, true);
       assertEquals(expectedOutput, result, "Chat template output should match expected result");
