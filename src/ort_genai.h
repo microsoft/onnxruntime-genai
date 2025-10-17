@@ -315,9 +315,23 @@ struct OgaTokenizer : OgaAbstract {
     return token_id;
   }
 
-  void GetEosTokenIds(OgaSequences& sequences) const {
-    OgaCheckResult(OgaTokenizerGetEosTokenIds(this, &sequences));
+#if OGA_USE_SPAN
+  std::span<const int32_t> GetEosTokenIds() const {
+    const int32_t* eos_ids;
+    size_t count;
+    OgaCheckResult(OgaTokenizerGetEosTokenIds(this, &eos_ids, &count));
+    return {eos_ids, count};
   }
+#else
+  std::vector<int32_t> GetEosTokenIds() const {
+    std::vector<int32_t> eos_ids;
+    const int32_t* eos_ids_ptr;
+    size_t count;
+    OgaCheckResult(OgaTokenizerGetEosTokenIds(this, &eos_ids_ptr, &count));
+    eos_ids.assign(eos_ids_ptr, eos_ids_ptr + count);
+    return eos_ids;
+  }
+#endif
 
   int32_t GetPadTokenId() const {
     int32_t token_id;
