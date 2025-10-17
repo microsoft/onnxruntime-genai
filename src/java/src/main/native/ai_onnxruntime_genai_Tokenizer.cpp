@@ -153,13 +153,15 @@ Java_ai_onnxruntime_genai_Tokenizer_tokenizerApplyChatTemplate(JNIEnv* env, jobj
   CString c_messages{env, messages};
 
   std::optional<CString> c_tools;
+  const char* c_tools_ptr = nullptr;
   if (tools != nullptr) {
     c_tools = CString{env, tools};
+    c_tools_ptr = *c_tools;
   }
 
   const char* result = nullptr;
 
-  if (ThrowIfError(env, OgaTokenizerApplyChatTemplate(tokenizer, c_template_str, c_messages, c_tools.value_or(nullptr), add_generation_prompt, &result))) {
+  if (ThrowIfError(env, OgaTokenizerApplyChatTemplate(tokenizer, c_template_str, c_messages, c_tools_ptr, add_generation_prompt, &result))) {
     return nullptr;
   }
 
