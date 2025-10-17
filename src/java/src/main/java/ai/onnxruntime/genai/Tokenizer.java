@@ -3,9 +3,7 @@
  */
 package ai.onnxruntime.genai;
 
-/**
- * The Tokenizer class is responsible for converting between text and token ids.
- */
+/** The Tokenizer class is responsible for converting between text and token ids. */
 public class Tokenizer implements AutoCloseable {
   private long nativeHandle;
 
@@ -148,12 +146,15 @@ public class Tokenizer implements AutoCloseable {
    * @return The formatted chat string.
    * @throws GenAIException If the call to the GenAI native API fails.
    */
-  public String applyChatTemplate(String templateStr, String messages, String tools, boolean addGenerationPrompt) throws GenAIException {
+  public String applyChatTemplate(
+      String templateStr, String messages, String tools, boolean addGenerationPrompt)
+      throws GenAIException {
     if (nativeHandle == 0) {
       throw new IllegalStateException("Instance has been freed and is invalid");
     }
 
-    return tokenizerApplyChatTemplate(nativeHandle, templateStr, messages, tools, addGenerationPrompt);
+    return tokenizerApplyChatTemplate(
+        nativeHandle, templateStr, messages, tools, addGenerationPrompt);
   }
 
   /**
@@ -230,7 +231,14 @@ public class Tokenizer implements AutoCloseable {
 
   private native int tokenizerToTokenId(long tokenizerHandle, String str) throws GenAIException;
 
-  private native String tokenizerApplyChatTemplate(long tokenizerHandle, String templateStr, String messages, String tools, boolean addGenerationPrompt) throws GenAIException;
+  private native String tokenizerApplyChatTemplate(
+      long tokenizerHandle,
+      String templateStr,
+      String messages,
+      String tools,
+      boolean addGenerationPrompt)
+      throws GenAIException;
 
-  private native void tokenizerUpdateOptions(long tokenizerHandle, String[] keys, String[] values) throws GenAIException;
+  private native void tokenizerUpdateOptions(long tokenizerHandle, String[] keys, String[] values)
+      throws GenAIException;
 }

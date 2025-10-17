@@ -16,6 +16,11 @@ import org.junit.jupiter.api.Test;
 
 // NOTE: Typical usage is covered in GenerationTest.java so we are just filling test gaps here.
 public class TokenizerTest {
+  @SuppressWarnings("unused") // Used in EnabledIf
+  private static boolean havePhi2() {
+    return TestUtils.phi2ModelPath() != null;
+  }
+
   @Test
   public void testBatchEncodeDecode() throws GenAIException {
     try (Model model = new Model(TestUtils.tinyGpt2ModelPath());
@@ -33,6 +38,7 @@ public class TokenizerTest {
   }
 
   @Test
+  @EnabledIf("havePhi2")
   public void testGetBosTokenId() throws GenAIException {
     try (Model model = new Model(TestUtils.phi2ModelPath());
         Tokenizer tokenizer = new Tokenizer(model)) {
@@ -42,6 +48,7 @@ public class TokenizerTest {
   }
 
   @Test
+  @EnabledIf("havePhi2")
   public void testGetEosTokenIds() throws GenAIException {
     try (Model model = new Model(TestUtils.phi2ModelPath());
         Tokenizer tokenizer = new Tokenizer(model)) {
@@ -56,6 +63,7 @@ public class TokenizerTest {
   }
 
   @Test
+  @EnabledIf("havePhi2")
   public void testGetPadTokenId() throws GenAIException {
     try (Model model = new Model(TestUtils.phi2ModelPath());
         Tokenizer tokenizer = new Tokenizer(model)) {
@@ -65,6 +73,7 @@ public class TokenizerTest {
   }
 
   @Test
+  @EnabledIf("havePhi2")
   public void testApplyChatTemplate() throws GenAIException {
     // We load the phi-2 model just to get a tokenizer (phi-2 does not have a chat template)
     try (Model model = new Model(TestUtils.phi2ModelPath());
@@ -98,6 +107,7 @@ public class TokenizerTest {
   }
 
   @Test
+  @EnabledIf("havePhi2")
   public void testUpdateOptionsWithMap() throws GenAIException {
     try (Model model = new Model(TestUtils.phi2ModelPath());
         Tokenizer tokenizer = new Tokenizer(model)) {
