@@ -7,12 +7,11 @@ package ai.onnxruntime.genai;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.HashMap;
 import java.util.Map;
-
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIf;
 
 // NOTE: Typical usage is covered in GenerationTest.java so we are just filling test gaps here.
 public class TokenizerTest {
@@ -79,23 +78,31 @@ public class TokenizerTest {
     try (Model model = new Model(TestUtils.phi2ModelPath());
         Tokenizer tokenizer = new Tokenizer(model)) {
       // Testing phi-4 chat template
-      String messagesJson = "[\n"
-          + "  {\n"
-          + "    \"role\": \"system\",\n"
-          + "    \"content\": \"You are a helpful assistant.\",\n"
-          + "    \"tools\": \"Calculator\"\n"
-          + "  },\n"
-          + "  {\n"
-          + "    \"role\": \"user\",\n"
-          + "    \"content\": \"How do I add two numbers?\"\n"
-          + "  },\n"
-          + "  {\n"
-          + "    \"role\": \"assistant\",\n"
-          + "    \"content\": \"You can add numbers by using the '+' operator.\"\n"
-          + "  }\n"
-          + "]";
+      String messagesJson =
+          "[\n"
+              + "  {\n"
+              + "    \"role\": \"system\",\n"
+              + "    \"content\": \"You are a helpful assistant.\",\n"
+              + "    \"tools\": \"Calculator\"\n"
+              + "  },\n"
+              + "  {\n"
+              + "    \"role\": \"user\",\n"
+              + "    \"content\": \"How do I add two numbers?\"\n"
+              + "  },\n"
+              + "  {\n"
+              + "    \"role\": \"assistant\",\n"
+              + "    \"content\": \"You can add numbers by using the '+' operator.\"\n"
+              + "  }\n"
+              + "]";
 
-      String chatTemplate = "{% for message in messages %}{% if message['role'] == 'system' and 'tools' in message and message['tools'] is not none %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|tool|>' + message['tools'] + '<|/tool|>' + '<|end|>' }}{% else %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|end|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>' }}{% else %}{{ eos_token }}{% endif %}";
+      String chatTemplate =
+          "{% for message in messages %}{% if message['role']"
+              + " == 'system' and 'tools' in message and message['tools']"
+              + " is not none %}{{ '<|' + message['role'] + '|>' + message['content']"
+              + " + '<|tool|>' + message['tools'] + '<|/tool|>' + '<|end|>' }}"
+              + "{% else %}{{ '<|' + message['role'] + '|>' + message['content']"
+              + " + '<|end|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}"
+              + "{{ '<|assistant|>' }}{% else %}{{ eos_token }}{% endif %}";
 
       // From HuggingFace Python output for 'microsoft/Phi-4-multimodal-instruct'
       String expectedOutput = "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>"
