@@ -24,6 +24,10 @@ struct MultiModalLanguageModel : Model {
   std::unique_ptr<OrtSession> speech_session_;     // audio_embeds, audio_sizes, audio_projection_mode -> audio_features
   std::unique_ptr<OrtSession> embedding_session_;  // input_ids, image_features, audio_features -> inputs_embeds
   std::unique_ptr<OrtSession> decoder_session_;    // inputs_embeds, attention_mask, kv_cache -> logits
+
+  std::unique_ptr<OrtSessionOptions> vision_session_options_;
+  std::unique_ptr<OrtSessionOptions> speech_session_options_;
+  std::unique_ptr<OrtSessionOptions> embedding_session_options_;
 };
 
 struct VisionState : State {
