@@ -425,6 +425,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatch
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data);
 
 /**
+ * \brief Sets whether to enable ff_tokens during constrained decoding for the Generator params
+ * \param[in] params The generator params to set the guidance on
+ * \param[in] enabled Whether to enable ff_tokens generation. Only valid when guidance type is set and batch_size is 1.
+ * \return OgaResult containing the error message if the setting of the guidance failed
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidanceFFTokens(OgaGeneratorParams* params, bool enabled);
+
+/**
  * \brief Creates a generator from the given model and generator params.
  * \param[in] model The model to use for generation.
  * \param[in] params The parameters to use for generation.
