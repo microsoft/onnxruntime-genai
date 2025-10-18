@@ -155,7 +155,8 @@ void GreedySearch_Cpu::SelectTop() {
     SetNextToken(batch_id, token);
   }
 
-  AppendNextTokensToSequences();
+  if (!done_)
+    AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
@@ -176,7 +177,8 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
     std::discrete_distribution<> dis(top_k_scores.begin(), top_k_scores.end());
     SetNextToken(batch_id, indices[dis(gen_)]);
   }
-  AppendNextTokensToSequences();
+  if (!done_)
+    AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
@@ -214,7 +216,8 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
 
     SetNextToken(batch_id, token);
   }
-  AppendNextTokensToSequences();
+  if (!done_)
+    AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
@@ -273,7 +276,8 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
     int32_t token = indices[sampled_k_index];
     SetNextToken(batch_id, token);
   }
-  AppendNextTokensToSequences();
+  if (!done_)
+    AppendNextTokensToSequences();
 }
 
 bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {
