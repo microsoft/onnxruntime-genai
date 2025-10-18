@@ -330,9 +330,9 @@ inline void OrtIoBinding::SynchronizeOutputs() {
   Ort::ThrowOnError(Ort::api->SynchronizeBoundOutputs(this));
 }
 
-inline std::unique_ptr<OrtArenaCfg> OrtArenaCfg::Create(size_t max_mem, int arena_extend_strategy, int initial_chunk_size_bytes, int max_dead_bytes_per_chunk) {
+inline std::unique_ptr<OrtArenaCfg> OrtArenaCfg::Create(const char* const* keys, const size_t* values, size_t count) {
   OrtArenaCfg* p;
-  Ort::ThrowOnError(Ort::api->CreateArenaCfg(max_mem, arena_extend_strategy, initial_chunk_size_bytes, max_dead_bytes_per_chunk, &p));
+  Ort::ThrowOnError(Ort::api->CreateArenaCfgV2(keys, values, count, &p));
   return std::unique_ptr<OrtArenaCfg>{p};
 }
 
@@ -572,42 +572,6 @@ inline OrtSessionOptions& OrtSessionOptions::DisableCpuMemArena() {
   return *this;
 }
 
-inline OrtSessionOptions& OrtSessionOptions::EnableCpuEpFallback() {
-  return AddConfigEntry("session.disable_cpu_ep_fallback", "0");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::DisableCpuEpFallback() {
-  return AddConfigEntry("session.disable_cpu_ep_fallback", "1");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::EnableQuantQdq() {
-  return AddConfigEntry("session.disable_quant_qdq", "0");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::DisableQuantQdq() {
-  return AddConfigEntry("session.disable_quant_qdq", "1");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::EnableQuantQdqCleanup() {
-  return AddConfigEntry("session.enable_quant_qdq_cleanup", "1");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::DisableQuantQdqCleanup() {
-  return AddConfigEntry("session.enable_quant_qdq_cleanup", "0");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::SetEpContextEnable() {
-  return AddConfigEntry("ep.context_enable", "1");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::SetEpContextEmbedMode(const char* mode) {
-  return AddConfigEntry("ep.context_embed_mode", mode);
-}
-
-inline OrtSessionOptions& OrtSessionOptions::SetEpContextFilePath(const char* file_path) {
-  return AddConfigEntry("ep.context_file_path", file_path);
-}
-
 inline OrtSessionOptions& OrtSessionOptions::SetExecutionMode(ExecutionMode execution_mode) {
   Ort::ThrowOnError(Ort::api->SetSessionExecutionMode(this, execution_mode));
   return *this;
@@ -620,6 +584,11 @@ inline OrtSessionOptions& OrtSessionOptions::SetLogId(const char* logid) {
 
 inline OrtSessionOptions& OrtSessionOptions::SetLogSeverityLevel(int level) {
   Ort::ThrowOnError(Ort::api->SetSessionLogSeverityLevel(this, level));
+  return *this;
+}
+
+inline OrtSessionOptions& OrtSessionOptions::SetLogVerbosityLevel(int level) {
+  Ort::ThrowOnError(Ort::api->SetSessionLogVerbosityLevel(this, level));
   return *this;
 }
 

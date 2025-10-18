@@ -55,7 +55,9 @@ static OrtLoggingLevel GetDefaultOrtLoggingLevel() {
 
 OrtGlobals::OrtGlobals()
     : env_{OrtEnv::Create(GetDefaultOrtLoggingLevel())} {
-  auto arena_config = OrtArenaCfg::Create(0, -1, -1, -1);
+  const char* keys[] = {"max_mem", "arena_extend_strategy", "initial_chunk_size_bytes", "max_dead_bytes_per_chunk"};
+  const size_t values[] = {static_cast<size_t>(0), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1)};
+  auto arena_config = OrtArenaCfg::Create(keys, values, 4);
   Ort::Allocator& allocator_cpu{Ort::Allocator::GetWithDefaultOptions()};
   env_->CreateAndRegisterAllocator(allocator_cpu.GetInfo(), *arena_config);
 
@@ -409,20 +411,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 }
 
 void Generator::SetRuntimeOption(const char* key, const char* value) {
-  // TODO: Need a better way to handle different keys
-  // We can create a config manager to host all configurations and do comparison at that point
-  if (strcmp(key, "terminate_session") == 0) {
-    if (strcmp(value, "0") == 0) {
-      state_->UnsetTerminate();
-    } else if (strcmp(value, "1") == 0) {
-      state_->SetTerminate();
-    } else {
-      // Value not expected
-      throw std::runtime_error(std::string("terminate_session key value unexpected: ") + value);
-    }
-  } else {
-    throw std::runtime_error(std::string("SetRuntimeOption key is not expected: ") + key);
-  }
+  state_->SetRunOption(key, value);
 }
 
 bool Generator::IsDone() const {

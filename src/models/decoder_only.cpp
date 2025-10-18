@@ -35,6 +35,9 @@ DeviceSpan<float> DecoderOnly_State::Run(int total_length, DeviceSpan<int32_t>& 
     return RunWithChunking(total_length, next_tokens, next_indices, chunk_size_opt.value());
   } else {
     UpdateInputsOutputs(next_tokens, next_indices, total_length);
+    if (model_.config_->model.decoder.run_options.has_value()) {
+      State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+    }
 
     // Graph capture enabled for token generation case, allowing it to repeat the same graph for each token.
     bool graph_capture_this_run = params_->use_graph_capture && input_ids_.GetShape()[1] == 1;
@@ -51,6 +54,9 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
   size_t processed_tokens = 0;
   int length = total_length - static_cast<int>(num_tokens);
 
+  if (model_.config_->model.decoder.run_options.has_value()) {
+    State::SetRunOptions(model_.config_->model.decoder.run_options.value());
+  }
   while (processed_tokens < num_tokens) {
     size_t current_chunk_size = std::min(chunk_size, num_tokens - processed_tokens);
 
