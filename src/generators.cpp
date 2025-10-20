@@ -352,10 +352,6 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
     set_extra_inputs_ = false;
   }
 
-  if (last_action_ == Action::generated) {
-    ComputeLogits(search_->GetNextTokens());
-  }
-
   auto input_ids_device = AllocateInputIdsOnDevice(input_ids);
   search_->AppendTokens(input_ids_device);
   computed_logits_ = false;
