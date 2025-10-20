@@ -75,7 +75,6 @@ class Model:
 
         # EP-specific variables
         self.ep = ep
-
         self.ep_attrs = {
             "cpu": {},
             "cuda": {
@@ -3208,6 +3207,90 @@ class Model:
 
         return expand_name
 
+    def make_attention_mask_graph_capture_reformatting_for_gqa(self, attn_mask_basename):
+        # Make nodes for the attention mask subgraph that calculates
+        # attributes about the 2D attention mask to use in GroupQueryAttention
+        # WebGPU graph mode: Remove right path, calculate total_seq_len from seqlens_k
+        #
+        #          attention_mask
+        #               |
+        #         Cast to int32
+        #               |
+        #           ReduceSum
+        #               |
+        #              Sub
+        #               |
+        #           seqlens_k
+        #             (1D)
+        #               |
+        #              Add (seqlens_k + 1)
+        #               |
+        #            Squeeze
+        #               |
+        #         total_seq_len
+        #             (int)
+
+        # Left path - calculate seqlens_k
+        cast_1_name = f"{attn_mask_basename}/Cast"
+        self.make_cast(cast_1_name, "attention_mask", dtype=ir.DataType.INT32, shape=["batch_size", "total_sequence_length"])
+        reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
+        reduce_sum_inputs = [f"{cast_1_name}/output_0", "/model/constants/INT64/[1]"]
+        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        sub_name = f"{attn_mask_basename}/Sub"
+        sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT32/[1]"]
+        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+
+        # Calculate total_seq_len = seqlens_k + 1
+        add_name = f"{attn_mask_basename}/Add"
+        add_inputs = [f"{sub_name}/output_0", "/model/constants/INT32/[1]"]
+        self.make_add(add_name, add_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+
+        # Squeeze to get int value
+        squeeze_name = f"{attn_mask_basename}/Squeeze"
+        squeeze_inputs = [f"{add_name}/output_0", "/model/constants/INT64/[0]"]
+        self.make_squeeze(squeeze_name, squeeze_inputs, dtype=ir.DataType.INT32, shape=[])
+
+        self.mask_attrs["seqlens_k"] = sub_name
+        self.mask_attrs["total_seq_len"] = squeeze_name
+
+    def make_attention_mask_standard_reformatting_for_gqa(self, attn_mask_basename):
+        # Make nodes for the attention mask subgraph that calculates
+        # attributes about the 2D attention mask to use in GroupQueryAttention
+        # Standard mode: Both left and right paths
+        #
+        #                attention_mask
+        #               /              \
+        #          ReduceSum          Shape
+        #              |                |
+        #             Sub             Gather
+        #              |                |
+        #        Cast to int32    Cast to int32
+        #              |                |
+        #          seqlens_k      total_seq_len
+        #            (1D)             (int)
+
+        # Left path
+        reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
+        reduce_sum_inputs = ["attention_mask", "/model/constants/INT64/[1]"]
+        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
+        sub_name = f"{attn_mask_basename}/Sub"
+        sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/[1]"]
+        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
+        cast_1_name = f"{attn_mask_basename}/Sub/Cast"
+        self.make_cast(cast_1_name, f"{sub_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size", 1])
+
+        # Right path
+        shape_name = f"{attn_mask_basename}/Shape"
+        self.make_shape(shape_name, "attention_mask", shape=[2])
+        gather_name = f"{attn_mask_basename}/Gather"
+        gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/1"]
+        self.make_gather(gather_name, gather_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
+        cast_2_name = f"{attn_mask_basename}/Gather/Cast"
+        self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=ir.DataType.INT32, shape=None)
+
+        self.mask_attrs["seqlens_k"] = cast_1_name
+        self.mask_attrs["total_seq_len"] = cast_2_name
+
     def make_attention_mask_reformatting_for_gqa(self):
         # Make nodes for the attention mask subgraph that calculates
         # attributes about the 2D attention mask to use in GroupQueryAttention
@@ -3215,83 +3298,9 @@ class Model:
         attn_mask_basename = f"{basename}/attn_mask_subgraph"
 
         if self.extra_options.get("enable_webgpu_graph", False):
-            # WebGPU graph mode: Remove right path, calculate total_seq_len from seqlens_k
-            #
-            #          attention_mask
-            #               |
-            #         Cast to int32
-            #               |
-            #           ReduceSum
-            #               |
-            #              Sub
-            #               |
-            #           seqlens_k
-            #             (1D)
-            #               |
-            #              Add (seqlens_k + 1)
-            #               |
-            #            Squeeze
-            #               |
-            #         total_seq_len
-            #             (int)
-
-            # Left path - calculate seqlens_k
-            cast_1_name = f"{attn_mask_basename}/Cast"
-            self.make_cast(cast_1_name, "attention_mask", dtype=ir.DataType.INT32, shape=["batch_size", "total_sequence_length"])
-            reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
-            reduce_sum_inputs = [f"{cast_1_name}/output_0", "/model/constants/INT64/[1]"]
-            self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
-            sub_name = f"{attn_mask_basename}/Sub"
-            sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT32/[1]"]
-            self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
-
-            # Calculate total_seq_len = seqlens_k + 1
-            add_name = f"{attn_mask_basename}/Add"
-            add_inputs = [f"{sub_name}/output_0", "/model/constants/INT32/[1]"]
-            self.make_add(add_name, add_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
-
-            # Squeeze to get int value
-            squeeze_name = f"{attn_mask_basename}/Squeeze"
-            squeeze_inputs = [f"{add_name}/output_0", "/model/constants/INT64/[0]"]
-            self.make_squeeze(squeeze_name, squeeze_inputs, dtype=ir.DataType.INT32, shape=[])
-
-            self.mask_attrs["seqlens_k"] = sub_name
-            self.mask_attrs["total_seq_len"] = squeeze_name
+            self.make_attention_mask_graph_capture_reformatting_for_gqa(attn_mask_basename)
         else:
-            # Standard mode: Both left and right paths
-            #
-            #                attention_mask
-            #               /              \
-            #          ReduceSum          Shape
-            #              |                |
-            #             Sub             Gather
-            #              |                |
-            #        Cast to int32    Cast to int32
-            #              |                |
-            #          seqlens_k      total_seq_len
-            #            (1D)             (int)
-
-            # Left path
-            reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
-            reduce_sum_inputs = ["attention_mask", "/model/constants/INT64/[1]"]
-            self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
-            sub_name = f"{attn_mask_basename}/Sub"
-            sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/[1]"]
-            self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
-            cast_1_name = f"{attn_mask_basename}/Sub/Cast"
-            self.make_cast(cast_1_name, f"{sub_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size", 1])
-
-            # Right path
-            shape_name = f"{attn_mask_basename}/Shape"
-            self.make_shape(shape_name, "attention_mask", shape=[2])
-            gather_name = f"{attn_mask_basename}/Gather"
-            gather_inputs = [f"{shape_name}/output_0", "/model/constants/INT64/1"]
-            self.make_gather(gather_name, gather_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
-            cast_2_name = f"{attn_mask_basename}/Gather/Cast"
-            self.make_cast(cast_2_name, f"{gather_name}/output_0", dtype=ir.DataType.INT32, shape=None)
-
-            self.mask_attrs["seqlens_k"] = cast_1_name
-            self.mask_attrs["total_seq_len"] = cast_2_name
+            self.make_attention_mask_standard_reformatting_for_gqa(attn_mask_basename)
 
     def make_attention_mask_reformatting_for_sparse_attn(self):
         # Make nodes for the attention mask subgraph that calculates
@@ -3494,7 +3503,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
             self.position_ids_name = None
 
     def make_position_ids_reformatting(self):
-        if self.ep != "dml":
+        if self.ep not in self.eps_without_if_support:
             position_ids_input_to_rotemb = super().make_position_ids_reformatting()
             return position_ids_input_to_rotemb
 
