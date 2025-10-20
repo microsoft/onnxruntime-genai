@@ -3503,7 +3503,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         # Skip Long RoPE scaling subgraph for WebGPU graph capture (currently not supported due to limited int64 ops support)
         if self.extra_options.get("enable_webgpu_graph", False):
             print(
-                f"Warning: Long RoPE scaling is not supported yet with WebGPU graph capture. "
+                "WARNING: Long RoPE scaling is not supported yet with WebGPU graph capture. "
                 f"Make sure the model' max_length is <= original_context_length ({self.original_context_length}) to avoid issues. "
             )
             return super().make_position_ids_reformatting()
