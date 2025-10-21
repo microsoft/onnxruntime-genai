@@ -32,7 +32,19 @@ steps:
         default { 'unknown' }
       }
 
+      $genai_version_raw = switch ($nuget_version_type)
+      {
+        'dev' { "$version_info-" }
+        'stable' { "$version_info" }
+        default { 'unknown' }
+      }
+
       Write-Host "Setting variable: genai_version = ${version}"
       Write-Host "##vso[task.setvariable variable=genai_version]${version}"
-      Write-Host "Setting variable: genai_version_raw = ${version_info}"
-      Write-Host "##vso[task.setvariable variable=genai_version_raw]${version_info}"
+      if ($nuget_version_type -eq 'stable') {
+        Write-Host "Setting variable: genai_version_raw = ${version_info}"
+        Write-Host "##vso[task.setvariable variable=genai_version_raw]${version_info}"
+      } else {
+        Write-Host "Setting variable: genai_version_raw = ${version_info}-"
+        Write-Host "##vso[task.setvariable variable=genai_version_raw]${version_info}-"
+      }
