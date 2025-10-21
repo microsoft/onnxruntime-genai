@@ -3500,34 +3500,66 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
             position_ids_input_to_rotemb = super().make_position_ids_reformatting()
             return position_ids_input_to_rotemb
 
-        # Skip Long RoPE scaling subgraph for WebGPU graph capture (currently not supported due to limited int64 ops support)
-        if self.extra_options.get("enable_webgpu_graph", False):
-            print(
-                "WARNING: Long RoPE scaling is not supported yet with WebGPU graph capture. "
-                f"Make sure the model' max_length is <= original_context_length ({self.original_context_length}) to avoid issues. "
-            )
-            return super().make_position_ids_reformatting()
+        # Make Long RoPE scaling subgraph to adjust position_ids for sequences beyond original context length
+        # For WebGPU: use int32 for all ops due to limited int64 support, then cast back to int64
+        # For other EPs: use native int64 throughout
+        #
+        # WebGPU graph:                              Other EPs graph:
+        #   position_ids                               position_ids
+        #        |                                          |
+        #   Cast (int32)                                ReduceMax (int64)
+        #        |                                          |
+        #   ReduceMax (int32)                          GreaterOrEqual
+        #        |                                          |
+        #   GreaterOrEqual                             Cast (int64)
+        #        |                                          |
+        #   Cast (int32)                               Mul (int64)
+        #        |                                          |
+        #   Mul (int32)                                Add (int64)
+        #        |
+        #   Add (int32)
+        #        |
+        #   Cast (int64)
 
         basename = "/model/pos_ids_reformat"
         proto_dtype = self.input_types["position_ids"]
         str_dtype = self.to_str_dtype(proto_dtype)
 
+        # For WebGPU, use int32 for computation due to limited int64 ops support
+        is_webgpu = self.extra_options.get("enable_webgpu_graph", False)
+        compute_dtype = ir.DataType.INT32 if is_webgpu else proto_dtype
+        compute_str_dtype = self.to_str_dtype(compute_dtype)
+
+        # Cast position_ids to int32 for WebGPU
+        input_tensor = "position_ids"
+        if is_webgpu:
+            cast_input_name = f"{basename}/Cast_input"
+            self.make_cast(cast_input_name, input_tensor, dtype=ir.DataType.INT32, shape=["batch_size", "sequence_length"])
+            input_tensor = f"{cast_input_name}/output_0"
+
         reduce_max_name = f"{basename}/ReduceMax"
-        reduce_max_inputs = ["position_ids"]
-        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=proto_dtype, shape=[1])
+        reduce_max_inputs = [input_tensor]
+        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=compute_dtype, shape=[1])
         greater_or_equal_name = f"{basename}/GreaterOrEqual"
-        greater_or_equal_inputs = [f"{reduce_max_name}/output_0", f"/model/constants/{str_dtype}/{self.original_context_length}"]
+        greater_or_equal_inputs = [f"{reduce_max_name}/output_0", f"/model/constants/{compute_str_dtype}/{self.original_context_length}"]
         self.make_greater_or_equal(greater_or_equal_name, greater_or_equal_inputs, shape=[])
         cast_name = f"{basename}/Cast"
-        self.make_cast(cast_name, f"{greater_or_equal_name}/output_0", dtype=proto_dtype, shape=None)
+        self.make_cast(cast_name, f"{greater_or_equal_name}/output_0", dtype=compute_dtype, shape=None)
         mul_name = f"{basename}/Mul"
-        mul_inputs = [f"{cast_name}/output_0", f"/model/constants/{str_dtype}/{self.original_context_length}"]
-        self.make_mul(mul_name, mul_inputs, dtype=proto_dtype, shape=None)
+        mul_inputs = [f"{cast_name}/output_0", f"/model/constants/{compute_str_dtype}/{self.original_context_length}"]
+        self.make_mul(mul_name, mul_inputs, dtype=compute_dtype, shape=None)
         add_1_name = f"{basename}/Add_1"
-        add_1_inputs = [f"{mul_name}/output_0", "position_ids"]
-        self.make_add(add_1_name, add_1_inputs, dtype=proto_dtype, shape=["batch_size", "sequence_length"])
+        add_1_inputs = [f"{mul_name}/output_0", input_tensor]
+        self.make_add(add_1_name, add_1_inputs, dtype=compute_dtype, shape=["batch_size", "sequence_length"])
 
-        return add_1_name
+        # Cast back to int64 for WebGPU to maintain compatibility
+        result_name = add_1_name
+        if is_webgpu:
+            cast_output_name = f"{basename}/Cast_output"
+            self.make_cast(cast_output_name, f"{add_1_name}/output_0", dtype=ir.DataType.INT64, shape=["batch_size", "sequence_length"])
+            result_name = cast_output_name
+
+        return result_name
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         if self.position_ids_name is not None:
