@@ -544,3 +544,369 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda_BatchSize1_LargeVocabSize) {
   }
 }
 #endif
+
+#if USE_TRT_RTX
+TEST(SamplingTests, BatchedSamplingTopPNvTensorRtRtx) {
+  std::vector<int32_t> input_ids{0, 1, 2, 3};
+  std::vector<int32_t> expected_output{1, 2, 3, 4};
+  std::vector<float> logits_cpu = {0.1f, 0.6f, 0.1f, 0.1f, 0.1f,
+                                   0.1f, 0.1f, 0.6f, 0.1f, 0.1f,
+                                   0.1f, 0.1f, 0.1f, 0.6f, 0.1f,
+                                   0.1f, 0.1f, 0.1f, 0.1f, 0.6f};
+  int batch_size = 4;
+  int vocab_size = 5;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt");
+  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_p", 0.25f);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{batch_size, vocab_size}));
+
+  // Verify outputs match expected outputs
+  generator->GenerateNextToken();
+  auto next_tokens = generator->GetNextTokens();
+  EXPECT_TRUE(0 == std::memcmp(expected_output.data(), next_tokens.data(), expected_output.size() * sizeof(int32_t)));
+}
+
+TEST(SamplingTests, BatchedSamplingTopKNvTensorRtRtx) {
+  std::vector<int32_t> input_ids{0, 1, 2, 3};
+  std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,
+                                0.25f, 2.0f, 1.25f, 1.5f, 0.25f,
+                                0.25f, 2.0f, 0.25f, 1.5f, 1.25f,
+                                1.25f, 0.25f, 1.5f, 0.25f, 2.0f};
+  int batch_size = 4;
+  int vocab_size = 5;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt");
+  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_k", 2);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{batch_size, vocab_size}));
+
+  // Verify outputs match expected outputs
+  generator->GenerateNextToken();
+  auto next_tokens = generator->GetNextTokens();
+  for (int b = 0; b < batch_size; b++) {
+    auto next_token = next_tokens[b];
+    auto next_token_score = logits_cpu[next_token + vocab_size * b];
+    EXPECT_GT(next_token_score, 1.25f);
+  }
+}
+
+TEST(SamplingTests, BatchedSamplingTopPAndKNvTensorRtRtx) {
+  std::vector<int32_t> input_ids{0, 1, 2, 3};
+  std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,
+                                0.25f, 2.0f, 1.25f, 1.5f, 0.25f,
+                                0.25f, 2.0f, 0.25f, 1.5f, 1.25f,
+                                1.25f, 0.25f, 1.5f, 0.25f, 2.0f};
+  int batch_size = 4;
+  int vocab_size = 5;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt");
+  config->Overlay(R"({ "model": { "vocab_size" : 5 } })");
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_k", 2);
+  params->SetSearchOption("top_p", 0.25f);
+  params->SetSearchOption("batch_size", batch_size);
+
+  auto generator = OgaGenerator::Create(*model, *params);
+  generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{batch_size, vocab_size}));
+
+  // Verify outputs match expected outputs
+  generator->GenerateNextToken();
+  auto next_tokens = generator->GetNextTokens();
+  for (int b = 0; b < batch_size; b++) {
+    auto next_token = next_tokens[b];
+    auto next_token_score = logits_cpu[next_token + vocab_size * b];
+    EXPECT_GT(next_token_score, 1.25f);
+  }
+}
+
+TEST(SamplingTests, RandomizedSamplingTopPNvTensorRtRtx) {
+  const int batch_size = 5;
+  const float p = 0.95f;
+  const int vocab_size = 21;  // Keep same as CUDA for consistency
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt");
+  config->Overlay(R"({ "model": { "vocab_size" : 21 } })");
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_p", p);
+  params->SetSearchOption("batch_size", batch_size);
+
+  std::random_device rd;
+  std::mt19937 engine(rd());
+  std::vector<int> indices(vocab_size);
+  const int n = 11;  // Number of elements to be set to large values
+  const int num_iter = 5000;
+  std::map<float, int> logit_to_count;
+
+  // Run test
+  for (int i = 0; i < num_iter; i++) {
+    std::vector<float> logits_cpu(vocab_size * batch_size);
+    // Shuffle integers 1 to n randomly into cpu_span
+    for (int b = 0; b < batch_size; b++) {
+      std::iota(indices.begin(), indices.end(), 0);
+      std::shuffle(indices.begin(), indices.end(), engine);
+      for (int j = 0; j < n; j++)
+        logits_cpu[indices[j] + vocab_size * b] = float(n - j);
+    }
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{batch_size, vocab_size}));
+    generator->GenerateNextToken();
+    auto next_tokens = generator->GetNextTokens();
+
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      auto next_token = next_tokens[b];
+      auto next_token_score = logits_cpu[next_token + vocab_size * b];
+      logit_to_count[next_token_score]++;
+      EXPECT_GT(next_token_score, 0.0f);
+    }
+  }
+
+  // Calculate expected distribution of tokens
+  std::vector<float> expected_distributions(vocab_size);
+  for (int i = 0; i < vocab_size; i++) {
+    if (i < n) {
+      expected_distributions[i] = float(i + 1);
+    } else {
+      expected_distributions[i] = 0.0f;
+    }
+  }
+  Softmax(expected_distributions, 1.0f);
+  bool first_greater_than_p = true;
+  float sum = 0.0;
+  for (int i = n - 1; i >= 0; i--) {
+    sum += expected_distributions[i];
+    if (sum <= p) {
+      expected_distributions[i] *= 1.0f / p;
+    } else if (first_greater_than_p) {
+      float accumulated = (sum - expected_distributions[i]) / p;
+      expected_distributions[i] = 1.0f - accumulated;
+      first_greater_than_p = false;
+    } else {
+      expected_distributions[i] = 0.0;
+    }
+  }
+  for (int i = n; i < vocab_size; i++) {
+    expected_distributions[i] = 0.0f;
+  }
+  const int total_count = batch_size * num_iter;
+  // Check that the distribution of tokens generated by the model is close to the expected distribution
+  for (auto& [logit, count] : logit_to_count) {
+    const float expected_distribution = expected_distributions[int(logit) - 1];
+    EXPECT_NEAR(count / float(total_count), expected_distribution, 0.01);
+  }
+}
+
+TEST(SamplingTests, RandomizedSamplingTopKNvTensorRtRtx) {
+  const int batch_size = 5;
+  const int k = 5;
+  const int vocab_size = 17;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt");
+  config->Overlay(R"({ "model": { "vocab_size" : 17 } })");
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_k", k);
+  params->SetSearchOption("batch_size", batch_size);
+
+  std::random_device rd;
+  std::mt19937 engine(rd());
+  std::vector<int> indices(vocab_size);
+  const int num_iter = 5000;
+  std::map<float, int> logit_to_count;
+
+  // Run test
+  for (int i = 0; i < num_iter; i++) {
+    std::vector<float> logits_cpu(vocab_size * batch_size);
+    // Shuffle integers 1 to k randomly into cpu_span
+    for (int b = 0; b < batch_size; b++) {
+      std::iota(indices.begin(), indices.end(), 0);
+      std::shuffle(indices.begin(), indices.end(), engine);
+      for (int j = 0; j < k; j++)
+        logits_cpu[indices[j] + vocab_size * b] = float(k - j);
+    }
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{batch_size, vocab_size}));
+    generator->GenerateNextToken();
+    auto next_tokens = generator->GetNextTokens();
+
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      auto next_token = next_tokens[b];
+      auto next_token_score = logits_cpu[next_token + vocab_size * b];
+      logit_to_count[next_token_score]++;
+      EXPECT_GT(next_token_score, 0.0f);
+    }
+  }
+  // Calculate expected distribution of tokens by Softmaxing given logits (integers 1 through k)
+  std::vector<float> expected_distributions(k);
+  for (int i = 0; i < k; i++)
+    expected_distributions[i] = float(i + 1);
+  Softmax(expected_distributions, 1.0f);
+  const int total_count = batch_size * num_iter;
+  // Check that the distribution of tokens generated by the model is close to the expected distribution
+  for (auto& [logit, count] : logit_to_count) {
+    const float expected_distribution = expected_distributions[int(logit) - 1];
+    EXPECT_NEAR(count / float(total_count), expected_distribution, 0.01);
+  }
+}
+
+TEST(SamplingTests, RandomizedSamplingTopPAndKNvTensorRtRtx) {
+  const int batch_size = 5;
+  const int k = 7;
+  const float p = 0.75f;
+  const int vocab_size = 21;
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt");
+  config->Overlay(R"({ "model": { "vocab_size" : 21 } })");
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", true);
+  params->SetSearchOption("top_k", k);
+  params->SetSearchOption("top_p", p);
+  params->SetSearchOption("batch_size", batch_size);
+
+  std::random_device rd;
+  std::mt19937 engine(rd());
+  std::vector<int> indices(vocab_size);
+  const int num_iter = 5000;
+  std::map<float, int> logit_to_count;
+
+  // Run test
+  for (int i = 0; i < num_iter; i++) {
+    std::vector<float> logits_cpu(vocab_size * batch_size);
+    // Shuffle integers 1 to k randomly into cpu_span
+    for (int b = 0; b < batch_size; b++) {
+      std::iota(indices.begin(), indices.end(), 0);
+      std::shuffle(indices.begin(), indices.end(), engine);
+      for (int j = 0; j < k; j++)
+        logits_cpu[indices[j] + vocab_size * b] = float(k - j);
+    }
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{batch_size, vocab_size}));
+    generator->GenerateNextToken();
+    auto next_tokens = generator->GetNextTokens();
+
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      auto next_token = next_tokens[b];
+      auto next_token_score = logits_cpu[next_token + vocab_size * b];
+      logit_to_count[next_token_score]++;
+      EXPECT_GT(next_token_score, 0.0f);
+    }
+  }
+  // Calculate expected distribution of tokens by Softmaxing given logits (integers 1 through k)
+  std::vector<float> expected_distributions(k);
+  std::vector<float> expected_distributions_original(k);
+  for (int i = 0; i < k; i++) {
+    expected_distributions[i] = float(i + 1);
+    expected_distributions_original[i] = float(i + 1);
+  }
+  Softmax(expected_distributions_original, 1.0f);
+  // Calculate expected distribution of tokens by top_p
+  bool first_greater_than_p = true;
+  float sum = 0.0;
+  for (int i = k - 1; i >= 0; i--) {
+    sum += expected_distributions_original[i];
+    if (sum > p) {
+      if (first_greater_than_p) {
+        first_greater_than_p = false;
+      } else {
+        expected_distributions[i] = std::numeric_limits<float>::lowest();
+      }
+    }
+  }
+  Softmax(expected_distributions, 1.0f);
+  const int total_count = batch_size * num_iter;
+  // Check that the distribution of tokens generated by the model is close to the expected distribution
+  for (auto& [logit, count] : logit_to_count) {
+    const float expected_distribution = expected_distributions[int(logit) - 1];
+    EXPECT_NEAR(count / float(total_count), expected_distribution, 0.01);
+  }
+}
+
+TEST(SamplingTests, RandomizedSamplingSelectTopNvTensorRtRtx) {
+  int batch_size = 5;
+  int vocab_size = 32000;
+  std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
+
+  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt");
+  config->Overlay(R"({ "model": { "vocab_size" : 32000 } })");
+  config->ClearProviders();
+  config->AppendProvider("NvTensorRtRtx");
+
+  auto model = OgaModel::Create(*config);
+  auto params = OgaGeneratorParams::Create(*model);
+  params->SetSearchOption("max_length", 10);
+  params->SetSearchOptionBool("do_sample", false);
+  params->SetSearchOption("batch_size", batch_size);
+
+  std::vector<float> logits_cpu(vocab_size * batch_size);
+  std::vector<int> indices(vocab_size * batch_size);
+  std::random_device rd;
+  std::mt19937 engine(rd());
+  std::uniform_int_distribution<> dist(1, 25);
+  int num_iter = 100;
+  for (int i = 0; i < num_iter; i++) {
+    int num_large = dist(engine);
+    CreateRandomLogits(logits_cpu.data(), num_large, vocab_size, batch_size, engine);
+
+    auto generator = OgaGenerator::Create(*model, *params);
+    generator->SetLogits(*OgaTensor::Create(logits_cpu.data(), std::array<int64_t, 2>{batch_size, vocab_size}));
+    generator->GenerateNextToken();
+    auto next_tokens = generator->GetNextTokens();
+
+    // Verify outputs match expected outputs
+    for (int b = 0; b < batch_size; b++) {
+      float max_score = *std::max_element(logits_cpu.begin() + vocab_size * b, logits_cpu.begin() + vocab_size * (b + 1));
+      auto next_token = next_tokens[b];
+      auto next_token_score = logits_cpu[next_token + vocab_size * b];
+      EXPECT_EQ(next_token_score, max_score);
+    }
+  }
+}
+#endif
