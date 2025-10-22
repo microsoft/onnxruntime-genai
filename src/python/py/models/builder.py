@@ -465,10 +465,12 @@ class Model:
         if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
             genai_config["model"]["decoder"]["sliding_window"] = {"window_size": self.window_size, "slide_key_value_cache": False, "slide_inputs": False}
             
-            # Add layer-specific attention types if model has alternating attention patterns
+            # Add layer indices for sliding window layers if model has alternating attention patterns
             layer_types = self.get_layer_types()
             if layer_types is not None:
-                genai_config["model"]["decoder"]["sliding_window"]["layer_types"] = layer_types
+                # Export list of layer indices that use sliding window attention
+                sliding_layers = [i for i, lt in enumerate(layer_types) if lt == "sliding_attention"]
+                genai_config["model"]["decoder"]["sliding_window"]["layers"] = sliding_layers
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
@@ -487,16 +489,14 @@ class Model:
         """
         return None
 
-    def use_alternating_kv_dimensions(self):
+    def make_kv_value_cache_shape(self, layer_id, shape):
         """
-        Returns True if this model needs alternating KV cache dimension names.
-        This is needed for models with alternating attention patterns when using TensorRT.
+        Modifies KV cache shape dimension names for models with alternating attention patterns.
+        For TensorRT EP with sliding window layers, replaces 'sequence' with 'sliding' in dimension name.
         """
-        # Enable for models with layer_types when using TensorRT EP
-        if self.ep == "trt-rtx" and hasattr(self, 'get_layer_types'):
-            layer_types = self.get_layer_types()
-            return layer_types is not None
-        return False
+        if self.ep == "trt-rtx" and hasattr(self, "is_local") and self.is_local(layer_id):
+            return [shape[0], shape[1], shape[2].replace("sequence", "sliding"), shape[3]]
+        return shape
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
@@ -674,39 +674,23 @@ class Model:
 
         # Add KV cache to inputs and outputs
         for i in range(self.num_layers):
-            # Use alternating dimension names if needed (for TensorRT with alternating attention)
-            if self.use_alternating_kv_dimensions():
-                layer_types = self.get_layer_types()
-                layer_type = layer_types[i] if layer_types and i < len(layer_types) else "full_attention"
-                
-                # Use dimension name based on attention type
-                if layer_type == "sliding_attention":
-                    dim_suffix = "_sliding"
-                else:  # "full_attention"
-                    dim_suffix = "_full"
-                
-                past_key_shape = ["batch_size", self.num_kv_heads, f"past_sequence_length{dim_suffix}", self.head_size]
-                past_value_shape = ["batch_size", self.num_kv_heads, f"past_sequence_length{dim_suffix}", self.head_size]
-                present_key_shape = ["batch_size", self.num_kv_heads, f"total_sequence_length{dim_suffix}", self.head_size]
-                present_value_shape = ["batch_size", self.num_kv_heads, f"total_sequence_length{dim_suffix}", self.head_size]
-            else:
-                # Use standard dimension names (current behavior)
-                past_key_shape = self.input_shapes["past_key_values.key"]
-                past_value_shape = self.input_shapes["past_key_values.value"]
-                present_key_shape = self.output_shapes["present.key"]
-                present_value_shape = self.output_shapes["present.value"]
-            
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=past_key_shape))
+            key_shape = self.make_kv_value_cache_shape(i, self.input_shapes["past_key_values.key"])
+            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=key_shape))
+
             value_name = f"past_key_values.{i}.value"
-            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=past_value_shape))
+            value_shape = self.make_kv_value_cache_shape(i, self.input_shapes["past_key_values.value"])
+            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=value_shape))
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=present_key_shape))
+            key_shape = self.make_kv_value_cache_shape(i, self.output_shapes["present.key"])
+            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=key_shape))
+
             value_name = f"present.{i}.value"
-            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=present_value_shape))
+            value_shape = self.make_kv_value_cache_shape(i, self.output_shapes["present.value"])
+            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=value_shape))
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.

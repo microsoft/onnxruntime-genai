@@ -6,6 +6,7 @@
 #include "kv_cache.h"
 #include "windowed_kv_cache.h"
 #include "../openvino/interface.h"
+#include <unordered_set>
 
 namespace Generators {
 
@@ -179,21 +180,27 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   if (state.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx &&
       model_.config_->model.decoder.sliding_window.has_value() &&
       model_.config_->model.decoder.sliding_window->window_size > 0 &&
-      !model_.config_->model.decoder.sliding_window->layer_types.empty()) {
-    // Use per-layer allocation based on layer_types
+      !model_.config_->model.decoder.sliding_window->layers.empty()) {
+    // Use per-layer allocation based on sliding window layer indices
     use_layer_types_ = true;
     layer_shapes_.resize(layer_count_);
     
     int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
     int max_length = state_.params_->search.max_length;
     
+    // Create a set of sliding window layer indices for fast lookup
+    std::unordered_set<int> sliding_layers(
+        model_.config_->model.decoder.sliding_window->layers.begin(),
+        model_.config_->model.decoder.sliding_window->layers.end());
+
     for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
       layer_shapes_[layer_idx] = shape_;  // Copy base shape
       
-      const std::string& layer_type = model_.config_->model.decoder.sliding_window->layer_types[layer_idx];
-      if (layer_type == "sliding_attention") {
+      if (sliding_layers.count(layer_idx) > 0) {
+        // Sliding window layer
         layer_shapes_[layer_idx][2] = std::min(max_length, sliding_window_size);
-      } else {  // "full_attention"
+      } else {
+        // Full attention layer
         layer_shapes_[layer_idx][2] = max_length;
       }
     }

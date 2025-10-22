@@ -364,6 +364,17 @@ struct StringArray_Element : JSON::Element {
   std::vector<std::string>& v_;
 };
 
+struct IntArray_Element : JSON::Element {
+  explicit IntArray_Element(std::vector<int>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.push_back(static_cast<int>(JSON::Get<double>(value)));
+  }
+
+ private:
+  std::vector<int>& v_;
+};
+
 struct StringStringMap_Element : JSON::Element {
   explicit StringStringMap_Element(std::unordered_map<std::string, std::string>& v) : v_{v} {}
 
@@ -469,15 +480,19 @@ struct SlidingWindow_Element : JSON::Element {
   }
 
   Element& OnArray(std::string_view name) override {
-    if (name == "layer_types") {
-      return layer_types_;
+    if (name == "layers") {
+      // Lazy initialize layers_ when first accessed
+      if (!layers_) {
+        layers_ = std::make_unique<IntArray_Element>(v_->layers);
+      }
+      return *layers_;
     }
     throw JSON::unknown_value_error{};
   }
 
  private:
   std::optional<Config::Model::Decoder::SlidingWindow>& v_;
-  StringArray_Element layer_types_{v_->layer_types};
+  std::unique_ptr<IntArray_Element> layers_;
 };
 
 struct Encoder_Element : JSON::Element {
