@@ -83,7 +83,9 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   std::string guidance_type;  // e.g. json_schema or regex
   std::string guidance_data;  // e.g. rules data in json_schema or regex
+  bool guidance_ff_tokens_enabled{false};  // Whether to enable ff_tokens during constrained decoding
   void SetGuidance(std::string_view type, std::string_view data);
+  void SetGuidanceFFTokens(bool enabled);
 };
 
 struct Generator : LeakChecked<Generator> {

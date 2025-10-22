@@ -29,6 +29,8 @@ struct ConstrainedLogitsProcessor {
   virtual void Reset() = 0;
   // ResetWithoutCompute is used to reset the masks and constraints for logits processor without computing the mask for chat
   virtual void ResetWithoutCompute() = 0;
+  // Return a clone of the ff_tokens for the given index
+  virtual std::vector<int32_t> GetFFTokens(size_t index) = 0;
 };
 
 #if USE_GUIDANCE
@@ -43,6 +45,7 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
   void CommitTokens(std::span<int32_t> tokens) override;
   void Reset() override;
   void ResetWithoutCompute() override;
+  std::vector<int32_t> GetFFTokens(size_t index) override;
   // GetMask is used to get the logits mask
   std::vector<std::vector<uint32_t>> GetMask();
   // tokenize_partial is used to tokenize the input tokens with special prefix, this will get stable
@@ -73,6 +76,7 @@ struct GuidanceLogitsProcessor : public ConstrainedLogitsProcessor {
 
   std::future<std::vector<std::vector<uint32_t>>> mask_future_;
   std::vector<std::vector<uint32_t>> logits_masks_;
+  std::vector<std::vector<int32_t>> ff_tokens_batch_;
 
   struct TokenizeData {
     Tokenizer* tokenizer;
