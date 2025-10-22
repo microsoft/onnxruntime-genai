@@ -266,6 +266,14 @@ void GeneratorParams::SetGuidance(std::string_view type, std::string_view data) 
   guidance_data = data;
 }
 
+bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_type) const {
+  // past_present_share_buffer is only actually enabled when:
+  // 1. The config option is set to true, AND
+  // 2. Either num_beams == 1 OR the model is Whisper
+  return search.past_present_share_buffer &&
+         (search.num_beams == 1 || model_type == "whisper");
+}
+
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }

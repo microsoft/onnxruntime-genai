@@ -327,7 +327,7 @@ void DefaultPositionInputs::RewindMask(size_t index) {
 
 bool DefaultPositionInputs::ShouldUseStaticMaskHandling() const {
   return state_.params_->use_graph_capture ||
-         (state_.params_->search.past_present_share_buffer &&
+         (state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type) &&
           model_.p_device_->GetType() == DeviceType::NvTensorRtRtx);
 }
 
