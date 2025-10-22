@@ -463,14 +463,15 @@ class Model:
         }
 
         if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
-            genai_config["model"]["decoder"]["sliding_window"] = {"window_size": self.window_size, "slide_key_value_cache": False, "slide_inputs": False}
+            # Compute layer indices that use sliding window attention
+            layer_idxs = [layer_id for layer_id in range(self.num_layers) if hasattr(self, "is_local") and self.is_local(layer_id)]
             
-            # Add layer indices for sliding window layers if model has alternating attention patterns
-            layer_types = self.get_layer_types()
-            if layer_types is not None:
-                # Export list of layer indices that use sliding window attention
-                sliding_layers = [i for i, lt in enumerate(layer_types) if lt == "sliding_attention"]
-                genai_config["model"]["decoder"]["sliding_window"]["layers"] = sliding_layers
+            genai_config["model"]["decoder"]["sliding_window"] = {
+                "window_size": self.window_size,
+                "slide_key_value_cache": False,
+                "slide_inputs": False,
+                "layers": layer_idxs
+            }
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
@@ -481,15 +482,7 @@ class Model:
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
 
-    def get_layer_types(self):
-        """
-        Returns a list of attention types for each layer.
-        Override in subclasses to provide layer-specific attention patterns.
-        Returns None for models with uniform attention across all layers.
-        """
-        return None
-
-    def make_kv_value_cache_shape(self, layer_id, shape):
+    def make_key_value_cache_shape(self, layer_id, shape):
         """
         Modifies KV cache shape dimension names for models with alternating attention patterns.
         For TensorRT EP with sliding window layers, replaces 'sequence' with 'sliding' in dimension name.
@@ -676,20 +669,20 @@ class Model:
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            key_shape = self.make_kv_value_cache_shape(i, self.input_shapes["past_key_values.key"])
+            key_shape = self.make_key_value_cache_shape(i, self.input_shapes["past_key_values.key"])
             inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=key_shape))
 
             value_name = f"past_key_values.{i}.value"
-            value_shape = self.make_kv_value_cache_shape(i, self.input_shapes["past_key_values.value"])
+            value_shape = self.make_key_value_cache_shape(i, self.input_shapes["past_key_values.value"])
             inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=value_shape))
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            key_shape = self.make_kv_value_cache_shape(i, self.output_shapes["present.key"])
+            key_shape = self.make_key_value_cache_shape(i, self.output_shapes["present.key"])
             outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=key_shape))
 
             value_name = f"present.{i}.value"
-            value_shape = self.make_kv_value_cache_shape(i, self.output_shapes["present.value"])
+            value_shape = self.make_key_value_cache_shape(i, self.output_shapes["present.value"])
             outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=value_shape))
 
     def make_constant(self, name):
@@ -3484,20 +3477,6 @@ class Gemma2Model(GemmaModel):
         self.window_size = original_window_size if self.is_local(layer_id) else -1  # default is -1 in GroupQueryAttention kernel
         super().make_attention(layer_id, attention, root_input, **kwargs)
         self.window_size = original_window_size
-
-    def get_layer_types(self):
-        """
-        Gemma2 uses alternating attention patterns:
-        - Even layers (0, 2, 4, ...): full_attention
-        - Odd layers (1, 3, 5, ...): sliding_attention
-        """
-        layer_types = []
-        for layer_id in range(self.num_layers):
-            if self.is_local(layer_id):
-                layer_types.append("sliding_attention")
-            else:
-                layer_types.append("full_attention")
-        return layer_types
 
 
 class Phi3MiniModel(MistralModel):
