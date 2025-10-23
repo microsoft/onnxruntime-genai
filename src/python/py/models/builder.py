@@ -3347,9 +3347,6 @@ class MistralModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        super().make_attention(layer_id, attention, root_input, **kwargs)
-
 
 class QwenModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -3507,7 +3504,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         # WebGPU graph:                              Other EPs graph:
         #   position_ids                               position_ids
         #        |                                          |
-        #   Cast (int32)                                ReduceMax (int64)
+        #   Cast (int32)                               ReduceMax (int64)
         #        |                                          |
         #   ReduceMax (int32)                          GreaterOrEqual
         #        |                                          |
