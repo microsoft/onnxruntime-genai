@@ -8,6 +8,15 @@ https://onnxruntime.ai/docs/build/android.html#prerequisites
 
 Use the latest release Android NDK available.
 
+## Android 16KB Page Size Support
+
+Starting November 1st, 2025, all new apps and updates to existing apps submitted to Google Play and targeting Android 15+ devices must support 16 KB page sizes. This repository now includes support for 16KB page sizes:
+
+- The build system automatically sets `-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON` when building for Android
+- The Android Gradle Plugin has been updated to version 8.1.0
+- The compile and target SDK versions have been updated to 34
+
+For more information, see [Google's 16KB page size best practices](https://developer.android.com/guide/practices/page-sizes).
 
 ## Get the ONNX Runtime Android package
 
