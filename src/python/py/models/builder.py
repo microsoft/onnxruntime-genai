@@ -1423,6 +1423,27 @@ class Model:
 
         return cos_cache_name, sin_cache_name
 
+    def _pad_cache_to_uniform_shape(self, small_cache, large_cache, pad_value=0.0):
+        """Pad small cache to match large cache shape for uniform If node branches.
+
+        This is used for TRT-RTX EP which requires uniform dimensions in both branches of If nodes.
+
+        Args:
+            small_cache: The smaller cache tensor to pad
+            large_cache: The larger cache tensor (defines target shape)
+            pad_value: Value to use for padding (1.0 for cos_cache, 0.0 for sin_cache)
+        """
+        import torch
+        target_shape = large_cache.shape
+        if small_cache.shape == target_shape:
+            return small_cache
+
+        # Create padded tensor filled with pad_value
+        padded_cache = torch.full(target_shape, pad_value, dtype=small_cache.dtype)
+        # Copy original data to the beginning
+        padded_cache[:small_cache.shape[0], :] = small_cache
+        return padded_cache
+
     def make_rotary_embedding(self, name, root_input, **kwargs):
         cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
         num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
@@ -1461,16 +1482,23 @@ class Model:
         self.rope_attrs["save_caches"] = False
         cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
 
-        if self.ep in ["dml", "trt-rtx"]:
-            # Concat small and large cos/sin caches for DML and TRT-RTX EPs
-            # These EPs don't support the If operator
+        if self.ep == "dml":
+            # Concat small and large cos/sin caches for DML EP
+            # DML EP doesn't support the If operator
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
             sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
             # Save cos/sin caches to disk
             self.make_initializer(cos_cache, cos_cache_name)
             self.make_initializer(sin_cache, sin_cache_name)
-            # Do NOT make the subgraph with the If node for these EPs.
+            # Do NOT make the subgraph with the If node for DML EP.
             return
+
+        # Pad small caches to match large cache dimensions for TRT-RTX EP
+        # TRT-RTX requires uniform dimensions in both branches of If nodes
+        # Pad cos_cache with 1s (cos(0)=1) and sin_cache with 0s (sin(0)=0)
+        if self.ep == "trt-rtx":
+            cos_cache_small = self._pad_cache_to_uniform_shape(cos_cache_small, cos_cache_large, pad_value=1.0)
+            sin_cache_small = self._pad_cache_to_uniform_shape(sin_cache_small, sin_cache_large, pad_value=0.0)
 
         # Make the following subgraph to decide which cos/sin caches to use in the rotary embeddings
         #
@@ -1500,14 +1528,18 @@ class Model:
                 ir.Value(name=sin_cache_large_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(sin_cache_large.shape))
             ],
             name="/large/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_large)))
+
+        # Determine shape for small cache nodes - use large shape for TRT-RTX (padded), original shape otherwise
+        small_cache_shape = cos_cache_large.shape if self.ep == "trt-rtx" else cos_cache_small.shape
+
         cos_cache_small_node = ir.node(
             "Constant", [], outputs=[
-                ir.Value(name=cos_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(cos_cache_small.shape))
+                ir.Value(name=cos_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(small_cache_shape))
             ],
             name="/small/cos_cache/Constant", attributes=dict(value=ir.tensor(cos_cache_small)))
         sin_cache_small_node = ir.node(
             "Constant", [], outputs=[
-                ir.Value(name=sin_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(sin_cache_small.shape))
+                ir.Value(name=sin_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(small_cache_shape))
             ],
             name="/small/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_small)))
         self.make_node(
