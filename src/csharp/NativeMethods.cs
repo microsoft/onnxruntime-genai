@@ -354,6 +354,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                                   out IntPtr /* OgaNamedTensors** */ namedTensors);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern int /* extError_t */ OgaSplitSignalSegments(
+            IntPtr /* const OgaTensor* */ input,
+            IntPtr /* const OgaTensor* */ sr_tensor,
+            IntPtr /* const OgaTensor* */ frame_ms_tensor,
+            IntPtr /* const OgaTensor* */ hop_ms_tensor,
+            IntPtr /* const OgaTensor* */ energy_threshold_db_tensor,
+            IntPtr /* OgaTensor* */ output0);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern unsafe IntPtr /* OgaResult* */ OgaProcessorDecode(IntPtr /* const OgaMultiModalProcessor* */ processor,
                                                                                int* /* const int32_t* */ sequence,
                                                                                UIntPtr /* size_t */ sequenceLength,

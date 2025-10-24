@@ -78,6 +78,34 @@ T* ReturnUnique(std::unique_ptr<U> p) {
   return static_cast<T*>(p.release());
 }
 
+// Helper function to convert OgaTensor to OrtxTensor, sometimes needed as an input to onnxruntime-extensions methods.
+template <typename T>
+static OrtxTensor* MakeOrtxTensor(OgaTensor* src) {
+  if (!src)
+    throw std::runtime_error("Null tensor passed to MakeOrtxTensor");
+
+  auto* gen = reinterpret_cast<Generators::Tensor*>(src);
+  T* data = const_cast<T*>(gen->GetData<T>());
+  std::vector<int64_t> shape = gen->GetShape();
+
+  auto* ort = new Ort::Custom::Tensor<T>(shape, data);
+  return reinterpret_cast<OrtxTensor*>(ort);
+}
+
+// Helper function to convert const OgaTensor to const OrtxTensor, sometimes needed as an input to onnxruntime-extensions methods.
+template <typename T>
+static const OrtxTensor* MakeOrtxTensorConst(const OgaTensor* src) {
+    if (!src)
+        throw std::runtime_error("Null tensor passed to MakeOrtxTensorConst");
+
+    auto* gen = reinterpret_cast<const Generators::Tensor*>(src);
+    const T* data = gen->GetData<T>();
+    std::vector<int64_t> shape = gen->GetShape();
+
+    auto* ort = new Ort::Custom::Tensor<T>(shape, const_cast<T*>(data));
+    return reinterpret_cast<const OrtxTensor*>(ort);
+}
+
 extern "C" {
 
 #define OGA_TRY try {
@@ -883,6 +911,67 @@ OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudiosAndPrompts(const OgaMu
     prompts_.push_back(prompt.c_str());
   *input_tensors = ReturnUnique<OgaNamedTensors>(processor->Process(prompts_, images, audios));
   return nullptr;
+  OGA_CATCH
+}
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSplitSignalSegments(
+    const OgaTensor* input,
+    const OgaTensor* sr_tensor,
+    const OgaTensor* frame_ms_tensor,
+    const OgaTensor* hop_ms_tensor,
+    const OgaTensor* energy_threshold_db_tensor,
+    OgaTensor* output0) {
+  OGA_TRY
+  printf(">>> Entered OgaSplitSignalSegments\n");
+
+  if (!input || !sr_tensor || !frame_ms_tensor || !hop_ms_tensor ||
+      !energy_threshold_db_tensor || !output0) {
+    throw std::runtime_error("Null tensor argument passed to OgaSplitSignalSegments");
+  }
+
+  const OrtxTensor* in_tensor = MakeOrtxTensorConst<float>(input);
+  const OrtxTensor* sr_tensor_obj = MakeOrtxTensorConst<int64_t>(sr_tensor);
+  const OrtxTensor* frame_tensor = MakeOrtxTensorConst<int64_t>(frame_ms_tensor);
+  const OrtxTensor* hop_tensor = MakeOrtxTensorConst<int64_t>(hop_ms_tensor);
+  const OrtxTensor* thr_tensor = MakeOrtxTensorConst<float>(energy_threshold_db_tensor);
+  OrtxTensor* out_tensor = MakeOrtxTensor<int64_t>(output0);
+
+  printf(">>> Constructed all tensors successfully\n");
+
+  // ----- Perform the actual operation -----
+  extError_t err = OrtxSplitSignalSegments(
+      in_tensor,
+      sr_tensor_obj,
+      frame_tensor,
+      hop_tensor,
+      thr_tensor,
+      out_tensor);
+
+  std::cout << err << std::endl;
+
+  std::cout << "adresa1 " << out_tensor << std::endl;
+
+  const ortc::Tensor<int64_t>& internal_out =
+      *reinterpret_cast<const ortc::Tensor<int64_t>*>(out_tensor);
+
+  const int64_t* new_data = internal_out.Data();
+  std::vector<int64_t> new_shape = internal_out.Shape();
+
+  printf(">>> internal_out: shape = [");
+  for (size_t i = 0; i < new_shape.size(); ++i) {
+    printf("%lld", static_cast<long long>(new_shape[i]));
+    if (i + 1 < new_shape.size()) printf(", ");
+  }
+  printf("], data ptr = %p\n", new_data);
+
+  size_t num_elems2 = internal_out.NumberOfElement();
+  printf(">>> internal_out first few values: ");
+  for (size_t i = 0; i < std::min<size_t>(num_elems2, 10); ++i)
+    printf("%lld ", static_cast<long long>(new_data[i]));
+  printf("\n");
+  printf(">>> Exiting OgaSplitSignalSegments\n");
+  return nullptr;
+
   OGA_CATCH
 }
 

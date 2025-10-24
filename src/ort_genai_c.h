@@ -705,6 +705,14 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaM
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudiosAndPrompts(const OgaMultiModalProcessor*, const OgaStringArray* prompts, const OgaImages* images, const OgaAudios* audios, OgaNamedTensors** input_tensors);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSplitSignalSegments(
+    const OgaTensor* input,
+    const OgaTensor* sr_tensor,
+    const OgaTensor* frame_ms_tensor,
+    const OgaTensor* hop_ms_tensor,
+    const OgaTensor* energy_threshold_db_tensor,
+    OgaTensor* output0);
+
 /** Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);

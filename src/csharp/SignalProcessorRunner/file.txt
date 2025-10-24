@@ -1,0 +1,1000 @@
+    6  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+    7  cd ..
+    8  cd onnxruntime
+    9  ./build.sh --config Debug --use_cuda --cuda_home /home/nebanfic/cuda12.6 --cudnn_home /datadisks/disk6/nebanfic/cuda12.6 --build_wheel --cuda_version=12.6 --parallel --cmake_extra_defines 'CMAKE_CUDA_ARCHITECTURES=80' --skip_tests
+   10  git tatus
+   11  git status
+   12  cd ..
+   13  cp p
+   14  cd phi4-mm
+   15  pip uninstall onnxruntime-gpu
+   16  ./build.sh --config Debug --use_cuda --cuda_home /home/nebanfic/cuda12.6 --cudnn_home /datadisks/disk6/nebanfic/cuda12.6 --build_wheel --cuda_version=12.6 --parallel --cmake_extra_defines 'CMAKE_CUDA_ARCHITECTURES=80' --skip_tests
+   17  pip install ../onnxruntime/build/Linux/Debug/dist/onnxruntime_gpu-1.23.0-cp313-cp313-linux_x86_64.whl 
+   18  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+   19  cd ..
+   20  cd onnxruntime
+   21  ./build.sh --config Debug --use_cuda --cuda_home /home/nebanfic/cuda12.6 --cudnn_home /datadisks/disk6/nebanfic/cuda12.6 --build_wheel --cuda_version=12.6 --parallel --cmake_extra_defines 'CMAKE_CUDA_ARCHITECTURES=80' --skip_tests
+   22  cd ..
+   23  cd phi4-mm
+   24  pip uninstall onnxruntime-gpu
+   25  pip install ../onnxruntime/build/Linux/Debug/dist/onnxruntime_gpu-1.23.0-cp313-cp313-linux_x86_64.whl 
+   26  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+   27  cd ..
+   28  cd onnxruntime
+   29  ./build.sh --config Debug --use_cuda --cuda_home /home/nebanfic/cuda12.6 --cudnn_home /datadisks/disk6/nebanfic/cuda12.6 --build_wheel --cuda_version=12.6 --parallel --cmake_extra_defines 'CMAKE_CUDA_ARCHITECTURES=80' --skip_tests
+   30  cd ..
+   31  cd phi4-mm
+   32  pip uninstall onnxruntime-gpu
+   33  pip install ../onnxruntime/build/Linux/Debug/dist/onnxruntime_gpu-1.23.0-cp313-cp313-linux_x86_64.whl 
+   34  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+   35  cd ..
+   36  cd onnxruntime
+   37  ./build.sh --config Debug --use_cuda --cuda_home /home/nebanfic/cuda12.6 --cudnn_home /datadisks/disk6/nebanfic/cuda12.6 --build_wheel --cuda_version=12.6 --parallel --cmake_extra_defines 'CMAKE_CUDA_ARCHITECTURES=80' --skip_tests
+   38  cd ..
+   39  cd phi4-mm
+   40  pip uninstall onnxruntime-gpu
+   41  pip install ../onnxruntime/build/Linux/Debug/dist/onnxruntime_gpu-1.23.0-cp313-cp313-linux_x86_64.whl 
+   42  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+   43  python testscript.py 
+   44  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+   45  python testscript.py 
+   46  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+   47  cd ..
+   48  cd onnxruntime
+   49  git diff
+   50  cd ..
+   51  cd phi4-mm
+   52  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+   53  python testscript.py 
+   54  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+   55  python testscript.py 
+   56  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+   57  source ~/miniconda3/bin/activate
+   58  cd phi4-mm
+   59  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+   60  cd ..
+   61  cd onnxruntime
+   62  ./build.sh --config Debug --use_cuda --cuda_home /home/nebanfic/cuda12.6 --cudnn_home /datadisks/disk6/nebanfic/cuda12.6 --build_wheel --cuda_version=12.6 --parallel --cmake_extra_defines 'CMAKE_CUDA_ARCHITECTURES=80' --skip_tests
+   63  cd ..
+   64  cd phi4-mm
+   65  pip uninstall onnxruntime-gpu
+   66  pip install ../onnxruntime/build/Linux/Debug/dist/onnxruntime_gpu-1.23.0-cp313-cp313-linux_x86_64.whl 
+   67  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+   68  cd ..
+   69  cd onnxruntime
+   70  git status
+   71  git checkout -b nebanfic/mha-bf16
+   72  git add --all
+   73  git commit -m "MHA BF16
+   74  "
+   75  git push origin nebanfic/mha-bf16
+   76  ./build.sh --config Debug --use_cuda --cuda_home /home/nebanfic/cuda12.6 --cudnn_home /datadisks/disk6/nebanfic/cuda12.6 --build_wheel --cuda_version=12.6 --parallel --cmake_extra_defines 'CMAKE_CUDA_ARCHITECTURES=80' --skip_tests
+   77  cd ..
+   78  cd phi4-mm
+   79  pip uninstall onnxruntime-gpu
+   80  pip install ../onnxruntime/build/Linux/Debug/dist/onnxruntime_gpu-1.23.0-cp313-cp313-linux_x86_64.whl 
+   81  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+   82  cd ..
+   83  cdo new-genai/
+   84  cd onnxruntime
+   85  git status
+   86  git add --all
+   87  git commit -m "Clean code"
+   88  git push origin nebanfic/mha-bf16
+   89  ls
+   90  ls
+   91  cd nebanfic/
+   92  ls
+   93  pwd
+   94  cd ..
+   95  rm -r nebanfic/
+   96  ls
+   97  pwd
+   98  cd ../..
+   99  ls
+  100  cd datadisks/disk6/nebanfic/
+  101  sudo mount --bind /datadisks/disk6/nebanfic /home/nebanfic
+  102  ls
+  103  cd ../../..
+  104  cd home/nebanfic/
+  105  ls
+  106    source ~/miniconda3/bin/activate
+  107   ./build.sh --config Debug --use_cuda --cuda_home /home/nebanfic/cuda12.6 --cudnn_home /datadisks/disk6/nebanfic/cuda12.6 --build_wheel --cuda_version=12.6 --parallel --cmake_extra_defines 'CMAKE_CUDA_ARCHITECTURES=80' --skip_tests
+  108  cd onnxruntime
+  109   ./build.sh --config Debug --use_cuda --cuda_home /home/nebanfic/cuda12.6 --cudnn_home /datadisks/disk6/nebanfic/cuda12.6 --build_wheel --cuda_version=12.6 --parallel --cmake_extra_defines 'CMAKE_CUDA_ARCHITECTURES=80' --skip_tests
+  110  cd ..
+  111  cd phi4-mm
+  112  pip uninstall onnxruntime-gpu
+  113  pip install ../onnxruntime/build/Linux/Debug/dist/onnxruntime_gpu-1.23.0-cp313-cp313-linux_x86_64.whl 
+  114  LD_PRELOAD=/usr/lib/libstdc++.so.6  python run_attention2.py 
+  115  cd ..
+  116  cd onnxruntime
+  117  git status
+  118  git diff
+  119  git add --all
+  120  git commit -m "use OrtCudaType
+  121  "
+  122  git push origin nebanfic/mha-bf16
+  123  ls
+  124  cd onnxruntime
+  125  git status
+  126  git commit --allow-empty -m "ci: trigger pipeline"
+  127  git push origin nebanfic/mha-bf16
+  128  exiy
+  129  ls
+  130  cd onnxruntime-extensions/
+  131  cd ..
+  132    source ~/miniconda3/bin/activate
+  133  pwd
+  134  cd onnxruntime-extensions/
+  135  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  136  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON -DOCOS_BUILD_SHARED_LIB=ON
+  137  cd test/
+  138  ls
+  139  python test_audio_signal.py 
+  140  cd ..
+  141  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON -DOCOS_BUILD_SHARED_LIB=ON -DOCOS_BUILD_PYTHON=ON
+  142  cmake -B out -DCMAKE_BUILD_TYPE=Release -DOCOS_BUILD_PYTHON=ON
+  143  cmake --build out --config Release --target wheel
+  144  /home/nebanfic/onnxruntime-extensions/out
+  145  find out -name "*.whl"
+  146  cmake -B out -DCMAKE_BUILD_TYPE=Release -DOCOS_BUILD_PYTHON=ON
+  147  cmake --build out --config Release --target wheel
+  148  cmake --build out --target help > out/targets.txt
+  149  find out -name "*.whl"
+  150  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON -DOCOS_BUILD_SHARED_LIB=ON -DOCOS_BUILD_PYTHON=ON
+  151  find out -type f -name "onnxruntime_extensions*.so"
+  152  cmake --build out --target help | grep extensions_pydll
+  153  cmake --build out --target help | grep extensions_pydllff
+  154  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON -DOCOS_BUILD_SHARED_LIB=ON -DOCOS_BUILD_PYTHON=ON
+  155  cd out/
+  156  ls
+  157  cd Linux/
+  158  ls
+  159  cd RelWithDebInfo/
+  160  ls
+  161  cd lib/
+  162  pysite=$(python3 -c "import site; print(site.getusersitepackages())")
+  163  mkdir -p $pysite/onnxruntime_extensions
+  164  cp ~/onnxruntime-extensions/out/Linux/RelWithDebInfo/lib/libextensions_pydll.so    $pysite/onnxruntime_extensions/onnxruntime_extensions.so
+  165  touch $pysite/onnxruntime_extensions/__init__.py
+  166  pip list
+  167  python3 -c "import onnxruntime_extensions; print('✅ import OK'); print(dir(onnxruntime_extensions))"
+  168  cd ../../..
+  169  cd ..
+  170  ls
+  171  cd t
+  172  cd test/
+  173  ls
+  174  python test_audio_signal.py 
+  175  python3 - <<'PY'
+  176  import importlib.util
+  177  from pathlib import Path
+  178  so_path = Path.home() / "onnxruntime-extensions/out/Linux/RelWithDebInfo/lib/libextensions_pydll.so"
+  179  spec = importlib.util.spec_from_file_location("onnxruntime_extensions", str(so_path))
+  180  mod = importlib.util.module_from_spec(spec)
+  181  spec.loader.exec_module(mod)
+  182  print("✅ Loaded module:", mod)
+  183  print("Available symbols:", dir(mod))
+  184  PY
+  185  LD_PRELOAD=/usr/lib/libstdc++.so.6  python3 - <<'PY'
+  186  import importlib.util
+  187  from pathlib import Path
+  188  so_path = Path.home() / "onnxruntime-extensions/out/Linux/RelWithDebInfo/lib/libextensions_pydll.so"
+  189  spec = importlib.util.spec_from_file_location("onnxruntime_extensions", str(so_path))
+  190  mod = importlib.util.module_from_spec(spec)
+  191  spec.loader.exec_module(mod)
+  192  print("✅ Loaded module:", mod)
+  193  print("Available symbols:", dir(mod))
+  194  PY
+  195  LD_PRELOAD=/usr/lib/libstdc++.so.6 import importlib.util
+  196  from pathlib import Path
+  197  path = Path.home() / "onnxruntime-extensions/out/Linux/RelWithDebInfo/lib/libextensions_pydll.so"
+  198  spec = importlib.util.spec_from_file_location("extensions_pydll", str(path))
+  199  mod = importlib.util.module_from_spec(spec)
+  200  spec.loader.exec_module(mod)
+  201  print("✅ Loaded:", mod)
+  202  LD_PRELOAD=/usr/lib/libstdc++.so.6 python tryrun.py 
+  203  mkdir build && cd build
+  204  cmake ..
+  205  cmake --build .
+  206  ./test_signal
+  207  cmake ..
+  208  ./test_signal
+  209  cd ..
+  210  cmake ..
+  211  cd build/
+  212  cmake ..
+  213  cd ..
+  214  mkdir build && cd build
+  215  cmake ..
+  216  cmake --build .
+  217  ./test_signal
+  218  mkdir build && cd build
+  219  cmake ..
+  220  cmake --build .
+  221  ./test_signal
+  222  ls
+  223  rm -rf build/
+  224  mkdir build && cd build
+  225  cmake ..
+  226  cmake --build .
+  227  ./test_signal
+  228  rm -rf b
+  229  cd ..
+  230  rm -rf build/
+  231  mkdir build && cd build
+  232  cmake ..
+  233  cmake --build .
+  234  find ~/onnxruntime-extensions/out -type d -name "dlib"
+  235  cd ..
+  236  rm -rf build/
+  237  mkdir build && cd build
+  238  cmake ..
+  239  cmake --build .
+  240  Run this from the repo root:
+  241  find ~/onnxruntime-extensions -name "onnxruntime_c_api.h"
+  242  cd ..
+  243  rm -rf build/
+  244  mkdir build && cd build
+  245  cmake ..
+  246  cmake --build .
+  247  cd ~/onnxruntime-extensions/test
+  248  rm -rf build
+  249  mkdir build && cd build
+  250  cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo ..
+  251  cmake --build .
+  252  add_subdirectory(test)
+  253  cd ~/onnxruntime-extensions
+  254  rm -rf out
+  255  mkdir out && cd out
+  256  cmake -DCMAKE_BUILD_TYPE=RelWithDebInfo ..
+  257  cmake --build . --target test_signal
+  258  mkdir -p ~/test_signal/build
+  259  cd ~/test_signal/build
+  260  cmake ..
+  261  cmake --build . --target test_signal -j
+  262  ./test_signal
+  263  cd ..
+  264  cd onnxruntime-extensions/
+  265  cd test/
+  266  rm -rf build/
+  267  mkdir build 
+  268  cd build/
+  269  cmake ..
+  270  cmake --build . --target test_signal -j
+  271  ./test_signal
+  272  cd ..
+  273  git status
+  274  git checkout -- .
+  275  git clean -fd
+  276  git status
+  277  python -m pip install git+https://github.com/microsoft/onnxruntime-extensions.git
+  278  cd test/
+  279  python test_audio_signal.py 
+  280  pip lis
+  281  pip list
+  282  cd ..
+  283  pytest test
+  284  LD_PRELOAD=/usr/lib/libstdc++.so.6 pytest test
+  285  pip install -r requirements-dev.txt
+  286  sudo apt-get install -y python3-dev python3-pip
+  287  pip install .
+  288  pip list
+  289  pip uninstall onnxruntime-extensions
+  290  pip install .
+  291  python -c "import onnxruntime_extensions as ortx; print(dir(ortx))"
+  292  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON -DOCOS_BUILD_SHARED_LIB=ON -DOCOS_BUILD_PYTHON=ON
+  293  pip uninstall onnxruntime-extensions
+  294   pip install -e .
+  295  python -c "import onnxruntime_extensions as ortx; print(dir(ortx))"
+  296  LD_PRELOAD=/usr/lib/libstdc++.so.6 python -c "import onnxruntime_extensions as ortx; print(dir(ortx))"
+  297  LD_PRELOAD=/usr/lib/libstdc++.so.6 python -c "from onnxruntime_extensions import StftNorm; print('STFT op available')"
+  298  echo "dsij" > nenadtest.py
+  299  cd test/
+  300  LD_PRELOAD=/usr/lib/libstdc++.so.6 python test_audio_signal.py 
+  301  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  302  cd ..
+  303  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  304  cd test/
+  305  python test_audio_signal.py 
+  306  LD_PRELOAD=/usr/lib/libstdc++.so.6 python test_audio_signal.py 
+  307  cd ..
+  308  cp nenadtest.py test/nenadtest.py
+  309  cd test/
+  310  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  311  cd ..
+  312  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  313  cd test/
+  314  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  315  cd ..
+  316  git status
+  317  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  318  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON -DOCOS_BUILD_SHARED_LIB=ON -DOCOS_BUILD_PYTHON=ON
+  319  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  320  pip install . -e
+  321  pip install -e . 
+  322  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  323  pip install librosa
+  324  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  325  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON -DOCOS_BUILD_SHARED_LIB=ON -DOCOS_BUILD_PYTHON=ON
+  326  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  327  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON -DOCOS_BUILD_SHARED_LIB=ON -DOCOS_BUILD_PYTHON=ON
+  328  pip install librosa
+  329  pip install -e . 
+  330  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  331  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON -DOCOS_BUILD_SHARED_LIB=ON -DOCOS_BUILD_PYTHON=ON
+  332  pip install -e . 
+  333  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  334  lss
+  335  ls
+  336    source ~/miniconda3/bin/activate
+  337  git clone https://github.com/microsoft/onnxruntime-extensions.git
+  338  cd onnxruntime-extensions/
+  339  ls
+  340  build.sh
+  341  ./build.sh
+  342  cd shared/api/
+  343  cd ../..
+  344  touch shared/api/speech_extractor.cc 
+  345  ./build.sh
+  346  git status
+  347  git diff
+  348  ./build.sh
+  349  git status
+  350  grep -R "speech_extractor.cc" out/Linux/RelWithDebInfo/CMakeFiles | grep -v 'DependInfo'
+  351  grep -R "speech_extractor.cc" CMakeLists.txt
+  352  ./build.sh -DBUILD_AUDIO_EXTENSION=ON
+  353  ./build.sh -DOCOS_ENABLE_AUDIO=ON
+  354  ./build.sh -DBUILD_AUDIO_EXTENSION=ON
+  355  ./build.sh -DOCOS_ENABLE_AUDIO=ON
+  356  ./build.sh -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_DLIB=ON
+  357  ./build.sh DOCOS_BUILD_SHARED_LIB=ON
+  358  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  359    source ~/miniconda3/bin/activate
+  360  ls
+  361  cd onnxruntime-genai/
+  362  ls
+  363  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  364  cd ..
+  365  cd onnxruntime-extensions/
+  366  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  367  git status
+  368  git diff
+  369  git status
+  370  git diff  onnxruntime_extensions/_torch_cvt.py
+  371  git status
+  372  python nenadtest.py 
+  373  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  374  git status
+  375  cp test/kirk.mp3 ../kirk.mp3
+  376  git status
+  377  rm test/kirk.mp3 
+  378  git status
+  379  git checkout -b nebanfic/stft-segment
+  380  git add --all
+  381  git commit -m "Start stft segmentation"
+  382  git push origin nebanfic/stft-segmebt
+  383  git push origin nebanfic/stft-segment
+  384  cp ../kirk.mp3 test/kirk.mp3
+  385  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  386  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  387  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  388  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  389  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  390  pip install -e . 
+  391  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  392  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  393  pip install -e . 
+  394  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  395  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  396  pip install -e . 
+  397  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  398  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  399  OrtStatusPtr segment_extraction2(const ortc::Tensor<int64_t>& input,
+  400                                   ortc::Tensor<int64_t>& output0) {
+  401      const int64_t num_samples = 16000;
+  402      std::vector<float> pcm(num_samples);
+  403      for (int i = 0; i < num_samples; ++i)
+  404          pcm[i] = 0.5f * std::sin(2.0f * M_PI * 440.0f * i / 16000.0f);
+  405      ortc::Tensor<float> pcm_tensor({1, num_samples}, pcm.data());
+  406      const int64_t n_fft = 400;
+  407      const int64_t hop_length = 160;
+  408      const int64_t frame_length = 400;
+  409      std::vector<float> hann(n_fft);
+  410      for (int i = 0; i < n_fft; ++i)
+  411          hann[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (n_fft - 1)));
+  412      ortc::Tensor<float> win_tensor({n_fft}, hann.data());
+  413      // ✅ Empty tensor: StftNormal will allocate this internally
+  414      ortc::Tensor<float> stft_out{nullptr};
+  415      StftNormal stft;
+  416      auto status = stft.Compute(pcm_tensor, n_fft, hop_length, win_tensor, frame_length, stft_out);
+  417      if (status.IsError())
+  418          return status.ToOrtStatus();
+  419      const auto& shape = stft_out.Shape();
+  420      std::cout << "STFT shape: [" << shape[0] << ", " << shape[1] << ", " << shape[2] << "]\n";
+  421      auto* out_data = output0.Allocate({1});
+  422      out_data[0] = shape[2];
+  423      return nullptr;
+  424  }
+  425  q
+  426      std::cout << "STFT shape: [" << shape[0] << ", " << shape[1] << ", " << shape[2] << "]\n";
+  427      auto* out_data = output0.Allocate({1});
+  428      out_data[0] = shape[2];
+  429      return nullptr;
+  430  }
+  431  q
+  432  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  433  pip install -e .
+  434  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  435  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  436  pip install -e .
+  437  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  438  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  439  pip install -e .
+  440  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  441  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  442  pip install -e .
+  443  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  444  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  445  pip install -e .
+  446  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  447  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  448  pip install -e .
+  449  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  450  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  451  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  452  pip install -e .
+  453  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  454  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  455  pip install -e .
+  456  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  457  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  458  pip install -e .
+  459  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  460  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  461  pip install -e .
+  462  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  463  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  464  pip install -e .
+  465  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  466  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  467  pip install -e .
+  468  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  469  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  470  pip install -e .
+  471  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  472  ls
+  473  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  474  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  475  pip install -e .
+  476  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  477  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  478  pip install -e .
+  479  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  480  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  481  pip install -e .
+  482  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  483  ls
+  484  git status
+  485  rm test/kirk.mp3 
+  486  git status
+  487  git add --all
+  488  git commit -m "More stft segments code"
+  489  git push origin nebanfic/stft-segment
+  490  git status
+  491  git diff
+  492  cp ../kirk.mp3 test/kirk.mp3
+  493  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  494  pip install -e .
+  495  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  496  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  497  pip install -e .
+  498  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  499  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  500  pip install -e .
+  501  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  502  ezit
+  503  ls
+  504    source ~/miniconda3/bin/activate
+  505  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  506  cd onnxruntime-extensions/
+  507  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  508  git status
+  509  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  510  pip install -e .
+  511  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  512  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  513  pip install -e .
+  514  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  515  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  516  pip install -e .
+  517  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  518  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  519  pip install -e .
+  520  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  521  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  522  pip install -e .
+  523  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  524  ls
+  525  git status
+  526  rm test/kirk.mp3 
+  527  git status
+  528  git add --all
+  529  git commit -m "Add MergeAndFilter method"
+  530  git push origin nebanfic/stft-segment
+  531  cp ../kirk.mp3 test/kirk.mp3
+  532  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  533  git status
+  534  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  535  pip install -e .
+  536  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  537  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  538  pip install -e .
+  539  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  540  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  541  pip install -e .
+  542  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  543  git status
+  544  git diff
+  545  git status
+  546  rm test/kirk.mp3 
+  547  git status
+  548  git add --all
+  549  git commit -m "Fix wrong includes"
+  550  git push origin nebanfic/stft-segment
+  551  cp ../kirk.mp3 test/kirk.mp3
+  552  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  553  git status
+  554  git checkout -- .
+  555  git clean -fd
+  556  git status
+  557  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  558  cp ../kirk.mp3 test/kirk.mp3
+  559  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  560  pip install -e .
+  561  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  562  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  563  pip install -e .
+  564  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  565  pip install pydub
+  566  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  567  git status
+  568  rm test/kirk.mp3 
+  569  git status
+  570  git add --all
+  571  git commit -m "Reorganize code"
+  572  git push origin nebanfic/stft-segment
+  573  LD_PRELOAD=/usr/lib/libstdc++.so.6 python test/test_audio_signal.py 
+  574  cp test/test_audio_signal.py test_audio_signal.py
+  575  LD_PRELOAD=/usr/lib/libstdc++.so.6 python test_audio_signal.py 
+  576  cp test/test_audio_signal.py test_audio_signal.py
+  577  LD_PRELOAD=/usr/lib/libstdc++.so.6 python test_audio_signal.py 
+  578  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py 
+  579  cp ../kirk.mp3 test/kirk.mp3
+  580  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py 
+  581  LD_PRELOAD=/usr/lib/libstdc++.so.6 python test_audio_signal.py 
+  582  ls
+  583  LD_PRELOAD=/usr/lib/libstdc++.so.6 python test_audio_signal.py 
+  584  git status
+  585  rm test/kirk.mp3 
+  586  git stauts
+  587  git status
+  588  git diff
+  589  git status
+  590  cp test_audio_signal.py test/test_audio_signal.py 
+  591  git status
+  592  rm test_audio_signal.py 
+  593  git status
+  594  git diff
+  595  git status
+  596  git checkout --  nenadtest.py
+  597  git status
+  598  git diff
+  599  git status
+  600  gir diff
+  601  git diff
+  602  git status
+  603  git add --all
+  604  git commit -m "Add a test"
+  605  git push origin nebanfic/stft-segment
+  606  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  607  pip install -e .
+  608  LD_PRELOAD=/usr/lib/libstdc++.so.6 python test_audio_signal.py 
+  609  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py 
+  610  cp ../kirk.mp3 test/kirk3.mp3
+  611  cp ../kirk.mp3 test/kirk.mp3
+  612  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py 
+  613  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  614  pip install -e .
+  615  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py 
+  616  git status
+  617  rm test/kirk.mp3 
+  618  rm test/kirk3.mp3 
+  619  git statu
+  620  git status
+  621  cp nenadtest.py ../nenadtest_stft.py
+  622  rm nenadtest.py 
+  623  rm test/nenadtest.py 
+  624  git status
+  625  git add --all
+  626  git commit -m "Further refinements"
+  627  git push origin nebanfic/stft-segment
+  628  ezit
+  629  ls
+  630    source ~/miniconda3/bin/activate
+  631  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  632  cd onnxruntime-extensions/
+  633  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  634  git status
+  635  cp ../nenadtest_stft.py nenadtest.py
+  636  cp ../kirk.mp3 test/kirk.mp3
+  637  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  638  pip install -e .
+  639  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py 
+  640  git status
+  641  rm nenadtest.py 
+  642  rm test/kirk.mp3 
+  643  git status
+  644  git diff
+  645  git add --all
+  646  git commit -m "Add ifdef"
+  647  git push origin nebanfic/stft-segment
+  648    source ~/miniconda3/bin/activate
+  649  ls
+  650  cd one
+  651  cd onnxruntime-extensions/
+  652  ls
+  653  cp ../kirk.mp3 test/kirk.mp3 
+  654  cp ../nenadtest_stft.py nenadtest.py
+  655  cp test/test_audio_signal.py test_audio_signal.py
+  656  LD_PRELOAD=/usr/lib/libstdc++.so.6 python test_audio_signal.py 
+  657  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  658  pip install -e .
+  659  LD_PRELOAD=/usr/lib/libstdc++.so.6 python test_audio_signal.py 
+  660  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py 
+  661  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  662  git status
+  663  rm nenadtest.py 
+  664  rm test/kirk.mp3 
+  665  rm test_audio_signal.py 
+  666  git status
+  667  git diff
+  668  git status
+  669  git add --all
+  670  git commit -m "Optimize merge method"
+  671  git push origin nebanfic/stft-segment
+  672  lls
+  673  ls
+  674  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  675  ./out/Linux/RelWithDebInfo/bin/extensions_test 
+  676  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  677  ./out/Linux/RelWithDebInfo/bin/extensions_test 
+  678  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  679  git status.
+  680  git checkout -- 
+  681  git checkout -- .
+  682  git status
+  683  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  684  git status
+  685  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  686  pip install -e .
+  687  cp ../kirk.mp3 test/kirk.mp3
+  688  cp ../nenadtest_stft.py nenadtest.py
+  689  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py
+  690  cp test/test_audio_signal.py test_audio_signal.py
+  691  LD_PRELOAD=/usr/lib/libstdc++.so.6 python test_audio_signal.py 
+  692  git status
+  693  rm nenadtest.py 
+  694  rm test/kirk.mp3 
+  695  rm test_audio_signal.py 
+  696  git status
+  697  git diff
+  698  git status
+  699  git add --all
+  700  git commit -m "Resolve some comments"
+  701  git push origin nebanfic/stft-segmentr
+  702  git push origin nebanfic/stft-segment
+  703    source ~/miniconda3/bin/activate
+  704  cd onnxruntime-extensions/
+  705  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  706  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  707  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  708  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  709  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  710  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  711  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  712  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  713  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  714  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  715  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  716  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  717  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  718  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  719  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  720  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  721  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  722  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  723  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  724  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  725  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  726  git status
+  727  git dif
+  728  git diff
+  729  git status
+  730  git checkout -- .
+  731  git status
+  732  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  733  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  734  git status
+  735  git dif
+  736  git diff
+  737  git add --all
+  738  git commit -m "cpp test"
+  739  git push origin nebanfic/stft-segment
+  740    source ~/miniconda3/bin/activate
+  741  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  742  cd onnxruntime-extensions/
+  743  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  744  git status
+  745  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  746  pip install -e .
+  747  cp ../nenadtest_stft.py nenadtest.py
+  748  cp ../kirk.mp3 kirk.mp3
+  749  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  750  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py 
+  751  ls
+  752  git status
+  753  cp kirk.mp3 test/kirk.mp3
+  754  LD_PRELOAD=/usr/lib/libstdc++.so.6 python nenadtest.py 
+  755  git status
+  756  git diff
+  757  git status
+  758  cp test/test_audio_signal.py test_audio_signal.py
+  759  LD_PRELOAD=/usr/lib/libstdc++.so.6 python test_audio_signal.py 
+  760  git status
+  761  rm kirk.mp3 
+  762  rm nenadtest.py 
+  763  git stauts
+  764  git status
+  765  rm test/kirk.mp3 
+  766  rm test_audio_signal.py 
+  767  git status
+  768  git diff
+  769  git add --all
+  770  git commit -m "Resolve the rest of the comments"
+  771  git push origin nebanfic/stft-segment
+  772  git status
+  773  git add --all
+  774  git commit -m "fix fmt"
+  775  git push origin nebanfic/stft-segment
+  776    source ~/miniconda3/bin/activate
+  777  cd  onnxruntime-extensions/
+  778  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  779  git status
+  780  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  781  git status
+  782  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  783  git status
+  784  git add --all
+  785  git commit -m "Rename SplitSegmentsByEnergy method"
+  786  git push origin nebanfic/stft-segment
+  787  ls
+  788  cd new-genai/
+  789  ls
+  790  cd onnxruntime-genai/
+  791  git status
+  792  git diff
+  793  git pull 
+  794  cd ../..
+  795    source ~/miniconda3/bin/activate
+  796  ls
+  797  cd onnxruntime-extensions/
+  798  ls
+  799  cd ..
+  800  cd new-genai/onnxruntime-genai/
+  801  python build.py --config Release
+  802  git diff
+  803  python build.py --config Release
+  804  grep -R "onnxruntime-extensions" cmake/external/helper_functions.cmake
+  805  grep onnxruntime_extensions_SOURCE_DIR build/Linux/Release/CMakeCache.txt
+  806  cd build/Linux/Release/_deps/onnxruntime_extensions-src
+  807  git branch --show-current
+  808  git rev-parse HEAD
+  809  cd ../../..
+  810  cd ../..
+  811  python build.py --config Release
+  812  cd build/Linux/Release/_deps/onnxruntime_extensions-src
+  813  git rev-parse HEAD
+  814  cd ../../..
+  815  cd ../..
+  816  git statu
+  817  git status
+  818  git diff
+  819  git status
+  820  git grep -n "deps.txt"
+  821  python build.py --config Release
+  822  git status
+  823  git diff
+  824  git checkout -- .
+  825  git clean -fd
+  826  git status
+  827  git diff
+  828  git checkout -- .
+  829  git status
+  830  python build.py --config Release
+  831  git status
+  832  git diff
+  833  python build.py --config Release
+  834  cd ../..
+  835  cd onnxruntime-extensions/
+  836  checkout main
+  837  git checkout main
+  838  git pull origin main
+  839  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  840    source ~/miniconda3/bin/activate
+  841  cd onnxruntime-extensions/
+  842  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  843  git status
+  844  git diff
+  845  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  846  git diff
+  847  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  848  git status
+  849  git diff
+  850  git dif
+  851  f
+  852  git diff
+  853  git status
+  854  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  855  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  856  git status
+  857  git diff
+  858  git status
+  859  git diff shared/api/speech_features.hpp
+  860  git status
+  861  git checkout --   shared/api/speech_features.hpp
+  862  git status
+  863  git diff
+  864  git status
+  865  git checkout -- include/ortx_extractor.h
+  866  git status
+  867  git diff
+  868  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  869  git diff
+  870  git status
+  871  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  872  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  873  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  874  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  875  ./build.sh -DOCOS_ENABLE_DLIB=ON -DOCOS_ENABLE_AUDIO=ON -DOCOS_ENABLE_C_API=ON
+  876  ./out/Linux/RelWithDebInfo/bin/pp_api_test 
+  877  git status
+  878  git checkout -b nebanfic/stft-c-api
+  879  git add --all
+  880  git commit -m "Expose C API for SplitSignalSegments"
+  881  git push origin nebanfic/stft-c-api
+  882  ./gradlew build --stacktrace
+  883  ls | grep gradlew
+  884  grep gradlew
+  885  python3 tools/clang_format_check.py --fix
+  886  find . -maxdepth 2 -type f | grep -i clang_format
+  887  clang-format --version
+  888  clang-format -i shared/api/c_api_feature_extraction.cc
+  889  git status
+  890  clang-format -i shared/api/c_api_feature_extraction.h
+  891  git status
+  892  git include/ortx_extractor.h
+  893  clang-format include/ortx_extractor.h
+  894  git status
+  895  clang-format -i include/ortx_extractor.h
+  896  git status
+  897  clang-format --dry-run --Werror shared/api/c_api_feature_extraction.cc
+  898  git status
+  899  clang-format -i  test/pp_api_test/test_feature_extraction.cc
+  900  git status
+  901  cd ..
+  902  cd new-genai/onnxruntime-genai/
+  903  git status
+  904  git diff
+  905  python build.py --config Release
+  906  ls
+  907  cd build/Linux/Release/_deps/onnxruntime_extensions-src
+  908  git rev-parse HEAD
+  909  cd ../../../..
+  910   cd ..
+  911  python build.py --config Release
+  912  cd build/Linux/Release/_deps/onnxruntime_extensions-src
+  913  git rev-parse HEAD
+  914  cd ../..
+  915  cd ..
+  916  python build.py --config Release
+  917  cd build/Linux/Release/_deps/onnxruntime_extensions-src
+  918  git rev-parse HEAD
+  919  cd ../../../..
+  920  cd ..
+  921  python build.py --config Release
+  922  cd build/Linux/Release/_deps/onnxruntime_extensions-src
+  923  git rev-parse HEAD
+  924  cd ../../../..
+  925  cd .
+  926  cd ..
+  927  python build.py --config Release
+  928  cd build/Linux/Release/_deps/onnxruntime_extensions-src
+  929  git rev-parse HEAD
+  930  cd ../../..
+  931  cd ../..
+  932  python build.py --config Release
+  933  dotnet build csharp/src/Microsoft.ML.OnnxRuntimeGenAI/Microsoft.ML.OnnxRuntimeGenAI.csproj
+  934  find . -name "Microsoft.ML.OnnxRuntimeGenAI.csproj"
+  935  dotnet build src/csharp/Microsoft.ML.OnnxRuntimeGenAI.csproj
+  936  git status
+  937  git diff
+  938  dotnet build src/csharp/Microsoft.ML.OnnxRuntimeGenAI.csproj
+  939  q
+  940  git status
+  941  git checkout --  src/csharp/MultiModalProcessor.cs
+  942  git status
+  943  dotnet build src/csharp/Microsoft.ML.OnnxRuntimeGenAI.csproj
+  944  dotnet build src/csharp/Microsoft.ML.OnnxRuntimeGenAI.csproj -c Debug
+  945  dotnet script
+  946  cd src/csharp
+  947  dotnet new console -n SignalProcessorRunner
+  948  cd SignalProcessorRunner
+  949  dotnet add reference ../Microsoft.ML.OnnxRuntimeGenAI.csproj
+  950  dotnet run -c Debug
+  951  export LD_LIBRARY_PATH=/home/nebanfic/new-genai/onnxruntime-genai/build/Linux/Release:$LD_LIBRARY_PATH
+  952  dotnet run -c Debug
+  953  dotnet clean
+  954  dotnet build -c Debug
+  955  dotnet run -c Debug
+  956  ls build/Linux/Release/libonnxruntime-genai.so
+  957  dotnet run -c Debug
+  958  gdb --args dotnet run -c Debug
+  959  cd ../..
+  960  cd ..
+  961  python build.py --config Release
+  962  cd src/
+  963  ls
+  964  cd csharp/SignalProcessorRunner/
+  965  dotnet clean
+  966  dotnet build -c Debug
+  967  dotnet run -c Debug
+  968  cd ../../..
+  969  python build.py --config Release
+  970  cd src/csharp/SignalProcessorRunner/
+  971  dotnet clean
+  972  dotnet build -c Debug
+  973  dotnet run -c Debug
+  974  cd ../../..
+  975  python build.py --config Release
+  976  cd src/csharp/SignalProcessorRunner/
+  977  dotnet clean
+  978  dotnet build -c Debug
+  979  dotnet run -c Debug
+  980  git status
+  981  cd ../../../..
+  982  cd ..
+  983  cd onnxruntime
+  984  git status
+  985  git checkout main
+  986  git pull
+  987  ./build.sh --config Debug --use_cuda --cuda_home /home/nebanfic/cuda12.6 --cudnn_home /datadisks/disk6/nebanfic/cuda12.6 --build_wheel --cuda_version=12.6 --parallel --cmake_extra_defines 'CMAKE_CUDA_ARCHITECTURES=80' --skip_tests
+  988  cd new-genai/onnxruntime-genai/
+  989  python build.py --config Release
+  990  cd ../..
+  991    source ~/miniconda3/bin/activate
+  992  cd new-genai/onnxruntime-genai/
+  993  git status
+  994  git diff
+  995  git status
+  996  python build.py --config Release
+  997  git status
+  998  python build.py --config Release
+  999  dotnet clean
+ 1000  ls
+ 1001  cd src/csharp/SignalProcessorRunner/
+ 1002  dotnet clean
+ 1003  dotnet build -c Debug
+ 1004  dotnet run -c Debug
+ 1005  history > file.txt
