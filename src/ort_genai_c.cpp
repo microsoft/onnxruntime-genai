@@ -81,8 +81,9 @@ T* ReturnUnique(std::unique_ptr<U> p) {
 // Helper function to convert OgaTensor to OrtxTensor, sometimes needed as an input to onnxruntime-extensions methods.
 template <typename T>
 static OrtxTensor* MakeOrtxTensor(OgaTensor* src) {
-  if (!src)
+  if (!src) {
     throw std::runtime_error("Null tensor passed to MakeOrtxTensor");
+  }
 
   auto* gen = reinterpret_cast<Generators::Tensor*>(src);
   T* data = const_cast<T*>(gen->GetData<T>());
@@ -95,8 +96,9 @@ static OrtxTensor* MakeOrtxTensor(OgaTensor* src) {
 // Helper function to convert const OgaTensor to const OrtxTensor, sometimes needed as an input to onnxruntime-extensions methods.
 template <typename T>
 static const OrtxTensor* MakeOrtxTensorConst(const OgaTensor* src) {
-  if (!src)
+  if (!src) {
     throw std::runtime_error("Null tensor passed to MakeOrtxTensorConst");
+  }
 
   auto* gen = reinterpret_cast<const Generators::Tensor*>(src);
   const T* data = gen->GetData<T>();

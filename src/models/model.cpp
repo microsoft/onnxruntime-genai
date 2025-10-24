@@ -214,22 +214,6 @@ State::~State() {
 }
 
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
-      OrtxTensor input{};
-    OrtxTensor sr{};
-    OrtxTensor frame_ms{};
-    OrtxTensor hop_ms{};
-    OrtxTensor energy_threshold_db{};
-    OrtxTensor output{};
-
-    // Call the C API
-    extError_t err = OrtxSplitSignalSegments(
-        &input,
-        &sr,
-        &frame_ms,
-        &hop_ms,
-        &energy_threshold_db,
-        &output);
-  
   bool pad_right_{true};
 
   size_t max_length = 0;
