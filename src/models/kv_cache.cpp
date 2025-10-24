@@ -184,10 +184,10 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     // Use per-layer allocation based on sliding window layer indices
     use_layer_types_ = true;
     layer_shapes_.resize(layer_count_);
-    
+
     int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
     int max_length = state_.params_->search.max_length;
-    
+
     // Create a set of sliding window layer indices for fast lookup
     std::unordered_set<int> sliding_layers(
         model_.config_->model.decoder.sliding_window->layers.begin(),
@@ -195,7 +195,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
 
     for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
       layer_shapes_[layer_idx] = shape_;  // Copy base shape
-      
+
       if (sliding_layers.count(layer_idx) > 0) {
         // Sliding window layer
         layer_shapes_[layer_idx][2] = std::min(max_length, sliding_window_size);
@@ -223,7 +223,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
         if (Device().GetType() != DeviceType::WEBGPU) {
           ByteWrapTensor(Device(), *presents_.back()).Zero();
         }
-        
+
         // Value tensor
         presents_.push_back(OrtValue::CreateTensor(Allocator(), layer_shapes_[layer_idx], type_));
         if (Device().GetType() != DeviceType::WEBGPU) {
@@ -293,14 +293,14 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
     for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
       int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
       int actual_length = std::min(total_length, max_cache_length);
-      
+
       std::array<int64_t, 4> current_shape = layer_shapes_[layer_idx];
       current_shape[2] = actual_length;
-      
+
       // Key tensor
       presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
       state_.outputs_[output_index_ + layer_idx * 2] = presents_[layer_idx * 2].get();
-      
+
       // Value tensor
       presents_[layer_idx * 2 + 1] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
       state_.outputs_[output_index_ + layer_idx * 2 + 1] = presents_[layer_idx * 2 + 1].get();
@@ -340,28 +340,28 @@ void DefaultKeyValueCache::RewindTo(size_t index) {
 template <typename T>
 void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
   assert(index > 0 && !past_present_share_buffer_);
-  
+
   if (use_layer_types_) {
     // Handle per-layer shapes
     for (int i = 0; i < layer_count_ * 2; i++) {
       int layer_idx = i / 2;
       std::array<int64_t, 4> layer_shape = layer_shapes_[layer_idx];
       int max_cache_length = static_cast<int>(layer_shape[2]);
-      
+
       // Ensure we don't rewind beyond what's available
       if (static_cast<int>(index) > max_cache_length) {
         throw std::runtime_error("Requested rewind length is greater than the layer's cache length.");
       }
-      
+
       std::array<int64_t, 4> new_shape = layer_shape;
       new_shape[2] = static_cast<int>(index);
       auto batch_x_num_heads = new_shape[0] * new_shape[1];
       auto new_length_x_head_size = new_shape[2] * new_shape[3];
-      
+
       OrtValue& present = *presents_[i];
       auto present_shape = present.GetTensorTypeAndShapeInfo()->GetShape();
       auto old_length_x_head_size = present_shape[2] * new_shape[3];
-      
+
       std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), new_shape, type_);
       auto past_span = WrapTensor<T>(Device(), *past);
       auto present_span = WrapTensor<T>(Device(), present);
@@ -406,7 +406,7 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
 template <typename ScoreType>
 void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
   std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
-  
+
   std::array<int64_t, 4> tensor_shape;
   if (use_layer_types_) {
     // Get shape from the actual tensor for per-layer allocation
@@ -418,7 +418,7 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device
   } else {
     tensor_shape = shape_;
   }
-  
+
   auto block_size_per_beam = tensor_shape[1] * tensor_shape[2] * tensor_shape[3];
 
   OrtValue& present_value = *presents_[index];
