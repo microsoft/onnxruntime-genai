@@ -149,7 +149,7 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int 
 DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      past_present_share_buffer_{state_.params_->search.past_present_share_buffer && (state_.params_->search.num_beams == 1 || model_.config_->model.type == "whisper")},
+      past_present_share_buffer_{state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type)},
       shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 0, model_.config_->model.decoder.head_size} {
   if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
     Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");

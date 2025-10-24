@@ -84,6 +84,10 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   std::string guidance_type;  // e.g. json_schema or regex
   std::string guidance_data;  // e.g. rules data in json_schema or regex
   void SetGuidance(std::string_view type, std::string_view data);
+
+  // Determines if past_present_share_buffer is actually enabled based on config and runtime conditions
+  // Returns true only if config option is true AND (num_beams == 1 OR model is Whisper)
+  bool IsPastPresentShareBufferEnabled(const std::string& model_type) const;
 };
 
 struct Generator : LeakChecked<Generator> {

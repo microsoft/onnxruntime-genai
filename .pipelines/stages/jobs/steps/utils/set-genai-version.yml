@@ -32,7 +32,14 @@ steps:
         default { 'unknown' }
       }
 
+      $artifact_version = switch ($nuget_version_type)
+      {
+        'dev' { "$version_info$date" }
+        'stable' { "$version_info" }
+        default { 'unknown' }
+      }
+
       Write-Host "Setting variable: genai_version = ${version}"
       Write-Host "##vso[task.setvariable variable=genai_version]${version}"
-      Write-Host "Setting variable: genai_version_raw = ${version_info}"
-      Write-Host "##vso[task.setvariable variable=genai_version_raw]${version_info}"
+      Write-Host "Setting variable: genai_version_raw = ${artifact_version}"
+      Write-Host "##vso[task.setvariable variable=genai_version_raw]${artifact_version}"
