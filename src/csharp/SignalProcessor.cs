@@ -38,6 +38,25 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         }
 
         /// <summary>
+/// Thin wrapper around the native OgaMergeSignalSegments.
+/// All arguments are OgaTensor handles (IntPtr).
+/// </summary>
+public static void MergeSignalSegments(
+    IntPtr segmentsTensor,
+    IntPtr mergeGapMsTensor,
+    IntPtr outputTensor)
+{
+    int err = NativeMethods.OgaMergeSignalSegments(
+        segmentsTensor,
+        mergeGapMsTensor,
+        outputTensor);
+
+    if (err != 0)
+        throw new InvalidOperationException($"OgaMergeSignalSegments failed with error code {err}");
+}
+
+
+        /// <summary>
         /// Create a tensor view over a managed float[] using OgaCreateTensorFromBuffer.
         /// Caller must pin the array for the duration of native usage or use it only for the call.
         /// </summary>
@@ -192,6 +211,142 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                 if (output != IntPtr.Zero) NativeMethods.OgaDestroyTensor(output);
             }
         }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+public static (double Start, double End)[] SplitAndMergeSegments(
+    float[] audio,
+    int sampleRate,
+    int frameMs,
+    int hopMs,
+    float energyThresholdDb,
+    int mergeGapMs,
+    bool returnInMilliseconds = false)
+{
+    if (audio == null || audio.Length == 0)
+        throw new ArgumentException("Audio array cannot be null or empty", nameof(audio));
+
+    const int MaxSegs = 1024;
+    long[] splitBacking = new long[MaxSegs * 2];
+    long[] mergedBacking = new long[MaxSegs * 2];
+
+    // ✅ all tensor handles declared here
+    IntPtr input = IntPtr.Zero, sr = IntPtr.Zero, frame = IntPtr.Zero, hop = IntPtr.Zero,
+           thr = IntPtr.Zero, splitOut = IntPtr.Zero, mergeGap = IntPtr.Zero, mergedOut = IntPtr.Zero;
+
+    try
+    {
+        long[] inputShape = new long[] { 1, audio.Length };
+
+        // --- Build tensors ---
+        input = CreateFloatTensorFromArray(audio, inputShape);
+        sr    = CreateInt64TensorFromArray(new long[] { sampleRate }, new long[] { 1 });
+        frame = CreateInt64TensorFromArray(new long[] { frameMs }, new long[] { 1 });
+        hop   = CreateInt64TensorFromArray(new long[] { hopMs }, new long[] { 1 });
+        thr   = CreateFloatTensorFromArray(new float[] { energyThresholdDb }, new long[] { 1 });
+
+        // Output buffers
+        splitOut  = CreateOutputInt64Tensor(splitBacking, MaxSegs, 2);
+        mergedOut = CreateOutputInt64Tensor(mergedBacking, MaxSegs, 2);
+
+        // --- 1. Split ---
+        SplitSignalSegments(input, sr, frame, hop, thr, splitOut);
+        
+        // --- 🔍 Debug print split-out tensor ---
+Console.WriteLine("=== Debug: Split output preview ===");
+long[] splitShapeBuf = new long[2];
+Result.VerifySuccess(NativeMethods.OgaTensorGetShape(splitOut, splitShapeBuf, (UIntPtr)splitShapeBuf.Length));
+long splitRows = splitShapeBuf[0];
+long splitCols = splitShapeBuf[1];
+Console.WriteLine($"Split output shape: [{splitRows}, {splitCols}]");
+
+for (int i = 0; i < Math.Min(splitRows, 8); ++i)
+{
+    long start = splitBacking[i * 2 + 0];
+    long end   = splitBacking[i * 2 + 1];
+    Console.WriteLine($"  split[{i}] = ({start}, {end})");
+}
+Console.WriteLine("==============================\n");
+        // --- 2. Merge ---
+        mergeGap = CreateInt64TensorFromArray(new long[] { mergeGapMs }, new long[] { 1 });
+        MergeSignalSegments(splitOut, mergeGap, mergedOut);
+
+        // --- 🔍 Debug print merged-out tensor ---
+Console.WriteLine("=== Debug: Merge output preview ===");
+long[] mergedShapeBuf = new long[2];
+Result.VerifySuccess(NativeMethods.OgaTensorGetShape(mergedOut, mergedShapeBuf, (UIntPtr)mergedShapeBuf.Length));
+long mergedRowsDbg = mergedShapeBuf[0];
+long mergedColsDbg = mergedShapeBuf[1];
+Console.WriteLine($"Merged output shape: [{mergedRowsDbg}, {mergedColsDbg}]");
+
+for (int i = 0; i < Math.Min(mergedRowsDbg, 8); ++i)
+{
+    long start = mergedBacking[i * 2 + 0];
+    long end   = mergedBacking[i * 2 + 1];
+    Console.WriteLine($"  merged[{i}] = ({start}, {end})");
+}
+Console.WriteLine("==============================\n");
+
+        // --- Read merged shape ---
+        long[] shapeBuf = new long[2];
+        Result.VerifySuccess(NativeMethods.OgaTensorGetShape(mergedOut, shapeBuf, (UIntPtr)shapeBuf.Length));
+        long mergedRows = shapeBuf[0];
+        long mergedCols = shapeBuf[1];
+        if (mergedCols != 2)
+            throw new InvalidOperationException($"Expected merged output with 2 columns, got {mergedCols}");
+
+        // --- Convert to managed tuples ---
+        var result = new (double Start, double End)[mergedRows];
+        for (int i = 0; i < mergedRows; ++i)
+        {
+            long start = mergedBacking[i * 2 + 0];
+            long end   = mergedBacking[i * 2 + 1];
+            if (returnInMilliseconds)
+            {
+                double startMs = (start * 1000.0) / sampleRate;
+                double endMs   = (end   * 1000.0) / sampleRate;
+                result[i] = (startMs, endMs);
+            }
+            else
+            {
+                result[i] = (start, end);
+            }
+        }
+
+        return result;
+    }
+    finally
+    {
+        if (input     != IntPtr.Zero) NativeMethods.OgaDestroyTensor(input);
+        if (sr        != IntPtr.Zero) NativeMethods.OgaDestroyTensor(sr);
+        if (frame     != IntPtr.Zero) NativeMethods.OgaDestroyTensor(frame);
+        if (hop       != IntPtr.Zero) NativeMethods.OgaDestroyTensor(hop);
+        if (thr       != IntPtr.Zero) NativeMethods.OgaDestroyTensor(thr);
+        if (splitOut  != IntPtr.Zero) NativeMethods.OgaDestroyTensor(splitOut);
+        if (mergeGap  != IntPtr.Zero) NativeMethods.OgaDestroyTensor(mergeGap);
+        if (mergedOut != IntPtr.Zero) NativeMethods.OgaDestroyTensor(mergedOut);
+    }
+}
+
+
+
+
+
+
+
+        
 #endif
     }
 }

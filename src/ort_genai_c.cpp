@@ -95,15 +95,15 @@ static OrtxTensor* MakeOrtxTensor(OgaTensor* src) {
 // Helper function to convert const OgaTensor to const OrtxTensor, sometimes needed as an input to onnxruntime-extensions methods.
 template <typename T>
 static const OrtxTensor* MakeOrtxTensorConst(const OgaTensor* src) {
-    if (!src)
-        throw std::runtime_error("Null tensor passed to MakeOrtxTensorConst");
+  if (!src)
+    throw std::runtime_error("Null tensor passed to MakeOrtxTensorConst");
 
-    auto* gen = reinterpret_cast<const Generators::Tensor*>(src);
-    const T* data = gen->GetData<T>();
-    std::vector<int64_t> shape = gen->GetShape();
+  auto* gen = reinterpret_cast<const Generators::Tensor*>(src);
+  const T* data = gen->GetData<T>();
+  std::vector<int64_t> shape = gen->GetShape();
 
-    auto* ort = new Ort::Custom::Tensor<T>(shape, const_cast<T*>(data));
-    return reinterpret_cast<const OrtxTensor*>(ort);
+  auto* ort = new Ort::Custom::Tensor<T>(shape, const_cast<T*>(data));
+  return reinterpret_cast<const OrtxTensor*>(ort);
 }
 
 extern "C" {
@@ -922,8 +922,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSplitSignalSegments(
     const OgaTensor* energy_threshold_db_tensor,
     OgaTensor* output0) {
   OGA_TRY
-  printf(">>> Entered OgaSplitSignalSegments\n");
-
   if (!input || !sr_tensor || !frame_ms_tensor || !hop_ms_tensor ||
       !energy_threshold_db_tensor || !output0) {
     throw std::runtime_error("Null tensor argument passed to OgaSplitSignalSegments");
@@ -938,7 +936,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSplitSignalSegments(
 
   printf(">>> Constructed all tensors successfully\n");
 
-  // ----- Perform the actual operation -----
   extError_t err = OrtxSplitSignalSegments(
       in_tensor,
       sr_tensor_obj,
@@ -947,11 +944,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSplitSignalSegments(
       thr_tensor,
       out_tensor);
 
-  std::cout << err << std::endl;
-
-  std::cout << "adresa1 " << out_tensor << std::endl;
-
-  const ortc::Tensor<int64_t>& internal_out =
+        const ortc::Tensor<int64_t>& internal_out =
       *reinterpret_cast<const ortc::Tensor<int64_t>*>(out_tensor);
 
   const int64_t* new_data = internal_out.Data();
@@ -970,6 +963,38 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSplitSignalSegments(
     printf("%lld ", static_cast<long long>(new_data[i]));
   printf("\n");
   printf(">>> Exiting OgaSplitSignalSegments\n");
+
+  if (err != kOrtxOK) {
+    throw std::runtime_error(OrtxGetLastErrorMessage());
+  }
+  return nullptr;
+
+  OGA_CATCH
+}
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMergeSignalSegments(
+    const OgaTensor* segments_tensor,
+    const OgaTensor* merge_gap_ms_tensor,
+    OgaTensor* output0) {
+  OGA_TRY
+  if (!segments_tensor || !merge_gap_ms_tensor || !output0) {
+    throw std::runtime_error("Null tensor argument passed to OgaMergeSignalSegments");
+  }
+
+  const OrtxTensor* seg_tensor = MakeOrtxTensorConst<int64_t>(segments_tensor);
+  const OrtxTensor* gap_tensor = MakeOrtxTensorConst<int64_t>(merge_gap_ms_tensor);
+  OrtxTensor* out_tensor = MakeOrtxTensor<int64_t>(output0);
+
+  printf(">>> Constructed all tensors successfully for OgaMergeSignalSegments\n");
+
+  extError_t err = OrtxMergeSignalSegments(
+      seg_tensor,
+      gap_tensor,
+      out_tensor);
+
+  if (err != kOrtxOK) {
+    throw std::runtime_error(OrtxGetLastErrorMessage());
+  }
   return nullptr;
 
   OGA_CATCH

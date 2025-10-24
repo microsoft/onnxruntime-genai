@@ -713,6 +713,11 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSplitSignalSegments(
     const OgaTensor* energy_threshold_db_tensor,
     OgaTensor* output0);
 
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMergeSignalSegments(
+    const OgaTensor* segments_tensor,
+    const OgaTensor* merge_gap_ms_tensor,
+    OgaTensor* output0);
+
 /** Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecode(const OgaTokenizer*, const int32_t* tokens, size_t token_count, const char** out_string);
