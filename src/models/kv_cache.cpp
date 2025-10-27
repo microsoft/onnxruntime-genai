@@ -176,40 +176,40 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   // Set the size after empty_past_ has been created with 0 for this field
-  // Check if we need to use per-layer allocation for models with alternating attention patterns
   if (state.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx &&
       model_.config_->model.decoder.sliding_window.has_value() &&
-      model_.config_->model.decoder.sliding_window->window_size > 0 &&
-      !model_.config_->model.decoder.sliding_window->layers.empty()) {
-    // Use per-layer allocation based on sliding window layer indices
-    use_layer_types_ = true;
-    layer_shapes_.resize(layer_count_);
-
+      model_.config_->model.decoder.sliding_window->window_size > 0) {
     int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
     int max_length = state_.params_->search.max_length;
 
-    // Create a set of sliding window layer indices for fast lookup
-    std::unordered_set<int> sliding_layers(
-        model_.config_->model.decoder.sliding_window->layers.begin(),
-        model_.config_->model.decoder.sliding_window->layers.end());
+    // Check if we need per-layer allocation for models with alternating attention patterns
+    if (!model_.config_->model.decoder.sliding_window->layers.empty()) {
+      // Use per-layer allocation based on sliding window layer indices
+      use_layer_types_ = true;
+      layer_shapes_.resize(layer_count_);
 
-    for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
-      layer_shapes_[layer_idx] = shape_;  // Copy base shape
+      // Create a set of sliding window layer indices for fast lookup
+      std::unordered_set<int> sliding_layers(
+          model_.config_->model.decoder.sliding_window->layers.begin(),
+          model_.config_->model.decoder.sliding_window->layers.end());
 
-      if (sliding_layers.count(layer_idx) > 0) {
-        // Sliding window layer
-        layer_shapes_[layer_idx][2] = std::min(max_length, sliding_window_size);
-      } else {
-        // Full attention layer
-        layer_shapes_[layer_idx][2] = max_length;
+      for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+        layer_shapes_[layer_idx] = shape_;  // Copy base shape
+
+        if (sliding_layers.count(layer_idx) > 0) {
+          // Sliding window layer
+          layer_shapes_[layer_idx][2] = std::min(max_length, sliding_window_size);
+        } else {
+          // Full attention layer
+          layer_shapes_[layer_idx][2] = max_length;
+        }
       }
+      // Set shape_[2] to max of all layer shapes for RewindTo bounds checking
+      shape_[2] = max_length;
+    } else {
+      // Uniform sliding window allocation (backward compatibility)
+      shape_[2] = std::min(max_length, sliding_window_size);
     }
-  } else if (state.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx &&
-             model_.config_->model.decoder.sliding_window.has_value() &&
-             model_.config_->model.decoder.sliding_window->window_size > 0) {
-    // Uniform sliding window allocation (backward compatibility)
-    shape_[2] = std::min(state_.params_->search.max_length,
-                         model_.config_->model.decoder.sliding_window->window_size);
   } else if (past_present_share_buffer_) {
     shape_[2] = state_.params_->search.max_length;
   }
@@ -343,18 +343,24 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
 
   if (use_layer_types_) {
     // Handle per-layer shapes
+    // First validate that index doesn't exceed the global max_length
+    int max_length = static_cast<int>(shape_[2]);  // Set to max_length in constructor
+    if (static_cast<int>(index) > max_length) {
+      throw std::runtime_error("Requested rewind length exceeds max_length.");
+    }
+
     for (int i = 0; i < layer_count_ * 2; i++) {
       int layer_idx = i / 2;
       std::array<int64_t, 4> layer_shape = layer_shapes_[layer_idx];
-      int max_cache_length = static_cast<int>(layer_shape[2]);
+      int layer_max_cache = static_cast<int>(layer_shape[2]);
 
-      // Ensure we don't rewind beyond what's available
-      if (static_cast<int>(index) > max_cache_length) {
-        throw std::runtime_error("Requested rewind length is greater than the layer's cache length.");
-      }
+      // For each layer, rewind to min(index, layer's max capacity)
+      // - Full attention layers: min(index, max_length)
+      // - Sliding window layers: min(index, sliding_window_size)
+      int actual_rewind_length = std::min(static_cast<int>(index), layer_max_cache);
 
       std::array<int64_t, 4> new_shape = layer_shape;
-      new_shape[2] = static_cast<int>(index);
+      new_shape[2] = actual_rewind_length;
       auto batch_x_num_heads = new_shape[0] * new_shape[1];
       auto new_length_x_head_size = new_shape[2] * new_shape[3];
 
