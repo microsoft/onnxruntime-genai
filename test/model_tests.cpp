@@ -256,11 +256,11 @@ static const std::pair<const char*, const char*> c_phi3_nvtrt_model_paths[] = {
 };
 
 void Test_GreedySearch_Phi3_NvTensorRtRtx(const char* model_path, const char* model_label) {
-  std::vector<int64_t> input_ids_shape{1, 19};
-  std::vector<int32_t> input_ids{32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001};
+  const std::vector<int64_t> input_ids_shape{1, 19};
+  const std::vector<int32_t> input_ids{32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001};
 
   // Complete expected sequence (input + generated) from model_qa.cpp using the working phi3-fp16-nvtrt model
-  std::vector<int32_t> expected_output{
+  const::vector<int32_t> expected_output{
     32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001,  // Input tokens (19)
     15043, 29991, 306, 29915, 29885, 2599 
   };
@@ -269,7 +269,7 @@ void Test_GreedySearch_Phi3_NvTensorRtRtx(const char* model_path, const char* mo
   config->AppendProvider("NvTensorRtRtx");
   auto model = OgaModel::Create(*config);
 
-  int max_length = 25;
+  constexpr int max_length = 25;
   int batch_size = static_cast<int>(input_ids_shape[0]);
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", max_length);
@@ -297,8 +297,8 @@ TEST(ModelTests, GreedySearchPhi3NvTensorRtRtx) {
 }
 
 void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const char* model_label) {
-  std::vector<int64_t> input_ids_shape{1, 19};
-  std::vector<int32_t> input_ids{
+  const std::vector<int64_t> input_ids_shape{1, 19};
+  const std::vector<int32_t> input_ids{
       32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889,
       32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001};
 
@@ -307,7 +307,7 @@ void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const cha
   config->AppendProvider("NvTensorRtRtx");
   auto model = OgaModel::Create(*config);
 
-  int max_length = 25;
+  constexpr int max_length = 25;
   int batch_size = static_cast<int>(input_ids_shape[0]);
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", max_length);
