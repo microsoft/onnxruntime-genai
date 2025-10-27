@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
 namespace Microsoft.ML.OnnxRuntimeGenAI
@@ -138,7 +139,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             if (inputSignal == null || inputSignal.Length == 0)
                 throw new ArgumentException("Input array cannot be null or empty", nameof(inputSignal));
 
-            const int MaxSegs = 1024;
+            const int MaxSegs = 128;
             long[] splitBacking = new long[MaxSegs * 2];
             long[] mergedBacking = new long[MaxSegs * 2];
 
@@ -181,15 +182,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                     throw new InvalidOperationException($"Expected merged output with 2 columns, got {mergedCols}");
 
                 // Convert to array of start/end tuples.
-                var result = new (double Start, double End)[mergedRows];
+                var result = new List<(double Start, double End)>();
                 for (int i = 0; i < mergedRows; ++i)
                 {
                     long start = mergedBacking[i * 2 + 0];
                     long end = mergedBacking[i * 2 + 1];
-                    result[i] = (start, end);
+                    if (start == 0 && end == 0) continue;
+                    result.Add((start, end));
                 }
 
-                return result;
+                return result.ToArray();
             }
             finally
             {
