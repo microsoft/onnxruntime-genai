@@ -133,8 +133,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             int frameMs,
             int hopMs,
             float energyThresholdDb,
-            int mergeGapMs,
-            bool returnInMilliseconds = false)
+            int mergeGapMs)
         {
             if (inputSignal == null || inputSignal.Length == 0)
                 throw new ArgumentException("Input array cannot be null or empty", nameof(inputSignal));
@@ -187,16 +186,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                 {
                     long start = mergedBacking[i * 2 + 0];
                     long end = mergedBacking[i * 2 + 1];
-                    if (returnInMilliseconds)
-                    {
-                        double startMs = (start * 1000.0) / sampleRate;
-                        double endMs = (end * 1000.0) / sampleRate;
-                        result[i] = (startMs, endMs);
-                    }
-                    else
-                    {
-                        result[i] = (start, end);
-                    }
+                    result[i] = (start, end);
                 }
 
                 return result;

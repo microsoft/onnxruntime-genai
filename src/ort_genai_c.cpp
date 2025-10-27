@@ -938,8 +938,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSplitSignalSegments(
   const OrtxTensor* thr_tensor = MakeOrtxTensorConst<float>(energy_threshold_db_tensor);
   OrtxTensor* out_tensor = MakeOrtxTensor<int64_t>(output0);
 
-  printf(">>> Constructed all tensors successfully\n");
-
   extError_t err = OrtxSplitSignalSegments(
       in_tensor,
       sr_tensor_obj,
@@ -947,26 +945,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSplitSignalSegments(
       hop_tensor,
       thr_tensor,
       out_tensor);
-
-        const ortc::Tensor<int64_t>& internal_out =
-      *reinterpret_cast<const ortc::Tensor<int64_t>*>(out_tensor);
-
-  const int64_t* new_data = internal_out.Data();
-  std::vector<int64_t> new_shape = internal_out.Shape();
-
-  printf(">>> internal_out: shape = [");
-  for (size_t i = 0; i < new_shape.size(); ++i) {
-    printf("%lld", static_cast<long long>(new_shape[i]));
-    if (i + 1 < new_shape.size()) printf(", ");
-  }
-  printf("], data ptr = %p\n", new_data);
-
-  size_t num_elems2 = internal_out.NumberOfElement();
-  printf(">>> internal_out first few values: ");
-  for (size_t i = 0; i < std::min<size_t>(num_elems2, 10); ++i)
-    printf("%lld ", static_cast<long long>(new_data[i]));
-  printf("\n");
-  printf(">>> Exiting OgaSplitSignalSegments\n");
 
   if (err != kOrtxOK) {
     throw std::runtime_error(OrtxGetLastErrorMessage());
@@ -988,8 +966,6 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaMergeSignalSegments(
   const OrtxTensor* seg_tensor = MakeOrtxTensorConst<int64_t>(segments_tensor);
   const OrtxTensor* gap_tensor = MakeOrtxTensorConst<int64_t>(merge_gap_ms_tensor);
   OrtxTensor* out_tensor = MakeOrtxTensor<int64_t>(output0);
-
-  printf(">>> Constructed all tensors successfully for OgaMergeSignalSegments\n");
 
   extError_t err = OrtxMergeSignalSegments(
       seg_tensor,
