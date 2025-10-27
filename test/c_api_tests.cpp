@@ -203,7 +203,7 @@ TEST(CAPITests, ChatTemplate) {
         "content": "Sure, I can calculate the sum for you!"
       }
     ])";
-  
+
   const char* chat_template = R"({% for message in messages %}{% if message['role'] == 'system' and 'tools' in message and message['tools'] is not none %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|tool|>' + message['tools'] + '<|/tool|>' + '<|end|>' }}{% else %}{{ '<|' + message['role'] + '|>' + message['content'] + '<|end|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>' }}{% else %}{{ eos_token }}{% endif %})";
 
   // From HuggingFace Python output for 'microsoft/Phi-4-mini-instruct'
