@@ -192,11 +192,17 @@ steps:
       artifactName: $(artifactName)-$(PyNoDotVer)-wheel
       targetPath: '$(Build.ArtifactStagingDirectory)\wheel'
 
-  - task: PublishSymbols@2
-    displayName: 'Publish Build Symbols'
-    condition: and(succeeded(), eq(variables['build_config'], 'relwithdebinfo'))
-    inputs:
-      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\src\python\RelWithDebInfo\'
-      SearchPattern: 'onnxruntime_genai.pdb'
-      SymbolServerType: teamServices
-      SymbolExpirationInDays: 365
+  - ${{if and(eq(variables['build_config'], 'relwithdebinfo'), or(eq(variables['Build.SourceBranch'], 'refs/heads/main'), startsWith(variables['Build.SourceBranch'], 'refs/heads/rel-')))}}:
+      - template: ../templates/publish-symbolrequestprod-api.yml
+        parameters:
+          ${{if and(eq(variables['Build.SourceBranch'], 'refs/heads/main')}}:
+            symbolExpiryTime: 60
+          includePublicSymbolServer: true
+          symbolsArtifactName: onnxruntime_genai_capi
+          symbolsVersion: $(Build.BuildId)
+          symbolProject: 'ONNX Runtime'
+          subscription: 'OnnxrunTimeCodeSign_20240611'
+          searchPattern: |
+            $(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\src\python\RelWithDebInfo\onnxruntime_genai.pdb
+      
+
