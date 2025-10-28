@@ -90,7 +90,6 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
   // Determines if past_present_share_buffer is actually enabled based on config and runtime conditions
   // Returns true only if config option is true AND (num_beams == 1 OR model is Whisper)
   bool IsPastPresentShareBufferEnabled(const std::string& model_type) const;
-  void SetGuidanceFFTokens(bool enabled);
 };
 
 struct Generator : LeakChecked<Generator> {
