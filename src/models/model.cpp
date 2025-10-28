@@ -921,7 +921,9 @@ Model::Model(std::unique_ptr<Config> config) : config_{std::move(config)} {
   EnsureDeviceOrtInit(*p_device_, *config_, arena_cfg_);
 
   // Only CUDA, TRT-RTX and DML does every input on the device
-  if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx)
+  // For WebGPU, use device memory only if graph capture is enabled, otherwise use CPU
+  if (p_device_->GetType() == DeviceType::CUDA || p_device_->GetType() == DeviceType::DML || p_device_->GetType() == DeviceType::NvTensorRtRtx ||
+      (p_device_->GetType() == DeviceType::WEBGPU && IsGraphCaptureEnabled(config_->model.decoder.session_options)))
     p_device_inputs_ = p_device_;
   else
     p_device_inputs_ = GetDeviceInterface(DeviceType::CPU);
