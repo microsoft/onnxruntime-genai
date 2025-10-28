@@ -280,10 +280,6 @@ bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_t
          (search.num_beams == 1 || model_type == "whisper");
 }
 
-void GeneratorParams::SetGuidanceFFTokens(bool enabled) {
-  guidance_ff_tokens_enabled = enabled;
-}
-
 std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorParams& params) {
   return std::make_unique<Generator>(model, params);
 }
