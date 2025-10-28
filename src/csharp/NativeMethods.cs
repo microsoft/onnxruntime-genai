@@ -118,6 +118,10 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                    byte[] /* const char* */ data);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetGuidanceFFTokens(IntPtr /* OgaGeneratorParams* */ generatorParams,
+                                                                                   bool enabled);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyGenerator(IntPtr /* OgaGenerator* */ generator);
 
         // This function is used to check if the generator has finished generating all sequences.
