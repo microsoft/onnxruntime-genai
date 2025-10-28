@@ -1,1 +1,1 @@
-onnxruntime==1.22.0
+onnxruntime==1.23.2
