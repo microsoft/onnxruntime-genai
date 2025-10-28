@@ -407,7 +407,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
     auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
     if (!ff_tokens.empty()) {
       // process fast-forward tokens
-      std::span<int32_t> forced_tokens_span {ff_tokens};
+      std::span<int32_t> forced_tokens_span{ff_tokens};
       auto forced_tokens = AllocateInputIdsOnDevice(forced_tokens_span);
       search_->AppendTokens(forced_tokens);
 
