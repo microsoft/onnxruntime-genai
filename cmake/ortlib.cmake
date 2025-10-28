@@ -80,17 +80,12 @@ if(ORT_HOME)
     set(ORT_LIB_DIR ${ORT_HOME}/lib)
   endif()
 else()
-  # If ORT_HOME is not specified, download the onnxruntime headers and libraries from the nightly feed
-  set(ORT_VERSION "1.22.0")
-  set(ORT_FEED_ORG_NAME "aiinfra")
-  set(ORT_FEED_PROJECT "2692857e-05ef-43b4-ba9c-ccf1c22c437c")
-  set(ORT_NIGHTLY_FEED_ID "7982ae20-ed19-4a35-a362-a96ac99897b7")
+  # If ORT_HOME is not specified, download the onnxruntime headers and libraries from NuGet.org
+  set(ORT_VERSION "1.23.2")
 
   if (USE_DML)
-    set(ORT_VERSION "1.22.0")
     set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime.DirectML")
   elseif(USE_CUDA)
-    set(ORT_VERSION "1.22.0")
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
       set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime.Gpu.Linux")
     elseif(WIN32)
@@ -99,13 +94,13 @@ else()
       message(FATAL_ERROR "Unsupported platform for CUDA")
     endif()
   elseif(USE_ROCM)
-    set(ORT_VERSION "1.22.0")
     set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime.Rocm")
   else()
     set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime")
   endif()
 
-  set(ORT_FETCH_URL "https://pkgs.dev.azure.com/${ORT_FEED_ORG_NAME}/${ORT_FEED_PROJECT}/_apis/packaging/feeds/${ORT_NIGHTLY_FEED_ID}/nuget/packages/${ORT_PACKAGE_NAME}/versions/${ORT_VERSION}/content?api-version=6.0-preview.1")
+  # Download from NuGet.org stable release instead of nightly feed
+  set(ORT_FETCH_URL "https://www.nuget.org/api/v2/package/${ORT_PACKAGE_NAME}/${ORT_VERSION}")
 
   message(STATUS "Using ONNX Runtime package ${ORT_PACKAGE_NAME} version ${ORT_VERSION}")
 
