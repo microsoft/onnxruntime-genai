@@ -1045,12 +1045,12 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
   for (auto& provider_options : config.model.decoder.session_options.provider_options) {
     if (provider_options.name == normalized_provider && !option_name.empty()) {
       provider_options.options.erase(
-        std::remove_if(provider_options.options.begin(),
-                       provider_options.options.end(),
-                       [&option_name](const Config::NamedString& opt) {
-                         return opt.first == option_name;
-                       }),
-        provider_options.options.end());
+          std::remove_if(provider_options.options.begin(),
+                         provider_options.options.end(),
+                         [&option_name](const Config::NamedString& opt) {
+                           return opt.first == option_name;
+                         }),
+          provider_options.options.end());
     }
   }
 
