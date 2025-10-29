@@ -407,15 +407,18 @@ class Model:
             pass
 
         inputs = dict(zip(self.input_names, self.input_names))
-        inputs.update({
-            "past_key_names": "past_key_values.%d.key",
-            "past_value_names": "past_key_values.%d.value",
-        })
+        if not self.exclude_kv_caches:
+            inputs.update({
+                "past_key_names": "past_key_values.%d.key",
+                "past_value_names": "past_key_values.%d.value",
+            })
+
         outputs = dict(zip(self.output_names, self.output_names))
-        outputs.update({
-            "present_key_names": "present.%d.key",
-            "present_value_names": "present.%d.value",
-        })
+        if not self.exclude_kv_caches:
+            outputs.update({
+                "present_key_names": "present.%d.key",
+                "present_value_names": "present.%d.value",
+            })
         if "hidden_states" in outputs:
             # Remove 'hidden_states' from 'outputs' entry in config since ORT GenAI doesn't use it
             del outputs["hidden_states"]
