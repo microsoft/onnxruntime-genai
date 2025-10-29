@@ -6,7 +6,7 @@
 #include "kv_cache.h"
 #include "windowed_kv_cache.h"
 #include "../openvino/interface.h"
-#include <unordered_set>
+#include <algorithm>
 
 namespace Generators {
 
@@ -176,33 +176,25 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   // Set the size after empty_past_ has been created with 0 for this field
-  if (state.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx &&
-      model_.config_->model.decoder.sliding_window.has_value() &&
+  if (model_.config_->model.decoder.sliding_window.has_value() &&
       model_.config_->model.decoder.sliding_window->window_size > 0) {
-    int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
-    int max_length = state_.params_->search.max_length;
+    const int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
+    const int max_length = state_.params_->search.max_length;
 
     // Check if we need per-layer allocation for models with alternating attention patterns
     if (!model_.config_->model.decoder.sliding_window->layers.empty()) {
       // Use per-layer allocation based on sliding window layer indices
-      use_layer_types_ = true;
       layer_shapes_.resize(layer_count_);
 
-      // Create a set of sliding window layer indices for fast lookup
-      std::unordered_set<int> sliding_layers(
-          model_.config_->model.decoder.sliding_window->layers.begin(),
-          model_.config_->model.decoder.sliding_window->layers.end());
-
+      // Initialize all layers with base shape and max_length
       for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
-        layer_shapes_[layer_idx] = shape_;  // Copy base shape
+        layer_shapes_[layer_idx] = shape_;
+        layer_shapes_[layer_idx][2] = max_length;
+      }
 
-        if (sliding_layers.count(layer_idx) > 0) {
-          // Sliding window layer
-          layer_shapes_[layer_idx][2] = std::min(max_length, sliding_window_size);
-        } else {
-          // Full attention layer
-          layer_shapes_[layer_idx][2] = max_length;
-        }
+      // Update sliding window layers with constrained cache size
+      for (int layer_idx : model_.config_->model.decoder.sliding_window->layers) {
+        layer_shapes_[layer_idx][2] = std::min(max_length, sliding_window_size);
       }
       // Set shape_[2] to max of all layer shapes for RewindTo bounds checking
       shape_[2] = max_length;
@@ -215,31 +207,20 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   try {
-    if (use_layer_types_) {
-      // Allocate per-layer with different shapes
-      for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
-        // Key tensor
-        presents_.push_back(OrtValue::CreateTensor(Allocator(), layer_shapes_[layer_idx], type_));
-        if (Device().GetType() != DeviceType::WEBGPU) {
-          ByteWrapTensor(Device(), *presents_.back()).Zero();
-        }
-
-        // Value tensor
-        presents_.push_back(OrtValue::CreateTensor(Allocator(), layer_shapes_[layer_idx], type_));
-        if (Device().GetType() != DeviceType::WEBGPU) {
-          ByteWrapTensor(Device(), *presents_.back()).Zero();
-        }
+    // Allocate KV cache tensors - 2 per layer (key and value)
+    // For per-layer shapes: alternates between key and value for each layer
+    // For uniform shape: all tensors use the same shape
+    for (int i = 0; i < layer_count_ * 2; ++i) {
+      std::array<int64_t, 4> tensor_shape = shape_;
+      if (!layer_shapes_.empty()) {
+        // Per-layer allocation: use layer-specific shape
+        // i/2 gives us the layer index since we have 2 tensors per layer
+        tensor_shape = layer_shapes_[i / 2];
       }
-    } else {
-      // Uniform allocation (existing behavior)
-      for (int i = 0; i < layer_count_ * 2; ++i) {
-        presents_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
 
-        // Zero the memory so we don't leak any data from the previous run
-        // WebGPU device has no Zero() implementation yet. Since this zeroing is optional we disable it for WebGPU for now
-        if (Device().GetType() != DeviceType::WEBGPU) {
-          ByteWrapTensor(Device(), *presents_.back()).Zero();
-        }
+      presents_.push_back(OrtValue::CreateTensor(Allocator(), tensor_shape, type_));
+      if (Device().GetType() != DeviceType::WEBGPU) {
+        ByteWrapTensor(Device(), *presents_.back()).Zero();
       }
     }
   } catch (const Ort::Exception&) {
@@ -288,11 +269,11 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
     }
   }
 
-  if (use_layer_types_) {
+  if (!layer_shapes_.empty()) {
     // Update per-layer shapes based on total_length, but respect max allocations
     for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
-      int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
-      int actual_length = std::min(total_length, max_cache_length);
+      const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
+      const int actual_length = std::min(total_length, max_cache_length);
 
       std::array<int64_t, 4> current_shape = layer_shapes_[layer_idx];
       current_shape[2] = actual_length;
@@ -341,7 +322,7 @@ template <typename T>
 void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
   assert(index > 0 && !past_present_share_buffer_);
 
-  if (use_layer_types_) {
+  if (!layer_shapes_.empty()) {
     // Handle per-layer shapes
     // First validate that index doesn't exceed the global max_length
     int max_length = static_cast<int>(shape_[2]);  // Set to max_length in constructor
@@ -350,23 +331,23 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
     }
 
     for (int i = 0; i < layer_count_ * 2; i++) {
-      int layer_idx = i / 2;
-      std::array<int64_t, 4> layer_shape = layer_shapes_[layer_idx];
-      int layer_max_cache = static_cast<int>(layer_shape[2]);
+      const int layer_idx = i / 2;
+      const std::array<int64_t, 4> layer_shape = layer_shapes_[layer_idx];
+      const int layer_max_cache = static_cast<int>(layer_shape[2]);
 
       // For each layer, rewind to min(index, layer's max capacity)
       // - Full attention layers: min(index, max_length)
       // - Sliding window layers: min(index, sliding_window_size)
-      int actual_rewind_length = std::min(static_cast<int>(index), layer_max_cache);
+      const int actual_rewind_length = std::min(static_cast<int>(index), layer_max_cache);
 
       std::array<int64_t, 4> new_shape = layer_shape;
       new_shape[2] = actual_rewind_length;
-      auto batch_x_num_heads = new_shape[0] * new_shape[1];
-      auto new_length_x_head_size = new_shape[2] * new_shape[3];
+      const auto batch_x_num_heads = new_shape[0] * new_shape[1];
+      const auto new_length_x_head_size = new_shape[2] * new_shape[3];
 
       OrtValue& present = *presents_[i];
-      auto present_shape = present.GetTensorTypeAndShapeInfo()->GetShape();
-      auto old_length_x_head_size = present_shape[2] * new_shape[3];
+      const auto present_shape = present.GetTensorTypeAndShapeInfo()->GetShape();
+      const auto old_length_x_head_size = present_shape[2] * new_shape[3];
 
       std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), new_shape, type_);
       auto past_span = WrapTensor<T>(Device(), *past);
@@ -414,13 +395,11 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device
   std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
 
   std::array<int64_t, 4> tensor_shape;
-  if (use_layer_types_) {
+  if (!layer_shapes_.empty()) {
     // Get shape from the actual tensor for per-layer allocation
     OrtValue& present_value = *presents_[index];
-    auto present_shape = present_value.GetTensorTypeAndShapeInfo()->GetShape();
-    for (size_t i = 0; i < 4; i++) {
-      tensor_shape[i] = present_shape[i];
-    }
+    const auto present_shape = present_value.GetTensorTypeAndShapeInfo()->GetShape();
+    std::copy(present_shape.begin(), present_shape.end(), tensor_shape.begin());
   } else {
     tensor_shape = shape_;
   }
