@@ -49,9 +49,6 @@ def main(args):
     # Apply search configuration overlay
     config.overlay(json.dumps({"search": search_config}))
 
-    if args.verbose:
-        print("Creating model...")
-
     model = og.Model(config)
 
     if args.verbose: print("Model loaded")
