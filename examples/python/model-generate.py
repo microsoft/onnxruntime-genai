@@ -21,24 +21,40 @@ def main(args):
 
     config = og.Config(args.model_path)
 
+    # Configure search options
     search_config = {
         "batch_size": batch_size,
-        "num_beams": 3
+        "num_beams": args.num_beams
     }
 
-    # Add chunk_size only for NvTensorRtRtx execution provider
-    if args.execution_provider == "NvTensorRtRtx" and args.chunk_size > 0:
-        search_config["chunk_size"] = args.chunk_size
-
-    config.overlay(json.dumps({"search": search_config}))
-
-
+    # Configure execution provider if specified
     if args.execution_provider != "follow_config":
         config.clear_providers()
         if args.execution_provider != "cpu":
             if args.verbose:
                 print(f"Setting model to {args.execution_provider}...")
             config.append_provider(args.execution_provider)
+
+    # Disable CUDA graph if using beam search (num_beams > 1),
+    # num_beams > 1 requires past_present_share_buffer to be false and out of place kv cache is not supported with cuda graph true hance make is false
+    if args.num_beams > 1:
+        if args.verbose:
+            print(f"num_beams={args.num_beams} > 1 with NvTensorRtRtx. Disabling CUDA graph...")
+        config.set_provider_option("NvTensorRtRtx", "enable_cuda_graph", "0")
+        if args.verbose:
+            print("Set enable_cuda_graph to '0' via set_provider_option()")
+
+    if args.execution_provider == "NvTensorRtRtx":
+        # Add chunk_size if specified
+        if args.chunk_size > 0:
+            search_config["chunk_size"] = args.chunk_size
+
+    # Apply search configuration overlay
+    config.overlay(json.dumps({"search": search_config}))
+
+    if args.verbose:
+        print("Creating model...")
+
     model = og.Model(config)
 
     if args.verbose: print("Model loaded")
@@ -103,6 +119,7 @@ if __name__ == "__main__":
     parser.add_argument('-b', '--batch_size_for_cuda_graph', type=int, default=1, help='Max batch size for CUDA graph')
     parser.add_argument('-c', '--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}. If not set, the prompt is used as is.')
     parser.add_argument('--chunk_size', type=int, default=0, help='Chunk size for prefill chunking during context processing (default: 0 = disabled, >0 = enabled)')
+    parser.add_argument('-n', '--num_beams', type=int, default=3, help='Number of beams for beam search (default: 3)')
     parser.add_argument('--non-interactive', action=argparse.BooleanOptionalAction, required=False, default=False, help='Non-interactive mode, mainly for CI usage')
 
     args = parser.parse_args()

@@ -4,6 +4,7 @@
 #include "generators.h"
 #include "runtime_settings.h"
 #include "json.h"
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <limits>
@@ -1032,8 +1033,26 @@ void ClearProviders(Config& config) {
 }
 
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
-  if (auto normalized_provider = NormalizeProviderName(provider_name); !contains(config.model.decoder.session_options.providers, normalized_provider))
+  // Normalize the provider name once
+  auto normalized_provider = NormalizeProviderName(provider_name);
+
+  // Ensure provider is in the providers list
+  if (!contains(config.model.decoder.session_options.providers, normalized_provider)) {
     config.model.decoder.session_options.providers.push_back(std::string(normalized_provider));
+  }
+
+  // Remove any existing options with the same name to avoid duplicates
+  for (auto& provider_options : config.model.decoder.session_options.provider_options) {
+    if (provider_options.name == normalized_provider && !option_name.empty()) {
+      provider_options.options.erase(
+        std::remove_if(provider_options.options.begin(),
+                       provider_options.options.end(),
+                       [&option_name](const Config::NamedString& opt) {
+                         return opt.first == option_name;
+                       }),
+        provider_options.options.end());
+    }
+  }
 
   std::ostringstream json;
   json << R"({")" << provider_name << R"(":{)";
