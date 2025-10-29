@@ -38,9 +38,7 @@ def main(args):
     # Disable CUDA graph if using beam search (num_beams > 1),
     # num_beams > 1 requires past_present_share_buffer to be false and out of place kv cache is not supported with cuda graph true hance make is false
     if args.num_beams > 1:
-        if args.verbose:
-            print(f"num_beams={args.num_beams} > 1 with NvTensorRtRtx. Disabling CUDA graph...")
-        config.set_provider_option("NvTensorRtRtx", "enable_cuda_graph", "0")
+        config.set_provider_option(args.execution_provider, "enable_cuda_graph", "0")
         if args.verbose:
             print("Set enable_cuda_graph to '0' via set_provider_option()")
 
