@@ -298,6 +298,7 @@ class Model:
         if self.io_dtype == ir.DataType.BFLOAT16:
             self.output_types["logits"] = ir.DataType.FLOAT
 
+        self.exclude_kv_caches = self.extra_options.get("exclude_kv_caches", False)
         self.exclude_lm_head = self.extra_options.get("exclude_lm_head", False)
         self.include_hidden_states = self.extra_options.get("include_hidden_states", False)
 
@@ -650,18 +651,19 @@ class Model:
             outputs.append(self.make_value(name, dtype=dtype, shape=shape))
 
         # Add KV cache to inputs and outputs
-        for i in range(self.num_layers):
-            # Add KV cache to inputs
-            key_name = f"past_key_values.{i}.key"
-            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
-            value_name = f"past_key_values.{i}.value"
-            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
+        if not self.exclude_kv_caches:
+            for i in range(self.num_layers):
+                # Add KV cache to inputs
+                key_name = f"past_key_values.{i}.key"
+                inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
+                value_name = f"past_key_values.{i}.value"
+                inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
 
-            # Add KV cache to outputs
-            key_name = f"present.{i}.key"
-            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"]))
-            value_name = f"present.{i}.value"
-            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"]))
+                # Add KV cache to outputs
+                key_name = f"present.{i}.key"
+                outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"]))
+                value_name = f"present.{i}.value"
+                outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"]))
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
@@ -2070,10 +2072,10 @@ class Model:
             self.attention_attrs["k_path"] = f"{k_rotary_name}/output_0"
 
         # Make repeat KV nodes (Note: `repeat_kv` needs to be kept since GroupQueryAttention isn't supported for FP32 CUDA)
-        past_k = f"past_key_values.{layer_id}.key"
-        past_v = f"past_key_values.{layer_id}.value"
-        present_k = f"present.{layer_id}.key"
-        present_v = f"present.{layer_id}.value"
+        past_k = f"past_key_values.{layer_id}.key" if not self.exclude_kv_caches else ""
+        past_v = f"past_key_values.{layer_id}.value" if not self.exclude_kv_caches else ""
+        present_k = f"present.{layer_id}.key" if not self.exclude_kv_caches else ""
+        present_v = f"present.{layer_id}.value" if not self.exclude_kv_caches else ""
         if self.num_attn_heads != self.num_kv_heads and self.attention_attrs["op_type"] == "MultiHeadAttention":
             self.attention_attrs["k_path"] = self.make_repeat_kv(layer_id, root_input=self.attention_attrs["k_path"], past_kv=past_k, present_kv=present_k)
             self.attention_attrs["v_path"] = self.make_repeat_kv(layer_id, root_input=self.attention_attrs["v_path"], past_kv=past_v, present_kv=present_v)
@@ -4685,6 +4687,10 @@ def get_args():
                 exclude_lm_head = Remove language modeling head from your ONNX model.
                     Use this option when you want to remove the language modeling head from within your ONNX model.
                     Instead of `logits`, you will have `hidden_states` as the output to your ONNX model.
+                exclude_kv_caches = Remove KV cache inputs and outputs from your ONNX model.
+                    Use this option when you want to remove past key-value cache inputs and present key-value cache outputs from within your ONNX model.
+                    There will be no `past_key_values.idx.key` or `past_key_values.idx.value` inputs to your ONNX model.
+                    There will be no `present.idx.key` or `present.idx.value` outputs to your ONNX model.
                 include_hidden_states = Include hidden states as output from your ONNX model.
                     Use this option when you want to have the hidden states as an output from your ONNX model.
                     In addition to `logits`, you will have `hidden_states` as an output to your ONNX model.
