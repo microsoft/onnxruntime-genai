@@ -427,11 +427,11 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
 
       std::span<int32_t> new_next_token_span{ff_tokens};
       auto new_next_token = AllocateInputIdsOnDevice(new_next_token_span);
-      auto logits = state_->Run(search_->GetSequenceLength(), new_next_token, search_->GetNextIndices());
+      logits = state_->Run(search_->GetSequenceLength(), new_next_token, search_->GetNextIndices());
       if (g_log.enabled && g_log.model_logits) {
-        auto& stream = Log("model_logits");
-        DumpValues(stream, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
-        stream << std::endl;
+        auto& stream_ = Log("model_logits");
+        DumpValues(stream_, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
+        stream_ << std::endl;
       }
       SetLogits(logits);
     }
