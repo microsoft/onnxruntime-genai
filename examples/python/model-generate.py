@@ -42,10 +42,9 @@ def main(args):
         if args.verbose:
             print("Set enable_cuda_graph to '0' via set_provider_option()")
 
-    if args.execution_provider == "NvTensorRtRtx":
-        # Add chunk_size if specified
-        if args.chunk_size > 0:
-            search_config["chunk_size"] = args.chunk_size
+    # Add chunk_size only for NvTensorRtRtx execution provider
+    if args.execution_provider == "NvTensorRtRtx" and args.chunk_size > 0:
+        search_config["chunk_size"] = args.chunk_size
 
     # Apply search configuration overlay
     config.overlay(json.dumps({"search": search_config}))
