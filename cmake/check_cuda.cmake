@@ -52,6 +52,13 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
   )
 
   add_compile_definitions(USE_CUDA=1)
+
+  if(USE_TRT_RTX)
+    add_compile_definitions(USE_TRT_RTX=1)
+  else()
+    add_compile_definitions(USE_TRT_RTX=0)
+  endif()
+
   include_directories("${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}")
 elseif(USE_CUDA)
   # USE_CUDA is true but cmake could not find the cuda compiler
@@ -60,4 +67,5 @@ else()
   file(GLOB generator_cuda_srcs "${GENERATORS_ROOT}/*_cuda*.*")
   list(REMOVE_ITEM generator_srcs ${generator_cuda_srcs})
   add_compile_definitions(USE_CUDA=0)
+  add_compile_definitions(USE_TRT_RTX=0)
 endif()
