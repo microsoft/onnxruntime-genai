@@ -77,13 +77,13 @@ public class TokenizerTest {
     // We load the phi-2 model just to get a tokenizer (phi-2 does not have a chat template)
     try (Model model = new Model(TestUtils.phi2ModelPath());
         Tokenizer tokenizer = new Tokenizer(model)) {
-      // Testing phi-4 chat template
+      // Testing phi-4-mini chat template
       String messagesJson =
           "[\n"
               + "  {\n"
               + "    \"role\": \"system\",\n"
               + "    \"content\": \"You are a helpful assistant.\",\n"
-              + "    \"tools\": \"Calculator\"\n"
+              + "    \"tools\": \"[{\\\"name\\\": \\\"calculate_sum\\\", \\\"description\\\": \\\"Calculate the sum of two numbers.\\\", \\\"parameters\\\": {\\\"a\\\": {\\\"type\\\": \\\"int\\\"}, \\\"b\\\": {\\\"type\\\": \\\"int\\\"}}}]\"\n"
               + "  },\n"
               + "  {\n"
               + "    \"role\": \"user\",\n"
@@ -104,9 +104,9 @@ public class TokenizerTest {
               + " + '<|end|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}"
               + "{{ '<|assistant|>' }}{% else %}{{ eos_token }}{% endif %}";
 
-      // From HuggingFace Python output for 'microsoft/Phi-4-multimodal-instruct'
+      // From HuggingFace Python output for 'microsoft/Phi-4-mini-instruct'
       String expectedOutput =
-          "<|system|>You are a helpful assistant.<|tool|>Calculator<|/tool|><|end|><|user|>"
+          "<|system|>You are a helpful assistant.<|tool|>[{'name': 'calculate_sum', 'description': 'Calculate the sum of two numbers.', 'parameters': {'a': {'type': 'int'}, 'b': {'type': 'int'}}}]<|/tool|><|end|><|user|>"
               + "How do I add two numbers?<|end|><|assistant|>You can add numbers by using the '+' operator.<|end|><|assistant|>";
 
       String result = tokenizer.applyChatTemplate(chatTemplate, messagesJson, null, true);
