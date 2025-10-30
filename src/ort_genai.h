@@ -430,12 +430,8 @@ struct OgaGeneratorParams : OgaAbstract {
     printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
   }
 
-  void SetGuidance(const char* type, const char* data) {
-    OgaCheckResult(OgaGeneratorParamsSetGuidance(this, type, data));
-  }
-
-  void SetGuidanceFFTokens(bool enabled) {
-    OgaCheckResult(OgaGeneratorParamsSetGuidanceFFTokens(this, enabled));
+  void SetGuidance(const char* type, const char* data, bool enable_ff_tokens) {
+    OgaCheckResult(OgaGeneratorParamsSetGuidance(this, type, data, enable_ff_tokens));
   }
 
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }

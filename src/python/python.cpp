@@ -196,12 +196,8 @@ struct PyGeneratorParams {
     std::cerr << "TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release" << std::endl;
   }
 
-  void SetGuidance(const std::string& type, const std::string& data) {
-    params_->SetGuidance(type.c_str(), data.c_str());
-  }
-
-  void SetGuidanceFFTokens(bool enabled) {
-    params_->SetGuidanceFFTokens(enabled);
+  void SetGuidance(const std::string& type, const std::string& data, bool enable_ff_tokens = false) {
+    params_->SetGuidance(type.c_str(), data.c_str(), enable_ff_tokens);
   }
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
@@ -322,8 +318,9 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init<const OgaModel&>())
       .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
-      .def("set_guidance", &PyGeneratorParams::SetGuidance)
-      .def("set_guidance_ff_tokens", &PyGeneratorParams::SetGuidanceFFTokens);
+      .def("set_guidance", &PyGeneratorParams::SetGuidance,
+           pybind11::arg("type"), pybind11::arg("data"),
+           pybind11::arg("enable_ff_tokens") = false);
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });

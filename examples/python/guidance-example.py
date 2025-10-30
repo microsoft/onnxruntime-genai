@@ -41,8 +41,7 @@ def main(args):
     guidance_type = "lark_grammar"
     guidance_input = f"""start: %json {json.dumps(schema)}\n"""
     params.set_search_options(**search_options)
-    params.set_guidance(guidance_type, guidance_input) # set guidance
-    params.set_guidance_ff_tokens(args.enable_ff_tokens)  # enable guidance feed-forward tokens
+    params.set_guidance(guidance_type, guidance_input, args.enable_ff_tokens) # set guidance
 
     generator = og.Generator(model, params)
 

@@ -263,13 +263,10 @@ GeneratorParams::GeneratorParams(const Model& model)
   }
 }
 
-void GeneratorParams::SetGuidance(std::string_view type, std::string_view data) {
+void GeneratorParams::SetGuidance(std::string_view type, std::string_view data, bool enable_ff_tokens) {
   guidance_type = type;
   guidance_data = data;
-}
-
-void GeneratorParams::SetGuidanceFFTokens(bool enabled) {
-  guidance_ff_tokens_enabled = enabled;
+  guidance_ff_tokens_enabled = enable_ff_tokens;
 }
 
 bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_type) const {
