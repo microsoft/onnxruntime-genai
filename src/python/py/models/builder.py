@@ -286,8 +286,9 @@ class Model:
         self.int4_tied_embeddings = config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False
         self.int4_tied_embeddings = extra_options.get("int4_tied_embeddings", self.int4_tied_embeddings)
         self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last"}
-        if not self.int8_lm_head:
+        if not self.int8_lm_head and extra_options.get("int4_algo_config", "default") != "rtn":
             # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
+            # tied_embeddings lm_head.MatMul.weight_Q{}G{} only works with rtn on 4bit
             self.int4_tied_embeddings = False
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
