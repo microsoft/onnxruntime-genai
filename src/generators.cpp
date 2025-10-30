@@ -263,9 +263,10 @@ GeneratorParams::GeneratorParams(const Model& model)
   }
 }
 
-void GeneratorParams::SetGuidance(std::string_view type, std::string_view data) {
+void GeneratorParams::SetGuidance(std::string_view type, std::string_view data, bool enable_ff_tokens = false) {
   guidance_type = type;
   guidance_data = data;
+  guidance_ff_tokens_enabled = enable_ff_tokens;
 }
 
 bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_type) const {
@@ -399,10 +400,12 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
+
   if (last_action_ == Action::generated && guidance_logits_processor_) {
     auto next_tokens_span = next_tokens.CopyDeviceToCpu();
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
+
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
@@ -410,6 +413,27 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
     stream << std::endl;
   }
   SetLogits(logits);
+
+  if (last_action_ == Action::generated && guidance_logits_processor_) {
+    auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
+    if (!ff_tokens.empty()) {
+      // process fast-forward tokens
+      std::span<int32_t> forced_tokens_span{ff_tokens};
+      auto forced_tokens = AllocateInputIdsOnDevice(forced_tokens_span);
+      search_->AppendTokens(forced_tokens);
+
+      std::span<int32_t> new_next_token_span{ff_tokens};
+      auto new_next_token = AllocateInputIdsOnDevice(new_next_token_span);
+      logits = state_->Run(search_->GetSequenceLength(), new_next_token, search_->GetNextIndices());
+      if (g_log.enabled && g_log.model_logits) {
+        auto& stream_ = Log("model_logits");
+        DumpValues(stream_, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
+        stream_ << std::endl;
+      }
+      SetLogits(logits);
+    }
+  }
+
   last_action_ = Action::standard;
   computed_logits_ = true;
 }
