@@ -423,7 +423,7 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatch
  * \param[in] enable_ff_tokens Whether to enable ff_tokens generation. Only valid when guidance type is set and batch_size is 1.
  * \return OgaResult containing the error message if the setting of the guidance failed
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens = false);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens);
 
 /**
  * \brief Creates a generator from the given model and generator params.
