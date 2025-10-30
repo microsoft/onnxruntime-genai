@@ -561,12 +561,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
           options.insert({"user_compute_stream", stream_value_str});
         }
 
-        std::vector<const char*> keys, values;
-        for (auto& [key, value] : options) {
-          keys.emplace_back(key.c_str());
-          values.emplace_back(value.c_str());
-        }
-
         session_options.AppendExecutionProvider_V2(GetOrtEnv(), cuda_ep_devices_ptrs, options);
       } else {
         auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
