@@ -375,6 +375,10 @@ class Model:
                 and not self.attention_attrs["k_norm"]
             )
 
+            # Allow extra_options to override use_packed_matmul
+            if "unpack_matmul" in extra_options:
+                self.attention_attrs["use_packed_matmul"] = not extra_options.get("unpack_matmul", False)
+
             # Some EPs don't support fusing rotary embeddings inside GQA yet
             self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml"]
             if self.attention_attrs["use_rope_in_attn"]:
