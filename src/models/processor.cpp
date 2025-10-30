@@ -199,7 +199,7 @@ std::unique_ptr<OrtValue> ProcessTensor<float, int64_t>(OrtxTensor* tensor, Ort:
 }
 
 template <typename T>
-static OrtxTensor* MakeOrtxTensor(Generators::Tensor* src) {
+OrtxTensor* MakeOrtxTensor(Generators::Tensor* src) {
   if (!src) {
     throw std::runtime_error("Null tensor passed to MakeOrtxTensor");
   }
@@ -212,7 +212,7 @@ static OrtxTensor* MakeOrtxTensor(Generators::Tensor* src) {
 }
 
 template <typename T>
-static const OrtxTensor* MakeOrtxTensorConst(const Generators::Tensor* src) {
+const OrtxTensor* MakeOrtxTensorConst(const Generators::Tensor* src) {
   if (!src) {
     throw std::runtime_error("Null tensor passed to MakeOrtxTensorConst");
   }
