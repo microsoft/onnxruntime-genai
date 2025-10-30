@@ -401,7 +401,7 @@ inline OrtEnv& OrtEnv::CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info,
 inline std::vector<const OrtEpDevice*> OrtEnv::GetEpDevices() {
   size_t num_devices = 0;
   const OrtEpDevice* const* device_ptrs = nullptr;
-  Ort::api->GetEpDevices(this, &device_ptrs, &num_devices);
+  Ort::ThrowOnError(Ort::api->GetEpDevices(this, &device_ptrs, &num_devices));
 
   std::vector<const OrtEpDevice*> devices;
   for (size_t i = 0; i < num_devices; ++i) {
