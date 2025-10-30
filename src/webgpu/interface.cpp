@@ -14,29 +14,133 @@ const char* device_label = "WebGPU";
 struct WebGPUMemory final : DeviceBuffer {
   WebGPUMemory(size_t size) : owned_{true} {
     size_in_bytes_ = size;
-    p_cpu_ = p_device_ = static_cast<uint8_t*>(ort_allocator_->Alloc(size_in_bytes_));
+    p_device_ = static_cast<uint8_t*>(ort_allocator_->Alloc(size_in_bytes_));
   }
 
   WebGPUMemory(void* p, size_t size) : owned_{false} {
     size_in_bytes_ = size;
-    p_cpu_ = p_device_ = static_cast<uint8_t*>(p);
+    p_device_ = static_cast<uint8_t*>(p);
   }
 
   ~WebGPUMemory() override {
     if (owned_)
       ort_allocator_->Free(p_device_);
+    if (p_cpu_)
+      free(p_cpu_);
   }
 
   const char* GetType() const override { return device_label; }
-  void AllocateCpu() override { throw std::runtime_error("CPU can't access WebGPU memory"); }
-  void CopyDeviceToCpu() override { throw std::runtime_error("CPU can't access WebGPU memory"); }
-  void CopyCpuToDevice() override { throw std::runtime_error("CPU can't access WebGPU memory"); }
+
+  void AllocateCpu() override {
+    if (!p_cpu_)
+      p_cpu_ = static_cast<uint8_t*>(malloc(size_in_bytes_));
+  }
+
+  void CopyDeviceToCpu() override {
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
+
+    AllocateCpu();
+
+    // Get WebGPU allocator's memory info
+    const OrtMemoryInfo* webgpu_mem_info = nullptr;
+    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
+
+    // Create source tensor (WebGPU device memory) - treat as 1D uint8 array
+    int64_t shape_val = static_cast<int64_t>(size_in_bytes_);
+    std::span<const int64_t> shape{&shape_val, 1};
+    auto src_tensor = OrtValue::CreateTensor(*webgpu_mem_info, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+    // Create CPU memory info and destination tensor
+    auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto dst_tensor = OrtValue::CreateTensor(*cpu_mem_info, p_cpu_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+    // Use ORT C API's CopyTensors (synchronous copy, stream = nullptr)
+    OrtValue* src_ptrs[] = {src_tensor.get()};
+    OrtValue* dst_ptrs[] = {dst_tensor.get()};
+    Ort::ThrowOnError(Ort::api->CopyTensors(&GetOrtEnv(), src_ptrs, dst_ptrs, nullptr, 1));
+  }
+
+  void CopyCpuToDevice() override {
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
+
+    // Get WebGPU allocator's memory info
+    const OrtMemoryInfo* webgpu_mem_info = nullptr;
+    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
+
+    // Create source tensor (CPU memory) - treat as 1D uint8 array
+    int64_t shape_val = static_cast<int64_t>(size_in_bytes_);
+    std::span<const int64_t> shape{&shape_val, 1};
+    auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, p_cpu_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+    // Create destination tensor (WebGPU device memory)
+    auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+    // Use ORT C API's CopyTensors (synchronous copy, stream = nullptr)
+    OrtValue* src_ptrs[] = {src_tensor.get()};
+    OrtValue* dst_ptrs[] = {dst_tensor.get()};
+    Ort::ThrowOnError(Ort::api->CopyTensors(&GetOrtEnv(), src_ptrs, dst_ptrs, nullptr, 1));
+  }
+
   void CopyFrom(size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes) override {
-    throw std::runtime_error("CPU can't access WebGPU memory");
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
+
+    // Get WebGPU allocator's memory info
+    const OrtMemoryInfo* webgpu_mem_info = nullptr;
+    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
+
+    if (source.GetType() == device_label) {
+      // WebGPU-to-WebGPU copy using CopyTensors
+      // Create source tensor (source WebGPU buffer sub-span)
+      int64_t shape_val = static_cast<int64_t>(size_in_bytes);
+      std::span<const int64_t> shape{&shape_val, 1};
+      auto src_tensor = OrtValue::CreateTensor(*webgpu_mem_info, source.p_device_ + begin_source, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+      // Create destination tensor (this WebGPU buffer sub-span)
+      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, p_device_ + begin_dest, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+      // Use ORT C API's CopyTensors for GPU-to-GPU copy
+      OrtValue* src_ptrs[] = {src_tensor.get()};
+      OrtValue* dst_ptrs[] = {dst_tensor.get()};
+      Ort::ThrowOnError(Ort::api->CopyTensors(&GetOrtEnv(), src_ptrs, dst_ptrs, nullptr, 1));
+    } else {
+      // Cross-device copy (e.g., CPU to WebGPU or vice versa)
+      // Use CopyThroughCpu as fallback since we don't have source device's OrtMemoryInfo
+      CopyThroughCpu(*this, begin_dest, source, begin_source, size_in_bytes);
+    }
   }
 
   void Zero() override {
-    throw std::runtime_error("Zeroing not implemented for WebGPU memory");
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
+
+    // Allocate zeroed CPU memory
+    std::vector<uint8_t> zero_buffer(size_in_bytes_, 0);
+
+    // Get WebGPU allocator's memory info
+    const OrtMemoryInfo* webgpu_mem_info = nullptr;
+    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
+
+    // Create source tensor (CPU memory with zeros) - treat as 1D uint8 array
+    int64_t shape_val = static_cast<int64_t>(size_in_bytes_);
+    std::span<const int64_t> shape{&shape_val, 1};
+    auto cpu_mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
+    auto src_tensor = OrtValue::CreateTensor(*cpu_mem_info, zero_buffer.data(), size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+    // Create destination tensor (WebGPU device memory)
+    auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, p_device_, size_in_bytes_, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+
+    // Use ORT C API's CopyTensors to copy zeros to GPU (synchronous copy, stream = nullptr)
+    OrtValue* src_ptrs[] = {src_tensor.get()};
+    OrtValue* dst_ptrs[] = {dst_tensor.get()};
+    Ort::ThrowOnError(Ort::api->CopyTensors(&GetOrtEnv(), src_ptrs, dst_ptrs, nullptr, 1));
   }
 
   bool owned_;

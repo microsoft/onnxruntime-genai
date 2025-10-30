@@ -388,6 +388,28 @@ inline OrtEnv& OrtEnv::CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info,
   return *this;
 }
 
+inline std::vector<const OrtEpDevice*> OrtEnv::GetEpDevices() const {
+  const OrtEpDevice* const* device_ptrs = nullptr;
+  size_t num_devices = 0;
+  Ort::ThrowOnError(Ort::api->GetEpDevices(this, &device_ptrs, &num_devices));
+  return std::vector<const OrtEpDevice*>(device_ptrs, device_ptrs + num_devices);
+}
+
+inline void OrtEnv::CopyTensors(const std::vector<const OrtValue*>& src_tensors,
+                                const std::vector<OrtValue*>& dst_tensors,
+                                OrtSyncStream* stream) const {
+  if (src_tensors.size() != dst_tensors.size()) {
+    throw std::runtime_error("Number of source and destination tensors must match");
+  }
+  Ort::ThrowOnError(Ort::api->CopyTensors(this, src_tensors.data(), dst_tensors.data(), stream, src_tensors.size()));
+}
+
+inline std::unique_ptr<OrtSyncStream> OrtSyncStream::Create(const OrtEpDevice* ep_device, const OrtKeyValuePairs* stream_options) {
+  OrtSyncStream* p;
+  Ort::ThrowOnError(Ort::api->CreateSyncStreamForEpDevice(ep_device, stream_options, &p));
+  return std::unique_ptr<OrtSyncStream>(p);
+}
+
 inline std::unique_ptr<OrtThreadingOptions> OrtThreadingOptions::Create() {
   OrtThreadingOptions* p;
   Ort::ThrowOnError(Ort::api->CreateThreadingOptions(&p));
