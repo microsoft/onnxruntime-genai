@@ -369,14 +369,14 @@ class Model:
             # Some EPs don't support packed Q/K/V for GQA yet
             # Packed MatMul with LoRA/QLoRA is not currently supported
             self.attention_attrs["use_packed_matmul"] = (
-                self.ep not in ["dml", "webgpu"]
+                self.ep not in ["dml"]
                 and not self.matmul_attrs["use_lora"]
                 and not self.attention_attrs["q_norm"]
                 and not self.attention_attrs["k_norm"]
             )
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
-            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml", "webgpu"]
+            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml"]
             if self.attention_attrs["use_rope_in_attn"]:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 self.input_names.remove("position_ids")
