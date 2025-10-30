@@ -8,6 +8,7 @@
 #include "ort_genai_c.h"
 #include "generators.h"
 #include "models/model.h"
+#include "models/processor.h"
 #include "constrained_logits_processor.h"
 #include "runtime_settings.h"
 #include "search.h"
