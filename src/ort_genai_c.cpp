@@ -8,6 +8,7 @@
 #include "ort_genai_c.h"
 #include "generators.h"
 #include "models/model.h"
+#include "models/processor.h"
 #include "constrained_logits_processor.h"
 #include "runtime_settings.h"
 #include "search.h"
@@ -76,36 +77,6 @@ T* ReturnShared(std::shared_ptr<U>& p) {
 template <typename T, typename U>
 T* ReturnUnique(std::unique_ptr<U> p) {
   return static_cast<T*>(p.release());
-}
-
-// Helper function to convert OgaTensor to OrtxTensor, sometimes needed as an input to onnxruntime-extensions methods.
-template <typename T>
-static OrtxTensor* MakeOrtxTensor(OgaTensor* src) {
-  if (!src) {
-    throw std::runtime_error("Null tensor passed to MakeOrtxTensor");
-  }
-
-  auto* gen = reinterpret_cast<Generators::Tensor*>(src);
-  T* data = const_cast<T*>(gen->GetData<T>());
-  std::vector<int64_t> shape = gen->GetShape();
-
-  auto* ort = new Ort::Custom::Tensor<T>(shape, data);
-  return reinterpret_cast<OrtxTensor*>(ort);
-}
-
-// Helper function to convert const OgaTensor to const OrtxTensor, sometimes needed as an input to onnxruntime-extensions methods.
-template <typename T>
-static const OrtxTensor* MakeOrtxTensorConst(const OgaTensor* src) {
-  if (!src) {
-    throw std::runtime_error("Null tensor passed to MakeOrtxTensorConst");
-  }
-
-  auto* gen = reinterpret_cast<const Generators::Tensor*>(src);
-  const T* data = gen->GetData<T>();
-  std::vector<int64_t> shape = gen->GetShape();
-
-  auto* ort = new Ort::Custom::Tensor<T>(shape, const_cast<T*>(data));
-  return reinterpret_cast<const OrtxTensor*>(ort);
 }
 
 extern "C" {
@@ -931,12 +902,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSplitSignalSegments(
     throw std::runtime_error("Null tensor argument passed to OgaSplitSignalSegments");
   }
 
-  const OrtxTensor* in_tensor = MakeOrtxTensorConst<float>(input);
-  const OrtxTensor* sr_tensor_obj = MakeOrtxTensorConst<int64_t>(sr_tensor);
-  const OrtxTensor* frame_tensor = MakeOrtxTensorConst<int64_t>(frame_ms_tensor);
-  const OrtxTensor* hop_tensor = MakeOrtxTensorConst<int64_t>(hop_ms_tensor);
-  const OrtxTensor* thr_tensor = MakeOrtxTensorConst<float>(energy_threshold_db_tensor);
-  OrtxTensor* out_tensor = MakeOrtxTensor<int64_t>(output0);
+  const OrtxTensor* in_tensor = MakeOrtxTensorConst<float>(reinterpret_cast<const Generators::Tensor*>(input));
+  const OrtxTensor* sr_tensor_obj = MakeOrtxTensorConst<int64_t>(reinterpret_cast<const Generators::Tensor*>(sr_tensor));
+  const OrtxTensor* frame_tensor = MakeOrtxTensorConst<int64_t>(reinterpret_cast<const Generators::Tensor*>(frame_ms_tensor));
+  const OrtxTensor* hop_tensor = MakeOrtxTensorConst<int64_t>(reinterpret_cast<const Generators::Tensor*>(hop_ms_tensor));
+  const OrtxTensor* thr_tensor = MakeOrtxTensorConst<float>(reinterpret_cast<const Generators::Tensor*>(energy_threshold_db_tensor));
+  OrtxTensor* out_tensor = MakeOrtxTensor<int64_t>(reinterpret_cast<Generators::Tensor*>(output0));
 
   extError_t err = OrtxSplitSignalSegments(
       in_tensor,
@@ -963,9 +934,9 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaMergeSignalSegments(
     throw std::runtime_error("Null tensor argument passed to OgaMergeSignalSegments");
   }
 
-  const OrtxTensor* seg_tensor = MakeOrtxTensorConst<int64_t>(segments_tensor);
-  const OrtxTensor* gap_tensor = MakeOrtxTensorConst<int64_t>(merge_gap_ms_tensor);
-  OrtxTensor* out_tensor = MakeOrtxTensor<int64_t>(output0);
+  const OrtxTensor* seg_tensor = MakeOrtxTensorConst<int64_t>(reinterpret_cast<const Generators::Tensor*>(segments_tensor));
+  const OrtxTensor* gap_tensor = MakeOrtxTensorConst<int64_t>(reinterpret_cast<const Generators::Tensor*>(merge_gap_ms_tensor));
+  OrtxTensor* out_tensor = MakeOrtxTensor<int64_t>(reinterpret_cast<Generators::Tensor*>(output0));
 
   extError_t err = OrtxMergeSignalSegments(
       seg_tensor,

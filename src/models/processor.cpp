@@ -198,8 +198,37 @@ std::unique_ptr<OrtValue> ProcessTensor<float, int64_t>(OrtxTensor* tensor, Ort:
   return tensor_value;
 }
 
+template <typename T>
+static OrtxTensor* MakeOrtxTensor(Generators::Tensor* src) {
+  if (!src) {
+    throw std::runtime_error("Null tensor passed to MakeOrtxTensor");
+  }
+
+  T* data = const_cast<T*>(src->GetData<T>());
+  std::vector<int64_t> shape = src->GetShape();
+
+  auto* ort = new Ort::Custom::Tensor<T>(shape, data);
+  return reinterpret_cast<OrtxTensor*>(ort);
+}
+
+template <typename T>
+static const OrtxTensor* MakeOrtxTensorConst(const Generators::Tensor* src) {
+  if (!src) {
+    throw std::runtime_error("Null tensor passed to MakeOrtxTensorConst");
+  }
+
+  const T* data = src->GetData<T>();
+  std::vector<int64_t> shape = src->GetShape();
+
+  auto* ort = new Ort::Custom::Tensor<T>(shape, const_cast<T*>(data));
+  return reinterpret_cast<const OrtxTensor*>(ort);
+}
+
 template std::unique_ptr<OrtValue> ProcessTensor<float>(OrtxTensor* tensor, Ort::Allocator& allocator);
 template std::unique_ptr<OrtValue> ProcessTensor<int64_t>(OrtxTensor* tensor, Ort::Allocator& allocator);
 template std::unique_ptr<OrtValue> ProcessTensor<bool>(OrtxTensor* tensor, Ort::Allocator& allocator);
 
+template const OrtxTensor* MakeOrtxTensorConst<float>(const Generators::Tensor*);
+template const OrtxTensor* MakeOrtxTensorConst<int64_t>(const Generators::Tensor*);
+template OrtxTensor* MakeOrtxTensor<int64_t>(Generators::Tensor*);
 }  // namespace Generators
