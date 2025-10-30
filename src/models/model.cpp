@@ -567,7 +567,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
           values.emplace_back(value.c_str());
         }
 
-        session_options.AppendExecutionProvider_V2(GetOrtEnv(), ep_devices_ptrs, options);
+        session_options.AppendExecutionProvider_V2(GetOrtEnv(), cuda_ep_devices_ptrs, options);
       } else {
         auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
         std::vector<const char*> keys, values;
