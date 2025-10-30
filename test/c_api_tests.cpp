@@ -1337,7 +1337,7 @@ TEST(CAPITests, SetGuidance) {
   tokenizer->Encode(input_string, *input_sequences);
   auto params = OgaGeneratorParams::Create(*model);
   params->SetSearchOption("max_length", 32);
-  params->SetGuidance("regex", "answer: .*");
+  params->SetGuidance("regex", "answer: .*", false);
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokenSequences(*input_sequences);

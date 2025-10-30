@@ -263,7 +263,7 @@ GeneratorParams::GeneratorParams(const Model& model)
   }
 }
 
-void GeneratorParams::SetGuidance(std::string_view type, std::string_view data, bool enable_ff_tokens) {
+void GeneratorParams::SetGuidance(std::string_view type, std::string_view data, bool enable_ff_tokens = false) {
   guidance_type = type;
   guidance_data = data;
   guidance_ff_tokens_enabled = enable_ff_tokens;

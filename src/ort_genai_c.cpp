@@ -395,7 +395,7 @@ OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGen
   OGA_CATCH
 }
 
-OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens) {
+OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens = false) {
   OGA_TRY
   params->SetGuidance(type, data, enable_ff_tokens);
   return nullptr;
