@@ -207,6 +207,7 @@ struct Config {
         std::string alignment{"right"};    // The alignment of the window, either "left" or "right"
         bool slide_key_value_cache{true};  // Whether to slide the key-value cache along with the input prompt
         bool slide_inputs{true};           // Whether to slide the input prompt along with the key-value cache
+        std::vector<int> layers;           // Layer indices that use sliding window attention (for models with alternating patterns)
       };
       std::optional<SlidingWindow> sliding_window;
 
