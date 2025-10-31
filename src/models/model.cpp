@@ -664,9 +664,9 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       // for OpenVINO, fallback to "device_type" in provider_options if no device filtering is specified
       std::optional<std::string> config_ov_device_type = std::nullopt;
       if (provider_options.name == "OpenVINO" &&
-        !config_device_id.has_value() &&
-        !config_vendor_id.has_value() &&
-        !config_device_type_enum.has_value()) {
+          !config_device_id.has_value() &&
+          !config_vendor_id.has_value() &&
+          !config_device_type_enum.has_value()) {
         for (auto& option : provider_options.options) {
           if (option.first == "device_type") {
             config_ov_device_type = option.second;
