@@ -231,16 +231,4 @@ template std::unique_ptr<OrtValue> ProcessTensor<bool>(OrtxTensor* tensor, Ort::
 template const OrtxTensor* MakeOrtxTensorConst<float>(const Generators::Tensor*);
 template const OrtxTensor* MakeOrtxTensorConst<int64_t>(const Generators::Tensor*);
 template OrtxTensor* MakeOrtxTensor<int64_t>(Generators::Tensor*);
-
-template <>
-const OrtxTensor* MakeOrtxTensorConst<double>(const Generators::Tensor* src) {
-  (void)src;
-  return nullptr;
-}
-
-template <>
-OrtxTensor* MakeOrtxTensor<double>(Generators::Tensor* src) {
-  (void)src;
-  return nullptr;
-}
 }  // namespace Generators
