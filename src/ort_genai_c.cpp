@@ -8,6 +8,7 @@
 #include "ort_genai_c.h"
 #include "generators.h"
 #include "models/model.h"
+#include "models/processor.h"
 #include "constrained_logits_processor.h"
 #include "runtime_settings.h"
 #include "search.h"
@@ -885,6 +886,37 @@ OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudiosAndPrompts(const OgaMu
     prompts_.push_back(prompt.c_str());
   *input_tensors = ReturnUnique<OgaNamedTensors>(processor->Process(prompts_, images, audios));
   return nullptr;
+  OGA_CATCH
+}
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSplitSignalSegments(
+    const OgaTensor* input,
+    const OgaTensor* sr_tensor,
+    const OgaTensor* frame_ms_tensor,
+    const OgaTensor* hop_ms_tensor,
+    const OgaTensor* energy_threshold_db_tensor,
+    OgaTensor* output0) {
+  OGA_TRY
+  return reinterpret_cast<OgaResult*>(Generators::SplitSignalSegments(
+      reinterpret_cast<const Generators::Tensor*>(input),
+      reinterpret_cast<const Generators::Tensor*>(sr_tensor),
+      reinterpret_cast<const Generators::Tensor*>(frame_ms_tensor),
+      reinterpret_cast<const Generators::Tensor*>(hop_ms_tensor),
+      reinterpret_cast<const Generators::Tensor*>(energy_threshold_db_tensor),
+      reinterpret_cast<Generators::Tensor*>(output0)));
+  OGA_CATCH
+}
+
+OGA_EXPORT OgaResult* OGA_API_CALL OgaMergeSignalSegments(
+    const OgaTensor* segments_tensor,
+    const OgaTensor* merge_gap_ms_tensor,
+    OgaTensor* output0) {
+  OGA_TRY
+  return reinterpret_cast<OgaResult*>(
+      Generators::MergeSignalSegments(
+          reinterpret_cast<const Generators::Tensor*>(segments_tensor),
+          reinterpret_cast<const Generators::Tensor*>(merge_gap_ms_tensor),
+          reinterpret_cast<Generators::Tensor*>(output0)));
   OGA_CATCH
 }
 

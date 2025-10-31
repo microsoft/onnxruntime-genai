@@ -148,7 +148,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGenerator_AppendTokenSequences(IntPtr /* OgaGenerator* */ generator,
                                                                                        IntPtr /* const OgaSequences* */ sequences);
-                                                                                       
+
 
         // This function is used to rewind the generator to the given newLength.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
@@ -354,6 +354,21 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                                                   IntPtr /* const Images* */ images,
                                                                                                   IntPtr /* const Audios* */ audios,
                                                                                                   out IntPtr /* OgaNamedTensors** */ namedTensors);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern int /* extError_t */ OgaSplitSignalSegments(
+            IntPtr /* const OgaTensor* */ input,
+            IntPtr /* const OgaTensor* */ sr_tensor,
+            IntPtr /* const OgaTensor* */ frame_ms_tensor,
+            IntPtr /* const OgaTensor* */ hop_ms_tensor,
+            IntPtr /* const OgaTensor* */ energy_threshold_db_tensor,
+            IntPtr /* OgaTensor* */ output0);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern int /* extError_t */ OgaMergeSignalSegments(
+            IntPtr /* const OgaTensor* */ segments_tensor,
+            IntPtr /* const OgaTensor* */ merge_gap_ms_tensor,
+            IntPtr /* OgaTensor* */ output0);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern unsafe IntPtr /* OgaResult* */ OgaProcessorDecode(IntPtr /* const OgaMultiModalProcessor* */ processor,
