@@ -7,6 +7,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
@@ -108,7 +109,11 @@ void PrintSummary(const std::vector<BenchmarkResult>& results) {
 }
 
 BenchmarkResult RunBenchmark(const BenchmarkParams& params) {
-  auto config = OgaConfig::Create(MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32");
+  const char* model_path = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32";
+  if (strcmp(params.device_type, "NvTensorRtRtx") == 0) {
+    model_path = MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt";
+  }
+  auto config = OgaConfig::Create(model_path);
   std::string overlay = R"({ "model": { "vocab_size" : )" + std::to_string(params.vocab_size) + R"( } })";
   config->Overlay(overlay.c_str());
   config->ClearProviders();
@@ -178,6 +183,10 @@ TEST(SamplingBenchmarks, PerformanceTests) {
 #if USE_CUDA
   device_types.push_back("cuda");
 #endif
+  // Add NvTensorRtRtx if model is available
+  if (std::filesystem::exists(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt")) {
+    device_types.push_back("NvTensorRtRtx");
+  }
 
   std::vector<int> batch_sizes = {1};
   std::vector<int> vocab_sizes = {201088};
