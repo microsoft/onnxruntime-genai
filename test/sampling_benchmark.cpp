@@ -7,6 +7,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
@@ -182,9 +183,10 @@ TEST(SamplingBenchmarks, PerformanceTests) {
 #if USE_CUDA
   device_types.push_back("cuda");
 #endif
-#if USE_TRT_RTX
-  device_types.push_back("NvTensorRtRtx");
-#endif
+  // Add NvTensorRtRtx if model is available
+  if (std::filesystem::exists(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt")) {
+    device_types.push_back("NvTensorRtRtx");
+  }
 
   std::vector<int> batch_sizes = {1};
   std::vector<int> vocab_sizes = {201088};

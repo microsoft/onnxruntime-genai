@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>  // for memcmp
+#include <filesystem>
 #include <map>
 #include <numeric>
 #include <random>
@@ -545,8 +546,11 @@ TEST(SamplingTests, RandomizedSamplingSelectTopCuda_BatchSize1_LargeVocabSize) {
 }
 #endif
 
-#if USE_TRT_RTX
 TEST(SamplingTests, BatchedSamplingTopPNvTensorRtRtx) {
+  // Skip test if NvTensorRT model is not available
+  if (!std::filesystem::exists(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt")) {
+    GTEST_SKIP() << "NvTensorRT model not available";
+  }
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<int32_t> expected_output{1, 2, 3, 4};
   std::vector<float> logits_cpu = {0.1f, 0.6f, 0.1f, 0.1f, 0.1f,
@@ -578,6 +582,10 @@ TEST(SamplingTests, BatchedSamplingTopPNvTensorRtRtx) {
 }
 
 TEST(SamplingTests, BatchedSamplingTopKNvTensorRtRtx) {
+  // Skip test if NvTensorRT model is not available
+  if (!std::filesystem::exists(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt")) {
+    GTEST_SKIP() << "NvTensorRT model not available";
+  }
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,
                                 0.25f, 2.0f, 1.25f, 1.5f, 0.25f,
@@ -612,6 +620,10 @@ TEST(SamplingTests, BatchedSamplingTopKNvTensorRtRtx) {
 }
 
 TEST(SamplingTests, BatchedSamplingTopPAndKNvTensorRtRtx) {
+  // Skip test if NvTensorRT model is not available
+  if (!std::filesystem::exists(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt")) {
+    GTEST_SKIP() << "NvTensorRT model not available";
+  }
   std::vector<int32_t> input_ids{0, 1, 2, 3};
   std::vector<float> logits_cpu{2.0f, 1.5f, 1.25f, 0.25f, 0.25f,
                                 0.25f, 2.0f, 1.25f, 1.5f, 0.25f,
@@ -647,6 +659,10 @@ TEST(SamplingTests, BatchedSamplingTopPAndKNvTensorRtRtx) {
 }
 
 TEST(SamplingTests, RandomizedSamplingTopPNvTensorRtRtx) {
+  // Skip test if NvTensorRT model is not available
+  if (!std::filesystem::exists(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt")) {
+    GTEST_SKIP() << "NvTensorRT model not available";
+  }
   const int batch_size = 5;
   const float p = 0.95f;
   const int vocab_size = 21;  // Keep same as CUDA for consistency
@@ -731,6 +747,10 @@ TEST(SamplingTests, RandomizedSamplingTopPNvTensorRtRtx) {
 }
 
 TEST(SamplingTests, RandomizedSamplingTopKNvTensorRtRtx) {
+  // Skip test if NvTensorRT model is not available
+  if (!std::filesystem::exists(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt")) {
+    GTEST_SKIP() << "NvTensorRT model not available";
+  }
   const int batch_size = 5;
   const int k = 5;
   const int vocab_size = 17;
@@ -791,6 +811,10 @@ TEST(SamplingTests, RandomizedSamplingTopKNvTensorRtRtx) {
 }
 
 TEST(SamplingTests, RandomizedSamplingTopPAndKNvTensorRtRtx) {
+  // Skip test if NvTensorRT model is not available
+  if (!std::filesystem::exists(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt")) {
+    GTEST_SKIP() << "NvTensorRT model not available";
+  }
   const int batch_size = 5;
   const int k = 7;
   const float p = 0.75f;
@@ -870,6 +894,10 @@ TEST(SamplingTests, RandomizedSamplingTopPAndKNvTensorRtRtx) {
 }
 
 TEST(SamplingTests, RandomizedSamplingSelectTopNvTensorRtRtx) {
+  // Skip test if NvTensorRT model is not available
+  if (!std::filesystem::exists(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt")) {
+    GTEST_SKIP() << "NvTensorRT model not available";
+  }
   int batch_size = 5;
   int vocab_size = 32000;
   std::vector<int32_t> input_ids{0, 1, 2, 3, 4};
@@ -909,4 +937,3 @@ TEST(SamplingTests, RandomizedSamplingSelectTopNvTensorRtRtx) {
     }
   }
 }
-#endif
