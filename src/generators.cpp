@@ -138,6 +138,8 @@ struct GenaiInterfaceImpl : GenaiInterface {
 struct LibraryHandle {
   LibraryHandle(const char* filename) {
     auto path = CurrentModulePath() + filename;
+    if (!fs::path(path).exists())
+      path = filename;
     handle_ = LoadLibrary(path.c_str());
     if (!handle_)
       throw std::runtime_error(std::string("Failed to load library: ") + DetermineLoadLibraryError(filename));

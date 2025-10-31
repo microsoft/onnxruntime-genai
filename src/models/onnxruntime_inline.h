@@ -336,6 +336,16 @@ inline std::unique_ptr<OrtArenaCfg> OrtArenaCfg::Create(const char* const* keys,
   return std::unique_ptr<OrtArenaCfg>{p};
 }
 
+inline std::string OrtEpDevice::Name() const {
+  const char* name = Ort::api->EpDevice_EpName(this);
+  return std::string(name);
+}
+
+inline std::string OrtEpDevice::Vendor() const {
+  const char* vendor = Ort::api->EpDevice_EpVendor(this);
+  return std::string(vendor);
+}
+
 inline void OrtCommonEnvInit(OrtEnv& v, _In_ const char* logid) {
   if (strcmp(logid, "onnxruntime-node") == 0) {
     Ort::ThrowOnError(Ort::api->SetLanguageProjection(&v, OrtLanguageProjection::ORT_PROJECTION_NODEJS));
@@ -386,6 +396,18 @@ inline OrtEnv& OrtEnv::DisableTelemetryEvents() {
 inline OrtEnv& OrtEnv::CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info, const OrtArenaCfg& arena_cfg) {
   Ort::ThrowOnError(Ort::api->CreateAndRegisterAllocator(this, &mem_info, &arena_cfg));
   return *this;
+}
+
+inline std::vector<const OrtEpDevice*> OrtEnv::GetEpDevices() {
+  size_t num_devices = 0;
+  const OrtEpDevice* const* device_ptrs = nullptr;
+  Ort::ThrowOnError(Ort::api->GetEpDevices(this, &device_ptrs, &num_devices));
+
+  std::vector<const OrtEpDevice*> devices;
+  for (size_t i = 0; i < num_devices; ++i) {
+    devices.emplace_back(device_ptrs[i]);
+  }
+  return devices;
 }
 
 inline std::unique_ptr<OrtThreadingOptions> OrtThreadingOptions::Create() {
@@ -692,6 +714,19 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_OpenVINO(co
 
 inline OrtSessionOptions& OrtSessionOptions::RegisterCustomOpsLibrary(const ORTCHAR_T* library_file_prefix) {
   Ort::ThrowOnError(Ort::api->RegisterCustomOpsLibrary_V2(this, library_file_prefix));
+  return *this;
+}
+
+inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_V2(OrtEnv& env, const std::vector<const OrtEpDevice*>& ep_devices,
+                                                                        const std::unordered_map<std::string, std::string>& options) {
+  std::vector<const char*> keys, values;
+  keys.reserve(options.size());
+  values.reserve(options.size());
+  for (const auto& kv : options) {
+    keys.push_back(kv.first.c_str());
+    values.push_back(kv.second.c_str());
+  }
+  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_V2(this, &env, ep_devices.data(), ep_devices.size(), keys.data(), values.data(), keys.size()));
   return *this;
 }
 
