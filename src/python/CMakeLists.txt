@@ -56,6 +56,11 @@ if(BUILD_WHEEL)
     ${WHEEL_TARGET_NAME}
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
+  add_custom_command(TARGET python POST_BUILD
+    COMMAND ${PYTHON_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/stubgen.py -r ${PACKAGE_DIR_NAME} -v ${ORT_VERSION}
+    WORKING_DIRECTORY ${WHEEL_FILES_DIR}
+    COMMENT "Generate type stubs for onnxruntime_genai"
+  )
   set(auditwheel_exclude_list
     "libcublas.so.11"
     "libcublas.so.12"

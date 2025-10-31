@@ -314,6 +314,25 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       });
   m.add_object("_cleanup", cleanup);
 
+  pybind11::enum_<OgaElementType>(m, "ElementType")
+      .value("undefined", OgaElementType_undefined)
+      .value("float32", OgaElementType_float32)
+      .value("uint8", OgaElementType_uint8)
+      .value("int8", OgaElementType_int8)
+      .value("uint16", OgaElementType_uint16)
+      .value("int16", OgaElementType_int16)
+      .value("int32", OgaElementType_int32)
+      .value("int64", OgaElementType_int64)
+      .value("string", OgaElementType_string)
+      .value("bool", OgaElementType_bool)
+      .value("float16", OgaElementType_float16)
+      .value("float64", OgaElementType_float64)
+      .value("uint32", OgaElementType_uint32)
+      .value("uint64", OgaElementType_uint64)
+      .value("complex64", OgaElementType_complex64)
+      .value("complex128", OgaElementType_complex128)
+      .value("bfloat16", OgaElementType_bfloat16);
+
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
       .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
