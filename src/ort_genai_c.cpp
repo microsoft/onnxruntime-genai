@@ -897,31 +897,13 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaSplitSignalSegments(
     const OgaTensor* energy_threshold_db_tensor,
     OgaTensor* output0) {
   OGA_TRY
-  if (!input || !sr_tensor || !frame_ms_tensor || !hop_ms_tensor ||
-      !energy_threshold_db_tensor || !output0) {
-    throw std::runtime_error("Null tensor argument passed to OgaSplitSignalSegments");
-  }
-
-  const OrtxTensor* in_tensor = Generators::MakeOrtxTensorConst<float>(reinterpret_cast<const Generators::Tensor*>(input));
-  const OrtxTensor* sr_tensor_obj = Generators::MakeOrtxTensorConst<int64_t>(reinterpret_cast<const Generators::Tensor*>(sr_tensor));
-  const OrtxTensor* frame_tensor = Generators::MakeOrtxTensorConst<int64_t>(reinterpret_cast<const Generators::Tensor*>(frame_ms_tensor));
-  const OrtxTensor* hop_tensor = Generators::MakeOrtxTensorConst<int64_t>(reinterpret_cast<const Generators::Tensor*>(hop_ms_tensor));
-  const OrtxTensor* thr_tensor = Generators::MakeOrtxTensorConst<float>(reinterpret_cast<const Generators::Tensor*>(energy_threshold_db_tensor));
-  OrtxTensor* out_tensor = Generators::MakeOrtxTensor<int64_t>(reinterpret_cast<Generators::Tensor*>(output0));
-
-  extError_t err = OrtxSplitSignalSegments(
-      in_tensor,
-      sr_tensor_obj,
-      frame_tensor,
-      hop_tensor,
-      thr_tensor,
-      out_tensor);
-
-  if (err != kOrtxOK) {
-    throw std::runtime_error(OrtxGetLastErrorMessage());
-  }
-  return nullptr;
-
+  return reinterpret_cast<OgaResult*>(Generators::SplitSignalSegments(
+      reinterpret_cast<const Generators::Tensor*>(input),
+      reinterpret_cast<const Generators::Tensor*>(sr_tensor),
+      reinterpret_cast<const Generators::Tensor*>(frame_ms_tensor),
+      reinterpret_cast<const Generators::Tensor*>(hop_ms_tensor),
+      reinterpret_cast<const Generators::Tensor*>(energy_threshold_db_tensor),
+      reinterpret_cast<Generators::Tensor*>(output0)));
   OGA_CATCH
 }
 
@@ -930,24 +912,11 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaMergeSignalSegments(
     const OgaTensor* merge_gap_ms_tensor,
     OgaTensor* output0) {
   OGA_TRY
-  if (!segments_tensor || !merge_gap_ms_tensor || !output0) {
-    throw std::runtime_error("Null tensor argument passed to OgaMergeSignalSegments");
-  }
-
-  const OrtxTensor* seg_tensor = Generators::MakeOrtxTensorConst<int64_t>(reinterpret_cast<const Generators::Tensor*>(segments_tensor));
-  const OrtxTensor* gap_tensor = Generators::MakeOrtxTensorConst<int64_t>(reinterpret_cast<const Generators::Tensor*>(merge_gap_ms_tensor));
-  OrtxTensor* out_tensor = Generators::MakeOrtxTensor<int64_t>(reinterpret_cast<Generators::Tensor*>(output0));
-
-  extError_t err = OrtxMergeSignalSegments(
-      seg_tensor,
-      gap_tensor,
-      out_tensor);
-
-  if (err != kOrtxOK) {
-    throw std::runtime_error(OrtxGetLastErrorMessage());
-  }
-  return nullptr;
-
+  return reinterpret_cast<OgaResult*>(
+      Generators::MergeSignalSegments(
+          reinterpret_cast<const Generators::Tensor*>(segments_tensor),
+          reinterpret_cast<const Generators::Tensor*>(merge_gap_ms_tensor),
+          reinterpret_cast<Generators::Tensor*>(output0)));
   OGA_CATCH
 }
 

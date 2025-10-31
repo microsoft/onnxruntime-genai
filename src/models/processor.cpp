@@ -224,6 +224,62 @@ const OrtxTensor* MakeOrtxTensorConst(const Generators::Tensor* src) {
   return reinterpret_cast<const OrtxTensor*>(ort);
 }
 
+void* SplitSignalSegments(
+    const Generators::Tensor* input,
+    const Generators::Tensor* sr_tensor,
+    const Generators::Tensor* frame_ms_tensor,
+    const Generators::Tensor* hop_ms_tensor,
+    const Generators::Tensor* energy_threshold_db_tensor,
+    Generators::Tensor* output0) {
+  if (!input || !sr_tensor || !frame_ms_tensor || !hop_ms_tensor ||
+      !energy_threshold_db_tensor || !output0) {
+    throw std::runtime_error("Null tensor argument passed to OgaSplitSignalSegments");
+  }
+
+  const OrtxTensor* in_tensor = Generators::MakeOrtxTensorConst<float>(input);
+  const OrtxTensor* sr_tensor_obj = Generators::MakeOrtxTensorConst<int64_t>(sr_tensor);
+  const OrtxTensor* frame_tensor = Generators::MakeOrtxTensorConst<int64_t>(frame_ms_tensor);
+  const OrtxTensor* hop_tensor = Generators::MakeOrtxTensorConst<int64_t>(hop_ms_tensor);
+  const OrtxTensor* thr_tensor = Generators::MakeOrtxTensorConst<float>(energy_threshold_db_tensor);
+  OrtxTensor* out_tensor = Generators::MakeOrtxTensor<int64_t>(output0);
+
+  extError_t err = OrtxSplitSignalSegments(
+      in_tensor,
+      sr_tensor_obj,
+      frame_tensor,
+      hop_tensor,
+      thr_tensor,
+      out_tensor);
+
+  if (err != kOrtxOK) {
+    throw std::runtime_error(OrtxGetLastErrorMessage());
+  }
+  return nullptr;
+}
+
+void* MergeSignalSegments(
+    const Generators::Tensor* segments_tensor,
+    const Generators::Tensor* merge_gap_ms_tensor,
+    Generators::Tensor* output0) {
+  if (!segments_tensor || !merge_gap_ms_tensor || !output0) {
+    throw std::runtime_error("Null tensor argument passed to OgaMergeSignalSegments");
+  }
+
+  const OrtxTensor* seg_tensor = Generators::MakeOrtxTensorConst<int64_t>(segments_tensor);
+  const OrtxTensor* gap_tensor = Generators::MakeOrtxTensorConst<int64_t>(merge_gap_ms_tensor);
+  OrtxTensor* out_tensor = Generators::MakeOrtxTensor<int64_t>(output0);
+
+  extError_t err = OrtxMergeSignalSegments(
+      seg_tensor,
+      gap_tensor,
+      out_tensor);
+
+  if (err != kOrtxOK) {
+    throw std::runtime_error(OrtxGetLastErrorMessage());
+  }
+  return nullptr;
+}
+
 template std::unique_ptr<OrtValue> ProcessTensor<float>(OrtxTensor* tensor, Ort::Allocator& allocator);
 template std::unique_ptr<OrtValue> ProcessTensor<int64_t>(OrtxTensor* tensor, Ort::Allocator& allocator);
 template std::unique_ptr<OrtValue> ProcessTensor<bool>(OrtxTensor* tensor, Ort::Allocator& allocator);

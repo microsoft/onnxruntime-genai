@@ -62,6 +62,19 @@ OrtxTensor* MakeOrtxTensor(Generators::Tensor* src);
 template <typename T>
 const OrtxTensor* MakeOrtxTensorConst(const Generators::Tensor* src);
 
+void* SplitSignalSegments(
+    const Generators::Tensor* input,
+    const Generators::Tensor* sr_tensor,
+    const Generators::Tensor* frame_ms_tensor,
+    const Generators::Tensor* hop_ms_tensor,
+    const Generators::Tensor* energy_threshold_db_tensor,
+    Generators::Tensor* output0);
+
+void* MergeSignalSegments(
+    const Generators::Tensor* segments_tensor,
+    const Generators::Tensor* merge_gap_ms_tensor,
+    Generators::Tensor* output0);
+
 struct Processor {
   Processor() = default;
   Processor(const Processor&) = delete;
