@@ -323,15 +323,22 @@ void SetLogOptions(const nb::kwargs& dict) {
 }
 
 void SetLogCallback(std::optional<nb::callable> callback) {
-  static std::optional<nb::callable> log_callback;
-  log_callback = callback;
-
-  if (log_callback.has_value()) {
+  // Use a pointer to heap-allocated callable to avoid lifetime issues
+  static std::unique_ptr<nb::callable> log_callback_ptr;
+  
+  if (callback.has_value()) {
+    // Store the callback on the heap and keep it alive
+    log_callback_ptr = std::make_unique<nb::callable>(callback.value());
+    
     OgaPy::OgaCheckResult(OgaSetLogCallback([](const char* message, size_t length) {
-      nb::gil_scoped_acquire gil;
-      (*log_callback)(std::string_view(message, length));
+      if (log_callback_ptr) {
+        nb::gil_scoped_acquire gil;
+        (*log_callback_ptr)(std::string_view(message, length));
+      }
     }));
   } else {
+    // Clear the callback
+    log_callback_ptr.reset();
     OgaPy::OgaCheckResult(OgaSetLogCallback(nullptr));
   }
 }
@@ -862,7 +869,13 @@ NB_MODULE(onnxruntime_genai, m) {
       });
 
   m.def("set_log_options", &SetLogOptions);
-  m.def("set_log_callback", &SetLogCallback);
+  m.def("set_log_callback", [](nb::handle callback) {
+    if (callback.is_none()) {
+      SetLogCallback(std::nullopt);
+    } else {
+      SetLogCallback(nb::cast<nb::callable>(callback));
+    }
+  });
 
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });
