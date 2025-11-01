@@ -4,8 +4,13 @@ file(GLOB python_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
-find_package(Python COMPONENTS Interpreter Development)
-pybind11_add_module(python ${python_srcs})
+
+# Ensure intrusive_counter.cpp is included for nanobind intrusive reference counting
+list(APPEND python_srcs "${CMAKE_CURRENT_SOURCE_DIR}/intrusive_counter.cpp")
+
+# Find nanobind and create Python module
+find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+nanobind_add_module(python STABLE_ABI NB_STATIC ${python_srcs})
 target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
 target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE onnxruntime-genai)
@@ -103,7 +108,7 @@ if(BUILD_WHEEL)
 
   if(MANYLINUX)
     add_custom_target(PyPackageBuild
-      COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
+      COMMAND ${Python_EXECUTABLE} -m pip wheel --no-deps .
       COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*
       COMMAND auditwheel repair onnxruntime_genai*linux_x86_64.whl -w ${WHEEL_FILES_DIR} ${modified_exclude_list}
       WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
@@ -112,7 +117,7 @@ if(BUILD_WHEEL)
     )
   else()
     add_custom_target(PyPackageBuild
-      COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
+      COMMAND ${Python_EXECUTABLE} -m pip wheel --no-deps .
       WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
       COMMENT "Building wheel on ${WHEEL_FILES_DIR}"
       EXCLUDE_FROM_ALL
