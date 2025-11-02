@@ -237,16 +237,27 @@ struct PyGenerator {
   }
 
   nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>> GetNextTokens() {
-    const int32_t* out;
-    size_t out_count;
-    OgaPy::OgaCheckResult(OgaGenerator_GetNextTokens(reinterpret_cast<OgaGenerator*>(generator_.get()), &out, &out_count));
-    return ToPython(std::span<const int32_t>(out, out_count));
+    // Use wrapper method that handles reference counting
+    auto view = generator_->GetNextTokens();
+    // Copy data to numpy array (temporal borrow - data invalidated by next generator call)
+    nb::ndarray<nb::numpy, int32_t, nb::shape<-1>> result = 
+        nb::ndarray<nb::numpy, int32_t, nb::shape<-1>>(
+            nb::ndarray<nb::numpy, int32_t>::allocate({view->size()}));
+    std::copy(view->begin(), view->end(), result.mutable_data());
+    delete view;
+    return result;
   }
 
   nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>> GetSequence(int index) {
-    const int32_t* data = OgaGenerator_GetSequenceData(reinterpret_cast<OgaGenerator*>(generator_.get()), index);
-    size_t count = OgaGenerator_GetSequenceCount(reinterpret_cast<OgaGenerator*>(generator_.get()), index);
-    return ToPython(std::span<const int32_t>(data, count));
+    // Use wrapper method that handles reference counting
+    auto view = generator_->GetSequenceData(index);
+    // Create numpy array that references the view's data
+    // Store view in refs_ to keep it (and parent) alive
+    auto array_view = nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
+        view->data(), {view->size()}, nb::handle());
+    // Keep view alive by storing it
+    refs_.emplace_back(nb::cast(view, nb::rv_policy::take_ownership));
+    return array_view;
   }
 
   nb::ndarray<> GetInput(const std::string& name) {
@@ -491,11 +502,13 @@ NB_MODULE(onnxruntime_genai, m) {
         OgaPy::OgaCheckResult(OgaTokenizerGetBosTokenId(t.get(), &token_id));
         return token_id;
       })
-      .def_prop_ro("eos_token_ids", [](const OgaPy::OgaTokenizer& t) {
-        const int32_t* eos_ids;
-        size_t count;
-        OgaPy::OgaCheckResult(OgaTokenizerGetEosTokenIds(t.get(), &eos_ids, &count));
-        return ToPython(std::span<const int32_t>(eos_ids, count));
+      .def_prop_ro("eos_token_ids", [](OgaPy::OgaTokenizer& t) {
+        // Use wrapper method that handles reference counting
+        auto view = t.GetEosTokenIds();
+        // Create numpy array that references view's data
+        auto array_view = nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
+            view->data(), {view->size()}, nb::cast(view, nb::rv_policy::take_ownership));
+        return array_view;
       })
       .def_prop_ro("pad_token_id", [](const OgaPy::OgaTokenizer& t) {
         int32_t token_id;
@@ -521,22 +534,28 @@ NB_MODULE(onnxruntime_genai, m) {
         }
         OgaPy::OgaCheckResult(OgaUpdateTokenizerOptions(t.get(), keys.data(), values.data(), kwargs.size()));
        })
-      .def("encode", [](const OgaPy::OgaTokenizer& t, std::string s) -> nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>> {
-        // Use pure C API to avoid lifetime issues with C++ wrapper classes
+      .def("encode", [](OgaPy::OgaTokenizer& t, std::string s) -> nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>> {
+        // Create sequences
         OgaSequences* sequences_ptr;
         OgaPy::OgaCheckResult(OgaCreateSequences(&sequences_ptr));
         
-        // Wrap in our intrusive-counted wrapper for automatic cleanup
-        OgaPy::OgaSequences sequences(sequences_ptr);
+        auto sequences = new OgaPy::OgaSequences(sequences_ptr);
         
         // Encode using C API
-        OgaPy::OgaCheckResult(OgaTokenizerEncode(t.get(), s.c_str(), sequences.get()));
+        OgaPy::OgaCheckResult(OgaTokenizerEncode(t.get(), s.c_str(), sequences->get()));
         
-        // Get the encoded data
-        const int32_t* data = OgaSequencesGetSequenceData(sequences.get(), 0);
-        size_t count = OgaSequencesGetSequenceCount(sequences.get(), 0);
+        // Use wrapper method to get sequence data with proper ref counting
+        auto view = sequences->GetSequenceData(0);
         
-        return ToPython(std::span<const int32_t>(data, count));
+        // Create numpy array that references view's data
+        // The view keeps the parent alive
+        auto array_view = nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
+            view->data(), {view->size()}, nb::cast(view, nb::rv_policy::take_ownership));
+        
+        // Clean up sequences (view keeps it alive)
+        delete sequences;
+        
+        return array_view;
       })
       .def("to_token_id", [](const OgaPy::OgaTokenizer& t, const char* str) {
         int32_t token_id;
@@ -866,6 +885,51 @@ NB_MODULE(onnxruntime_genai, m) {
         bool has_pending_requests;
         OgaPy::OgaCheckResult(OgaEngineHasPendingRequests(engine.get(), &has_pending_requests));
         return has_pending_requests;
+      });
+
+  // Bind borrowed array view classes with buffer protocol for numpy interop
+  nb::class_<OgaPy::SequenceDataView>(
+      m, "SequenceDataView",
+      nb::intrusive_ptr<OgaPy::SequenceDataView>(
+          [](OgaPy::SequenceDataView *o, PyObject *po) noexcept { o->set_self_py(po); }))
+      .def("__len__", [](const OgaPy::SequenceDataView& view) { return view.size(); })
+      .def("__getitem__", [](const OgaPy::SequenceDataView& view, size_t index) { return view[index]; })
+      .def_buffer([](OgaPy::SequenceDataView* view) {
+        return nb::ndarray<nb::numpy, const int32_t>(
+            view->data(), {view->size()}, nb::handle());
+      });
+
+  nb::class_<OgaPy::GeneratorSequenceDataView>(
+      m, "GeneratorSequenceDataView",
+      nb::intrusive_ptr<OgaPy::GeneratorSequenceDataView>(
+          [](OgaPy::GeneratorSequenceDataView *o, PyObject *po) noexcept { o->set_self_py(po); }))
+      .def("__len__", [](const OgaPy::GeneratorSequenceDataView& view) { return view.size(); })
+      .def("__getitem__", [](const OgaPy::GeneratorSequenceDataView& view, size_t index) { return view[index]; })
+      .def_buffer([](OgaPy::GeneratorSequenceDataView* view) {
+        return nb::ndarray<nb::numpy, const int32_t>(
+            view->data(), {view->size()}, nb::handle());
+      });
+
+  nb::class_<OgaPy::NextTokensView>(
+      m, "NextTokensView",
+      nb::intrusive_ptr<OgaPy::NextTokensView>(
+          [](OgaPy::NextTokensView *o, PyObject *po) noexcept { o->set_self_py(po); }))
+      .def("__len__", [](const OgaPy::NextTokensView& view) { return view.size(); })
+      .def("__getitem__", [](const OgaPy::NextTokensView& view, size_t index) { return view[index]; })
+      .def_buffer([](OgaPy::NextTokensView* view) {
+        return nb::ndarray<nb::numpy, const int32_t>(
+            view->data(), {view->size()}, nb::handle());
+      });
+
+  nb::class_<OgaPy::EosTokenIdsView>(
+      m, "EosTokenIdsView",
+      nb::intrusive_ptr<OgaPy::EosTokenIdsView>(
+          [](OgaPy::EosTokenIdsView *o, PyObject *po) noexcept { o->set_self_py(po); }))
+      .def("__len__", [](const OgaPy::EosTokenIdsView& view) { return view.size(); })
+      .def("__getitem__", [](const OgaPy::EosTokenIdsView& view, size_t index) { return view[index]; })
+      .def_buffer([](OgaPy::EosTokenIdsView* view) {
+        return nb::ndarray<nb::numpy, const int32_t>(
+            view->data(), {view->size()}, nb::handle());
       });
 
   m.def("set_log_options", &SetLogOptions);

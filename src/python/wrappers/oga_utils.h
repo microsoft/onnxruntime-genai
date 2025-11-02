@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #pragma once
+#include "oga_object.h"
 #include "../../ort_genai_c.h"
 
 namespace OgaPy {
@@ -15,18 +16,22 @@ private:
   ::OgaResult* ptr_;
 };
 
-struct OgaStringArray {
+struct OgaStringArray : OgaObject {
   explicit OgaStringArray(::OgaStringArray* p) : ptr_(p) {}
-  ~OgaStringArray() { if (ptr_) OgaDestroyStringArray(ptr_); }
+  ~OgaStringArray() override { if (ptr_) OgaDestroyStringArray(ptr_); }
   ::OgaStringArray* get() const { return ptr_; }
 private:
   ::OgaStringArray* ptr_;
 };
 
-struct OgaSequences {
+struct OgaSequences : OgaObject {
   explicit OgaSequences(::OgaSequences* p) : ptr_(p) {}
-  ~OgaSequences() { if (ptr_) OgaDestroySequences(ptr_); }
+  ~OgaSequences() override { if (ptr_) OgaDestroySequences(ptr_); }
   ::OgaSequences* get() const { return ptr_; }
+  
+  // Get sequence data as a borrowed view (automatically handles reference counting)
+  SequenceDataView* GetSequenceData(size_t index);
+  
 private:
   ::OgaSequences* ptr_;
 };

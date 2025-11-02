@@ -124,3 +124,29 @@ if(BUILD_WHEEL)
     )
   endif()
 endif()
+# Add borrowed view unit tests if testing is enabled
+if(ENABLE_TESTS)
+  # Add test executable
+  add_executable(test_borrowed_view test_borrowed_view.cpp oga_wrapper_impl.cpp intrusive_counter.cpp)
+  
+  target_include_directories(test_borrowed_view PRIVATE 
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${ORT_HEADER_DIR}
+  )
+  
+  target_link_libraries(test_borrowed_view PRIVATE 
+    onnxruntime-genai
+    GTest::gtest
+    GTest::gtest_main
+  )
+  
+  # Add nanobind includes
+  find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
+  find_package(nanobind CONFIG REQUIRED)
+  target_link_libraries(test_borrowed_view PRIVATE nanobind::nanobind)
+  
+  # Register test with CTest
+  add_test(NAME BorrowedViewUnitTests COMMAND test_borrowed_view)
+  
+  message(STATUS "Borrowed view unit tests enabled")
+endif()
