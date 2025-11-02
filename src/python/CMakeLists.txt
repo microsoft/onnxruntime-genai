@@ -140,9 +140,8 @@ if(ENABLE_TESTS)
     GTest::gtest_main
   )
   
-  # Add nanobind includes
+  # Add nanobind includes (nanobind is already added via add_subdirectory in root CMakeLists)
   find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-  find_package(nanobind CONFIG REQUIRED)
   target_link_libraries(test_borrowed_view PRIVATE nanobind::nanobind)
   
   # Register test with CTest
