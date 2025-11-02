@@ -12,7 +12,8 @@ struct OgaResult {
   explicit OgaResult(::OgaResult* p) : ptr_(p) {}
   ~OgaResult() { if (ptr_) OgaDestroyResult(ptr_); }
   ::OgaResult* get() const { return ptr_; }
-private:
+
+ private:
   ::OgaResult* ptr_;
 };
 
@@ -20,7 +21,8 @@ struct OgaStringArray : OgaObject {
   explicit OgaStringArray(::OgaStringArray* p) : ptr_(p) {}
   ~OgaStringArray() override { if (ptr_) OgaDestroyStringArray(ptr_); }
   ::OgaStringArray* get() const { return ptr_; }
-private:
+
+ private:
   ::OgaStringArray* ptr_;
 };
 
@@ -28,11 +30,11 @@ struct OgaSequences : OgaObject {
   explicit OgaSequences(::OgaSequences* p) : ptr_(p) {}
   ~OgaSequences() override { if (ptr_) OgaDestroySequences(ptr_); }
   ::OgaSequences* get() const { return ptr_; }
-  
+
   // Get sequence data as a borrowed view (automatically handles reference counting)
   SequenceDataView* GetSequenceData(size_t index);
-  
-private:
+
+ private:
   ::OgaSequences* ptr_;
 };
 
@@ -53,4 +55,4 @@ inline void OgaCheckResult(::OgaResult* result) {
   }
 }
 
-} // namespace OgaPy
+}  // namespace OgaPy

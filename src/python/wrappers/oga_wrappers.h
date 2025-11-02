@@ -7,7 +7,7 @@
 
 #include "oga_object.h"
 #include "oga_borrowed_view.h"  // Define BorrowedArrayView template first
-#include "oga_utils.h"           // Then utils which uses the type aliases
+#include "oga_utils.h"  // Then utils which uses the type aliases
 #include "oga_config.h"
 #include "oga_model.h"
 #include "oga_tokenizer.h"

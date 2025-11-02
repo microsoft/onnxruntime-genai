@@ -12,7 +12,7 @@ SequenceDataView* OgaSequences::GetSequenceData(size_t index) {
   return new SequenceDataView(this, data, count);
 }
 
-// OgaTokenizer::GetEosTokenIds implementation  
+// OgaTokenizer::GetEosTokenIds implementation
 EosTokenIdsView* OgaTokenizer::GetEosTokenIds() {
   const int32_t* token_ids = nullptr;
   size_t count = 0;
@@ -20,4 +20,4 @@ EosTokenIdsView* OgaTokenizer::GetEosTokenIds() {
   return new EosTokenIdsView(this, token_ids, count);
 }
 
-} // namespace OgaPy
+}  // namespace OgaPy
