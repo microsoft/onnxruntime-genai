@@ -140,9 +140,13 @@ if(ENABLE_TESTS)
     GTest::gtest_main
   )
   
-  # Add nanobind includes (nanobind is already added via add_subdirectory in root CMakeLists)
+  # Add nanobind and Python includes (nanobind is header-only, fetched in root CMakeLists)
   find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
-  target_link_libraries(test_borrowed_view PRIVATE nanobind::nanobind)
+  target_include_directories(test_borrowed_view PRIVATE 
+    ${nanobind_SOURCE_DIR}/include
+    ${Python_INCLUDE_DIRS}
+  )
+  target_link_libraries(test_borrowed_view PRIVATE ${Python_LIBRARIES})
   
   # Register test with CTest
   add_test(NAME BorrowedViewUnitTests COMMAND test_borrowed_view)
