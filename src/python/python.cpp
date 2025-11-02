@@ -239,25 +239,36 @@ struct PyGenerator {
   nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>> GetNextTokens() {
     // Use wrapper method that handles reference counting
     auto view = generator_->GetNextTokens();
-    // Copy data to numpy array (temporal borrow - data invalidated by next generator call)
-    nb::ndarray<nb::numpy, int32_t, nb::shape<-1>> result = 
-        nb::ndarray<nb::numpy, int32_t, nb::shape<-1>>(
-            nb::ndarray<nb::numpy, int32_t>::allocate({view->size()}));
-    std::copy(view->begin(), view->end(), result.mutable_data());
+    // Copy data to Python-owned numpy array (temporal borrow - data invalidated by next generator call)
+    std::vector<int32_t> data_copy(view->begin(), view->end());
     delete view;
-    return result;
+    
+    // Create numpy array with copied data
+    size_t shape[1] = {data_copy.size()};
+    int32_t* data_ptr = new int32_t[data_copy.size()];
+    std::copy(data_copy.begin(), data_copy.end(), data_ptr);
+    
+    nb::capsule owner(data_ptr, [](void* p) noexcept {
+      delete[] reinterpret_cast<int32_t*>(p);
+    });
+    
+    return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
+        data_ptr, 1, shape, owner);
   }
 
   nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>> GetSequence(int index) {
     // Use wrapper method that handles reference counting
     auto view = generator_->GetSequenceData(index);
-    // Create numpy array that references the view's data
-    // Store view in refs_ to keep it (and parent) alive
-    auto array_view = nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
-        view->data(), {view->size()}, nb::handle());
-    // Keep view alive by storing it
-    refs_.emplace_back(nb::cast(view, nb::rv_policy::take_ownership));
-    return array_view;
+    // Create numpy array that references the view's data (zero-copy)
+    // The view keeps the parent (generator) alive via intrusive_ptr
+    size_t shape[1] = {view->size()};
+    
+    nb::capsule owner(view, [](void* p) noexcept {
+      delete reinterpret_cast<OgaPy::GeneratorSequenceDataView*>(p);
+    });
+    
+    return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
+        view->data(), 1, shape, owner);
   }
 
   nb::ndarray<> GetInput(const std::string& name) {
@@ -505,10 +516,15 @@ NB_MODULE(onnxruntime_genai, m) {
       .def_prop_ro("eos_token_ids", [](OgaPy::OgaTokenizer& t) {
         // Use wrapper method that handles reference counting
         auto view = t.GetEosTokenIds();
-        // Create numpy array that references view's data
-        auto array_view = nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
-            view->data(), {view->size()}, nb::cast(view, nb::rv_policy::take_ownership));
-        return array_view;
+        // Create numpy array that references view's data (zero-copy)
+        size_t shape[1] = {view->size()};
+        
+        nb::capsule owner(view, [](void* p) noexcept {
+          delete reinterpret_cast<OgaPy::EosTokenIdsView*>(p);
+        });
+        
+        return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
+            view->data(), 1, shape, owner);
       })
       .def_prop_ro("pad_token_id", [](const OgaPy::OgaTokenizer& t) {
         int32_t token_id;
@@ -547,15 +563,18 @@ NB_MODULE(onnxruntime_genai, m) {
         // Use wrapper method to get sequence data with proper ref counting
         auto view = sequences->GetSequenceData(0);
         
-        // Create numpy array that references view's data
-        // The view keeps the parent alive
-        auto array_view = nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
-            view->data(), {view->size()}, nb::cast(view, nb::rv_policy::take_ownership));
+        // Create numpy array that references view's data (zero-copy)
+        size_t shape[1] = {view->size()};
         
-        // Clean up sequences (view keeps it alive)
+        nb::capsule owner(view, [](void* p) noexcept {
+          delete reinterpret_cast<OgaPy::SequenceDataView*>(p);
+        });
+        
+        // Clean up sequences (view keeps it alive via intrusive_ptr)
         delete sequences;
         
-        return array_view;
+        return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
+            view->data(), 1, shape, owner);
       })
       .def("to_token_id", [](const OgaPy::OgaTokenizer& t, const char* str) {
         int32_t token_id;
@@ -887,50 +906,10 @@ NB_MODULE(onnxruntime_genai, m) {
         return has_pending_requests;
       });
 
-  // Bind borrowed array view classes with buffer protocol for numpy interop
-  nb::class_<OgaPy::SequenceDataView>(
-      m, "SequenceDataView",
-      nb::intrusive_ptr<OgaPy::SequenceDataView>(
-          [](OgaPy::SequenceDataView *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("__len__", [](const OgaPy::SequenceDataView& view) { return view.size(); })
-      .def("__getitem__", [](const OgaPy::SequenceDataView& view, size_t index) { return view[index]; })
-      .def_buffer([](OgaPy::SequenceDataView* view) {
-        return nb::ndarray<nb::numpy, const int32_t>(
-            view->data(), {view->size()}, nb::handle());
-      });
+  // Note: BorrowedArrayView classes (SequenceDataView, etc.) are internal wrappers
+  // and not exposed to Python. They're used internally to manage lifetimes, and
+  // Python always receives numpy ndarrays.
 
-  nb::class_<OgaPy::GeneratorSequenceDataView>(
-      m, "GeneratorSequenceDataView",
-      nb::intrusive_ptr<OgaPy::GeneratorSequenceDataView>(
-          [](OgaPy::GeneratorSequenceDataView *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("__len__", [](const OgaPy::GeneratorSequenceDataView& view) { return view.size(); })
-      .def("__getitem__", [](const OgaPy::GeneratorSequenceDataView& view, size_t index) { return view[index]; })
-      .def_buffer([](OgaPy::GeneratorSequenceDataView* view) {
-        return nb::ndarray<nb::numpy, const int32_t>(
-            view->data(), {view->size()}, nb::handle());
-      });
-
-  nb::class_<OgaPy::NextTokensView>(
-      m, "NextTokensView",
-      nb::intrusive_ptr<OgaPy::NextTokensView>(
-          [](OgaPy::NextTokensView *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("__len__", [](const OgaPy::NextTokensView& view) { return view.size(); })
-      .def("__getitem__", [](const OgaPy::NextTokensView& view, size_t index) { return view[index]; })
-      .def_buffer([](OgaPy::NextTokensView* view) {
-        return nb::ndarray<nb::numpy, const int32_t>(
-            view->data(), {view->size()}, nb::handle());
-      });
-
-  nb::class_<OgaPy::EosTokenIdsView>(
-      m, "EosTokenIdsView",
-      nb::intrusive_ptr<OgaPy::EosTokenIdsView>(
-          [](OgaPy::EosTokenIdsView *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("__len__", [](const OgaPy::EosTokenIdsView& view) { return view.size(); })
-      .def("__getitem__", [](const OgaPy::EosTokenIdsView& view, size_t index) { return view[index]; })
-      .def_buffer([](OgaPy::EosTokenIdsView* view) {
-        return nb::ndarray<nb::numpy, const int32_t>(
-            view->data(), {view->size()}, nb::handle());
-      });
 
   m.def("set_log_options", &SetLogOptions);
   m.def("set_log_callback", [](nb::handle callback) {

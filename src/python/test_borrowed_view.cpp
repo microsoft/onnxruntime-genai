@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 #include <gtest/gtest.h>
-#include "../wrappers/oga_wrappers.h"
+#include "wrappers/oga_wrappers.h"
 #include <vector>
 #include <memory>
 

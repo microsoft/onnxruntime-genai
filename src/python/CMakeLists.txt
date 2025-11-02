@@ -5,8 +5,14 @@ file(GLOB python_srcs CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
 )
 
-# Ensure intrusive_counter.cpp is included for nanobind intrusive reference counting
-list(APPEND python_srcs "${CMAKE_CURRENT_SOURCE_DIR}/intrusive_counter.cpp")
+# Remove test files from python module sources
+list(FILTER python_srcs EXCLUDE REGEX ".*test.*\\.cpp$")
+
+# Ensure intrusive_counter.cpp and oga_wrapper_impl.cpp are included
+list(APPEND python_srcs 
+  "${CMAKE_CURRENT_SOURCE_DIR}/intrusive_counter.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/oga_wrapper_impl.cpp"
+)
 
 # Find nanobind and create Python module
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
