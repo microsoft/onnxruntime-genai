@@ -285,10 +285,10 @@ class Model:
 
         self.int4_tied_embeddings = config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False
         self.int4_tied_embeddings = extra_options.get("int4_tied_embeddings", self.int4_tied_embeddings)
-        self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last"}
-        if not self.int8_lm_head and extra_options.get("int4_algo_config", "default") != "rtn":
+        self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last", "rtn_last"}
+        if not self.int8_lm_head and extra_options.get("int4_algo_config", "default") not in {"rtn", "k_quant"}:
             # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
-            # tied_embeddings lm_head.MatMul.weight_Q{}G{} only works with rtn on 4bit
+            # tied_embeddings lm_head.MatMul.weight_Q{}G{} only works with rtn&k_quant on 4bit
             self.int4_tied_embeddings = False
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
@@ -489,28 +489,35 @@ class Model:
         customized_weight_config = {}
         int4_algo_config = None
 
-        if quant_method == "rtn":
-            int4_algo_config = RTNWeightOnlyQuantConfig()
+        if quant_method in {"rtn", "rtn_last"}:
+            if quant_method == "rtn":
+                int4_algo_config = RTNWeightOnlyQuantConfig()
+            elif quant_method == "rtn_last":
+                customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
+                int4_algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
-        elif quant_method in {"k_quant_mixed", "k_quant_last"}:
+        elif quant_method in {"k_quant", "k_quant_mixed", "k_quant_last"}:
             from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
 
-            if quant_method == "k_quant_mixed":
-                # k_quant_mixed is from llama.cpp.
-                # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
-                # We also consider some MatMuls are more senstive to quantization than other MatMuls.
-                layers_to_exclude = [
-                    i
-                    for i in range(self.num_layers)
-                    if i < self.num_layers / 8 or i >= 7 * self.num_layers / 8 or (i - (round)(self.num_layers / 8)) % 3 == 2
-                ]
-                for i in layers_to_exclude:
-                    customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
-                    customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
-                    customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
+            if quant_method == "k_quant":
+                int4_algo_config = KQuantWeightOnlyQuantConfig()
+            else:
+                if quant_method == "k_quant_mixed":
+                    # k_quant_mixed is from llama.cpp.
+                    # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
+                    # We also consider some MatMuls are more senstive to quantization than other MatMuls.
+                    layers_to_exclude = [
+                        i
+                        for i in range(self.num_layers)
+                        if i < self.num_layers / 8 or i >= 7 * self.num_layers / 8 or (i - (round)(self.num_layers / 8)) % 3 == 2
+                    ]
+                    for i in layers_to_exclude:
+                        customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
+                        customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
+                        customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
 
-            customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
-            int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+                customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
+                int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
         return int4_algo_config
 
