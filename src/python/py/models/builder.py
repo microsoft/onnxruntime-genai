@@ -1542,34 +1542,103 @@ class Model:
                 ir.Value(name=sin_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(small_cache_shape))
             ],
             name="/small/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_small)))
-        self.make_node(
-            "If", inputs=[f"{greater_name}/output_0"], outputs=[cos_cache_name, sin_cache_name], name=if_name,
-            then_branch=ir.Graph(
-                inputs=[],
-                outputs=[
-                    cos_cache_large_node.outputs[0],
-                    sin_cache_large_node.outputs[0],
-                ],
-                nodes=[
-                    cos_cache_large_node,
-                    sin_cache_large_node,
-                ],
-                name="large_rotemb_caches_graph",
-            ),
-            else_branch=ir.Graph(
 
-                inputs=[],
-                outputs=[
-                    cos_cache_small_node.outputs[0],
-                    sin_cache_small_node.outputs[0],
+        # For TRT-RTX, split into two separate If nodes to workaround trt-rtx bug
+        # where multiple outputs from a single If node cause tensor overwriting
+        if self.ep == "trt-rtx":
+            # Create separate If node for cos_cache only
+            cos_if_name = f"{basename}/If_cos"
+
+            # Create unique constant nodes for cos to avoid tensor sharing
+            cos_large_for_split = ir.node(
+                "Constant", [], outputs=[
+                    ir.Value(name=f"{cos_cache_large_name}_split", type=ir.TensorType(self.io_dtype), shape=ir.Shape(cos_cache_large.shape))
                 ],
-                nodes=[
-                    cos_cache_small_node,
-                    sin_cache_small_node,
+                name=f"/large/cos_cache/Constant_split_cos", attributes=dict(value=ir.tensor(cos_cache_large)))
+
+            cos_small_for_split = ir.node(
+                "Constant", [], outputs=[
+                    ir.Value(name=f"{cos_cache_small_name}_split", type=ir.TensorType(self.io_dtype), shape=ir.Shape(small_cache_shape))
                 ],
-                name="small_rotemb_caches_graph",
-            ),
-        )
+                name=f"/small/cos_cache/Constant_split_cos", attributes=dict(value=ir.tensor(cos_cache_small)))
+
+            self.make_node(
+                "If", inputs=[f"{greater_name}/output_0"], outputs=[cos_cache_name], name=cos_if_name,
+                then_branch=ir.Graph(
+                    inputs=[],
+                    outputs=[cos_large_for_split.outputs[0]],
+                    nodes=[cos_large_for_split],
+                    name="large_cos_cache_graph",
+                ),
+                else_branch=ir.Graph(
+                    inputs=[],
+                    outputs=[cos_small_for_split.outputs[0]],
+                    nodes=[cos_small_for_split],
+                    name="small_cos_cache_graph",
+                ),
+            )
+
+            # Create separate If node for sin_cache only
+            sin_if_name = f"{basename}/If_sin"
+
+            # Create unique constant nodes for sin to avoid tensor sharing
+            sin_large_for_split = ir.node(
+                "Constant", [], outputs=[
+                    ir.Value(name=f"{sin_cache_large_name}_split", type=ir.TensorType(self.io_dtype), shape=ir.Shape(sin_cache_large.shape))
+                ],
+                name=f"/large/sin_cache/Constant_split_sin", attributes=dict(value=ir.tensor(sin_cache_large)))
+
+            sin_small_for_split = ir.node(
+                "Constant", [], outputs=[
+                    ir.Value(name=f"{sin_cache_small_name}_split", type=ir.TensorType(self.io_dtype), shape=ir.Shape(small_cache_shape))
+                ],
+                name=f"/small/sin_cache/Constant_split_sin", attributes=dict(value=ir.tensor(sin_cache_small)))
+
+            self.make_node(
+                "If", inputs=[f"{greater_name}/output_0"], outputs=[sin_cache_name], name=sin_if_name,
+                then_branch=ir.Graph(
+                    inputs=[],
+                    outputs=[sin_large_for_split.outputs[0]],
+                    nodes=[sin_large_for_split],
+                    name="large_sin_cache_graph",
+                ),
+                else_branch=ir.Graph(
+                    inputs=[],
+                    outputs=[sin_small_for_split.outputs[0]],
+                    nodes=[sin_small_for_split],
+                    name="small_sin_cache_graph",
+                ),
+            )
+        else:
+            # For other EPs, use single If node with multiple outputs
+            self.make_node(
+                "If", inputs=[f"{greater_name}/output_0"], outputs=[cos_cache_name, sin_cache_name], name=if_name,
+                then_branch=ir.Graph(
+                    inputs=[],
+                    outputs=[
+                        cos_cache_large_node.outputs[0],
+                        sin_cache_large_node.outputs[0],
+                    ],
+                    nodes=[
+                        cos_cache_large_node,
+                        sin_cache_large_node,
+                    ],
+                    name="large_rotemb_caches_graph",
+                ),
+                else_branch=ir.Graph(
+                    inputs=[],
+                    outputs=[
+                        cos_cache_small_node.outputs[0],
+                        sin_cache_small_node.outputs[0],
+                    ],
+                    nodes=[
+                        cos_cache_small_node,
+                        sin_cache_small_node,
+                    ],
+                    name="small_rotemb_caches_graph",
+                ),
+            )
+
         self.make_value(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
