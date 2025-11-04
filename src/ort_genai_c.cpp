@@ -1047,7 +1047,7 @@ OgaResult* OGA_API_CALL OgaRequestGetOpaqueData(OgaRequest* request, void** data
 
 void OGA_API_CALL OgaDestroyStringArray(OgaStringArray* string_array) { delete string_array; }
 void OGA_API_CALL OgaDestroyResult(OgaResult* p) { delete p; }
-void OGA_API_CALL OgaDestroyString(const char* p) { delete p; }
+void OGA_API_CALL OgaDestroyString(const char* p) { delete[] p; }
 void OGA_API_CALL OgaDestroySequences(OgaSequences* p) { delete p; }
 void OGA_API_CALL OgaDestroyConfig(OgaConfig* p) { delete p; }
 void OGA_API_CALL OgaDestroyModel(OgaModel* p) { p->ExternalRelease(); }

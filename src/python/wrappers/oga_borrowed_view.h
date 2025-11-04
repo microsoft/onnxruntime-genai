@@ -20,11 +20,11 @@ struct BorrowedArrayView : OgaObject {
     if (!data && size > 0) {
       throw std::invalid_argument("BorrowedArrayView: data cannot be null when size > 0");
     }
-    intrusive_inc_ref(parent_);
+    intrusive_inc_ref(parent_); 
   }
 
   ~BorrowedArrayView() override {
-    intrusive_dec_ref(parent_);
+    intrusive_dec_ref(parent_); 
   }
 
   const T* data() const { return data_; }

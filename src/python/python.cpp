@@ -45,7 +45,7 @@ template <typename T>
 std::span<T> ToSpan(OgaTensor& v) {
   OgaElementType type;
   OgaPy::OgaCheckResult(OgaTensorGetType(&v, &type));
-  assert(static_cast<ONNXTensorElementDataType>(type) == Ort::TypeToTensorType<T>);
+  assert(static_cast<ONNXTensorElementDataType>(type) == Ort::TypeToTensorType<std::remove_const_t<T>>);
 
   size_t rank;
   OgaPy::OgaCheckResult(OgaTensorGetShapeRank(&v, &rank));
@@ -200,7 +200,7 @@ struct PyGeneratorParams {
     params_.reset(new OgaPy::OgaGeneratorParams(p));
   }
 
-  operator OgaGeneratorParams*() { return reinterpret_cast<OgaGeneratorParams*>(params_.get()); }
+  operator OgaGeneratorParams*() { return params_->get(); }
 
   std::unique_ptr<OgaPy::OgaGeneratorParams> params_;
 
@@ -208,11 +208,11 @@ struct PyGeneratorParams {
     for (const auto& entry : dict) {
       auto name = nb::cast<std::string>(entry.first);
       if (nb::isinstance<nb::float_>(entry.second)) {
-        OgaPy::OgaCheckResult(OgaGeneratorParamsSetSearchNumber(reinterpret_cast<OgaGeneratorParams*>(params_.get()), name.c_str(), nb::cast<double>(entry.second)));
+        OgaPy::OgaCheckResult(OgaGeneratorParamsSetSearchNumber(params_->get(), name.c_str(), nb::cast<double>(entry.second)));
       } else if (nb::isinstance<nb::bool_>(entry.second)) {
-        OgaPy::OgaCheckResult(OgaGeneratorParamsSetSearchBool(reinterpret_cast<OgaGeneratorParams*>(params_.get()), name.c_str(), nb::cast<bool>(entry.second)));
+        OgaPy::OgaCheckResult(OgaGeneratorParamsSetSearchBool(params_->get(), name.c_str(), nb::cast<bool>(entry.second)));
       } else if (nb::isinstance<nb::int_>(entry.second)) {
-        OgaPy::OgaCheckResult(OgaGeneratorParamsSetSearchNumber(reinterpret_cast<OgaGeneratorParams*>(params_.get()), name.c_str(), nb::cast<int>(entry.second)));
+        OgaPy::OgaCheckResult(OgaGeneratorParamsSetSearchNumber(params_->get(), name.c_str(), nb::cast<int>(entry.second)));
       } else
         throw std::runtime_error("Unknown search option type, can be float/bool/int:" + name);
     }
@@ -223,7 +223,7 @@ struct PyGeneratorParams {
   }
 
   void SetGuidance(const std::string& type, const std::string& data, bool enable_ff_tokens = false) {
-    OgaPy::OgaCheckResult(OgaGeneratorParamsSetGuidance(reinterpret_cast<OgaGeneratorParams*>(params_.get()), type.c_str(), data.c_str(), enable_ff_tokens));
+    OgaPy::OgaCheckResult(OgaGeneratorParamsSetGuidance(params_->get(), type.c_str(), data.c_str(), enable_ff_tokens));
   }
 
   std::vector<nb::object> refs_;  // References to data we want to ensure doesn't get garbage collected
@@ -237,16 +237,16 @@ struct PyGenerator {
   }
 
   nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>> GetNextTokens() {
-    // Use wrapper method that handles reference counting
-    auto view = generator_->GetNextTokens();
-    // Copy data to Python-owned numpy array (temporal borrow - data invalidated by next generator call)
-    std::vector<int32_t> data_copy(view->begin(), view->end());
-    delete view;
+    // Get data directly from C API without using BorrowedArrayView
+    // to avoid intrusive ref counting issues with unique_ptr ownership
+    const int32_t* tokens = nullptr;
+    size_t count = 0;
+    OgaPy::OgaCheckResult(OgaGenerator_GetNextTokens(generator_->get(), &tokens, &count));
     
-    // Create numpy array with copied data
-    size_t shape[1] = {data_copy.size()};
-    int32_t* data_ptr = new int32_t[data_copy.size()];
-    std::copy(data_copy.begin(), data_copy.end(), data_ptr);
+    // Copy data to Python-owned numpy array (temporal borrow - data invalidated by next generator call)
+    size_t shape[1] = {count};
+    int32_t* data_ptr = new int32_t[count];
+    std::copy(tokens, tokens + count, data_ptr);
     
     nb::capsule owner(data_ptr, [](void* p) noexcept {
       delete[] reinterpret_cast<int32_t*>(p);
@@ -257,75 +257,75 @@ struct PyGenerator {
   }
 
   nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>> GetSequence(int index) {
-    // Use wrapper method that handles reference counting
-    auto view = generator_->GetSequenceData(index);
-    // Create numpy array that references the view's data (zero-copy)
-    // The view keeps the parent (generator) alive via intrusive_ptr
-    size_t shape[1] = {view->size()};
+    // Get data directly from C API without using BorrowedArrayView
+    const int32_t* data = OgaGenerator_GetSequenceData(generator_->get(), index);
+    size_t count = OgaGenerator_GetSequenceCount(generator_->get(), index);
     
-    nb::capsule owner(view, [](void* p) noexcept {
-      delete reinterpret_cast<OgaPy::GeneratorSequenceDataView*>(p);
+    // Copy data to Python-owned numpy array
+    size_t shape[1] = {count};
+    int32_t* data_ptr = new int32_t[count];
+    std::copy(data, data + count, data_ptr);
+    
+    nb::capsule owner(data_ptr, [](void* p) noexcept {
+      delete[] reinterpret_cast<int32_t*>(p);
     });
     
     return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
-        view->data(), 1, shape, owner);
+        data_ptr, 1, shape, owner);
   }
 
   nb::ndarray<> GetInput(const std::string& name) {
-    OgaTensor* p;
-    OgaPy::OgaCheckResult(OgaGenerator_GetInput(reinterpret_cast<OgaGenerator*>(generator_.get()), name.c_str(), &p));
+    OgaTensor* p = generator_->GetInput(name.c_str());
     return ToNumpy(*p);
   }
 
   nb::ndarray<> GetOutput(const std::string& name) {
-    OgaTensor* p;
-    OgaPy::OgaCheckResult(OgaGenerator_GetOutput(reinterpret_cast<OgaGenerator*>(generator_.get()), name.c_str(), &p));
+    OgaTensor* p = generator_->GetOutput(name.c_str());
     return ToNumpy(*p);
   }
 
   void SetModelInput(const std::string& name, nb::ndarray<>& value) {
-    OgaPy::OgaCheckResult(OgaGenerator_SetModelInput(reinterpret_cast<OgaGenerator*>(generator_.get()), name.c_str(), reinterpret_cast<OgaTensor*>(ToOgaTensor(value, false).get())));
+    generator_->SetModelInput(name.c_str(), reinterpret_cast<OgaTensor*>(ToOgaTensor(value, false).get()));
   }
 
   void SetInputs(OgaPy::OgaNamedTensors& named_tensors) {
-    OgaPy::OgaCheckResult(OgaGenerator_SetInputs(reinterpret_cast<OgaGenerator*>(generator_.get()), named_tensors.get()));
+    generator_->SetInputs(named_tensors.get());
   }
 
   void AppendTokens(OgaPy::OgaTensor& tokens) {
     auto span = ToSpan<const int32_t>(*tokens.get());
-    OgaPy::OgaCheckResult(OgaGenerator_AppendTokens(reinterpret_cast<OgaGenerator*>(generator_.get()), span.data(), span.size()));
+    generator_->AppendTokens(span.data(), span.size());
   }
 
   void AppendTokens(nb::ndarray<const int32_t, nb::ndim<1>>& tokens) {
     auto span = ToSpan(tokens);
-    OgaPy::OgaCheckResult(OgaGenerator_AppendTokens(reinterpret_cast<OgaGenerator*>(generator_.get()), span.data(), span.size()));
+    generator_->AppendTokens(span.data(), span.size());
   }
 
   nb::ndarray<> GetLogits() {
-    OgaTensor* p;
-    OgaPy::OgaCheckResult(OgaGenerator_GetLogits(reinterpret_cast<OgaGenerator*>(generator_.get()), &p));
+    OgaTensor* p = generator_->GetLogits();
     return ToNumpy(std::unique_ptr<OgaPy::OgaTensor>(new OgaPy::OgaTensor(p)));
   }
 
   void SetLogits(nb::ndarray<>& new_logits) {
     auto tensor = ToOgaTensor(new_logits, false);
-    OgaPy::OgaCheckResult(OgaGenerator_SetLogits(reinterpret_cast<OgaGenerator*>(generator_.get()), reinterpret_cast<OgaTensor*>(tensor.get())));
+    generator_->SetLogits(reinterpret_cast<OgaTensor*>(tensor.get()));
   }
 
   void GenerateNextToken() {
-    OgaPy::OgaCheckResult(OgaGenerator_GenerateNextToken(reinterpret_cast<OgaGenerator*>(generator_.get())));
+    generator_->GenerateNextToken();
   }
 
   void RewindTo(size_t new_length) {
-    OgaPy::OgaCheckResult(OgaGenerator_RewindTo(reinterpret_cast<OgaGenerator*>(generator_.get()), new_length));
+    generator_->RewindTo(new_length);
   }
 
   bool IsDone() const {
-    return OgaGenerator_IsDone(reinterpret_cast<const OgaGenerator*>(generator_.get()));
+    return generator_->IsDone();
   }
 
   void SetActiveAdapter(OgaPy::OgaAdapters& adapters, const std::string& adapter_name) {
-    OgaPy::OgaCheckResult(OgaSetActiveAdapter(reinterpret_cast<OgaGenerator*>(generator_.get()), adapters.get(), adapter_name.c_str()));
+    generator_->SetActiveAdapter(&adapters, adapter_name.c_str());
   }
 
  private:
@@ -557,10 +557,15 @@ NB_MODULE(onnxruntime_genai, m) {
         
         auto sequences = new OgaPy::OgaSequences(sequences_ptr);
         
+        // Manually increment ref count since we created with new (starts at 0)
+        // The BorrowedArrayView will also increment it, giving us ref count of 2
+        OgaPy::intrusive_inc_ref(sequences);
+        
         // Encode using C API
         OgaPy::OgaCheckResult(OgaTokenizerEncode(t.get(), s.c_str(), sequences->get()));
         
         // Use wrapper method to get sequence data with proper ref counting
+        // This will increment ref count to 2 (or 3 if we already inc'd above)
         auto view = sequences->GetSequenceData(0);
         
         // Create numpy array that references view's data (zero-copy)
@@ -570,8 +575,8 @@ NB_MODULE(onnxruntime_genai, m) {
           delete reinterpret_cast<OgaPy::SequenceDataView*>(p);
         });
         
-        // Clean up sequences (view keeps it alive via intrusive_ptr)
-        delete sequences;
+        // Decrement our ref count (view still holds one, so sequences stays alive)
+        OgaPy::intrusive_dec_ref(sequences);
         
         return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
             view->data(), 1, shape, owner);
@@ -587,11 +592,13 @@ NB_MODULE(onnxruntime_genai, m) {
         OgaPy::OgaCheckResult(OgaTokenizerDecode(t.get(), span.data(), span.size(), &p));
         return std::string(OgaPy::OgaString(p));
       })
-      .def("apply_chat_template", [](const OgaPy::OgaTokenizer& t, const char* messages, const char* template_str, const char* tools, bool add_generation_prompt) -> std::string { 
+      .def("apply_chat_template", [](const OgaPy::OgaTokenizer& t, const char* messages, std::optional<std::string> template_str, std::optional<std::string> tools, bool add_generation_prompt) -> std::string { 
         const char *p;
-        OgaPy::OgaCheckResult(OgaTokenizerApplyChatTemplate(t.get(), template_str, messages, tools, add_generation_prompt, &p));
+        const char* template_ptr = template_str.has_value() ? template_str->c_str() : nullptr;
+        const char* tools_ptr = tools.has_value() ? tools->c_str() : nullptr;
+        OgaPy::OgaCheckResult(OgaTokenizerApplyChatTemplate(t.get(), template_ptr, messages, tools_ptr, add_generation_prompt, &p));
         return std::string(OgaPy::OgaString(p));
-      }, "messages"_a, nb::kw_only(), "template_str"_a = nullptr, "tools"_a = nullptr, "add_generation_prompt"_a = true)
+      }, "messages"_a, nb::kw_only(), "template_str"_a = nb::none(), "tools"_a = nb::none(), "add_generation_prompt"_a = true)
       .def("encode_batch", [](const OgaPy::OgaTokenizer& t, std::vector<std::string> strings) {
         std::vector<const char*> c_strings;
         for (const auto& s : strings)
@@ -855,30 +862,23 @@ NB_MODULE(onnxruntime_genai, m) {
         OgaPy::OgaCheckResult(OgaCreateSequences(&p));
         auto sequences = new OgaPy::OgaSequences(p);
         auto tokens_span = ToSpan(tokens);
-        OgaPy::OgaCheckResult(OgaAppendTokenSequence(tokens_span.data(), tokens_span.size(), reinterpret_cast<OgaSequences*>(sequences)));
-        OgaPy::OgaCheckResult(OgaRequestAddTokens(request.get(), reinterpret_cast<OgaSequences*>(sequences)));
+        sequences->AppendTokenSequence(tokens_span.data(), tokens_span.size());
+        request.AddTokens(sequences);
       })
       .def("has_unseen_tokens", [](const OgaPy::OgaRequest& request) {
-        bool has_unseen_tokens;
-        OgaPy::OgaCheckResult(OgaRequestHasUnseenTokens(request.get(), &has_unseen_tokens));
-        return has_unseen_tokens;
+        return request.HasUnseenTokens();
       })
       .def("is_done", [](const OgaPy::OgaRequest& request) {
-        bool is_done;
-        OgaPy::OgaCheckResult(OgaRequestIsDone(request.get(), &is_done));
-        return is_done;
+        return request.IsDone();
       })
       .def("get_unseen_token", [](OgaPy::OgaRequest& request) {
-        int32_t token;
-        OgaPy::OgaCheckResult(OgaRequestGetUnseenToken(request.get(), &token));
-        return token;
+        return request.GetUnseenToken();
       })
       .def("set_opaque_data", [](OgaPy::OgaRequest& request, nb::object opaque_data) {
-        OgaPy::OgaCheckResult(OgaRequestSetOpaqueData(request.get(), opaque_data.ptr()));
+        request.SetOpaqueData(opaque_data.ptr());
       })
       .def("get_opaque_data", [](OgaPy::OgaRequest& request) -> nb::object {
-        void* data;
-        OgaPy::OgaCheckResult(OgaRequestGetOpaqueData(request.get(), &data));
+        void* data = request.GetOpaqueData();
         if (!data)
           return nb::none();
         return nb::borrow<nb::object>(static_cast<PyObject*>(data));
@@ -893,17 +893,13 @@ NB_MODULE(onnxruntime_genai, m) {
         OgaPy::OgaCheckResult(OgaCreateEngine(model.get(), &p));
         new (self) OgaPy::OgaEngine(p);
       })
-      .def("add_request", [](OgaPy::OgaEngine& engine, OgaPy::OgaRequest& request){ OgaPy::OgaCheckResult(OgaEngineAddRequest(engine.get(), request.get())); })
+      .def("add_request", [](OgaPy::OgaEngine& engine, OgaPy::OgaRequest& request){ engine.AddRequest(&request); })
       .def("step", [](OgaPy::OgaEngine& engine) { 
-        OgaRequest* p;
-        OgaPy::OgaCheckResult(OgaEngineStep(engine.get(), &p));
-        return new OgaPy::OgaRequest(p);
+        return engine.Step();
       })
-      .def("remove_request", [](OgaPy::OgaEngine& engine, OgaPy::OgaRequest& request){ OgaPy::OgaCheckResult(OgaEngineRemoveRequest(engine.get(), request.get()));})
+      .def("remove_request", [](OgaPy::OgaEngine& engine, OgaPy::OgaRequest& request){ engine.RemoveRequest(&request); })
       .def("has_pending_requests", [](OgaPy::OgaEngine& engine) {
-        bool has_pending_requests;
-        OgaPy::OgaCheckResult(OgaEngineHasPendingRequests(engine.get(), &has_pending_requests));
-        return has_pending_requests;
+        return engine.HasPendingRequests();
       });
 
   // Note: BorrowedArrayView classes (SequenceDataView, etc.) are internal wrappers
