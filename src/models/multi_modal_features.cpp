@@ -77,4 +77,28 @@ void MultiModalFeatures::ReuseFeaturesBuffer(MultiModalFeatures& other) {
   state_.inputs_[index_] = other.state_.outputs_[other.index_];
 }
 
+DeviceSpan<uint8_t> MultiModalFeatures::AsByteSpan() {
+  if (!features_) {
+    throw std::runtime_error("MultiModalFeatures: features_ not allocated");
+  }
+  return ByteWrapTensor(*model_.p_device_, *features_);
+}
+
+size_t MultiModalFeatures::BytesPerImage() const {
+  // Shape can be [B, T, H] or [T, H]. Compute T*H and multiply by element size.
+  if (shape_.empty()) return 0;
+  int64_t tokens = 0;
+  int64_t hidden = 0;
+  if (shape_.size() == 3) {
+    tokens = shape_[1];
+    hidden = shape_[2];
+  } else if (shape_.size() == 2) {
+    tokens = shape_[0];
+    hidden = shape_[1];
+  } else {
+    throw std::runtime_error("MultiModalFeatures: unexpected features shape rank");
+  }
+  return static_cast<size_t>(tokens) * static_cast<size_t>(hidden) * Ort::SizeOf(type_);
+}
+
 }  // namespace Generators

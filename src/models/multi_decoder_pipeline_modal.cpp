@@ -118,12 +118,94 @@ void VisionPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_in
   image_features_ = std::make_unique<MultiModalFeatures>(*this, MultiModalFeatures::Mode::Output,  // model output
                                                          model_.config_->model.vision.outputs.image_features,
                                                          num_images_, num_image_tokens_);
-  image_features_->Add();
+  for (const auto& ei : extra_inputs) {
+    if (ei.name == "pixel_values") {
+      pixel_values_tensor_ = ei.tensor;
+      break;
+    }
+  }
   extra_inputs_.Add(extra_inputs, model_.vision_session_->GetInputNames());
 }
 
-DeviceSpan<float> VisionPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
-  State::Run(*model_.vision_session_);
+// Create a [1, C, H, W] tensor and copy the i-th image from a [N, C, H, W] tensor.
+static std::shared_ptr<Tensor> MakeSingleImagePixelValues(const std::shared_ptr<Tensor>& full,
+                                                          int64_t index,
+                                                          DeviceInterface* device) {
+  if (!full || !full->GetOrtTensor()) {
+    throw std::runtime_error("MakeSingleImagePixelValues: source tensor is null");
+  }
+  const auto full_shape = full->GetShape();  // expected [N, C, H, W]
+  if (full_shape.size() != 4) {
+    throw std::runtime_error("MakeSingleImagePixelValues: expected [N, C, H, W] shape");
+  }
+  const int64_t N = full_shape[0];
+  const int64_t C = full_shape[1];
+  const int64_t H = full_shape[2];
+  const int64_t W = full_shape[3];
+  if (index < 0 || index >= N) {
+    throw std::runtime_error("MakeSingleImagePixelValues: index out of range");
+  }
+
+  // Destination shape [1, C, H, W]
+  std::vector<int64_t> dst_shape = {1, C, H, W};
+
+  auto dst = std::make_shared<Tensor>(device, full->GetType());
+  dst->CreateTensor(dst_shape, /*make_static=*/false);
+
+  // Compute byte ranges and copy
+  const size_t elem_size = Ort::SizeOf(full->GetType());
+  const size_t per_image_bytes = static_cast<size_t>(C) * static_cast<size_t>(H) * static_cast<size_t>(W) * elem_size;
+  const size_t offset_bytes = static_cast<size_t>(index) * per_image_bytes;
+
+  auto src_bytes = full->GetByteSpan();
+  auto dst_bytes = dst->GetByteSpan();
+
+  if (offset_bytes + per_image_bytes > src_bytes.size() || per_image_bytes > dst_bytes.size()) {
+    throw std::runtime_error("MakeSingleImagePixelValues: copy bounds exceeded");
+  }
+
+  dst_bytes.CopyFrom(src_bytes.subspan(offset_bytes, per_image_bytes));
+  return dst;
+}
+
+DeviceSpan<float> VisionPipelineState::Run(int current_length,
+                                           DeviceSpan<int32_t>& next_tokens,
+                                           DeviceSpan<int32_t> next_indices) {
+  if (!model_.vision_session_ || !image_features_ || !pixel_values_tensor_) {
+    return {};
+  }
+
+  const int64_t total_images = num_images_;
+  const size_t bytes_per_image = image_features_->BytesPerImage();
+
+  // Flat destination bytes of the global features buffer
+  auto dst_all_bytes = image_features_->AsByteSpan();
+
+  // Bind a single-image output features object once and reuse across runs
+  std::unique_ptr<MultiModalFeatures> run_features =
+      std::make_unique<MultiModalFeatures>(*this,
+                                           MultiModalFeatures::Mode::Output,
+                                           model_.config_->model.vision.outputs.image_features,
+                                           /*batch_size=*/1,
+                                           /*num_feature_tokens=*/num_image_tokens_);
+  run_features->Add();
+
+  for (int64_t i = 0; i < total_images; ++i) {
+    auto pixel_values_i = MakeSingleImagePixelValues(pixel_values_tensor_, i, model_.p_device_);
+    extra_inputs_.Replace("pixel_values", pixel_values_i);
+
+    State::Run(*model_.vision_session_);
+
+    auto src_bytes = run_features->AsByteSpan();
+
+    const size_t dst_offset = static_cast<size_t>(i) * bytes_per_image;
+    if (dst_offset + bytes_per_image <= dst_all_bytes.size() && bytes_per_image <= src_bytes.size()) {
+      dst_all_bytes.subspan(dst_offset, bytes_per_image).CopyFrom(src_bytes.subspan(0, bytes_per_image));
+    } else {
+      throw std::runtime_error("VisionPipelineState::Run: features copy out of bounds");
+    }
+  }
+
   return {};
 }
 
@@ -648,6 +730,7 @@ DeviceSpan<float> MultiModalDecoderPipelineState::Run(int current_length, Device
     if (num_audio_tokens_ > 0 && speech_state_) {
       speech_state_->Run(current_length, next_tokens, next_indices);
     }
+    vision_state_->image_features_->Add();
     if (vision_state_) embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
     if (speech_state_) embedding_state_->audio_features_->ReuseFeaturesBuffer(*speech_state_->audio_features_);
     embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_pipeline_state_->full_inputs_embeds_);

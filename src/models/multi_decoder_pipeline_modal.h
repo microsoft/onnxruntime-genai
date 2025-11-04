@@ -43,6 +43,7 @@ struct VisionPipelineState : State {
   const MultiModalPipelineLanguageModel& model_;
   int64_t num_image_tokens_;
   int64_t num_images_{};
+  std::shared_ptr<Tensor> pixel_values_tensor_;
   ExtraInputs extra_inputs_{*this};  // Model inputs
   std::unique_ptr<MultiModalFeatures> image_features_;
 };

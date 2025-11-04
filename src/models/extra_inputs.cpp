@@ -60,4 +60,14 @@ void ExtraInputs::Add(const std::vector<ExtraInput>& extra_inputs, const std::ve
   registrar_.Add();
 }
 
+bool ExtraInputs::Replace(const std::string& name, const std::shared_ptr<Tensor>& tensor) {
+  for (size_t i = 0; i < state_.input_names_.size(); ++i) {
+    if (name == std::string(state_.input_names_[i])) {
+      state_.inputs_[i] = tensor->ort_tensor_.get();
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace Generators

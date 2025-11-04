@@ -19,6 +19,9 @@ struct MultiModalFeatures {
   void Update(bool is_prompt);
   void ReuseFeaturesBuffer(MultiModalFeatures& other);
 
+  DeviceSpan<uint8_t> AsByteSpan();
+  size_t BytesPerImage() const;
+
   auto& GetShape() const { return shape_; }
   size_t GetIndex() { return index_; }
   OrtValue* Get() { return features_.get(); }
