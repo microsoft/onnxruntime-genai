@@ -11,9 +11,10 @@ namespace OgaPy {
 // Forward declaration (full definition needed for SetActiveAdapter)
 struct OgaAdapters;
 
-struct OgaGeneratorParams {
+// OgaGeneratorParams is now an intrusive object for consistency
+struct OgaGeneratorParams : OgaObject { // <-- CHANGED: Inherit from OgaObject
   explicit OgaGeneratorParams(::OgaGeneratorParams* p) : ptr_(p) {}
-  ~OgaGeneratorParams() { if (ptr_) OgaDestroyGeneratorParams(ptr_); }
+  ~OgaGeneratorParams() override { if (ptr_) OgaDestroyGeneratorParams(ptr_); } // <-- CHANGED: Added override
   ::OgaGeneratorParams* get() const { return ptr_; }
   
   // Set a search option (numeric value)
@@ -40,9 +41,10 @@ private:
   ::OgaGeneratorParams* ptr_;
 };
 
-struct OgaGenerator {
+// OgaGenerator is now an intrusive object to manage its lifetime
+struct OgaGenerator : OgaObject { // <-- CHANGED: Inherit from OgaObject
   explicit OgaGenerator(::OgaGenerator* p) : ptr_(p) {}
-  ~OgaGenerator() { if (ptr_) OgaDestroyGenerator(ptr_); }
+  ~OgaGenerator() override { if (ptr_) OgaDestroyGenerator(ptr_); } // <-- CHANGED: Added override
   ::OgaGenerator* get() const { return ptr_; }
   
   // Check if generation is complete
@@ -86,6 +88,8 @@ struct OgaGenerator {
     const int32_t* tokens = nullptr;
     size_t count = 0;
     OgaCheckResult(OgaGenerator_GetNextTokens(ptr_, &tokens, &count));
+    // The NextTokensView constructor will call intrusive_inc_ref(this),
+    // correctly extending the lifetime of this OgaGenerator object.
     return new NextTokensView(this, tokens, count);
   }
   
@@ -134,6 +138,7 @@ struct OgaGenerator {
   GeneratorSequenceDataView* GetSequenceData(size_t index) {
     const int32_t* data = OgaGenerator_GetSequenceData(ptr_, index);
     size_t count = OgaGenerator_GetSequenceCount(ptr_, index);
+    // The GeneratorSequenceDataView constructor will call intrusive_inc_ref(this)
     return new GeneratorSequenceDataView(this, data, count);
   }
   
