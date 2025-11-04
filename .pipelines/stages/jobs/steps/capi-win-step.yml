@@ -158,7 +158,7 @@ steps:
     condition: and(succeeded(), eq(variables['build_config'], 'relwithdebinfo'))
     inputs:
       SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\RelWithDebInfo\'
-      SearchPattern: 'onnxruntime_genai.pdb'
+      SearchPattern: 'onnxruntime-genai*.pdb'
       SymbolServerType: teamServices
       SymbolExpirationInDays: 365
 
