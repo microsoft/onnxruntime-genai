@@ -58,13 +58,13 @@ struct OgaGenerator : OgaObject { // <-- CHANGED: Inherit from OgaObject
   }
   
   // Set a model input tensor
-  void SetModelInput(const char* name, OgaTensor* tensor) {
+  void SetModelInput(const char* name, ::OgaTensor* tensor) {
     OgaCheckResult(OgaGenerator_SetModelInput(ptr_, name, tensor));
   }
   
   // Set all model inputs at once
   void SetInputs(const OgaNamedTensors* named_tensors) {
-    OgaCheckResult(OgaGenerator_SetInputs(ptr_, named_tensors));
+    OgaCheckResult(OgaGenerator_SetInputs(ptr_, named_tensors->get()));
   }
   
   // Append token sequences to the generator
@@ -104,28 +104,28 @@ struct OgaGenerator : OgaObject { // <-- CHANGED: Inherit from OgaObject
   }
   
   // Get an input tensor
-  OgaTensor* GetInput(const char* name) {
-    OgaTensor* out = nullptr;
+  ::OgaTensor* GetInput(const char* name) {
+    ::OgaTensor* out = nullptr;
     OgaCheckResult(OgaGenerator_GetInput(ptr_, name, &out));
     return out;
   }
   
   // Get an output tensor
-  OgaTensor* GetOutput(const char* name) {
-    OgaTensor* out = nullptr;
+  ::OgaTensor* GetOutput(const char* name) {
+    ::OgaTensor* out = nullptr;
     OgaCheckResult(OgaGenerator_GetOutput(ptr_, name, &out));
     return out;
   }
   
   // Get logits tensor
-  OgaTensor* GetLogits() {
-    OgaTensor* out = nullptr;
+  ::OgaTensor* GetLogits() {
+    ::OgaTensor* out = nullptr;
     OgaCheckResult(OgaGenerator_GetLogits(ptr_, &out));
     return out;
   }
   
   // Set logits tensor
-  void SetLogits(OgaTensor* tensor) {
+  void SetLogits(::OgaTensor* tensor) {
     OgaCheckResult(OgaGenerator_SetLogits(ptr_, tensor));
   }
   

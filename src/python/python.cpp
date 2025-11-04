@@ -27,914 +27,845 @@ using namespace nb::literals;
 namespace nanobind::detail {
 template <>
 struct dtype_traits<Ort::Float16_t> {
-  static constexpr dlpack::dtype value{ (uint8_t) dlpack::dtype_code::Float, 16, 1 };
-  static constexpr auto name = const_name("float16");
+ static constexpr dlpack::dtype value{ (uint8_t) dlpack::dtype_code::Float, 16, 1 };
+ static constexpr auto name = const_name("float16");
 };
 } // namespace nanobind::detail
 
 template <typename T, typename... Extra>
 auto ToSpan(nb::ndarray<T, Extra...>& v) {
-    if constexpr (std::is_const_v<T>) {
-        return std::span<const T>(v.data(), v.size());
-    } else {
-        return std::span<T>(v.mutable_data(), v.size());
-    }
+  if constexpr (std::is_const_v<T>) {
+    return std::span<const T>(v.data(), v.size());
+  } else {
+    return std::span<T>(v.mutable_data(), v.size());
+  }
 }
 
 template <typename T>
 std::span<T> ToSpan(OgaTensor& v) {
-  OgaElementType type;
-  OgaPy::OgaCheckResult(OgaTensorGetType(&v, &type));
-  assert(static_cast<ONNXTensorElementDataType>(type) == Ort::TypeToTensorType<std::remove_const_t<T>>);
+ OgaElementType type;
+ OgaPy::OgaCheckResult(OgaTensorGetType(&v, &type));
+ assert(static_cast<ONNXTensorElementDataType>(type) == Ort::TypeToTensorType<std::remove_const_t<T>>);
 
-  size_t rank;
-  OgaPy::OgaCheckResult(OgaTensorGetShapeRank(&v, &rank));
-  std::vector<int64_t> shape(rank);
-  OgaPy::OgaCheckResult(OgaTensorGetShape(&v, shape.data(), rank));
+ size_t rank;
+ OgaPy::OgaCheckResult(OgaTensorGetShapeRank(&v, &rank));
+ std::vector<int64_t> shape(rank);
+ OgaPy::OgaCheckResult(OgaTensorGetShape(&v, shape.data(), rank));
 
-  auto element_count = std::accumulate(shape.begin(), shape.end(), 1LL, std::multiplies<int64_t>());
-  void* data;
-  OgaPy::OgaCheckResult(OgaTensorGetData(&v, &data));
-  return {reinterpret_cast<T*>(data), static_cast<size_t>(element_count)};
+ auto element_count = std::accumulate(shape.begin(), shape.end(), 1LL, std::multiplies<int64_t>());
+ void* data;
+ OgaPy::OgaCheckResult(OgaTensorGetData(&v, &data));
+ return {reinterpret_cast<T*>(data), static_cast<size_t>(element_count)};
 }
 
 template <typename T>
 nb::ndarray<nb::numpy, T, nb::shape<-1>> ToPython(std::span<T> v) {
-  return nb::ndarray<nb::numpy, T, nb::shape<-1>>(v.data(), {v.size()});
+ return nb::ndarray<nb::numpy, T, nb::shape<-1>>(v.data(), {v.size()});
 }
 
 ONNXTensorElementDataType ToTensorType(const nb::dlpack::dtype& type) {
-  if (type.code == (uint8_t)nb::dlpack::dtype_code::Int) {
-    switch (type.bits) {
-      case 8: return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
-      case 16: return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16;
-      case 32: return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
-      case 64: return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
-    }
-  } else if (type.code == (uint8_t)nb::dlpack::dtype_code::UInt) {
-    switch (type.bits) {
-      case 8: return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
-      case 16: return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16;
-      case 32: return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32;
-      case 64: return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64;
-    }
-  } else if (type.code == (uint8_t)nb::dlpack::dtype_code::Float) {
-    switch (type.bits) {
-      case 16: return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
-      case 32: return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
-      case 64: return ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
-    }
-  } else if (type.code == (uint8_t)nb::dlpack::dtype_code::Bool) {
-    return ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;
+ if (type.code == (uint8_t)nb::dlpack::dtype_code::Int) {
+  switch (type.bits) {
+   case 8: return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8;
+   case 16: return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16;
+   case 32: return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+   case 64: return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64;
   }
-  throw std::runtime_error("Unsupported numpy type");
+ } else if (type.code == (uint8_t)nb::dlpack::dtype_code::UInt) {
+  switch (type.bits) {
+   case 8: return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8;
+   case 16: return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16;
+   case 32: return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32;
+   case 64: return ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64;
+  }
+ } else if (type.code == (uint8_t)nb::dlpack::dtype_code::Float) {
+  switch (type.bits) {
+   case 16: return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+   case 32: return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+   case 64: return ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE;
+  }
+ } else if (type.code == (uint8_t)nb::dlpack::dtype_code::Bool) {
+  return ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL;
+ }
+ throw std::runtime_error("Unsupported numpy type");
 }
 
 nb::dlpack::dtype ToDlpackDtype(ONNXTensorElementDataType type) {
-    switch (type) {
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL: return nb::dtype<bool>();
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: return nb::dtype<int8_t>();
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: return nb::dtype<uint8_t>();
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16: return nb::dtype<int16_t>();
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16: return nb::dtype<uint16_t>();
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: return nb::dtype<int32_t>();
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32: return nb::dtype<uint32_t>();
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: return nb::dtype<int64_t>();
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64: return nb::dtype<uint64_t>();
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: return nb::dtype<Ort::Float16_t>();
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: return nb::dtype<float>();
-        case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE: return nb::dtype<double>();
-        default: throw std::runtime_error("Unsupported onnx type");
-    }
+  switch (type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL: return nb::dtype<bool>();
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: return nb::dtype<int8_t>();
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: return nb::dtype<uint8_t>();
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16: return nb::dtype<int16_t>();
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16: return nb::dtype<uint16_t>();
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: return nb::dtype<int32_t>();
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32: return nb::dtype<uint32_t>();
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: return nb::dtype<int64_t>();
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64: return nb::dtype<uint64_t>();
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: return nb::dtype<Ort::Float16_t>();
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: return nb::dtype<float>();
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE: return nb::dtype<double>();
+    default: throw std::runtime_error("Unsupported onnx type");
+  }
 }
 
-std::unique_ptr<OgaPy::OgaTensor> ToOgaTensor(nb::ndarray<>& v, bool copy = true) {
-  auto type = ToTensorType(v.dtype());
+// Creates a new C-API-level OgaTensor from a numpy array by copying the data.
+// The returned ::OgaTensor* has an external refcount of 1.
+// The caller is responsible for balancing this with a call to OgaDestroyTensor.
+::OgaTensor* CreateOgaTensorFromNdarray(nb::ndarray<>& v) {
+ auto type = ToTensorType(v.dtype());
 
-  std::vector<int64_t> shape(v.ndim());
-  for (size_t i = 0; i < v.ndim(); i++)
-    shape[i] = v.shape(i);
+ std::vector<int64_t> shape(v.ndim());
+ for (size_t i = 0; i < v.ndim(); i++)
+  shape[i] = v.shape(i);
 
-  bool is_c_contig = true;
-  if (v.ndim() > 0) {
-    int64_t expected_stride = 1;
-    for (size_t i = v.ndim(); i-- > 0;) {
-      if (v.stride(i) != expected_stride) {
-        is_c_contig = false;
-        break;
-      }
-      expected_stride *= v.shape(i);
-    }
+ bool is_c_contig = true;
+ if (v.ndim() > 0) {
+  int64_t expected_stride = 1;
+  for (size_t i = v.ndim(); i-- > 0;) {
+   if (v.stride(i) != expected_stride) {
+    is_c_contig = false;
+    break;
+   }
+   expected_stride *= v.shape(i);
   }
+ }
 
-  bool is_f_contig = true;
-  if (v.ndim() > 0) {
-    int64_t expected_stride = 1;
-    for (size_t i = 0; i < v.ndim(); ++i) {
-      if (v.stride(i) != expected_stride) {
-        is_f_contig = false;
-        break;
-      }
-      expected_stride *= v.shape(i);
-    }
-  }
+ if (!is_c_contig)
+  throw std::runtime_error("Array must be contiguous. Please use NumPy's 'ascontiguousarray' method on the value.");
 
-  if (!is_c_contig && !is_f_contig)
-    throw std::runtime_error("Array must be contiguous. Please use NumPy's 'ascontiguousarray' method on the value.");
+ ::OgaTensor* p;
+ // Pass nullptr to data to force allocation of a new buffer
+ OgaPy::OgaCheckResult(OgaCreateTensorFromBuffer(nullptr, shape.data(), shape.size(), static_cast<OgaElementType>(type), &p));
+ // p now has an external refcount of 1
 
-  OgaTensor* p;
-  OgaPy::OgaCheckResult(OgaCreateTensorFromBuffer(copy ? nullptr : v.data(), shape.data(), shape.size(), static_cast<OgaElementType>(type), &p));
-  auto tensor = std::unique_ptr<OgaPy::OgaTensor>(new OgaPy::OgaTensor(p));
+ // Copy data from numpy array into the new tensor
+ void* data;
+ OgaPy::OgaCheckResult(OgaTensorGetData(p, &data));
+ auto ort_data = reinterpret_cast<uint8_t*>(data);
+ auto python_data = reinterpret_cast<const uint8_t*>(v.data());
+ std::copy(python_data, python_data + v.nbytes(), ort_data);
 
-  if (copy) {
-    void* data;
-    OgaPy::OgaCheckResult(OgaTensorGetData(p, &data));
-    auto ort_data = reinterpret_cast<uint8_t*>(data);
-    auto python_data = reinterpret_cast<const uint8_t*>(v.data());
-    std::copy(python_data, python_data + v.nbytes(), ort_data);
-  }
-  return tensor;
+ return p;
 }
 
-nb::ndarray<> ToNumpy(OgaTensor& v) {
-  size_t rank;
-  OgaPy::OgaCheckResult(OgaTensorGetShapeRank(&v, &rank));
-  std::vector<size_t> shape(rank);
-  std::vector<int64_t> shape_i64(rank);
-  OgaPy::OgaCheckResult(OgaTensorGetShape(&v, shape_i64.data(), rank));
-  for(size_t i=0; i<rank; ++i) shape[i] = shape_i64[i];
+// Creates a zero-copy numpy array that views the data owned by 'v'.
+// The numpy array's lifetime is tied to the 'v' object.
+nb::ndarray<> ToNumpyView(OgaPy::OgaTensor& v) {
+ ::OgaTensor* v_ptr = v.get();
+ size_t rank;
+ OgaPy::OgaCheckResult(OgaTensorGetShapeRank(v_ptr, &rank));
+ std::vector<size_t> shape(rank);
+ std::vector<int64_t> shape_i64(rank);
+ OgaPy::OgaCheckResult(OgaTensorGetShape(v_ptr, shape_i64.data(), rank));
+ for(size_t i=0; i<rank; ++i) shape[i] = shape_i64[i];
 
-  OgaElementType type_enum;
-  OgaPy::OgaCheckResult(OgaTensorGetType(&v, &type_enum));
+ OgaElementType type_enum;
+ OgaPy::OgaCheckResult(OgaTensorGetType(v_ptr, &type_enum));
 
-  void* data;
-  OgaPy::OgaCheckResult(OgaTensorGetData(&v, &data));
+ void* data;
+ OgaPy::OgaCheckResult(OgaTensorGetData(v_ptr, &data));
 
-  return nb::ndarray<>(data, rank, shape.data(), nb::handle(), nullptr, ToDlpackDtype(static_cast<ONNXTensorElementDataType>(type_enum)));
+ // The owner is the Python object 'v' itself. nanobind will inc_ref it.
+ return nb::ndarray<>(data, rank, shape.data(), nb::find(v), nullptr, ToDlpackDtype(static_cast<ONNXTensorElementDataType>(type_enum)));
 }
 
+// Creates a numpy array that takes ownership of a *newly created* OgaTensor
+// via a nanobind capsule. Used for GetLogits, GetInput, GetOutput.
 nb::ndarray<> ToNumpy(std::unique_ptr<OgaPy::OgaTensor> v) {
-  OgaTensor* v_ptr = reinterpret_cast<OgaTensor*>(v.get());
-  size_t rank;
-  OgaPy::OgaCheckResult(OgaTensorGetShapeRank(v_ptr, &rank));
-  std::vector<size_t> shape(rank);
-  std::vector<int64_t> shape_i64(rank);
-  OgaPy::OgaCheckResult(OgaTensorGetShape(v_ptr, shape_i64.data(), rank));
-  for(size_t i=0; i<rank; ++i) shape[i] = shape_i64[i];
+ ::OgaTensor* v_ptr = v->get();
+ size_t rank;
+ OgaPy::OgaCheckResult(OgaTensorGetShapeRank(v_ptr, &rank));
+ std::vector<size_t> shape(rank);
+ std::vector<int64_t> shape_i64(rank);
+ OgaPy::OgaCheckResult(OgaTensorGetShape(v_ptr, shape_i64.data(), rank));
+ for(size_t i=0; i<rank; ++i) shape[i] = shape_i64[i];
 
-  OgaElementType type_enum;
-  OgaPy::OgaCheckResult(OgaTensorGetType(v_ptr, &type_enum));
+ OgaElementType type_enum;
+ OgaPy::OgaCheckResult(OgaTensorGetType(v_ptr, &type_enum));
 
-  void* data;
-  OgaPy::OgaCheckResult(OgaTensorGetData(v_ptr, &data));
+ void* data;
+ OgaPy::OgaCheckResult(OgaTensorGetData(v_ptr, &data));
 
-  nb::capsule owner(v.release(), [](void *p) noexcept { delete reinterpret_cast<OgaPy::OgaTensor*>(p); });
+ // The capsule owns the OgaPy::OgaTensor wrapper.
+ // When the ndarray is GC'd, the capsule is destroyed,
+ // which deletes the wrapper, which calls OgaDestroyTensor(v_ptr).
+ nb::capsule owner(v.release(), [](void *p) noexcept { delete reinterpret_cast<OgaPy::OgaTensor*>(p); });
 
-  return nb::ndarray<>(data, rank, shape.data(), owner, nullptr, ToDlpackDtype(static_cast<ONNXTensorElementDataType>(type_enum)));
+ return nb::ndarray<>(data, rank, shape.data(), owner, nullptr, ToDlpackDtype(static_cast<ONNXTensorElementDataType>(type_enum)));
 }
 
-struct PyGeneratorParams {
-  PyGeneratorParams(const OgaPy::OgaModel& model) {
-    ::OgaGeneratorParams* p;
-    OgaPy::OgaCheckResult(OgaCreateGeneratorParams(model.get(), &p));
-    params_.reset(new OgaPy::OgaGeneratorParams(p));
-  }
-
-  operator OgaGeneratorParams*() { return params_->get(); }
-
-  std::unique_ptr<OgaPy::OgaGeneratorParams> params_;
-
-  void SetSearchOptions(const nb::kwargs& dict) {
-    for (const auto& entry : dict) {
-      auto name = nb::cast<std::string>(entry.first);
-      if (nb::isinstance<nb::float_>(entry.second)) {
-        OgaPy::OgaCheckResult(OgaGeneratorParamsSetSearchNumber(params_->get(), name.c_str(), nb::cast<double>(entry.second)));
-      } else if (nb::isinstance<nb::bool_>(entry.second)) {
-        OgaPy::OgaCheckResult(OgaGeneratorParamsSetSearchBool(params_->get(), name.c_str(), nb::cast<bool>(entry.second)));
-      } else if (nb::isinstance<nb::int_>(entry.second)) {
-        OgaPy::OgaCheckResult(OgaGeneratorParamsSetSearchNumber(params_->get(), name.c_str(), nb::cast<int>(entry.second)));
-      } else
-        throw std::runtime_error("Unknown search option type, can be float/bool/int:" + name);
-    }
-  }
-
-  void TryGraphCaptureWithMaxBatchSize(nb::int_ max_batch_size) {
-    std::cerr << "TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release" << std::endl;
-  }
-
-  void SetGuidance(const std::string& type, const std::string& data, bool enable_ff_tokens = false) {
-    OgaPy::OgaCheckResult(OgaGeneratorParamsSetGuidance(params_->get(), type.c_str(), data.c_str(), enable_ff_tokens));
-  }
-
-  std::vector<nb::object> refs_;  // References to data we want to ensure doesn't get garbage collected
-};
-
-struct PyGenerator {
-  PyGenerator(const OgaPy::OgaModel& model, PyGeneratorParams& params) {
-    OgaGenerator* p;
-    OgaPy::OgaCheckResult(OgaCreateGenerator(model.get(), params, &p));
-    generator_.reset(new OgaPy::OgaGenerator(p));
-  }
-
-  nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>> GetNextTokens() {
-    // Get data directly from C API without using BorrowedArrayView
-    // to avoid intrusive ref counting issues with unique_ptr ownership
-    const int32_t* tokens = nullptr;
-    size_t count = 0;
-    OgaPy::OgaCheckResult(OgaGenerator_GetNextTokens(generator_->get(), &tokens, &count));
-    
-    // Copy data to Python-owned numpy array (temporal borrow - data invalidated by next generator call)
-    size_t shape[1] = {count};
-    int32_t* data_ptr = new int32_t[count];
-    std::copy(tokens, tokens + count, data_ptr);
-    
-    nb::capsule owner(data_ptr, [](void* p) noexcept {
-      delete[] reinterpret_cast<int32_t*>(p);
-    });
-    
-    return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
-        data_ptr, 1, shape, owner);
-  }
-
-  nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>> GetSequence(int index) {
-    // Get data directly from C API without using BorrowedArrayView
-    const int32_t* data = OgaGenerator_GetSequenceData(generator_->get(), index);
-    size_t count = OgaGenerator_GetSequenceCount(generator_->get(), index);
-    
-    // Copy data to Python-owned numpy array
-    size_t shape[1] = {count};
-    int32_t* data_ptr = new int32_t[count];
-    std::copy(data, data + count, data_ptr);
-    
-    nb::capsule owner(data_ptr, [](void* p) noexcept {
-      delete[] reinterpret_cast<int32_t*>(p);
-    });
-    
-    return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
-        data_ptr, 1, shape, owner);
-  }
-
-  nb::ndarray<> GetInput(const std::string& name) {
-    OgaTensor* p = generator_->GetInput(name.c_str());
-    return ToNumpy(*p);
-  }
-
-  nb::ndarray<> GetOutput(const std::string& name) {
-    OgaTensor* p = generator_->GetOutput(name.c_str());
-    return ToNumpy(*p);
-  }
-
-  void SetModelInput(const std::string& name, nb::ndarray<>& value) {
-    generator_->SetModelInput(name.c_str(), reinterpret_cast<OgaTensor*>(ToOgaTensor(value, false).get()));
-  }
-
-  void SetInputs(OgaPy::OgaNamedTensors& named_tensors) {
-    generator_->SetInputs(named_tensors.get());
-  }
-
-  void AppendTokens(OgaPy::OgaTensor& tokens) {
-    auto span = ToSpan<const int32_t>(*tokens.get());
-    generator_->AppendTokens(span.data(), span.size());
-  }
-
-  void AppendTokens(nb::ndarray<const int32_t, nb::ndim<1>>& tokens) {
-    auto span = ToSpan(tokens);
-    generator_->AppendTokens(span.data(), span.size());
-  }
-
-  nb::ndarray<> GetLogits() {
-    OgaTensor* p = generator_->GetLogits();
-    return ToNumpy(std::unique_ptr<OgaPy::OgaTensor>(new OgaPy::OgaTensor(p)));
-  }
-
-  void SetLogits(nb::ndarray<>& new_logits) {
-    auto tensor = ToOgaTensor(new_logits, false);
-    generator_->SetLogits(reinterpret_cast<OgaTensor*>(tensor.get()));
-  }
-
-  void GenerateNextToken() {
-    generator_->GenerateNextToken();
-  }
-
-  void RewindTo(size_t new_length) {
-    generator_->RewindTo(new_length);
-  }
-
-  bool IsDone() const {
-    return generator_->IsDone();
-  }
-
-  void SetActiveAdapter(OgaPy::OgaAdapters& adapters, const std::string& adapter_name) {
-    generator_->SetActiveAdapter(&adapters, adapter_name.c_str());
-  }
-
- private:
-  std::unique_ptr<OgaPy::OgaGenerator> generator_;
-};
+// PyGeneratorParams and PyGenerator structs are no longer needed.
+// We bind OgaPy::OgaGeneratorParams and OgaPy::OgaGenerator directly.
 
 void SetLogOptions(const nb::kwargs& dict) {
-  for (const auto& entry : dict) {
-    auto name = nb::cast<std::string>(entry.first);
-    if (nb::isinstance<nb::bool_>(entry.second)) {
-      OgaPy::OgaCheckResult(OgaSetLogBool(name.c_str(), nb::cast<bool>(entry.second)));
-    } else if (nb::isinstance<nb::str>(entry.second)) {
-      OgaPy::OgaCheckResult(OgaSetLogString(name.c_str(), nb::cast<std::string>(entry.second).c_str()));
-    } else
-      throw std::runtime_error("Unknown log option type, can be bool/string:" + name);
-  }
+ for (const auto& entry : dict) {
+  auto name = nb::cast<std::string>(entry.first);
+  if (nb::isinstance<nb::bool_>(entry.second)) {
+   OgaPy::OgaCheckResult(OgaSetLogBool(name.c_str(), nb::cast<bool>(entry.second)));
+  } else if (nb::isinstance<nb::str>(entry.second)) {
+   OgaPy::OgaCheckResult(OgaSetLogString(name.c_str(), nb::cast<std::string>(entry.second).c_str()));
+  } else
+   throw std::runtime_error("Unknown log option type, can be bool/string:" + name);
+ }
 }
 
 void SetLogCallback(std::optional<nb::callable> callback) {
-  // Use a pointer to heap-allocated callable to avoid lifetime issues
-  static std::unique_ptr<nb::callable> log_callback_ptr;
-  
-  if (callback.has_value()) {
-    // Store the callback on the heap and keep it alive
-    log_callback_ptr = std::make_unique<nb::callable>(callback.value());
-    
-    OgaPy::OgaCheckResult(OgaSetLogCallback([](const char* message, size_t length) {
-      if (log_callback_ptr) {
-        nb::gil_scoped_acquire gil;
-        (*log_callback_ptr)(std::string_view(message, length));
-      }
-    }));
-  } else {
-    // Clear the callback
-    log_callback_ptr.reset();
-    OgaPy::OgaCheckResult(OgaSetLogCallback(nullptr));
-  }
+ // Use a pointer to heap-allocated callable to avoid lifetime issues
+ static std::unique_ptr<nb::callable> log_callback_ptr;
+
+ if (callback.has_value()) {
+  // Store the callback on the heap and keep it alive
+  log_callback_ptr = std::make_unique<nb::callable>(callback.value());
+ 
+  OgaPy::OgaCheckResult(OgaSetLogCallback([](const char* message, size_t length) {
+   if (log_callback_ptr) {
+    nb::gil_scoped_acquire gil;
+    (*log_callback_ptr)(std::string_view(message, length));
+   }
+  }));
+ } else {
+  // Clear the callback
+  log_callback_ptr.reset();
+  OgaPy::OgaCheckResult(OgaSetLogCallback(nullptr));
+ }
 }
 
 NB_MODULE(onnxruntime_genai, m) {
-  // Initialize intrusive reference counting for nanobind
-  nb::intrusive_init(
-      [](PyObject *o) noexcept {
-          nb::gil_scoped_acquire guard;
-          Py_INCREF(o);
-      },
-      [](PyObject *o) noexcept {
-          nb::gil_scoped_acquire guard;
-          Py_DECREF(o);
-      });
+ // Initialize intrusive reference counting for nanobind
+ nb::intrusive_init(
+   [](PyObject *o) noexcept {
+     nb::gil_scoped_acquire guard;
+     Py_INCREF(o);
+   },
+   [](PyObject *o) noexcept {
+     nb::gil_scoped_acquire guard;
+     Py_DECREF(o);
+   });
 
-  m.doc() = R"pbdoc(
-        Ort Generators library
-        ----------------------
+ m.doc() = R"pbdoc(
+    Ort Generators library
+    ----------------------
 
-        .. currentmodule:: cmake_example
+    .. currentmodule:: cmake_example
 
-        .. autosummary::
-           :toctree: _generate
+    .. autosummary::
+     :toctree: _generate
 
-    )pbdoc";
+  )pbdoc";
 
-  // Add a cleanup call to happen before global variables are destroyed
-  static int unused{};  // The capsule needs something to reference
-  nb::capsule cleanup(
-      &unused, "cleanup", [](void*) noexcept {
-        OgaShutdown();
-      });
-  m.attr("_cleanup") = cleanup;
+ // Add a cleanup call to happen before global variables are destroyed
+ static int unused{}; // The capsule needs something to reference
+ nb::capsule cleanup(
+   &unused, "cleanup", [](void*) noexcept {
+    OgaShutdown();
+   });
+ m.attr("_cleanup") = cleanup;
 
-  nb::class_<PyGeneratorParams>(m, "GeneratorParams")
-      .def(nb::init<const OgaPy::OgaModel&>())
-      .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
-      .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
-      .def("set_guidance", &PyGeneratorParams::SetGuidance,
-           "type"_a, "data"_a,
-           "enable_ff_tokens"_a = false);
+  // Bind OgaPy::OgaGeneratorParams directly
+ nb::class_<OgaPy::OgaGeneratorParams>(m, "GeneratorParams",
+        nb::intrusive_ptr<OgaPy::OgaGeneratorParams>(
+     [](OgaPy::OgaGeneratorParams *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def("__init__", [](OgaPy::OgaGeneratorParams* self, const OgaPy::OgaModel& model) {
+     ::OgaGeneratorParams* p;
+     OgaPy::OgaCheckResult(OgaCreateGeneratorParams(model.get(), &p)); // p has ext_ref=1
+     new (self) OgaPy::OgaGeneratorParams(p);
+          // 'self' wrapper now owns the ext_ref=1. When 'self' is GC'd,
+          // its destructor will call OgaDestroyGeneratorParams(p), balancing the ref.
+   })
+   .def("try_graph_capture_with_max_batch_size", &OgaPy::OgaGeneratorParams::TryGraphCaptureWithMaxBatchSize)
+   .def("set_search_options", [](OgaPy::OgaGeneratorParams& self, const nb::kwargs& dict) {
+     for (const auto& entry : dict) {
+      auto name = nb::cast<std::string>(entry.first);
+      if (nb::isinstance<nb::float_>(entry.second))
+        self.SetSearchNumber(name.c_str(), nb::cast<double>(entry.second));
+      else if (nb::isinstance<nb::bool_>(entry.second))
+        self.SetSearchBool(name.c_str(), nb::cast<bool>(entry.second));
+      else if (nb::isinstance<nb::int_>(entry.second))
+        self.SetSearchNumber(name.c_str(), nb::cast<int>(entry.second));
+      else
+        throw std::runtime_error("Unknown search option type, can be float/bool/int:" + name);
+     }
+   })
+   .def("set_guidance", &OgaPy::OgaGeneratorParams::SetGuidance,
+     "type"_a, "data"_a,
+     "enable_ff_tokens"_a = false);
 
-  nb::class_<OgaPy::OgaTokenizerStream>(
-      m, "TokenizerStream",
-      nb::intrusive_ptr<OgaPy::OgaTokenizerStream>(
-          [](OgaPy::OgaTokenizerStream *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("decode", [](OgaPy::OgaTokenizerStream& t, int32_t token) { 
-        const char* out;
-        OgaPy::OgaCheckResult(OgaTokenizerStreamDecode(t.get(), token, &out));
-        return out; 
-      });
+ nb::class_<OgaPy::OgaTokenizerStream>(
+   m, "TokenizerStream",
+   nb::intrusive_ptr<OgaPy::OgaTokenizerStream>(
+     [](OgaPy::OgaTokenizerStream *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def("decode", [](OgaPy::OgaTokenizerStream& t, int32_t token) {
+    const char* out;
+    OgaPy::OgaCheckResult(OgaTokenizerStreamDecode(t.get(), token, &out));
+    return out;
+   });
 
-  nb::class_<OgaPy::OgaNamedTensors>(
-      m, "NamedTensors",
-      nb::intrusive_ptr<OgaPy::OgaNamedTensors>(
-          [](OgaPy::OgaNamedTensors *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("__init__", [](OgaPy::OgaNamedTensors* self) { 
-        ::OgaNamedTensors* p;
-        OgaPy::OgaCheckResult(OgaCreateNamedTensors(&p));
-        new (self) OgaPy::OgaNamedTensors(p);
-       })
-      .def("__getitem__", [](OgaPy::OgaNamedTensors& named_tensors, const std::string& name) {
-        OgaTensor* p;
-        OgaPy::OgaCheckResult(OgaNamedTensorsGet(named_tensors.get(), name.c_str(), &p));
-        if (!p)
-          throw std::runtime_error("Tensor with name: " + name + " not found.");
-        return new OgaPy::OgaTensor(p);
-      })
-      .def("__setitem__", [](OgaPy::OgaNamedTensors& named_tensors, const std::string& name, nb::ndarray<>& value) {
-        auto tensor = ToOgaTensor(value);
-        OgaPy::OgaCheckResult(OgaNamedTensorsSet(named_tensors.get(), name.c_str(), tensor->get()));
-      })
-      .def("__setitem__", [](OgaPy::OgaNamedTensors& named_tensors, const std::string& name, OgaPy::OgaTensor& value) {
-        OgaPy::OgaCheckResult(OgaNamedTensorsSet(named_tensors.get(), name.c_str(), value.get()));
-      })
-      .def("__contains__", [](const OgaPy::OgaNamedTensors& named_tensors, const std::string& name) {
-        OgaTensor* p;
-        OgaPy::OgaCheckResult(OgaNamedTensorsGet(const_cast<OgaNamedTensors*>(named_tensors.get()), name.c_str(), &p));
-        auto tensor = new OgaPy::OgaTensor(p);
-        return tensor != nullptr;
-      })
-      .def("__delitem__", [](OgaPy::OgaNamedTensors& named_tensors, const std::string& name) {
-        OgaPy::OgaCheckResult(OgaNamedTensorsDelete(named_tensors.get(), name.c_str()));
-      })
-      .def("__len__", [](const OgaPy::OgaNamedTensors& named_tensors) {
-        size_t count;
-        OgaPy::OgaCheckResult(OgaNamedTensorsCount(named_tensors.get(), &count));
-        return count;
-      })
-      .def("keys", [](OgaPy::OgaNamedTensors& named_tensors) {
-        std::vector<std::string> keys;
-        OgaStringArray* p;
-        OgaPy::OgaCheckResult(OgaNamedTensorsGetNames(named_tensors.get(), &p));
-        auto names = new OgaPy::OgaStringArray(p);
-        size_t count;
-        OgaPy::OgaCheckResult(OgaStringArrayGetCount(reinterpret_cast<OgaStringArray*>(names), &count));
-        for (size_t i = 0; i < count; i++) {
-          const char* str;
-          OgaPy::OgaCheckResult(OgaStringArrayGetString(reinterpret_cast<OgaStringArray*>(names), i, &str));
-          keys.push_back(str);
-        }
-        return keys;
-      });
+ nb::class_<OgaPy::OgaNamedTensors>(
+   m, "NamedTensors",
+   nb::intrusive_ptr<OgaPy::OgaNamedTensors>(
+     [](OgaPy::OgaNamedTensors *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def("__init__", [](OgaPy::OgaNamedTensors* self) {
+    ::OgaNamedTensors* p;
+    OgaPy::OgaCheckResult(OgaCreateNamedTensors(&p));
+    new (self) OgaPy::OgaNamedTensors(p);
+   })
+   .def("__getitem__", [](OgaPy::OgaNamedTensors& named_tensors, const std::string& name) {
+    ::OgaTensor* p;
+    OgaPy::OgaCheckResult(OgaNamedTensorsGet(named_tensors.get(), name.c_str(), &p));
+    if (!p)
+     throw std::runtime_error("Tensor with name: " + name + " not found.");
+    return new OgaPy::OgaTensor(p); // p has ext_ref=1, wrapper will release it
+   })
+   .def("__setitem__", [](OgaPy::OgaNamedTensors& named_tensors, const std::string& name, nb::ndarray<>& value) {
+    // This is for: named_tensors["key"] = np.array(...)
+    ::OgaTensor* p = CreateOgaTensorFromNdarray(value); // p has ext_ref=1
+    OgaPy::OgaCheckResult(OgaNamedTensorsSet(named_tensors.get(), name.c_str(), p)); // map adds its own ref
+    OgaDestroyTensor(p); // Release the ext_ref=1 from creation
+   })
+   .def("__setitem__", [](OgaPy::OgaNamedTensors& named_tensors, const std::string& name, OgaPy::OgaTensor& value) {
+    // This is for: named_tensors["key"] = og.Tensor(...)
+    OgaPy::OgaCheckResult(OgaNamedTensorsSet(named_tensors.get(), name.c_str(), value.get()));
+   })
+   .def("__contains__", [](const OgaPy::OgaNamedTensors& named_tensors, const std::string& name) {
+    ::OgaTensor* p;
+    OgaPy::OgaCheckResult(OgaNamedTensorsGet(const_cast<OgaNamedTensors*>(named_tensors.get()), name.c_str(), &p));
+    bool found = (p != nullptr);
+    if (found)
+      OgaDestroyTensor(p); // Release the ref from OgaNamedTensorsGet
+    return found;
+   })
+   .def("__delitem__", [](OgaPy::OgaNamedTensors& named_tensors, const std::string& name) {
+    OgaPy::OgaCheckResult(OgaNamedTensorsDelete(named_tensors.get(), name.c_str()));
+   })
+   .def("__len__", [](const OgaPy::OgaNamedTensors& named_tensors) {
+    size_t count;
+    OgaPy::OgaCheckResult(OgaNamedTensorsCount(named_tensors.get(), &count));
+    return count;
+   })
+   .def("keys", [](OgaPy::OgaNamedTensors& named_tensors) {
+    std::vector<std::string> keys;
+    ::OgaStringArray* p;
+    OgaPy::OgaCheckResult(OgaNamedTensorsGetNames(named_tensors.get(), &p));
 
-  nb::class_<OgaPy::OgaTensor>(
-      m, "Tensor",
-      nb::intrusive_ptr<OgaPy::OgaTensor>(
-          [](OgaPy::OgaTensor *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("__init__", [](OgaPy::OgaTensor* self, nb::ndarray<>& v) {
-        auto temp_tensor = ToOgaTensor(v); // Returns unique_ptr<OgaPy::OgaTensor>
-        // Move the C pointer ownership from temp_tensor to self
-        ::OgaTensor* c_ptr = temp_tensor->get();
-        // Construct self with the C pointer
-        new (self) OgaPy::OgaTensor(c_ptr);
-        // Now prevent temp_tensor from destroying the C pointer
-        // We do this by creating a new OgaTensor wrapper that doesn't own it
-        temp_tensor.reset(new OgaPy::OgaTensor(nullptr));
-      })
-      .def("shape", [](OgaPy::OgaTensor& t) { 
-        size_t rank;
-        OgaPy::OgaCheckResult(OgaTensorGetShapeRank(t.get(), &rank));
-        std::vector<int64_t> shape(rank);
-        OgaPy::OgaCheckResult(OgaTensorGetShape(t.get(), shape.data(), rank));
-        return shape;
-      })
-      .def("type", [](OgaPy::OgaTensor& t) { 
-        OgaElementType type;
-        OgaPy::OgaCheckResult(OgaTensorGetType(t.get(), &type));
-        return type;
-      })
-      .def("data", [](OgaPy::OgaTensor& t) {
-        void* data;
-        OgaPy::OgaCheckResult(OgaTensorGetData(t.get(), &data));
-        return nb::capsule(data, "pointer");
-      })
-      .def("as_numpy", [](OgaPy::OgaTensor& t) { return ToNumpy(*t.get()); });
+    // Use unique_ptr to manage the wrapper's lifetime
+    auto names = std::unique_ptr<OgaPy::OgaStringArray>(new OgaPy::OgaStringArray(p));
 
-  nb::class_<OgaPy::OgaTokenizer>(
-      m, "Tokenizer",
-      nb::intrusive_ptr<OgaPy::OgaTokenizer>(
-          [](OgaPy::OgaTokenizer *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("__init__", [](OgaPy::OgaTokenizer* self, const OgaPy::OgaModel& model) {
-        ::OgaTokenizer* p;
-        OgaPy::OgaCheckResult(OgaCreateTokenizer(model.get(), &p));
-        new (self) OgaPy::OgaTokenizer(p);
-      })
-      .def_prop_ro("bos_token_id", [](const OgaPy::OgaTokenizer& t) {
-        int32_t token_id;
-        OgaPy::OgaCheckResult(OgaTokenizerGetBosTokenId(t.get(), &token_id));
-        return token_id;
-      })
-      .def_prop_ro("eos_token_ids", [](OgaPy::OgaTokenizer& t) {
-        // Use wrapper method that handles reference counting
-        auto view = t.GetEosTokenIds();
-        // Create numpy array that references view's data (zero-copy)
-        size_t shape[1] = {view->size()};
-        
-        nb::capsule owner(view, [](void* p) noexcept {
-          delete reinterpret_cast<OgaPy::EosTokenIdsView*>(p);
-        });
-        
-        return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
-            view->data(), 1, shape, owner);
-      })
-      .def_prop_ro("pad_token_id", [](const OgaPy::OgaTokenizer& t) {
-        int32_t token_id;
-        OgaPy::OgaCheckResult(OgaTokenizerGetPadTokenId(t.get(), &token_id));
-        return token_id;
-      })
-      .def("update_options", [](OgaPy::OgaTokenizer& t, nb::kwargs kwargs) {
-        std::vector<std::string> key_storage;
-        std::vector<std::string> value_storage;
-        key_storage.reserve(kwargs.size());
-        value_storage.reserve(kwargs.size());
-
-        std::vector<const char*> keys;
-        std::vector<const char*> values;
-        keys.reserve(kwargs.size());
-        values.reserve(kwargs.size());
-
-        for (const auto& item : kwargs) {
-            key_storage.emplace_back(nb::cast<std::string>(item.first));
-            value_storage.emplace_back(nb::cast<std::string>(item.second));
-            keys.push_back(key_storage.back().c_str());
-            values.push_back(value_storage.back().c_str());
-        }
-        OgaPy::OgaCheckResult(OgaUpdateTokenizerOptions(t.get(), keys.data(), values.data(), kwargs.size()));
-       })
-      .def("encode", [](OgaPy::OgaTokenizer& t, std::string s) -> nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>> {
-        // Create sequences
-        OgaSequences* sequences_ptr;
-        OgaPy::OgaCheckResult(OgaCreateSequences(&sequences_ptr));
-        
-        auto sequences = new OgaPy::OgaSequences(sequences_ptr);
-        
-        // Manually increment ref count since we created with new (starts at 0)
-        // The BorrowedArrayView will also increment it, giving us ref count of 2
-        OgaPy::intrusive_inc_ref(sequences);
-        
-        // Encode using C API
-        OgaPy::OgaCheckResult(OgaTokenizerEncode(t.get(), s.c_str(), sequences->get()));
-        
-        // Use wrapper method to get sequence data with proper ref counting
-        // This will increment ref count to 2 (or 3 if we already inc'd above)
-        auto view = sequences->GetSequenceData(0);
-        
-        // Create numpy array that references view's data (zero-copy)
-        size_t shape[1] = {view->size()};
-        
-        nb::capsule owner(view, [](void* p) noexcept {
-          delete reinterpret_cast<OgaPy::SequenceDataView*>(p);
-        });
-        
-        // Decrement our ref count (view still holds one, so sequences stays alive)
-        OgaPy::intrusive_dec_ref(sequences);
-        
-        return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
-            view->data(), 1, shape, owner);
-      })
-      .def("to_token_id", [](const OgaPy::OgaTokenizer& t, const char* str) {
-        int32_t token_id;
-        OgaPy::OgaCheckResult(OgaTokenizerToTokenId(t.get(), str, &token_id));
-        return token_id;
-       })
-      .def("decode", [](const OgaPy::OgaTokenizer& t, nb::ndarray<const int32_t, nb::ndim<1>> tokens) -> std::string { 
-        auto span = ToSpan(tokens);
-        const char* p;
-        OgaPy::OgaCheckResult(OgaTokenizerDecode(t.get(), span.data(), span.size(), &p));
-        return std::string(OgaPy::OgaString(p));
-      })
-      .def("apply_chat_template", [](const OgaPy::OgaTokenizer& t, const char* messages, std::optional<std::string> template_str, std::optional<std::string> tools, bool add_generation_prompt) -> std::string { 
-        const char *p;
-        const char* template_ptr = template_str.has_value() ? template_str->c_str() : nullptr;
-        const char* tools_ptr = tools.has_value() ? tools->c_str() : nullptr;
-        OgaPy::OgaCheckResult(OgaTokenizerApplyChatTemplate(t.get(), template_ptr, messages, tools_ptr, add_generation_prompt, &p));
-        return std::string(OgaPy::OgaString(p));
-      }, "messages"_a, nb::kw_only(), "template_str"_a = nb::none(), "tools"_a = nb::none(), "add_generation_prompt"_a = true)
-      .def("encode_batch", [](const OgaPy::OgaTokenizer& t, std::vector<std::string> strings) {
-        std::vector<const char*> c_strings;
-        for (const auto& s : strings)
-          c_strings.push_back(s.c_str());
-        OgaTensor* p;
-        OgaPy::OgaCheckResult(OgaTokenizerEncodeBatch(t.get(), c_strings.data(), c_strings.size(), &p));
-        return new OgaPy::OgaTensor(p);
-       })
-      .def("decode_batch", [](const OgaPy::OgaTokenizer& t, const OgaPy::OgaTensor& tokens) {
-        std::vector<std::string> strings;
-        OgaStringArray* p;
-        OgaPy::OgaCheckResult(OgaTokenizerDecodeBatch(t.get(), tokens.get(), &p));
-        auto decoded = new OgaPy::OgaStringArray(p);
-        size_t count;
-        OgaPy::OgaCheckResult(OgaStringArrayGetCount(reinterpret_cast<OgaStringArray*>(decoded), &count));
-        for (size_t i = 0; i < count; i++) {
-          const char* str;
-          OgaPy::OgaCheckResult(OgaStringArrayGetString(reinterpret_cast<OgaStringArray*>(decoded), i, &str));
-          strings.push_back(str);
-        }
-        return strings; 
-      })
-      .def("create_stream", [](const OgaPy::OgaTokenizer& t) { 
-        OgaTokenizerStream* p;
-        OgaPy::OgaCheckResult(OgaCreateTokenizerStream(t.get(), &p));
-        return new OgaPy::OgaTokenizerStream(p);
-      });
-
-  nb::class_<OgaPy::OgaConfig>(
-      m, "Config",
-      nb::intrusive_ptr<OgaPy::OgaConfig>(
-          [](OgaPy::OgaConfig *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("__init__", [](OgaPy::OgaConfig* self, const std::string& config_path) {
-        ::OgaConfig* p;
-        OgaPy::OgaCheckResult(OgaCreateConfig(config_path.c_str(), &p));
-        new (self) OgaPy::OgaConfig(p);
-      })
-      .def("append_provider", [](OgaPy::OgaConfig& config, const char* provider) { OgaPy::OgaCheckResult(OgaConfigAppendProvider(config.get(), provider));})
-      .def("set_provider_option", [](OgaPy::OgaConfig& config, const char* provider, const char* name, const char* value) { OgaPy::OgaCheckResult(OgaConfigSetProviderOption(config.get(), provider, name, value));})
-      .def("clear_providers", [](OgaPy::OgaConfig& config) { OgaPy::OgaCheckResult(OgaConfigClearProviders(config.get()));})
-      .def("add_model_data", [](OgaPy::OgaConfig& config, const std::string& model_filename, nb::object obj) {
-        if (nb::isinstance<nb::bytes>(obj)) {
-          auto model_bytes = nb::cast<nb::bytes>(obj);
-          OgaPy::OgaCheckResult(OgaConfigAddModelData(config.get(), model_filename.c_str(), model_bytes.data(), model_bytes.size()));
-        } else if (nb::isinstance<nb::ndarray<>>(obj)) {
-          auto array = nb::cast<nb::ndarray<nb::ro, uint8_t, nb::ndim<1>>>(obj);
-          OgaPy::OgaCheckResult(OgaConfigAddModelData(config.get(), model_filename.c_str(), array.data(), array.nbytes()));
-        } else {
-          throw std::runtime_error("Unsupported input type. Expected bytes or a 1D uint8 numpy array.");
-        }
-      })
-      .def("remove_model_data", [](OgaPy::OgaConfig& config, const std::string& model_filename) {
-        OgaPy::OgaCheckResult(OgaConfigRemoveModelData(config.get(), model_filename.c_str()));
-      })
-      .def("overlay", [](OgaPy::OgaConfig& config, const char* json) { OgaPy::OgaCheckResult(OgaConfigOverlay(config.get(), json)); })
-      .def("set_decoder_provider_options_hardware_device_type", [](OgaPy::OgaConfig& config, const char* provider, const char* hardware_device_type) { OgaPy::OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareDeviceType(config.get(), provider, hardware_device_type)); })
-      .def("set_decoder_provider_options_hardware_device_id", [](OgaPy::OgaConfig& config, const char* provider, uint32_t hardware_device_id) { OgaPy::OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareDeviceId(config.get(), provider, hardware_device_id)); })
-      .def("set_decoder_provider_options_hardware_vendor_id", [](OgaPy::OgaConfig& config, const char* provider, uint32_t hardware_vendor_id) { OgaPy::OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareVendorId(config.get(), provider, hardware_vendor_id)); })
-      .def("clear_decoder_provider_options_hardware_device_type", [](OgaPy::OgaConfig& config, const char* provider) { OgaPy::OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareDeviceType(config.get(), provider)); })
-      .def("clear_decoder_provider_options_hardware_device_id", [](OgaPy::OgaConfig& config, const char* provider) { OgaPy::OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareDeviceId(config.get(), provider)); })
-      .def("clear_decoder_provider_options_hardware_vendor_id", [](OgaPy::OgaConfig& config, const char* provider) { OgaPy::OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareVendorId(config.get(), provider)); });
-
-  nb::class_<OgaPy::OgaModel>(
-      m, "Model",
-      nb::intrusive_ptr<OgaPy::OgaModel>(
-          [](OgaPy::OgaModel *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("__init__", [](OgaPy::OgaModel* self, const OgaPy::OgaConfig& config) {
-        ::OgaModel* p;
-        OgaPy::OgaCheckResult(OgaCreateModelFromConfig(config.get(), &p));
-        new (self) OgaPy::OgaModel(p);
-      })
-      .def("__init__", [](OgaPy::OgaModel* self, const std::string& config_path) {
-        ::OgaModel* p;
-        OgaPy::OgaCheckResult(OgaCreateModel(config_path.c_str(), &p));
-        new (self) OgaPy::OgaModel(p);
-      })
-      .def_prop_ro("type", [](const OgaPy::OgaModel& model) -> std::string { 
-        const char *p;
-        OgaPy::OgaCheckResult(OgaModelGetType(model.get(), &p));
-        return std::string(OgaPy::OgaString(p));
-      })
-      .def_prop_ro(
-          "device_type", [](const OgaPy::OgaModel& model) -> std::string { 
-            const char* p;
-            OgaPy::OgaCheckResult(OgaModelGetDeviceType(model.get(), &p));
-            return std::string(OgaPy::OgaString(p));
-          }, "The device type the model is running on")
-      .def("create_multimodal_processor", [](const OgaPy::OgaModel& model) { 
-        OgaMultiModalProcessor* p;
-        OgaPy::OgaCheckResult(OgaCreateMultiModalProcessor(model.get(), &p));
-        return new OgaPy::OgaMultiModalProcessor(p);
-      });
-
-  nb::class_<PyGenerator>(m, "Generator")
-      .def(nb::init<const OgaPy::OgaModel&, PyGeneratorParams&>())
-      .def("is_done", &PyGenerator::IsDone)
-      .def("get_input", &PyGenerator::GetInput)
-      .def("get_output", &PyGenerator::GetOutput)
-      .def("set_inputs", &PyGenerator::SetInputs)
-      .def("set_model_input", &PyGenerator::SetModelInput)
-      .def("append_tokens", nb::overload_cast<nb::ndarray<const int32_t, nb::ndim<1>>&>(&PyGenerator::AppendTokens))
-      .def("append_tokens", nb::overload_cast<OgaPy::OgaTensor&>(&PyGenerator::AppendTokens))
-      .def("get_logits", &PyGenerator::GetLogits)
-      .def("set_logits", &PyGenerator::SetLogits)
-      .def("generate_next_token", &PyGenerator::GenerateNextToken)
-      .def("rewind_to", &PyGenerator::RewindTo)
-      .def("get_next_tokens", &PyGenerator::GetNextTokens)
-      .def("get_sequence", &PyGenerator::GetSequence)
-      .def("set_active_adapter", &PyGenerator::SetActiveAdapter);
-
-  nb::class_<OgaPy::OgaImages>(
-      m, "Images",
-      nb::intrusive_ptr<OgaPy::OgaImages>(
-          [](OgaPy::OgaImages *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def_static("open", [](nb::args image_paths) {
-        std::vector<std::string> image_paths_string;
-        std::vector<const char*> image_paths_vector;
-        for (auto image_path : image_paths) {
-          if (!nb::isinstance<nb::str>(image_path))
-            throw std::runtime_error("Image paths must be strings.");
-          image_paths_string.push_back(nb::cast<std::string>(image_path));
-          image_paths_vector.push_back(image_paths_string.back().c_str());
-        }
-        OgaStringArray* p_strs;
-        OgaPy::OgaCheckResult(OgaCreateStringArrayFromStrings(image_paths_vector.data(), image_paths_vector.size(), &p_strs));
-        auto strs = new OgaPy::OgaStringArray(p_strs);
-        OgaImages* p;
-        OgaPy::OgaCheckResult(OgaLoadImages(reinterpret_cast<OgaStringArray*>(strs), &p));
-        return new OgaPy::OgaImages(p);
-      })
-      .def_static("open_bytes", [](nb::args image_datas) {
-        std::vector<const void*> image_raw_data(image_datas.size());
-        std::vector<size_t> image_sizes(image_datas.size());
-        for (size_t i = 0; i < image_datas.size(); ++i) {
-          if (!nb::isinstance<nb::bytes>(image_datas[i]))
-            throw std::runtime_error("Image data must be bytes.");
-          auto bytes = nb::cast<nb::bytes>(image_datas[i]);
-          image_raw_data[i] = bytes.data();
-          image_sizes[i] = bytes.size();
-        }
-        OgaImages* p;
-        OgaPy::OgaCheckResult(OgaLoadImagesFromBuffers(image_raw_data.data(), image_sizes.data(), image_raw_data.size(), &p));
-        return new OgaPy::OgaImages(p);
-      });
-
-  nb::class_<OgaPy::OgaAudios>(
-      m, "Audios",
-      nb::intrusive_ptr<OgaPy::OgaAudios>(
-          [](OgaPy::OgaAudios *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def_static("open", [](nb::args audio_paths) {
-        std::vector<std::string> audio_paths_string;
-        std::vector<const char*> audio_paths_vector;
-
-        for (const auto& audio_path : audio_paths) {
-          if (!nb::isinstance<nb::str>(audio_path))
-            throw std::runtime_error("Audio paths must be strings.");
-          audio_paths_string.push_back(nb::cast<std::string>(audio_path));
-          audio_paths_vector.push_back(audio_paths_string.back().c_str());
-        }
-        OgaStringArray* p_strs;
-        OgaPy::OgaCheckResult(OgaCreateStringArrayFromStrings(audio_paths_vector.data(), audio_paths_vector.size(), &p_strs));
-        auto strs = new OgaPy::OgaStringArray(p_strs);
-        OgaAudios* p;
-        OgaPy::OgaCheckResult(OgaLoadAudios(reinterpret_cast<OgaStringArray*>(strs), &p));
-        return new OgaPy::OgaAudios(p);
-      })
-      .def_static("open_bytes", [](nb::args audio_datas) {
-        std::vector<const void*> audio_raw_data(audio_datas.size());
-        std::vector<size_t> audio_sizes(audio_datas.size());
-        for (size_t i = 0; i < audio_datas.size(); ++i) {
-          if (!nb::isinstance<nb::bytes>(audio_datas[i]))
-            throw std::runtime_error("Audio data must be bytes.");
-          auto bytes = nb::cast<nb::bytes>(audio_datas[i]);
-          audio_raw_data[i] = bytes.data();
-          audio_sizes[i] = bytes.size();
-        }
-
-        OgaAudios*p;
-        OgaPy::OgaCheckResult(OgaLoadAudiosFromBuffers(audio_raw_data.data(), audio_sizes.data(), audio_raw_data.size(), &p));
-        return new OgaPy::OgaAudios(p);
-      });
-
-  nb::class_<OgaPy::OgaMultiModalProcessor>(
-      m, "MultiModalProcessor",
-      nb::intrusive_ptr<OgaPy::OgaMultiModalProcessor>(
-          [](OgaPy::OgaMultiModalProcessor *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("__call__", [](OgaPy::OgaMultiModalProcessor& processor, nb::object prompts, const nb::kwargs& kwargs) {
-            OgaImages* images{};
-            OgaAudios* audios{};
-            if (kwargs.contains("images")) {
-              images = reinterpret_cast<OgaImages*>(nb::cast<OgaPy::OgaImages*>(kwargs["images"]));
-            }
-            if (kwargs.contains("audios")) {
-              audios = reinterpret_cast<OgaAudios*>(nb::cast<OgaPy::OgaAudios*>(kwargs["audios"]));
-            }
-
-            std::vector<std::string> prompts_str;
-            std::vector<const char*> c_prompts;
-            if (nb::isinstance<nb::str>(prompts)) {
-              // One prompt
-              OgaNamedTensors* p;
-              OgaPy::OgaCheckResult(OgaProcessorProcessImagesAndAudios(processor.get(), nb::cast<std::string>(prompts).c_str(), images, audios, &p));
-              return new OgaPy::OgaNamedTensors(p);
-            } else if (nb::isinstance<nb::list>(prompts)) {
-              // Multiple prompts
-              for (const auto& prompt : prompts) {
-                if (!nb::isinstance<nb::str>(prompt)) {
-                  throw std::runtime_error("One or more items in the list of provided prompts is not a string.");
-                }
-                prompts_str.push_back(nb::cast<std::string>(prompt));
-                c_prompts.push_back(prompts_str.back().c_str());
-              }
-            } else if (!prompts.is_none()) {
-              // Unsupported type for prompts
-              throw std::runtime_error("Unsupported type for prompts. Prompts must be a string or a list of strings.");
-            }
-
-            OgaStringArray* p_strs;
-            OgaPy::OgaCheckResult(OgaCreateStringArrayFromStrings(c_prompts.data(), c_prompts.size(), &p_strs));
-            auto strs = new OgaPy::OgaStringArray(p_strs);
-            OgaNamedTensors* p;
-            OgaPy::OgaCheckResult(OgaProcessorProcessImagesAndAudiosAndPrompts(processor.get(), reinterpret_cast<OgaStringArray*>(strs), images, audios, &p));
-            return new OgaPy::OgaNamedTensors(p);
-          }, "prompts"_a = nb::none(), nb::arg())
-      .def("create_stream", [](OgaPy::OgaMultiModalProcessor& processor) { 
-        OgaTokenizerStream* p;
-        OgaPy::OgaCheckResult(OgaCreateTokenizerStreamFromProcessor(processor.get(), &p));
-        return new OgaPy::OgaTokenizerStream(p);
-      })
-      .def("decode", [](OgaPy::OgaMultiModalProcessor& processor, nb::ndarray<const int32_t, nb::ndim<1>> tokens) -> std::string {
-        auto span = ToSpan(tokens);
-        const char *p;
-        OgaPy::OgaCheckResult(OgaProcessorDecode(processor.get(), span.data(), span.size(), &p));
-        return std::string(OgaPy::OgaString(p));
-      });
-
-  nb::class_<OgaPy::OgaAdapters>(
-      m, "Adapters",
-      nb::intrusive_ptr<OgaPy::OgaAdapters>(
-          [](OgaPy::OgaAdapters *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("__init__", [](OgaPy::OgaAdapters* self, OgaPy::OgaModel& model) {
-        ::OgaAdapters* p;
-        OgaPy::OgaCheckResult(OgaCreateAdapters(model.get(), &p));
-        new (self) OgaPy::OgaAdapters(p);
-      })
-      .def("unload", [](OgaPy::OgaAdapters& adapters, const char* adapter_name){ OgaPy::OgaCheckResult(OgaUnloadAdapter(adapters.get(), adapter_name));})
-      .def("load", [](OgaPy::OgaAdapters& adapters, const char* adapter_file_path, const char* adapter_name){ OgaPy::OgaCheckResult(OgaLoadAdapter(adapters.get(), adapter_file_path, adapter_name));});
-
-  nb::class_<OgaPy::OgaRequest>(
-      m, "Request",
-      nb::intrusive_ptr<OgaPy::OgaRequest>(
-          [](OgaPy::OgaRequest *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("__init__",
-          [](OgaPy::OgaRequest* self, PyGeneratorParams& params) {
-            ::OgaRequest* p;
-            OgaPy::OgaCheckResult(OgaCreateRequest(params, &p));
-            new (self) OgaPy::OgaRequest(p);
-          })
-      .def("add_tokens", [](OgaPy::OgaRequest& request, nb::ndarray<const int32_t, nb::ndim<1>> tokens) {
-        OgaSequences* p;
-        OgaPy::OgaCheckResult(OgaCreateSequences(&p));
-        auto sequences = new OgaPy::OgaSequences(p);
-        auto tokens_span = ToSpan(tokens);
-        sequences->AppendTokenSequence(tokens_span.data(), tokens_span.size());
-        request.AddTokens(sequences);
-      })
-      .def("has_unseen_tokens", [](const OgaPy::OgaRequest& request) {
-        return request.HasUnseenTokens();
-      })
-      .def("is_done", [](const OgaPy::OgaRequest& request) {
-        return request.IsDone();
-      })
-      .def("get_unseen_token", [](OgaPy::OgaRequest& request) {
-        return request.GetUnseenToken();
-      })
-      .def("set_opaque_data", [](OgaPy::OgaRequest& request, nb::object opaque_data) {
-        request.SetOpaqueData(opaque_data.ptr());
-      })
-      .def("get_opaque_data", [](OgaPy::OgaRequest& request) -> nb::object {
-        void* data = request.GetOpaqueData();
-        if (!data)
-          return nb::none();
-        return nb::borrow<nb::object>(static_cast<PyObject*>(data));
-      });
-
-  nb::class_<OgaPy::OgaEngine>(
-      m, "Engine",
-      nb::intrusive_ptr<OgaPy::OgaEngine>(
-          [](OgaPy::OgaEngine *o, PyObject *po) noexcept { o->set_self_py(po); }))
-      .def("__init__", [](OgaPy::OgaEngine* self, OgaPy::OgaModel& model) {
-        ::OgaEngine* p;
-        OgaPy::OgaCheckResult(OgaCreateEngine(model.get(), &p));
-        new (self) OgaPy::OgaEngine(p);
-      })
-      .def("add_request", [](OgaPy::OgaEngine& engine, OgaPy::OgaRequest& request){ engine.AddRequest(&request); })
-      .def("step", [](OgaPy::OgaEngine& engine) { 
-        return engine.Step();
-      })
-      .def("remove_request", [](OgaPy::OgaEngine& engine, OgaPy::OgaRequest& request){ engine.RemoveRequest(&request); })
-      .def("has_pending_requests", [](OgaPy::OgaEngine& engine) {
-        return engine.HasPendingRequests();
-      });
-
-  // Note: BorrowedArrayView classes (SequenceDataView, etc.) are internal wrappers
-  // and not exposed to Python. They're used internally to manage lifetimes, and
-  // Python always receives numpy ndarrays.
-
-
-  m.def("set_log_options", &SetLogOptions);
-  m.def("set_log_callback", [](nb::handle callback) {
-    if (callback.is_none()) {
-      SetLogCallback(std::nullopt);
-    } else {
-      SetLogCallback(nb::cast<nb::callable>(callback));
+    size_t count;
+    OgaPy::OgaCheckResult(OgaStringArrayGetCount(names->get(), &count));
+    keys.reserve(count);
+    for (size_t i = 0; i < count; i++) {
+     const char* str;
+     OgaPy::OgaCheckResult(OgaStringArrayGetString(names->get(), i, &str));
+     keys.push_back(str);
     }
-  });
+    return keys;
+   });
 
-  m.def("is_cuda_available", []() { return USE_CUDA != 0; });
-  m.def("is_dml_available", []() { return USE_DML != 0; });
-  m.def("is_rocm_available", []() { return USE_ROCM != 0; });
-  m.def("is_webgpu_available", []() { return true; });
-  m.def("is_qnn_available", []() { return true; });
-  m.def("is_openvino_available", []() { return true; });
+ nb::class_<OgaPy::OgaTensor>(
+   m, "Tensor",
+   nb::intrusive_ptr<OgaPy::OgaTensor>(
+     [](OgaPy::OgaTensor *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def("__init__", [](OgaPy::OgaTensor* self, nb::ndarray<>& v) {
+    // This is for: my_tensor = og.Tensor(np.array(...))
+    ::OgaTensor* p = CreateOgaTensorFromNdarray(v); // p has ext_ref=1
+    new (self) OgaPy::OgaTensor(p);
+    // 'self' wrapper now owns the ext_ref=1
+   })
+   .def("shape", [](OgaPy::OgaTensor& t) {
+    size_t rank;
+    OgaPy::OgaCheckResult(OgaTensorGetShapeRank(t.get(), &rank));
+    std::vector<int64_t> shape(rank);
+    OgaPy::OgaCheckResult(OgaTensorGetShape(t.get(), shape.data(), rank));
+    return shape;
+   })
+   .def("type", [](OgaPy::OgaTensor& t) {
+    OgaElementType type;
+    OgaPy::OgaCheckResult(OgaTensorGetType(t.get(), &type));
+    return type;
+   })
+   .def("data", [](OgaPy::OgaTensor& t) {
+    void* data;
+    OgaPy::OgaCheckResult(OgaTensorGetData(t.get(), &data));
+    return nb::capsule(data, "pointer");
+   })
+   .def("as_numpy", &ToNumpyView); // <-- FIXED
+
+ nb::class_<OgaPy::OgaTokenizer>(
+   m, "Tokenizer",
+   nb::intrusive_ptr<OgaPy::OgaTokenizer>(
+     [](OgaPy::OgaTokenizer *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def("__init__", [](OgaPy::OgaTokenizer* self, const OgaPy::OgaModel& model) {
+    ::OgaTokenizer* p;
+    OgaPy::OgaCheckResult(OgaCreateTokenizer(model.get(), &p));
+    new (self) OgaPy::OgaTokenizer(p);
+   })
+   .def_prop_ro("bos_token_id", [](const OgaPy::OgaTokenizer& t) {
+    int32_t token_id;
+    OgaPy::OgaCheckResult(OgaTokenizerGetBosTokenId(t.get(), &token_id));
+    return token_id;
+   })
+   .def_prop_ro("eos_token_ids", [](OgaPy::OgaTokenizer& t) {
+    auto view = t.GetEosTokenIds();
+    size_t shape[1] = {view->size()};
+    nb::capsule owner(view, [](void* p) noexcept {
+     delete reinterpret_cast<OgaPy::EosTokenIdsView*>(p);
+    });
+    return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
+      view->data(), 1, shape, owner);
+   })
+   .def_prop_ro("pad_token_id", [](const OgaPy::OgaTokenizer& t) {
+    int32_t token_id;
+    OgaPy::OgaCheckResult(OgaTokenizerGetPadTokenId(t.get(), &token_id));
+    return token_id;
+   })
+   .def("update_options", [](OgaPy::OgaTokenizer& t, nb::kwargs kwargs) {
+    std::vector<std::string> key_storage;
+    std::vector<std::string> value_storage;
+    key_storage.reserve(kwargs.size());
+    value_storage.reserve(kwargs.size());
+    std::vector<const char*> keys;
+    std::vector<const char*> values;
+    keys.reserve(kwargs.size());
+    values.reserve(kwargs.size());
+    for (const auto& item : kwargs) {
+      key_storage.emplace_back(nb::cast<std::string>(item.first));
+      value_storage.emplace_back(nb::cast<std::string>(item.second));
+      keys.push_back(key_storage.back().c_str());
+      values.push_back(value_storage.back().c_str());
+    }
+    OgaPy::OgaCheckResult(OgaUpdateTokenizerOptions(t.get(), keys.data(), values.data(), kwargs.size()));
+   })
+   .def("encode", [](OgaPy::OgaTokenizer& t, std::string s) -> nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>> {
+    ::OgaSequences* sequences_ptr;
+    OgaPy::OgaCheckResult(OgaCreateSequences(&sequences_ptr));
+    auto sequences = new OgaPy::OgaSequences(sequences_ptr);
+    OgaPy::intrusive_inc_ref(sequences);
+    OgaPy::OgaCheckResult(OgaTokenizerEncode(t.get(), s.c_str(), sequences->get()));
+    auto view = sequences->GetSequenceData(0);
+    size_t shape[1] = {view->size()};
+    nb::capsule owner(view, [](void* p) noexcept {
+     delete reinterpret_cast<OgaPy::SequenceDataView*>(p);
+    });
+    OgaPy::intrusive_dec_ref(sequences);
+    return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
+      view->data(), 1, shape, owner);
+   })
+   .def("to_token_id", [](const OgaPy::OgaTokenizer& t, const char* str) {
+    int32_t token_id;
+    OgaPy::OgaCheckResult(OgaTokenizerToTokenId(t.get(), str, &token_id));
+    return token_id;
+   })
+   .def("decode", [](const OgaPy::OgaTokenizer& t, nb::ndarray<const int32_t, nb::ndim<1>> tokens) -> std::string {
+    auto span = ToSpan(tokens);
+    const char* p;
+    OgaPy::OgaCheckResult(OgaTokenizerDecode(t.get(), span.data(), span.size(), &p));
+    return std::string(OgaPy::OgaString(p));
+   })
+   .def("apply_chat_template", [](const OgaPy::OgaTokenizer& t, const char* messages, std::optional<std::string> template_str, std::optional<std::string> tools, bool add_generation_prompt) -> std::string {
+    const char *p;
+    const char* template_ptr = template_str.has_value() ? template_str->c_str() : nullptr;
+    const char* tools_ptr = tools.has_value() ? tools->c_str() : nullptr;
+    OgaPy::OgaCheckResult(OgaTokenizerApplyChatTemplate(t.get(), template_ptr, messages, tools_ptr, add_generation_prompt, &p));
+    return std::string(OgaPy::OgaString(p));
+   }, "messages"_a, nb::kw_only(), "template_str"_a = nb::none(), "tools"_a = nb::none(), "add_generation_prompt"_a = true)
+   .def("encode_batch", [](const OgaPy::OgaTokenizer& t, std::vector<std::string> strings) {
+    std::vector<const char*> c_strings;
+    c_strings.reserve(strings.size());
+    for (const auto& s : strings)
+     c_strings.push_back(s.c_str());
+    ::OgaTensor* p;
+    OgaPy::OgaCheckResult(OgaTokenizerEncodeBatch(t.get(), c_strings.data(), c_strings.size(), &p));
+    return new OgaPy::OgaTensor(p); // p has ext_ref=1, wrapper will release
+   })
+   .def("decode_batch", [](const OgaPy::OgaTokenizer& t, const OgaPy::OgaTensor& tokens) {
+    std::vector<std::string> strings;
+    ::OgaStringArray* p;
+    OgaPy::OgaCheckResult(OgaTokenizerDecodeBatch(t.get(), tokens.get(), &p));
+    auto decoded = std::unique_ptr<OgaPy::OgaStringArray>(new OgaPy::OgaStringArray(p));
+    size_t count;
+    OgaPy::OgaCheckResult(OgaStringArrayGetCount(decoded->get(), &count));
+    strings.reserve(count);
+    for (size_t i = 0; i < count; i++) {
+     const char* str;
+     OgaPy::OgaCheckResult(OgaStringArrayGetString(decoded->get(), i, &str));
+     strings.push_back(str);
+    }
+    return strings;
+   })
+   .def("create_stream", [](const OgaPy::OgaTokenizer& t) {
+    ::OgaTokenizerStream* p;
+    OgaPy::OgaCheckResult(OgaCreateTokenizerStream(t.get(), &p));
+    return new OgaPy::OgaTokenizerStream(p); // Wrapper owns new'd object
+   });
+
+ nb::class_<OgaPy::OgaConfig>(
+   m, "Config",
+   nb::intrusive_ptr<OgaPy::OgaConfig>(
+     [](OgaPy::OgaConfig *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def("__init__", [](OgaPy::OgaConfig* self, const std::string& config_path) {
+    ::OgaConfig* p;
+    OgaPy::OgaCheckResult(OgaCreateConfig(config_path.c_str(), &p));
+    new (self) OgaPy::OgaConfig(p); // Wrapper owns new'd object
+   })
+   .def("append_provider", [](OgaPy::OgaConfig& config, const char* provider) { OgaPy::OgaCheckResult(OgaConfigAppendProvider(config.get(), provider));})
+   .def("set_provider_option", [](OgaPy::OgaConfig& config, const char* provider, const char* name, const char* value) { OgaPy::OgaCheckResult(OgaConfigSetProviderOption(config.get(), provider, name, value));})
+   .def("clear_providers", [](OgaPy::OgaConfig& config) { OgaPy::OgaCheckResult(OgaConfigClearProviders(config.get()));})
+   .def("add_model_data", [](OgaPy::OgaConfig& config, const std::string& model_filename, nb::object obj) {
+    if (nb::isinstance<nb::bytes>(obj)) {
+     auto model_bytes = nb::cast<nb::bytes>(obj);
+     OgaPy::OgaCheckResult(OgaConfigAddModelData(config.get(), model_filename.c_str(), model_bytes.data(), model_bytes.size()));
+    } else if (nb::isinstance<nb::ndarray<>>(obj)) {
+     auto array = nb::cast<nb::ndarray<nb::ro, uint8_t, nb::ndim<1>>>(obj);
+     OgaPy::OgaCheckResult(OgaConfigAddModelData(config.get(), model_filename.c_str(), array.data(), array.nbytes()));
+    } else {
+     throw std::runtime_error("Unsupported input type. Expected bytes or a 1D uint8 numpy array.");
+    }
+   })
+   .def("remove_model_data", [](OgaPy::OgaConfig& config, const std::string& model_filename) {
+    OgaPy::OgaCheckResult(OgaConfigRemoveModelData(config.get(), model_filename.c_str()));
+   })
+   .def("overlay", [](OgaPy::OgaConfig& config, const char* json) { OgaPy::OgaCheckResult(OgaConfigOverlay(config.get(), json)); })
+   .def("set_decoder_provider_options_hardware_device_type", [](OgaPy::OgaConfig& config, const char* provider, const char* hardware_device_type) { OgaPy::OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareDeviceType(config.get(), provider, hardware_device_type)); })
+   .def("set_decoder_provider_options_hardware_device_id", [](OgaPy::OgaConfig& config, const char* provider, uint32_t hardware_device_id) { OgaPy::OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareDeviceId(config.get(), provider, hardware_device_id)); })
+   .def("set_decoder_provider_options_hardware_vendor_id", [](OgaPy::OgaConfig& config, const char* provider, uint32_t hardware_vendor_id) { OgaPy::OgaCheckResult(OgaConfigSetDecoderProviderOptionsHardwareVendorId(config.get(), provider, hardware_vendor_id)); })
+   .def("clear_decoder_provider_options_hardware_device_type", [](OgaPy::OgaConfig& config, const char* provider) { OgaPy::OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareDeviceType(config.get(), provider)); })
+   .def("clear_decoder_provider_options_hardware_device_id", [](OgaPy::OgaConfig& config, const char* provider) { OgaPy::OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareDeviceId(config.get(), provider)); })
+   .def("clear_decoder_provider_options_hardware_vendor_id", [](OgaPy::OgaConfig& config, const char* provider) { OgaPy::OgaCheckResult(OgaConfigClearDecoderProviderOptionsHardwareVendorId(config.get(), provider)); });
+
+ nb::class_<OgaPy::OgaModel>(
+   m, "Model",
+   nb::intrusive_ptr<OgaPy::OgaModel>(
+     [](OgaPy::OgaModel *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def("__init__", [](OgaPy::OgaModel* self, const OgaPy::OgaConfig& config) {
+    ::OgaModel* p;
+    OgaPy::OgaCheckResult(OgaCreateModelFromConfig(config.get(), &p)); // p has ext_ref=1
+    new (self) OgaPy::OgaModel(p); // wrapper will release ref
+   })
+   .def("__init__", [](OgaPy::OgaModel* self, const std::string& config_path) {
+    ::OgaModel* p;
+    OgaPy::OgaCheckResult(OgaCreateModel(config_path.c_str(), &p)); // p has ext_ref=1
+    new (self) OgaPy::OgaModel(p); // wrapper will release ref
+   })
+   .def_prop_ro("type", [](const OgaPy::OgaModel& model) -> std::string {
+    const char *p;
+    OgaPy::OgaCheckResult(OgaModelGetType(model.get(), &p));
+    return std::string(OgaPy::OgaString(p));
+   })
+   .def_prop_ro(
+     "device_type", [](const OgaPy::OgaModel& model) -> std::string {
+      const char* p;
+      OgaPy::OgaCheckResult(OgaModelGetDeviceType(model.get(), &p));
+      return std::string(OgaPy::OgaString(p));
+     }, "The device type the model is running on")
+   .def("create_multimodal_processor", [](const OgaPy::OgaModel& model) {
+    ::OgaMultiModalProcessor* p;
+    OgaPy::OgaCheckResult(OgaCreateMultiModalProcessor(model.get(), &p)); // p has ext_ref=1
+    return new OgaPy::OgaMultiModalProcessor(p); // wrapper will release ref
+   });
+
+  // Bind OgaPy::OgaGenerator directly
+ nb::class_<OgaPy::OgaGenerator>(m, "Generator",
+        nb::intrusive_ptr<OgaPy::OgaGenerator>(
+     [](OgaPy::OgaGenerator *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def("__init__", [](OgaPy::OgaGenerator* self, const OgaPy::OgaModel& model, OgaPy::OgaGeneratorParams& params) {
+     ::OgaGenerator* p;
+     // OgaCreateGenerator returns a raw 'new' pointer, not ref-counted
+     OgaPy::OgaCheckResult(OgaCreateGenerator(model.get(), params.get(), &p));
+     new (self) OgaPy::OgaGenerator(p); // wrapper destructor will delete p
+   })
+   .def("is_done", &OgaPy::OgaGenerator::IsDone)
+   .def("get_input", [](OgaPy::OgaGenerator& self, const std::string& name) {
+     ::OgaTensor* p = self.GetInput(name.c_str()); // p has ext_ref=1
+     // ToNumpy takes ownership of the wrapper, which balances the ref
+     return ToNumpy(std::unique_ptr<OgaPy::OgaTensor>(new OgaPy::OgaTensor(p)));
+   })
+   .def("get_output", [](OgaPy::OgaGenerator& self, const std::string& name) {
+     ::OgaTensor* p = self.GetOutput(name.c_str()); // p has ext_ref=1
+     return ToNumpy(std::unique_ptr<OgaPy::OgaTensor>(new OgaPy::OgaTensor(p)));
+   })
+   .def("set_inputs", &OgaPy::OgaGenerator::SetInputs)
+   .def("set_model_input", [](OgaPy::OgaGenerator& self, const std::string& name, OgaPy::OgaTensor& value) {
+     self.SetModelInput(name.c_str(), value.get());
+   })
+   .def("set_model_input", [](OgaPy::OgaGenerator& self, const std::string& name, nb::ndarray<>& value) {
+     ::OgaTensor* p = CreateOgaTensorFromNdarray(value); // p has ext_ref=1
+     self.SetModelInput(name.c_str(), p); // C-API stores its own shared_ptr
+     OgaDestroyTensor(p); // Release the ext_ref=1 from creation
+   })
+   .def("append_tokens", [](OgaPy::OgaGenerator& self, OgaPy::OgaTensor& tokens) {
+     auto span = ToSpan<const int32_t>(*tokens.get());
+     self.AppendTokens(span.data(), span.size());
+   })
+   .def("append_tokens", [](OgaPy::OgaGenerator& self, nb::ndarray<const int32_t, nb::ndim<1>>& tokens) {
+     auto span = ToSpan(tokens);
+     self.AppendTokens(span.data(), span.size());
+   })
+   .def("get_logits", [](OgaPy::OgaGenerator& self) {
+     ::OgaTensor* p = self.GetLogits(); // p has ext_ref=1
+     return ToNumpy(std::unique_ptr<OgaPy::OgaTensor>(new OgaPy::OgaTensor(p)));
+   })
+   .def("set_logits", [](OgaPy::OgaGenerator& self, OgaPy::OgaTensor& value) {
+     self.SetLogits(value.get());
+   })
+   .def("set_logits", [](OgaPy::OgaGenerator& self, nb::ndarray<>& value) {
+     ::OgaTensor* p = CreateOgaTensorFromNdarray(value); // p has ext_ref=1
+     self.SetLogits(p); // C-API copies the data
+     OgaDestroyTensor(p); // Release the ext_ref=1
+   })
+   .def("generate_next_token", &OgaPy::OgaGenerator::GenerateNextToken)
+   .def("rewind_to", &OgaPy::OgaGenerator::RewindTo)
+   .def("get_next_tokens", [](OgaPy::OgaGenerator& self) {
+     auto view = self.GetNextTokens(); // Returns NextTokensView*
+     size_t shape[1] = {view->size()};
+     nb::capsule owner(view, [](void* p) noexcept {
+      delete reinterpret_cast<OgaPy::NextTokensView*>(p);
+     });
+     return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
+       view->data(), 1, shape, owner);
+   })
+   .def("get_sequence", [](OgaPy::OgaGenerator& self, int index) {
+     auto view = self.GetSequenceData(index); // Returns GeneratorSequenceDataView*
+     size_t shape[1] = {view->size()};
+     nb::capsule owner(view, [](void* p) noexcept {
+      delete reinterpret_cast<OgaPy::GeneratorSequenceDataView*>(p);
+     });
+     return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
+       view->data(), 1, shape, owner);
+   })
+   .def("set_active_adapter", &OgaPy::OgaGenerator::SetActiveAdapter);
+
+ nb::class_<OgaPy::OgaImages>(
+   m, "Images",
+   nb::intrusive_ptr<OgaPy::OgaImages>(
+     [](OgaPy::OgaImages *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def_static("open", [](nb::args image_paths) {
+    std::vector<std::string> image_paths_string;
+    std::vector<const char*> image_paths_vector;
+    image_paths_vector.reserve(image_paths.size());
+    image_paths_string.reserve(image_paths.size());
+    for (auto image_path : image_paths) {
+     if (!nb::isinstance<nb::str>(image_path))
+      throw std::runtime_error("Image paths must be strings.");
+     image_paths_string.push_back(nb::cast<std::string>(image_path));
+     image_paths_vector.push_back(image_paths_string.back().c_str());
+    }
+    ::OgaStringArray* p_strs;
+    OgaPy::OgaCheckResult(OgaCreateStringArrayFromStrings(image_paths_vector.data(), image_paths_vector.size(), &p_strs));
+    auto strs = std::unique_ptr<OgaPy::OgaStringArray>(new OgaPy::OgaStringArray(p_strs));
+    ::OgaImages* p;
+    OgaPy::OgaCheckResult(OgaLoadImages(strs->get(), &p));
+    return new OgaPy::OgaImages(p); // wrapper owns new'd object
+   })
+   .def_static("open_bytes", [](nb::args image_datas) {
+    std::vector<const void*> image_raw_data(image_datas.size());
+    std::vector<size_t> image_sizes(image_datas.size());
+    for (size_t i = 0; i < image_datas.size(); ++i) {
+     if (!nb::isinstance<nb::bytes>(image_datas[i]))
+      throw std::runtime_error("Image data must be bytes.");
+     auto bytes = nb::cast<nb::bytes>(image_datas[i]);
+     image_raw_data[i] = bytes.data();
+     image_sizes[i] = bytes.size();
+    }
+    ::OgaImages* p;
+    OgaPy::OgaCheckResult(OgaLoadImagesFromBuffers(image_raw_data.data(), image_sizes.data(), image_raw_data.size(), &p));
+    return new OgaPy::OgaImages(p); // wrapper owns new'd object
+   });
+
+ nb::class_<OgaPy::OgaAudios>(
+   m, "Audios",
+   nb::intrusive_ptr<OgaPy::OgaAudios>(
+     [](OgaPy::OgaAudios *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def_static("open", [](nb::args audio_paths) {
+    std::vector<std::string> audio_paths_string;
+    std::vector<const char*> audio_paths_vector;
+    audio_paths_string.reserve(audio_paths.size());
+    audio_paths_vector.reserve(audio_paths.size());
+
+    for (const auto& audio_path : audio_paths) {
+     if (!nb::isinstance<nb::str>(audio_path))
+      throw std::runtime_error("Audio paths must be strings.");
+     audio_paths_string.push_back(nb::cast<std::string>(audio_path));
+     audio_paths_vector.push_back(audio_paths_string.back().c_str());
+    }
+    ::OgaStringArray* p_strs;
+    OgaPy::OgaCheckResult(OgaCreateStringArrayFromStrings(audio_paths_vector.data(), audio_paths_vector.size(), &p_strs));
+    auto strs = std::unique_ptr<OgaPy::OgaStringArray>(new OgaPy::OgaStringArray(p_strs));
+    ::OgaAudios* p;
+    OgaPy::OgaCheckResult(OgaLoadAudios(strs->get(), &p));
+    return new OgaPy::OgaAudios(p); // wrapper owns new'd object
+   })
+   .def_static("open_bytes", [](nb::args audio_datas) {
+     std::vector<const void*> audio_raw_data(audio_datas.size());
+    std::vector<size_t> audio_sizes(audio_datas.size());
+    for (size_t i = 0; i < audio_datas.size(); ++i) {
+     if (!nb::isinstance<nb::bytes>(audio_datas[i]))
+      throw std::runtime_error("Audio data must be bytes.");
+     auto bytes = nb::cast<nb::bytes>(audio_datas[i]);
+     audio_raw_data[i] = bytes.data();
+     audio_sizes[i] = bytes.size();
+    }
+
+    ::OgaAudios*p;
+    OgaPy::OgaCheckResult(OgaLoadAudiosFromBuffers(audio_raw_data.data(), audio_sizes.data(), audio_raw_data.size(), &p));
+    return new OgaPy::OgaAudios(p); // wrapper owns new'd object
+   });
+
+ nb::class_<OgaPy::OgaMultiModalProcessor>(
+   m, "MultiModalProcessor",
+   nb::intrusive_ptr<OgaPy::OgaMultiModalProcessor>(
+     [](OgaPy::OgaMultiModalProcessor *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def("__call__", [](OgaPy::OgaMultiModalProcessor& processor, nb::object prompts, const nb::kwargs& kwargs) {
+      OgaImages* images{};
+      OgaAudios* audios{};
+      if (kwargs.contains("images")) {
+       images = nb::cast<OgaPy::OgaImages*>(kwargs["images"])->get();
+      }
+      if (kwargs.contains("audios")) {
+       audios = nb::cast<OgaPy::OgaAudios*>(kwargs["audios"])->get();
+      }
+
+      std::vector<std::string> prompts_str;
+      std::vector<const char*> c_prompts;
+      if (nb::isinstance<nb::str>(prompts)) {
+       // One prompt
+       ::OgaNamedTensors* p;
+       OgaPy::OgaCheckResult(OgaProcessorProcessImagesAndAudios(processor.get(), nb::cast<std::string>(prompts).c_str(), images, audios, &p));
+       return new OgaPy::OgaNamedTensors(p);
+      } else if (nb::isinstance<nb::list>(prompts)) {
+       // Multiple prompts
+       prompts_str.reserve(nb::len(prompts));
+       c_prompts.reserve(nb::len(prompts));
+       for (const auto& prompt : prompts) {
+        if (!nb::isinstance<nb::str>(prompt)) {
+         throw std::runtime_error("One or more items in the list of provided prompts is not a string.");
+        }
+        prompts_str.push_back(nb::cast<std::string>(prompt));
+          c_prompts.push_back(prompts_str.back().c_str());
+       }
+      } else if (!prompts.is_none()) {
+       // Unsupported type for prompts
+       throw std::runtime_error("Unsupported type for prompts. Prompts must be a string or a list of strings.");
+      }
+
+      ::OgaStringArray* p_strs;
+      OgaPy::OgaCheckResult(OgaCreateStringArrayFromStrings(c_prompts.data(), c_prompts.size(), &p_strs));
+      auto strs = std::unique_ptr<OgaPy::OgaStringArray>(new OgaPy::OgaStringArray(p_strs));
+      ::OgaNamedTensors* p;
+      OgaPy::OgaCheckResult(OgaProcessorProcessImagesAndAudiosAndPrompts(processor.get(), strs->get(), images, audios, &p));
+      return new OgaPy::OgaNamedTensors(p);
+     }, "prompts"_a = nb::none(), nb::arg())
+   .def("create_stream", [](OgaPy::OgaMultiModalProcessor& processor) {
+    ::OgaTokenizerStream* p;
+    OgaPy::OgaCheckResult(OgaCreateTokenizerStreamFromProcessor(processor.get(), &p));
+    return new OgaPy::OgaTokenizerStream(p);
+   })
+   .def("decode", [](OgaPy::OgaMultiModalProcessor& processor, nb::ndarray<const int32_t, nb::ndim<1>> tokens) -> std::string {
+    auto span = ToSpan(tokens);
+    const char *p;
+    OgaPy::OgaCheckResult(OgaProcessorDecode(processor.get(), span.data(), span.size(), &p));
+    return std::string(OgaPy::OgaString(p));
+   });
+
+ nb::class_<OgaPy::OgaAdapters>(
+   m, "Adapters",
+   nb::intrusive_ptr<OgaPy::OgaAdapters>(
+     [](OgaPy::OgaAdapters *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def("__init__", [](OgaPy::OgaAdapters* self, OgaPy::OgaModel& model) {
+    ::OgaAdapters* p;
+    OgaPy::OgaCheckResult(OgaCreateAdapters(model.get(), &p));
+    new (self) OgaPy::OgaAdapters(p);
+   })
+   .def("unload", [](OgaPy::OgaAdapters& adapters, const char* adapter_name){ OgaPy::OgaCheckResult(OgaUnloadAdapter(adapters.get(), adapter_name));})
+   .def("load", [](OgaPy::OgaAdapters& adapters, const char* adapter_file_path, const char* adapter_name){ OgaPy::OgaCheckResult(OgaLoadAdapter(adapters.get(), adapter_file_path, adapter_name));});
+
+    nb::class_<OgaPy::OgaRequest>(
+   m, "Request",
+   nb::intrusive_ptr<OgaPy::OgaRequest>(
+     [](OgaPy::OgaRequest *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def("__init__",
+     [](OgaPy::OgaRequest* self, OgaPy::OgaGeneratorParams& params) {
+      ::OgaRequest* p;
+      OgaPy::OgaCheckResult(OgaCreateRequest(params.get(), &p));
+      new (self) OgaPy::OgaRequest(p);
+     })
+   .def("add_tokens", [](OgaPy::OgaRequest& request, nb::ndarray<const int32_t, nb::ndim<1>> tokens) {
+    ::OgaSequences* p;
+    OgaPy::OgaCheckResult(OgaCreateSequences(&p));
+    auto sequences = std::unique_ptr<OgaPy::OgaSequences>(new OgaPy::OgaSequences(p));
+    auto tokens_span = ToSpan(tokens);
+    OgaPy::OgaCheckResult(OgaAppendTokenSequence(tokens_span.data(), tokens_span.size(), sequences->get()));
+    OgaPy::OgaCheckResult(OgaRequestAddTokens(request.get(), sequences->get()));
+   })
+   .def("has_unseen_tokens", [](const OgaPy::OgaRequest& request) {
+    return request.HasUnseenTokens();
+   })
+   .def("is_done", [](const OgaPy::OgaRequest& request) {
+    return request.IsDone();
+   })
+   .def("get_unseen_token", [](OgaPy::OgaRequest& request) {
+    return request.GetUnseenToken();
+   })
+   .def("set_opaque_data", [](OgaPy::OgaRequest& request, nb::object opaque_data) {
+    request.SetOpaqueData(opaque_data.ptr());
+   })
+   .def("get_opaque_data", [](OgaPy::OgaRequest& request) -> nb::object {
+    void* data = request.GetOpaqueData();
+    if (!data)
+     return nb::none();
+    return nb::borrow<nb::object>(static_cast<PyObject*>(data));
+   });
+
+ nb::class_<OgaPy::OgaEngine>(
+   m, "Engine",
+   nb::intrusive_ptr<OgaPy::OgaEngine>(
+     [](OgaPy::OgaEngine *o, PyObject *po) noexcept { o->set_self_py(po); }))
+   .def("__init__", [](OgaPy::OgaEngine* self, OgaPy::OgaModel& model) {
+    ::OgaEngine* p;
+    OgaPy::OgaCheckResult(OgaCreateEngine(model.get(), &p));
+    new (self) OgaPy::OgaEngine(p);
+   })
+   .def("add_request", [](OgaPy::OgaEngine& engine, OgaPy::OgaRequest& request){ engine.AddRequest(&request); })
+   .def("step", [](OgaPy::OgaEngine& engine) {
+    return engine.Step();
+   })
+   .def("remove_request", [](OgaPy::OgaEngine& engine, OgaPy::OgaRequest& request){ engine.RemoveRequest(&request); })
+   .def("has_pending_requests", [](OgaPy::OgaEngine& engine) {
+    return engine.HasPendingRequests();
+   });
+
+ // Note: BorrowedArrayView classes (SequenceDataView, etc.) are internal wrappers
+ // and not exposed to Python. They're used internally to manage lifetimes, and
+ // Python always receives numpy ndarrays.
+
+
+ m.def("set_log_options", &SetLogOptions);
+ m.def("set_log_callback", [](nb::handle callback) {
+   if (callback.is_none()) {
+   SetLogCallback(std::nullopt);
+  } else {
+   SetLogCallback(nb::cast<nb::callable>(callback));
+  }
+ });
+
+ m.def("is_cuda_available", []() { return USE_CUDA != 0; });
+ m.def("is_dml_available", []() { return USE_DML != 0; });
+ m.def("is_rocm_available", []() { return USE_ROCM != 0; });
+ m.def("is_webgpu_available", []() { return true; });
+ m.def("is_qnn_available", []() { return true; });
+ m.def("is_openvino_available", []() { return true; });
 
   m.def("set_current_gpu_device_id", [](int device_id) { OgaPy::OgaCheckResult(OgaSetCurrentGpuDeviceId(device_id)); });
-  m.def("get_current_gpu_device_id", []() { 
-    int device_id;
-    OgaPy::OgaCheckResult(OgaGetCurrentGpuDeviceId(&device_id));
-    return device_id;
-  });
+ m.def("get_current_gpu_device_id", []() {
+  int device_id;
+  OgaPy::OgaCheckResult(OgaGetCurrentGpuDeviceId(&device_id));
+  return device_id;
+ });
 
-  m.def("register_execution_provider_library", [](const std::string& provider_name, const std::string& path_str) {
-    OgaRegisterExecutionProviderLibrary(provider_name.c_str(), path_str.c_str());
-  });
+ m.def("register_execution_provider_library", [](const std::string& provider_name, const std::string& path_str) {
+  OgaRegisterExecutionProviderLibrary(provider_name.c_str(), path_str.c_str());
+ });
 
-  m.def("unregister_execution_provider_library", [](const std::string& provider_name) {
-    OgaUnregisterExecutionProviderLibrary(provider_name.c_str());
-  });
+ m.def("unregister_execution_provider_library", [](const std::string& provider_name) {
+  OgaUnregisterExecutionProviderLibrary(provider_name.c_str());
+ });
 }

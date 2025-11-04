@@ -10,9 +10,9 @@ namespace OgaPy {
 // This is used to turn OgaResult return values from the C API into std::runtime_error exceptions
 inline void OgaCheckResult(::OgaResult* result) {
   if (result) {
-    const char* error = OgaResultGetError(result);
-    OgaDestroyResult(result);
-    throw std::runtime_error(error);
+    std::string error_message = OgaResultGetError(result);
+    OgaDestroyResult(result);                            
+    throw std::runtime_error(error_message);
   }
 }
 
