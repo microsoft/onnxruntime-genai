@@ -171,7 +171,7 @@ nb::ndarray<> ToNumpyView(OgaPy::OgaTensor& v) {
 
 // Creates a numpy array that takes ownership of a *newly created* OgaTensor
 // via a nanobind capsule. Used for GetLogits, GetInput, GetOutput.
-nb::ndarray<> ToNumpy(std::unique_ptr<OgaPy::OgaTensor> v) {
+nb::ndarray<nb::numpy> ToNumpy(std::unique_ptr<OgaPy::OgaTensor> v) {
  ::OgaTensor* v_ptr = v->get();
  size_t rank;
  OgaPy::OgaCheckResult(OgaTensorGetShapeRank(v_ptr, &rank));
@@ -191,7 +191,7 @@ nb::ndarray<> ToNumpy(std::unique_ptr<OgaPy::OgaTensor> v) {
  // which deletes the wrapper, which calls OgaDestroyTensor(v_ptr).
  nb::capsule owner(v.release(), [](void *p) noexcept { delete reinterpret_cast<OgaPy::OgaTensor*>(p); });
 
- return nb::ndarray<>(data, rank, shape.data(), owner, nullptr, ToDlpackDtype(static_cast<ONNXTensorElementDataType>(type_enum)));
+ return nb::ndarray<nb::numpy>(data, rank, shape.data(), owner, nullptr, ToDlpackDtype(static_cast<ONNXTensorElementDataType>(type_enum)));
 }
 
 // PyGeneratorParams and PyGenerator structs are no longer needed.
@@ -407,11 +407,8 @@ NB_MODULE(onnxruntime_genai, m) {
    .def_prop_ro("eos_token_ids", [](OgaPy::OgaTokenizer& t) {
     auto view = t.GetEosTokenIds();
     size_t shape[1] = {view->size()};
-    nb::capsule owner(view, [](void* p) noexcept {
-     delete reinterpret_cast<OgaPy::EosTokenIdsView*>(p);
-    });
     return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
-      view->data(), 1, shape, owner);
+      view->data(), 1, shape, nb::find(view));
    })
    .def_prop_ro("pad_token_id", [](const OgaPy::OgaTokenizer& t) {
     int32_t token_id;
@@ -510,16 +507,14 @@ NB_MODULE(onnxruntime_genai, m) {
    .def("append_provider", [](OgaPy::OgaConfig& config, const char* provider) { OgaPy::OgaCheckResult(OgaConfigAppendProvider(config.get(), provider));})
    .def("set_provider_option", [](OgaPy::OgaConfig& config, const char* provider, const char* name, const char* value) { OgaPy::OgaCheckResult(OgaConfigSetProviderOption(config.get(), provider, name, value));})
    .def("clear_providers", [](OgaPy::OgaConfig& config) { OgaPy::OgaCheckResult(OgaConfigClearProviders(config.get()));})
-   .def("add_model_data", [](OgaPy::OgaConfig& config, const std::string& model_filename, nb::object obj) {
-    if (nb::isinstance<nb::bytes>(obj)) {
-     auto model_bytes = nb::cast<nb::bytes>(obj);
+   .def("add_model_data", [](OgaPy::OgaConfig& config, const std::string& model_filename, nb::bytes model_bytes) {
      OgaPy::OgaCheckResult(OgaConfigAddModelData(config.get(), model_filename.c_str(), model_bytes.data(), model_bytes.size()));
-    } else if (nb::isinstance<nb::ndarray<>>(obj)) {
-     auto array = nb::cast<nb::ndarray<nb::ro, uint8_t, nb::ndim<1>>>(obj);
+   })
+   .def("add_model_data", [](OgaPy::OgaConfig& config, const std::string& model_filename, nb::ndarray<nb::ro, uint8_t, nb::ndim<1>> array) {
      OgaPy::OgaCheckResult(OgaConfigAddModelData(config.get(), model_filename.c_str(), array.data(), array.nbytes()));
-    } else {
-     throw std::runtime_error("Unsupported input type. Expected bytes or a 1D uint8 numpy array.");
-    }
+   })
+   .def("add_model_data", [](OgaPy::OgaConfig& config, const std::string& model_filename, nb::ndarray<nb::memview, nb::ro, uint8_t, nb::ndim<1>> array) {
+     OgaPy::OgaCheckResult(OgaConfigAddModelData(config.get(), model_filename.c_str(), array.data(), array.nbytes()));
    })
    .def("remove_model_data", [](OgaPy::OgaConfig& config, const std::string& model_filename) {
     OgaPy::OgaCheckResult(OgaConfigRemoveModelData(config.get(), model_filename.c_str()));
@@ -574,12 +569,12 @@ NB_MODULE(onnxruntime_genai, m) {
      new (self) OgaPy::OgaGenerator(p); // wrapper destructor will delete p
    })
    .def("is_done", &OgaPy::OgaGenerator::IsDone)
-   .def("get_input", [](OgaPy::OgaGenerator& self, const std::string& name) {
+   .def("get_input", [](OgaPy::OgaGenerator& self, const std::string& name) -> nb::ndarray<nb::numpy> {
      ::OgaTensor* p = self.GetInput(name.c_str()); // p has ext_ref=1
      // ToNumpy takes ownership of the wrapper, which balances the ref
      return ToNumpy(std::unique_ptr<OgaPy::OgaTensor>(new OgaPy::OgaTensor(p)));
    })
-   .def("get_output", [](OgaPy::OgaGenerator& self, const std::string& name) {
+   .def("get_output", [](OgaPy::OgaGenerator& self, const std::string& name) -> nb::ndarray<nb::numpy> {
      ::OgaTensor* p = self.GetOutput(name.c_str()); // p has ext_ref=1
      return ToNumpy(std::unique_ptr<OgaPy::OgaTensor>(new OgaPy::OgaTensor(p)));
    })
@@ -596,11 +591,13 @@ NB_MODULE(onnxruntime_genai, m) {
      auto span = ToSpan<const int32_t>(*tokens.get());
      self.AppendTokens(span.data(), span.size());
    })
-   .def("append_tokens", [](OgaPy::OgaGenerator& self, nb::ndarray<const int32_t, nb::ndim<1>>& tokens) {
-     auto span = ToSpan(tokens);
-     self.AppendTokens(span.data(), span.size());
+   .def("append_tokens", [](OgaPy::OgaGenerator& self, nb::ndarray<const int32_t, nb::c_contig> tokens) {
+     if (tokens.ndim() == 0) {
+       throw std::runtime_error("Input array cannot be scalar.");
+     }
+     self.AppendTokens(tokens.data(), tokens.size());
    })
-   .def("get_logits", [](OgaPy::OgaGenerator& self) {
+   .def("get_logits", [](OgaPy::OgaGenerator& self) -> nb::ndarray<nb::numpy> {
      ::OgaTensor* p = self.GetLogits(); // p has ext_ref=1
      return ToNumpy(std::unique_ptr<OgaPy::OgaTensor>(new OgaPy::OgaTensor(p)));
    })
@@ -617,20 +614,14 @@ NB_MODULE(onnxruntime_genai, m) {
    .def("get_next_tokens", [](OgaPy::OgaGenerator& self) {
      auto view = self.GetNextTokens(); // Returns NextTokensView*
      size_t shape[1] = {view->size()};
-     nb::capsule owner(view, [](void* p) noexcept {
-      delete reinterpret_cast<OgaPy::NextTokensView*>(p);
-     });
      return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
-       view->data(), 1, shape, owner);
+       view->data(), 1, shape, nb::find(view));
    })
    .def("get_sequence", [](OgaPy::OgaGenerator& self, int index) {
      auto view = self.GetSequenceData(index); // Returns GeneratorSequenceDataView*
      size_t shape[1] = {view->size()};
-     nb::capsule owner(view, [](void* p) noexcept {
-      delete reinterpret_cast<OgaPy::GeneratorSequenceDataView*>(p);
-     });
      return nb::ndarray<nb::numpy, const int32_t, nb::shape<-1>>(
-       view->data(), 1, shape, owner);
+       view->data(), 1, shape, nb::find(view));
    })
    .def("set_active_adapter", &OgaPy::OgaGenerator::SetActiveAdapter);
 
