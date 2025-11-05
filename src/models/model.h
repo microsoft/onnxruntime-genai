@@ -14,6 +14,10 @@
 
 namespace Generators {
 
+// Note: Within this namespace, unqualified "OrtValue" refers to Ort::OrtValue (C++ wrapper),
+// NOT ::OrtValue (C API opaque pointer). Similarly for OrtSession, OrtRunOptions, etc.
+// When interfacing with C API directly (e.g., OrtTensorTypeAndShapeInfo), use :: prefix.
+
 struct Tokenizer;
 
 void Cast(OrtValue& input, std::unique_ptr<OrtValue>& output, DeviceInterface& device, ONNXTensorElementDataType type);

@@ -138,8 +138,17 @@ endif()
 
 find_package(Threads REQUIRED)
 
+# Create an OBJECT library that can be shared between the shared library and Python bindings
+add_library(onnxruntime-genai-objects OBJECT ${generator_srcs})
+target_include_directories(onnxruntime-genai-objects PRIVATE ${ORT_HEADER_DIR})
+target_include_directories(onnxruntime-genai-objects PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
+target_link_libraries(onnxruntime-genai-objects PRIVATE onnxruntime_extensions)
+target_link_directories(onnxruntime-genai-objects PRIVATE ${ORT_LIB_DIR})
+target_link_libraries(onnxruntime-genai-objects PRIVATE Threads::Threads)
+
+# Now create the shared library from the object library
 if(WIN32)
-  add_library(onnxruntime-genai SHARED ${generator_srcs} "${GENERATORS_ROOT}/dll/onnxruntime-genai.rc")
+  add_library(onnxruntime-genai SHARED $<TARGET_OBJECTS:onnxruntime-genai-objects> "${GENERATORS_ROOT}/dll/onnxruntime-genai.rc")
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_INFO=\"${VERSION_INFO}\")
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_MAJOR=${VERSION_MAJOR})
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_MINOR=${VERSION_MINOR})
@@ -147,9 +156,10 @@ if(WIN32)
   target_compile_definitions(onnxruntime-genai PRIVATE VERSION_SUFFIX=${VERSION_SUFFIX})
   target_compile_definitions(onnxruntime-genai PRIVATE FILE_NAME=\"onnxruntime-genai.dll\")
 else()
-  add_library(onnxruntime-genai SHARED ${generator_srcs})
+  add_library(onnxruntime-genai SHARED $<TARGET_OBJECTS:onnxruntime-genai-objects>)
 endif()
 
+# The shared library needs the same settings
 target_include_directories(onnxruntime-genai PRIVATE ${ORT_HEADER_DIR})
 target_include_directories(onnxruntime-genai PRIVATE ${onnxruntime_extensions_SOURCE_DIR}/shared/api)
 target_link_libraries(onnxruntime-genai PRIVATE onnxruntime_extensions)
@@ -208,10 +218,13 @@ endif()
 
 
 if(USE_GUIDANCE)
+  target_include_directories(onnxruntime-genai-objects PUBLIC ${llguidance_SOURCE_DIR}/parser/)
+  target_link_libraries(onnxruntime-genai-objects PRIVATE llguidance)
   target_include_directories(onnxruntime-genai PUBLIC ${llguidance_SOURCE_DIR}/parser/)
   target_link_libraries(onnxruntime-genai PRIVATE llguidance)
   if (WIN32)
     # bcrypt is needed for the rust std lib
+    target_link_libraries(onnxruntime-genai-objects PRIVATE bcrypt)
     target_link_libraries(onnxruntime-genai PRIVATE bcrypt)
   endif()
 endif()
@@ -221,6 +234,7 @@ if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set_target_properties(onnxruntime-genai-objects PROPERTIES POSITION_INDEPENDENT_CODE ON)
   set_target_properties(onnxruntime-genai PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_link_libraries(onnxruntime-genai PRIVATE dl)  # For dlopen & co
 endif()

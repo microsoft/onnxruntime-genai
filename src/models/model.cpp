@@ -151,6 +151,11 @@ void State::Run(OrtSession& session, bool graph_capture_this_run) {
   session.Run(run_options_.get(), input_names_.data(), inputs_.data(), input_names_.size(),
               output_names_.data(), outputs_.data(), output_names_.size());
 
+  std::cerr << "[State::Run] After session.Run(), outputs_ contains:" << std::endl;
+  for (size_t i = 0; i < output_names_.size(); ++i) {
+    std::cerr << "[State::Run]   outputs_[" << i << "] ('" << output_names_[i] << "') = " << outputs_[i] << std::endl;
+  }
+  
   extra_outputs_.RegisterOutputs();
 
   DumpOutputs();
@@ -195,11 +200,16 @@ OrtValue* State::GetInput(const char* name) {
 
 OrtValue* State::GetOutput(const char* name) {
   ThrowErrorIfSessionTerminated(session_terminated_);
+  std::cerr << "[State::GetOutput] Looking for output: '" << name << "'" << std::endl;
+  std::cerr << "[State::GetOutput] Total outputs: " << output_names_.size() << std::endl;
   for (size_t i = 0; i < output_names_.size(); i++) {
+    std::cerr << "[State::GetOutput]   output_names_[" << i << "] = '" << output_names_[i] << "', outputs_[" << i << "] = " << outputs_[i] << std::endl;
     if (std::strcmp(output_names_[i], name) == 0) {
+      std::cerr << "[State::GetOutput] Found match at index " << i << ", returning pointer " << outputs_[i] << std::endl;
       return outputs_[i];
     }
   }
+  std::cerr << "[State::GetOutput] No match found, returning nullptr" << std::endl;
   return nullptr;
 }
 
