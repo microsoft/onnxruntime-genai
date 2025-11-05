@@ -146,8 +146,6 @@ struct PyGenerator {
   }
   
   nb::ndarray<nb::numpy, float> GetOutput(const std::string& name) {
-    std::cerr << "GetOutput called for name: '" << name << "'" << std::endl;
-    
     // Check that generator and state are valid
     if (!generator) {
       throw std::runtime_error("Generator is null");
@@ -157,49 +155,26 @@ struct PyGenerator {
       throw std::runtime_error("Generator state is null");
     }
     
-    std::cerr << "Generator and state are valid" << std::endl;
-    
     // For all outputs, get from state (including logits)
     // Note: In Generators namespace, OrtValue refers to the C++ wrapper (same memory layout as C API)
     OrtValue* ort_value = generator->state_->GetOutput(name.c_str());
-    
-    std::cerr << "State->GetOutput returned: " << ort_value << std::endl;
     
     // Check if the output exists
     if (!ort_value) {
       throw std::runtime_error("Output '" + name + "' not found. Available outputs might be empty or the name is incorrect.");
     }
     
-    std::cerr << "Got OrtValue pointer: " << ort_value << std::endl;
-    std::cerr << "Pointer type: Ort::OrtValue* (C++ wrapper in Generators namespace)" << std::endl;
-    
-    // Try using C API directly instead of C++ wrapper
-    ::OrtValue* c_api_value_test = reinterpret_cast<::OrtValue*>(ort_value);
-    std::cerr << "C API pointer: " << c_api_value_test << std::endl;
+    // Cast to C API type (they are binary compatible - same struct, different namespace)
+    ::OrtValue* c_api_value = reinterpret_cast<::OrtValue*>(ort_value);
     
     // Use C API to check if it's a tensor
     int is_tensor = 0;
-    std::cerr << "About to call Ort::api->IsTensor" << std::endl;
-    std::cerr << "Ort::api = " << Ort::api << std::endl;
-    std::cerr << "Ort::api->IsTensor = " << (void*)Ort::api->IsTensor << std::endl;
-    
-    OrtStatus* status = Ort::api->IsTensor(c_api_value_test, &is_tensor);
-    std::cerr << "Ort::api->IsTensor returned status = " << status << std::endl;
-    
+    OrtStatus* status = Ort::api->IsTensor(c_api_value, &is_tensor);
     Ort::ThrowOnError(status);
-    std::cerr << "IsTensor via C API: " << is_tensor << std::endl;
     
     if (!is_tensor) {
       throw std::runtime_error("Output '" + name + "' is not a tensor");
     }
-    
-    std::cerr << "IsTensor check passed" << std::endl;
-    std::cerr << "About to reinterpret_cast to ::OrtValue*" << std::endl;
-    
-    // Cast to C API type (they are binary compatible - same struct, different namespace)
-    ::OrtValue* c_api_value = reinterpret_cast<::OrtValue*>(ort_value);
-    
-    std::cerr << "After cast, c_api_value: " << c_api_value << std::endl;
     
     // Use C API to get tensor information - ::OrtTensorTypeAndShapeInfo is a C API opaque pointer
     ::OrtTensorTypeAndShapeInfo* type_info_raw;

@@ -110,48 +110,119 @@ nb::ndarray<> ConvertTensorToNumpy(const std::shared_ptr<Tensor>& tensor) {
   ONNXTensorElementDataType element_type;
   Ort::ThrowOnError(Ort::api->GetTensorElementType(type_info.get(), &element_type));
   
-  std::cerr << "ConvertTensorToNumpy: element_type = " << element_type << std::endl;
-  
   // Get data pointer
   void* data_raw;
   Ort::ThrowOnError(Ort::api->GetTensorMutableData(c_api_value, &data_raw));
   
   // Clone data to CPU memory that Python owns and return as ndarray<>
-  if (element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    const float* data = static_cast<const float*>(data_raw);
-    float* buffer = new float[element_count];
-    std::memcpy(buffer, data, element_count * sizeof(float));
-    
-    nb::capsule owner(buffer, [](void* p) noexcept {
-      delete[] static_cast<float*>(p);
-    });
-    
-    nb::ndarray<nb::numpy, float> typed_array(buffer, shape.size(), shape.data(), owner);
-    return nb::ndarray<>(typed_array);  // Convert to untyped
-  } else if (element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
-    const int32_t* data = static_cast<const int32_t*>(data_raw);
-    int32_t* buffer = new int32_t[element_count];
-    std::memcpy(buffer, data, element_count * sizeof(int32_t));
-    
-    nb::capsule owner(buffer, [](void* p) noexcept {
-      delete[] static_cast<int32_t*>(p);
-    });
-    
-    nb::ndarray<nb::numpy, int32_t> typed_array(buffer, shape.size(), shape.data(), owner);
-    return nb::ndarray<>(typed_array);  // Convert to untyped
-  } else if (element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
-    const int64_t* data = static_cast<const int64_t*>(data_raw);
-    int64_t* buffer = new int64_t[element_count];
-    std::memcpy(buffer, data, element_count * sizeof(int64_t));
-    
-    nb::capsule owner(buffer, [](void* p) noexcept {
-      delete[] static_cast<int64_t*>(p);
-    });
-    
-    nb::ndarray<nb::numpy, int64_t> typed_array(buffer, shape.size(), shape.data(), owner);
-    return nb::ndarray<>(typed_array);  // Convert to untyped
-  } else {
-    throw std::runtime_error("Unsupported tensor element type");
+  // Support all types that pybind11 version supported
+  switch (element_type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL: {
+      const bool* data = static_cast<const bool*>(data_raw);
+      bool* buffer = new bool[element_count];
+      std::memcpy(buffer, data, element_count * sizeof(bool));
+      nb::capsule owner(buffer, [](void* p) noexcept { delete[] static_cast<bool*>(p); });
+      nb::ndarray<nb::numpy, bool> typed_array(buffer, shape.size(), shape.data(), owner);
+      return nb::ndarray<>(typed_array);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8: {
+      const int8_t* data = static_cast<const int8_t*>(data_raw);
+      int8_t* buffer = new int8_t[element_count];
+      std::memcpy(buffer, data, element_count * sizeof(int8_t));
+      nb::capsule owner(buffer, [](void* p) noexcept { delete[] static_cast<int8_t*>(p); });
+      nb::ndarray<nb::numpy, int8_t> typed_array(buffer, shape.size(), shape.data(), owner);
+      return nb::ndarray<>(typed_array);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: {
+      const uint8_t* data = static_cast<const uint8_t*>(data_raw);
+      uint8_t* buffer = new uint8_t[element_count];
+      std::memcpy(buffer, data, element_count * sizeof(uint8_t));
+      nb::capsule owner(buffer, [](void* p) noexcept { delete[] static_cast<uint8_t*>(p); });
+      nb::ndarray<nb::numpy, uint8_t> typed_array(buffer, shape.size(), shape.data(), owner);
+      return nb::ndarray<>(typed_array);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16: {
+      const int16_t* data = static_cast<const int16_t*>(data_raw);
+      int16_t* buffer = new int16_t[element_count];
+      std::memcpy(buffer, data, element_count * sizeof(int16_t));
+      nb::capsule owner(buffer, [](void* p) noexcept { delete[] static_cast<int16_t*>(p); });
+      nb::ndarray<nb::numpy, int16_t> typed_array(buffer, shape.size(), shape.data(), owner);
+      return nb::ndarray<>(typed_array);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16: {
+      const uint16_t* data = static_cast<const uint16_t*>(data_raw);
+      uint16_t* buffer = new uint16_t[element_count];
+      std::memcpy(buffer, data, element_count * sizeof(uint16_t));
+      nb::capsule owner(buffer, [](void* p) noexcept { delete[] static_cast<uint16_t*>(p); });
+      nb::ndarray<nb::numpy, uint16_t> typed_array(buffer, shape.size(), shape.data(), owner);
+      return nb::ndarray<>(typed_array);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32: {
+      const int32_t* data = static_cast<const int32_t*>(data_raw);
+      int32_t* buffer = new int32_t[element_count];
+      std::memcpy(buffer, data, element_count * sizeof(int32_t));
+      nb::capsule owner(buffer, [](void* p) noexcept { delete[] static_cast<int32_t*>(p); });
+      nb::ndarray<nb::numpy, int32_t> typed_array(buffer, shape.size(), shape.data(), owner);
+      return nb::ndarray<>(typed_array);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32: {
+      const uint32_t* data = static_cast<const uint32_t*>(data_raw);
+      uint32_t* buffer = new uint32_t[element_count];
+      std::memcpy(buffer, data, element_count * sizeof(uint32_t));
+      nb::capsule owner(buffer, [](void* p) noexcept { delete[] static_cast<uint32_t*>(p); });
+      nb::ndarray<nb::numpy, uint32_t> typed_array(buffer, shape.size(), shape.data(), owner);
+      return nb::ndarray<>(typed_array);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64: {
+      const int64_t* data = static_cast<const int64_t*>(data_raw);
+      int64_t* buffer = new int64_t[element_count];
+      std::memcpy(buffer, data, element_count * sizeof(int64_t));
+      nb::capsule owner(buffer, [](void* p) noexcept { delete[] static_cast<int64_t*>(p); });
+      nb::ndarray<nb::numpy, int64_t> typed_array(buffer, shape.size(), shape.data(), owner);
+      return nb::ndarray<>(typed_array);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64: {
+      const uint64_t* data = static_cast<const uint64_t*>(data_raw);
+      uint64_t* buffer = new uint64_t[element_count];
+      std::memcpy(buffer, data, element_count * sizeof(uint64_t));
+      nb::capsule owner(buffer, [](void* p) noexcept { delete[] static_cast<uint64_t*>(p); });
+      nb::ndarray<nb::numpy, uint64_t> typed_array(buffer, shape.size(), shape.data(), owner);
+      return nb::ndarray<>(typed_array);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16: {
+      // For fp16, treat as uint16 buffer but with numpy float16 dtype
+      const uint16_t* data = reinterpret_cast<const uint16_t*>(data_raw);
+      uint16_t* buffer = new uint16_t[element_count];
+      std::memcpy(buffer, data, element_count * sizeof(uint16_t));
+      nb::capsule owner(buffer, [](void* p) noexcept { delete[] static_cast<uint16_t*>(p); });
+      
+      // Create dtype for float16 (NumPy type code 23)
+      nb::dlpack::dtype fp16_dtype;
+      fp16_dtype.code = (uint8_t)nb::dlpack::dtype_code::Float;
+      fp16_dtype.bits = 16;
+      fp16_dtype.lanes = 1;
+      
+      nb::ndarray<nb::numpy> typed_array(buffer, shape.size(), shape.data(), owner, nullptr, fp16_dtype);
+      return nb::ndarray<>(typed_array);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: {
+      const float* data = static_cast<const float*>(data_raw);
+      float* buffer = new float[element_count];
+      std::memcpy(buffer, data, element_count * sizeof(float));
+      nb::capsule owner(buffer, [](void* p) noexcept { delete[] static_cast<float*>(p); });
+      nb::ndarray<nb::numpy, float> typed_array(buffer, shape.size(), shape.data(), owner);
+      return nb::ndarray<>(typed_array);
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE: {
+      const double* data = static_cast<const double*>(data_raw);
+      double* buffer = new double[element_count];
+      std::memcpy(buffer, data, element_count * sizeof(double));
+      nb::capsule owner(buffer, [](void* p) noexcept { delete[] static_cast<double*>(p); });
+      nb::ndarray<nb::numpy, double> typed_array(buffer, shape.size(), shape.data(), owner);
+      return nb::ndarray<>(typed_array);
+    }
+    default:
+      throw std::runtime_error("Unsupported tensor element type: " + std::to_string(element_type));
   }
 }
 
