@@ -1,13 +1,9 @@
 include(${REPO_ROOT}/cmake/cxx_standard.cmake)
 
-# Find Python and nanobind
+# Find Python
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
-execute_process(
-  COMMAND "${Python_EXECUTABLE}" -c "import nanobind; print(nanobind.cmake_dir())"
-  OUTPUT_VARIABLE nanobind_ROOT
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-find_package(nanobind CONFIG REQUIRED PATHS "${nanobind_ROOT}")
+
+# nanobind is fetched via FetchContent in cmake/external/onnxruntime_external_deps.cmake
 
 # Source files for the Python module
 set(python_srcs
