@@ -80,7 +80,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }}
+          cmake --preset windows_x64_cuda_release -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DPython_EXECUTABLE=python
 
       - name: Build with CMake
         run: |

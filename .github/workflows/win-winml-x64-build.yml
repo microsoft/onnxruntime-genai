@@ -62,7 +62,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_winml_relwithdebinfo -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DWINML_SDK_VERSION='1.8.2091'
+          cmake --preset windows_x64_winml_relwithdebinfo -T cuda=${{ env.cuda_dir }}\\v${{ env.cuda_version }} -DWINML_SDK_VERSION='1.8.2091' -DPython_EXECUTABLE=python
 
       - name: Build with CMake
         run: |

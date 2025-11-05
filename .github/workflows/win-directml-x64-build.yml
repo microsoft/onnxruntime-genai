@@ -100,7 +100,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_directml_release -DTEST_PHI2=True
+          cmake --preset windows_x64_directml_release -DTEST_PHI2=True -DPython_EXECUTABLE=python
 
       - name: Build with CMake
         run: |
