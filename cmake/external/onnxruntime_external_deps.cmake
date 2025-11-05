@@ -2,6 +2,11 @@ message("Loading Dependencies URLs ...")
 include(FetchContent)
 include(cmake/external/helper_functions.cmake)
 
+# Find Python
+if(ENABLE_PYTHON)
+  find_package(Python COMPONENTS Interpreter Development REQUIRED)
+endif()
+
 file(STRINGS cmake/deps.txt ONNXRUNTIME_DEPS_LIST)
 foreach(ONNXRUNTIME_DEP IN LISTS ONNXRUNTIME_DEPS_LIST)
   # Lines start with "#" are comments

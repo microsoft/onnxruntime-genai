@@ -1,7 +1,5 @@
 include(${REPO_ROOT}/cmake/cxx_standard.cmake)
 
-# Find Python
-find_package(Python COMPONENTS Interpreter Development REQUIRED)
 
 # nanobind is fetched via FetchContent in cmake/external/onnxruntime_external_deps.cmake
 
