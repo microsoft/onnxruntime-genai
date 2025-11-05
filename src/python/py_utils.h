@@ -34,5 +34,6 @@ void BindModel(nb::module_& m);
 void BindGenerator(nb::module_& m);
 void BindMultiModal(nb::module_& m);
 void BindAdapters(nb::module_& m);
+void BindEngine(nb::module_& m);
 
 } // namespace Generators

@@ -25,45 +25,46 @@ void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_vie
 
 void BindConfig(nb::module_& m) {
   nb::class_<Config>(m, "Config")
-    .def("__init__", [](Config* config, const std::string& config_path) {
-      new (config) Config(fs::path(config_path), std::string_view{});
+    .def("__init__", [](Config* config, std::string_view config_path) {
+      std::string path_str(config_path);
+      new (config) Config(fs::path(path_str), std::string_view{});
     })
     .def("clear_providers", [](Config& config) {
       ClearProviders(config);
     })
-    .def("append_provider", [](Config& config, const std::string& provider) {
+    .def("append_provider", [](Config& config, std::string_view provider) {
       // AppendProvider just adds the provider without options
       SetProviderOption(config, provider, {}, {});
     })
-    .def("set_provider_option", [](Config& config, const std::string& provider, 
-                                    const std::string& key, const std::string& value) {
+    .def("set_provider_option", [](Config& config, std::string_view provider, 
+                                    std::string_view key, std::string_view value) {
       SetProviderOption(config, provider, key, value);
     })
     .def("set_decoder_provider_options_hardware_device_type", 
-         [](Config& config, const std::string& provider, const std::string& device_type) {
+         [](Config& config, std::string_view provider, std::string_view device_type) {
       SetDecoderProviderOptionsHardwareDeviceType(config, provider, device_type);
     })
     .def("set_decoder_provider_options_hardware_device_id",
-         [](Config& config, const std::string& provider, uint32_t device_id) {
+         [](Config& config, std::string_view provider, uint32_t device_id) {
       SetDecoderProviderOptionsHardwareDeviceId(config, provider, device_id);
     })
     .def("set_decoder_provider_options_hardware_vendor_id",
-         [](Config& config, const std::string& provider, uint32_t vendor_id) {
+         [](Config& config, std::string_view provider, uint32_t vendor_id) {
       SetDecoderProviderOptionsHardwareVendorId(config, provider, vendor_id);
     })
     .def("clear_decoder_provider_options_hardware_device_type",
-         [](Config& config, const std::string& provider) {
+         [](Config& config, std::string_view provider) {
       ClearDecoderProviderOptionsHardwareDeviceType(config, provider);
     })
     .def("clear_decoder_provider_options_hardware_device_id",
-         [](Config& config, const std::string& provider) {
+         [](Config& config, std::string_view provider) {
       ClearDecoderProviderOptionsHardwareDeviceId(config, provider);
     })
     .def("clear_decoder_provider_options_hardware_vendor_id",
-         [](Config& config, const std::string& provider) {
+         [](Config& config, std::string_view provider) {
       ClearDecoderProviderOptionsHardwareVendorId(config, provider);
     })
-    .def("add_model_data", [](Config& config, const std::string& model_filename, nb::object model_data_obj) {
+    .def("add_model_data", [](Config& config, std::string_view model_filename, nb::object model_data_obj) {
       // Support bytes, bytearray, memoryview - anything with buffer protocol
       if (PyObject_CheckBuffer(model_data_obj.ptr())) {
         Py_buffer view;
@@ -82,12 +83,12 @@ void BindConfig(nb::module_& m) {
         }
         
         const auto emplaced = config.model_data_spans_.emplace(
-          model_filename, 
+          std::string(model_filename), 
           std::span<const std::byte>(byte_ptr, data_size)
         );
         
         if (!emplaced.second) {
-          throw std::runtime_error("Model data for '" + model_filename +
+          throw std::runtime_error(std::string("Model data for '") + std::string(model_filename) +
                                    "' was already added previously. "
                                    "If you want to replace it, please remove it first.");
         }
@@ -95,10 +96,10 @@ void BindConfig(nb::module_& m) {
         throw std::runtime_error("model_data must be a bytes-like object (bytes, bytearray, or memoryview)");
       }
     })
-    .def("remove_model_data", [](Config& config, const std::string& model_filename) {
-      auto it = config.model_data_spans_.find(model_filename);
+    .def("remove_model_data", [](Config& config, std::string_view model_filename) {
+      auto it = config.model_data_spans_.find(std::string(model_filename));
       if (it == config.model_data_spans_.end()) {
-        throw std::runtime_error("Model data for '" + model_filename + "' was not found.");
+        throw std::runtime_error(std::string("Model data for '") + std::string(model_filename) + "' was not found.");
       }
       config.model_data_spans_.erase(it);
     });

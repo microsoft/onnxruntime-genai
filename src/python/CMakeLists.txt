@@ -17,6 +17,7 @@ set(python_srcs
   py_named_tensors.cpp
   py_adapters.cpp
   py_multimodal.cpp
+  py_engine.cpp
 )
 
 # Create the Python module using nanobind

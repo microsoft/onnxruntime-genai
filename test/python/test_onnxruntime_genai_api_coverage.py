@@ -62,15 +62,15 @@ def test_config_decoder_provider_options(test_data_path):
     
     config = og.Config(model_path)
     
-    # Test setting hardware device options - API requires provider name + value
-    config.set_decoder_provider_options_hardware_device_type("CPUExecutionProvider", "GPU")
-    config.set_decoder_provider_options_hardware_device_id("CPUExecutionProvider", 0)
-    config.set_decoder_provider_options_hardware_vendor_id("CPUExecutionProvider", 0x1002)
+    # Test setting hardware device options
+    config.set_decoder_provider_options_hardware_device_type("GPU")
+    config.set_decoder_provider_options_hardware_device_id(0)
+    config.set_decoder_provider_options_hardware_vendor_id(0x1002)  # Example vendor ID
     
-    # Test clearing options - also requires provider name
-    config.clear_decoder_provider_options_hardware_device_type("CPUExecutionProvider")
-    config.clear_decoder_provider_options_hardware_device_id("CPUExecutionProvider")
-    config.clear_decoder_provider_options_hardware_vendor_id("CPUExecutionProvider")
+    # Test clearing hardware device options
+    config.clear_decoder_provider_options_hardware_device_type()
+    config.clear_decoder_provider_options_hardware_device_id()
+    config.clear_decoder_provider_options_hardware_vendor_id()
     
     # Should not raise any exception
     model = og.Model(config)
@@ -99,12 +99,9 @@ def test_model_type_property(test_data_path):
 # Tokenizer API Tests
 # ============================================================================
 
-def test_tokenizer_update_options(test_data_path):
+def test_tokenizer_update_options(device, phi2_for):
     """Test Tokenizer.update_options method"""
-    # Use the tiny-random-gpt2 model instead of phi2
-    model_path = os.fspath(
-        Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32"
-    )
+    model_path = phi2_for(device)
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
     
@@ -118,12 +115,9 @@ def test_tokenizer_update_options(test_data_path):
     assert len(tokens) > 0
 
 
-def test_tokenizer_to_token_id(test_data_path):
+def test_tokenizer_to_token_id(device, phi2_for):
     """Test Tokenizer.to_token_id method"""
-    # Use the tiny-random-gpt2 model instead of phi2
-    model_path = os.fspath(
-        Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32"
-    )
+    model_path = phi2_for(device)
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
     
@@ -137,7 +131,6 @@ def test_tokenizer_to_token_id(test_data_path):
 # GeneratorParams API Tests
 # ============================================================================
 
-@pytest.mark.skip(reason="set_guidance causes segfault - needs investigation")
 def test_generator_params_set_guidance(test_data_path):
     """Test GeneratorParams.set_guidance method"""
     model_path = os.fspath(
@@ -341,7 +334,6 @@ def test_audios_open_bytes(test_data_path, relative_audio_path):
 # Adapters API Tests
 # ============================================================================
 
-@pytest.mark.parametrize("device", ["cpu"])
 def test_adapters_unload(test_data_path, device, phi2_for):
     """Test Adapters.unload method"""
     # Skip if no adapter model available

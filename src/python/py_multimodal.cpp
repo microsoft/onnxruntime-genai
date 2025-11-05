@@ -22,10 +22,11 @@ struct PyMultiModalProcessor {
   PyMultiModalProcessor(std::shared_ptr<MultiModalProcessor> proc)
     : processor(std::move(proc)) {}
   
-  std::unique_ptr<PyNamedTensors> Process(const std::string& prompt,
+  std::unique_ptr<PyNamedTensors> Process(std::string_view prompt,
                                           const Images* images,
                                           const Audios* audios) const {
-    auto cpp_result = processor->Process(prompt, images, audios);
+    std::string prompt_str(prompt);
+    auto cpp_result = processor->Process(prompt_str, images, audios);
     return ConvertNamedTensors(std::move(cpp_result));
   }
   

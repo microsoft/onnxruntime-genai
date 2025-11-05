@@ -35,33 +35,33 @@ nb::ndarray<> PyTensor::AsNumpy() const {
 }
 
 // PyNamedTensors implementation
-void PyNamedTensors::Set(const std::string& name, nb::object value) {
+void PyNamedTensors::Set(std::string_view name, nb::object value) {
   // If it's a plain numpy array, wrap it in a Tensor
   if (nb::isinstance<nb::ndarray<>>(value)) {
     auto arr = nb::cast<nb::ndarray<>>(value);
-    tensors[name] = std::make_shared<PyTensor>(arr);
+    tensors[std::string(name)] = std::make_shared<PyTensor>(arr);
   } else if (nb::isinstance<PyTensor>(value)) {
     // It's already a PyTensor
-    tensors[name] = std::make_shared<PyTensor>(nb::cast<PyTensor&>(value));
+    tensors[std::string(name)] = std::make_shared<PyTensor>(nb::cast<PyTensor&>(value));
   } else {
     throw std::runtime_error("NamedTensors only accepts numpy arrays or og.Tensor objects");
   }
 }
 
-std::shared_ptr<PyTensor> PyNamedTensors::Get(const std::string& name) {
-  auto it = tensors.find(name);
+std::shared_ptr<PyTensor> PyNamedTensors::Get(std::string_view name) {
+  auto it = tensors.find(std::string(name));
   if (it == tensors.end()) {
-    throw std::runtime_error("Tensor not found: " + name);
+    throw std::runtime_error(std::string("Tensor not found: ") + std::string(name));
   }
   return it->second;
 }
 
-void PyNamedTensors::Delete(const std::string& name) {
-  tensors.erase(name);
+void PyNamedTensors::Delete(std::string_view name) {
+  tensors.erase(std::string(name));
 }
 
-bool PyNamedTensors::Contains(const std::string& name) const {
-  return tensors.find(name) != tensors.end();
+bool PyNamedTensors::Contains(std::string_view name) const {
+  return tensors.find(std::string(name)) != tensors.end();
 }
 
 std::vector<std::string> PyNamedTensors::Keys() const {

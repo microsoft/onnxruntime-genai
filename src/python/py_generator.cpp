@@ -138,14 +138,15 @@ struct PyGenerator {
     generator->RewindToLength(new_length);
   }
   
-  void SetActiveAdapter(PyAdapters& adapters, const std::string& adapter_name) {
+  void SetActiveAdapter(PyAdapters& adapters, std::string_view adapter_name) {
     if (!generator || !generator->state_) {
       throw std::runtime_error("Generator or generator state is null");
     }
-    generator->state_->SetActiveAdapter(adapters.GetAdapters().get(), adapter_name);
+    std::string name_str(adapter_name);
+    generator->state_->SetActiveAdapter(adapters.GetAdapters().get(), name_str);
   }
   
-  nb::ndarray<nb::numpy, float> GetOutput(const std::string& name) {
+  nb::ndarray<nb::numpy, float> GetOutput(std::string_view name) {
     // Check that generator and state are valid
     if (!generator) {
       throw std::runtime_error("Generator is null");
@@ -157,11 +158,12 @@ struct PyGenerator {
     
     // For all outputs, get from state (including logits)
     // Note: In Generators namespace, OrtValue refers to the C++ wrapper (same memory layout as C API)
-    OrtValue* ort_value = generator->state_->GetOutput(name.c_str());
+    std::string name_str(name);
+    OrtValue* ort_value = generator->state_->GetOutput(name_str.c_str());
     
     // Check if the output exists
     if (!ort_value) {
-      throw std::runtime_error("Output '" + name + "' not found. Available outputs might be empty or the name is incorrect.");
+      throw std::runtime_error(std::string("Output '") + name_str + "' not found. Available outputs might be empty or the name is incorrect.");
     }
     
     // Cast to C API type (they are binary compatible - same struct, different namespace)
@@ -173,7 +175,7 @@ struct PyGenerator {
     Ort::ThrowOnError(status);
     
     if (!is_tensor) {
-      throw std::runtime_error("Output '" + name + "' is not a tensor");
+      throw std::runtime_error(std::string("Output '") + name_str + "' is not a tensor");
     }
     
     // Use C API to get tensor information - ::OrtTensorTypeAndShapeInfo is a C API opaque pointer
@@ -215,7 +217,7 @@ struct PyGenerator {
       const float* data = static_cast<const float*>(data_raw);
       
       if (!data) {
-        throw std::runtime_error("Failed to get tensor data for output '" + name + "'");
+        throw std::runtime_error(std::string("Failed to get tensor data for output '") + name_str + "'");
       }
       
       float* buffer = new float[element_count];
@@ -247,7 +249,7 @@ struct PyGenerator {
       const uint16_t* data = static_cast<const uint16_t*>(data_raw);
       
       if (!data) {
-        throw std::runtime_error("Failed to get tensor data for output '" + name + "'");
+        throw std::runtime_error(std::string("Failed to get tensor data for output '") + name_str + "'");
       }
       
       // Allocate host buffer for fp16 data
@@ -305,7 +307,7 @@ struct PyGenerator {
       return nb::ndarray<nb::numpy, float>(buffer, shape.size(), shape.data(), owner, nullptr, nb::dtype<float>());
     }
     
-    throw std::runtime_error("Unsupported tensor element type for output '" + name + "'. Only float32 and float16 are currently supported.");
+    throw std::runtime_error(std::string("Unsupported tensor element type for output '") + name_str + "'. Only float32 and float16 are currently supported.");
   }
 };
 

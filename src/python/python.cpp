@@ -21,6 +21,7 @@ NB_MODULE(onnxruntime_genai, m) {
   Generators::BindNamedTensors(m);
   Generators::BindMultiModal(m);
   Generators::BindAdapters(m);
+  Generators::BindEngine(m);
 
   // Device availability checks
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
@@ -40,9 +41,7 @@ NB_MODULE(onnxruntime_genai, m) {
   
   // Logging functions
   m.def("set_log_options", [](const nb::kwargs& kwargs) {
-    for (auto item : kwargs) {
-      auto key = item.first;
-      auto value = item.second;
+    for (const auto& [key, value] : kwargs) {
       auto name = nb::cast<std::string>(key);
       
       // Check if it's a bool

@@ -50,8 +50,9 @@ struct PyTokenizer {
     return std::make_unique<PyTokenizerStream>(*tokenizer);
   }
   
-  std::vector<int32_t> Encode(const std::string& text) const {
-    return tokenizer->Encode(text.c_str());
+  std::vector<int32_t> Encode(std::string_view text) const {
+    std::string text_str(text);
+    return tokenizer->Encode(text_str.c_str());
   }
   
   std::string Decode(const std::vector<int32_t>& tokens) const {
@@ -121,12 +122,18 @@ struct PyTokenizer {
     return tokenizer->DecodeBatch(std::span<const int32_t>(data, batch_size * seq_len), batch_size);
   }
   
-  std::string ApplyChatTemplate(const std::string& messages, bool add_generation_prompt = true, 
-                                 const std::string* template_str = nullptr) const {
+  std::string ApplyChatTemplate(std::string_view messages, bool add_generation_prompt = true, 
+                                 std::optional<std::string_view> template_str = std::nullopt) const {
     // phi3-qa.py uses: tokenizer.apply_chat_template(json.dumps(input_message), add_generation_prompt=True)
     // The messages is already a JSON string
-    const char* template_c_str = template_str ? template_str->c_str() : nullptr;
-    return tokenizer->ApplyChatTemplate(template_c_str, messages.c_str(), nullptr, add_generation_prompt);
+    std::string messages_str(messages);
+    std::string template_storage;
+    const char* template_c_str = nullptr;
+    if (template_str) {
+      template_storage = std::string(*template_str);
+      template_c_str = template_storage.c_str();
+    }
+    return tokenizer->ApplyChatTemplate(template_c_str, messages_str.c_str(), nullptr, add_generation_prompt);
   }
   
   int32_t GetBosTokenId() const {
@@ -157,13 +164,13 @@ void BindTokenizer(nb::module_& m) {
     .def("encode_batch", &PyTokenizer::EncodeBatchAsNumpy, "texts"_a)
     .def("decode_batch", &PyTokenizer::DecodeBatch, "array"_a)
     .def("apply_chat_template", 
-         [](const PyTokenizer& self, const std::string& messages, bool add_generation_prompt, 
+         [](const PyTokenizer& self, std::string_view messages, bool add_generation_prompt, 
             nb::object template_str) {
            if (template_str.is_none()) {
-             return self.ApplyChatTemplate(messages, add_generation_prompt, nullptr);
+             return self.ApplyChatTemplate(messages, add_generation_prompt, std::nullopt);
            } else {
              std::string template_string = nb::cast<std::string>(template_str);
-             return self.ApplyChatTemplate(messages, add_generation_prompt, &template_string);
+             return self.ApplyChatTemplate(messages, add_generation_prompt, std::string_view(template_string));
            }
          }, 
          "messages"_a, "add_generation_prompt"_a = true, "template_str"_a = nb::none())

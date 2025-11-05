@@ -29,10 +29,10 @@ struct PyTensor {
 struct PyNamedTensors {
   std::unordered_map<std::string, std::shared_ptr<PyTensor>> tensors;
   
-  void Set(const std::string& name, nb::object value);
-  std::shared_ptr<PyTensor> Get(const std::string& name);
-  void Delete(const std::string& name);
-  bool Contains(const std::string& name) const;
+  void Set(std::string_view name, nb::object value);
+  std::shared_ptr<PyTensor> Get(std::string_view name);
+  void Delete(std::string_view name);
+  bool Contains(std::string_view name) const;
   std::vector<std::string> Keys() const;
   size_t Size() const;
 };

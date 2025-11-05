@@ -26,12 +26,15 @@ struct PyAdapters {
     adapters = std::make_shared<Adapters>(model.GetModel().get());
   }
   
-  void LoadAdapter(const std::string& adapter_file_path, const std::string& adapter_name) {
-    adapters->LoadAdapter(adapter_file_path.c_str(), adapter_name);
+  void LoadAdapter(std::string_view adapter_file_path, std::string_view adapter_name) {
+    std::string path_str(adapter_file_path);
+    std::string name_str(adapter_name);
+    adapters->LoadAdapter(path_str.c_str(), name_str);
   }
   
-  void UnloadAdapter(const std::string& adapter_name) {
-    adapters->UnloadAdapter(adapter_name);
+  void UnloadAdapter(std::string_view adapter_name) {
+    std::string name_str(adapter_name);
+    adapters->UnloadAdapter(name_str);
   }
   
   std::shared_ptr<Adapters> GetAdapters() { return adapters; }

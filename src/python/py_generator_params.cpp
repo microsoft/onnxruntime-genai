@@ -30,23 +30,23 @@ struct PyGeneratorParams {
   }
   
   void SetSearchOptions(const nb::kwargs& kwargs) {
-    for (auto item : kwargs) {
-      std::string name = nb::cast<std::string>(item.first);
+    for (const auto& [key, value] : kwargs) {
+      std::string name = nb::cast<std::string>(key);
       
       // Check if it's a bool
-      if (nb::isinstance<nb::bool_>(item.second)) {
-        bool value = nb::cast<bool>(item.second);
-        SetSearchBool(params->search, name, value);
+      if (nb::isinstance<nb::bool_>(value)) {
+        bool val = nb::cast<bool>(value);
+        SetSearchBool(params->search, name, val);
       }
       // Check if it's a float
-      else if (nb::isinstance<nb::float_>(item.second)) {
-        double value = nb::cast<double>(item.second);
-        SetSearchNumber(params->search, name, value);
+      else if (nb::isinstance<nb::float_>(value)) {
+        double val = nb::cast<double>(value);
+        SetSearchNumber(params->search, name, val);
       }
       // Check if it's an int
-      else if (nb::isinstance<nb::int_>(item.second)) {
-        double value = static_cast<double>(nb::cast<int>(item.second));
-        SetSearchNumber(params->search, name, value);
+      else if (nb::isinstance<nb::int_>(value)) {
+        double val = static_cast<double>(nb::cast<int>(value));
+        SetSearchNumber(params->search, name, val);
       }
       else {
         throw std::runtime_error("Unsupported search option type for: " + name);
