@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "py_utils.h"
+#include "py_wrappers.h"
 #include "py_numpy.h"  // For ToNumpy helper
 #include "../generators.h"
 #include "../search.h"  // Needed for Generator::search_
@@ -19,22 +20,6 @@
 namespace nb = nanobind;
 
 namespace Generators {
-
-// Forward declare wrapper classes - defined in their respective .cpp files
-struct PyModel {
-  std::shared_ptr<Model> model;
-  std::shared_ptr<Model> GetModel() { return model; }
-};
-
-struct PyGeneratorParams {
-  std::shared_ptr<GeneratorParams> params;
-  std::shared_ptr<GeneratorParams> GetParams() { return params; }
-};
-
-struct PyAdapters {
-  std::shared_ptr<Adapters> adapters;
-  std::shared_ptr<Adapters> GetAdapters() { return adapters; }
-};
 
 // Wrapper for Generator
 struct PyGenerator {

@@ -49,6 +49,19 @@ endif()
 # Set output name
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
+# Control symbol visibility - only export the Python module initialization function
+# This helps reduce binary size and prevents symbol conflicts
+if(APPLE)
+  # macOS uses exported symbols list
+  target_link_options(python PRIVATE "LINKER:-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/exported_symbols.lst")
+elseif(UNIX)
+  # Linux uses version script with --gc-sections to remove unused code
+  target_link_options(python PRIVATE "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/version_script.lds" "LINKER:--gc-sections")
+elseif(WIN32)
+  # Windows uses .def file
+  target_link_options(python PRIVATE "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/python.def")
+endif()
+
 # Visual Studio specific options
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
   target_link_options(python PRIVATE "/CETCOMPAT")

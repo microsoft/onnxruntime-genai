@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "py_utils.h"
+#include "py_wrappers.h"
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/shared_ptr.h>
@@ -14,15 +15,6 @@
 namespace nb = nanobind;
 
 namespace Generators {
-
-// Forward declarations
-struct PyGeneratorParams {
-  std::shared_ptr<GeneratorParams> GetParams();
-};
-
-struct PyModel {
-  std::shared_ptr<Model> GetModel();
-};
 
 // Python wrapper for Request
 struct PyRequest {

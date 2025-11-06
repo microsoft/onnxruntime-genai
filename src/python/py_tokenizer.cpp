@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "py_utils.h"
+#include "py_wrappers.h"
 #include "../generators.h"
 #include "../models/model.h"
 #include <nanobind/stl/string.h>
@@ -13,12 +14,6 @@
 namespace nb = nanobind;
 
 namespace Generators {
-
-// Forward declare PyModel - defined in py_model.cpp
-struct PyModel {
-  std::shared_ptr<Model> model;
-  std::shared_ptr<Model> GetModel() { return model; }
-};
 
 // Wrapper for TokenizerStream
 struct PyTokenizerStream {
