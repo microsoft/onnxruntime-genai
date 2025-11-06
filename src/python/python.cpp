@@ -4,6 +4,7 @@
 #include "py_utils.h"
 #include <nanobind/nanobind.h>
 #include "../models/onnxruntime_api.h"
+#include "../generators.h"
 
 namespace nb = nanobind;
 
@@ -77,10 +78,12 @@ NB_MODULE(onnxruntime_genai, m) {
   }, nb::arg("callback").none(), "Set a callback function for log messages. Pass None to clear.");
   
   // Register cleanup function to run before Python shutdown
-  // This ensures our objects are destroyed before LeakChecked counts are checked
+  // This ensures OrtGlobals is destroyed before C++ static destructors run
   auto cleanup = []() {
-    // Force Python GC to run before C++ static destructors
+    // Force Python GC to run first to release Python-held references
     PyGC_Collect();
+    // Explicitly call Shutdown to destroy OrtGlobals before static destructors
+    Generators::Shutdown();
   };
   
   // Use Python's atexit to register cleanup
