@@ -4,7 +4,7 @@ include(cmake/external/helper_functions.cmake)
 
 # Find Python
 if(ENABLE_PYTHON)
-  find_package(Python COMPONENTS Interpreter Development REQUIRED)
+  find_package(Python 3.10 COMPONENTS Interpreter Development.Module REQUIRED)
 endif()
 
 file(STRINGS cmake/deps.txt ONNXRUNTIME_DEPS_LIST)

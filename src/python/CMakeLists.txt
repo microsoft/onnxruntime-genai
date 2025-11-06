@@ -20,7 +20,6 @@ set(python_srcs
 
 # Create the Python module using nanobind
 nanobind_add_module(python ${python_srcs})
-
 # Include directories
 target_include_directories(python PRIVATE 
   ${ORT_HEADER_DIR}
@@ -28,7 +27,6 @@ target_include_directories(python PRIVATE
   ${onnxruntime_extensions_SOURCE_DIR}/include
   ${onnxruntime_extensions_SOURCE_DIR}/shared/api
   ${onnxruntime_extensions_SOURCE_DIR}/base
-  ${CMAKE_BINARY_DIR}/_deps/nlohmann_json-src/include
 )
 
 # Link directories
