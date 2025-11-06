@@ -265,9 +265,8 @@ void Test_GreedySearch_Phi3_NvTensorRtRtx(const char* model_path, const char* mo
 
   // Complete expected sequence (input + generated) from model_qa.cpp using the working phi3-fp16-nvtrt model
   const std::vector<int32_t> expected_output{
-    32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001,  // Input tokens (19)
-    15043, 29991, 306, 29915, 29885, 2599 
-  };
+      32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001,  // Input tokens (19)
+      15043, 29991, 306, 29915, 29885, 2599};
   auto config = OgaConfig::Create(model_path);
   config->ClearProviders();
   config->AppendProvider("NvTensorRtRtx");
@@ -290,7 +289,7 @@ void Test_GreedySearch_Phi3_NvTensorRtRtx(const char* model_path, const char* mo
   for (int i = 0; i < batch_size; i++) {
     auto sequence = generator->GetSequence(i);
     auto* expected_output_start = &expected_output[i * max_length];
-    
+
     EXPECT_TRUE(0 == std::memcmp(expected_output_start, sequence.data(), max_length * sizeof(int32_t)));
   }
 }
@@ -305,7 +304,7 @@ void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const cha
   if (!std::filesystem::exists(model_path)) {
     GTEST_SKIP() << "NvTensorRT model not available at: " << model_path;
   }
-  
+
   const std::vector<int64_t> input_ids_shape{1, 19};
   const std::vector<int32_t> input_ids{
       32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889,
@@ -314,8 +313,7 @@ void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const cha
   // Expected output sequence (input + generated tokens) for validation with greedy search
   const std::vector<int32_t> expected_output{
       32006, 887, 526, 263, 8444, 29871, 23869, 20255, 29889, 32007, 32010, 6324, 29892, 1128, 526, 366, 29973, 32007, 32001,  // Input tokens (19)
-      15043, 1554, 13, 16271, 29892, 8733
-  };
+      15043, 1554, 13, 16271, 29892, 8733};
 
   auto config = OgaConfig::Create(model_path);
   config->ClearProviders();
@@ -338,11 +336,11 @@ void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const cha
   }
 
   auto sequence = generator->GetSequence(0);
-  
+
   // Verify output matches expected output
   EXPECT_EQ(sequence.size(), expected_output.size());
   EXPECT_TRUE(0 == std::memcmp(expected_output.data(), sequence.data(),
-                                expected_output.size() * sizeof(int32_t)));
+                               expected_output.size() * sizeof(int32_t)));
 }
 
 TEST(ModelTests, OutOfPlaceKvCachePhi3NvTensorRtRtx) {
