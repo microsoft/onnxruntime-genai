@@ -137,7 +137,7 @@ if(BUILD_WHEEL)
 
   if(MANYLINUX)
     add_custom_target(PyPackageBuild
-      COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
+      COMMAND ${Python_INTERPRETER} -m pip wheel --no-deps .
       COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*
       COMMAND auditwheel repair onnxruntime_genai*linux_x86_64.whl -w ${WHEEL_FILES_DIR} ${modified_exclude_list}
       WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
@@ -146,7 +146,7 @@ if(BUILD_WHEEL)
     )
   else()
     add_custom_target(PyPackageBuild
-      COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
+      COMMAND ${Python_INTERPRETER} -m pip wheel --no-deps .
       WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
       COMMENT "Building wheel on ${WHEEL_FILES_DIR}"
       EXCLUDE_FROM_ALL
