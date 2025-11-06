@@ -78,26 +78,78 @@ if(BUILD_WHEEL)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/__init__.py.in ${WHEEL_TARGET_NAME}/__init__.py @ONLY)
 
+  # Copy over any additional python files
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/py/" DESTINATION ${WHEEL_TARGET_NAME}/)
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/package_description.md" DESTINATION ${WHEEL_FILES_DIR}/)
   file(COPY "${CMAKE_SOURCE_DIR}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_TARGET_NAME}/)
   file(COPY "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION ${WHEEL_TARGET_NAME}/)
 
   add_custom_command(TARGET python POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy ${ortgenai_embed_libs} $<TARGET_FILE:python> ${WHEEL_TARGET_NAME}
+    COMMAND ${CMAKE_COMMAND} -E copy
+    ${ortgenai_embed_libs} $<TARGET_FILE:python>
+    ${WHEEL_TARGET_NAME}
     COMMENT "Copying files to wheel directory: ${WHEEL_TARGET_NAME}"
   )
+  set(auditwheel_exclude_list
+    "libcublas.so.11"
+    "libcublas.so.12"
+    "libcublasLt.so.11"
+    "libcublasLt.so.12"
+    "libcudart.so.11.0"
+    "libcudart.so.12"
+    "libcudnn.so.8"
+    "libcudnn.so.9"
+    "libcufft.so.10"
+    "libcufft.so.11"
+    "libcurand.so.10"
+    "libnvinfer.so.8"
+    "libnvinfer.so.10"
+    "libnvinfer_plugin.so.8"
+    "libnvinfer_plugin.so.10"
+    "libnvonnxparser.so.8"
+    "libnvonnxparser.so.10"
 
+    "libamdhip64.so.5"
+    "libamdhip64.so.6"
+    "libhipblas.so.0"
+    "libhipblas.so.2"
+    "libhipfft.so"
+    "libhipfft.so.0"
+    "libhiprtc.so.5"
+    "libhsa-runtime64.so.1"
+    "librccl.so.1"
+    "librocblas.so.3"
+    "librocfft.so.0"
+    "libroctracer64.so.4"
+    "libMIOpen.so.1"
+  )
+  set(modified_exclude_list)
+  foreach(item IN LISTS auditwheel_exclude_list)
+    list(APPEND modified_exclude_list "--exclude" ${item})
+  endforeach()
+
+  # On Linux we need this so the python bindings can load our other shared libraries in the same folder
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_target_properties(python PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "$ORIGIN")
-  elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin")  # For macOS
     set_target_properties(python PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE INSTALL_RPATH "@loader_path")
   endif()
 
-  add_custom_target(PyPackageBuild
-    COMMAND ${Python_EXECUTABLE} -m pip wheel --no-deps .
-    WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
-    COMMENT "Building wheel on ${WHEEL_FILES_DIR}"
-    EXCLUDE_FROM_ALL
-  )
+  if(MANYLINUX)
+    add_custom_target(PyPackageBuild
+      COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
+      COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*
+      COMMAND auditwheel repair onnxruntime_genai*linux_x86_64.whl -w ${WHEEL_FILES_DIR} ${modified_exclude_list}
+      WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
+      COMMENT "Building wheel with MANYLINUX on ${WHEEL_FILES_DIR}"
+      EXCLUDE_FROM_ALL
+    )
+  else()
+    add_custom_target(PyPackageBuild
+      COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
+      WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
+      COMMENT "Building wheel on ${WHEEL_FILES_DIR}"
+      EXCLUDE_FROM_ALL
+    )
+  endif()
 endif()
