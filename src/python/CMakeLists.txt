@@ -37,8 +37,14 @@ target_link_directories(python PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(python PRIVATE 
   onnxruntime-genai-objects
   onnxruntime_extensions
-  ${ONNXRUNTIME_LIB}
 )
+
+# On Windows, we need to link against ONNXRUNTIME_LIB for proper symbol resolution
+# On Linux/macOS/Android, the ORT library is preloaded at runtime via _dll_directory.py
+# before the Python extension loads, so we don't need it at link time
+if(WIN32)
+  target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
+endif()
 
 # Link CUDA if enabled
 if(USE_CUDA)
