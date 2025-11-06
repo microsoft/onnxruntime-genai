@@ -36,7 +36,7 @@ def main(args):
             config.append_provider(args.execution_provider)
 
     # Disable CUDA graph if using beam search (num_beams > 1),
-    # num_beams > 1 requires past_present_share_buffer to be false and out of place kv cache is not supported with cuda graph true hance make is false
+    # num_beams > 1 requires past_present_share_buffer to be false so enable_cuda_graph must be false
     if args.num_beams > 1:
         config.set_provider_option(args.execution_provider, "enable_cuda_graph", "0")
         if args.verbose:
