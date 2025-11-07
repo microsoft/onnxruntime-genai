@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 
@@ -9,15 +10,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 {
     public static class SignalProcessor
     {
-        // Numeric ElementType values matching OgaElementType in the C API:
-        // enum OgaElementType { undefined=0, float32=1, ..., int64=7, ... }
         private const int ET_Float32 = 1;
         private const int ET_Int64 = 7;
 
-        /// <summary>
-        /// Thin wrapper around the native OgaSplitSignalSegments.
-        /// All arguments are OgaTensor handles (IntPtr).
-        /// </summary>
+        // Track pinned buffers for tensors created from managed arrays
+        private static readonly ConcurrentDictionary<IntPtr, GCHandle> _tensorPins = new();
+
+        #region Native wrappers
+
         public static void SplitSignalSegments(
             IntPtr inputTensor,
             IntPtr srTensor,
@@ -38,10 +38,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                 throw new InvalidOperationException($"OgaSplitSignalSegments failed with error code {err}");
         }
 
-        /// <summary>
-        /// Thin wrapper around the native OgaMergeSignalSegments.
-        /// All arguments are OgaTensor handles (IntPtr).
-        /// </summary>
         public static void MergeSignalSegments(
             IntPtr segmentsTensor,
             IntPtr mergeGapMsTensor,
@@ -56,74 +52,133 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                 throw new InvalidOperationException($"OgaMergeSignalSegments failed with error code {err}");
         }
 
+        #endregion
+
+        #region Tensor creation helpers (fixed)
 
         /// <summary>
-        /// Create a tensor view over a managed float[] using OgaCreateTensorFromBuffer.
+        /// Create a tensor view over a managed float[].
+        /// The underlying buffer is pinned for the lifetime of the tensor.
         /// </summary>
-        public static unsafe IntPtr CreateFloatTensorFromArray(float[] data, long[] shape)
+        public static IntPtr CreateFloatTensorFromArray(float[] data, long[] shape)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
             if (shape == null) throw new ArgumentNullException(nameof(shape));
 
+            var handle = GCHandle.Alloc(data, GCHandleType.Pinned);
+
             IntPtr tensor;
-            fixed (float* p = data)
+            var status = NativeMethods.OgaCreateTensorFromBuffer(
+                handle.AddrOfPinnedObject(),
+                shape,
+                (UIntPtr)shape.Length,
+                (ElementType)ET_Float32,
+                out tensor);
+
+            if (status.ToInt64() != 0)
             {
-                Result.VerifySuccess(
-                    NativeMethods.OgaCreateTensorFromBuffer(
-                        (IntPtr)p,
-                        shape,
-                        (UIntPtr)shape.Length,
-                        (ElementType)ET_Float32,
-                        out tensor));
+                handle.Free();
+                throw new InvalidOperationException($"OgaCreateTensorFromBuffer(float) failed with {status.ToInt64()}");
             }
+
+            if (!_tensorPins.TryAdd(tensor, handle))
+            {
+                handle.Free();
+                throw new InvalidOperationException("Failed to track pinned buffer for float tensor.");
+            }
+
             return tensor;
         }
 
         /// <summary>
-        /// Create a tensor view over a managed long[] using OgaCreateTensorFromBuffer.
+        /// Create a tensor view over a managed long[].
+        /// The underlying buffer is pinned for the lifetime of the tensor.
         /// </summary>
-        public static unsafe IntPtr CreateInt64TensorFromArray(long[] data, long[] shape)
+        public static IntPtr CreateInt64TensorFromArray(long[] data, long[] shape)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
             if (shape == null) throw new ArgumentNullException(nameof(shape));
 
+            var handle = GCHandle.Alloc(data, GCHandleType.Pinned);
+
             IntPtr tensor;
-            fixed (long* p = data)
+            var status = NativeMethods.OgaCreateTensorFromBuffer(
+                handle.AddrOfPinnedObject(),
+                shape,
+                (UIntPtr)shape.Length,
+                (ElementType)ET_Int64,
+                out tensor);
+
+            if (status.ToInt64() != 0)
             {
-                Result.VerifySuccess(
-                    NativeMethods.OgaCreateTensorFromBuffer(
-                        (IntPtr)p,
-                        shape,
-                        (UIntPtr)shape.Length,
-                        (ElementType)ET_Int64,
-                        out tensor));
+                handle.Free();
+                throw new InvalidOperationException($"OgaCreateTensorFromBuffer(int64) failed with {status.ToInt64()}");
             }
+
+            if (!_tensorPins.TryAdd(tensor, handle))
+            {
+                handle.Free();
+                throw new InvalidOperationException("Failed to track pinned buffer for int64 tensor.");
+            }
+
             return tensor;
         }
 
         /// <summary>
         /// Create an output tensor that points at a caller-owned long[] buffer.
+        /// The buffer is pinned for the lifetime of the tensor.
         /// </summary>
-        public static unsafe IntPtr CreateOutputInt64Tensor(long[] backingBuffer, long rows, long cols)
+        public static IntPtr CreateOutputInt64Tensor(long[] backingBuffer, long rows, long cols)
         {
             if (backingBuffer == null) throw new ArgumentNullException(nameof(backingBuffer));
             if (rows * cols > backingBuffer.LongLength)
                 throw new ArgumentException("backingBuffer too small for requested shape");
 
-            IntPtr tensor;
             long[] shape = new long[] { rows, cols };
-            fixed (long* p = backingBuffer)
+
+            var handle = GCHandle.Alloc(backingBuffer, GCHandleType.Pinned);
+
+            IntPtr tensor;
+            var status = NativeMethods.OgaCreateTensorFromBuffer(
+                handle.AddrOfPinnedObject(),
+                shape,
+                (UIntPtr)shape.Length,
+                (ElementType)ET_Int64,
+                out tensor);
+
+            if (status.ToInt64() != 0)
             {
-                Result.VerifySuccess(
-                    NativeMethods.OgaCreateTensorFromBuffer(
-                        (IntPtr)p,
-                        shape,
-                        (UIntPtr)shape.Length,
-                        (ElementType)ET_Int64,
-                        out tensor));
+                handle.Free();
+                throw new InvalidOperationException($"OgaCreateTensorFromBuffer(output int64) failed with {status.ToInt64()}");
             }
+
+            if (!_tensorPins.TryAdd(tensor, handle))
+            {
+                handle.Free();
+                throw new InvalidOperationException("Failed to track pinned buffer for output tensor.");
+            }
+
             return tensor;
         }
+
+        /// <summary>
+        /// Destroy a tensor and release its pinned managed buffer (if any).
+        /// </summary>
+        private static void SafeDestroyTensor(IntPtr tensor)
+        {
+            if (tensor == IntPtr.Zero)
+                return;
+
+            NativeMethods.OgaDestroyTensor(tensor);
+
+            if (_tensorPins.TryRemove(tensor, out var handle))
+            {
+                if (handle.IsAllocated)
+                    handle.Free();
+            }
+        }
+
+        #endregion
 
         /// <summary>
         /// Runs STFT over the input signal and finds the areas of high energy with start/end timestamps in ms.
@@ -139,7 +194,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             if (inputSignal == null || inputSignal.Length == 0)
                 throw new ArgumentException("Input array cannot be null or empty", nameof(inputSignal));
 
-            const int MaxSegs = 128;
+            const int MaxSegs = 1024;
+
             long[] splitBacking = new long[MaxSegs * 2];
             long[] mergedBacking = new long[MaxSegs * 2];
 
@@ -171,17 +227,12 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
                 long[] mergedShapeBuf = new long[2];
                 Result.VerifySuccess(NativeMethods.OgaTensorGetShape(mergedOut, mergedShapeBuf, (UIntPtr)mergedShapeBuf.Length));
-                long mergedRowsDbg = mergedShapeBuf[0];
-                long mergedColsDbg = mergedShapeBuf[1];
+                long mergedRows = mergedShapeBuf[0];
+                long mergedCols = mergedShapeBuf[1];
 
-                long[] shapeBuf = new long[2];
-                Result.VerifySuccess(NativeMethods.OgaTensorGetShape(mergedOut, shapeBuf, (UIntPtr)shapeBuf.Length));
-                long mergedRows = shapeBuf[0];
-                long mergedCols = shapeBuf[1];
                 if (mergedCols != 2)
                     throw new InvalidOperationException($"Expected merged output with 2 columns, got {mergedCols}");
 
-                // Convert to array of start/end tuples.
                 var result = new List<(double Start, double End)>();
                 for (int i = 0; i < mergedRows; ++i)
                 {
@@ -195,14 +246,14 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             }
             finally
             {
-                if (input != IntPtr.Zero) NativeMethods.OgaDestroyTensor(input);
-                if (sr != IntPtr.Zero) NativeMethods.OgaDestroyTensor(sr);
-                if (frame != IntPtr.Zero) NativeMethods.OgaDestroyTensor(frame);
-                if (hop != IntPtr.Zero) NativeMethods.OgaDestroyTensor(hop);
-                if (thr != IntPtr.Zero) NativeMethods.OgaDestroyTensor(thr);
-                if (splitOut != IntPtr.Zero) NativeMethods.OgaDestroyTensor(splitOut);
-                if (mergeGap != IntPtr.Zero) NativeMethods.OgaDestroyTensor(mergeGap);
-                if (mergedOut != IntPtr.Zero) NativeMethods.OgaDestroyTensor(mergedOut);
+                SafeDestroyTensor(input);
+                SafeDestroyTensor(sr);
+                SafeDestroyTensor(frame);
+                SafeDestroyTensor(hop);
+                SafeDestroyTensor(thr);
+                SafeDestroyTensor(splitOut);
+                SafeDestroyTensor(mergeGap);
+                SafeDestroyTensor(mergedOut);
             }
         }
     }
