@@ -1642,7 +1642,6 @@ class Model:
                 ir.Value(name=sin_cache_large_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(sin_cache_large.shape))
             ],
             name="/large/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_large)))
-
         cos_cache_small_node = ir.node(
             "Constant", [], outputs=[
                 ir.Value(name=cos_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(cos_cache_small.shape))
@@ -1650,7 +1649,7 @@ class Model:
             name="/small/cos_cache/Constant", attributes=dict(value=ir.tensor(cos_cache_small)))
         sin_cache_small_node = ir.node(
             "Constant", [], outputs=[
-                ir.Value(name=sin_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(cos_cache_small.shape))
+                ir.Value(name=sin_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(sin_cache_small.shape))
             ],
             name="/small/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_small)))
 
@@ -1682,7 +1681,6 @@ class Model:
                 name="small_rotemb_caches_graph",
             ),
         )
-
         self.make_value(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
