@@ -82,6 +82,7 @@ class Model:
                 "enable_skip_layer_norm_strict_mode": "1"
             },
             "dml": {},
+            # TODO: Enable graph capture for webgpu once supported both in onnxruntime-genai and onnxruntime.
             "webgpu": {},
             "trt-rtx": {"enable_cuda_graph": "1"}
         }
@@ -368,14 +369,14 @@ class Model:
             # Some EPs don't support packed Q/K/V for GQA yet
             # Packed MatMul with LoRA/QLoRA is not currently supported
             self.attention_attrs["use_packed_matmul"] = (
-                self.ep not in ["dml", "webgpu"]
+                self.ep not in ["dml"]
                 and not self.matmul_attrs["use_lora"]
                 and not self.attention_attrs["q_norm"]
                 and not self.attention_attrs["k_norm"]
             )
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
-            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml", "webgpu"]
+            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml"]
             if self.attention_attrs["use_rope_in_attn"]:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 self.input_names.remove("position_ids")
@@ -463,7 +464,15 @@ class Model:
         }
 
         if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
-            genai_config["model"]["decoder"]["sliding_window"] = {"window_size": self.window_size, "slide_key_value_cache": False, "slide_inputs": False}
+            # Compute layer indices that use sliding window attention
+            layer_idxs = [layer_id for layer_id in range(self.num_layers) if hasattr(self, "is_local") and self.is_local(layer_id)]
+            
+            genai_config["model"]["decoder"]["sliding_window"] = {
+                "window_size": self.window_size,
+                "slide_key_value_cache": False,
+                "slide_inputs": False,
+                "layers": layer_idxs
+            }
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
@@ -473,6 +482,15 @@ class Model:
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
+
+    def make_key_value_cache_shape(self, layer_id, shape):
+        """
+        Modifies KV cache shape dimension names for models with alternating attention patterns.
+        For TensorRT EP with sliding window layers, replaces 'sequence' with 'sliding' in dimension name.
+        """
+        if self.ep == "trt-rtx" and hasattr(self, "is_local") and self.is_local(layer_id):
+            return [shape[0], shape[1], shape[2].replace("sequence", "sliding"), shape[3]]
+        return shape
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
@@ -652,15 +670,21 @@ class Model:
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
+            key_shape = self.make_key_value_cache_shape(i, self.input_shapes["past_key_values.key"])
+            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=key_shape))
+
             value_name = f"past_key_values.{i}.value"
-            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
+            value_shape = self.make_key_value_cache_shape(i, self.input_shapes["past_key_values.value"])
+            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=value_shape))
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"]))
+            key_shape = self.make_key_value_cache_shape(i, self.output_shapes["present.key"])
+            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=key_shape))
+
             value_name = f"present.{i}.value"
-            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"]))
+            value_shape = self.make_key_value_cache_shape(i, self.output_shapes["present.value"])
+            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=value_shape))
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
@@ -3019,12 +3043,11 @@ class Model:
 
     def make_preprocessing_nodes(self):
         self.make_attention_mask_reformatting()
-        # TODO: add make_position_ids_reformatting() here
 
     def make_attention_mask_reformatting(self):
-        if self.extra_options.get("enable_cuda_graph", False) or self.ep == "dml":
+        if self.extra_options.get("enable_cuda_graph", False) or self.extra_options.get("enable_webgpu_graph", False) or self.ep == "dml":
             # ORT does not allow nodes to be placed on mulitple execution providers
-            # with cuda graph enabled. We've only verified it works with GQA and with
+            # with graph capture enabled. We've only verified it works with GQA and with
             # past_present_share_buffer enabled(so the total_seq_len in GQA is hardcoded
             # to a fixed value by logic).
             # For other models, we need to check if it works and update the logic here.
@@ -3345,7 +3368,47 @@ class Model:
 
         return expand_name
 
-    def make_attention_mask_reformatting_for_gqa(self):
+    def make_attention_mask_graph_capture_reformatting_for_gqa(self, attn_mask_basename):
+        # Make nodes for the attention mask subgraph that calculates
+        # attributes about the 2D attention mask to use in GroupQueryAttention
+        #
+        # Key difference vs make_attention_mask_standard_reformatting_for_gqa:
+        # - Standard mode: total_seq_len is calculated from Shape op (always runs on CPU)
+        # - Graph capture mode: No Shape ops inserted to ensure all ops run on GPU (no CPU ops)
+        #
+        #          attention_mask
+        #               |
+        #         Cast to int32
+        #               |
+        #           ReduceSum
+        #              /    \
+        #             /      \
+        #           Sub    Squeeze
+        #            |        |
+        #       seqlens_k  total_seq_len
+        #         (1D)       (int)
+
+        # Calculate ReduceSum from attention_mask
+        cast_1_name = f"{attn_mask_basename}/Cast"
+        self.make_cast(cast_1_name, "attention_mask", dtype=ir.DataType.INT32, shape=["batch_size", "total_sequence_length"])
+        reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
+        reduce_sum_inputs = [f"{cast_1_name}/output_0", "/model/constants/INT64/[1]"]
+        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+
+        # Left branch: Calculate seqlens_k = ReduceSum - 1
+        sub_name = f"{attn_mask_basename}/Sub"
+        sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT32/[1]"]
+        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+
+        # Right branch: Squeeze to get int value for total_seq_len
+        squeeze_name = f"{attn_mask_basename}/Squeeze"
+        squeeze_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/[0]"]
+        self.make_squeeze(squeeze_name, squeeze_inputs, dtype=ir.DataType.INT32, shape=[])
+
+        self.mask_attrs["seqlens_k"] = sub_name
+        self.mask_attrs["total_seq_len"] = squeeze_name
+
+    def make_attention_mask_standard_reformatting_for_gqa(self, attn_mask_basename):
         # Make nodes for the attention mask subgraph that calculates
         # attributes about the 2D attention mask to use in GroupQueryAttention
         #
@@ -3359,8 +3422,6 @@ class Model:
         #              |                |
         #          seqlens_k      total_seq_len
         #            (1D)             (int)
-        basename = "/model/attn_mask_reformat"
-        attn_mask_basename = f"{basename}/attn_mask_subgraph"
 
         # Left path
         reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
@@ -3383,6 +3444,17 @@ class Model:
 
         self.mask_attrs["seqlens_k"] = cast_1_name
         self.mask_attrs["total_seq_len"] = cast_2_name
+
+    def make_attention_mask_reformatting_for_gqa(self):
+        # Make nodes for the attention mask subgraph that calculates
+        # attributes about the 2D attention mask to use in GroupQueryAttention
+        basename = "/model/attn_mask_reformat"
+        attn_mask_basename = f"{basename}/attn_mask_subgraph"
+
+        if self.extra_options.get("enable_webgpu_graph", False):
+            self.make_attention_mask_graph_capture_reformatting_for_gqa(attn_mask_basename)
+        else:
+            self.make_attention_mask_standard_reformatting_for_gqa(attn_mask_basename)
 
     def make_attention_mask_reformatting_for_sparse_attn(self):
         # Make nodes for the attention mask subgraph that calculates
@@ -3422,42 +3494,9 @@ class Model:
         self.mask_attrs["total_seq_len"] = cast_2_name
 
     def make_position_ids_reformatting(self):
-        # Make nodes for the position ids reformatting subgraph
-        #
-        #          input_ids   position_ids
-        #              |            |
-        #            Shape          |
-        #              |            |
-        #            Gather         |
-        #              |            |
-        #          Unsqueeze        |
-        #              |            |
-        #            Concat         |
-        #                  \       /
-        #                   Reshape
-        #                      |
-        #      position_ids input for RotaryEmbedding
-
-        basename = "/model/pos_ids_reformat"
-        proto_dtype = self.input_types["position_ids"]
-        str_dtype = self.to_str_dtype(proto_dtype)
-
-        shape_name = f"{basename}/Shape"
-        self.make_shape(shape_name, root_input="input_ids" if not self.exclude_embeds else "inputs_embeds", shape=[2] if not self.exclude_embeds else [3])
-        gather_name = f"{basename}/Gather"
-        gather_inputs = [f"{shape_name}/output_0", f"/model/constants/{str_dtype}/1"]
-        self.make_gather(gather_name, gather_inputs, dtype=ir.DataType.INT64, shape=[], axis=0)
-        unsqueeze_name = f"{basename}/Unsqueeze"
-        unsqueeze_inputs = [f"{gather_name}/output_0", f"/model/constants/{str_dtype}/[0]"]
-        self.make_unsqueeze(unsqueeze_name, unsqueeze_inputs, dtype=proto_dtype, shape=[1])
-        concat_name = f"{basename}/Concat"
-        concat_inputs = [f"/model/constants/{str_dtype}/[-1]", f"{unsqueeze_name}/output_0"]
-        self.make_concat(concat_name, concat_inputs, dtype=proto_dtype, shape=[2], axis=0)
-        reshape_name = f"{basename}/Reshape"
-        reshape_inputs = ["position_ids", f"{concat_name}/output_0"]
-        self.make_reshape(reshape_name, reshape_inputs, dtype=proto_dtype, shape=None)
-
-        return reshape_name
+        # For most cases, position_ids are already properly formatted as 2D tensors
+        # with int64 values matching input_ids shape, so we can use them directly
+        return "position_ids"
 
 
 class LlamaModel(Model):
@@ -3468,10 +3507,6 @@ class LlamaModel(Model):
 class MistralModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
-        self.position_ids_name = f"{self.make_position_ids_reformatting()}/output_0" if not self.attention_attrs["use_rope_in_attn"] else "position_ids"
-
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
-        super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
 
 
 class QwenModel(MistralModel):
@@ -3609,32 +3644,86 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
 
+        # Set position_ids_name based on whether position_ids is available as an input
+        if "position_ids" in self.input_names:
+            position_ids_result = self.make_position_ids_reformatting()
+            self.position_ids_name = f"{position_ids_result}/output_0" if position_ids_result != "position_ids" else "position_ids"
+        else:
+            # When position_ids is not an input (use_rope_in_attn is True),
+            # position_ids won't be used since rotary embeddings are handled in GQA
+            self.position_ids_name = None
+
     def make_position_ids_reformatting(self):
-        if self.ep != "dml":
+        if self.ep not in self.eps_without_if_support:
             position_ids_input_to_rotemb = super().make_position_ids_reformatting()
             return position_ids_input_to_rotemb
+
+        # Make Long RoPE scaling subgraph to adjust position_ids for sequences beyond original context length
+        # For WebGPU: use int32 for all ops due to limited int64 support, then cast back to int64
+        # For other EPs: use native int64 throughout
+        #
+        # WebGPU graph:                              Other EPs graph:
+        #   position_ids                               position_ids
+        #        |                                          |
+        #   Cast (int32)                               ReduceMax (int64)
+        #        |                                          |
+        #   ReduceMax (int32)                          GreaterOrEqual
+        #        |                                          |
+        #   GreaterOrEqual                             Cast (int64)
+        #        |                                          |
+        #   Cast (int32)                               Mul (int64)
+        #        |                                          |
+        #   Mul (int32)                                Add (int64)
+        #        |
+        #   Add (int32)
+        #        |
+        #   Cast (int64)
 
         basename = "/model/pos_ids_reformat"
         proto_dtype = self.input_types["position_ids"]
         str_dtype = self.to_str_dtype(proto_dtype)
 
+        # For WebGPU, use int32 for computation due to limited int64 ops support
+        is_webgpu = self.extra_options.get("enable_webgpu_graph", False)
+        compute_dtype = ir.DataType.INT32 if is_webgpu else proto_dtype
+        compute_str_dtype = self.to_str_dtype(compute_dtype)
+
+        # Cast position_ids to int32 for WebGPU
+        input_tensor = "position_ids"
+        if is_webgpu:
+            cast_input_name = f"{basename}/Cast_input"
+            self.make_cast(cast_input_name, input_tensor, dtype=ir.DataType.INT32, shape=["batch_size", "sequence_length"])
+            input_tensor = f"{cast_input_name}/output_0"
+
         reduce_max_name = f"{basename}/ReduceMax"
-        reduce_max_inputs = ["position_ids"]
-        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=proto_dtype, shape=[1])
+        reduce_max_inputs = [input_tensor]
+        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=compute_dtype, shape=[1])
         greater_or_equal_name = f"{basename}/GreaterOrEqual"
-        greater_or_equal_inputs = [f"{reduce_max_name}/output_0", f"/model/constants/{str_dtype}/{self.original_context_length}"]
+        greater_or_equal_inputs = [f"{reduce_max_name}/output_0", f"/model/constants/{compute_str_dtype}/{self.original_context_length}"]
         self.make_greater_or_equal(greater_or_equal_name, greater_or_equal_inputs, shape=[])
         cast_name = f"{basename}/Cast"
-        self.make_cast(cast_name, f"{greater_or_equal_name}/output_0", dtype=proto_dtype, shape=None)
+        self.make_cast(cast_name, f"{greater_or_equal_name}/output_0", dtype=compute_dtype, shape=None)
         mul_name = f"{basename}/Mul"
-        mul_inputs = [f"{cast_name}/output_0", f"/model/constants/{str_dtype}/{self.original_context_length}"]
-        self.make_mul(mul_name, mul_inputs, dtype=proto_dtype, shape=None)
+        mul_inputs = [f"{cast_name}/output_0", f"/model/constants/{compute_str_dtype}/{self.original_context_length}"]
+        self.make_mul(mul_name, mul_inputs, dtype=compute_dtype, shape=None)
         add_1_name = f"{basename}/Add_1"
-        add_1_inputs = [f"{mul_name}/output_0", "position_ids"]
-        self.make_add(add_1_name, add_1_inputs, dtype=proto_dtype, shape=["batch_size", "sequence_length"])
+        add_1_inputs = [f"{mul_name}/output_0", input_tensor]
+        self.make_add(add_1_name, add_1_inputs, dtype=compute_dtype, shape=["batch_size", "sequence_length"])
 
-        return add_1_name
+        # Cast back to int64 for WebGPU to maintain compatibility
+        result_name = add_1_name
+        if is_webgpu:
+            cast_output_name = f"{basename}/Cast_output"
+            self.make_cast(cast_output_name, f"{add_1_name}/output_0", dtype=ir.DataType.INT64, shape=["batch_size", "sequence_length"])
+            result_name = cast_output_name
 
+        return result_name
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        if self.position_ids_name is not None:
+            super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
+        else:
+            super().make_attention(layer_id, attention, root_input, **kwargs)
 
 class Phi3SmallModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -4434,12 +4523,12 @@ class GPTOSSModel(Model):
         self.layernorm_attrs["skip_input"] = f"{moe_name}/output_0"
 
 
-def check_extra_options(kv_pairs):
+def check_extra_options(kv_pairs, execution_provider):
     """
     Check key-value pairs and set values correctly
     """
     bools = [
-        "int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph",
+        "int4_is_symmetric", "exclude_embeds", "exclude_lm_head", "include_hidden_states", "enable_cuda_graph", "enable_webgpu_graph",
         "use_8bits_moe", "use_qdq", "use_webgpu_fp32", "use_cuda_bf16", "int4_tied_embeddings", "hf_remote",
     ]
     for key in bools:
@@ -4468,8 +4557,12 @@ def check_extra_options(kv_pairs):
         # 'include_hidden_states' is for when 'hidden_states' are outputted and 'logits' are outputted
         raise ValueError("Both 'exclude_lm_head' and 'include_hidden_states' cannot be used together. Please use only one of them at once.")
 
+    if kv_pairs.get("enable_webgpu_graph", False) and execution_provider != "webgpu":
+        print("WARNING: enable_webgpu_graph is only supported with WebGPU execution provider. Disabling enable_webgpu_graph.")
+        kv_pairs["enable_webgpu_graph"] = False
 
-def parse_extra_options(kv_items):
+
+def parse_extra_options(kv_items, execution_provider):
     """
     Parse key-value pairs that are separated by '='
     """
@@ -4481,7 +4574,7 @@ def parse_extra_options(kv_items):
             kv_pairs[kv[0].strip()] = kv[1].strip()
 
     print(f"Extra options: {kv_pairs}")
-    check_extra_options(kv_pairs)
+    check_extra_options(kv_pairs, execution_provider)
     return kv_pairs
 
 
@@ -4759,6 +4852,9 @@ def get_args():
                 enable_cuda_graph = Enable CUDA graph capture during inference. Default is false.
                     If enabled, all nodes being placed on the CUDA EP is the prerequisite for the CUDA graph to be used correctly.
                     It is not guaranteed that CUDA graph be enabled as it depends on the model and the graph structure.
+                enable_webgpu_graph = Enable WebGPU graph capture during inference. Default is false.
+                    If enabled, the model structure will be optimized for WebGPU graph execution.
+                    This affects attention mask reformatting and position IDs handling.
                 use_8bits_moe = Use 8-bit quantization for MoE layers. Default is false.
                     If true, the QMoE op will use 8-bit quantization. If false, the QMoE op will use 4-bit quantization.
                 use_qdq = Use the QDQ decomposition for ops.
@@ -4778,5 +4874,5 @@ def get_args():
 
 if __name__ == '__main__':
     args = get_args()
-    extra_options = parse_extra_options(args.extra_options)
+    extra_options = parse_extra_options(args.extra_options, args.execution_provider)
     create_model(args.model_name, args.input, args.output, args.precision, args.execution_provider, args.cache_dir, **extra_options)
