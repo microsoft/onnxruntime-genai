@@ -1643,48 +1643,45 @@ class Model:
             ],
             name="/large/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_large)))
 
-        # Determine shape for small cache nodes
-        small_cache_shape = cos_cache_small.shape
-
         cos_cache_small_node = ir.node(
             "Constant", [], outputs=[
-                ir.Value(name=cos_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(small_cache_shape))
+                ir.Value(name=cos_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(cos_cache_small.shape))
             ],
             name="/small/cos_cache/Constant", attributes=dict(value=ir.tensor(cos_cache_small)))
         sin_cache_small_node = ir.node(
             "Constant", [], outputs=[
-                ir.Value(name=sin_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(small_cache_shape))
+                ir.Value(name=sin_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(cos_cache_small.shape))
             ],
             name="/small/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_small)))
 
         # Create single If node with multiple outputs
         self.make_node(
             "If", inputs=[f"{greater_name}/output_0"], outputs=[cos_cache_name, sin_cache_name], name=if_name,
-                then_branch=ir.Graph(
-                    inputs=[],
-                    outputs=[
-                        cos_cache_large_node.outputs[0],
-                        sin_cache_large_node.outputs[0],
-                    ],
-                    nodes=[
-                        cos_cache_large_node,
-                        sin_cache_large_node,
-                    ],
-                    name="large_rotemb_caches_graph",
-                ),
-                else_branch=ir.Graph(
-                    inputs=[],
-                    outputs=[
-                        cos_cache_small_node.outputs[0],
-                        sin_cache_small_node.outputs[0],
-                    ],
-                    nodes=[
-                        cos_cache_small_node,
-                        sin_cache_small_node,
-                    ],
-                    name="small_rotemb_caches_graph",
-                ),
-            )
+            then_branch=ir.Graph(
+                inputs=[],
+                outputs=[
+                    cos_cache_large_node.outputs[0],
+                    sin_cache_large_node.outputs[0],
+                ],
+                nodes=[
+                    cos_cache_large_node,
+                    sin_cache_large_node,
+                ],
+                name="large_rotemb_caches_graph",
+            ),
+            else_branch=ir.Graph(
+                inputs=[],
+                outputs=[
+                    cos_cache_small_node.outputs[0],
+                    sin_cache_small_node.outputs[0],
+                ],
+                nodes=[
+                    cos_cache_small_node,
+                    sin_cache_small_node,
+                ],
+                name="small_rotemb_caches_graph",
+            ),
+        )
 
         self.make_value(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
