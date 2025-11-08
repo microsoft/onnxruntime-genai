@@ -13,7 +13,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         private const int ET_Float32 = 1;
         private const int ET_Int64 = 7;
 
-        // Track pinned buffers for tensors created from managed arrays
         private static readonly ConcurrentDictionary<IntPtr, GCHandle> _tensorPins = new();
 
         #region Native wrappers
@@ -58,13 +57,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         /// <summary>
         /// Create a tensor view over a managed float[].
-        /// The underlying buffer is pinned for the lifetime of the tensor.
         /// </summary>
         public static IntPtr CreateFloatTensorFromArray(float[] data, long[] shape)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
             if (shape == null) throw new ArgumentNullException(nameof(shape));
 
+            // The underlying buffer is pinned for the lifetime of the tensor.
             var handle = GCHandle.Alloc(data, GCHandleType.Pinned);
 
             IntPtr tensor;
@@ -92,13 +91,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         /// <summary>
         /// Create a tensor view over a managed long[].
-        /// The underlying buffer is pinned for the lifetime of the tensor.
         /// </summary>
         public static IntPtr CreateInt64TensorFromArray(long[] data, long[] shape)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
             if (shape == null) throw new ArgumentNullException(nameof(shape));
 
+            // The underlying buffer is pinned for the lifetime of the tensor.
             var handle = GCHandle.Alloc(data, GCHandleType.Pinned);
 
             IntPtr tensor;
@@ -126,7 +125,6 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
         /// <summary>
         /// Create an output tensor that points at a caller-owned long[] buffer.
-        /// The buffer is pinned for the lifetime of the tensor.
         /// </summary>
         public static IntPtr CreateOutputInt64Tensor(long[] backingBuffer, long rows, long cols)
         {
@@ -136,6 +134,7 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
 
             long[] shape = new long[] { rows, cols };
 
+            // The buffer is pinned for the lifetime of the tensor.
             var handle = GCHandle.Alloc(backingBuffer, GCHandleType.Pinned);
 
             IntPtr tensor;
