@@ -86,6 +86,7 @@ def _parse_args():
 
     # Default to not building the language bindings
     parser.add_argument("--build_csharp", action="store_true", help="Build the C# API.")
+    parser.add_argument("--msbuild_extra_options", nargs="+", action="extend", default=[], help="Extra MSBuild properties (/p:key=value). Provide as key=value.")
     parser.add_argument("--build_java", action="store_true", help="Build Java bindings.")
     parser.add_argument("--publish_java_maven_local", action="store_true", help="Publish Java bindings to local Maven repository after tests.")
 
@@ -243,7 +244,9 @@ def _validate_build_dir(args: argparse.Namespace):
 
     # set to a config specific build dir. it should exist unless we're creating the cmake setup
     is_strict = not args.update
-    args.build_dir = args.build_dir.resolve(strict=is_strict) / args.config
+    args.build_dir = args.build_dir.resolve(strict=is_strict)
+    if not 'Visual Studio' in args.cmake_generator and not 'Multi-Config' in args.cmake_generator:
+        args.build_dir = args.build_dir / args.config
 
 
 def _validate_cuda_args(args: argparse.Namespace):
@@ -386,7 +389,7 @@ def _create_env(args: argparse.Namespace):
     return env
 
 
-def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
+def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path, msbuild_extra_options):
     # Tests folder does not have a sln file. We use the csproj file to build and test.
     # The csproj file requires the platform to be AnyCPU (not "Any CPU")
     configuration = f"/p:Configuration={args.config}"
@@ -395,9 +398,7 @@ def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
     native_lib_path = f"/p:NativeBuildOutputDir={str(args.build_dir / args.config) if util.is_windows() else str(args.build_dir)}"
     ort_lib_path = f"/p:OrtLibDir={ort_lib_dir}"
 
-    props = [configuration, platform, native_lib_path, ort_lib_path]
-
-    return props
+    return [configuration, platform, native_lib_path, ort_lib_path] + ["/p:" + option for option in msbuild_extra_options]
 
 
 def _run_android_tests(args: argparse.Namespace):
@@ -631,6 +632,9 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             )
             args.test = False
 
+    if util.is_windows() and 'Ninja' in args.cmake_generator:
+        command += ["--compile-no-warning-as-error"]
+
     if args.cmake_extra_defines != []:
         command += args.cmake_extra_defines
 
@@ -666,9 +670,13 @@ def build(args: argparse.Namespace, env: dict[str, str]):
     if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
 
+        msbuild_extra_options = args.msbuild_extra_options
+        if args.config == "Release" and not [opt for opt in msbuild_extra_options if 'IsReleaseBuild' in opt]:
+            msbuild_extra_options.append("IsReleaseBuild=True")
+
         # Build the library
         csharp_build_command = [dotnet, "build", ".",]
-        csharp_build_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
+        csharp_build_command += _get_csharp_properties(args, lib_dir, msbuild_extra_options)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
@@ -730,12 +738,14 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
     """
     examples_dir = REPO_ROOT / "examples" / "c"
     build_dir = examples_dir / "build"
+    if not 'Visual Studio' in args.cmake_generator and not 'Multi-Config' in args.cmake_generator:
+        build_dir = build_dir / args.config
 
     if build_dir.exists():
         log.info(f"Removing existing build directory: {build_dir}")
         shutil.rmtree(build_dir)
 
-    build_dir.mkdir()
+    build_dir.mkdir(parents=True)
 
     samples_to_build = [
         "-DMODEL_QA=ON",
@@ -746,10 +756,6 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
     ]
 
     include_dir = REPO_ROOT / "src"
-    lib_dir = args.build_dir
-    if util.is_windows():
-        # On Windows, the library files are in a subdirectory named after the configuration (e.g. Debug, Release, etc.)
-        lib_dir = lib_dir / args.config
 
     cmake_command = [
         str(args.cmake_path),
@@ -757,8 +763,7 @@ def build_examples(args: argparse.Namespace, env: dict[str, str]):
         "-B", str(build_dir),
         "-G", args.cmake_generator,
     ] + samples_to_build + [
-        "-DORT_GENAI_INCLUDE_DIR=" + str(include_dir),
-        "-DORT_GENAI_LIB_DIR=" + str(lib_dir),
+        "-DCMAKE_PREFIX_PATH=" + str(args.build_dir),
     ]
 
     if args.cmake_generator.startswith("Visual Studio"):
@@ -791,7 +796,7 @@ if __name__ == "__main__":
 
     if arguments.build:
         build(arguments, environment)
-    
+
     if arguments.package:
         package(arguments, environment)
 

@@ -229,15 +229,17 @@ if (ENABLE_TESTS)
              WORKING_DIRECTORY ${JAVA_SRC_ROOT})
   endif()
 
+  set(_onnxruntime_bin_dir ${ORT_LIB_DIR})
   if(WIN32)
     set(ONNXRUNTIME_GENAI_DEPENDENCY "*.dll")
+    set(_onnxruntime_bin_dir ${ORT_BIN_DIR})
   elseif(APPLE)
     set(ONNXRUNTIME_GENAI_DEPENDENCY "*.dylib")
   else()
     set(ONNXRUNTIME_GENAI_DEPENDENCY "*.so")
   endif()
 
-  file(GLOB ort_native_libs "${ORT_LIB_DIR}/${ONNXRUNTIME_GENAI_DEPENDENCY}")
+  file(GLOB ort_native_libs "${_onnxruntime_bin_dir}/${ONNXRUNTIME_GENAI_DEPENDENCY}")
 
   # Copy ORT native libs for Java tests
   foreach(LIB_FILE ${ort_native_libs})

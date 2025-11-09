@@ -14,70 +14,31 @@ if(USE_CXX)
   add_compile_definitions(USE_CXX)
 endif()
 
-if(WIN32)
-  set(ONNXRUNTIME_GENAI_LIB "onnxruntime-genai.dll")
-elseif(APPLE)
-  set(ONNXRUNTIME_GENAI_LIB "libonnxruntime-genai.dylib")
-elseif(CMAKE_SYSTEM_NAME MATCHES "AIX")
-  set(ONNXRUNTIME_GENAI_LIB "libonnxruntime-genai.a")
-else()
-  set(ONNXRUNTIME_GENAI_LIB "libonnxruntime-genai.so")
-endif()
+find_package(onnxruntime-genai REQUIRED)
 
-# Set default library directory if not specified
-if(NOT ORT_GENAI_LIB_DIR)
-  set(ORT_GENAI_LIB_DIR "${CMAKE_SOURCE_DIR}/lib")
-endif()
-
-file(GLOB ort_genai_libs "${ORT_GENAI_LIB_DIR}/*")
-
-message(STATUS "ORT_GENAI_LIB_DIR: ${ORT_GENAI_LIB_DIR}")
-
-function(prepare_executable executable)
-  target_link_directories(${executable} PRIVATE ${ORT_GENAI_LIB_DIR})
-  target_link_libraries(${executable} PRIVATE ${ONNXRUNTIME_GENAI_LIB})
-
-  if (ORT_GENAI_INCLUDE_DIR)
-    target_include_directories(${executable} PRIVATE ${ORT_GENAI_INCLUDE_DIR})
-  else()
-    target_include_directories(${executable} PRIVATE ${CMAKE_SOURCE_DIR}/include)
-  endif()
-
-  target_link_libraries(${executable} PUBLIC onnxruntime-genai)
-
-  foreach(DEPENDENCY_FILE ${ort_genai_libs})
-    if (NOT IS_DIRECTORY ${DEPENDENCY_FILE})
-      add_custom_command(
-        TARGET ${executable} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DEPENDENCY_FILE} $<TARGET_FILE_DIR:${executable}>
-      )
-    endif()
-  endforeach()
+function(genai_add_example target)
+  add_executable(${target} ${ARGN})
+  target_link_libraries(${target} PRIVATE onnxruntime::onnxruntime-genai)
 endfunction()
 
-set(EXAMPLES_SOURCE_DIR ${CMAKE_SOURCE_DIR}/src)
+set(EXAMPLES_SOURCE_DIR ${PROJECT_SOURCE_DIR}/src)
 
 if(MODEL_CHAT)
-  add_executable(model_chat ${EXAMPLES_SOURCE_DIR}/model_chat.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
-  prepare_executable(model_chat)
+  genai_add_example(model_chat ${EXAMPLES_SOURCE_DIR}/model_chat.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
 endif()
 
 if(MODEL_QA)
-  add_executable(model_qa ${EXAMPLES_SOURCE_DIR}/model_qa.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
-  prepare_executable(model_qa)
+  genai_add_example(model_qa ${EXAMPLES_SOURCE_DIR}/model_qa.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
 endif()
 
 if(MODEL_VISION)
-  add_executable(model_vision ${EXAMPLES_SOURCE_DIR}/model_vision.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
-  prepare_executable(model_vision)
+  genai_add_example(model_vision ${EXAMPLES_SOURCE_DIR}/model_vision.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
 endif()
 
 if(PHI4-MM)
-  add_executable(phi4-mm ${CMAKE_SOURCE_DIR}/src/phi4-mm.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
-  prepare_executable(phi4-mm)
+  genai_add_example(phi4-mm ${EXAMPLES_SOURCE_DIR}/phi4-mm.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
 endif()
 
 if(WHISPER)
-  add_executable(whisper ${CMAKE_SOURCE_DIR}/src/whisper.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
-  prepare_executable(whisper)
+  genai_add_example(whisper ${EXAMPLES_SOURCE_DIR}/whisper.cpp ${EXAMPLES_SOURCE_DIR}/common.cpp)
 endif()
