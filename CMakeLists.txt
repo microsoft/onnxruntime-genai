@@ -214,7 +214,7 @@ if((USE_CUDA OR USE_TRT_RTX) AND CMAKE_CUDA_COMPILER)
 endif()
 
 if(USE_GUIDANCE)
-  target_include_directories(onnxruntime-genai PUBLIC ${llguidance_SOURCE_DIR}/parser/)
+  target_include_directories(onnxruntime-genai PRIVATE ${llguidance_SOURCE_DIR}/parser/)
   target_link_libraries(onnxruntime-genai PRIVATE llguidance)
   if (WIN32)
     # bcrypt is needed for the rust std lib
