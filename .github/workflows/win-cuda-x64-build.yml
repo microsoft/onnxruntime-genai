@@ -45,6 +45,14 @@ jobs:
           add-cmake-to-path: 'true'
           disable-terrapin: 'false'
 
+      - name: List cuda sdk files
+        run: |
+          azcopy.exe ls "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ env.cuda_version }}"
+
+      - name: List cuda sdk 12.4 files
+        run: |
+          azcopy.exe ls "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v12.4"
+          
       - name: Download cuda
         run: |
           azcopy.exe cp --recursive "https://lotusscus.blob.core.windows.net/models/cuda_sdk/v${{ env.cuda_version }}" ${{ env.cuda_dir}}
