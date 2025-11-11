@@ -91,27 +91,29 @@ struct WebGPUMemory final : DeviceBuffer {
       throw std::runtime_error("WebGPU allocator not initialized");
     }
 
-    // Get WebGPU allocator's memory info
-    const OrtMemoryInfo* webgpu_mem_info = nullptr;
-    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
+    // Fast path: WebGPU-to-WebGPU copy with zero offsets
+    // NOTE: p_device_ is a WGPUBuffer handle (cast to uint8_t*), not a memory pointer.
+    // We cannot use pointer arithmetic (p_device_ + offset) to create sub-buffer views.
+    // OrtValue::CreateTensor expects the actual buffer handle, not an offset pointer.
+    if (source.GetType() == device_label && begin_source == 0 && begin_dest == 0) {
+      // Get WebGPU allocator's memory info
+      const OrtMemoryInfo* webgpu_mem_info = nullptr;
+      Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
 
-    if (source.GetType() == device_label) {
-      // WebGPU-to-WebGPU copy using CopyTensors
-      // Create source tensor (source WebGPU buffer sub-span)
+      // Full buffer copy using CopyTensors (no offsets)
       int64_t shape_val = static_cast<int64_t>(size_in_bytes);
       std::span<const int64_t> shape{&shape_val, 1};
-      auto src_tensor = OrtValue::CreateTensor(*webgpu_mem_info, source.p_device_ + begin_source, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
-
-      // Create destination tensor (this WebGPU buffer sub-span)
-      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, p_device_ + begin_dest, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      auto src_tensor = OrtValue::CreateTensor(*webgpu_mem_info, source.p_device_, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
+      auto dst_tensor = OrtValue::CreateTensor(*webgpu_mem_info, p_device_, size_in_bytes, shape, ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8);
 
       // Use ORT C API's CopyTensors for GPU-to-GPU copy
       OrtValue* src_ptrs[] = {src_tensor.get()};
       OrtValue* dst_ptrs[] = {dst_tensor.get()};
       Ort::ThrowOnError(Ort::api->CopyTensors(&GetOrtEnv(), src_ptrs, dst_ptrs, nullptr, 1));
     } else {
-      // Cross-device copy (e.g., CPU to WebGPU or vice versa)
-      // Use CopyThroughCpu as fallback since we don't have source device's OrtMemoryInfo
+      // Fallback: Copy through CPU for:
+      // - WebGPU-to-WebGPU copies with non-zero offsets (buffer handles don't support offset arithmetic)
+      // - Cross-device copies (e.g., CPU to WebGPU or vice versa)
       CopyThroughCpu(*this, begin_dest, source, begin_source, size_in_bytes);
     }
   }
