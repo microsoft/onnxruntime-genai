@@ -550,6 +550,7 @@ def update(args: argparse.Namespace, env: dict[str, str]):
             f"-DANDROID_PLATFORM=android-{args.android_api}",
             f"-DANDROID_ABI={args.android_abi}",
             f"-DANDROID_MIN_SDK={args.android_api}",
+            "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
             "-DENABLE_PYTHON=OFF",
             "-DENABLE_TESTS=OFF",
         ]
