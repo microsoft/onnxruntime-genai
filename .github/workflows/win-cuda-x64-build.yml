@@ -15,8 +15,8 @@ env:
   AZCOPY_AUTO_LOGIN_TYPE: MSI
   AZCOPY_MSI_CLIENT_ID: 63b63039-6328-442f-954b-5a64d124e5b4
   cuda_dir: "${{ github.workspace }}\\cuda_sdk"
-  cuda_version: "12.4"
-  CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.4
+  cuda_version: "12.2"
+  CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.2
   binaryDir: 'build/cuda/win-x64'
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
