@@ -165,7 +165,11 @@ target_link_directories(onnxruntime-genai PRIVATE ${ORT_LIB_DIR})
 target_link_libraries(onnxruntime-genai PRIVATE Threads::Threads)
 
 # The genai library itself is always embedded in the shared library
-list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
+if(WIN32 OR ANDROID OR IOS)
+  list(APPEND ortgenai_embed_libs "$<TARGET_FILE:onnxruntime-genai>")
+else()
+  list(APPEND ortgenai_embed_libs "$<TARGET_SONAME_FILE:onnxruntime-genai>")
+endif()
 
 # we keep the shared libraries disconnected on Android as they will come from separate AARs and we don't want to force
 # the ORT version to match in both.
