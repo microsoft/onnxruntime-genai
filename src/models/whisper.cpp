@@ -96,6 +96,7 @@ DeviceSpan<float> WhisperDecoderState::Run(int current_length, DeviceSpan<int32_
 
     int num_hidden_layers = model_.config_->model.decoder.num_hidden_layers;
     output_cross_qk_names_.reserve(num_hidden_layers);
+    output_cross_qk_.reserve(num_hidden_layers);
     for (int i = 0; i < num_hidden_layers; i++) {
       output_cross_qk_.emplace_back(OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), output_cross_qk_shape_, output_cross_qk_type_));
       output_cross_qk_names_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.output_cross_qk_names, i));
