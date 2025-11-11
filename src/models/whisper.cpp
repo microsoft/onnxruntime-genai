@@ -94,7 +94,9 @@ DeviceSpan<float> WhisperDecoderState::Run(int current_length, DeviceSpan<int32_
     output_cross_qk_shape_ = std::array<int64_t, 4>{params_->BatchBeamSize(), model_.config_->model.decoder.num_attention_heads, current_length, num_frames_ / 2};
     output_cross_qk_index_ = outputs_.size();
 
-    for (int i = 0; i < model_.config_->model.decoder.num_hidden_layers; i++) {
+    int num_hidden_layers = model_.config_->model.decoder.num_hidden_layers;
+    output_cross_qk_names_.reserve(num_hidden_layers);
+    for (int i = 0; i < num_hidden_layers; i++) {
       output_cross_qk_.emplace_back(OrtValue::CreateTensor(model_.p_device_inputs_->GetAllocator(), output_cross_qk_shape_, output_cross_qk_type_));
       output_cross_qk_names_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.output_cross_qk_names, i));
 
