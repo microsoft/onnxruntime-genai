@@ -389,7 +389,7 @@ def _create_env(args: argparse.Namespace):
     return env
 
 
-def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path, msbuild_extra_options):
+def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path):
     # Tests folder does not have a sln file. We use the csproj file to build and test.
     # The csproj file requires the platform to be AnyCPU (not "Any CPU")
     configuration = f"/p:Configuration={args.config}"
@@ -397,6 +397,10 @@ def _get_csharp_properties(args: argparse.Namespace, ort_lib_dir: Path, msbuild_
     # need an extra config on windows as the actual build output is in the original build dir / config / config
     native_lib_path = f"/p:NativeBuildOutputDir={str(args.build_dir / args.config) if util.is_windows() else str(args.build_dir)}"
     ort_lib_path = f"/p:OrtLibDir={ort_lib_dir}"
+
+    msbuild_extra_options = args.msbuild_extra_options
+    if args.config == "Release" and not [opt for opt in msbuild_extra_options if 'IsReleaseBuild' in opt]:
+        msbuild_extra_options.append("IsReleaseBuild=True")
 
     return [configuration, platform, native_lib_path, ort_lib_path] + ["/p:" + option for option in msbuild_extra_options]
 
@@ -670,13 +674,9 @@ def build(args: argparse.Namespace, env: dict[str, str]):
     if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
 
-        msbuild_extra_options = args.msbuild_extra_options
-        if args.config == "Release" and not [opt for opt in msbuild_extra_options if 'IsReleaseBuild' in opt]:
-            msbuild_extra_options.append("IsReleaseBuild=True")
-
         # Build the library
         csharp_build_command = [dotnet, "build", ".",]
-        csharp_build_command += _get_csharp_properties(args, lib_dir, msbuild_extra_options)
+        csharp_build_command += _get_csharp_properties(args, lib_dir)
         util.run(csharp_build_command, cwd=REPO_ROOT / "src" / "csharp")
         util.run(csharp_build_command, cwd=REPO_ROOT / "test" / "csharp")
 
@@ -712,7 +712,7 @@ def test(args: argparse.Namespace, env: dict[str, str]):
     if args.build_csharp:
         dotnet = str(_resolve_executable_path("dotnet"))
         csharp_test_command = [dotnet, "test"]
-        csharp_test_command += _get_csharp_properties(args, ort_lib_dir=lib_dir)
+        csharp_test_command += _get_csharp_properties(args, lib_dir)
         util.run(csharp_test_command, env=env, cwd=str(REPO_ROOT / "test" / "csharp"))
 
     if args.build_java:

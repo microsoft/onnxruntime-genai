@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 3.18.1)
 
 project(ortgenaiapp)
+
 set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(USE_CXX "Invoke the C++ example" ON)
 option(MODEL_CHAT "Build the Model Chat example" OFF)
