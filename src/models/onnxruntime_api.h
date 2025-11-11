@@ -446,6 +446,13 @@ struct OrtStatus {
   Ort::Abstract make_abstract;
 };
 
+struct OrtEpDevice {
+  std::string Name() const;
+  std::string Vendor() const;
+
+  Ort::Abstract make_abstract;
+};
+
 /** \brief The Env (Environment)
  *
  * The Env holds the logging state used by all other objects.
@@ -470,10 +477,6 @@ struct OrtEnv {
 
   OrtEnv& CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info, const OrtArenaCfg& arena_cfg);  ///< Wraps OrtApi::CreateAndRegisterAllocator
 
-  /// \brief Get available execution provider devices. Wraps OrtApi::GetEpDevices
-  /// \return Vector of execution provider devices
-  std::vector<const OrtEpDevice*> GetEpDevices() const;
-
   /// \brief Copy tensors between devices. Wraps OrtApi::CopyTensors
   /// \param src_tensors Array of source OrtValue tensors
   /// \param dst_tensors Array of destination OrtValue tensors (must be pre-allocated)
@@ -481,6 +484,8 @@ struct OrtEnv {
   void CopyTensors(const std::vector<const OrtValue*>& src_tensors,
                    const std::vector<OrtValue*>& dst_tensors,
                    OrtSyncStream* stream = nullptr) const;
+
+  std::vector<const OrtEpDevice*> GetEpDevices();
 
   static void operator delete(void* p) { Ort::api->ReleaseEnv(reinterpret_cast<OrtEnv*>(p)); }
   Ort::Abstract make_abstract;
@@ -621,6 +626,9 @@ struct OrtSessionOptions {
   OrtSessionOptions& SetCustomThreadCreationOptions(void* ort_custom_thread_creation_options);      ///< Wraps OrtApi::SessionOptionsSetCustomThreadCreationOptions
   OrtSessionOptions& SetCustomJoinThreadFn(OrtCustomJoinThreadFn ort_custom_join_thread_fn);        ///< Wraps OrtApi::SessionOptionsSetCustomJoinThreadFn
   OrtSessionOptions& RegisterCustomOpsLibrary(const ORTCHAR_T* library_file_prefix);                ///< Wraps OrtApi::SessionOptionsRegisterCustomOpsLibrary
+
+  OrtSessionOptions& AppendExecutionProvider_V2(OrtEnv& env, const std::vector<const OrtEpDevice*>& ep_devices,
+                                                const std::unordered_map<std::string, std::string>& options);
 
   static void operator delete(void* p) { Ort::api->ReleaseSessionOptions(reinterpret_cast<OrtSessionOptions*>(p)); }
   Ort::Abstract make_abstract;

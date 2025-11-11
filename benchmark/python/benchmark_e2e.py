@@ -247,6 +247,9 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
             args.chat_template = '<s>{input}'
         elif model_type.startswith("qwen2"):
             args.chat_template = '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
+        elif model_type.startswith("gemma"):
+            # Gemma and Gemma2 models use this format
+            args.chat_template = '<start_of_turn>user\n{input}<end_of_turn>\n<start_of_turn>model\n'
         else:
             raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
 

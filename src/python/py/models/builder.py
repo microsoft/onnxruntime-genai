@@ -369,14 +369,14 @@ class Model:
             # Some EPs don't support packed Q/K/V for GQA yet
             # Packed MatMul with LoRA/QLoRA is not currently supported
             self.attention_attrs["use_packed_matmul"] = (
-                self.ep not in ["dml", "webgpu"]
+                self.ep not in ["dml"]
                 and not self.matmul_attrs["use_lora"]
                 and not self.attention_attrs["q_norm"]
                 and not self.attention_attrs["k_norm"]
             )
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
-            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml", "webgpu"]
+            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml"]
             if self.attention_attrs["use_rope_in_attn"]:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 self.input_names.remove("position_ids")
@@ -464,7 +464,15 @@ class Model:
         }
 
         if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
-            genai_config["model"]["decoder"]["sliding_window"] = {"window_size": self.window_size, "slide_key_value_cache": False, "slide_inputs": False}
+            # Compute layer indices that use sliding window attention
+            layer_idxs = [layer_id for layer_id in range(self.num_layers) if hasattr(self, "is_local") and self.is_local(layer_id)]
+            
+            genai_config["model"]["decoder"]["sliding_window"] = {
+                "window_size": self.window_size,
+                "slide_key_value_cache": False,
+                "slide_inputs": False,
+                "layers": layer_idxs
+            }
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
@@ -474,6 +482,15 @@ class Model:
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
+
+    def make_key_value_cache_shape(self, layer_id, shape):
+        """
+        Modifies KV cache shape dimension names for models with alternating attention patterns.
+        For TensorRT EP with sliding window layers, replaces 'sequence' with 'sliding' in dimension name.
+        """
+        if self.ep == "trt-rtx" and hasattr(self, "is_local") and self.is_local(layer_id):
+            return [shape[0], shape[1], shape[2].replace("sequence", "sliding"), shape[3]]
+        return shape
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
@@ -653,15 +670,21 @@ class Model:
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
+            key_shape = self.make_key_value_cache_shape(i, self.input_shapes["past_key_values.key"])
+            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=key_shape))
+
             value_name = f"past_key_values.{i}.value"
-            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
+            value_shape = self.make_key_value_cache_shape(i, self.input_shapes["past_key_values.value"])
+            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=value_shape))
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"]))
+            key_shape = self.make_key_value_cache_shape(i, self.output_shapes["present.key"])
+            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=key_shape))
+
             value_name = f"present.{i}.value"
-            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"]))
+            value_shape = self.make_key_value_cache_shape(i, self.output_shapes["present.value"])
+            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=value_shape))
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
