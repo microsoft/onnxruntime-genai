@@ -2033,9 +2033,15 @@ class Model:
 
         # Unpack attention weights if needed
         self.make_attention_unpacked(layer_id, attention, root_input, **kwargs)
+        
+        # Get dtype used for MatMul ops
+        q_dtype = getattr(attention.q_proj, "weight", getattr(attention.q_proj, "bits", None))
+        k_dtype = getattr(attention.k_proj, "weight", getattr(attention.k_proj, "bits", None))
+        v_dtype = getattr(attention.v_proj, "weight", getattr(attention.v_proj, "bits", None))
+        qkv_dtype_equal = getattr(q_dtype, "dtype", q_dtype) == getattr(k_dtype, "dtype", k_dtype) == getattr(v_dtype, "dtype", v_dtype)
 
         # Make MatMul nodes
-        if self.attention_attrs["use_packed_matmul"]:
+        if self.attention_attrs["use_packed_matmul"] and qkv_dtype_equal:
             # Combine 3 MatMuls into 1 packed MatMul
             qkv_matmul_basename = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
             qkv_matmul_name = self.make_packed_matmul(attention.q_proj, attention.k_proj, attention.v_proj, qkv_matmul_basename, root_input)
@@ -2057,7 +2063,7 @@ class Model:
         v_bias_exists = attention.v_proj.bias is not None and torch.count_nonzero(attention.v_proj.bias) > 0
         any_bias_exists = q_bias_exists or k_bias_exists or v_bias_exists
 
-        if self.attention_attrs["use_packed_matmul"] and any_bias_exists:
+        if self.attention_attrs["use_packed_matmul"] and qkv_dtype_equal and any_bias_exists:
             # Combine 3 Adds into 1 packed Add
             qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
             self.make_packed_add(attention.q_proj.bias, attention.k_proj.bias, attention.v_proj.bias, qkv_add_name, root_input=self.attention_attrs["q_path"])
