@@ -290,6 +290,11 @@ class Model:
             # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
             # tied_embeddings lm_head.MatMul.weight_Q{}G{} only works with rtn&k_quant on 4bit
             self.int4_tied_embeddings = False
+        
+        # Disable tied embeddings if LM head is excluded from quantization
+        lm_head_excluded = "/lm_head/MatMul" in self.quant_attrs["int4"]["nodes_to_exclude"]
+        if lm_head_excluded:
+            self.int4_tied_embeddings = False
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
@@ -1093,7 +1098,8 @@ class Model:
 
     def make_embedding(self, embedding):
         basename = "/model/embed_tokens"
-        if self.int4_tied_embeddings:
+        # Use GatherBlockQuantized if and only if tied embeddings are enabled and export model is quantized. quantized d_type in set_onnx_dtype is INT4/UINT4
+        if self.int4_tied_embeddings and self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
             gather_name = f"{basename}/GatherBlockQuantized"
             gather_output = f"{gather_name}/output_0"
 
