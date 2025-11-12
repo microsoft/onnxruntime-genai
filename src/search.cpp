@@ -155,8 +155,10 @@ void GreedySearch_Cpu::SelectTop() {
     SetNextToken(batch_id, token);
   }
 
-  if (!done_)
-    AppendNextTokensToSequences();
+  // Always append tokens to sequences, even when done_ is true (EOS token encountered).
+  // This ensures the EOS token is included in the final output sequences.
+  // The generation loop will exit after this via IsDone() check, preventing further computation.
+  AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
@@ -177,8 +179,7 @@ void GreedySearch_Cpu::SampleTopK(int k, float temperature) {
     std::discrete_distribution<> dis(top_k_scores.begin(), top_k_scores.end());
     SetNextToken(batch_id, indices[dis(gen_)]);
   }
-  if (!done_)
-    AppendNextTokensToSequences();
+  AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
@@ -216,8 +217,7 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
 
     SetNextToken(batch_id, token);
   }
-  if (!done_)
-    AppendNextTokensToSequences();
+  AppendNextTokensToSequences();
 }
 
 void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
@@ -276,8 +276,7 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
     int32_t token = indices[sampled_k_index];
     SetNextToken(batch_id, token);
   }
-  if (!done_)
-    AppendNextTokensToSequences();
+  AppendNextTokensToSequences();
 }
 
 bool GreedySearch_Cpu::PadIfAlreadyEOS(size_t batch_id) {
