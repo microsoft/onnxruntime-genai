@@ -82,8 +82,10 @@ def main(args):
 
     if args.verbose: print("Generating tokens ...\n")
     start_time = time.time()
-    while not generator.is_done():
+    while True:
         generator.generate_next_token()
+        if generator.is_done():
+            break
     run_time = time.time() - start_time
 
     for i in range(len(prompts)):
