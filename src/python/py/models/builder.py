@@ -25,6 +25,7 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
     MatMulNBitsQuantizer,
     QuantFormat,
     RTNWeightOnlyQuantConfig,
+    KQuantWeightOnlyQuantConfig,
 )
 from tqdm import tqdm
 from transformers import (
@@ -286,17 +287,15 @@ class Model:
 
         lm_head_excluded = "/lm_head/MatMul" in self.quant_attrs["int4"]["nodes_to_exclude"]
 
-        self.int4_tied_embeddings = config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False
-        self.int4_tied_embeddings = extra_options.get("int4_tied_embeddings", self.int4_tied_embeddings)
+        self.int4_tied_embeddings = extra_options.get("int4_tied_embeddings", config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False)
         self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last", "rtn_last"}
-        if not self.int8_lm_head and extra_options.get("int4_algo_config", "default") not in {"rtn", "k_quant"}:
-            # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
-            # tied_embeddings lm_head.MatMul.weight_Q{}G{} only works with rtn&k_quant on 4bit
-            self.int4_tied_embeddings = False
-        
-        # Disable int4_tied_embeddings if LM head is excluded from quantization
-        if lm_head_excluded:
-            self.int4_tied_embeddings = False
+        # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
+        # tied_embeddings lm_head.MatMul.weight_Q{}G{} only works with rtn&k_quant on 4bit, or with int8 lm_head
+        self.int4_tied_embeddings = (
+            self.int4_tied_embeddings
+            and not lm_head_excluded
+            and (self.int8_lm_head or extra_options.get("int4_algo_config", "default") in {"rtn", "k_quant"})
+        )
         
         # Check if shared embeddings are used for float embeddings and lm_head
         self.shared_embeddings = extra_options.get("shared_embeddings", False)
@@ -500,34 +499,29 @@ class Model:
         int4_algo_config = None
 
         if quant_method in {"rtn", "rtn_last"}:
-            if quant_method == "rtn":
-                int4_algo_config = RTNWeightOnlyQuantConfig()
-            elif quant_method == "rtn_last":
+            if quant_method == "rtn_last":
                 customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
-                int4_algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+            int4_algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
         elif quant_method in {"k_quant", "k_quant_mixed", "k_quant_last"}:
-            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
-
-            if quant_method == "k_quant":
-                int4_algo_config = KQuantWeightOnlyQuantConfig()
-            else:
-                if quant_method == "k_quant_mixed":
-                    # k_quant_mixed is from llama.cpp.
-                    # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
-                    # We also consider some MatMuls are more senstive to quantization than other MatMuls.
-                    layers_to_exclude = [
-                        i
-                        for i in range(self.num_layers)
-                        if i < self.num_layers / 8 or i >= 7 * self.num_layers / 8 or (i - (round)(self.num_layers / 8)) % 3 == 2
-                    ]
-                    for i in layers_to_exclude:
-                        customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
-                        customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
-                        customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
-
+            if quant_method != "k_quant":
                 customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
-                int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
+
+            if quant_method == "k_quant_mixed":
+                # k_quant_mixed is from llama.cpp.
+                # Reference: https://github.com/ggml-org/llama.cpp/blob/36667c8edcded08063ed51c7d57e9e086bbfc903/src/llama-quant.cpp#L136
+                # We also consider some MatMuls are more senstive to quantization than other MatMuls.
+                layers_to_exclude = [
+                    i
+                    for i in range(self.num_layers)
+                    if i < self.num_layers / 8 or i >= 7 * self.num_layers / 8 or (i - (round)(self.num_layers / 8)) % 3 == 2
+                ]
+                for i in layers_to_exclude:
+                    customized_weight_config["/model/layers." + str(i) + "/attn/qkv_proj/MatMul"] = {"bits": 8}
+                    customized_weight_config["/model/layers." + str(i) + "/attn/v_proj/MatMul"] = {"bits": 8}
+                    customized_weight_config["/model/layers." + str(i) + "/mlp/down_proj/MatMul"] = {"bits": 8}
+
+            int4_algo_config = KQuantWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
         return int4_algo_config
 
@@ -1118,11 +1112,6 @@ class Model:
             self.make_reshape(weight_reshape_name, weight_reshape_inputs, dtype=ir.DataType.UINT8, shape=[self.vocab_size, flat_dim])
             self.make_node('GatherBlockQuantized', inputs=[weight_reshape_output, 'input_ids', 'lm_head.MatMul.weight_scale', 'lm_head.MatMul.weight_zp'], outputs=[gather_output], name=gather_name, domain="com.microsoft", bits=bits, block_size=int(self.int4_block_size), gather_axis=0, quantize_axis=1)
         elif self.shared_embeddings:
-            # Float shared embeddings (new feature)
-            # Works for: 1) Pure FP models, 2) INT4 models with LM head excluded from quantization
-            # Reference the LM head weight directly via Transpose node
-            # LM head weight is saved as [vocab_size, hidden_size] (already transposed in make_matmul_float)
-            # We need [vocab_size, hidden_size] for Gather, so we transpose back to get correct shape
             transpose_name = f"{basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
             self.make_transpose(transpose_name, "lm_head.MatMul.weight", self.io_dtype, [self.vocab_size, self.hidden_size], [1, 0])
@@ -1131,7 +1120,7 @@ class Model:
             gather_output = f"{gather_name}/output_0"
             self.make_node('Gather', inputs=[transpose_output, 'input_ids'], outputs=[gather_output], name=gather_name)
         else:
-            # Use separate embedding weights (default behavior)
+            #Default behavior: Separate emb_tokens and lmhead weights
             weight = "model.embed_tokens.weight"
             self.make_initializer(embedding, weight, to=self.io_dtype)
 
@@ -4697,7 +4686,10 @@ def get_args():
                     Use this option when you want to exclude certain nodes from being quantized.
                     Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
                 int4_algo_config = Method for int4 quantization. Default is 'default'.
-                    Currently supported options are: 'default', 'rtn', 'k_quant_mixed', 'k_quant_last'.
+                    Currently supported options are: 'default', 'rtn', 'rtn_last', 'k_quant', 'k_quant_mixed', 'k_quant_last'.
+                    rtn = RTN algorithm for int4 quantization.
+                    rtn_last = RTN algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
+                    k_quant = k_quant algorithm for int4 quantization.
                     k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
                     k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
                 int4_tied_embeddings = Enable weight sharing for quantized models (INT4/UINT4/INT8/UINT8). Default is false.
