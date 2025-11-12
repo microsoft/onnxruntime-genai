@@ -208,7 +208,7 @@ TEST(CAPITests, ChatTemplate) {
 
   // From HuggingFace Python output for 'microsoft/Phi-4-mini-instruct'
   const char* expected_output =
-      "<|system|>System message<|tool|>[{'name': 'calculate_sum', 'description': 'Calculate the sum of two numbers.', 'parameters': {'a': {'type': 'int'}, 'b': {'type': 'int'}}}]<|/tool|><|end|><|user|>"
+      "<|system|>System message<|tool|>[{\"name\": \"calculate_sum\", \"description\": \"Calculate the sum of two numbers.\", \"parameters\": {\"a\": {\"type\": \"int\"}, \"b\": {\"type\": \"int\"}}}]<|/tool|><|end|><|user|>"
       "Hello, can you call some tools for me?<|end|><|assistant|>Sure, I can calculate the sum for you!<|end|><|assistant|>";
 
   auto out_string = tokenizer->ApplyChatTemplate(chat_template, messages_json, nullptr, true);
