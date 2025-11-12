@@ -25,7 +25,6 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
     MatMulNBitsQuantizer,
     QuantFormat,
     RTNWeightOnlyQuantConfig,
-    KQuantWeightOnlyQuantConfig,
 )
 from tqdm import tqdm
 from transformers import (
@@ -504,6 +503,7 @@ class Model:
             int4_algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
         elif quant_method in {"k_quant", "k_quant_mixed", "k_quant_last"}:
+            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
             if quant_method != "k_quant":
                 customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
 
