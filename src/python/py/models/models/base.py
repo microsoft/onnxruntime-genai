@@ -2823,7 +2823,7 @@ class Model:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
 
-    def make_model(self, input_path):
+    def make_model(self, input_path, config=None):
         # Make inputs and outputs to ONNX model
         self.make_inputs_and_outputs()
 
@@ -2849,7 +2849,10 @@ class Model:
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
             model = QuantModel.from_pretrained(self.quant_type, input_path=input_path, quant_attrs=self.quant_attrs, q_size=q_size, kv_size=kv_size, intermediate_size=self.intermediate_size, num_layers=self.num_layers)
-
+        elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
+            from transformers import Qwen2_5_VLForConditionalGeneration
+            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(self.model_name_or_path, config=config, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=self.hf_remote)
+            model = model.language_model
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
@@ -2890,6 +2893,8 @@ class Model:
                     # Language modeling head (SkipLayerNorm --> logits)
                     print("Reading LM head")
                     self.make_lm_head(module)
+            else:
+                print(f"Skipping unrecognized module: {module.__class__.__name__}")
 
         del model
 

@@ -305,7 +305,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     if not config_only:
         # Make ONNX model
-        onnx_model.make_model(input_path)
+        onnx_model.make_model(input_path, config)
 
         # Save ONNX model
         onnx_model.save_model(output_dir)
