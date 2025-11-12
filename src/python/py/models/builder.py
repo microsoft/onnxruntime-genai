@@ -283,6 +283,9 @@ class Model:
             self.quant_attrs["config"] = config.quantization_config
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
 
+
+        lm_head_excluded = "/lm_head/MatMul" in self.quant_attrs["int4"]["nodes_to_exclude"]
+
         self.int4_tied_embeddings = config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False
         self.int4_tied_embeddings = extra_options.get("int4_tied_embeddings", self.int4_tied_embeddings)
         self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last", "rtn_last"}
@@ -291,10 +294,12 @@ class Model:
             # tied_embeddings lm_head.MatMul.weight_Q{}G{} only works with rtn&k_quant on 4bit
             self.int4_tied_embeddings = False
         
-        # Disable tied embeddings if LM head is excluded from quantization
-        lm_head_excluded = "/lm_head/MatMul" in self.quant_attrs["int4"]["nodes_to_exclude"]
+        # Disable int4_tied_embeddings if LM head is excluded from quantization
         if lm_head_excluded:
             self.int4_tied_embeddings = False
+        
+        # Check if shared embeddings are used for float embeddings and lm_head
+        self.shared_embeddings = extra_options.get("shared_embeddings", False)
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
@@ -1112,7 +1117,21 @@ class Model:
             # https://github.com/microsoft/onnxruntime/blob/0c9356cb986fd4cd2c5d510909d31186010ba226/onnxruntime/python/tools/quantization/neural_compressor/weight_only.py#L73
             self.make_reshape(weight_reshape_name, weight_reshape_inputs, dtype=ir.DataType.UINT8, shape=[self.vocab_size, flat_dim])
             self.make_node('GatherBlockQuantized', inputs=[weight_reshape_output, 'input_ids', 'lm_head.MatMul.weight_scale', 'lm_head.MatMul.weight_zp'], outputs=[gather_output], name=gather_name, domain="com.microsoft", bits=bits, block_size=int(self.int4_block_size), gather_axis=0, quantize_axis=1)
+        elif self.shared_embeddings:
+            # Float shared embeddings (new feature)
+            # Works for: 1) Pure FP models, 2) INT4 models with LM head excluded from quantization
+            # Reference the LM head weight directly via Transpose node
+            # LM head weight is saved as [vocab_size, hidden_size] (already transposed in make_matmul_float)
+            # We need [vocab_size, hidden_size] for Gather, so we transpose back to get correct shape
+            transpose_name = f"{basename}/Transpose"
+            transpose_output = f"{transpose_name}/output_0"
+            self.make_transpose(transpose_name, "lm_head.MatMul.weight", self.io_dtype, [self.vocab_size, self.hidden_size], [1, 0])
+            
+            gather_name = f"{basename}/Gather"
+            gather_output = f"{gather_name}/output_0"
+            self.make_node('Gather', inputs=[transpose_output, 'input_ids'], outputs=[gather_output], name=gather_name)
         else:
+            # Use separate embedding weights (default behavior)
             weight = "model.embed_tokens.weight"
             self.make_initializer(embedding, weight, to=self.io_dtype)
 
@@ -4681,8 +4700,14 @@ def get_args():
                     Currently supported options are: 'default', 'rtn', 'k_quant_mixed', 'k_quant_last'.
                     k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
                     k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
-                int4_tied_embeddings = Enable weight sharing for quantization. Default is false.
-                    Use this option when you want to share the weights in the embedding and unembedding.
+                int4_tied_embeddings = Enable weight sharing for quantized models (INT4/UINT4/INT8/UINT8). Default is false.
+                    Use this option when you want to share the quantized weights between embedding and LM head layers.
+                    Only works with rtn and k_quant quantization algorithms.
+                    Cannot be used if LM head is excluded from quantization (use shared_embeddings instead).
+                shared_embeddings = Enable weight sharing for FP16/FP32/BF16 weights. Default is false.
+                    Use this option when you want to share the float weights between embedding and LM head layers.
+                    Works for pure FP models or INT4 models where LM head is excluded from quantization.
+                    This reduces model size by eliminating duplicate weights.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model.
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
