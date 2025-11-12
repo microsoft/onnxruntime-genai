@@ -369,14 +369,14 @@ class Model:
             # Some EPs don't support packed Q/K/V for GQA yet
             # Packed MatMul with LoRA/QLoRA is not currently supported
             self.attention_attrs["use_packed_matmul"] = (
-                self.ep not in ["dml", "webgpu"]
+                self.ep not in ["dml"]
                 and not self.matmul_attrs["use_lora"]
                 and not self.attention_attrs["q_norm"]
                 and not self.attention_attrs["k_norm"]
             )
 
             # Some EPs don't support fusing rotary embeddings inside GQA yet
-            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml", "webgpu"]
+            self.attention_attrs["use_rope_in_attn"] = self.ep not in ["dml"]
             if self.attention_attrs["use_rope_in_attn"]:
                 # GQA + Rot.Emb. does not require `position_ids` as input
                 self.input_names.remove("position_ids")
@@ -464,7 +464,15 @@ class Model:
         }
 
         if self.ep == "trt-rtx" and self.window_size is not None and self.window_size > 0:
-            genai_config["model"]["decoder"]["sliding_window"] = {"window_size": self.window_size, "slide_key_value_cache": False, "slide_inputs": False}
+            # Compute layer indices that use sliding window attention
+            layer_idxs = [layer_id for layer_id in range(self.num_layers) if hasattr(self, "is_local") and self.is_local(layer_id)]
+            
+            genai_config["model"]["decoder"]["sliding_window"] = {
+                "window_size": self.window_size,
+                "slide_key_value_cache": False,
+                "slide_inputs": False,
+                "layers": layer_idxs
+            }
 
         if self.ep != "cpu":
             ep_name = self.ep.replace("trt-rtx", "NvTensorRtRtx")
@@ -474,6 +482,15 @@ class Model:
         print(f"Saving GenAI config in {out_dir}")
         with open(os.path.join(out_dir,"genai_config.json"), "w") as f:
             json.dump(genai_config, f, indent=4)
+
+    def make_key_value_cache_shape(self, layer_id, shape):
+        """
+        Modifies KV cache shape dimension names for models with alternating attention patterns.
+        For TensorRT EP with sliding window layers, replaces 'sequence' with 'sliding' in dimension name.
+        """
+        if self.ep == "trt-rtx" and hasattr(self, "is_local") and self.is_local(layer_id):
+            return [shape[0], shape[1], shape[2].replace("sequence", "sliding"), shape[3]]
+        return shape
 
     def save_processing(self, model_name_or_path, extra_kwargs, out_dir):
         tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, token=self.hf_token, trust_remote_code=self.hf_remote, **extra_kwargs)
@@ -653,15 +670,21 @@ class Model:
         for i in range(self.num_layers):
             # Add KV cache to inputs
             key_name = f"past_key_values.{i}.key"
-            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=self.input_shapes["past_key_values.key"]))
+            key_shape = self.make_key_value_cache_shape(i, self.input_shapes["past_key_values.key"])
+            inputs.append(self.make_value(key_name, dtype=self.input_types["past_key_values.key"], shape=key_shape))
+
             value_name = f"past_key_values.{i}.value"
-            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=self.input_shapes["past_key_values.value"]))
+            value_shape = self.make_key_value_cache_shape(i, self.input_shapes["past_key_values.value"])
+            inputs.append(self.make_value(value_name, dtype=self.input_types["past_key_values.value"], shape=value_shape))
 
             # Add KV cache to outputs
             key_name = f"present.{i}.key"
-            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=self.output_shapes["present.key"]))
+            key_shape = self.make_key_value_cache_shape(i, self.output_shapes["present.key"])
+            outputs.append(self.make_value(key_name, dtype=self.output_types["present.key"], shape=key_shape))
+
             value_name = f"present.{i}.value"
-            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=self.output_shapes["present.value"]))
+            value_shape = self.make_key_value_cache_shape(i, self.output_shapes["present.value"])
+            outputs.append(self.make_value(value_name, dtype=self.output_types["present.value"], shape=value_shape))
 
     def make_constant(self, name):
         # Make constant ops for 0, 1, 2, 3, etc.
@@ -2010,9 +2033,15 @@ class Model:
 
         # Unpack attention weights if needed
         self.make_attention_unpacked(layer_id, attention, root_input, **kwargs)
+        
+        # Get dtype used for MatMul ops
+        q_dtype = getattr(attention.q_proj, "weight", getattr(attention.q_proj, "bits", None))
+        k_dtype = getattr(attention.k_proj, "weight", getattr(attention.k_proj, "bits", None))
+        v_dtype = getattr(attention.v_proj, "weight", getattr(attention.v_proj, "bits", None))
+        qkv_dtype_equal = getattr(q_dtype, "dtype", q_dtype) == getattr(k_dtype, "dtype", k_dtype) == getattr(v_dtype, "dtype", v_dtype)
 
         # Make MatMul nodes
-        if self.attention_attrs["use_packed_matmul"]:
+        if self.attention_attrs["use_packed_matmul"] and qkv_dtype_equal:
             # Combine 3 MatMuls into 1 packed MatMul
             qkv_matmul_basename = f"/model/layers.{layer_id}/attn/qkv_proj/MatMul"
             qkv_matmul_name = self.make_packed_matmul(attention.q_proj, attention.k_proj, attention.v_proj, qkv_matmul_basename, root_input)
@@ -2034,7 +2063,7 @@ class Model:
         v_bias_exists = attention.v_proj.bias is not None and torch.count_nonzero(attention.v_proj.bias) > 0
         any_bias_exists = q_bias_exists or k_bias_exists or v_bias_exists
 
-        if self.attention_attrs["use_packed_matmul"] and any_bias_exists:
+        if self.attention_attrs["use_packed_matmul"] and qkv_dtype_equal and any_bias_exists:
             # Combine 3 Adds into 1 packed Add
             qkv_add_name = f"/model/layers.{layer_id}/attn/qkv_proj/Add"
             self.make_packed_add(attention.q_proj.bias, attention.k_proj.bias, attention.v_proj.bias, qkv_add_name, root_input=self.attention_attrs["q_path"])

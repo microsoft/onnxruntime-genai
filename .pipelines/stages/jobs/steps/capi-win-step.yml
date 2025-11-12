@@ -153,6 +153,15 @@ steps:
       artifactName: $(artifactName)-capi
       targetPath: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\package'
 
+  - task: PublishSymbols@2
+    displayName: 'Publish Build Symbols'
+    condition: and(succeeded(), eq(variables['build_config'], 'relwithdebinfo'))
+    inputs:
+      SymbolsFolder: '$(Build.Repository.LocalPath)\build\$(ep)\$(os)-$(arch)\RelWithDebInfo\'
+      SearchPattern: 'onnxruntime-genai*.pdb'
+      SymbolServerType: teamServices
+      SymbolExpirationInDays: 365
+
 - ${{ if eq(parameters.target, 'python') }}:
   - task: BinSkim@4
     displayName: 'Run BinSkim'

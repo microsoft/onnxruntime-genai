@@ -532,44 +532,76 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
     const auto& provider_options = *provider_options_it;
 
     if (provider_options.name == "cuda") {
-      auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
-      std::vector<const char*> keys, values;
-
-      // Memory management settings
-      const char* arena_keys[] = {"max_mem", "arena_extend_strategy", "initial_chunk_size_bytes", "max_dead_bytes_per_chunk", "initial_growth_chunk_size_bytes"};
-      size_t arena_values[] = {static_cast<size_t>(0), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1)};
-      bool use_arena_management = false;
-
-      for (auto& option : provider_options.options) {
-        auto it = std::find(std::begin(arena_keys), std::end(arena_keys), option.first);
-
-        if (it == std::end(arena_keys)) {
-          keys.emplace_back(option.first.c_str());
-          values.emplace_back(option.second.c_str());
-        } else {
-          size_t idx = std::distance(std::begin(arena_keys), it);
-          arena_values[idx] = static_cast<size_t>(std::stoull(option.second));
-          use_arena_management = true;
+      auto device_ptrs = GetOrtEnv().GetEpDevices();
+      std::vector<const OrtEpDevice*> cuda_ep_devices_ptrs;
+      for (size_t i = 0; i < device_ptrs.size(); ++i) {
+        if (device_ptrs[i]->Name() == "CUDAExecutionProvider") {
+          // The CUDAExecutionProvider library was registered with the ORT environment
+          // Avoid using the built-in CUDAExecutionProvider by using the V2 API.
+          cuda_ep_devices_ptrs.push_back(device_ptrs[i]);
+          break;
         }
       }
-      ort_provider_options->Update(keys.data(), values.data(), keys.size());
+      if (!cuda_ep_devices_ptrs.empty()) {
+        std::unordered_map<std::string, std::string> options;
+        for (auto& option : provider_options.options) {
+          options.insert(option);
+        }
 
-      // Device type determines the scoring device.
-      // Only use the primary session options to determine the device type
-      if (is_primary_session_options) {
-        p_device = GetDeviceInterface(DeviceType::CUDA);
+        // Device type determines the scoring device.
+        // Only use the primary session options to determine the device type
+        if (is_primary_session_options) {
+          p_device = GetDeviceInterface(DeviceType::CUDA);
 
-        // Create and set our cudaStream_t
-        ort_provider_options->UpdateValue("user_compute_stream", p_device->GetCudaStream());
+          // Create and set our cudaStream_t
+          void* stream_ptr = p_device->GetCudaStream();
+          std::stringstream stream_value;
+          stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
+          std::string stream_value_str = stream_value.str();
+          options.insert({"user_compute_stream", stream_value_str});
+        }
+
+        session_options.AppendExecutionProvider_V2(GetOrtEnv(), cuda_ep_devices_ptrs, options);
+      } else {
+        auto ort_provider_options = OrtCUDAProviderOptionsV2::Create();
+        std::vector<const char*> keys, values;
+
+        // Memory management settings
+        const char* arena_keys[] = {"max_mem", "arena_extend_strategy", "initial_chunk_size_bytes", "max_dead_bytes_per_chunk", "initial_growth_chunk_size_bytes"};
+        size_t arena_values[] = {static_cast<size_t>(0), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1), static_cast<size_t>(-1)};
+        bool use_arena_management = false;
+
+        for (auto& option : provider_options.options) {
+          auto it = std::find(std::begin(arena_keys), std::end(arena_keys), option.first);
+
+          if (it == std::end(arena_keys)) {
+            keys.emplace_back(option.first.c_str());
+            values.emplace_back(option.second.c_str());
+          } else {
+            size_t idx = std::distance(std::begin(arena_keys), it);
+            arena_values[idx] = static_cast<size_t>(std::stoull(option.second));
+            use_arena_management = true;
+          }
+        }
+        ort_provider_options->Update(keys.data(), values.data(), keys.size());
+
+        // Device type determines the scoring device.
+        // Only use the primary session options to determine the device type
+        if (is_primary_session_options) {
+          p_device = GetDeviceInterface(DeviceType::CUDA);
+
+          // Create and set our cudaStream_t
+          ort_provider_options->UpdateValue("user_compute_stream", p_device->GetCudaStream());
+        }
+
+        // Use fine-grained memory management of BFC Arena
+        if (use_arena_management) {
+          if (arena_cfg == nullptr) arena_cfg = OrtArenaCfg::Create(arena_keys, arena_values, 5);
+          ort_provider_options->UpdateValue("default_memory_arena_cfg", arena_cfg.get());
+        }
+
+        session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
       }
-
-      // Use fine-grained memory management of BFC Arena
-      if (use_arena_management) {
-        if (arena_cfg == nullptr) arena_cfg = OrtArenaCfg::Create(arena_keys, arena_values, 5);
-        ort_provider_options->UpdateValue("default_memory_arena_cfg", arena_cfg.get());
-      }
-
-      session_options.AppendExecutionProvider_CUDA_V2(*ort_provider_options);
     } else if (provider_options.name == "rocm") {
       OrtROCMProviderOptions ort_provider_options;
 

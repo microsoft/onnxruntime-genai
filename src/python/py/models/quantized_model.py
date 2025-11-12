@@ -863,6 +863,22 @@ class GPTQModel(QuantizedModel):
         self.pack_qzeros(temp_module)
         module.qzeros = temp_module.qzeros
 
+    def _load_quant_config(self, quant_attrs):
+        super()._load_quant_config(quant_attrs)
+        self.overrides = quant_attrs["config"].get("dynamic", {})
+
+    def get_overrides(self, layer_name):
+        for pattern, overrides in self.overrides.items():
+            if re.match(pattern.removeprefix("+:"), layer_name):
+                return overrides
+        return {}
+
+    def get_layer_bits(self, layer_name):
+        return self.get_overrides(layer_name).get("bits", self.global_bits)
+
+    def get_layer_group_size(self, layer_name):
+        return self.get_overrides(layer_name).get("group_size", self.global_group_size)
+
 class QuarkModel(QuantizedModel):
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
         super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
