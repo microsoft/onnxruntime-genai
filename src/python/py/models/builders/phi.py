@@ -1,3 +1,8 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.  See License.txt in the project root for
+# license information.
+# --------------------------------------------------------------------------
 from .base import Model
 from .mistral import MistralModel
 
@@ -28,6 +33,91 @@ class PhiModel(Model):
 
         # Assign output 0 of residual Add as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{residual_add_name}/output_0"
+
+
+class GemmaModel(MistralModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.embed_attrs["scale"] = np.round(np.sqrt(self.hidden_size), decimals=2)
+        self.layernorm_attrs["add_offset"] = 1
+
+
+class Gemma2Model(GemmaModel):
+    def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
+        super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+        self.layernorm_attrs["cast"]["use_fp32"] = True
+        self.layernorm_attrs["cast"]["root_input"] = True
+        self.layernorm_attrs["cast"]["skip_input"] = False
+        self.layernorm_attrs["cast"]["output_0"] = True
+        self.layernorm_attrs["cast"]["output_3"] = False
+        self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
+        self.is_local = lambda layer_id: layer_id % 2 == 1
+
+    def make_layernorm(self, layer_id, layernorm, skip, simple, location):
+        if "final_norm" in location:
+            # Set cast for final LayerNorm since it is a special case and not covered in `make_layer`
+            self.layernorm_attrs["cast"]["root_input"] = False
+        super().make_layernorm(layer_id, layernorm, skip, simple, location)
+
+    def make_layer(self, layer_id, layer):
+        # Gemma-2 decoder layer is typically defined as:
+        # input_layernorm --> attention --> post_attention_layernorm --> pre_ffn_layernorm --> MLP --> post_ffn_layernorm
+
+        # Adjust LayerNorm attributes because of extra LayerNorms inserted
+        # 1. Only cast root_input if the first layer of LayerNorms are being created
+        original_cast_root_input = self.layernorm_attrs["cast"]["root_input"]
+        self.layernorm_attrs["cast"]["root_input"] = self.layernorm_attrs["first_layernorm"]
+        self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
+        self.layernorm_attrs["cast"]["root_input"] = original_cast_root_input
+
+        self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
+
+        # Adjust LayerNorm attributes for extra LayerNorm to insert
+        # 1. Temporarily set root_input for LayerNorm to skip_input for post_attention_layernorm
+        # 2. Set skip_input to output of post_attention_layernorm
+        # 3. Do not cast outputs from post_attention_layernorm
+        original_root_input = self.layernorm_attrs["root_input"]
+        original_cast_output_0 = self.layernorm_attrs["cast"]["output_0"]
+        self.layernorm_attrs["root_input"] = self.layernorm_attrs["skip_input"]
+        self.layernorm_attrs["cast"]["output_0"] = False
+        self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="post_attention")
+        self.layernorm_attrs["root_input"] = original_root_input
+        self.layernorm_attrs["skip_input"] = self.layernorm_attrs["output_0"]
+        self.layernorm_attrs["cast"]["output_0"] = original_cast_output_0
+
+        # Adjust LayerNorm attributes because of extra LayerNorms inserted
+        # 1. Only cast root_input if the first layer of LayerNorms are being created
+        original_cast_root_input = self.layernorm_attrs["cast"]["root_input"]
+        self.layernorm_attrs["cast"]["root_input"] = self.layernorm_attrs["first_layernorm"]
+        self.make_layernorm(layer_id, layer.pre_feedforward_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="pre_feedforward")
+        self.layernorm_attrs["cast"]["root_input"] = original_cast_root_input
+
+        self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
+
+        # Adjust LayerNorm attributes for extra LayerNorm to insert
+        # 1. Temporarily set root_input for LayerNorm to skip_input for post_feedforward_layernorm
+        # 2. Set skip_input to output of post_feedforward_layernorm
+        # 3. Do not cast outputs from post_feedforward_layernorm
+        original_root_input = self.layernorm_attrs["root_input"]
+        original_cast_output_0 = self.layernorm_attrs["cast"]["output_0"]
+        self.layernorm_attrs["root_input"] = self.layernorm_attrs["skip_input"]
+        self.layernorm_attrs["cast"]["output_0"] = False
+        self.make_layernorm(layer_id, layer.post_feedforward_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="post_feedforward")
+        self.layernorm_attrs["root_input"] = original_root_input
+        self.layernorm_attrs["skip_input"] = self.layernorm_attrs["output_0"]
+        self.layernorm_attrs["cast"]["output_0"] = original_cast_output_0
+
+        self.layernorm_attrs["first_layernorm"] = False
+        if layer_id == self.num_layers - 1:
+            # Norm after last decoder layer of model (last layer --> norm)
+            self.layernorm_attrs["last_layernorm"] = True
+
+    def make_attention(self, layer_id, attention, root_input, **kwargs):
+        original_window_size = self.window_size
+        self.window_size = original_window_size if self.is_local(layer_id) else -1  # default is -1 in GroupQueryAttention kernel
+        super().make_attention(layer_id, attention, root_input, **kwargs)
+        self.window_size = original_window_size
+
 
 class Phi3MiniModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -76,6 +166,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
 
         basename = "/model/pos_ids_reformat"
         proto_dtype = self.input_types["position_ids"]
+        str_dtype = self.to_str_dtype(proto_dtype)
 
         # For WebGPU, use int32 for computation due to limited int64 ops support
         is_webgpu = self.extra_options.get("enable_webgpu_graph", False)

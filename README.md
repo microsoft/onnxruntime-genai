@@ -1,33 +1,49 @@
 # ONNX Runtime GenAI
 
-Note: between 0.9.0 and the 0.8.3 release, there is a breaking API change. Previously, the inputs for non-LLMs would be set with `params.SetInputs(inputs)`. Now, inputs for non-LLMs are set with `generator.SetInputs(inputs)`. With this change, inputs for all models and their modalities are set on the `generator` instead of the `generatorParams`. The inputs for LLMs are set with `generator.append_tokens(tokens)` and the inputs for non-LLMs are set with `generator.SetInputs(inputs)`.
+Note: between `v0.11.0` and `v0.10.1`, there is a breaking API usage change to improve model quality during multi-turn conversations.
+
+Previously, the decoding loop could be written as follows.
+
+```
+while not IsDone():
+    GenerateToken()
+    GetLastToken()
+    PrintLastToken()
+```
+
+In 0.11.0, the decoding loop should now be written as follows.
+
+```
+while True:
+    GenerateToken()
+    if IsDone():
+        break
+    GetLastToken()
+    PrintLastToken()
+```
+
+Please read [this PR's description](https://github.com/microsoft/onnxruntime-genai/pull/1849) for more information.
+
+## Status
 
 [![Latest version](https://img.shields.io/nuget/vpre/Microsoft.ML.OnnxRuntimeGenAI.Managed?label=latest)](https://www.nuget.org/packages/Microsoft.ML.OnnxRuntimeGenAI.Managed/absoluteLatest)
 
 [![Nightly Build](https://github.com/microsoft/onnxruntime-genai/actions/workflows/linux-cpu-x64-nightly-build.yml/badge.svg)](https://github.com/microsoft/onnxruntime-genai/actions/workflows/linux-cpu-x64-nightly-build.yml)
 
-Run generative AI models with ONNX Runtime.
+## Description
 
-This API gives you an easy, flexible and performant way of running LLMs on device. 
+Run generative AI models with ONNX Runtime. This API gives you an easy, flexible and performant way of running LLMs on device. It implements the generative AI loop for ONNX models, including pre and post processing, inference with ONNX Runtime, logits processing, search and sampling, and KV cache management.
 
-It implements the generative AI loop for ONNX models, including pre and post processing, inference with ONNX Runtime, logits processing, search and sampling, and KV cache management.
-
-See documentation at https://onnxruntime.ai/docs/genai.
+See documentation at the [ONNX Runtime website](https://onnxruntime.ai/docs/genai) for more details.
 
 |Support matrix|Supported now|Under development|On the roadmap|
 | -------------- | ------------- | ----------------- | -------------- |
-| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Gemma <br/> gpt-oss <br/> Granite <br/> Llama * <br/> Mistral + <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen <br/> SmolLM3 | Whisper | Stable diffusion |
-|API| Python <br/>C# <br/>C/C++ <br/> Java ^ |Objective-C||
-|Platform| Linux <br/> Windows <br/>Mac ^ <br/>Android ^  ||iOS |||
-|Architecture|x86 <br/> x64 <br/> Arm64 ~ ||||
-|Hardware Acceleration|CUDA<br/>DirectML<br/>NvTensorRtRtx<br/>|QNN <br/> OpenVINO <br/> ROCm |  |
-|Features|MultiLoRA <br/> Continuous decoding (session continuation)^ | Constrained decoding | Speculative decoding |
-
-\* The Llama model architecture supports similar model families such as CodeLlama, Vicuna, Yi, and more.
-
-\+ The Mistral model architecture supports similar model families such as Zephyr.
-
-\^ Requires build from source
+| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Gemma <br/> gpt-oss <br/> Granite <br/> Llama <br/> Mistral <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen <br/> SmolLM3 <br/> Whisper | Stable diffusion | Multi-modal models |
+| API| Python <br/>C# <br/>C/C++ <br/> Java ^ | Objective-C ||
+| Platform | Linux <br/> Windows <br/>Mac ^ <br/>Android ^  || iOS |||
+| Architecture | x86 <br/> x64 <br/> Arm64 ~ ||||
+| Hardware Acceleration | CPU <br/> CUDA <br/> DirectML <br/> NvTensorRtRtx (TRT-RTX) <br/> OpenVINO <br/> QNN <br/> WebGPU | | AMD GPU |
+| Features | Multi-LoRA <br/> Continuous decoding <br/> Constrained decoding | | Speculative decoding |
 
 \~ Windows builds available, requires build from source for other platforms
 
@@ -84,13 +100,14 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
 
    try:
       generator.append_tokens(input_tokens)
-      while not generator.is_done():
-        generator.generate_next_token()
-
-        new_token = generator.get_next_tokens()[0]
-        print(tokenizer_stream.decode(new_token), end='', flush=True)
+      while True:
+         generator.generate_next_token()
+         if generator.is_done():
+            break
+         new_token = generator.get_next_tokens()[0]
+         print(tokenizer_stream.decode(new_token), end='', flush=True)
    except KeyboardInterrupt:
-       print("  --control+c pressed, aborting generation--")
+         print("  --control+c pressed, aborting generation--")
 
    print()
    del generator
@@ -98,16 +115,16 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
 
 ### Choosing the Right Examples: Release vs. Main Branch
 
-Due to evolving nature of this project and ongoing feature additions, examples in the `main` branch may not always align with the latest stable release. This section outlines how to ensure compatibility between the examples and the corresponding version. Majority of the steps would remain same, just the package installation and the model example file would change.
+Due to the evolving nature of this project and ongoing feature additions, examples in the `main` branch may not always align with the latest stable release. This section outlines how to ensure compatibility between the examples and the corresponding version. The majority of the steps would remain same. Just the package installation and the model example file would change.
 
 ### Stable version
-Install the package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install). Let's say you installed 0.5.2 version of ONNX Runtime GenAI, so the instructions would look like this:
+Install the package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install). Let's say you installed the 0.10.1 version of ONNX Runtime GenAI, so the instructions would look like this:
 
 ```bash
 # Clone the repo
 git clone https://github.com/microsoft/onnxruntime-genai.git && cd onnxruntime-genai
 # Checkout the branch for the version you are using
-git checkout v0.5.2
+git checkout v0.10.1
 cd examples
 ```
 
@@ -142,7 +159,4 @@ contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additio
 ## Trademarks
 
 This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft 
-trademarks or logos is subject to and must follow 
-[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
-Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
-Any use of third-party trademarks or logos are subject to those third-party's policies.
+trademarks or logos is subject to and must follow [Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general). Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship. Any use of third-party trademarks or logos are subject to those third-party's policies.

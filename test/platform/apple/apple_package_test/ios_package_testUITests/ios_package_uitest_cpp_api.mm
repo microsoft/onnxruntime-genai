@@ -55,9 +55,13 @@
     auto generator = OgaGenerator::Create(*model, *params);
     generator->AppendTokenSequences(*sequences);
 
-    while (!generator->IsDone()) {
+    while (true) {
       generator->GenerateNextToken();
+      if (generator->IsDone()) {
+        break;
+      }
     }
+
     const auto output_sequence_length = generator->GetSequenceCount(0);
     const auto* output_sequence_data = generator->GetSequenceData(0);
     auto out_string = tokenizer->Decode(output_sequence_data, output_sequence_length);

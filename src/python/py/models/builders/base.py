@@ -1457,6 +1457,110 @@ class Model:
 
         return cos_cache_name, sin_cache_name
 
+    def make_padded_cache(self, small_cache, large_cache, pad_value=0.0):
+        """Pad small cache to match large cache shape for uniform If node branches.
+
+        This is used for TRT-RTX EP which requires uniform dimensions in both branches of If nodes.
+
+        Args:
+            small_cache: The smaller cache tensor to pad
+            large_cache: The larger cache tensor (defines target shape)
+            pad_value: Value to use for padding (1.0 for cos_cache, 0.0 for sin_cache)
+        """
+        target_shape = large_cache.shape
+        if small_cache.shape == target_shape:
+            return small_cache
+
+        # Create padded tensor filled with pad_value
+        padded_cache = torch.full(target_shape, pad_value, dtype=small_cache.dtype)
+        # Copy original data to the beginning
+        padded_cache[:small_cache.shape[0], :] = small_cache
+        return padded_cache
+
+    def _make_split_if_nodes_for_trt_rtx(self, basename, greater_name,
+                                          cos_cache_name, sin_cache_name,
+                                          cos_cache_large, sin_cache_large,
+                                          cos_cache_small, sin_cache_small,
+                                          cos_cache_large_name, sin_cache_large_name,
+                                          cos_cache_small_name, sin_cache_small_name,
+                                          small_cache_shape):
+        """Create split If nodes for TRT-RTX to workaround trt-rtx multi-output bug.
+
+        This is a TEMPORARY workaround for TRT-RTX bug where If nodes with
+        multiple outputs
+
+        Creates two separate If nodes instead of one:
+        - {basename}/cos/If: Outputs cos_cache only
+        - {basename}/sin/If: Outputs sin_cache only
+
+        Both If nodes use the same condition and independently select their respective caches.
+        """
+        cos_if_name = f"{basename}/cos/If"
+
+        cos_large_for_split = ir.node(
+            "Constant", [], outputs=[
+                ir.Value(name=f"{cos_cache_large_name}_split", type=ir.TensorType(self.io_dtype), shape=ir.Shape(cos_cache_large.shape))
+            ],
+            name=f"/large/cos_cache/Constant_split_cos", attributes=dict(value=ir.tensor(cos_cache_large)))
+
+        cos_small_for_split = ir.node(
+            "Constant", [], outputs=[
+                ir.Value(name=f"{cos_cache_small_name}_split", type=ir.TensorType(self.io_dtype), shape=ir.Shape(small_cache_shape))
+            ],
+            name=f"/small/cos_cache/Constant_split_cos", attributes=dict(value=ir.tensor(cos_cache_small)))
+
+        self.make_node(
+            "If", inputs=[f"{greater_name}/output_0"], outputs=[cos_cache_name], name=cos_if_name,
+            then_branch=ir.Graph(
+                inputs=[],
+                outputs=[cos_large_for_split.outputs[0]],
+                nodes=[cos_large_for_split],
+                name="large_cos_cache_graph",
+            ),
+            else_branch=ir.Graph(
+                inputs=[],
+                outputs=[cos_small_for_split.outputs[0]],
+                nodes=[cos_small_for_split],
+                name="small_cos_cache_graph",
+            ),
+        )
+
+        # Create separate If node for sin_cache only
+        sin_if_name = f"{basename}/sin/If"
+
+        # Create unique constant nodes for sin to avoid tensor sharing
+        sin_large_for_split = ir.node(
+            "Constant", [], outputs=[
+                ir.Value(name=f"{sin_cache_large_name}_split", type=ir.TensorType(self.io_dtype), shape=ir.Shape(sin_cache_large.shape))
+            ],
+            name=f"/large/sin_cache/Constant_split_sin", attributes=dict(value=ir.tensor(sin_cache_large)))
+
+        sin_small_for_split = ir.node(
+            "Constant", [], outputs=[
+                ir.Value(name=f"{sin_cache_small_name}_split", type=ir.TensorType(self.io_dtype), shape=ir.Shape(small_cache_shape))
+            ],
+            name=f"/small/sin_cache/Constant_split_sin", attributes=dict(value=ir.tensor(sin_cache_small)))
+
+        self.make_node(
+            "If", inputs=[f"{greater_name}/output_0"], outputs=[sin_cache_name], name=sin_if_name,
+            then_branch=ir.Graph(
+                inputs=[],
+                outputs=[sin_large_for_split.outputs[0]],
+                nodes=[sin_large_for_split],
+                name="large_sin_cache_graph",
+            ),
+            else_branch=ir.Graph(
+                inputs=[],
+                outputs=[sin_small_for_split.outputs[0]],
+                nodes=[sin_small_for_split],
+                name="small_sin_cache_graph",
+            ),
+        )
+
+        # Create output values
+        self.make_value(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+        self.make_value(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
+
     def make_rotary_embedding(self, name, root_input, **kwargs):
         cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
         num_heads = self.num_kv_heads if "k_rotary" in name else self.num_attn_heads
@@ -1495,22 +1599,55 @@ class Model:
         self.rope_attrs["save_caches"] = False
         cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
 
-        # Determine which EPs don't support the If operator
-        self.eps_without_if_support = ["dml", "trt-rtx"]
-        if self.extra_options.get("enable_webgpu_graph", False):
-            self.eps_without_if_support.append("webgpu")
-
-        if self.ep in self.eps_without_if_support:
-            # Concat small and large cos/sin caches for DML, TRT-RTX, and WebGPU (when graph enabled) EPs
-            # These EPs don't support the If operator
+        if self.ep == "dml":
+            # Concat small and large cos/sin caches for DML EP
+            # DML EP doesn't support the If operator
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
             sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
             # Save cos/sin caches to disk
             self.make_initializer(cos_cache, cos_cache_name)
             self.make_initializer(sin_cache, sin_cache_name)
-            # Do NOT make the subgraph with the If node for these EPs.
+            # Do NOT make the subgraph with the If node for DML EP.
             return
 
+        # TRT-RTX: Apply padding and create split If nodes with early return
+        if self.ep == "trt-rtx":
+            # Pad small caches to match large cache dimensions
+            # Pad cos_cache with 1s (cos(0)=1) and sin_cache with 0s (sin(0)=0)
+            cos_cache_small = self.make_padded_cache(cos_cache_small, cos_cache_large, pad_value=1.0)
+            sin_cache_small = self.make_padded_cache(sin_cache_small, sin_cache_large, pad_value=0.0)
+
+            # Create Greater condition node for If nodes
+            basename = "/model/rotemb_caches_subgraph"
+            gather_name = ""
+            if self.attention_attrs["op_type"] == "GroupQueryAttention":
+                gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather"
+            else:
+                gather_name = "/model/attn_mask_reformat/attn_mask_subgraph/Gather_2"
+
+            greater_name = f"{basename}/Greater"
+            greater_inputs = [f"{gather_name}/output_0", f"/model/constants/INT64/{self.original_context_length}"]
+            self.make_greater(greater_name, greater_inputs, shape=[])
+
+            # Create split If nodes and return early
+            self._make_split_if_nodes_for_trt_rtx(
+                basename=basename,
+                greater_name=greater_name,
+                cos_cache_name=cos_cache_name,
+                sin_cache_name=sin_cache_name,
+                cos_cache_large=cos_cache_large,
+                sin_cache_large=sin_cache_large,
+                cos_cache_small=cos_cache_small,
+                sin_cache_small=sin_cache_small,
+                cos_cache_large_name=cos_cache_large_name,
+                sin_cache_large_name=sin_cache_large_name,
+                cos_cache_small_name=cos_cache_small_name,
+                sin_cache_small_name=sin_cache_small_name,
+                small_cache_shape=cos_cache_large.shape
+            )
+            return
+
+        # For other EPs (CUDA, CPU, WebGPU), create regular If node with multiple outputs
         # Make the following subgraph to decide which cos/sin caches to use in the rotary embeddings
         #
         # attention_mask --> Shape --> Gather --> Greater --> If --> (cos_cache, sin_cache)
@@ -1549,6 +1686,8 @@ class Model:
                 ir.Value(name=sin_cache_small_name, type=ir.TensorType(self.io_dtype), shape=ir.Shape(sin_cache_small.shape))
             ],
             name="/small/sin_cache/Constant", attributes=dict(value=ir.tensor(sin_cache_small)))
+
+        # Create single If node with multiple outputs
         self.make_node(
             "If", inputs=[f"{greater_name}/output_0"], outputs=[cos_cache_name, sin_cache_name], name=if_name,
             then_branch=ir.Graph(
@@ -1564,7 +1703,6 @@ class Model:
                 name="large_rotemb_caches_graph",
             ),
             else_branch=ir.Graph(
-
                 inputs=[],
                 outputs=[
                     cos_cache_small_node.outputs[0],

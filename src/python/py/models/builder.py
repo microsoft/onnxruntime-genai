@@ -2,8 +2,6 @@
 # Copyright (c) Microsoft Corporation.  All rights reserved.
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
-#
-# Copyright(C) 2024 Advanced Micro Devices, Inc. All rights reserved.
 # --------------------------------------------------------------------------
 """
 Run the model builder to create the desired ONNX model.
@@ -20,7 +18,7 @@ from transformers import (
     AutoConfig,
 )
 
-from models import (
+from builders import (
     ChatGLMModel,
     ErnieModel,
     Gemma2Model,

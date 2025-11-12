@@ -82,12 +82,16 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     generator->AppendTokenSequences(*sequences);
 
     try {
-      while (!generator->IsDone()) {
+      while (true) {
         generator->GenerateNextToken();
 
         if (is_first_token) {
           timing.RecordFirstTokenTimestamp();
           is_first_token = false;
+        }
+
+        if (generator->IsDone()) {
+          break;
         }
 
         const auto num_tokens = generator->GetSequenceCount(0);
