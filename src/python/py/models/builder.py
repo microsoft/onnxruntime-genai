@@ -41,6 +41,7 @@ from models import (
     Phi3VModel,
     Phi4MMModel,
     PhiModel,
+    Qwen25VLModel,
     Qwen3Model,
     QwenModel,
     SmolLM3Model,
@@ -294,6 +295,8 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
+        onnx_model = Qwen25VLModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config_only:
         # Create base Model class to guess model attributes
         onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
