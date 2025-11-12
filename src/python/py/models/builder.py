@@ -20,7 +20,7 @@ from transformers import (
     AutoConfig,
 )
 
-from models import (
+from builders import (
     ChatGLMModel,
     ErnieModel,
     Gemma2Model,
@@ -296,6 +296,10 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
+        extra_options["exclude_embeds"] = True
         onnx_model = Qwen25VLModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config_only:
         # Create base Model class to guess model attributes

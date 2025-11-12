@@ -184,7 +184,6 @@ class Model:
         # RotaryEmbedding-specific variables
         position_scale = config.rope_position_scale if hasattr(config, "rope_position_scale") else 1
         partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
-        #TODO: {'type': 'default', 'mrope_section': [16, 24, 24], 'rope_type': 'default'}
         rotemb_dim = int(self.head_size * partial_rotary_factor) if partial_rotary_factor != 1.0 else 0
         rope_theta = config.rope_theta if hasattr(config, "rope_theta") else config.rope_embedding_base if hasattr(config, "rope_embedding_base") else 10000
         self.rope_attrs = {
@@ -360,6 +359,11 @@ class Model:
                 "factor": factor,
                 "ntk_alpha": beta_slow,
                 "ntk_beta": beta_fast,
+            }
+        elif "mrope_section" in config.rope_scaling:
+            # For models that use MRoPE (e.g. Qwen 2.5 VL)
+            self.rope_attrs["mrope"] = {
+                "sections": config.rope_scaling["mrope_section"],  # Sections for MRoPE
             }
 
     def make_attention_init(self):
@@ -2849,10 +2853,6 @@ class Model:
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
             model = QuantModel.from_pretrained(self.quant_type, input_path=input_path, quant_attrs=self.quant_attrs, q_size=q_size, kv_size=kv_size, intermediate_size=self.intermediate_size, num_layers=self.num_layers)
-        elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
-            from transformers import Qwen2_5_VLForConditionalGeneration
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(self.model_name_or_path, config=config, cache_dir=self.cache_dir, token=self.hf_token, trust_remote_code=self.hf_remote)
-            model = model.language_model
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
