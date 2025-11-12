@@ -215,9 +215,13 @@ do
     using var generator = new Generator(model, generatorParams);
     generator.SetInputs(inputTensors);
     var watch = System.Diagnostics.Stopwatch.StartNew();
-    while (!generator.IsDone())
+    while (true)
     {
         generator.GenerateNextToken();
+        if (generator.IsDone())
+        {
+            break;
+        }
         Console.Write(stream.Decode(generator.GetNextTokens()[0]));
     }
     watch.Stop();

@@ -80,8 +80,11 @@ TEST(ModelTests, GreedySearchGptFp32) {
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
 
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   // Verify outputs match expected outputs
@@ -121,8 +124,11 @@ TEST(ModelTests, BeamSearchGptFp32) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   // Verify outputs match expected outputs
@@ -155,8 +161,11 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
 
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   // Verify outputs match expected outputs
@@ -177,8 +186,11 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
 
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   // Verify outputs match expected outputs
@@ -189,8 +201,11 @@ void Test_GreedySearch_Gpt_Cuda(const char* model_path, const char* model_label)
   generator->RewindTo(3);
   std::vector<int32_t> next_ids{731, 731};
   generator->AppendTokens(next_ids);
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   // Verify outputs match expected outputs
@@ -232,8 +247,11 @@ void Test_BeamSearch_Gpt_Cuda(const char* model_path, const char* model_label) {
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   // Verify outputs match expected outputs
@@ -281,8 +299,11 @@ void Test_GreedySearch_Phi3_NvTensorRtRtx(const char* model_path, const char* mo
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
 
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   // Verify outputs match expected outputs
@@ -331,8 +352,11 @@ void Test_OutOfPlaceKvCache_Phi3_NvTensorRtRtx(const char* model_path, const cha
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(input_ids);
 
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   auto sequence = generator->GetSequence(0);
@@ -370,8 +394,11 @@ Print all primes between 1 and n
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(tokens->Get(0));
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   auto result = generator->GetSequence(0);
@@ -401,8 +428,11 @@ Print all primes between 1 and n
 
   auto generator = OgaGenerator::Create(*model, *params);
   generator->AppendTokens(tokens->Get(0));
-  while (!generator->IsDone()) {
+  while (true) {
     generator->GenerateNextToken();
+    if (generator->IsDone()) {
+      break;
+    }
   }
 
   auto result = generator->GetSequence(0);
