@@ -171,7 +171,7 @@ do
     while (!generator.IsDone())
     {
         generator.GenerateNextToken();
-        Console.Write(stream.Decode(generator.GetSequence(0)[^1]));
+        Console.Write(stream.Decode(generator.GetNextTokens()[0]));
     }
     watch.Stop();
     var runTimeInSeconds = watch.Elapsed.TotalSeconds;

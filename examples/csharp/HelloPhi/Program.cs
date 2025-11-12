@@ -154,7 +154,7 @@ if (option == 1 || option == 2)
             while (!generator.IsDone())
             {
                 generator.GenerateNextToken();
-                Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
+                Console.Write(tokenizerStream.Decode(generator.GetNextTokens()[0]));
             }
             Console.WriteLine();
             watch.Stop();
@@ -191,7 +191,7 @@ if (option == 3) // Streaming Chat
         while (!generator.IsDone())
         {
             generator.GenerateNextToken();
-            Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
+            Console.Write(tokenizerStream.Decode(generator.GetNextTokens()[0]));
         }
         Console.WriteLine();
         watch.Stop();
