@@ -107,10 +107,15 @@ set(ORT_PACKAGE_LIB_DIR ${JAVA_NATIVE_LIB_DIR}/ai/onnxruntime/native/${JAVA_OS_A
 file(MAKE_DIRECTORY ${ORT_PACKAGE_LIB_DIR})
 
 # Add the native genai library to the native-lib dir
-add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
-                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                      $<TARGET_FILE:onnxruntime-genai>
-                      ${JAVA_PACKAGE_LIB_DIR}/$<TARGET_FILE_NAME:onnxruntime-genai>)
+if(WIN32)
+  add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
+                      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_FILE_NAME:onnxruntime-genai> ${JAVA_PACKAGE_LIB_DIR})
+else()
+  add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
+                      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        $<TARGET_LINKER_FILE:onnxruntime-genai> ${JAVA_PACKAGE_LIB_DIR})
+endif()
 
 # Add the JNI bindings to the native-jni dir
 add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
