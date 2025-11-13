@@ -121,14 +121,34 @@ class Qwen25VLModel(QwenModel):
         
         head_dim_half = self.head_size // 2
 
-        # Expand inv_freq: [H/2] -> [3, 1, H/2, 1]
+        # Get Batch Size from position_ids.shape[1]
+        shape_pos_ids_name = f"{basename}/shape_pos_ids"
+        shape_pos_ids_output = f"{shape_pos_ids_name}/output_0"
+        self.make_shape(shape_pos_ids_name, pos_ids_name, [3])
+
+        gather_batch_size_name = f"{basename}/gather_batch_size"
+        gather_batch_size_output = f"{gather_batch_size_name}/output_0"
+        self.make_gather(gather_batch_size_name, [shape_pos_ids_output, "/model/constants/INT64/[1]"], ir.DataType.INT64, [1], axis=0)
+        
+        # Expand inv_freq: [H/2] -> [1, 1, H/2, 1]
         unsqueeze_1_name = f"{basename}/inv_freq_unsqueeze_1"
         unsqueeze_1_output = f"{unsqueeze_1_name}/output_0"
         self.make_unsqueeze(unsqueeze_1_name, [inv_freq_name, "/model/constants/INT64/[0, 1, 3]"], ir.DataType.FLOAT, [1, 1, head_dim_half, 1])
         
+        # Create target shape for Expand: [3, B, H/2, 1]
+        concat_expand_shape_name = f"{basename}/concat_expand_shape"
+        concat_expand_shape_output = f"{concat_expand_shape_name}/output_0"
+        self.make_concat(
+            concat_expand_shape_name,
+            ["/model/constants/INT64/[3]", gather_batch_size_output, f"/model/constants/INT64/[{head_dim_half}, 1]"],
+            ir.DataType.INT64,
+            [4],
+            axis=0
+        )
+        
         expand_name = f"{basename}/inv_freq_expand"
         expand_output = f"{expand_name}/output_0"
-        self.make_expand(expand_name, [unsqueeze_1_output, f"/model/constants/INT64/[3, 1, {head_dim_half}, 1]"], ir.DataType.FLOAT, [3, 1, head_dim_half, 1])
+        self.make_expand(expand_name, [unsqueeze_1_output, concat_expand_shape_output], ir.DataType.FLOAT, [3, "batch_size", head_dim_half, 1])
         
         # Expand position_ids: [3, B, S] -> [3, B, 1, S]
         unsqueeze_2_name = f"{basename}/pos_ids_unsqueeze"
@@ -140,7 +160,7 @@ class Qwen25VLModel(QwenModel):
         cast_output = f"{cast_name}/output_0"
         self.make_cast(cast_name, unsqueeze_2_output, ir.DataType.FLOAT, [3, "batch_size", 1, "sequence_length"])
 
-        # MatMul: [3, 1, H/2, 1] @ [3, B, 1, S] -> [3, B, H/2, S]
+        # MatMul: [3, B, H/2, 1] @ [3, B, 1, S] -> [3, B, H/2, S]
         matmul_name = f"{basename}/freqs_matmul"
         matmul_output = f"{matmul_name}/output_0"
         self.make_node("MatMul", [expand_output, cast_output], [matmul_output], name=matmul_name)

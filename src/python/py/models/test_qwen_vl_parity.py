@@ -8,11 +8,12 @@ from typing import Tuple, Dict, Any, List
 
 # --- Configuration ---
 
-# Set to torch.bfloat16 or torch.float16 based on your model export
-# config.json shows "torch_dtype": "bfloat16", so we default to that.
-TORCH_DTYPE = torch.bfloat16 
+# Set this to match the precision of your ONNX model export.
+# For a fp32 ONNX model, this MUST be torch.float32.
+TORCH_DTYPE = torch.float32 
 
-# Tolerances for numerical comparison. BF16/FP16 require higher tolerances.
+# Tolerances for numerical comparison.
+# FP32 allows for much tighter tolerances.
 RTOL = 1e-2
 ATOL = 1e-2
 
@@ -21,7 +22,7 @@ ATOL = 1e-2
 def to_numpy(tensor):
     """Move tensor to CPU and convert to numpy, handling bf16."""
     if tensor.dtype == torch.bfloat16:
-        # FIX: NumPy doesn't support bfloat16, so cast to float32 first
+        # NumPy doesn't support bfloat16, so cast to float32 first
         return tensor.detach().cpu().to(torch.float32).numpy()
     return tensor.detach().cpu().numpy()
 
@@ -39,7 +40,10 @@ def get_ort_inputs_and_names(
     """Creates the complete dictionary of inputs required by the ONNX model."""
     
     global TORCH_DTYPE # Access global dtype
+    
+    # We create dummy pasts on the correct device and dtype
     if device == "cpu" and TORCH_DTYPE == torch.bfloat16:
+        # This case should not be hit now, but good to keep
         model_dtype = torch.float32
     else:
         model_dtype = TORCH_DTYPE
@@ -135,9 +139,9 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
     global TORCH_DTYPE # Use global dtype
     torch_dtype = TORCH_DTYPE
     
-    if device == "cpu" and TORCH_DTYPE == torch.bfloat16:
-        print("Warning: CPU does not support bfloat16. Testing with float32.")
-        torch_dtype = torch.float32 # Override for CPU
+    # if device == "cpu" and TORCH_DTYPE == torch.bfloat16:
+    #     print("Warning: CPU does not support bfloat16. Testing with float32.")
+    #     torch_dtype = torch.float32 # Override for CPU
         
     
     hf_full_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
