@@ -16,7 +16,6 @@ class Qwen3Model(QwenModel):
         super().make_attention_init()
 
 class Qwen25VLModel(QwenModel):
-    """Qwen 2.5 VL Text Model with 3D MRoPE support."""
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         # We must extract the text_config for the text model's parameters
         text_config_dict = config.text_config.to_dict()
@@ -33,6 +32,24 @@ class Qwen25VLModel(QwenModel):
         config.rope_scaling = text_config_dict["rope_scaling"]
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # Manually get the attention_scaling from the rope_config
+        # This replicates the logic from transformers.models.rope_utils._config_to_init_values
+        rope_type = "default"
+        if config.rope_scaling and "type" in config.rope_scaling:
+            # The config re-maps 'mrope' to 'default'
+            if config.rope_scaling["type"] != "mrope":
+                rope_type = config.rope_scaling["type"]
+        
+        if rope_type == "yarn":
+            factor = config.rope_scaling.get("factor", 1.0)
+            self.rope_attrs["attention_scaling"] = config.rope_scaling.get("attention_factor", (0.1 * torch.log(torch.tensor(factor)) + 1.0).item())
+        elif rope_type == "longrope":
+            factor = config.rope_scaling.get("factor", 1.0)
+            orig_max_pos = config.original_max_position_embeddings
+            self.rope_attrs["attention_scaling"] = config.rope_scaling.get("attention_factor", torch.sqrt(1 + torch.log(torch.tensor(factor)) / torch.log(torch.tensor(orig_max_pos))).item())
+        else:
+             self.rope_attrs["attention_scaling"] = 1.0
         
         # Qwen 2.5 VL applies RoPE manually before attention, not fused in the op
         self.attention_attrs["use_rope_in_attn"] = False
@@ -49,11 +66,40 @@ class Qwen25VLModel(QwenModel):
              # The sum (128) should now correctly match self.head_size (128)
              raise ValueError(f"MRoPE splits {self.mrope_splits} sum ({sum(self.mrope_splits)}) does not match head size ({self.head_size})")
 
-        # Force GroupQueryAttention as base.py's make_attention_init doesn't include this combo.
-        # The MHA op does not support GQA (different Q/K/V dims), but the GQA op does.
-        self.attention_attrs["op_type"] = "GroupQueryAttention"
-        print("Forcing GroupQueryAttention (GQA) for FP32 CUDA.")
+        # FIX: Force GroupQueryAttention for fp32 cuda,
+        # as base.py's make_attention_init doesn't include this combo.
+        # The MHA op does not support GQA (different Q/K/V dims), 
+        # but the GQA op does.
+        if self.ep == "cuda" and self.io_dtype == ir.DataType.FLOAT:
+            self.attention_attrs["op_type"] = "GroupQueryAttention"
+            print("Forcing GroupQueryAttention (GQA) for FP32 CUDA.")
         
+        if self.attention_attrs["op_type"] != "GroupQueryAttention":
+             raise ValueError(f"Qwen2.5-VL requires GroupQueryAttention, but op_type is {self.attention_attrs['op_type']}. This may be due to an unsupported EP/precision combo.")
+
+        # Create and save the inv_freq tensor
+        self.make_inv_freq_tensor()
+
+    def make_inv_freq_tensor(self):
+        """
+        Calculates and saves the `inv_freq` tensor as an initializer.
+        This is copied from base.py:make_rotary_embedding_caches_from_scratch
+        """
+        dim = int(self.rope_attrs["partial_rotary_factor"] * self.head_size)
+        inv_freq = 1.0 / (self.rope_attrs["rescale_factors"] * (self.rope_attrs["theta"] ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim)))
+        
+        # This model doesn't use rescale_inv_freq, so we don't call that helper
+        
+        # The HF model expects H/2, not R/2
+        if dim != self.head_size:
+             print(f"Warning: partial_rotary_factor ({self.rope_attrs['partial_rotary_factor']}) is not 1. This might be unsupported.")
+             # slice if needed
+             inv_freq = inv_freq[:(self.head_size // 2)]
+        
+        self.make_initializer(inv_freq, "model.inv_freq", to=ir.DataType.FLOAT)
+        print("Created and saved 'model.inv_freq' initializer.")
+
+
     def make_inputs_and_outputs(self):
         # Qwen 2.5 VL uses 3D position IDs: [3, batch_size, sequence_length]
         # for temporal, height, and width dimensions.
@@ -62,29 +108,119 @@ class Qwen25VLModel(QwenModel):
         # Call the base Model's make_inputs_and_outputs (skipping MistralModel's)
         super(QwenModel, self).make_inputs_and_outputs()
 
-    def apply_mrope(self, layer_id, root_input, cos_cache, sin_cache, num_heads, head_dim, basename):
+    def make_dynamic_rope_caches(self, layer_id, basename):
         """
-        Applies the 3D MRoPE logic to a Q or K tensor.
-        This replicates the logic of `apply_multimodal_rotary_pos_emb`.
+        Re-implements Qwen2_5_VLRotaryEmbedding.forward using ONNX ops.
+        Takes 3D position_ids and inv_freq and dynamically creates
+        the cos/sin caches.
+        """
+        # [3, B, S]
+        pos_ids_name = "position_ids" 
+        # [H/2]
+        inv_freq_name = "model.inv_freq"
+        
+        head_dim_half = self.head_size // 2
+
+        # Expand inv_freq: [H/2] -> [3, 1, H/2, 1]
+        unsqueeze_1_name = f"{basename}/inv_freq_unsqueeze_1"
+        unsqueeze_1_output = f"{unsqueeze_1_name}/output_0"
+        self.make_unsqueeze(unsqueeze_1_name, [inv_freq_name, "/model/constants/INT64/[0, 1, 3]"], ir.DataType.FLOAT, [1, 1, head_dim_half, 1])
+        
+        expand_name = f"{basename}/inv_freq_expand"
+        expand_output = f"{expand_name}/output_0"
+        self.make_expand(expand_name, [unsqueeze_1_output, f"/model/constants/INT64/[3, 1, {head_dim_half}, 1]"], ir.DataType.FLOAT, [3, 1, head_dim_half, 1])
+        
+        # Expand position_ids: [3, B, S] -> [3, B, 1, S]
+        unsqueeze_2_name = f"{basename}/pos_ids_unsqueeze"
+        unsqueeze_2_output = f"{unsqueeze_2_name}/output_0"
+        self.make_unsqueeze(unsqueeze_2_name, [pos_ids_name, "/model/constants/INT64/[2]"], ir.DataType.INT64, [3, "batch_size", 1, "sequence_length"])
+        
+        # Cast position_ids to float
+        cast_name = f"{basename}/pos_ids_cast"
+        cast_output = f"{cast_name}/output_0"
+        self.make_cast(cast_name, unsqueeze_2_output, ir.DataType.FLOAT, [3, "batch_size", 1, "sequence_length"])
+
+        # MatMul: [3, 1, H/2, 1] @ [3, B, 1, S] -> [3, B, H/2, S]
+        matmul_name = f"{basename}/freqs_matmul"
+        matmul_output = f"{matmul_name}/output_0"
+        self.make_node("MatMul", [expand_output, cast_output], [matmul_output], name=matmul_name)
+        self.make_value(matmul_output, ir.DataType.FLOAT, [3, "batch_size", head_dim_half, "sequence_length"])
+
+        # Transpose: [3, B, H/2, S] -> [3, B, S, H/2]
+        transpose_name = f"{basename}/freqs_transpose"
+        transpose_output = f"{transpose_name}/output_0"
+        self.make_transpose(transpose_name, matmul_output, ir.DataType.FLOAT, [3, "batch_size", "sequence_length", head_dim_half], perm=[0, 1, 3, 2])
+
+        # Concat (freqs, freqs): [3, B, S, H/2] -> [3, B, S, H]
+        concat_name = f"{basename}/emb_concat"
+        concat_output = f"{concat_name}/output_0"
+        self.make_concat(concat_name, [transpose_output, transpose_output], ir.DataType.FLOAT, [3, "batch_size", "sequence_length", self.head_size], axis=-1)
+
+        # Cos(emb) and Sin(emb)
+        cos_name = f"{basename}/cos"
+        cos_output = f"{cos_name}/output_0"
+        self.make_node("Cos", [concat_output], [cos_output], name=cos_name)
+        self.make_value(cos_output, ir.DataType.FLOAT, [3, "batch_size", "sequence_length", self.head_size])
+        
+        sin_name = f"{basename}/sin"
+        sin_output = f"{sin_name}/output_0"
+        self.make_node("Sin", [concat_output], [sin_output], name=sin_name)
+        self.make_value(sin_output, ir.DataType.FLOAT, [3, "batch_size", "sequence_length", self.head_size])
+
+        # Apply attention_scaling
+        cos_final_output = cos_output
+        sin_final_output = sin_output
+        scale = self.rope_attrs.get("attention_scaling", 1.0) # Get from rope_attrs
+
+        if scale != 1.0:
+            scale_const_name = f"/model/constants/FLOAT/{scale}"
+            
+            cos_mul_name = f"{basename}/cos_mul_scale"
+            cos_final_output = f"{cos_mul_name}/output_0"
+            self.make_node("Mul", [cos_output, scale_const_name], [cos_final_output], name=cos_mul_name)
+            self.make_value(cos_final_output, ir.DataType.FLOAT, [3, "batch_size", "sequence_length", self.head_size])
+
+            sin_mul_name = f"{basename}/sin_mul_scale"
+            sin_final_output = f"{sin_mul_name}/output_0"
+            self.make_node("Mul", [sin_output, scale_const_name], [sin_final_output], name=sin_mul_name)
+            self.make_value(sin_final_output, ir.DataType.FLOAT, [3, "batch_size", "sequence_length", self.head_size])
+
+        return cos_final_output, sin_final_output
+    
+    def rotate_half(self, x_name, x_shape, basename):
+        """
+        Builds ONNX nodes for rotate_half(x)
+        x_shape is [B, N, S, H]
+        """
+        # Split: [B, N, S, H] -> [B, N, S, H/2], [B, N, S, H/2]
+        split_name = f"{basename}/rotate_half/Split"
+        split_output_0 = f"{split_name}/output_0"
+        split_output_1 = f"{split_name}/output_1"
+        self.make_node("Split", [x_name], [split_output_0, split_output_1], name=split_name, axis=-1, num_outputs=2)
+        half_shape = x_shape[:-1] + [x_shape[-1] // 2]
+        self.make_value(split_output_0, self.io_dtype, half_shape)
+        self.make_value(split_output_1, self.io_dtype, half_shape)
+        
+        # Negate x2
+        neg_name = f"{basename}/rotate_half/Neg"
+        neg_output = f"{neg_name}/output_0"
+        self.make_node("Neg", [split_output_1], [neg_output], name=neg_name)
+        self.make_value(neg_output, self.io_dtype, half_shape)
+        
+        # Concat (-x2, x1)
+        concat_name = f"{basename}/rotate_half/Concat"
+        concat_output = f"{concat_name}/output_0"
+        self.make_concat(concat_name, [neg_output, split_output_0], self.io_dtype, x_shape, axis=-1)
+        
+        return concat_output
+
+    def apply_mrope_rotation(self, layer_id, q_or_k_path, q_or_k_shape, dyn_cos, dyn_sin, num_heads, basename):
+        """
+        Re-implements apply_multimodal_rotary_pos_emb using ONNX ops.
+        Takes Q/K tensor and the dynamically generated 3D caches
+        and applies the rotation.
         """
         
-        # root_input shape: [B, S, NumHeads * HeadDim]
-        
-        # Reshape to [B, S, NumHeads, HeadDim]
-        reshape_1_name = f"{basename}/Reshape_1"
-        reshape_1_output = f"{reshape_1_name}/output_0"
-        self.make_reshape(reshape_1_name, 
-                          [root_input, f"/model/constants/INT64/[0, 0, {num_heads}, {head_dim}]"],
-                          dtype=self.io_dtype, 
-                          shape=["batch_size", "sequence_length", num_heads, head_dim])
-
-        # Transpose to [B, NumHeads, S, HeadDim] to match RotaryEmbedding op spec
-        transpose_1_name = f"{basename}/Transpose_1"
-        transpose_1_output = f"{transpose_1_name}/output_0"
-        self.make_transpose(transpose_1_name, reshape_1_output, self.io_dtype, 
-                            shape=["batch_size", num_heads, "sequence_length", head_dim], 
-                            perm=[0, 2, 1, 3]) # Swap S (1) and N (2)
-
         # Create a Constant node for mrope_splits
         # This holds the correct splits, e.g., [16, 24, 24, 16, 24, 24]
         mrope_splits_node_name = f"{basename}/mrope_splits_node"
@@ -102,120 +238,118 @@ class Qwen25VLModel(QwenModel):
         )
         self.make_value(mrope_splits_output_name, ir.DataType.INT64, [len(self.mrope_splits)])
         
-        # Split into 6 parts
-        split_name = f"{basename}/Split"
-        num_splits = len(self.mrope_splits) # This is 6
-        split_outputs = [f"{split_name}/output_{i}" for i in range(num_splits)]
-        split_inputs = [transpose_1_output, mrope_splits_output_name]
-        self.make_node("Split", split_inputs, split_outputs, name=split_name, axis=-1)
+        # Split the dynamic caches [3, B, S, H] into 6 chunks on axis -1
+        num_splits = len(self.mrope_splits)
         
-        for i, shape_dim in enumerate(self.mrope_splits):
-            self.make_value(split_outputs[i], self.io_dtype, ["batch_size", num_heads, "sequence_length", shape_dim])
+        cos_split_name = f"{basename}/cos_split"
+        cos_split_outputs = [f"{cos_split_name}/output_{i}" for i in range(num_splits)]
+        self.make_node("Split", [dyn_cos, mrope_splits_output_name], cos_split_outputs, name=cos_split_name, axis=-1)
 
-        # Get the 3 position_ids (Temporal, Height, Width)
-        # This list will have 3 elements: [pos_t, pos_h, pos_w]
-        pos_id_names = []
-        for i, dim_name in enumerate(["temporal", "height", "width"]):
-            # Slice to get [1, B, S]
-            slice_name = f"{basename}/position_ids_slice_{dim_name}"
-            slice_output = f"{slice_name}/output_0"
-            slice_inputs = [
-                "position_ids",
-                f"/model/constants/INT64/[{i}]",   # start
-                f"/model/constants/INT64/[{i+1}]", # end
-                "/model/constants/INT64/[0]"    # axes
-            ]
-            self.make_slice(slice_name, slice_inputs, dtype=ir.DataType.INT64, shape=[1, "batch_size", "sequence_length"])
-            
-            # Squeeze to [B, S]
-            squeeze_name = f"{basename}/position_ids_squeeze_{dim_name}"
-            squeeze_output = f"{squeeze_name}/output_0"
-            self.make_squeeze(squeeze_name, [slice_output, "/model/constants/INT64/[0]"], dtype=ir.DataType.INT64, shape=["batch_size", "sequence_length"])
-            pos_id_names.append(squeeze_output)
-
-        # Apply RotaryEmbedding to each split using its corresponding position_id
-        rotated_splits = []
-        cache_offset = 0
-        # Loop 6 times
+        sin_split_name = f"{basename}/sin_split"
+        sin_split_outputs = [f"{sin_split_name}/output_{i}" for i in range(num_splits)]
+        self.make_node("Split", [dyn_sin, mrope_splits_output_name], sin_split_outputs, name=sin_split_name, axis=-1)
+        
+        # Re-order the caches: [T, H, W, T, H, W]
+        # We pick from the 3 dimensions of the cache using i % 3
+        cos_reordered = []
+        sin_reordered = []
         for i in range(num_splits):
             dim_chunk = self.mrope_splits[i]
-            cache_dim_chunk = dim_chunk // 2
+            cache_dim_to_use = i % 3 # 0 for T, 1 for H, 2 for W
             
-            # FIX: Slice the main cache to match the head_size of this chunk
-            cache_start_offset = cache_offset
-            cache_end_offset = cache_start_offset + cache_dim_chunk
+            # Gather from dim 0 of the split cache chunk
+            # input is [3, B, S, H_chunk], indices is [0, 1, or 2]
+            gather_cos_name = f"{basename}/cos_gather_{i}"
+            gather_cos_output = f"{gather_cos_name}/output_0"
+            self.make_node("Gather", [cos_split_outputs[i], f"/model/constants/INT64/[{cache_dim_to_use}]"], [gather_cos_output], name=gather_cos_name, axis=0)
+            self.make_value(gather_cos_output, ir.DataType.FLOAT, [1, "batch_size", "sequence_length", dim_chunk]) # Shape [1, B, S, H_chunk]
             
-            # Slice cos_cache
-            cos_slice_name = f"{basename}/cos_cache_slice_{i}"
-            cos_slice_output = f"{cos_slice_name}/output_0"
-            cos_slice_inputs = [
-                cos_cache,
-                f"/model/constants/INT64/[{cache_start_offset}]", # start
-                f"/model/constants/INT64/[{cache_end_offset}]",   # end
-                "/model/constants/INT64/[1]"                      # axes (axis 1)
-            ]
-            self.make_slice(cos_slice_name, cos_slice_inputs, self.io_dtype, shape=["max_sequence_length", cache_dim_chunk])
+            gather_sin_name = f"{basename}/sin_gather_{i}"
+            gather_sin_output = f"{gather_sin_name}/output_0"
+            self.make_node("Gather", [sin_split_outputs[i], f"/model/constants/INT64/[{cache_dim_to_use}]"], [gather_sin_output], name=gather_sin_name, axis=0)
+            self.make_value(gather_sin_output, ir.DataType.FLOAT, [1, "batch_size", "sequence_length", dim_chunk]) # Shape [1, B, S, H_chunk]
 
-            # Slice sin_cache
-            sin_slice_name = f"{basename}/sin_cache_slice_{i}"
-            sin_slice_output = f"{sin_slice_name}/output_0"
-            sin_slice_inputs = [
-                sin_cache,
-                f"/model/constants/INT64/[{cache_start_offset}]", # start
-                f"/model/constants/INT64/[{cache_end_offset}]",   # end
-                "/model/constants/INT64/[1]"                      # axes (axis 1)
-            ]
-            self.make_slice(sin_slice_name, sin_slice_inputs, self.io_dtype, shape=["max_sequence_length", cache_dim_chunk])
+            # FIX: Squeeze the gathered cache to [B, S, H_chunk]
+            squeeze_cos_name = f"{basename}/cos_squeeze_{i}"
+            squeeze_cos_output = f"{squeeze_cos_name}/output_0"
+            self.make_squeeze(squeeze_cos_name, [gather_cos_output, "/model/constants/INT64/[0]"], ir.DataType.FLOAT, ["batch_size", "sequence_length", dim_chunk])
 
-            # Update offset for next iteration
-            cache_offset = cache_end_offset
+            squeeze_sin_name = f"{basename}/sin_squeeze_{i}"
+            squeeze_sin_output = f"{squeeze_sin_name}/output_0"
+            self.make_squeeze(squeeze_sin_name, [gather_sin_output, "/model/constants/INT64/[0]"], ir.DataType.FLOAT, ["batch_size", "sequence_length", dim_chunk])
             
-            rotary_name = f"{basename}/RotaryEmbedding_{i}"
-            rotary_output = f"{rotary_name}/output_0"
+            # Unsqueeze to add the NumHeads dim: [B, 1, S, H_chunk]
+            unsqueeze_cos_name = f"{basename}/cos_unsqueeze_{i}"
+            unsqueeze_cos_output = f"{unsqueeze_cos_name}/output_0"
+            self.make_unsqueeze(unsqueeze_cos_name, [squeeze_cos_output, "/model/constants/INT64/[1]"], ir.DataType.FLOAT, ["batch_size", 1, "sequence_length", dim_chunk])
+            cos_reordered.append(unsqueeze_cos_output)
             
-            # Use i % 3 to cycle through the 3 position_id tensors (T, H, W)
-            pos_id_to_use = pos_id_names[i % 3]
-            
-            rotary_inputs = [
-                split_outputs[i],   # Input shape [B, N, S, H_split]
-                pos_id_to_use,      # Position ID shape [B, S]
-                cos_slice_output,   # Sliced cos_cache shape [MaxSeq, H_split/2]
-                sin_slice_output    # Sliced sin_cache shape [MaxSeq, H_split/2]
-            ]
-            
-            # rotary_embedding_dim=0 means apply to the full dimension of the split
-            self.make_node(
-                "RotaryEmbedding", 
-                inputs=rotary_inputs, 
-                outputs=[rotary_output], 
-                name=rotary_name, 
-                domain="com.microsoft",
-                interleaved=self.rope_attrs["interleaved"],
-                rotary_embedding_dim=0
-            )
-            self.make_value(rotary_output, self.io_dtype, ["batch_size", num_heads, "sequence_length", self.mrope_splits[i]])
-            rotated_splits.append(rotary_output)
+            unsqueeze_sin_name = f"{basename}/sin_unsqueeze_{i}"
+            unsqueeze_sin_output = f"{unsqueeze_sin_name}/output_0"
+            self.make_unsqueeze(unsqueeze_sin_name, [squeeze_sin_output, "/model/constants/INT64/[1]"], ir.DataType.FLOAT, ["batch_size", 1, "sequence_length", dim_chunk])
+            sin_reordered.append(unsqueeze_sin_output)
 
-        # Concat back to [B, NumHeads, S, HeadDim]
-        concat_name = f"{basename}/Concat"
-        concat_output = f"{concat_name}/output_0"
-        self.make_concat(concat_name, rotated_splits, dtype=self.io_dtype, 
-                         shape=["batch_size", num_heads, "sequence_length", head_dim], axis=-1)
+        # Concat re-ordered chunks back to [B, 1, S, H]
+        final_cos_concat_name = f"{basename}/cos_final_concat"
+        final_cos_concat_output = f"{final_cos_concat_name}/output_0"
+        self.make_concat(final_cos_concat_name, cos_reordered, ir.DataType.FLOAT, ["batch_size", 1, "sequence_length", self.head_size], axis=-1)
 
-        # Transpose back to [B, S, NumHeads, HeadDim]
-        transpose_2_name = f"{basename}/Transpose_2"
+        final_sin_concat_name = f"{basename}/sin_final_concat"
+        final_sin_concat_output = f"{final_sin_concat_name}/output_0"
+        self.make_concat(final_sin_concat_name, sin_reordered, ir.DataType.FLOAT, ["batch_size", 1, "sequence_length", self.head_size], axis=-1)
+
+        # Cast caches to model's io_dtype (e.g., float16)
+        final_cos_cast_name = f"{basename}/cos_final_cast"
+        final_cos_cast_output = f"{final_cos_cast_name}/output_0"
+        self.make_cast(final_cos_cast_name, final_cos_concat_output, self.io_dtype, ["batch_size", 1, "sequence_length", self.head_size])
+
+        final_sin_cast_name = f"{basename}/sin_final_cast"
+        final_sin_cast_output = f"{final_sin_cast_name}/output_0"
+        self.make_cast(final_sin_cast_name, final_sin_concat_output, self.io_dtype, ["batch_size", 1, "sequence_length", self.head_size])
+
+        # Reshape input Q/K: [B, S, N*H] -> [B, N, S, H]
+        # Note: q_or_k_shape is [B, S, N*H]
+        reshape_1_name = f"{basename}/q_or_k_reshape_1"
+        reshape_1_output = f"{reshape_1_name}/output_0"
+        reshape_1_target_shape_onnx = f"/model/constants/INT64/[0, 0, {num_heads}, {self.head_size}]"
+        reshape_1_target_shape_ort = ["batch_size", "sequence_length", num_heads, self.head_size]
+        self.make_reshape(reshape_1_name, [q_or_k_path, reshape_1_target_shape_onnx], self.io_dtype, reshape_1_target_shape_ort)
+
+        # Transpose Q/K: [B, S, N, H] -> [B, N, S, H]
+        transpose_1_name = f"{basename}/q_or_k_transpose_1"
+        transpose_1_output = f"{transpose_1_name}/output_0"
+        transpose_1_target_shape = ["batch_size", num_heads, "sequence_length", self.head_size]
+        self.make_transpose(transpose_1_name, reshape_1_output, self.io_dtype, transpose_1_target_shape, perm=[0, 2, 1, 3])
+
+        # Apply rotation: (q * cos) + (rotate_half(q) * sin)
+        
+        # 1. (q * cos)
+        mul_1_name = f"{basename}/mul_1"
+        mul_1_output = f"{mul_1_name}/output_0"
+        self.make_mul(mul_1_name, [transpose_1_output, final_cos_cast_output], self.io_dtype, transpose_1_target_shape)
+        
+        # 2. rotate_half(q)
+        rotated_half_q_name = self.rotate_half(transpose_1_output, transpose_1_target_shape, basename)
+        
+        # 3. (rotate_half(q) * sin)
+        mul_2_name = f"{basename}/mul_2"
+        mul_2_output = f"{mul_2_name}/output_0"
+        self.make_mul(mul_2_name, [rotated_half_q_name, final_sin_cast_output], self.io_dtype, transpose_1_target_shape)
+
+        # 4. (q * cos) + (rotate_half(q) * sin)
+        add_name = f"{basename}/add"
+        add_output = f"{add_name}/output_0"
+        self.make_add(add_name, [mul_1_output, mul_2_output], self.io_dtype, transpose_1_target_shape)
+
+        # Transpose back: [B, N, S, H] -> [B, S, N, H]
+        transpose_2_name = f"{basename}/q_or_k_transpose_2"
         transpose_2_output = f"{transpose_2_name}/output_0"
-        self.make_transpose(transpose_2_name, concat_output, self.io_dtype,
-                            shape=["batch_size", "sequence_length", num_heads, head_dim],
-                            perm=[0, 2, 1, 3]) # Swap N (1) and S (2)
-
-        # Reshape back to [B, S, NumHeads * HeadDim]
-        reshape_2_name = f"{basename}/Reshape_2"
+        self.make_transpose(transpose_2_name, add_output, self.io_dtype, reshape_1_target_shape_ort, perm=[0, 2, 1, 3])
+        
+        # Reshape back: [B, S, N, H] -> [B, S, N*H]
+        reshape_2_name = f"{basename}/q_or_k_reshape_2"
         reshape_2_output = f"{reshape_2_name}/output_0"
-        self.make_reshape(reshape_2_name, 
-                          [transpose_2_output, f"/model/constants/INT64/[0, 0, {num_heads * head_dim}]"], # Input is now transpose_2_output
-                          dtype=self.io_dtype, 
-                          shape=["batch_size", "sequence_length", num_heads * head_dim])
+        self.make_reshape(reshape_2_name, [transpose_2_output, f"/model/constants/INT64/[0, 0, {num_heads * self.head_size}]"], self.io_dtype, q_or_k_shape)
         
         return reshape_2_output
 
@@ -225,17 +359,19 @@ class Qwen25VLModel(QwenModel):
         """
         
         # 1. Unpack QKV if necessary (e.g. qkv_proj)
-        # This is handled by Model's make_attention, but we can call it directly.
+        # This is handled by MistralModel's make_attention, but we can call it directly.
         super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
         
         # 2. Build Q/K/V MatMul and Add nodes
         q_matmul_basename = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
         q_matmul_name = self.make_matmul(attention.q_proj, q_matmul_basename, root_input)
         self.attention_attrs["q_path"] = f"{q_matmul_name}/output_0"
+        q_shape = ["batch_size", "sequence_length", self.num_attn_heads * self.head_size]
         
         k_matmul_basename = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
         k_matmul_name = self.make_matmul(attention.k_proj, k_matmul_basename, root_input)
         self.attention_attrs["k_path"] = f"{k_matmul_name}/output_0"
+        k_shape = ["batch_size", "sequence_length", self.num_kv_heads * self.head_size]
         
         v_matmul_basename = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
         v_matmul_name = self.make_matmul(attention.v_proj, v_matmul_basename, root_input)
@@ -260,26 +396,28 @@ class Qwen25VLModel(QwenModel):
             self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
 
         # 3. Apply 3D RoPE (MRoPE)
-        # We don't need position_ids from kwargs, as we use the global 3D position_ids
-        cos_cache_name, sin_cache_name = self.make_rotary_embedding_caches()
+        # Create the dynamic caches (cos, sin) once, shaped [3, B, S, H]
+        cos_dynamic, sin_dynamic = self.make_dynamic_rope_caches(layer_id, basename=f"/model/layers.{layer_id}/attn/mrope_dynamic_cache")
         
-        self.attention_attrs["q_path"] = self.apply_mrope(
+        # Apply rotation to Q
+        self.attention_attrs["q_path"] = self.apply_mrope_rotation(
             layer_id,
             self.attention_attrs["q_path"],
-            cos_cache_name,
-            sin_cache_name,
+            q_shape,
+            cos_dynamic,
+            sin_dynamic,
             self.num_attn_heads,
-            self.head_size,
             basename=f"/model/layers.{layer_id}/attn/q_mrope"
         )
         
-        self.attention_attrs["k_path"] = self.apply_mrope(
+        # Apply rotation to K
+        self.attention_attrs["k_path"] = self.apply_mrope_rotation(
             layer_id,
             self.attention_attrs["k_path"],
-            cos_cache_name,
-            sin_cache_name,
+            k_shape,
+            cos_dynamic,
+            sin_dynamic,
             self.num_kv_heads,
-            self.head_size,
             basename=f"/model/layers.{layer_id}/attn/k_mrope"
         )
 
