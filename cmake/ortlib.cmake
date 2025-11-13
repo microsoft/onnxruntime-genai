@@ -80,8 +80,8 @@ if(ORT_HOME)
     set(ORT_LIB_DIR ${ORT_HOME}/lib)
   endif()
 else()
-  # If ORT_HOME is not specified, download the onnxruntime headers and libraries from NuGet.org
-  set(ORT_VERSION "1.23.2")
+  # If ORT_HOME is not specified, download the onnxruntime headers and libraries
+  set(ORT_VERSION "1.23.0")
 
   if (USE_DML)
     set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime.DirectML")
@@ -99,7 +99,7 @@ else()
     set(ORT_PACKAGE_NAME "Microsoft.ML.OnnxRuntime")
   endif()
 
-  # Download from NuGet.org stable release instead of nightly feed
+  # Download from NuGet.org
   set(ORT_FETCH_URL "https://www.nuget.org/api/v2/package/${ORT_PACKAGE_NAME}/${ORT_VERSION}")
 
   message(STATUS "Using ONNX Runtime package ${ORT_PACKAGE_NAME} version ${ORT_VERSION}")
