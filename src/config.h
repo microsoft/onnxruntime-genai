@@ -38,6 +38,7 @@ struct Config {
     // Vision encoder names
     static constexpr std::string_view PixelValuesName = "pixel_values";
     static constexpr std::string_view ImageSizesName = "image_sizes";
+    static constexpr std::string_view ImageGridThwName = "image_grid_thw";
     static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
     static constexpr std::string_view ImageFeaturesName = "image_features";
     static constexpr std::string_view NumImageTokens = "num_image_tokens";
@@ -162,6 +163,7 @@ struct Config {
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
         std::string image_sizes{Defaults::ImageSizesName};
+        std::string image_grid_thw{Defaults::ImageGridThwName};
         std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
       } inputs;
 
