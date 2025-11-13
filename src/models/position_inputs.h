@@ -109,6 +109,55 @@ struct WindowedPositionInputs : PositionInputs {
   size_t window_index_{};
 };
 
+// Qwen2-VL uses 3D rotary position embeddings for multimodal (vision + text) content.
+// Position IDs have shape [4, batch_size, seq_len] where:
+//   - Dimension 0: Text-only positions
+//   - Dimensions 1-3: Vision positions (temporal, height, width)
+// This class manages rope_deltas caching to maintain correct positional encoding across generation steps.
+struct Qwen2VLPositionInputs : PositionInputs {
+  Qwen2VLPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk);
+  Qwen2VLPositionInputs(const Qwen2VLPositionInputs&) = delete;
+  Qwen2VLPositionInputs& operator=(const Qwen2VLPositionInputs&) = delete;
+
+  void Add() override;
+  void Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) override;
+  void RewindTo(size_t index) override;
+
+ private:
+  void AddPositionIDs();
+  void AddAttentionMask();
+  
+  template <typename T>
+  void CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 3> shape);
+  void Update3DPositionIDs(int total_length, int new_length);
+  
+  template <typename T>
+  void CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape);
+  void UpdateAttentionMask(int total_length, int new_length);
+
+  const Model& model_;
+  State& state_;
+
+  size_t mask_input_index_{~0U};
+  size_t posid_input_index_{~0U};
+
+  ONNXTensorElementDataType type_;  // Common type for position_ids and attention_mask
+
+  bool has_mask_input_{false};
+  bool has_posid_input_{false};
+
+  std::array<int64_t, 3> position_ids_shape_{};  // {4, batch_size, sequence_length} for 3D positions
+  std::unique_ptr<Tensor> position_ids_;
+  std::unique_ptr<Tensor> position_ids_next_;  // Replaces position_ids_ after the first Run() call
+  
+  std::array<int64_t, 2> attention_mask_shape_{};  // {batch_size, sequence_length}
+  std::unique_ptr<Tensor> attention_mask_;
+  std::unique_ptr<Tensor> attention_mask_next_;  // Replaces attention_mask_ after each run
+  
+  std::unique_ptr<Tensor> rope_deltas_;  // Cached rope deltas for position calculation
+  bool is_first_update_{true};
+};
+
 std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name);
 
 }  // namespace Generators
