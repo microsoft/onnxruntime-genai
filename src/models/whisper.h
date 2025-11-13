@@ -33,6 +33,7 @@ struct AudioEncoderState : State {
 
  private:
   friend struct WhisperState;
+  friend struct WhisperStatefulState;
 
   const WhisperModel& model_;
 
@@ -120,4 +121,42 @@ struct WhisperState : State {
   std::unique_ptr<OrtValue> cross_qk_final_;            // { batch_size, num_return_sequences, num_alignment_heads, decoded_length, num_frames / 2 }
   // clang-format on
 };
+
+struct WhisperDecoderStatefulState : State {
+  WhisperDecoderStatefulState(const WhisperModel& model, const GeneratorParams& params);
+  WhisperDecoderStatefulState(const WhisperDecoderStatefulState&) = delete;
+  WhisperDecoderStatefulState& operator=(const WhisperDecoderStatefulState&) = delete;
+
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
+
+ private:
+  // clang-format off
+  friend struct WhisperStatefulState;
+
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, int current_length);
+
+  const WhisperModel& model_;
+  DefaultInputIDs input_ids_{*this};  // Model input
+  std::unique_ptr<KeyValueCache> kv_cache_;
+  Logits logits_{*this};  // Model output
+};
+
+// Whisper state used when encoder / decoder self & cross kv-cache is managed internal to the session.
+struct WhisperStatefulState : State {
+  WhisperStatefulState(const WhisperModel& model, const GeneratorParams& params);
+  WhisperStatefulState(const WhisperState&) = delete;
+  WhisperStatefulState& operator=(const WhisperStatefulState&) = delete;
+
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+
+  DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
+  OrtValue* GetInput(const char* name) override;
+  OrtValue* GetOutput(const char* name) override;
+
+private:
+  const WhisperModel& model_;
+  std::unique_ptr<AudioEncoderState> encoder_state_;
+  std::unique_ptr<WhisperDecoderStatefulState> decoder_state_;
+};
+
 }  // namespace Generators
