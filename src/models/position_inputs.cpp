@@ -485,29 +485,29 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
   has_mask_input_ = model_.session_info_.HasInput(model_.config_->model.decoder.inputs.attention_mask);
   has_posid_input_ = model_.session_info_.HasInput(model_.config_->model.decoder.inputs.position_ids);
 
-  type_ = Ort::TypeToTensorType<int32_t>;
+  type_ = Ort::TypeToTensorType<int64_t>;  // Default to int64 for Qwen2VL
   if (has_mask_input_) {
     type_ = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
   }
+  
+  ONNXTensorElementDataType posid_type = type_;
   if (has_posid_input_) {
-    if (has_mask_input_) {
-      if (model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.position_ids) != type_) {
-        throw std::runtime_error("position_ids & attention_mask must have the same data type");
-      }
-    }
-    // Set up 3D position IDs shape: [4, batch_size, sequence_length]
-    position_ids_shape_[0] = 4;  // 4 dimensions: text + 3D vision (temporal, height, width)
+    posid_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
+    
+    // Set up 3D position IDs shape: [3, batch_size, sequence_length]
+    // The 3 dimensions represent temporal, height, and width for mrope
+    position_ids_shape_[0] = 3;
     position_ids_shape_[1] = state_.params_->search.batch_size;
     position_ids_shape_[2] = 0;  // Will be set during first update
 
-    position_ids_ = std::make_unique<Tensor>();
-    position_ids_next_ = std::make_unique<Tensor>();
+    position_ids_ = std::make_unique<Tensor>(model_.p_device_inputs_, posid_type);
+    position_ids_next_ = std::make_unique<Tensor>(model_.p_device_inputs_, posid_type);
   }
   if (has_mask_input_) {
     attention_mask_shape_[0] = state_.params_->search.batch_size;
     attention_mask_shape_[1] = 0;  // Will be set during first update
-    attention_mask_ = std::make_unique<Tensor>();
-    attention_mask_next_ = std::make_unique<Tensor>();
+    attention_mask_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
+    attention_mask_next_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
   }
 }
 
@@ -534,9 +534,9 @@ void Qwen2VLPositionInputs::AddAttentionMask() {
 
 template <typename T>
 void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 3> shape) {
-  // For Qwen2-VL, in the prefill stage, position_ids are [4, batch_size, seq_len]
-  // During generation, they remain [4, batch_size, 1]
-  // The 4 dimensions are: [text_positions, temporal_positions, height_positions, width_positions]
+  // For Qwen2-VL, in the prefill stage, position_ids are [3, batch_size, seq_len]
+  // During generation, they remain [3, batch_size, 1]
+  // The 3 dimensions represent: [temporal, height, width] for mrope
   
   auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
   auto* position_data = position_ids->GetTensorMutableData<T>();
@@ -545,23 +545,33 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
   auto* position_data_next = position_ids_next->GetTensorMutableData<T>();
 
   // Initialize position IDs
-  // For text-only content (no vision), all 4 dimensions have the same position values
-  // This matches the behavior in transformers where text positions are replicated across dimensions
-  if (shape[1] == 1) {
-    // Single batch, simple case
-    for (int64_t dim = 0; dim < 4; ++dim) {
-      for (int64_t i = 0; i < shape[2]; ++i) {
-        position_data[dim * shape[1] * shape[2] + i] = static_cast<T>(i);
+  // For text-only content (no vision), all 3 dimensions have the same position values
+  // This matches the PyTorch get_rope_index behavior where text positions are [0,1,2,...]
+  // replicated across all 3 mrope dimensions
+  
+  // Fill position_ids: shape is [3, batch_size, seq_len]
+  for (int64_t dim = 0; dim < 3; ++dim) {
+    for (int64_t batch = 0; batch < shape[1]; ++batch) {
+      for (int64_t pos = 0; pos < shape[2]; ++pos) {
+        // All 3 dimensions get the same sequential position values for text
+        position_data[dim * shape[1] * shape[2] + batch * shape[2] + pos] = static_cast<T>(pos);
       }
     }
-    // Initialize next tensor with the last position + 1
-    for (int64_t dim = 0; dim < 4; ++dim) {
-      position_data_next[dim * shape[1] + 0] = static_cast<T>(shape[2]);
+  }
+  
+  // Fill position_ids_next for generation: shape is [3, batch_size, 1]
+  for (int64_t dim = 0; dim < 3; ++dim) {
+    for (int64_t batch = 0; batch < shape[1]; ++batch) {
+      // Next position is seq_len (continuing from last position)
+      position_data_next[dim * shape[1] + batch] = static_cast<T>(shape[2]);
     }
-  } else {
+  }
+  
+  // Old multi-batch code removed since we simplified to match PyTorch logic
+  if (false) {
     // Multiple batches - initialize with simple ascending values
     // In practice, vision-specific positions would be computed by the model's get_rope_index logic
-    for (int64_t dim = 0; dim < 4; ++dim) {
+    for (int64_t dim = 0; dim < 3; ++dim) {
       for (int64_t batch = 0; batch < shape[1]; ++batch) {
         for (int64_t pos = 0; pos < shape[2]; ++pos) {
           position_data[dim * shape[1] * shape[2] + batch * shape[2] + pos] = static_cast<T>(pos);
@@ -612,10 +622,10 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int total_length, int new_length
   }
 
   // Update position values for generation phase
-  // During generation, we increment all 4 dimensions uniformly for text generation
+  // During generation, we increment all 3 dimensions uniformly for text generation
   if (type_ == Ort::TypeToTensorType<int32_t>) {
-    auto* data = position_ids_->GetTensorMutableData<int32_t>();
-    for (int64_t dim = 0; dim < 4; ++dim) {
+    auto* data = position_ids_->GetMutableData<int32_t>();
+    for (int64_t dim = 0; dim < 3; ++dim) {
       for (int64_t batch = 0; batch < position_ids_shape_[1]; ++batch) {
         for (int64_t pos = 0; pos < position_ids_shape_[2]; ++pos) {
           data[dim * position_ids_shape_[1] * position_ids_shape_[2] + batch * position_ids_shape_[2] + pos] = 
@@ -624,8 +634,8 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int total_length, int new_length
       }
     }
   } else {
-    auto* data = position_ids_->GetTensorMutableData<int64_t>();
-    for (int64_t dim = 0; dim < 4; ++dim) {
+    auto* data = position_ids_->GetMutableData<int64_t>();
+    for (int64_t dim = 0; dim < 3; ++dim) {
       for (int64_t batch = 0; batch < position_ids_shape_[1]; ++batch) {
         for (int64_t pos = 0; pos < position_ids_shape_[2]; ++pos) {
           data[dim * position_ids_shape_[1] * position_ids_shape_[2] + batch * position_ids_shape_[2] + pos] = 
@@ -649,10 +659,10 @@ void Qwen2VLPositionInputs::UpdateAttentionMask(int total_length, int new_length
   if (!state_.params_->use_graph_capture || attention_mask_shape_[1] != 1) {
     // Update attention mask - typically all 1s during generation
     if (type_ == Ort::TypeToTensorType<int32_t>) {
-      auto* mask_data = attention_mask_->GetTensorMutableData<int32_t>();
+      auto* mask_data = attention_mask_->GetMutableData<int32_t>();
       std::fill_n(mask_data, attention_mask_shape_[0] * attention_mask_shape_[1], static_cast<int32_t>(1));
     } else {
-      auto* mask_data = attention_mask_->GetTensorMutableData<int64_t>();
+      auto* mask_data = attention_mask_->GetMutableData<int64_t>();
       std::fill_n(mask_data, attention_mask_shape_[0] * attention_mask_shape_[1], static_cast<int64_t>(1));
     }
   }
