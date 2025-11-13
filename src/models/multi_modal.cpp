@@ -181,9 +181,9 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
 DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      position_inputs_{model, *this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask} {
+      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
   inputs_embeds_.Add();
-  position_inputs_.Add();
+  position_inputs_->Add();
   logits_.Add();
   kv_cache_.Add();
 }
@@ -201,7 +201,7 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
-  position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
+  position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
   kv_cache_.Update(beam_indices, total_length);
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
