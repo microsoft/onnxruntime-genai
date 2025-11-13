@@ -444,7 +444,7 @@ struct OgaGenerator : OgaAbstract {
     return std::unique_ptr<OgaGenerator>(p);
   }
 
-  bool IsDone() const {
+  bool IsDone() {
     return OgaGenerator_IsDone(this);
   }
 
