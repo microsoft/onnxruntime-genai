@@ -1,0 +1,3 @@
+LIBRARY "onnxruntime_genai.pyd"
+EXPORTS
+ PyInit_onnxruntime_genai @1

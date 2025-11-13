@@ -2,6 +2,11 @@ message("Loading Dependencies URLs ...")
 include(FetchContent)
 include(cmake/external/helper_functions.cmake)
 
+# Find Python
+if(ENABLE_PYTHON)
+  find_package(Python 3.10 COMPONENTS Interpreter Development.Module REQUIRED)
+endif()
+
 file(STRINGS cmake/deps.txt ONNXRUNTIME_DEPS_LIST)
 foreach(ONNXRUNTIME_DEP IN LISTS ONNXRUNTIME_DEPS_LIST)
   # Lines start with "#" are comments
@@ -20,18 +25,29 @@ endforeach()
 message("Loading Dependencies ...")
 
 if(ENABLE_PYTHON)
+  # Fetch robin_map dependency for nanobind (header-only library)
   FetchContent_Declare(
-    pybind11_project
-    URL ${DEP_URL_pybind11}
-    URL_HASH SHA1=${DEP_SHA1_pybind11}
-    FIND_PACKAGE_ARGS 2.6 NAMES pybind11
+    robin_map
+    GIT_REPOSITORY https://github.com/Tessil/robin-map.git
+    GIT_TAG v1.4.0
+    GIT_SHALLOW TRUE
   )
-  onnxruntime_fetchcontent_makeavailable(pybind11_project)
-
-  if(TARGET pybind11::module)
-    set(pybind11_lib pybind11::module)
-  else()
-    set(pybind11_dep pybind11::pybind11)
+  FetchContent_GetProperties(robin_map)
+  if(NOT robin_map_POPULATED)
+    FetchContent_Populate(robin_map)
+  endif()
+  
+  FetchContent_Declare(
+    nanobind
+    URL ${DEP_URL_nanobind}
+    URL_HASH SHA1=${DEP_SHA1_nanobind}
+  )
+  FetchContent_GetProperties(nanobind)
+  if(NOT nanobind_POPULATED)
+    FetchContent_Populate(nanobind)
+    # Copy robin_map into nanobind's ext directory before adding subdirectory
+    file(COPY ${robin_map_SOURCE_DIR}/ DESTINATION ${nanobind_SOURCE_DIR}/ext/robin_map)
+    add_subdirectory(${nanobind_SOURCE_DIR} ${nanobind_BINARY_DIR})
   endif()
 endif()
 

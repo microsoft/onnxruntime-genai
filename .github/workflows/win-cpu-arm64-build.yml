@@ -82,7 +82,7 @@ jobs:
         run: |
           python -m pip install wheel requests
 
-          cmake --preset windows_arm64_cpu_release
+          cmake --preset windows_arm64_cpu_release -DPython_EXECUTABLE=python
 
       - name: Build with CMake
         run: |

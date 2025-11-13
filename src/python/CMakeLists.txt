@@ -1,46 +1,99 @@
 include(${REPO_ROOT}/cmake/cxx_standard.cmake)
 
-file(GLOB python_srcs CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
-  "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
-)
-find_package(Python COMPONENTS Interpreter Development)
-pybind11_add_module(python ${python_srcs})
-target_include_directories(python PRIVATE ${ORT_HEADER_DIR})
-target_link_directories(python PRIVATE ${ORT_LIB_DIR})
-target_link_libraries(python PRIVATE onnxruntime-genai)
 
-if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin"))
+# nanobind is fetched via FetchContent in cmake/external/onnxruntime_external_deps.cmake
+
+# Source files for the Python module
+set(python_srcs
+  python.cpp
+  py_tensor.cpp
+  py_config.cpp
+  py_model.cpp
+  py_tokenizer.cpp
+  py_generator_params.cpp
+  py_generator.cpp
+  py_named_tensors.cpp
+  py_adapters.cpp
+  py_multimodal.cpp
+  py_engine.cpp
+)
+
+# Create the Python module using nanobind
+nanobind_add_module(python ${python_srcs})
+# Include directories
+target_include_directories(python PRIVATE 
+  ${ORT_HEADER_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/..
+  ${onnxruntime_extensions_SOURCE_DIR}/include
+  ${onnxruntime_extensions_SOURCE_DIR}/shared/api
+  ${onnxruntime_extensions_SOURCE_DIR}/base
+)
+
+# Link directories
+target_link_directories(python PRIVATE ${ORT_LIB_DIR})
+
+# Link against the object files directly instead of the shared library
+# This gives us direct access to internal C++ APIs without going through the C API
+target_link_libraries(python PRIVATE 
+  onnxruntime-genai-objects
+  onnxruntime_extensions
+)
+
+# On Windows, we need to link against ONNXRUNTIME_LIB for proper symbol resolution
+# On Linux/macOS/Android, the ORT library is preloaded at runtime via _dll_directory.py
+# before the Python extension loads, so we don't need it at link time
+if(WIN32)
   target_link_libraries(python PRIVATE ${ONNXRUNTIME_LIB})
 endif()
 
+# Link CUDA if enabled
+if(USE_CUDA)
+  find_package(CUDAToolkit REQUIRED)
+  target_link_libraries(python PRIVATE CUDA::cudart)
+endif()
+
+# Set output name
 set_target_properties(python PROPERTIES OUTPUT_NAME "onnxruntime_genai")
 
+# Control symbol visibility - only export the Python module initialization function
+# This helps reduce binary size and prevents symbol conflicts
+if(APPLE)
+  # macOS uses exported symbols list
+  target_link_options(python PRIVATE "LINKER:-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/exported_symbols.lst")
+elseif(UNIX)
+  # Linux uses version script with --gc-sections to remove unused code
+  target_link_options(python PRIVATE "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/version_script.lds" "LINKER:--gc-sections")
+elseif(WIN32)
+  # Windows uses .def file
+  target_link_options(python PRIVATE "/DEF:${CMAKE_CURRENT_SOURCE_DIR}/python.def")
+endif()
+
+# Visual Studio specific options
 if(CMAKE_GENERATOR_TOOLSET MATCHES "Visual Studio")
   target_link_options(python PRIVATE "/CETCOMPAT")
   target_compile_options(python PRIVATE "/sdl" PRIVATE "/Qspectre")
 endif()
 
+# Source grouping for IDE
 source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${python_srcs})
 
+# Wheel building
 if(BUILD_WHEEL)
   set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
-  message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
-  if(USE_TRT_RTX)
-    set(TARGET_NAME "onnxruntime-genai-trt-rtx")
-  elseif(USE_WINML)
-    set(TARGET_NAME "onnxruntime-genai-winml")
-  elseif(USE_CUDA)
+  set(PACKAGE_DIR_NAME "onnxruntime_genai")
+  set(WHEEL_TARGET_NAME "${WHEEL_FILES_DIR}/${PACKAGE_DIR_NAME}")
+  
+  # Determine package name based on build configuration
+  if(USE_CUDA)
     set(TARGET_NAME "onnxruntime-genai-cuda")
-  elseif(USE_ROCM)
-    set(TARGET_NAME "onnxruntime-genai-rocm")
   elseif(USE_DML)
     set(TARGET_NAME "onnxruntime-genai-directml")
+  elseif(USE_ROCM)
+    set(TARGET_NAME "onnxruntime-genai-rocm")
   else()
     set(TARGET_NAME "onnxruntime-genai")
   endif()
-  set(PACKAGE_DIR_NAME "onnxruntime_genai")
-  set(WHEEL_TARGET_NAME "${WHEEL_FILES_DIR}/${PACKAGE_DIR_NAME}")
+  
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/setup.py.in ${WHEEL_FILES_DIR}/setup.py @ONLY)
   configure_file(${CMAKE_CURRENT_SOURCE_DIR}/__init__.py.in ${WHEEL_TARGET_NAME}/__init__.py @ONLY)
 
@@ -103,7 +156,7 @@ if(BUILD_WHEEL)
 
   if(MANYLINUX)
     add_custom_target(PyPackageBuild
-      COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
+      COMMAND ${Python_INTERPRETER} -m pip wheel --no-deps .
       COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*
       COMMAND auditwheel repair onnxruntime_genai*linux_x86_64.whl -w ${WHEEL_FILES_DIR} ${modified_exclude_list}
       WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
@@ -112,7 +165,7 @@ if(BUILD_WHEEL)
     )
   else()
     add_custom_target(PyPackageBuild
-      COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
+      COMMAND ${Python_INTERPRETER} -m pip wheel --no-deps .
       WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
       COMMENT "Building wheel on ${WHEEL_FILES_DIR}"
       EXCLUDE_FROM_ALL

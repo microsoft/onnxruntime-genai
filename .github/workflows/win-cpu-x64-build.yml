@@ -95,7 +95,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake --preset windows_x64_cpu_release
+          cmake --preset windows_x64_cpu_release -DPython_EXECUTABLE=python
 
       - name: Build with CMake
         run: |
