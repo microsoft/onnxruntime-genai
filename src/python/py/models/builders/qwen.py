@@ -41,13 +41,19 @@ class Qwen25VLModel(QwenModel):
         if not self.mrope_sections:
             raise ValueError("MRoPE sections not found in config.text_config.rope_scaling.mrope_section")
         
-        # From modeling_qwen2_5_vl.py, the splits are applied to head_dim (128).
-        # The config sections [16, 24, 24] sum to 64 (head_dim/2).
-        # The model logic doubles them, so we do the same.
-        self.mrope_splits = [s * 2 for s in self.mrope_sections]
+        # The HF logic is `mrope_section * 2`, not `[s * 2 for s in mrope_section]`.
+        # This results in [16, 24, 24, 16, 24, 24]
+        self.mrope_splits = self.mrope_sections * 2
+        
         if sum(self.mrope_splits) != self.head_size:
+             # The sum (128) should now correctly match self.head_size (128)
              raise ValueError(f"MRoPE splits {self.mrope_splits} sum ({sum(self.mrope_splits)}) does not match head size ({self.head_size})")
 
+        # Force GroupQueryAttention as base.py's make_attention_init doesn't include this combo.
+        # The MHA op does not support GQA (different Q/K/V dims), but the GQA op does.
+        self.attention_attrs["op_type"] = "GroupQueryAttention"
+        print("Forcing GroupQueryAttention (GQA) for FP32 CUDA.")
+        
     def make_inputs_and_outputs(self):
         # Qwen 2.5 VL uses 3D position IDs: [3, batch_size, sequence_length]
         # for temporal, height, and width dimensions.
@@ -72,15 +78,42 @@ class Qwen25VLModel(QwenModel):
                           dtype=self.io_dtype, 
                           shape=["batch_size", "sequence_length", num_heads, head_dim])
 
-        # Split into 3 parts along HeadDim based on mrope_splits: e.g., [32, 48, 48]
+        # Transpose to [B, NumHeads, S, HeadDim] to match RotaryEmbedding op spec
+        transpose_1_name = f"{basename}/Transpose_1"
+        transpose_1_output = f"{transpose_1_name}/output_0"
+        self.make_transpose(transpose_1_name, reshape_1_output, self.io_dtype, 
+                            shape=["batch_size", num_heads, "sequence_length", head_dim], 
+                            perm=[0, 2, 1, 3]) # Swap S (1) and N (2)
+
+        # Create a Constant node for mrope_splits
+        # This holds the correct splits, e.g., [16, 24, 24, 16, 24, 24]
+        mrope_splits_node_name = f"{basename}/mrope_splits_node"
+        mrope_splits_output_name = f"{basename}/mrope_splits"
+        mrope_splits_tensor = ir.tensor(
+            torch.tensor(self.mrope_splits, dtype=torch.int64),
+            name=mrope_splits_output_name
+        )
+        self.make_node(
+            "Constant",
+            inputs=[],
+            outputs=[mrope_splits_output_name],
+            name=mrope_splits_node_name,
+            value=mrope_splits_tensor
+        )
+        self.make_value(mrope_splits_output_name, ir.DataType.INT64, [len(self.mrope_splits)])
+        
+        # Split into 6 parts
         split_name = f"{basename}/Split"
-        split_outputs = [f"{split_name}/output_{i}" for i in range(3)]
-        self.make_node("Split", [reshape_1_output], split_outputs, name=split_name, axis=-1, split=self.mrope_splits)
+        num_splits = len(self.mrope_splits) # This is 6
+        split_outputs = [f"{split_name}/output_{i}" for i in range(num_splits)]
+        split_inputs = [transpose_1_output, mrope_splits_output_name]
+        self.make_node("Split", split_inputs, split_outputs, name=split_name, axis=-1)
+        
         for i, shape_dim in enumerate(self.mrope_splits):
-            self.make_value(split_outputs[i], self.io_dtype, ["batch_size", "sequence_length", num_heads, shape_dim])
+            self.make_value(split_outputs[i], self.io_dtype, ["batch_size", num_heads, "sequence_length", shape_dim])
 
         # Get the 3 position_ids (Temporal, Height, Width)
-        # position_ids input shape is [3, B, S]
+        # This list will have 3 elements: [pos_t, pos_h, pos_w]
         pos_id_names = []
         for i, dim_name in enumerate(["temporal", "height", "width"]):
             # Slice to get [1, B, S]
@@ -102,14 +135,52 @@ class Qwen25VLModel(QwenModel):
 
         # Apply RotaryEmbedding to each split using its corresponding position_id
         rotated_splits = []
-        for i in range(3):
+        cache_offset = 0
+        # Loop 6 times
+        for i in range(num_splits):
+            dim_chunk = self.mrope_splits[i]
+            cache_dim_chunk = dim_chunk // 2
+            
+            # FIX: Slice the main cache to match the head_size of this chunk
+            cache_start_offset = cache_offset
+            cache_end_offset = cache_start_offset + cache_dim_chunk
+            
+            # Slice cos_cache
+            cos_slice_name = f"{basename}/cos_cache_slice_{i}"
+            cos_slice_output = f"{cos_slice_name}/output_0"
+            cos_slice_inputs = [
+                cos_cache,
+                f"/model/constants/INT64/[{cache_start_offset}]", # start
+                f"/model/constants/INT64/[{cache_end_offset}]",   # end
+                "/model/constants/INT64/[1]"                      # axes (axis 1)
+            ]
+            self.make_slice(cos_slice_name, cos_slice_inputs, self.io_dtype, shape=["max_sequence_length", cache_dim_chunk])
+
+            # Slice sin_cache
+            sin_slice_name = f"{basename}/sin_cache_slice_{i}"
+            sin_slice_output = f"{sin_slice_name}/output_0"
+            sin_slice_inputs = [
+                sin_cache,
+                f"/model/constants/INT64/[{cache_start_offset}]", # start
+                f"/model/constants/INT64/[{cache_end_offset}]",   # end
+                "/model/constants/INT64/[1]"                      # axes (axis 1)
+            ]
+            self.make_slice(sin_slice_name, sin_slice_inputs, self.io_dtype, shape=["max_sequence_length", cache_dim_chunk])
+
+            # Update offset for next iteration
+            cache_offset = cache_end_offset
+            
             rotary_name = f"{basename}/RotaryEmbedding_{i}"
             rotary_output = f"{rotary_name}/output_0"
+            
+            # Use i % 3 to cycle through the 3 position_id tensors (T, H, W)
+            pos_id_to_use = pos_id_names[i % 3]
+            
             rotary_inputs = [
-                split_outputs[i],
-                pos_id_names[i],
-                cos_cache,
-                sin_cache
+                split_outputs[i],   # Input shape [B, N, S, H_split]
+                pos_id_to_use,      # Position ID shape [B, S]
+                cos_slice_output,   # Sliced cos_cache shape [MaxSeq, H_split/2]
+                sin_slice_output    # Sliced sin_cache shape [MaxSeq, H_split/2]
             ]
             
             # rotary_embedding_dim=0 means apply to the full dimension of the split
@@ -122,19 +193,27 @@ class Qwen25VLModel(QwenModel):
                 interleaved=self.rope_attrs["interleaved"],
                 rotary_embedding_dim=0
             )
-            self.make_value(rotary_output, self.io_dtype, ["batch_size", "sequence_length", num_heads, self.mrope_splits[i]])
+            self.make_value(rotary_output, self.io_dtype, ["batch_size", num_heads, "sequence_length", self.mrope_splits[i]])
             rotated_splits.append(rotary_output)
 
-        # Concat back to [B, S, NumHeads, HeadDim]
+        # Concat back to [B, NumHeads, S, HeadDim]
         concat_name = f"{basename}/Concat"
         concat_output = f"{concat_name}/output_0"
-        self.make_concat(concat_name, rotated_splits, dtype=self.io_dtype, shape=["batch_size", "sequence_length", num_heads, head_dim], axis=-1)
+        self.make_concat(concat_name, rotated_splits, dtype=self.io_dtype, 
+                         shape=["batch_size", num_heads, "sequence_length", head_dim], axis=-1)
+
+        # Transpose back to [B, S, NumHeads, HeadDim]
+        transpose_2_name = f"{basename}/Transpose_2"
+        transpose_2_output = f"{transpose_2_name}/output_0"
+        self.make_transpose(transpose_2_name, concat_output, self.io_dtype,
+                            shape=["batch_size", "sequence_length", num_heads, head_dim],
+                            perm=[0, 2, 1, 3]) # Swap N (1) and S (2)
 
         # Reshape back to [B, S, NumHeads * HeadDim]
         reshape_2_name = f"{basename}/Reshape_2"
         reshape_2_output = f"{reshape_2_name}/output_0"
         self.make_reshape(reshape_2_name, 
-                          [concat_output, f"/model/constants/INT64/[0, 0, {num_heads * head_dim}]"],
+                          [transpose_2_output, f"/model/constants/INT64/[0, 0, {num_heads * head_dim}]"], # Input is now transpose_2_output
                           dtype=self.io_dtype, 
                           shape=["batch_size", "sequence_length", num_heads * head_dim])
         
