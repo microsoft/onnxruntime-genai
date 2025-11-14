@@ -56,7 +56,13 @@ class Qwen25VLModel(QwenModel):
         self.layernorm_attrs["cast"]["output_3"] = True
         #
         # ----- END OF PARITY & TYPE FIX -----
-
+        # Qwen2's RoPE *always* computes in float32.
+        # We must replicate this behavior.
+        print("Forcing RoPE computation to float32 for Qwen2.5-VL parity.")
+        if "rope_cast" not in self.attention_attrs:
+            self.attention_attrs["rope_cast"] = {}
+        self.attention_attrs["rope_cast"]["use_fp32"] = True
+        
         # Manually get the attention_scaling from the rope_config
         # This replicates the logic from transformers.models.rope_utils._config_to_init_values
         rope_type = "default"
@@ -231,7 +237,7 @@ class Qwen25VLModel(QwenModel):
 
         return cos_final_output, sin_final_output
     
-    def rotate_half(self, x_name, x_shape, basename):
+    def rotate_half(self, x_name, x_shape, basename, compute_dtype):
         """
         Builds ONNX nodes for rotate_half(x)
         x_shape is [B, N, S, H]
@@ -242,19 +248,19 @@ class Qwen25VLModel(QwenModel):
         split_output_1 = f"{split_name}/output_1"
         self.make_node("Split", [x_name], [split_output_0, split_output_1], name=split_name, axis=-1, num_outputs=2)
         half_shape = x_shape[:-1] + [x_shape[-1] // 2]
-        self.make_value(split_output_0, self.io_dtype, half_shape)
-        self.make_value(split_output_1, self.io_dtype, half_shape)
+        self.make_value(split_output_0, compute_dtype, half_shape)
+        self.make_value(split_output_1, compute_dtype, half_shape)
         
         # Negate x2
         neg_name = f"{basename}/rotate_half/Neg"
         neg_output = f"{neg_name}/output_0"
         self.make_node("Neg", [split_output_1], [neg_output], name=neg_name)
-        self.make_value(neg_output, self.io_dtype, half_shape)
+        self.make_value(neg_output, compute_dtype, half_shape)
         
         # Concat (-x2, x1)
         concat_name = f"{basename}/rotate_half/Concat"
         concat_output = f"{concat_name}/output_0"
-        self.make_concat(concat_name, [neg_output, split_output_0], self.io_dtype, x_shape, axis=-1)
+        self.make_concat(concat_name, [neg_output, split_output_0], compute_dtype, x_shape, axis=-1)
         
         return concat_output
 
@@ -265,6 +271,15 @@ class Qwen25VLModel(QwenModel):
         and applies the rotation.
         """
         
+        # --- Handle precision for RoPE ---
+        # Check if we need to force float32 computation
+        force_fp32 = self.attention_attrs.get("rope_cast", {}).get("use_fp32", False)
+        
+        # Set compute_dtype (precision for math) and output_dtype (final precision)
+        compute_dtype = ir.DataType.FLOAT if force_fp32 else self.io_dtype
+        output_dtype = self.io_dtype
+        # --------------------------------
+
         # Create a Constant node for mrope_splits
         # This holds the correct splits, e.g., [16, 24, 24, 16, 24, 24]
         mrope_splits_node_name = f"{basename}/mrope_splits_node"
@@ -283,6 +298,7 @@ class Qwen25VLModel(QwenModel):
         self.make_value(mrope_splits_output_name, ir.DataType.INT64, [len(self.mrope_splits)])
         
         # Split the dynamic caches [3, B, S, H] into 6 chunks on axis -1
+        # Caches (dyn_cos, dyn_sin) are already in float32
         num_splits = len(self.mrope_splits)
         
         cos_split_name = f"{basename}/cos_split"
@@ -341,15 +357,8 @@ class Qwen25VLModel(QwenModel):
         final_sin_concat_output = f"{final_sin_concat_name}/output_0"
         self.make_concat(final_sin_concat_name, sin_reordered, ir.DataType.FLOAT, ["batch_size", 1, "sequence_length", self.head_size], axis=-1)
 
-        # Cast caches to model's io_dtype (e.g., bfloat16)
-        final_cos_cast_name = f"{basename}/cos_final_cast"
-        final_cos_cast_output = f"{final_cos_cast_name}/output_0"
-        self.make_cast(final_cos_cast_name, final_cos_concat_output, self.io_dtype, ["batch_size", 1, "sequence_length", self.head_size])
-
-        final_sin_cast_name = f"{basename}/sin_final_cast"
-        final_sin_cast_output = f"{final_sin_cast_name}/output_0"
-        self.make_cast(final_sin_cast_name, final_sin_concat_output, self.io_dtype, ["batch_size", 1, "sequence_length", self.head_size])
-
+        # Caches (final_cos_concat_output, final_sin_concat_output) are now in float32
+        
         # Reshape input Q/K: [B, S, N*H] -> [B, N, S, H]
         reshape_1_name = f"{basename}/q_or_k_reshape_1"
         reshape_1_output = f"{reshape_1_name}/output_0"
@@ -363,35 +372,68 @@ class Qwen25VLModel(QwenModel):
         transpose_1_target_shape = ["batch_size", num_heads, "sequence_length", self.head_size]
         self.make_transpose(transpose_1_name, reshape_1_output, self.io_dtype, transpose_1_target_shape, perm=[0, 2, 1, 3])
 
+        # --- Start RoPE computation ---
+        q_or_k_compute_input = transpose_1_output
+        cos_cache_compute_input = final_cos_concat_output
+        sin_cache_compute_input = final_sin_concat_output
+
+        if force_fp32 and self.io_dtype != ir.DataType.FLOAT:
+            # Cast Q/K (self.io_dtype) up to float32
+            q_or_k_cast_name = f"{basename}/q_or_k_cast_fp32"
+            q_or_k_cast_output = f"{q_or_k_cast_name}/output_0"
+            self.make_cast(q_or_k_cast_name, transpose_1_output, compute_dtype, transpose_1_target_shape)
+            q_or_k_compute_input = q_or_k_cast_output
+        elif not force_fp32 and self.io_dtype != ir.DataType.FLOAT:
+            # Cast Caches (float32) down to self.io_dtype
+            cos_cache_cast_name = f"{basename}/cos_final_cast"
+            cos_cache_cast_output = f"{cos_cache_cast_name}/output_0"
+            self.make_cast(cos_cache_cast_name, final_cos_concat_output, compute_dtype, ["batch_size", 1, "sequence_length", self.head_size])
+            cos_cache_compute_input = cos_cache_cast_output
+
+            sin_cache_cast_name = f"{basename}/sin_final_cast"
+            sin_cache_cast_output = f"{sin_cache_cast_name}/output_0"
+            self.make_cast(sin_cache_cast_name, final_sin_concat_output, compute_dtype, ["batch_size", 1, "sequence_length", self.head_size])
+            sin_cache_compute_input = sin_cache_cast_output
+
         # Apply rotation: (q * cos) + (rotate_half(q) * sin)
         
         # 1. (q * cos)
         mul_1_name = f"{basename}/mul_1"
         mul_1_output = f"{mul_1_name}/output_0"
-        self.make_mul(mul_1_name, [transpose_1_output, final_cos_cast_output], self.io_dtype, transpose_1_target_shape)
+        self.make_mul(mul_1_name, [q_or_k_compute_input, cos_cache_compute_input], compute_dtype, transpose_1_target_shape)
         
         # 2. rotate_half(q)
-        rotated_half_q_name = self.rotate_half(transpose_1_output, transpose_1_target_shape, basename)
+        rotated_half_q_name = self.rotate_half(q_or_k_compute_input, transpose_1_target_shape, basename, compute_dtype)
         
         # 3. (rotate_half(q) * sin)
         mul_2_name = f"{basename}/mul_2"
         mul_2_output = f"{mul_2_name}/output_0"
-        self.make_mul(mul_2_name, [rotated_half_q_name, final_sin_cast_output], self.io_dtype, transpose_1_target_shape)
+        self.make_mul(mul_2_name, [rotated_half_q_name, sin_cache_compute_input], compute_dtype, transpose_1_target_shape)
 
         # 4. (q * cos) + (rotate_half(q) * sin)
         add_name = f"{basename}/add"
         add_output = f"{add_name}/output_0"
-        self.make_add(add_name, [mul_1_output, mul_2_output], self.io_dtype, transpose_1_target_shape)
+        self.make_add(add_name, [mul_1_output, mul_2_output], compute_dtype, transpose_1_target_shape)
+        
+        # --- End RoPE computation ---
+
+        add_output_final = add_output
+        if force_fp32 and self.io_dtype != ir.DataType.FLOAT:
+            # Cast result back down to self.io_dtype
+            add_cast_name = f"{basename}/add_cast_output"
+            add_cast_output = f"{add_cast_name}/output_0"
+            self.make_cast(add_cast_name, add_output, output_dtype, transpose_1_target_shape)
+            add_output_final = add_cast_output
 
         # Transpose back: [B, N, S, H] -> [B, S, N, H]
         transpose_2_name = f"{basename}/q_or_k_transpose_2"
         transpose_2_output = f"{transpose_2_name}/output_0"
-        self.make_transpose(transpose_2_name, add_output, self.io_dtype, reshape_1_target_shape_ort, perm=[0, 2, 1, 3])
+        self.make_transpose(transpose_2_name, add_output_final, output_dtype, reshape_1_target_shape_ort, perm=[0, 2, 1, 3])
         
         # Reshape back: [B, S, N, H] -> [B, S, N*H]
         reshape_2_name = f"{basename}/q_or_k_reshape_2"
         reshape_2_output = f"{reshape_2_name}/output_0"
-        self.make_reshape(reshape_2_name, [transpose_2_output, f"/model/constants/INT64/[0, 0, {num_heads * self.head_size}]"], self.io_dtype, q_or_k_shape)
+        self.make_reshape(reshape_2_name, [transpose_2_output, f"/model/constants/INT64/[0, 0, {num_heads * self.head_size}]"], output_dtype, q_or_k_shape)
         
         return reshape_2_output
 
