@@ -2456,9 +2456,10 @@ class Model:
         dtype = torch.quint4x2 if self.moe_attrs["expert_weight_bits"] == 4 else torch.int8
         qweight, scales = None, None
 
-        # For QMoE, only use block-wise quantization if int4_block_size is explicitly specified
-        # Otherwise, use tensor-level quantization (TensorRT-LLM)
-        use_blockwise_quant = "int4_block_size" in self.extra_options
+        # For QMoE, only use block-wise quantization when explicitly requested
+        # via int4_block_size and when using the CPU execution provider, since
+        # block_size is only supported for CPU EP in the QMoE operator.
+        use_blockwise_quant = "int4_block_size" in self.extra_options and self.ep == "cpu"
 
         if use_blockwise_quant:
             block_size = self.quant_attrs["int4"]["block_size"]
