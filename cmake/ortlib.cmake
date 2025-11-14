@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
+include_guard()
+
 if(USE_WINML)
   message(STATUS "----- Building with WinML support ----- ")
 
@@ -57,6 +59,25 @@ else()
   add_compile_definitions(USE_WINML=0)
 endif()
 
+function(_get_target_location_property variable target property)
+  get_target_property(_result ${target} ${property})
+  if(NOT _result)
+    set(_configuration_types ${CMAKE_CONFIGURATION_TYPES})
+    if (NOT _configuration_types)
+      set(_configuration_types Release;RelWithDebInfo;MinSizeRel;Debug)
+    endif()
+    foreach(_build_type ${_configuration_types})
+      string(TOUPPER ${_build_type} _build_type)
+      get_target_property(_result ${target} ${property}_${_build_type})
+      if(_result)
+        break()
+      endif()
+    endforeach()
+  endif()
+  set(${variable} ${_result} PARENT_SCOPE)
+endfunction()
+
+
 if(ORT_HOME)
   # If ORT_HOME is specified at build time, use ORT_HOME to get the onnxruntime headers and libraries
   message(STATUS "Using ONNX Runtime from: ${ORT_HOME} [as provided]")
@@ -69,15 +90,42 @@ if(ORT_HOME)
     # Paths are based on the directory structure of the ORT Android AAR.
     set(ORT_HEADER_DIR ${ORT_HOME}/headers)
     set(ORT_LIB_DIR ${ORT_HOME}/jni/${ANDROID_ABI})
+    set(ORT_BIN_DIR ${ORT_LIB_DIR})
   elseif (IOS OR MAC_CATALYST)
     set(ORT_HEADER_DIR ${ORT_HOME}/Headers)
     set(ORT_LIB_DIR ${ORT_HOME}/)
+    set(ORT_BIN_DIR ${ORT_LIB_DIR})
   elseif (CMAKE_SYSTEM_NAME MATCHES "AIX")
     set(ORT_HEADER_DIR ${ORT_HOME}/include/onnxruntime)
+    set(ORT_BIN_DIR ${ORT_HOME}/bin)
     set(ORT_LIB_DIR ${ORT_HOME}/lib)
   else()
-    set(ORT_HEADER_DIR ${ORT_HOME}/include)
-    set(ORT_LIB_DIR ${ORT_HOME}/lib)
+    find_package(onnxruntime QUIET PATHS ${ORT_HOME}/${CMAKE_BUILD_TYPE} ${ORT_HOME})
+    if(onnxruntime_FOUND)
+      get_target_property(ORT_HEADER_DIR onnxruntime::onnxruntime INTERFACE_INCLUDE_DIRECTORIES)
+      _get_target_location_property(_onnxruntime_dll onnxruntime::onnxruntime IMPORTED_LOCATION)
+      if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        _get_target_location_property(_onnxruntime_lib onnxruntime::onnxruntime IMPORTED_IMPLIB)
+      else()
+        set(_onnxruntime_lib "${_onnxruntime_dll}")
+      endif()
+    else()
+      find_file(_onnxruntime_c_api_h onnxruntime_c_api.h REQUIRED
+              HINTS "${ORT_HOME}" PATH_SUFFIXES include include/onnxruntime)
+      if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        find_file(_onnxruntime_dll onnxruntime.dll REQUIRED
+                HINTS "${ORT_HOME}" PATH_SUFFIXES bin lib)
+        find_file(_onnxruntime_lib onnxruntime.lib REQUIRED
+                HINTS "${ORT_HOME}" PATH_SUFFIXES lib)
+      else()
+        find_file(_onnxruntime_dll libonnxruntime.so REQUIRED
+                HINTS "${ORT_HOME}" PATH_SUFFIXES bin lib)
+        set(_onnxruntime_lib "${_onnxruntime_dll}")
+      endif()
+      cmake_path(GET _onnxruntime_c_api_h PARENT_PATH ORT_HEADER_DIR)
+    endif()
+    cmake_path(GET _onnxruntime_dll PARENT_PATH ORT_BIN_DIR)
+    cmake_path(GET _onnxruntime_lib PARENT_PATH ORT_LIB_DIR)
   endif()
 else()
   # If ORT_HOME is not specified, download the onnxruntime headers and libraries from the nightly feed
@@ -154,6 +202,7 @@ else()
       message(FATAL_ERROR "Auto download ONNX Runtime for this platform is not supported.")
     endif()
   endif()
+  set(ORT_BIN_DIR ${ORT_LIB_DIR})
 endif()
 
 # Download DML headers and libraries
@@ -201,3 +250,4 @@ set(ONNXRUNTIME_LIB_DIR ${ORT_LIB_DIR})
 
 message(STATUS "ORT_HEADER_DIR: ${ORT_HEADER_DIR}")
 message(STATUS "ORT_LIB_DIR: ${ORT_LIB_DIR}")
+message(STATUS "ORT_BIN_DIR: ${ORT_BIN_DIR}")
