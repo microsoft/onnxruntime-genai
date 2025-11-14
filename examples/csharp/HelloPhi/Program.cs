@@ -162,7 +162,7 @@ if (option == 1 || option == 2)
                 {
                     break;
                 }
-                Console.Write(stream.Decode(generator.GetNextTokens()[0]));
+                Console.Write(tokenizerStream.Decode(generator.GetNextTokens()[0]));
             }
             Console.WriteLine();
             watch.Stop();
@@ -203,7 +203,7 @@ if (option == 3) // Streaming Chat
             {
                 break;
             }
-            Console.Write(stream.Decode(generator.GetNextTokens()[0]));
+            Console.Write(tokenizerStream.Decode(generator.GetNextTokens()[0]));
         }
         Console.WriteLine();
         watch.Stop();
