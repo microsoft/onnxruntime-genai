@@ -2577,6 +2577,11 @@ class Model:
         output = f"{name}/output_0"
 
         extra_kwargs = {"swiglu_limit": self.moe_attrs["swiglu_limit"]} if self.moe_attrs["swiglu_limit"] is not None else {}
+
+        # Only include block_size attribute if it was set
+        if "block_size" in self.moe_attrs:
+            extra_kwargs["block_size"] = self.moe_attrs["block_size"]
+
         self.make_node(
             "QMoE", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
             activation_alpha=self.moe_attrs["activation_alpha"],
@@ -2587,7 +2592,6 @@ class Model:
             normalize_routing_weights=self.moe_attrs["normalize_routing_weights"],
             swiglu_fusion=self.moe_attrs["swiglu_fusion"],
             use_sparse_mixer=self.moe_attrs["use_sparse_mixer"],
-            block_size=self.moe_attrs["block_size"],
             **extra_kwargs,
         )
         self.make_value(output, self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
@@ -2596,20 +2600,22 @@ class Model:
         dtype = torch.quint4x2 if self.moe_attrs["expert_weight_bits"] == 4 else torch.int8
         qweight, scales = None, None
 
-        # Get block size from quantization attributes
-        block_size = self.quant_attrs["int4"]["block_size"]
+        # For QMoE, only use block-wise quantization when explicitly requested
+        # via int4_block_size and when using the CPU execution provider, since
+        # block_size is only supported for CPU EP in the QMoE operator.
+        use_blockwise_quant = "int4_block_size" in self.extra_options and self.ep == "cpu"
 
-        # Use block-wise quantization if block_size > 0
-        if block_size > 0:
+        if use_blockwise_quant:
+            block_size = self.quant_attrs["int4"]["block_size"]
             try:
                 qweight, scales = self._symmetric_blockwise_quantize(weights, block_size)
                 self.moe_attrs["block_size"] = block_size
                 return qweight, scales.to(torch.float16)
             except Exception as e:
                 raise RuntimeError(f"Block-wise quantization failed with block_size={block_size}: {e}")
-        else:
-            # block_size is 0, so we're using tensor-level quantization
-            self.moe_attrs["block_size"] = 0
+
+        # Use tensor-level quantization (default for QMoE)
+        self.moe_attrs["block_size"] = 0
 
         # Existing tensor-level quantization implementation (fallback)
         unsuccessful = True
