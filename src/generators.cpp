@@ -453,8 +453,10 @@ bool Generator::IsDone() {
   bool is_done = search_->IsDone();
   if (is_done) {
     state_->Finalize(search_->GetSequenceLength());
-    guidance_logits_processor_->Reset();
-    last_action_ = Action::standard;
+    if (guidance_logits_processor_) {
+      guidance_logits_processor_->Reset();
+      last_action_ = Action::standard;
+    }
   }
 
   return is_done;
