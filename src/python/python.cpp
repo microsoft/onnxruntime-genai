@@ -256,7 +256,7 @@ struct PyGenerator {
     generator_->RewindTo(new_length);
   }
 
-  bool IsDone() const {
+  bool IsDone() {
     return generator_->IsDone();
   }
 
