@@ -1,8 +1,8 @@
-from .base import Model
+from .base import Model # Changed this to match your new inheritance
 import onnx_ir as ir
 import torch
 
-class QwenModel(Model):
+class QwenModel(Model): # Changed this to match your new inheritance
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
@@ -30,8 +30,32 @@ class Qwen25VLModel(QwenModel):
         config.rms_norm_eps = text_config_dict["rms_norm_eps"]
         config.sliding_window = text_config_dict["sliding_window"]
         config.rope_scaling = text_config_dict["rope_scaling"]
+        # Need this for attention_scaling calculation
+        if "original_max_position_embeddings" in text_config_dict:
+             config.original_max_position_embeddings = text_config_dict["original_max_position_embeddings"]
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
+
+        # ----- START OF PARITY & TYPE FIX -----
+        #
+        # BUG: The HF model (Qwen2RMSNorm) *always* computes LayerNorm in float32.
+        # By inheriting from `base.Model`, all `layernorm_attrs["cast"]` flags
+        # are `False`. This causes two problems:
+        # 1. Parity Error (FP32 model): The 47% mismatch you saw.
+        # 2. Type Mismatch Error (BF16 model): The `(float)` vs `(bfloat16)` error.
+        #
+        # SOLUTION: Manually set all `cast` flags to `True`. This forces the
+        # builder to cast bf16 inputs -> fp32, compute LN, and cast fp32
+        # outputs -> bf16, matching the HF model and fixing both errors.
+        #
+        print("Forcing LayerNorm computation to float32 (and enabling all casts) for Qwen2.5-VL parity.")
+        self.layernorm_attrs["cast"]["use_fp32"] = True
+        self.layernorm_attrs["cast"]["root_input"] = True
+        self.layernorm_attrs["cast"]["skip_input"] = True
+        self.layernorm_attrs["cast"]["output_0"] = True
+        self.layernorm_attrs["cast"]["output_3"] = True
+        #
+        # ----- END OF PARITY & TYPE FIX -----
 
         # Manually get the attention_scaling from the rope_config
         # This replicates the logic from transformers.models.rope_utils._config_to_init_values
@@ -54,6 +78,15 @@ class Qwen25VLModel(QwenModel):
         # Qwen 2.5 VL applies RoPE manually before attention, not fused in the op
         self.attention_attrs["use_rope_in_attn"] = False
         
+        # Your inheritance change fixed this, but this check is harmless and safe.
+        if "position_ids" not in self.input_names:
+            print("Re-adding 'position_ids' to self.input_names.")
+            if "attention_mask" in self.input_names:
+                idx = self.input_names.index("attention_mask")
+                self.input_names.insert(idx + 1, "position_ids")
+            else:
+                self.input_names.append("position_ids")
+        
         self.mrope_sections = self.rope_attrs.get("mrope", {}).get("sections", [])
         if not self.mrope_sections:
             raise ValueError("MRoPE sections not found in config.text_config.rope_scaling.mrope_section")
@@ -68,8 +101,6 @@ class Qwen25VLModel(QwenModel):
 
         # FIX: Force GroupQueryAttention for fp32 cuda,
         # as base.py's make_attention_init doesn't include this combo.
-        # The MHA op does not support GQA (different Q/K/V dims), 
-        # but the GQA op does.
         if self.ep == "cuda" and self.io_dtype == ir.DataType.FLOAT:
             self.attention_attrs["op_type"] = "GroupQueryAttention"
             print("Forcing GroupQueryAttention (GQA) for FP32 CUDA.")
@@ -88,12 +119,9 @@ class Qwen25VLModel(QwenModel):
         dim = int(self.rope_attrs["partial_rotary_factor"] * self.head_size)
         inv_freq = 1.0 / (self.rope_attrs["rescale_factors"] * (self.rope_attrs["theta"] ** (torch.arange(0, dim, 2, dtype=torch.int64).float() / dim)))
         
-        # This model doesn't use rescale_inv_freq, so we don't call that helper
-        
         # The HF model expects H/2, not R/2
         if dim != self.head_size:
              print(f"Warning: partial_rotary_factor ({self.rope_attrs['partial_rotary_factor']}) is not 1. This might be unsupported.")
-             # slice if needed
              inv_freq = inv_freq[:(self.head_size // 2)]
         
         self.make_initializer(inv_freq, "model.inv_freq", to=ir.DataType.FLOAT)
@@ -101,8 +129,7 @@ class Qwen25VLModel(QwenModel):
 
 
     def make_inputs_and_outputs(self):
-        # Qwen 2.5 VL uses 3D position IDs: [3, batch_size, sequence_length]
-        # for temporal, height, and width dimensions.
+        # Qwen2.5-VL uses 3D position_ids
         self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
         
         # Call the base Model's make_inputs_and_outputs (skipping MistralModel's)
@@ -114,11 +141,8 @@ class Qwen25VLModel(QwenModel):
         Takes 3D position_ids and inv_freq and dynamically creates
         the cos/sin caches.
         """
-        # [3, B, S]
         pos_ids_name = "position_ids" 
-        # [H/2]
         inv_freq_name = "model.inv_freq"
-        
         head_dim_half = self.head_size // 2
 
         # Get Batch Size from position_ids.shape[1]
@@ -270,7 +294,6 @@ class Qwen25VLModel(QwenModel):
         self.make_node("Split", [dyn_sin, mrope_splits_output_name], sin_split_outputs, name=sin_split_name, axis=-1)
         
         # Re-order the caches: [T, H, W, T, H, W]
-        # We pick from the 3 dimensions of the cache using i % 3
         cos_reordered = []
         sin_reordered = []
         for i in range(num_splits):
@@ -318,7 +341,7 @@ class Qwen25VLModel(QwenModel):
         final_sin_concat_output = f"{final_sin_concat_name}/output_0"
         self.make_concat(final_sin_concat_name, sin_reordered, ir.DataType.FLOAT, ["batch_size", 1, "sequence_length", self.head_size], axis=-1)
 
-        # Cast caches to model's io_dtype (e.g., float16)
+        # Cast caches to model's io_dtype (e.g., bfloat16)
         final_cos_cast_name = f"{basename}/cos_final_cast"
         final_cos_cast_output = f"{final_cos_cast_name}/output_0"
         self.make_cast(final_cos_cast_name, final_cos_concat_output, self.io_dtype, ["batch_size", 1, "sequence_length", self.head_size])
@@ -328,7 +351,6 @@ class Qwen25VLModel(QwenModel):
         self.make_cast(final_sin_cast_name, final_sin_concat_output, self.io_dtype, ["batch_size", 1, "sequence_length", self.head_size])
 
         # Reshape input Q/K: [B, S, N*H] -> [B, N, S, H]
-        # Note: q_or_k_shape is [B, S, N*H]
         reshape_1_name = f"{basename}/q_or_k_reshape_1"
         reshape_1_output = f"{reshape_1_name}/output_0"
         reshape_1_target_shape_onnx = f"/model/constants/INT64/[0, 0, {num_heads}, {self.head_size}]"
@@ -374,13 +396,9 @@ class Qwen25VLModel(QwenModel):
         return reshape_2_output
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
-        """
-        Overrides the base make_attention to insert custom 3D RoPE logic.
-        """
         
         # 1. Unpack QKV if necessary (e.g. qkv_proj)
-        # This is handled by MistralModel's make_attention, but we can call it directly.
-        super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
+        super(QwenModel, self).make_attention_unpacked(layer_id, attention, root_input, **kwargs)
         
         # 2. Build Q/K/V MatMul and Add nodes
         q_matmul_basename = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
@@ -416,7 +434,6 @@ class Qwen25VLModel(QwenModel):
             self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
 
         # 3. Apply 3D RoPE (MRoPE)
-        # Create the dynamic caches (cos, sin) once, shaped [3, B, S, H]
         cos_dynamic, sin_dynamic = self.make_dynamic_rope_caches(layer_id, basename=f"/model/layers.{layer_id}/attn/mrope_dynamic_cache")
         
         # Apply rotation to Q
@@ -479,7 +496,6 @@ class Qwen25VLModel(QwenModel):
             self.layernorm_attrs["skip_input"] = f"{o_matmul_name}/output_0"
 
     def make_model(self, input_path, config=None):
-        # Override make_model to correctly load the language_model part
         
         # Make inputs and outputs to ONNX model
         self.make_inputs_and_outputs()
@@ -506,7 +522,7 @@ class Qwen25VLModel(QwenModel):
         self.layer_id = 0
         
         # The base.Model.make_model() loop expects modules from a standard causal LM,
-        # so we iterate through the `model` (which is the Qwen2_5_VLTextModel)
+        # so we replicate its logic here but point to the correct modules in the hf_model
         
         # Handle Embeddings
         if not self.exclude_embeds:

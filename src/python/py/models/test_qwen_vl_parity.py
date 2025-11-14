@@ -2,22 +2,34 @@ import argparse
 import torch
 import numpy as np
 import onnxruntime as ort
+from onnx import TensorProto # Import TensorProto
 # The modeling script is in the transformers library, so we import it
 from transformers import Qwen2_5_VLForConditionalGeneration
 from typing import Tuple, Dict, Any, List
 
 # --- Configuration ---
 
-# Set this to match the precision of your ONNX model export.
-# For a fp32 ONNX model, this MUST be torch.float32.
-TORCH_DTYPE = torch.float32 
-
 # Tolerances for numerical comparison.
-# FP32 allows for much tighter tolerances.
 RTOL = 1e-2
 ATOL = 1e-2
 
 # --- Helper Functions ---
+
+def torch_dtype_to_onnx_tensor_proto(dtype: torch.dtype) -> int:
+    """Maps torch.dtype to onnx.TensorProto.DataType"""
+    if dtype == torch.float32:
+        return TensorProto.FLOAT
+    if dtype == torch.float16:
+        return TensorProto.FLOAT16
+    if dtype == torch.bfloat16:
+        return TensorProto.BFLOAT16
+    if dtype == torch.int64:
+        return TensorProto.INT64
+    if dtype == torch.int32:
+        return TensorProto.INT32
+    if dtype == torch.bool:
+        return TensorProto.BOOL
+    raise ValueError(f"Unsupported torch dtype: {dtype}")
 
 def to_numpy(tensor):
     """Move tensor to CPU and convert to numpy, handling bf16."""
@@ -26,75 +38,22 @@ def to_numpy(tensor):
         return tensor.detach().cpu().to(torch.float32).numpy()
     return tensor.detach().cpu().numpy()
 
-def get_ort_inputs_and_names(
-    sess: ort.InferenceSession, 
-    inputs_embeds: torch.Tensor,
-    position_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    past_key_values: List[np.ndarray] | None = None, # Changed type hint
-    num_layers: int = 0,
-    num_kv_heads: int = 0,
-    head_dim: int = 0,
-    device: str = "cuda"
-) -> Dict[str, np.ndarray]:
-    """Creates the complete dictionary of inputs required by the ONNX model."""
-    
-    global TORCH_DTYPE # Access global dtype
-    
-    # We create dummy pasts on the correct device and dtype
-    if device == "cpu" and TORCH_DTYPE == torch.bfloat16:
-        # This case should not be hit now, but good to keep
-        model_dtype = torch.float32
-    else:
-        model_dtype = TORCH_DTYPE
-
-    ort_inputs = {
-        "inputs_embeds": to_numpy(inputs_embeds),
-        "position_ids": to_numpy(position_ids),
-        "attention_mask": to_numpy(attention_mask)
-    }
-
-    if past_key_values is None:
-        # Prefill: Create dummy pasts with 0 sequence length
-        batch_size = inputs_embeds.shape[0]
-        past_shape = (batch_size, num_kv_heads, 0, head_dim)
-        dummy_past = torch.empty(past_shape, dtype=model_dtype, device=device)
-        dummy_past_np = to_numpy(dummy_past)
-        
-        for i in range(num_layers):
-            ort_inputs[f"past_key_values.{i}.key"] = dummy_past_np
-            ort_inputs[f"past_key_values.{i}.value"] = dummy_past_np
-    else:
-        # Decode: Use the provided pasts (which are already numpy arrays)
-        for i in range(num_layers):
-            ort_inputs[f"past_key_values.{i}.key"] = past_key_values[i*2]
-            ort_inputs[f"past_key_values.{i}.value"] = past_key_values[i*2 + 1]
-            
-    return ort_inputs
-
-def sort_ort_present_outputs(
-    ort_outputs: Dict[str, np.ndarray]
-) -> list[np.ndarray]:
-    """Gets the 'present' KV cache outputs from ORT in the correct layer order."""
-    present_names = sorted(
-        [name for name in ort_outputs.keys() if "present" in name],
-        key=lambda n: (int(n.split('.')[1]), n.split('.')[2]) # Sort by layer, then key/value
-    )
-    return [ort_outputs[name] for name in present_names]
-
 def compare_outputs(
     hf_logits: torch.Tensor,
-    ort_logits: np.ndarray,
-    hf_presents: List[Tuple[torch.Tensor, torch.Tensor]], # Changed type hint
-    ort_presents: list[np.ndarray],
+    ort_logits: torch.Tensor, # Changed to torch.Tensor
+    hf_presents: List[Tuple[torch.Tensor, torch.Tensor]], 
+    ort_presents: List[torch.Tensor], # Changed to list[torch.Tensor]
     step_name: str
 ):
     """Compares logits and KV cache outputs using numpy."""
     
     print(f"--- Comparing {step_name} Logits ---")
+    
+    # We can use to_numpy safely here because we'll compare fp32 vs fp32
+    # or (bf16->fp32) vs (bf16->fp32)
     np.testing.assert_allclose(
         to_numpy(hf_logits), 
-        ort_logits, 
+        to_numpy(ort_logits), 
         rtol=RTOL, 
         atol=ATOL
     )
@@ -103,7 +62,7 @@ def compare_outputs(
     print(f"\n--- Comparing {step_name} KV Cache ---")
     # hf_presents is now a list of tuples: [(k0, v0), (k1, v1), ...]
     # Flatten it to a list: [k0, v0, k1, v1, ...]
-    hf_presents_list = [to_numpy(t) for layer_kv in hf_presents for t in layer_kv]
+    hf_presents_list = [t for layer_kv in hf_presents for t in layer_kv]
     
     assert len(hf_presents_list) == len(ort_presents), \
         f"HF presents count ({len(hf_presents_list)}) != ORT presents count ({len(ort_presents)})"
@@ -116,16 +75,66 @@ def compare_outputs(
         ort_tensor = ort_presents[i]
         
         np.testing.assert_allclose(
-            hf_tensor, 
-            ort_tensor, 
+            to_numpy(hf_tensor), 
+            to_numpy(ort_tensor), 
             rtol=RTOL, 
             atol=ATOL
         )
     print(f"KV Cache (all {len(hf_presents_list)} tensors): PASS")
     print(f"\n✅ {step_name} Parity Test Passed!\n")
 
+def ort_io_binding_helper(
+    sess: ort.InferenceSession,
+    input_tensors: Dict[str, torch.Tensor],
+    output_tensors: Dict[str, torch.Tensor],
+    device: str
+) -> None:
+    """
+    Binds torch tensors to an ONNX Runtime IOBinding object and runs the session.
+    Tensors must be on the correct device (e.g., 'cuda:0').
+    """
+    bind = sess.io_binding()
+    
+    # Get device type and index for ORT
+    ort_device = device.split(":")[0]
+    ort_device_id = 0
+    if ":" in device:
+        ort_device_id = int(device.split(":")[1])
 
-def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gpu: bool):
+    for name, tensor in input_tensors.items():
+        if not tensor.is_contiguous():
+            print(f"Warning: Input tensor {name} is not contiguous. Making it contiguous.")
+            tensor = tensor.contiguous()
+            input_tensors[name] = tensor # Update dict entry for future runs (decode)
+            
+        bind.bind_input(
+            name,
+            ort_device,
+            ort_device_id,
+            torch_dtype_to_onnx_tensor_proto(tensor.dtype),
+            tensor.shape,
+            tensor.data_ptr()
+        )
+        
+    for name, tensor in output_tensors.items():
+        if not tensor.is_contiguous():
+            print(f"Warning: Output tensor {name} is not contiguous. Making it contiguous.")
+            tensor = tensor.contiguous()
+            output_tensors[name] = tensor # Update dict entry
+            
+        bind.bind_output(
+            name,
+            ort_device,
+            ort_device_id,
+            torch_dtype_to_onnx_tensor_proto(tensor.dtype),
+            tensor.shape,
+            tensor.data_ptr()
+        )
+    
+    sess.run_with_iobinding(bind)
+
+
+def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gpu: bool, use_bf16: bool):
     """
     Runs a two-step (prefill and decode) parity test between the Hugging Face
     and ONNX models.
@@ -134,15 +143,17 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
     print(f"Loading Hugging Face model: {hf_model_name}")
     print("This requires `trust_remote_code=True`.")
     
-    device = "cuda" if use_gpu and torch.cuda.is_available() else "cpu"
+    if not use_gpu:
+        print("ERROR: This test script now requires a GPU (`--cpu` is not supported) due to IOBinding.")
+        return
+
+    device = "cuda:0" # IOBinding needs the specific device ID
     
-    global TORCH_DTYPE # Use global dtype
-    torch_dtype = TORCH_DTYPE
+    torch_dtype = torch.bfloat16 if use_bf16 else torch.float32
     
-    # if device == "cpu" and TORCH_DTYPE == torch.bfloat16:
-    #     print("Warning: CPU does not support bfloat16. Testing with float32.")
-    #     torch_dtype = torch.float32 # Override for CPU
-        
+    # The builder script (base.Model) upcasts logits to float32
+    # when the io_dtype is bfloat16. We must match that here.
+    logits_dtype = torch.float32 if use_bf16 else torch_dtype
     
     hf_full_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         hf_model_name,
@@ -163,6 +174,7 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
     NUM_LAYERS = config.num_hidden_layers
     NUM_KV_HEADS = config.num_key_value_heads
     HEAD_DIM = config.hidden_size // config.num_attention_heads
+    VOCAB_SIZE = config.vocab_size # Get vocab size for output
     
     print("\n--- Model Parameters ---")
     print(f"Device: {device}")
@@ -174,12 +186,11 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
     print("------------------------\n")
 
     print(f"Loading ONNX model: {onnx_model_path}")
-    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if use_gpu else ["CPUExecutionProvider"]
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     sess = ort.InferenceSession(onnx_model_path, providers=providers)
     
     # Get all ONNX output names
     output_names = [o.name for o in sess.get_outputs()]
-    output_names_dict = {name: i for i, name in enumerate(output_names)}
 
     # =================================================================
     # 1. PREFILL STEP
@@ -187,19 +198,15 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
     print(f"Running Prefill Step (Sequence Length = {PREFILL_LEN})...")
     
     # --- Create HF/Torch Inputs ---
-    # We test the text model component directly, so we create random inputs_embeds.
     inputs_embeds_prefill = torch.rand(
         (BATCH_SIZE, PREFILL_LEN, HIDDEN_SIZE), 
         dtype=torch_dtype, 
         device=device
     )
     
-    # Create 3D position_ids [3, B, S]
-    # For a text-only test, all 3 dimensions (T, H, W) are identical.
     pos_ids_1d_prefill = torch.arange(PREFILL_LEN, device=device).expand(BATCH_SIZE, -1)
     position_ids_prefill = pos_ids_1d_prefill.unsqueeze(0).expand(3, -1, -1)
     
-    # Attention mask for prefill is [B, S_total]
     attention_mask_prefill = torch.ones(
         (BATCH_SIZE, PREFILL_LEN), 
         dtype=torch.int64, 
@@ -208,20 +215,39 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
     
     cache_position_prefill = torch.arange(PREFILL_LEN, device=device)
     
-    # --- Create ONNX Inputs ---
-    ort_inputs_prefill = get_ort_inputs_and_names(
-        sess,
-        inputs_embeds_prefill,
-        position_ids_prefill,
-        attention_mask_prefill,
-        past_key_values=None, # This tells the helper to create dummy 0-len pasts
-        num_layers=NUM_LAYERS,
-        num_kv_heads=NUM_KV_HEADS,
-        head_dim=HEAD_DIM,
+    # --- Create ONNX Input Tensors (on device) ---
+    ort_inputs_prefill = {
+        "inputs_embeds": inputs_embeds_prefill,
+        "position_ids": position_ids_prefill,
+        "attention_mask": attention_mask_prefill
+    }
+    
+    # Create dummy pasts with 0 sequence length
+    past_shape = (BATCH_SIZE, NUM_KV_HEADS, 0, HEAD_DIM)
+    dummy_past = torch.empty(past_shape, dtype=torch_dtype, device=device)
+    for i in range(NUM_LAYERS):
+        ort_inputs_prefill[f"past_key_values.{i}.key"] = dummy_past
+        ort_inputs_prefill[f"past_key_values.{i}.value"] = dummy_past
+
+    # --- Create ONNX Output Tensors (on device) ---
+    ort_logits_prefill = torch.empty(
+        (BATCH_SIZE, PREFILL_LEN, VOCAB_SIZE), 
+        dtype=logits_dtype,
         device=device
     )
     
-    # --- Run Models ---
+    ort_presents_prefill = []
+    ort_outputs_prefill = {"logits": ort_logits_prefill}
+    present_shape = (BATCH_SIZE, NUM_KV_HEADS, PREFILL_LEN, HEAD_DIM)
+    
+    for i in range(NUM_LAYERS):
+        ort_present_k = torch.empty(present_shape, dtype=torch_dtype, device=device)
+        ort_present_v = torch.empty(present_shape, dtype=torch_dtype, device=device)
+        ort_outputs_prefill[f"present.{i}.key"] = ort_present_k
+        ort_outputs_prefill[f"present.{i}.value"] = ort_present_v
+        ort_presents_prefill.extend([ort_present_k, ort_present_v])
+
+    # --- Run HF Model ---
     with torch.no_grad():
         hf_outputs_prefill = hf_text_model(
             inputs_embeds=inputs_embeds_prefill,
@@ -233,22 +259,18 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
             use_cache=True
         )
 
-    ort_outputs_prefill_list = sess.run(output_names, ort_inputs_prefill)
-    ort_outputs_prefill = {name: ort_outputs_prefill_list[i] for i, name in enumerate(output_names)}
+    # --- Run ONNX Model with IOBinding ---
+    ort_io_binding_helper(sess, ort_inputs_prefill, ort_outputs_prefill, device)
 
     # --- Compare Prefill ---
     hf_logits_prefill = hf_full_model.lm_head(hf_outputs_prefill.last_hidden_state)
-    ort_logits_prefill = ort_outputs_prefill["logits"]
-    
-    # FIX: Remove .to_tuple()
     hf_presents_prefill = hf_outputs_prefill.past_key_values
-    ort_presents_prefill = sort_ort_present_outputs(ort_outputs_prefill)
 
     compare_outputs(
         hf_logits_prefill,
-        ort_logits_prefill,
+        ort_logits_prefill, # This is the tensor we pre-allocated
         hf_presents_prefill,
-        ort_presents_prefill,
+        ort_presents_prefill, # This is the list of tensors we pre-allocated
         step_name="Prefill"
     )
 
@@ -264,7 +286,6 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
         device=device
     )
     
-    # Position ID for the *new* token is just its index
     pos_ids_1d_decode = torch.tensor(
         [[PREFILL_LEN]], 
         dtype=torch.int64, 
@@ -272,7 +293,6 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
     )
     position_ids_decode = pos_ids_1d_decode.unsqueeze(0).expand(3, -1, -1)
     
-    # Attention mask for decode is [B, S_total]
     attention_mask_decode = torch.ones(
         (BATCH_SIZE, PREFILL_LEN + DECODE_LEN), 
         dtype=torch.int64, 
@@ -284,23 +304,36 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
     # Use the KV cache from the HF prefill run
     hf_past_key_values = hf_outputs_prefill.past_key_values
     
-    # --- Create ONNX Inputs ---
-    # Use the KV cache from the ONNX prefill run
-    ort_past_key_values = ort_presents_prefill
+    # --- Create ONNX Input Tensors (on device) ---
+    ort_inputs_decode = {
+        "inputs_embeds": inputs_embeds_decode,
+        "position_ids": position_ids_decode,
+        "attention_mask": attention_mask_decode
+    }
     
-    ort_inputs_decode = get_ort_inputs_and_names(
-        sess,
-        inputs_embeds_decode,
-        position_ids_decode,
-        attention_mask_decode,
-        past_key_values=ort_past_key_values,
-        num_layers=NUM_LAYERS,
-        num_kv_heads=NUM_KV_HEADS,
-        head_dim=HEAD_DIM,
+    # Use the KV cache from the ONNX prefill run (these are already torch tensors)
+    for i in range(NUM_LAYERS):
+        ort_inputs_decode[f"past_key_values.{i}.key"] = ort_presents_prefill[i*2]
+        ort_inputs_decode[f"past_key_values.{i}.value"] = ort_presents_prefill[i*2 + 1]
+    
+    # --- Create ONNX Output Tensors (on device) ---
+    ort_logits_decode = torch.empty(
+        (BATCH_SIZE, DECODE_LEN, VOCAB_SIZE), 
+        dtype=logits_dtype, 
         device=device
     )
+    ort_presents_decode = []
+    ort_outputs_decode = {"logits": ort_logits_decode}
+    present_shape_decode = (BATCH_SIZE, NUM_KV_HEADS, PREFILL_LEN + DECODE_LEN, HEAD_DIM)
     
-    # --- Run Models ---
+    for i in range(NUM_LAYERS):
+        ort_present_k = torch.empty(present_shape_decode, dtype=torch_dtype, device=device)
+        ort_present_v = torch.empty(present_shape_decode, dtype=torch_dtype, device=device)
+        ort_outputs_decode[f"present.{i}.key"] = ort_present_k
+        ort_outputs_decode[f"present.{i}.value"] = ort_present_v
+        ort_presents_decode.extend([ort_present_k, ort_present_v])
+
+    # --- Run HF Model ---
     with torch.no_grad():
         hf_outputs_decode = hf_text_model(
             inputs_embeds=inputs_embeds_decode,
@@ -312,16 +345,12 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
             use_cache=True
         )
 
-    ort_outputs_decode_list = sess.run(output_names, ort_inputs_decode)
-    ort_outputs_decode = {name: ort_outputs_decode_list[i] for i, name in enumerate(output_names)}
+    # --- Run ONNX Model with IOBinding ---
+    ort_io_binding_helper(sess, ort_inputs_decode, ort_outputs_decode, device)
 
     # --- Compare Decode ---
     hf_logits_decode = hf_full_model.lm_head(hf_outputs_decode.last_hidden_state)
-    ort_logits_decode = ort_outputs_decode["logits"]
-    
-    # FIX: Remove .to_tuple()
     hf_presents_decode = hf_outputs_decode.past_key_values
-    ort_presents_decode = sort_ort_present_outputs(ort_outputs_decode)
     
     compare_outputs(
         hf_logits_decode,
@@ -346,7 +375,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--onnx_model",
         type=str,
-        default="./qwen_fp32/model.onnx",
+        required=True,
         help="Path to the exported ONNX model file."
     )
     parser.add_argument(
@@ -359,14 +388,28 @@ if __name__ == "__main__":
     parser.add_argument(
         "--cpu",
         action="store_true",
-        help="Force running the test on CPU."
+        help="Force running the test on CPU (Not supported with IOBinding)."
     )
-    
+
+    parser.add_argument(
+        "--bf16",
+        action="store_true",
+        help="Use bf16 precision."
+    )    
     args = parser.parse_args()
+    
+    if args.cpu and args.bf16:
+        print("Warning: Cannot run bf16 on CPU. Forcing float32.")
+        args.bf16 = False
+
+    if args.cpu:
+        print("Warning: CPU testing with IOBinding is not set up. Forcing GPU.")
+        # This script is now GPU-only
     
     test_parity(
         hf_model_name=args.hf_model, 
         cache_dir=args.cache_dir,
         onnx_model_path=args.onnx_model, 
-        use_gpu=not args.cpu
+        use_gpu=True, # Forcing GPU
+        use_bf16=args.bf16
     )
