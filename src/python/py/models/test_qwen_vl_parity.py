@@ -1,3 +1,4 @@
+import os
 import argparse
 import torch
 import numpy as np
@@ -151,9 +152,14 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
     
     torch_dtype = torch.bfloat16 if use_bf16 else torch.float32
     
-    # The builder script (base.Model) upcasts logits to float32
-    # when the io_dtype is bfloat16. We must match that here.
-    logits_dtype = torch.float32 if use_bf16 else torch_dtype
+    allow_bf16_logits = os.getenv("allow_bf16_logits") in ["1", "true", "True"]
+    if allow_bf16_logits:
+        logits_dtype = torch_dtype
+    else:
+        # The builder script (base.Model) upcasts logits to float32
+        # when the io_dtype is bfloat16. We must match that here.
+        logits_dtype = torch.float32 if use_bf16 else torch_dtype
+    print(f"Allocating ONNX logits output buffer with dtype: {logits_dtype}")
     
     hf_full_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         hf_model_name,
@@ -235,7 +241,6 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
         dtype=logits_dtype,
         device=device
     )
-    
     ort_presents_prefill = []
     ort_outputs_prefill = {"logits": ort_logits_prefill}
     present_shape = (BATCH_SIZE, NUM_KV_HEADS, PREFILL_LEN, HEAD_DIM)
@@ -317,9 +322,10 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
         ort_inputs_decode[f"past_key_values.{i}.value"] = ort_presents_prefill[i*2 + 1]
     
     # --- Create ONNX Output Tensors (on device) ---
+    # --- FIX: Logits from bf16 ONNX model are intentionally float32 for accuracy ---
     ort_logits_decode = torch.empty(
         (BATCH_SIZE, DECODE_LEN, VOCAB_SIZE), 
-        dtype=logits_dtype, 
+        dtype=logits_dtype,
         device=device
     )
     ort_presents_decode = []

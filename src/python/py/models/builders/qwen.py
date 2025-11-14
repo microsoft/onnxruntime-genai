@@ -1,3 +1,4 @@
+import os
 from .base import Model # Changed this to match your new inheritance
 import onnx_ir as ir
 import torch
@@ -62,6 +63,25 @@ class Qwen25VLModel(QwenModel):
         if "rope_cast" not in self.attention_attrs:
             self.attention_attrs["rope_cast"] = {}
         self.attention_attrs["rope_cast"]["use_fp32"] = True
+        
+        # ----- START OF LOGITS PRECISION FIX -----
+        #
+        # BUG: The base.Model.make_outputs_init() *always* casts logits to float32
+        # if the io_dtype is bfloat16. This is to improve accuracy in general.
+        #
+        # PROBLEM: The HF model (Qwen2_5_VL) *does not* do this. It computes
+        # the lm_head MatMul in bfloat16 and returns bfloat16 logits.
+        # This causes the parity test (which compares bf16 vs fp32) to fail.
+        #
+        # SOLUTION: We must override the base model's decision and set the
+        # output logits type to match the io_dtype (bfloat16).
+        #
+        self.allow_bf16_logits = os.getenv("allow_bf16_logits") in ["1", "true", "True"]
+        if self.allow_bf16_logits and self.io_dtype == ir.DataType.BFLOAT16:
+            print("Fixing output logits precision. Setting output_types['logits'] to BFLOAT16 to match HF model.")
+            self.output_types["logits"] = ir.DataType.BFLOAT16
+        #
+        # ----- END OF LOGITS PRECISION FIX -----
         
         # Manually get the attention_scaling from the rope_config
         # This replicates the logic from transformers.models.rope_utils._config_to_init_values
