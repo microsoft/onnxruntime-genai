@@ -12,28 +12,35 @@ namespace {
 
 std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
-                   OrtxTensor* pixel_values, OrtxTensor* image_grid_thw, Ort::Allocator& allocator) {
+                   OrtxTensor* pixel_values, OrtxTensor* image_grid_thw, 
+                   const int64_t* computed_grid_data, int64_t computed_grid_num_images,
+                   Ort::Allocator& allocator) {
   constexpr char vision_start_token[] = "<|vision_start|>";
   constexpr char vision_end_token[] = "<|vision_end|>";
   constexpr char image_pad_token[] = "<|image_pad|>";
 
   int64_t num_images = 0;
   int64_t total_image_tokens = 0;
+  const int64_t* image_grid_thw_data = nullptr;
   
-  if (pixel_values && image_grid_thw) {
+  if (pixel_values) {
     const float* pixel_values_data{};
     const int64_t* pixel_values_shape{};
     size_t pixel_values_num_dims;
     CheckResult(OrtxGetTensorData(pixel_values, reinterpret_cast<const void**>(&pixel_values_data),
                                   &pixel_values_shape, &pixel_values_num_dims));
     
-    const int64_t* image_grid_thw_data{};
-    const int64_t* image_grid_thw_shape{};
-    size_t image_grid_thw_num_dims;
-    CheckResult(OrtxGetTensorData(image_grid_thw, reinterpret_cast<const void**>(&image_grid_thw_data),
-                                  &image_grid_thw_shape, &image_grid_thw_num_dims));
-    
-    num_images = image_grid_thw_shape[0];
+    // Get image_grid_thw data from either processor output or computed value
+    if (image_grid_thw) {
+      const int64_t* image_grid_thw_shape{};
+      size_t image_grid_thw_num_dims;
+      CheckResult(OrtxGetTensorData(image_grid_thw, reinterpret_cast<const void**>(&image_grid_thw_data),
+                                    &image_grid_thw_shape, &image_grid_thw_num_dims));
+      num_images = image_grid_thw_shape[0];
+    } else if (computed_grid_data) {
+      image_grid_thw_data = computed_grid_data;
+      num_images = computed_grid_num_images;
+    }
     
     // Calculate total image tokens based on grid dimensions
     // For each image: (temporal * height * width) / (merge_size^2)
@@ -60,7 +67,8 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
   }
 
   // Count the number of vision_start tokens and make sure it matches the number of images
-  const std::regex vision_start_regex{std::string(vision_start_token)};
+  // Need to escape special regex characters in the token
+  const std::regex vision_start_regex{R"(<\|vision_start\|>)"};
   const auto vision_start_begin = std::sregex_iterator(text.begin(), text.end(), vision_start_regex);
   const auto vision_start_end = std::sregex_iterator();
   const auto vision_start_tokens = std::distance(vision_start_begin, vision_start_end);
@@ -72,13 +80,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 
   // For Qwen2-VL, we need to replace vision markers with image_pad tokens
   // The number of image_pad tokens for each image depends on the image dimensions
-  if (num_images > 0 && image_grid_thw) {
-    const int64_t* image_grid_thw_data{};
-    const int64_t* image_grid_thw_shape{};
-    size_t image_grid_thw_num_dims;
-    CheckResult(OrtxGetTensorData(image_grid_thw, reinterpret_cast<const void**>(&image_grid_thw_data),
-                                  &image_grid_thw_shape, &image_grid_thw_num_dims));
-    
+  if (num_images > 0 && image_grid_thw_data) {
     constexpr int64_t merge_size = 2;
     std::string modified_text;
     size_t last_pos = 0;
@@ -149,7 +151,7 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   auto named_tensors = std::make_unique<NamedTensors>();
 
   if (!images) {
-    [[maybe_unused]] auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, nullptr, nullptr, allocator);
+    [[maybe_unused]] auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, nullptr, nullptr, nullptr, 0, allocator);
     named_tensors->emplace(Config::Defaults::InputIdsName, std::make_shared<Tensor>(std::move(input_ids)));
     return named_tensors;
   }
@@ -161,12 +163,128 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   CheckResult(OrtxTensorResultGetAt(result.get(), 0, &pixel_values));
 
   OrtxTensor* image_grid_thw = nullptr;
-  CheckResult(OrtxTensorResultGetAt(result.get(), 1, &image_grid_thw));
+  // Try to get image_grid_thw from processor (second output)
+  auto status = OrtxTensorResultGetAt(result.get(), 1, &image_grid_thw);
+  
+  // Get pixel_values data and shape
+  const float* pixel_values_data{};
+  const int64_t* pixel_values_shape{};
+  size_t pixel_values_num_dims;
+  CheckResult(OrtxGetTensorData(pixel_values, reinterpret_cast<const void**>(&pixel_values_data),
+                                &pixel_values_shape, &pixel_values_num_dims));
+  
+  std::cerr << "DEBUG: pixel_values_num_dims=" << pixel_values_num_dims << " shape=[";
+  for (size_t i = 0; i < pixel_values_num_dims; ++i) {
+    if (i > 0) std::cerr << ", ";
+    std::cerr << pixel_values_shape[i];
+  }
+  std::cerr << "]" << std::endl;
+  
+  // If processor doesn't provide image_grid_thw or patched pixel_values, compute them
+  std::unique_ptr<OrtValue> computed_image_grid_thw;
+  std::unique_ptr<OrtValue> patched_pixel_values;
+  const int64_t* computed_grid_data = nullptr;
+  int64_t computed_grid_num_images = 0;
+  
+  // Check if pixel_values needs patching (shape should be [1, height, width, channels] in HWC format)
+  if (pixel_values_num_dims == 4 && pixel_values_shape[0] == 1) {
+    constexpr int64_t patch_size = 14;
+    constexpr int64_t temporal_patch_size = 2;
+    
+    int64_t height = pixel_values_shape[1];      // HWC: [batch, height, width, channels]
+    int64_t width = pixel_values_shape[2];
+    int64_t channels = pixel_values_shape[3];
+    
+    int64_t height_patches = height / patch_size;
+    int64_t width_patches = width / patch_size;
+    int64_t total_patches = height_patches * width_patches;
+    int64_t patch_dim = channels * temporal_patch_size * patch_size * patch_size;  // 3*2*14*14 = 1176
+    
+    // Create patched pixel_values: [total_patches, patch_dim]
+    patched_pixel_values = OrtValue::CreateTensor<float>(
+        allocator, std::vector<int64_t>{total_patches, patch_dim});
+    auto* patched_data = patched_pixel_values->GetTensorMutableData<float>();
+    
+    // Extract patches from single image in HWC format
+    // Each spatial patch is replicated temporal_patch_size times
+    int64_t patch_idx = 0;
+    for (int64_t ph = 0; ph < height_patches; ++ph) {
+      for (int64_t pw = 0; pw < width_patches; ++pw) {
+        int64_t h_start = ph * patch_size;
+        int64_t w_start = pw * patch_size;
+        
+        int64_t write_idx = patch_idx * patch_dim;
+        
+        // Repeat the same spatial patch temporal_patch_size times
+        // Output: [temporal, channels, patch_h, patch_w]
+        for (int64_t t = 0; t < temporal_patch_size; ++t) {
+          for (int64_t c = 0; c < channels; ++c) {
+            for (int64_t h = 0; h < patch_size; ++h) {
+              for (int64_t w = 0; w < patch_size; ++w) {
+                // HWC format: pixel_values[height][width][channels]
+                int64_t src_idx = (h_start + h) * width * channels + (w_start + w) * channels + c;
+                patched_data[write_idx++] = pixel_values_data[src_idx];
+              }
+            }
+          }
+        }
+        patch_idx++;
+      }
+    }
+    
+    // Create image_grid_thw: [1, 3] for single image
+    if (status != kOrtxOK || !image_grid_thw) {
+      computed_image_grid_thw = OrtValue::CreateTensor<int64_t>(
+          allocator, std::vector<int64_t>{1, 3});
+      auto* grid_data = computed_image_grid_thw->GetTensorMutableData<int64_t>();
+      
+      // For a single image: T=1 (one frame), H=height_patches, W=width_patches
+      // The temporal_patch_size is embedded in the patch dimension (1176 = 3*2*14*14)
+      grid_data[0] = 1;  // Single temporal frame for images
+      grid_data[1] = height_patches;
+      grid_data[2] = width_patches;
+      
+      computed_grid_data = grid_data;
+      computed_grid_num_images = 1;
+    }
+  }
 
-  auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values, image_grid_thw, allocator);
+  auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values, 
+                                                          image_grid_thw, computed_grid_data, computed_grid_num_images, allocator);
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
 
-  if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+  // Use patched pixel_values if we computed it, otherwise use processor output
+  if (patched_pixel_values) {
+    // Convert to the correct type if needed
+    if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
+      // Convert float to bfloat16
+      auto shape_vec = patched_pixel_values->GetTensorTypeAndShapeInfo()->GetShape();
+      auto bf16_tensor = OrtValue::CreateTensor<Ort::BFloat16_t>(allocator, shape_vec);
+      const float* src = patched_pixel_values->GetTensorData<float>();
+      auto* dst = static_cast<uint16_t*>(bf16_tensor->GetTensorMutableData<void>());
+      size_t count = patched_pixel_values->GetTensorTypeAndShapeInfo()->GetElementCount();
+      for (size_t i = 0; i < count; ++i) {
+        dst[i] = Float32ToBFloat16(src[i]);
+      }
+      named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                             std::make_shared<Tensor>(std::move(bf16_tensor)));
+    } else if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+      // Convert float to float16
+      auto shape_vec = patched_pixel_values->GetTensorTypeAndShapeInfo()->GetShape();
+      auto fp16_tensor = OrtValue::CreateTensor<Ort::Float16_t>(allocator, shape_vec);
+      const float* src = patched_pixel_values->GetTensorData<float>();
+      auto* dst = static_cast<uint16_t*>(fp16_tensor->GetTensorMutableData<void>());
+      size_t count = patched_pixel_values->GetTensorTypeAndShapeInfo()->GetElementCount();
+      for (size_t i = 0; i < count; ++i) {
+        dst[i] = FastFloat32ToFloat16(src[i]);
+      }
+      named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                             std::make_shared<Tensor>(std::move(fp16_tensor)));
+    } else {
+      named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                             std::make_shared<Tensor>(std::move(patched_pixel_values)));
+    }
+  } else if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(ProcessTensor<float>(pixel_values, allocator)));
   } else if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
@@ -177,9 +295,14 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
                            std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(pixel_values, allocator)));
   }
 
-  // Add image_grid_thw tensor
-  named_tensors->emplace("image_grid_thw",
-                         std::make_shared<Tensor>(ProcessTensor<int64_t>(image_grid_thw, allocator)));
+  // Add image_grid_thw tensor (either from processor or computed)
+  if (image_grid_thw) {
+    named_tensors->emplace("image_grid_thw",
+                           std::make_shared<Tensor>(ProcessTensor<int64_t>(image_grid_thw, allocator)));
+  } else if (computed_image_grid_thw) {
+    named_tensors->emplace("image_grid_thw",
+                           std::make_shared<Tensor>(std::move(computed_image_grid_thw)));
+  }
 
   named_tensors->emplace(std::string(Config::Defaults::NumImageTokens), std::make_shared<Tensor>(std::move(num_img_tokens)));
 

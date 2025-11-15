@@ -613,18 +613,13 @@ void Qwen2VLPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
 }
 
 void Qwen2VLPositionInputs::Update3DPositionIDs(int total_length, int new_length) {
-  // After first update, we use the cached position_ids_next tensor
-  if (position_ids_next_ && position_ids_shape_[1] > 1 && position_ids_shape_[2] == 1) {
-    position_ids_ = std::move(position_ids_next_);
-    position_ids_next_ = nullptr;
-  } else {
-    position_ids_->CreateTensor(position_ids_shape_, state_.params_->use_graph_capture && position_ids_shape_[2] == 1);
-  }
+  // Create tensor on CPU (like in CreateAndInitialize3DPositionIDs)
+  auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, type_);
 
   // Update position values for generation phase
   // During generation, we increment all 3 dimensions uniformly for text generation
   if (type_ == Ort::TypeToTensorType<int32_t>) {
-    auto* data = position_ids_->GetMutableData<int32_t>();
+    auto* data = position_ids->GetTensorMutableData<int32_t>();
     for (int64_t dim = 0; dim < 3; ++dim) {
       for (int64_t batch = 0; batch < position_ids_shape_[1]; ++batch) {
         for (int64_t pos = 0; pos < position_ids_shape_[2]; ++pos) {
@@ -634,7 +629,7 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int total_length, int new_length
       }
     }
   } else {
-    auto* data = position_ids_->GetMutableData<int64_t>();
+    auto* data = position_ids->GetTensorMutableData<int64_t>();
     for (int64_t dim = 0; dim < 3; ++dim) {
       for (int64_t batch = 0; batch < position_ids_shape_[1]; ++batch) {
         for (int64_t pos = 0; pos < position_ids_shape_[2]; ++pos) {
@@ -645,27 +640,26 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int total_length, int new_length
     }
   }
 
+  // Move to GPU if needed
+  position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, 1);
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 }
 
 void Qwen2VLPositionInputs::UpdateAttentionMask(int total_length, int new_length) {
-  if (attention_mask_next_ && attention_mask_shape_[1] == total_length - 1) {
-    attention_mask_ = std::move(attention_mask_next_);
-    attention_mask_next_ = nullptr;
+  // Create tensor on CPU (like in CreateAndInitialize3DPositionIDs)
+  auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
+
+  // Update attention mask - typically all 1s during generation
+  if (type_ == Ort::TypeToTensorType<int32_t>) {
+    auto* mask_data = attention_mask->GetTensorMutableData<int32_t>();
+    std::fill_n(mask_data, attention_mask_shape_[0] * attention_mask_shape_[1], static_cast<int32_t>(1));
   } else {
-    attention_mask_->CreateTensor(attention_mask_shape_, state_.params_->use_graph_capture && attention_mask_shape_[1] == 1);
+    auto* mask_data = attention_mask->GetTensorMutableData<int64_t>();
+    std::fill_n(mask_data, attention_mask_shape_[0] * attention_mask_shape_[1], static_cast<int64_t>(1));
   }
 
-  if (!state_.params_->use_graph_capture || attention_mask_shape_[1] != 1) {
-    // Update attention mask - typically all 1s during generation
-    if (type_ == Ort::TypeToTensorType<int32_t>) {
-      auto* mask_data = attention_mask_->GetMutableData<int32_t>();
-      std::fill_n(mask_data, attention_mask_shape_[0] * attention_mask_shape_[1], static_cast<int32_t>(1));
-    } else {
-      auto* mask_data = attention_mask_->GetMutableData<int64_t>();
-      std::fill_n(mask_data, attention_mask_shape_[0] * attention_mask_shape_[1], static_cast<int64_t>(1));
-    }
-  }
+  // Move to GPU if needed
+  attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, 1);
 
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
@@ -679,6 +673,7 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
       else
         CreateAndInitialize3DPositionIDs<int64_t>(next_tokens, position_ids_shape_);
     } else {
+      position_ids_shape_[2] = new_length;  // Update shape before Update3DPositionIDs
       Update3DPositionIDs(total_length, new_length);
     }
   }
@@ -691,7 +686,9 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
       else
         CreateAndInitializeAttentionMask<int64_t>(next_tokens, attention_mask_shape_);
     } else {
+      // UpdateAttentionMask checks old shape, then we update it
       UpdateAttentionMask(total_length, new_length);
+      attention_mask_shape_[1] = total_length;  // Update to current total length
     }
   }
   
