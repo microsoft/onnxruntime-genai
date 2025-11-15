@@ -129,11 +129,11 @@ struct Qwen2VLPositionInputs : PositionInputs {
   
   template <typename T>
   void CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 3> shape);
-  void Update3DPositionIDs(int total_length, int new_length);
+  void Update3DPositionIDs(int base_pos);
   
   template <typename T>
   void CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape);
-  void UpdateAttentionMask(int total_length, int new_length);
+  void UpdateAttentionMask();
 
   const Model& model_;
   State& state_;
@@ -146,15 +146,12 @@ struct Qwen2VLPositionInputs : PositionInputs {
   bool has_mask_input_{false};
   bool has_posid_input_{false};
 
-  std::array<int64_t, 3> position_ids_shape_{};  // {4, batch_size, sequence_length} for 3D positions
+  std::array<int64_t, 3> position_ids_shape_{};  // {3, batch_size, sequence_length} for 3D positions
   std::unique_ptr<Tensor> position_ids_;
-  std::unique_ptr<Tensor> position_ids_next_;  // Replaces position_ids_ after the first Run() call
   
   std::array<int64_t, 2> attention_mask_shape_{};  // {batch_size, sequence_length}
   std::unique_ptr<Tensor> attention_mask_;
-  std::unique_ptr<Tensor> attention_mask_next_;  // Replaces attention_mask_ after each run
   
-  std::unique_ptr<Tensor> rope_deltas_;  // Cached rope deltas for position calculation
   bool is_first_update_{true};
 };
 
