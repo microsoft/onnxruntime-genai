@@ -81,7 +81,6 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
 
         basename = "/model/pos_ids_reformat"
         proto_dtype = self.input_types["position_ids"]
-        str_dtype = self.to_str_dtype(proto_dtype)
 
         # For WebGPU, use int32 for computation due to limited int64 ops support
         is_webgpu = self.extra_options.get("enable_webgpu_graph", False)
