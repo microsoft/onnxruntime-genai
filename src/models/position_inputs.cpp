@@ -5,6 +5,15 @@
 
 namespace Generators {
 
+// Helper to dispatch type-specific tensor operations
+template<typename Func>
+void DispatchOnType(ONNXTensorElementDataType type, Func&& func) {
+  if (type == Ort::TypeToTensorType<int32_t>)
+    func.template operator()<int32_t>();
+  else
+    func.template operator()<int64_t>();
+}
+
 DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name)
     : model_{model},
       state_{state},
@@ -501,13 +510,11 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
     position_ids_shape_[2] = 0;  // Will be set during first update
 
     position_ids_ = std::make_unique<Tensor>(model_.p_device_inputs_, posid_type);
-    position_ids_next_ = std::make_unique<Tensor>(model_.p_device_inputs_, posid_type);
   }
   if (has_mask_input_) {
     attention_mask_shape_[0] = state_.params_->search.batch_size;
     attention_mask_shape_[1] = 0;  // Will be set during first update
     attention_mask_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
-    attention_mask_next_ = std::make_unique<Tensor>(model_.p_device_inputs_, type_);
   }
 }
 
@@ -534,161 +541,94 @@ void Qwen2VLPositionInputs::AddAttentionMask() {
 
 template <typename T>
 void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 3> shape) {
-  // For Qwen2-VL, in the prefill stage, position_ids are [3, batch_size, seq_len]
-  // During generation, they remain [3, batch_size, 1]
+  // For Qwen2-VL, position_ids are [3, batch_size, seq_len]
   // The 3 dimensions represent: [temporal, height, width] for mrope
+  // For text-only content, all 3 dimensions have the same position values [0,1,2,...]
   
   auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
   auto* position_data = position_ids->GetTensorMutableData<T>();
-  
-  auto position_ids_next = OrtValue::CreateTensor(model_.allocator_cpu_, std::array<int64_t, 3>{shape[0], shape[1], 1}, type_);
-  auto* position_data_next = position_ids_next->GetTensorMutableData<T>();
 
-  // Initialize position IDs
-  // For text-only content (no vision), all 3 dimensions have the same position values
-  // This matches the PyTorch get_rope_index behavior where text positions are [0,1,2,...]
-  // replicated across all 3 mrope dimensions
-  
   // Fill position_ids: shape is [3, batch_size, seq_len]
   for (int64_t dim = 0; dim < 3; ++dim) {
     for (int64_t batch = 0; batch < shape[1]; ++batch) {
       for (int64_t pos = 0; pos < shape[2]; ++pos) {
-        // All 3 dimensions get the same sequential position values for text
         position_data[dim * shape[1] * shape[2] + batch * shape[2] + pos] = static_cast<T>(pos);
       }
     }
   }
-  
-  // Fill position_ids_next for generation: shape is [3, batch_size, 1]
-  for (int64_t dim = 0; dim < 3; ++dim) {
-    for (int64_t batch = 0; batch < shape[1]; ++batch) {
-      // Next position is seq_len (continuing from last position)
-      position_data_next[dim * shape[1] + batch] = static_cast<T>(shape[2]);
-    }
-  }
-  
-  // Old multi-batch code removed since we simplified to match PyTorch logic
-  if (false) {
-    // Multiple batches - initialize with simple ascending values
-    // In practice, vision-specific positions would be computed by the model's get_rope_index logic
-    for (int64_t dim = 0; dim < 3; ++dim) {
-      for (int64_t batch = 0; batch < shape[1]; ++batch) {
-        for (int64_t pos = 0; pos < shape[2]; ++pos) {
-          position_data[dim * shape[1] * shape[2] + batch * shape[2] + pos] = static_cast<T>(pos);
-        }
-        position_data_next[dim * shape[1] + batch] = static_cast<T>(shape[2]);
-      }
-    }
-  }
 
-  // Move tensors to appropriate device and expand by num_beams
+  // Move tensor to GPU and expand by num_beams
   position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, state_.params_->search.num_beams);
-  position_ids_next_->ort_tensor_ = model_.ExpandInputs(position_ids_next, state_.params_->search.num_beams);
-  if (state_.params_->use_graph_capture)
-    position_ids_next_->MakeStatic();
   position_ids_shape_[1] *= state_.params_->search.num_beams;
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 }
 
 template <typename T>
 void Qwen2VLPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape) {
-  // Standard 2D attention mask initialization
   auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
   auto* mask_data = attention_mask->GetTensorMutableData<T>();
-  
-  auto attention_mask_next = OrtValue::CreateTensor(model_.allocator_cpu_, std::array<int64_t, 2>{shape[0], shape[1] + 1}, type_);
-  auto* mask_data_next = attention_mask_next->GetTensorMutableData<T>();
 
-  // Set mask to 1 for all positions (assuming no padding in first iteration)
+  // Set mask to 1 for all positions (no padding)
   std::fill_n(mask_data, shape[0] * shape[1], static_cast<T>(1));
-  std::fill_n(mask_data_next, shape[0] * (shape[1] + 1), static_cast<T>(1));
 
-  // Move tensors to device and expand by num_beams
+  // Move tensor to GPU and expand by num_beams
   attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, state_.params_->search.num_beams);
-  attention_mask_next_->ort_tensor_ = model_.ExpandInputs(attention_mask_next, state_.params_->search.num_beams);
-  if (state_.params_->use_graph_capture)
-    attention_mask_next_->MakeStatic();
   attention_mask_shape_[0] *= state_.params_->search.num_beams;
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
-void Qwen2VLPositionInputs::Update3DPositionIDs(int total_length, int new_length) {
-  // Create tensor on CPU (like in CreateAndInitialize3DPositionIDs)
+void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
   auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, type_);
 
-  // Update position values for generation phase
-  // During generation, we increment all 3 dimensions uniformly for text generation
-  if (type_ == Ort::TypeToTensorType<int32_t>) {
-    auto* data = position_ids->GetTensorMutableData<int32_t>();
+  DispatchOnType(type_, [&]<typename T>() {
+    auto* data = position_ids->GetTensorMutableData<T>();
     for (int64_t dim = 0; dim < 3; ++dim) {
       for (int64_t batch = 0; batch < position_ids_shape_[1]; ++batch) {
         for (int64_t pos = 0; pos < position_ids_shape_[2]; ++pos) {
           data[dim * position_ids_shape_[1] * position_ids_shape_[2] + batch * position_ids_shape_[2] + pos] = 
-            static_cast<int32_t>(total_length - new_length + pos);
+            static_cast<T>(base_pos + pos);
         }
       }
     }
-  } else {
-    auto* data = position_ids->GetTensorMutableData<int64_t>();
-    for (int64_t dim = 0; dim < 3; ++dim) {
-      for (int64_t batch = 0; batch < position_ids_shape_[1]; ++batch) {
-        for (int64_t pos = 0; pos < position_ids_shape_[2]; ++pos) {
-          data[dim * position_ids_shape_[1] * position_ids_shape_[2] + batch * position_ids_shape_[2] + pos] = 
-            static_cast<int64_t>(total_length - new_length + pos);
-        }
-      }
-    }
-  }
+  });
 
-  // Move to GPU if needed
   position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, 1);
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
 }
 
-void Qwen2VLPositionInputs::UpdateAttentionMask(int total_length, int new_length) {
-  // Create tensor on CPU (like in CreateAndInitialize3DPositionIDs)
+void Qwen2VLPositionInputs::UpdateAttentionMask() {
   auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
 
-  // Update attention mask - typically all 1s during generation
-  if (type_ == Ort::TypeToTensorType<int32_t>) {
-    auto* mask_data = attention_mask->GetTensorMutableData<int32_t>();
-    std::fill_n(mask_data, attention_mask_shape_[0] * attention_mask_shape_[1], static_cast<int32_t>(1));
-  } else {
-    auto* mask_data = attention_mask->GetTensorMutableData<int64_t>();
-    std::fill_n(mask_data, attention_mask_shape_[0] * attention_mask_shape_[1], static_cast<int64_t>(1));
-  }
+  DispatchOnType(type_, [&]<typename T>() {
+    auto* mask_data = attention_mask->GetTensorMutableData<T>();
+    std::fill_n(mask_data, attention_mask_shape_[0] * attention_mask_shape_[1], static_cast<T>(1));
+  });
 
-  // Move to GPU if needed
   attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, 1);
-
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
 }
 
 void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_length, int new_length) {
   if (has_posid_input_) {
+    position_ids_shape_[2] = new_length;
     if (is_first_update_) {
-      position_ids_shape_[2] = new_length;
-      if (type_ == Ort::TypeToTensorType<int32_t>)
-        CreateAndInitialize3DPositionIDs<int32_t>(next_tokens, position_ids_shape_);
-      else
-        CreateAndInitialize3DPositionIDs<int64_t>(next_tokens, position_ids_shape_);
+      DispatchOnType(type_, [&]<typename T>() {
+        CreateAndInitialize3DPositionIDs<T>(next_tokens, position_ids_shape_);
+      });
     } else {
-      position_ids_shape_[2] = new_length;  // Update shape before Update3DPositionIDs
-      Update3DPositionIDs(total_length, new_length);
+      Update3DPositionIDs(total_length - new_length);
     }
   }
 
   if (has_mask_input_) {
     if (is_first_update_) {
       attention_mask_shape_[1] = new_length;
-      if (type_ == Ort::TypeToTensorType<int32_t>)
-        CreateAndInitializeAttentionMask<int32_t>(next_tokens, attention_mask_shape_);
-      else
-        CreateAndInitializeAttentionMask<int64_t>(next_tokens, attention_mask_shape_);
+      DispatchOnType(type_, [&]<typename T>() {
+        CreateAndInitializeAttentionMask<T>(next_tokens, attention_mask_shape_);
+      });
     } else {
-      // UpdateAttentionMask checks old shape, then we update it
-      UpdateAttentionMask(total_length, new_length);
-      attention_mask_shape_[1] = total_length;  // Update to current total length
+      attention_mask_shape_[1] = total_length;
+      UpdateAttentionMask();
     }
   }
   

@@ -10,6 +10,8 @@ namespace Generators {
 
 namespace {
 
+constexpr int64_t kMergeSize = 2;  // Qwen2-VL merge size for vision tokens
+
 std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
                    OrtxTensor* pixel_values, OrtxTensor* image_grid_thw, 
@@ -44,12 +46,11 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
     
     // Calculate total image tokens based on grid dimensions
     // For each image: (temporal * height * width) / (merge_size^2)
-    constexpr int64_t merge_size = 2;
     for (int64_t i = 0; i < num_images; ++i) {
       int64_t t = image_grid_thw_data[i * 3 + 0];
       int64_t h = image_grid_thw_data[i * 3 + 1];
       int64_t w = image_grid_thw_data[i * 3 + 2];
-      total_image_tokens += (t * h * w) / (merge_size * merge_size);
+      total_image_tokens += (t * h * w) / (kMergeSize * kMergeSize);
     }
   }
 
@@ -81,7 +82,6 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
   // For Qwen2-VL, we need to replace vision markers with image_pad tokens
   // The number of image_pad tokens for each image depends on the image dimensions
   if (num_images > 0 && image_grid_thw_data) {
-    constexpr int64_t merge_size = 2;
     std::string modified_text;
     size_t last_pos = 0;
     size_t image_idx = 0;
@@ -96,7 +96,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
       int64_t t = image_grid_thw_data[image_idx * 3 + 0];
       int64_t h = image_grid_thw_data[image_idx * 3 + 1];
       int64_t w = image_grid_thw_data[image_idx * 3 + 2];
-      int64_t num_pads = (t * h * w) / (merge_size * merge_size);
+      int64_t num_pads = (t * h * w) / (kMergeSize * kMergeSize);
       
       // Add vision_start, image_pad tokens, and vision_end
       modified_text += vision_start_token;
@@ -181,17 +181,18 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   
   // Check if pixel_values needs patching (shape should be [1, height, width, channels] in HWC format)
   if (pixel_values_num_dims == 4 && pixel_values_shape[0] == 1) {
-    constexpr int64_t patch_size = 14;
-    constexpr int64_t temporal_patch_size = 2;
+    constexpr int64_t kPatchSize = 14;
+    constexpr int64_t kTemporalPatchSize = 2;
+    constexpr int64_t kChannels = 3;
     
     int64_t height = pixel_values_shape[1];      // HWC: [batch, height, width, channels]
     int64_t width = pixel_values_shape[2];
     int64_t channels = pixel_values_shape[3];
     
-    int64_t height_patches = height / patch_size;
-    int64_t width_patches = width / patch_size;
+    int64_t height_patches = height / kPatchSize;
+    int64_t width_patches = width / kPatchSize;
     int64_t total_patches = height_patches * width_patches;
-    int64_t patch_dim = channels * temporal_patch_size * patch_size * patch_size;  // 3*2*14*14 = 1176
+    int64_t patch_dim = channels * kTemporalPatchSize * kPatchSize * kPatchSize;
     
     // Create patched pixel_values: [total_patches, patch_dim]
     patched_pixel_values = OrtValue::CreateTensor<float>(
@@ -199,21 +200,21 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     auto* patched_data = patched_pixel_values->GetTensorMutableData<float>();
     
     // Extract patches from single image in HWC format
-    // Each spatial patch is replicated temporal_patch_size times
+    // Each spatial patch is replicated kTemporalPatchSize times
     int64_t patch_idx = 0;
     for (int64_t ph = 0; ph < height_patches; ++ph) {
       for (int64_t pw = 0; pw < width_patches; ++pw) {
-        int64_t h_start = ph * patch_size;
-        int64_t w_start = pw * patch_size;
+        int64_t h_start = ph * kPatchSize;
+        int64_t w_start = pw * kPatchSize;
         
         int64_t write_idx = patch_idx * patch_dim;
         
-        // Repeat the same spatial patch temporal_patch_size times
+        // Repeat the same spatial patch kTemporalPatchSize times
         // Output: [temporal, channels, patch_h, patch_w]
-        for (int64_t t = 0; t < temporal_patch_size; ++t) {
+        for (int64_t t = 0; t < kTemporalPatchSize; ++t) {
           for (int64_t c = 0; c < channels; ++c) {
-            for (int64_t h = 0; h < patch_size; ++h) {
-              for (int64_t w = 0; w < patch_size; ++w) {
+            for (int64_t h = 0; h < kPatchSize; ++h) {
+              for (int64_t w = 0; w < kPatchSize; ++w) {
                 // HWC format: pixel_values[height][width][channels]
                 int64_t src_idx = (h_start + h) * width * channels + (w_start + w) * channels + c;
                 patched_data[write_idx++] = pixel_values_data[src_idx];
@@ -232,7 +233,7 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
       auto* grid_data = computed_image_grid_thw->GetTensorMutableData<int64_t>();
       
       // For a single image: T=1 (one frame), H=height_patches, W=width_patches
-      // The temporal_patch_size is embedded in the patch dimension (1176 = 3*2*14*14)
+      // The kTemporalPatchSize is embedded in the patch dimension
       grid_data[0] = 1;  // Single temporal frame for images
       grid_data[1] = height_patches;
       grid_data[2] = width_patches;
