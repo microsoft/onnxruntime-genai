@@ -63,7 +63,7 @@ setup(
     description='ONNX Runtime GenAI',
     long_description=long_description,
     long_description_content_type='text/markdown',
-    packages=['onnxruntime_genai', 'onnxruntime_genai.models'],
+    packages=['onnxruntime_genai', 'onnxruntime_genai.models', 'onnxruntime_genai.models.builders'],
     include_package_data=True,
     package_data={'': ['*.pyd', '*.dll', '*.so*', '*.dylib'] + extras},
     install_requires=_get_install_requires(),
