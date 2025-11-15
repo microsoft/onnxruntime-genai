@@ -173,13 +173,6 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   CheckResult(OrtxGetTensorData(pixel_values, reinterpret_cast<const void**>(&pixel_values_data),
                                 &pixel_values_shape, &pixel_values_num_dims));
   
-  std::cerr << "DEBUG: pixel_values_num_dims=" << pixel_values_num_dims << " shape=[";
-  for (size_t i = 0; i < pixel_values_num_dims; ++i) {
-    if (i > 0) std::cerr << ", ";
-    std::cerr << pixel_values_shape[i];
-  }
-  std::cerr << "]" << std::endl;
-  
   // If processor doesn't provide image_grid_thw or patched pixel_values, compute them
   std::unique_ptr<OrtValue> computed_image_grid_thw;
   std::unique_ptr<OrtValue> patched_pixel_values;
