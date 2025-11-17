@@ -1589,7 +1589,12 @@ class Model:
         self.rope_attrs["save_caches"] = False
         cos_cache_small, sin_cache_small = self.make_rotary_embedding_caches(cos_cache_name=cos_cache_small_name, sin_cache_name=sin_cache_small_name)
 
-        if self.ep == "dml":
+        # Determine which EPs don't support the If operator
+        self.eps_without_if_support = ["dml"]
+        if self.extra_options.get("enable_webgpu_graph", False):
+            self.eps_without_if_support.append("webgpu")
+
+        if self.ep in self.eps_without_if_support:
             # Concat small and large cos/sin caches for DML EP
             # DML EP doesn't support the If operator
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
