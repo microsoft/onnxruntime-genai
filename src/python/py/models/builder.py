@@ -1595,8 +1595,8 @@ class Model:
             self.eps_without_if_support.append("webgpu")
 
         if self.ep in self.eps_without_if_support:
-            # Concat small and large cos/sin caches for DML EP
-            # DML EP doesn't support the If operator
+            # Concat small and large cos/sin caches for DML and WebGPU (when graph enabled) EPs
+            # These EPs don't support the If operator
             cos_cache = torch.cat((cos_cache_small, cos_cache_large), dim=0)
             sin_cache = torch.cat((sin_cache_small, sin_cache_large), dim=0)
             # Save cos/sin caches to disk
