@@ -18,7 +18,7 @@ env:
   cuda_version: "12.2"
   CUDA_PATH: ${{ github.workspace }}\\cuda_sdk\\v12.2
   binaryDir: 'build/cuda/win-x64'
-  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime.Gpu.Windows&api-version=6.0-preview.1"
+  ORT_NUGET_API: "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.gpu.windows/index.json"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime.Gpu.Windows"
 
 jobs:
@@ -53,14 +53,14 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Download OnnxRuntime Nightly
+      - name: Download OnnxRuntime from NuGet.org
         shell: pwsh
         run: |
-          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
-          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
-          Write-Host "$ORT_NIGHTLY_VERSION"
-          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -ExcludeVersion -NonInteractive
+          $resp = Invoke-RestMethod "${{ env.ORT_NUGET_API }}"
+          $ORT_VERSION = $resp.versions[-1]
+          Write-Host "Latest stable ORT GPU version: $ORT_VERSION"
+          "ORT_VERSION=$ORT_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_VERSION -ExcludeVersion -NonInteractive
 
       - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
         continue-on-error: true
