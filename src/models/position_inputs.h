@@ -109,13 +109,15 @@ struct WindowedPositionInputs : PositionInputs {
   size_t window_index_{};
 };
 
-// Qwen2-VL uses 3D rotary position embeddings for multimodal (vision + text) content.
-// Position IDs have shape [4, batch_size, seq_len] where:
-//   - Dimension 0: Text-only positions
-//   - Dimensions 1-3: Vision positions (temporal, height, width)
-// This class manages rope_deltas caching to maintain correct positional encoding across generation steps.
+// Qwen2-VL uses 3D rotary position embeddings (mrope) for multimodal (vision + text) content.
+// Position IDs have shape [3, batch_size, seq_len] where the 3 dimensions represent:
+//   - Dimensions 0: Temporal position
+//   - Dimensions 1: Height position
+//   - Dimensions 2: Width position
+// For text, all 3 dimensions are identical. For vision, they are distinct.
+// This class implements the logic from `get_rope_index` to build these 3D IDs.
 struct Qwen2VLPositionInputs : PositionInputs {
-  Qwen2VLPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk);
+  Qwen2VLPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::unique_ptr<NamedTensors>& inputs);
   Qwen2VLPositionInputs(const Qwen2VLPositionInputs&) = delete;
   Qwen2VLPositionInputs& operator=(const Qwen2VLPositionInputs&) = delete;
 
@@ -126,11 +128,11 @@ struct Qwen2VLPositionInputs : PositionInputs {
  private:
   void AddPositionIDs();
   void AddAttentionMask();
-  
+
   template <typename T>
   void CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 3> shape);
   void Update3DPositionIDs(int base_pos);
-  
+
   template <typename T>
   void CreateAndInitializeAttentionMask(DeviceSpan<int32_t> next_tokens, std::array<int64_t, 2> shape);
   void UpdateAttentionMask();
@@ -148,13 +150,28 @@ struct Qwen2VLPositionInputs : PositionInputs {
 
   std::array<int64_t, 3> position_ids_shape_{};  // {3, batch_size, sequence_length} for 3D positions
   std::unique_ptr<Tensor> position_ids_;
-  
+
   std::array<int64_t, 2> attention_mask_shape_{};  // {batch_size, sequence_length}
   std::unique_ptr<Tensor> attention_mask_;
-  
+
   bool is_first_update_{true};
+
+  // Cached data from processor
+  std::shared_ptr<Tensor> image_grid_thw_;
+  std::shared_ptr<Tensor> video_grid_thw_;
+  std::shared_ptr<Tensor> second_per_grid_ts_;
+  std::vector<int64_t> rope_deltas_;
+
+  // Config values initialized from model.config_ in constructor
+  const int32_t image_token_id_;
+  const int32_t video_token_id_;
+  const int32_t vision_start_token_id_;
+  const float tokens_per_second_;
+  const int32_t spatial_merge_size_;
 };
 
 std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name);
+
+std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<int32_t> sequence_lengths, const std::string& attention_mask_name, const std::unique_ptr<NamedTensors>& inputs);
 
 }  // namespace Generators

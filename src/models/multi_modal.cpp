@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "multi_modal.h"
+#include <numeric>
 
 namespace Generators {
 
@@ -90,8 +91,8 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
   }
 }
 
-std::unique_ptr<State> MultiModalLanguageModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
-  return std::make_unique<MultiModalPipelineState>(*this, sequence_lengths, params);
+std::unique_ptr<State> MultiModalLanguageModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params, std::unique_ptr<NamedTensors> inputs) const {
+  return std::make_unique<MultiModalPipelineState>(*this, sequence_lengths, params, std::move(inputs));
 }
 
 VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorParams& params)
@@ -178,12 +179,14 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
   return {};
 }
 
-DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
+DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths,
+                           const GeneratorParams& params)
     : State{params, model},
-      model_{model},
-      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
+      model_{model}
+//      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask, inputs)} { // REMOVED
+{
   inputs_embeds_.Add();
-  position_inputs_->Add();
+  // position_inputs_->Add(); // MOVED to pipeline constructor
   logits_.Add();
   kv_cache_.Add();
 }
@@ -201,16 +204,24 @@ DeviceSpan<float> DecoderState::Run(int current_length, DeviceSpan<int32_t>& nex
 void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices) {
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
-  position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
+  // position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length)); // MOVED to pipeline Run
   kv_cache_.Update(beam_indices, total_length);
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
 }
 
-MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
+// Overload for pipeline to call
+void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices, size_t new_length) {
+  kv_cache_.Update(beam_indices, total_length);
+  logits_.Update(next_tokens, new_length);
+  inputs_embeds_.UpdateSequenceLength(new_length);
+}
+
+MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params, std::unique_ptr<NamedTensors> inputs)
     : State{params, model},
       model_{model},
-      adapters_{std::make_shared<Adapters>(&model_)} {
+      adapters_{std::make_shared<Adapters>(&model_)},
+      inputs_{std::move(inputs)} {
   if (model_.vision_session_) {
     vision_state_ = std::make_unique<VisionState>(model_, params);
   }
@@ -219,6 +230,11 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
   }
   embedding_state_ = std::make_unique<EmbeddingState>(model, params);
   decoder_state_ = std::make_unique<DecoderState>(model_, sequence_lengths, params);
+
+  // Create position inputs here, using the decoder_state_ as the 'State' context
+  // This allows position_inputs_->Add() to add inputs to the decoder_state_
+  position_inputs_ = CreatePositionInputs(*decoder_state_, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask, inputs_);
+  position_inputs_->Add(); // Adds position_ids and attention_mask to decoder_state_
 
   if (vision_state_ != nullptr && model_.config_->model.vision.adapter_filename.has_value() && num_image_tokens_ > 0) {
     const auto lora_adapter = (model_.config_->config_path / fs::path(*model_.config_->model.vision.adapter_filename)).string();

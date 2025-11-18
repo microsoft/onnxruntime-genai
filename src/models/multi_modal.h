@@ -96,23 +96,24 @@ struct DecoderState : State {
   DecoderState& operator=(const DecoderState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
 
  private:
   friend struct MultiModalPipelineState;
 
-  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices, size_t new_length);
 
   const MultiModalLanguageModel& model_;
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
-  std::unique_ptr<PositionInputs> position_inputs_;  // Model input
+  // std::unique_ptr<PositionInputs> position_inputs_;  // Model input - REMOVED, will be owned by pipeline
   DefaultKeyValueCache kv_cache_{*this};   // Model input
   Logits logits_{*this};                   // Model output
 };
 
 struct MultiModalPipelineState : State {
   MultiModalPipelineState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths,
-                          const GeneratorParams& params);
+                          const GeneratorParams& params, std::unique_ptr<NamedTensors> inputs);
   MultiModalPipelineState(const MultiModalPipelineState&) = delete;
   MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
 
@@ -137,8 +138,10 @@ struct MultiModalPipelineState : State {
   std::unique_ptr<SpeechState> speech_state_;
   std::unique_ptr<EmbeddingState> embedding_state_;
   std::unique_ptr<DecoderState> decoder_state_;
+  std::unique_ptr<PositionInputs> position_inputs_; // NEW: Owned by the pipeline
   std::shared_ptr<Adapters> adapters_;
   bool is_prompt_{true};
+  std::unique_ptr<NamedTensors> inputs_; // inputs to pass to DecoderState
 
   const std::string vision_adapter_name_{"vision"};
   const std::string speech_adapter_name_{"speech"};
