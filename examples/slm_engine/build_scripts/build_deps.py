@@ -609,9 +609,9 @@ def main():
     ort_home = None
     if args.build_ort_from_source:
         if args.ort_version_to_use is None:
-            # If not Windows then use 1.22.0
+            # If not Windows then use 1.23.0
             if platform.system() != "Windows":
-                args.ort_version_to_use = "v1.22.0"
+                args.ort_version_to_use = "v1.23.0"
             else:
                 args.ort_version_to_use = "main"
         ort_home = build_ort(args, dep_src_dir, artifacts_dir)
@@ -622,7 +622,7 @@ def main():
             # The ORT binaries are available as they were downloaded during the GenAI build
             # This is the supported version for most platforms
             if args.ort_version_to_use is None:
-                ORT_VERSION = "1.22.0"
+                ORT_VERSION = "1.23.0"
             else:
                 ORT_VERSION = args.ort_version_to_use
             # Copy the ORT artifacts to the artifacts directory.
