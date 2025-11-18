@@ -665,8 +665,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         }
       } else if (provider_options.name == "WebGPU")
         p_device = GetDeviceInterface(DeviceType::WEBGPU);
-      else if (provider_options.name == "OpenVINO")
-        p_device = GetDeviceInterface(DeviceType::OpenVINO);
       else if (provider_options.name == "VitisAI") {
         session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
         session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
@@ -697,29 +695,12 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       std::optional<uint32_t> config_device_id = resolved_device_filtering.hardware_device_id;
       std::optional<uint32_t> config_vendor_id = resolved_device_filtering.hardware_vendor_id;
       std::optional<OrtHardwareDeviceType> config_device_type_enum = resolved_device_filtering.hardware_device_type;
-      // for OpenVINO, use "device_type" in provider_options exclusively if it's provided
-      std::optional<std::string> config_ov_device_type = std::nullopt;
-      if (provider_options.name == "OpenVINO") {
-        for (auto& option : provider_options.options) {
-          if (option.first == "device_type") {
-            config_ov_device_type = option.second;
-          }
-        }
-        if (config_ov_device_type.has_value()) {
-          config_device_id = std::nullopt;
-          config_vendor_id = std::nullopt;
-          config_device_type_enum = std::nullopt;
-        } else if (!(config_device_id.has_value() || config_vendor_id.has_value() || config_device_type_enum.has_value())) {
-          config_ov_device_type = "CPU";
-        }
-      }
 
       // Match EP device with EP name in provider options and model device config
       // include\onnxruntime\core\graph\constants.h
       const static std::unordered_map<std::string, std::string> s_providerNameToExecutionProvider{
           {"QNN", "QNNExecutionProvider"},
           {"WebGPU", "WebGpuExecutionProvider"},
-          {"OpenVINO", "OpenVINOExecutionProvider"},
           {"VitisAI", "VitisAIExecutionProvider"},
           {"NvTensorRtRtx", "NvTensorRTRTXExecutionProvider"},
       };
@@ -741,43 +722,19 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         const uint32_t hardware_vendor_id = Ort::api->HardwareDevice_VendorId(hardware_device);
         const OrtHardwareDeviceType hardware_device_type = Ort::api->HardwareDevice_Type(hardware_device);
 
-        auto check_ov_device_type = [&config_ov_device_type, &provider_options](const OrtEpDevice* device_ptr) -> bool {
-          if (provider_options.name != "OpenVINO") {
-            return true;
-          } else if (!config_ov_device_type.has_value()) {
-            return true;
-          } else {
-            const OrtKeyValuePairs* keyvals = Ort::api->EpDevice_EpMetadata(device_ptr);
-            size_t num_entries;
-            const char* const* keys = nullptr;
-            const char* const* values = nullptr;
-            Ort::api->GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
-            for (int kvi = 0; kvi < num_entries; kvi++) {
-              const std::string key = keys[kvi];
-              const std::string val = values[kvi];
-              if (key == "ov_device" && val == config_ov_device_type) {
-                return true;
-              }
-            }
-            return false;
-          }
-        };
         bool hardware_device_id_matched = (!config_device_id.has_value()) || config_device_id.value() == hardware_device_id;
         bool hardware_vendor_id_matched = (!config_vendor_id.has_value()) || config_vendor_id.value() == hardware_vendor_id;
         bool hardware_device_type_matched = (!config_device_type_enum.has_value()) ||
                                             config_device_type_enum.value() == hardware_device_type;
-        bool hardware_ov_device_type_matched = check_ov_device_type(device_ptrs[i]);
 
         // Append matched EP device
         if (Ort::api->EpDevice_EpName(device_ptrs[i]) == ep_name &&
             hardware_device_id_matched &&
             hardware_vendor_id_matched &&
-            hardware_device_type_matched &&
-            hardware_ov_device_type_matched) {
+            hardware_device_type_matched) {
           ep_devices_ptrs.push_back(device_ptrs[i]);
           // WinML Hotfix: DML and WebGPU EP factories currently only support one device at a time
-          // OpenVINO also supports only one device at a time
-          if (provider_options.name == "DML" || provider_options.name == "WebGPU" || provider_options.name == "OpenVINO") {
+          if (provider_options.name == "DML" || provider_options.name == "WebGPU") {
             break;
           }
         }
@@ -794,10 +751,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
             continue;
           }
 
-          // 'device_type' is not a supported option for OpenVINO when SessionOptionsAppendExecutionProvider_V2 is used.
-          if (provider_options.name == "OpenVINO" && option.first == "device_type") {
-            continue;
-          }
           keys.emplace_back(option.first.c_str());
           values.emplace_back(option.second.c_str());
         }
