@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 env:
   binaryDir: 'build/cpu/win-x64'
-  ORT_NUGET_API: "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime/index.json"
+  ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
   ORT_PACKAGE_NAME: "Microsoft.ML.OnnxRuntime"
 
 jobs:
@@ -70,14 +70,14 @@ jobs:
           & $exePath -y --default-toolchain=1.86.0
           Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
 
-      - name: Download OnnxRuntime from NuGet.org
+      - name: Download OnnxRuntime Nightly
         shell: pwsh
         run: |
-          $resp = Invoke-RestMethod "${{ env.ORT_NUGET_API }}"
-          $ORT_VERSION = $resp.versions[-1]
-          Write-Host "Latest stable ORT version: $ORT_VERSION"
-          "ORT_VERSION=$ORT_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
-          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_VERSION -x -NonInteractive
+          $resp = Invoke-RestMethod "${{ env.ORT_NIGHTLY_REST_API }}"
+          $ORT_NIGHTLY_VERSION = $resp.value[0].versions[0].normalizedVersion
+          Write-Host "$ORT_NIGHTLY_VERSION"
+          "ORT_NIGHTLY_VERSION=$ORT_NIGHTLY_VERSION" | Out-File -FilePath $env:GITHUB_ENV -Append
+          nuget install ${{ env.ORT_PACKAGE_NAME }} -version $ORT_NIGHTLY_VERSION -x -NonInteractive
 
       - run: Get-ChildItem  ${{ env.ORT_PACKAGE_NAME }} -Recurse
         continue-on-error: true
