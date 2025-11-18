@@ -20,6 +20,7 @@
 #include "marian.h"
 #include "decoder_only_pipeline.h"
 #include "../dml/interface.h"
+#include "../openvino/interface.h"
 
 #if defined(_WIN32)
 #include <direct.h>
@@ -647,6 +648,9 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 #else
       throw std::runtime_error("DML provider requested, but the installed GenAI has not been built with DML support");
 #endif
+    } else if (provider_options.name == "OpenVINO") {
+      p_device = GetDeviceInterface(DeviceType::OpenVINO);
+      OpenVINO_AppendProviderOptions(session_options, config, provider_options);
     } else {
       // For providers that go through the extensible AppendExecutionProvider API:
       if (provider_options.name == "QNN") {
