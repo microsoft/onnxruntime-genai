@@ -161,9 +161,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                             generator.AppendTokens(inputIDs);
                             Assert.False(generator.IsDone());
-                            while (!generator.IsDone())
+                            while (true)
                             {
                                 generator.GenerateNextToken();
+                                if (generator.IsDone())
+                                {
+                                    break;
+                                }
                             }
 
                             for (ulong i = 0; i < batchSize; i++)
@@ -212,9 +216,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                             generator.AppendTokens(inputIDs);
                             Assert.False(generator.IsDone());
-                            while (!generator.IsDone())
+                            while (true)
                             {
                                 generator.GenerateNextToken();
+                                if (generator.IsDone())
+                                {
+                                    break;
+                                }
                             }
 
                             for (ulong i = 0; i < batchSize; i++)
@@ -288,9 +296,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                         generator.AppendTokenSequences(sequences);
 
-                        while (!generator.IsDone())
+                        while (true)
                         {
                             generator.GenerateNextToken();
+                            if (generator.IsDone())
+                            {
+                                break;
+                            }
                         }
 
                         for (ulong i = 0; i < batchSize; i++)
@@ -347,9 +359,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                         generator.AppendTokenSequences(sequences);
 
-                        while (!generator.IsDone())
+                        while (true)
                         {
                             generator.GenerateNextToken();
+                            if (generator.IsDone())
+                            {
+                                break;
+                            }
                         }
 
                         for (ulong i = 0; i < batchSize; i++)
@@ -408,9 +424,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                         generator.AppendTokenSequences(sequences);
 
-                        while (!generator.IsDone())
+                        while (true)
                         {
                             generator.GenerateNextToken();
+                            if (generator.IsDone())
+                            {
+                                break;
+                            }
                         }
 
                         for (ulong i = 0; i < batchSize; i++)
@@ -615,9 +635,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                         generator.AppendTokenSequences(sequences);
 
-                        while (!generator.IsDone())
+                        while (true)
                         {
                             generator.GenerateNextToken();
+                            if (generator.IsDone())
+                            {
+                                break;
+                            }
                         }
 
                         for (ulong i = 0; i < batchSize; i++)
@@ -721,9 +745,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
 
                 using var generator = new Generator(model, genParams);
                 generator.AppendTokenSequences(sequences);
-                while(!generator.IsDone())
+                while (true)
                 {
                     generator.GenerateNextToken();
+                    if (generator.IsDone())
+                    {
+                        break;
+                    }
                 }
 
                 using var logits = generator.GetOutput("logits");
@@ -749,9 +777,13 @@ namespace Microsoft.ML.OnnxRuntimeGenAI.Tests
                 using var generator = new Generator(model, genParams);
                 generator.SetActiveAdapter(adapters, "adapters_a_and_b");
                 generator.AppendTokenSequences(sequences);
-                while (!generator.IsDone())
+                while (true)
                 {
                     generator.GenerateNextToken();
+                    if (generator.IsDone())
+                    {
+                        break;
+                    }
                 }
                 using var logits = generator.GetOutput("logits");
                 if (_useCudaModel)
