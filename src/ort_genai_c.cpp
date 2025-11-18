@@ -409,7 +409,7 @@ OgaResult* OgaCreateGenerator(const OgaModel* model, const OgaGeneratorParams* p
   OGA_CATCH
 }
 
-bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator) {
+bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator) {
   return generator->IsDone();
 }
 

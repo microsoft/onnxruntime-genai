@@ -444,7 +444,7 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
   state_->SetRunOption(key, value);
 }
 
-bool Generator::IsDone() const {
+bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (computed_logits_) {
     return false;
@@ -453,6 +453,10 @@ bool Generator::IsDone() const {
   bool is_done = search_->IsDone();
   if (is_done) {
     state_->Finalize(search_->GetSequenceLength());
+    if (guidance_logits_processor_) {
+      guidance_logits_processor_->Reset();
+      last_action_ = Action::standard;
+    }
   }
 
   return is_done;
