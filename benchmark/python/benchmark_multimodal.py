@@ -6,7 +6,7 @@
 
 # This is an end-to-end benchmarking script for any multi-modal ONNX model pipeline.
 #
-# Prerequisites: 
+# Prerequisites:
 # 0) Install ONNX Runtime GenAI and ONNX Runtime
 #
 # 1) Create or download the desired ONNX model
@@ -15,13 +15,14 @@
 
 import argparse
 import json
-import onnxruntime_genai as og
 import os
-import pandas as pd
-import psutil
 import subprocess
 import threading
 import time
+
+import onnxruntime_genai as og
+import pandas as pd
+import psutil
 from tqdm import tqdm
 
 peak_cpu_memory = 0.0
@@ -35,12 +36,18 @@ try:
 except Exception:
     IS_NVIDIA_SYSTEM = False
 
+
 # Monitor the GPU memory usage
 def monitor_gpu_memory():
     global peak_gpu_memory
 
     while not stop_monitoring:
-        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader,nounits'], capture_output=True, text=True)
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
 
         memory_usage = result.stdout.splitlines()
 
@@ -53,6 +60,7 @@ def monitor_gpu_memory():
             print("No GPU Memory Info Found")
         time.sleep(0.1)
 
+
 # Monitor the CPU memory usage
 def monitor_cpu_memory():
     global peak_cpu_memory
@@ -62,6 +70,7 @@ def monitor_cpu_memory():
         with peak_memory_lock:
             peak_cpu_memory = max(peak_cpu_memory, current_used_memory)
         time.sleep(0.1)
+
 
 def save_results(results, filename):
     df = pd.DataFrame(
@@ -85,6 +94,7 @@ def save_results(results, filename):
     df.to_csv(filename, header=True, index=False)
     print(f"Results saved in {filename}!")
 
+
 def run_benchmark_memory(args, model, processor, image, audio, generation_length, max_length):
     """
     This function is to run benchmark and print the memory usage
@@ -102,7 +112,7 @@ def run_benchmark_memory(args, model, processor, image, audio, generation_length
         monitor_thread = threading.Thread(target=monitor_gpu_memory)
     else:
         monitor_thread = threading.Thread(target=monitor_cpu_memory)
-    
+
     monitor_thread.start()
 
     metrics = run_benchmark(args, model, processor, image, audio, generation_length, max_length)
@@ -114,8 +124,9 @@ def run_benchmark_memory(args, model, processor, image, audio, generation_length
         metrics.append(peak_gpu_memory)
     else:
         metrics.append(peak_cpu_memory)
-    
+
     return metrics
+
 
 def run_benchmark(args, model, processor, image, audio, generation_length, max_length):
     # Get user arguments
@@ -127,12 +138,13 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
     if hasattr(model, "type"):
         model_type = model.type
     else:
-        with open(os.path.join(args.input_folder, "genai_config.json"), "r") as f:
+        with open(os.path.join(args.input_folder, "genai_config.json")) as f:
             genai_config = json.load(f)
             model_type = genai_config["model"]["type"]
 
     # Process prompt, image, and audio
-    if args.verbose: print("Processing inputs...")
+    if args.verbose:
+        print("Processing inputs...")
 
     user_prompt = "<|user|>\n"
     assistant_prompt = "<|assistant|>\n"
@@ -143,19 +155,19 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
     if image is not None and audio is not None:
         # Image + audio + text
         main_prompt = "What are some of the similarities and differences between the provided inputs?"
-        prompt = f'{user_prompt}{image_special}{audio_special}{main_prompt}{prompt_suffix}{assistant_prompt}'
+        prompt = f"{user_prompt}{image_special}{audio_special}{main_prompt}{prompt_suffix}{assistant_prompt}"
     elif image is not None:
         # Image + text
         main_prompt = "What is shown in this image?"
-        prompt = f'{user_prompt}{image_special}{main_prompt}{prompt_suffix}{assistant_prompt}'
+        prompt = f"{user_prompt}{image_special}{main_prompt}{prompt_suffix}{assistant_prompt}"
     elif audio is not None:
         # Audio + text
         main_prompt = "What is described in this audio?"
-        prompt = f'{user_prompt}{audio_special}{main_prompt}{prompt_suffix}{assistant_prompt}'
+        prompt = f"{user_prompt}{audio_special}{main_prompt}{prompt_suffix}{assistant_prompt}"
     else:
         # Text
         main_prompt = "What is the meaning of life?"
-        prompt = f'{user_prompt}{main_prompt}{prompt_suffix}{assistant_prompt}'        
+        prompt = f"{user_prompt}{main_prompt}{prompt_suffix}{assistant_prompt}"
 
     if model_type == "whisper":
         decoder_prompt_tokens = ["<|startoftranscript|>", "<|en|>", "<|transcribe|>", "<|notimestamps|>"]
@@ -163,14 +175,23 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
     else:
         prompts = [prompt]
     inputs = processor(prompts, images=image, audios=audio)
-    prompt_length = inputs['input_ids'].shape()[1]
-    if args.verbose: print(f"Prompt used: {prompt}")
+    prompt_length = inputs["input_ids"].shape()[1]
+    if args.verbose:
+        print(f"Prompt used: {prompt}")
 
     params = og.GeneratorParams(model)
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
-    params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
+    params.set_search_options(
+        do_sample=do_sample,
+        top_k=args.top_k,
+        top_p=args.top_p,
+        temperature=temperature,
+        max_length=max_length,
+        min_length=max_length,
+    )
 
-    if args.verbose: print("Processed inputs, running warmup runs...")
+    if args.verbose:
+        print("Processed inputs, running warmup runs...")
     for _ in tqdm(range(args.warmup)):
         generator = og.Generator(model, params)
         generator.set_inputs(inputs)
@@ -178,7 +199,8 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
         while not generator.is_done() and i < generation_length:
             generator.generate_next_token()
             i += 1
-        if args.print_model_output: print(processor.decode(generator.get_sequence(0)))
+        if args.print_model_output:
+            print(processor.decode(generator.get_sequence(0)))
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
 
@@ -187,7 +209,8 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
     token_gen_times = []
     sampling_times = []
     wall_clock_times = []
-    if args.verbose: print(f"Done with warmup, running benchmark for {num_repetitions} repetitions...")
+    if args.verbose:
+        print(f"Done with warmup, running benchmark for {num_repetitions} repetitions...")
     for _ in tqdm(range(num_repetitions)):
         wall_clock_start_time = time.time()
 
@@ -199,7 +222,14 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
 
         # Prepare run
         params = og.GeneratorParams(model)
-        params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length)
+        params.set_search_options(
+            do_sample=do_sample,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            temperature=temperature,
+            max_length=max_length,
+            min_length=max_length,
+        )
 
         # Measure prompt processing
         prompt_start_time = time.perf_counter()
@@ -220,12 +250,13 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
             token_gen_start_time = time.perf_counter()
             generator.generate_next_token()
             token_gen_end_time = time.perf_counter()
-            
+
             token_gen_times.append(token_gen_end_time - token_gen_start_time)
             i += 1
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
-        if args.print_model_output: print(processor.decode(generator.get_sequence(0)))
+        if args.print_model_output:
+            print(processor.decode(generator.get_sequence(0)))
 
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
@@ -246,7 +277,7 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
     avg_token_gen_thrpt = 1 / avg_token_gen_latency_s
     print(f"Average Token Generation Latency (per token): {avg_token_gen_latency_ms} ms")
     print(f"Average Token Generation Throughput (per token): {avg_token_gen_thrpt} tps")
-    
+
     # Calculate sampling metrics
     avg_sampling_latency_s = sum(sampling_times) / len(sampling_times)
     avg_sampling_latency_ms = avg_sampling_latency_s * 1000
@@ -266,25 +297,29 @@ def run_benchmark(args, model, processor, image, audio, generation_length, max_l
         max_length,
         avg_processing_latency_ms,
         avg_prompt_latency_ms,
-        avg_token_gen_thrpt, 
-        avg_token_gen_latency_ms, 
-        avg_sampling_thrpt, 
+        avg_token_gen_thrpt,
+        avg_token_gen_latency_ms,
+        avg_sampling_thrpt,
         avg_sampling_latency_ms,
         avg_wall_clock_thrpt,
         avg_wall_clock_time,
     ]
     return metrics
 
+
 def main(args):
     all_csv_metrics = []
 
     # Get tokenizer, and model
     model_path = args.input_folder
-    if args.verbose: print(f"Loading model... ")
-    model=og.Model(f'{model_path}')
-    if args.verbose: print("Model loaded, loading processor...")
+    if args.verbose:
+        print("Loading model... ")
+    model = og.Model(f"{model_path}")
+    if args.verbose:
+        print("Model loaded, loading processor...")
     processor = model.create_multimodal_processor()
-    if args.verbose: print("Processor loaded, loading image...")
+    if args.verbose:
+        print("Processor loaded, loading image...")
 
     # Get image
     image_path = args.image_path
@@ -304,7 +339,8 @@ def main(args):
     else:
         audio = None
 
-    if args.verbose: print("Image loaded, starting benchmark...")
+    if args.verbose:
+        print("Image loaded, starting benchmark...")
     for g, gen_length in enumerate(args.generation_lengths):
         if args.max_lengths:
             max_length = args.max_lengths[g]
@@ -314,29 +350,49 @@ def main(args):
         metrics = run_benchmark_memory(args, model, processor, image, audio, gen_length, max_length)
         all_csv_metrics.append(metrics)
     # Add metrics to CSV
-    if args.verbose: print("Adding results to CSV")
+    if args.verbose:
+        print("Adding results to CSV")
     filename = args.output
     save_results(all_csv_metrics, filename)
 
+
 def str2intlist(value):
-    return [int(v) for v in value.split(',')]
+    return [int(v) for v in value.split(",")]
+
 
 def str2strlist(value):
-    return [str(v) for v in value.split(',')]
+    return [str(v) for v in value.split(",")]
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="End-to-end benchmarking for ONNX Runtime GenAI")
-    parser.add_argument('-i', '--input_folder', type=str, required=True, help='Onnx model folder path (must contain genai_config.json and ONNX models)')
-    parser.add_argument('-au', '--audio_path', type=str, default="", required=False, help='Path to the audio')
-    parser.add_argument('-im', '--image_path', type=str, default="", required=False, help='Path to the image')
-    parser.add_argument('-g', '--generation_lengths', type=str2intlist, default=[256], help='Number of tokens to generate after prompt')
-    parser.add_argument('-m', '--max_lengths', type=str2intlist, default=[7680], help='Max length buffer sizes... User should supply one for every Generation length')
-    parser.add_argument('-r', '--repetitions', type=int, default=30, help='Number of times to repeat the benchmark')
-    parser.add_argument('-w', '--warmup', type=int, default=5, help='Number of warmup runs before benchmarking')
-    parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
-    parser.add_argument('-p', '--top_p', type=float, default=1.0, help='Top p probability to sample with')
-    parser.add_argument('-o', '--output', type=str, default='genai_e2e.csv', help='Output CSV file name or path (with .csv extension)')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Print extra information')
-    parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
+    parser.add_argument(
+        "-i",
+        "--input_folder",
+        type=str,
+        required=True,
+        help="Onnx model folder path (must contain genai_config.json and ONNX models)",
+    )
+    parser.add_argument("-au", "--audio_path", type=str, default="", required=False, help="Path to the audio")
+    parser.add_argument("-im", "--image_path", type=str, default="", required=False, help="Path to the image")
+    parser.add_argument(
+        "-g", "--generation_lengths", type=str2intlist, default=[256], help="Number of tokens to generate after prompt"
+    )
+    parser.add_argument(
+        "-m",
+        "--max_lengths",
+        type=str2intlist,
+        default=[7680],
+        help="Max length buffer sizes... User should supply one for every Generation length",
+    )
+    parser.add_argument("-r", "--repetitions", type=int, default=30, help="Number of times to repeat the benchmark")
+    parser.add_argument("-w", "--warmup", type=int, default=5, help="Number of warmup runs before benchmarking")
+    parser.add_argument("-k", "--top_k", type=int, default=50, help="Top k tokens to sample from")
+    parser.add_argument("-p", "--top_p", type=float, default=1.0, help="Top p probability to sample with")
+    parser.add_argument(
+        "-o", "--output", type=str, default="genai_e2e.csv", help="Output CSV file name or path (with .csv extension)"
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Print extra information")
+    parser.add_argument("-mo", "--print_model_output", action="store_true", help="Print model output")
     args = parser.parse_args()
     main(args)

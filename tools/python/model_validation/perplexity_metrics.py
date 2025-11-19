@@ -1,24 +1,27 @@
 import json
-from datasets import load_dataset
+
 import numpy as np
 import onnxruntime_genai as og
 import torch
+from datasets import load_dataset
+
 
 def get_wikitext2():
-    test = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
+    test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     # Concatenate the text with "\n\n" separator,
     result = "\n\n".join(text for text in test["text"])
     return result
 
+
 def perplexity_eval(model_dir):
     # Load the model and tokenizer
-    model = og.Model(f'{model_dir}')
+    model = og.Model(f"{model_dir}")
     tokenizer = og.Tokenizer(model)
 
     total_log_probs = 0
     total_token_count = 0
 
-    # Concatenated text 
+    # Concatenated text
     dataset = get_wikitext2()
 
     # Encode the entire dataset as one batch
@@ -28,11 +31,11 @@ def perplexity_eval(model_dir):
 
     # Need to retreive the Model's maximum via the ORT GenAI configuration
     ## Explore the biggest max length vs the context length in genai config and calculate the lower of the two
-    with open(model_dir+'/genai_config.json', 'r') as file:
+    with open(model_dir + "/genai_config.json") as file:
         config = json.load(file)
 
-    max_length = config["model"]["context_length"]-1 # This is the default for qwen
-    stride = 8192 
+    max_length = config["model"]["context_length"] - 1  # This is the default for qwen
+    stride = 8192
     # Just get the perplexity for one position
     seq_len = input_ids.size(1)
 
@@ -41,7 +44,7 @@ def perplexity_eval(model_dir):
     # Hugging face looping logic
     for begin_loc in range(0, seq_len, stride):
         end_loc = min(begin_loc + max_length, seq_len)
-        trg_len = end_loc - prev_end_loc 
+        trg_len = end_loc - prev_end_loc
         input_ids_chunk = input_ids[:, begin_loc:end_loc]
         target_ids = input_ids_chunk.clone()
         print(f"input_ids_chunk shape: {input_ids_chunk.shape}")
@@ -54,7 +57,7 @@ def perplexity_eval(model_dir):
 
         generator = og.Generator(model, params)
 
-        # Get Logits 
+        # Get Logits
         with torch.no_grad():
             generator.compute_logits()
             logits = generator.get_output("logits")
@@ -67,9 +70,9 @@ def perplexity_eval(model_dir):
         target_ids_flat = target_ids.flatten()
 
         target_log_probs = log_probs[0, np.arange(3), target_ids_flat]
-     
+
         target_log_probs_sliced = target_log_probs[:, -trg_len:]
-        
+
         print(f"target_log_probs shape: {target_log_probs_sliced.shape}")
 
         total_log_probs += np.sum(target_log_probs_sliced)

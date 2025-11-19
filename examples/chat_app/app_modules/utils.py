@@ -68,7 +68,7 @@ def convert_mdtext(md_text):
     non_code_parts = code_block_pattern.split(md_text)[::2]
 
     result = []
-    for non_code, code in zip(non_code_parts, [*code_blocks, ""]):
+    for non_code, code in zip(non_code_parts, [*code_blocks, ""], strict=False):
         if non_code.strip():
             formatted_non_code = normalize_markdown(non_code)
             if inline_code_pattern.search(formatted_non_code):
