@@ -3,14 +3,17 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-from .mistral import MistralModel
 import numpy as np
+
+from .mistral import MistralModel
+
 
 class GemmaModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.embed_attrs["scale"] = np.round(np.sqrt(self.hidden_size), decimals=2)
         self.layernorm_attrs["add_offset"] = 1
+
 
 class Gemma2Model(GemmaModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -20,7 +23,7 @@ class Gemma2Model(GemmaModel):
         self.layernorm_attrs["cast"]["skip_input"] = False
         self.layernorm_attrs["cast"]["output_0"] = True
         self.layernorm_attrs["cast"]["output_3"] = False
-        self.attention_attrs["scale"] = config.query_pre_attn_scalar ** -0.5
+        self.attention_attrs["scale"] = config.query_pre_attn_scalar**-0.5
 
     def is_local(self, layer_id):
         return layer_id % 2 == 1
@@ -39,7 +42,13 @@ class Gemma2Model(GemmaModel):
         # 1. Only cast root_input if the first layer of LayerNorms are being created
         original_cast_root_input = self.layernorm_attrs["cast"]["root_input"]
         self.layernorm_attrs["cast"]["root_input"] = self.layernorm_attrs["first_layernorm"]
-        self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
+        self.make_layernorm(
+            layer_id,
+            layer.input_layernorm,
+            skip=not self.layernorm_attrs["first_layernorm"],
+            simple=self.layernorm_attrs["simple"],
+            location="input",
+        )
         self.layernorm_attrs["cast"]["root_input"] = original_cast_root_input
 
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
@@ -52,7 +61,13 @@ class Gemma2Model(GemmaModel):
         original_cast_output_0 = self.layernorm_attrs["cast"]["output_0"]
         self.layernorm_attrs["root_input"] = self.layernorm_attrs["skip_input"]
         self.layernorm_attrs["cast"]["output_0"] = False
-        self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="post_attention")
+        self.make_layernorm(
+            layer_id,
+            layer.post_attention_layernorm,
+            skip=False,
+            simple=self.layernorm_attrs["simple"],
+            location="post_attention",
+        )
         self.layernorm_attrs["root_input"] = original_root_input
         self.layernorm_attrs["skip_input"] = self.layernorm_attrs["output_0"]
         self.layernorm_attrs["cast"]["output_0"] = original_cast_output_0
@@ -61,7 +76,13 @@ class Gemma2Model(GemmaModel):
         # 1. Only cast root_input if the first layer of LayerNorms are being created
         original_cast_root_input = self.layernorm_attrs["cast"]["root_input"]
         self.layernorm_attrs["cast"]["root_input"] = self.layernorm_attrs["first_layernorm"]
-        self.make_layernorm(layer_id, layer.pre_feedforward_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="pre_feedforward")
+        self.make_layernorm(
+            layer_id,
+            layer.pre_feedforward_layernorm,
+            skip=True,
+            simple=self.layernorm_attrs["simple"],
+            location="pre_feedforward",
+        )
         self.layernorm_attrs["cast"]["root_input"] = original_cast_root_input
 
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
@@ -74,7 +95,13 @@ class Gemma2Model(GemmaModel):
         original_cast_output_0 = self.layernorm_attrs["cast"]["output_0"]
         self.layernorm_attrs["root_input"] = self.layernorm_attrs["skip_input"]
         self.layernorm_attrs["cast"]["output_0"] = False
-        self.make_layernorm(layer_id, layer.post_feedforward_layernorm, skip=False, simple=self.layernorm_attrs["simple"], location="post_feedforward")
+        self.make_layernorm(
+            layer_id,
+            layer.post_feedforward_layernorm,
+            skip=False,
+            simple=self.layernorm_attrs["simple"],
+            location="post_feedforward",
+        )
         self.layernorm_attrs["root_input"] = original_root_input
         self.layernorm_attrs["skip_input"] = self.layernorm_attrs["output_0"]
         self.layernorm_attrs["cast"]["output_0"] = original_cast_output_0
@@ -86,9 +113,12 @@ class Gemma2Model(GemmaModel):
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         original_window_size = self.window_size
-        self.window_size = original_window_size if self.is_local(layer_id) else -1  # default is -1 in GroupQueryAttention kernel
+        self.window_size = (
+            original_window_size if self.is_local(layer_id) else -1
+        )  # default is -1 in GroupQueryAttention kernel
         super().make_attention(layer_id, attention, root_input, **kwargs)
         self.window_size = original_window_size
+
 
 class Gemma3Model(Gemma2Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -96,9 +126,9 @@ class Gemma3Model(Gemma2Model):
 
         self.rope_local_theta = config.rope_local_base_freq
         self.make_rotary_embedding_multi_cache()
+
     def is_local(self, layer_id):
         return bool((layer_id + 1) % 6)
-
 
     def make_attention_init(self):
         self.attention_attrs["q_norm"] = True
@@ -107,17 +137,24 @@ class Gemma3Model(Gemma2Model):
 
     def make_rotary_embedding_multi_cache(self):
         self.cos_cache_global_name, self.sin_cache_global_name = "cos_cache_global", "sin_cache_global"
-        super().make_rotary_embedding_caches(cos_cache_name=self.cos_cache_global_name, sin_cache_name=self.sin_cache_global_name)
+        super().make_rotary_embedding_caches(
+            cos_cache_name=self.cos_cache_global_name, sin_cache_name=self.sin_cache_global_name
+        )
 
         # Create the new cos/sin caches for local attention layers with its own theta value
         self.rope_attrs["create_caches"] = True
         self.rope_attrs["theta"] = self.rope_local_theta
 
         self.cos_cache_local_name, self.sin_cache_local_name = "cos_cache_local", "sin_cache_local"
-        super().make_rotary_embedding_caches(cos_cache_name=self.cos_cache_local_name, sin_cache_name=self.sin_cache_local_name)
+        super().make_rotary_embedding_caches(
+            cos_cache_name=self.cos_cache_local_name, sin_cache_name=self.sin_cache_local_name
+        )
 
     def make_rotary_embedding_caches(self, **kwargs):
-        cos_cache_name = kwargs.get("cos_cache_name", self.cos_cache_global_name if self.window_size == -1 else self.cos_cache_local_name)
-        sin_cache_name = kwargs.get("sin_cache_name", self.sin_cache_global_name if self.window_size == -1 else self.sin_cache_local_name)
+        cos_cache_name = kwargs.get(
+            "cos_cache_name", self.cos_cache_global_name if self.window_size == -1 else self.cos_cache_local_name
+        )
+        sin_cache_name = kwargs.get(
+            "sin_cache_name", self.sin_cache_global_name if self.window_size == -1 else self.sin_cache_local_name
+        )
         return super().make_rotary_embedding_caches(cos_cache_name=cos_cache_name, sin_cache_name=sin_cache_name)
-

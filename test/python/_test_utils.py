@@ -5,7 +5,6 @@ import logging
 import os
 import subprocess
 import sys
-from typing import Dict, List, Optional, Union
 
 
 def is_windows():
@@ -13,13 +12,13 @@ def is_windows():
 
 
 def run_subprocess(
-    args: List[str],
-    cwd: Optional[Union[str, bytes, os.PathLike]] = None,
+    args: list[str],
+    cwd: str | bytes | os.PathLike | None = None,
     capture: bool = False,
-    dll_path: Optional[Union[str, bytes, os.PathLike]] = None,
+    dll_path: str | bytes | os.PathLike | None = None,
     shell: bool = False,
-    env: Dict[str, str] = {},
-    log: Optional[logging.Logger] = None,
+    env: dict[str, str] = {},
+    log: logging.Logger | None = None,
 ):
     if log:
         log.info(f"Running subprocess in '{cwd or os.getcwd()}'\n{args}")
@@ -46,9 +45,7 @@ def run_subprocess(
     )
 
     if log:
-        log.debug(
-            "Subprocess completed. Return code=" + str(completed_process.returncode)
-        )
+        log.debug("Subprocess completed. Return code=" + str(completed_process.returncode))
     return completed_process
 
 
@@ -138,7 +135,7 @@ def download_models(download_path, precision, device, log):
 
     ci_paths, hf_paths = get_model_paths()
     output_paths = []
-    
+
     log.debug(f"Downloading {len(ci_paths)} PyTorch models and {len(hf_paths)} Hugging Face models")
 
     # python -m onnxruntime_genai.models.builder -i <input_path> -o <output_path> -p <precision> -e <device>
@@ -153,6 +150,7 @@ def download_models(download_path, precision, device, log):
     for model_name, hf_name in hf_paths.items():
         try:
             from huggingface_hub import model_info
+
             model_info(hf_name)
         except ImportError:
             log.warning("huggingface_hub is not installed. Skipping downloading hugging face models.")

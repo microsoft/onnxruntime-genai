@@ -4,6 +4,7 @@
 import os
 import sys
 
+
 def _is_windows():
     return sys.platform.startswith("win")
 
@@ -18,13 +19,14 @@ def _is_macos():
 
 def add_onnxruntime_dependency(package_id: str):
     """Add the onnxruntime shared library dependency.
-    
+
     On Windows, this function adds the onnxruntime DLL directory to the DLL search path.
     On Linux, this function loads the onnxruntime shared library and its dependencies
     so that they can be found by the dynamic linker.
     """
     if _is_windows():
         import importlib.util
+
         ort_package = importlib.util.find_spec("onnxruntime")
         if not ort_package:
             raise ImportError("Could not find the onnxruntime package.")
@@ -38,6 +40,7 @@ def add_onnxruntime_dependency(package_id: str):
         # Check to see if DirectML.dll exists before trying to load it.
         if os.path.exists(dml_path):
             import ctypes
+
             _ = ctypes.CDLL(dml_path)
 
         # Workaround for onnxruntime.dll loading
@@ -46,17 +49,18 @@ def add_onnxruntime_dependency(package_id: str):
         # Check to see if onnxruntime.dll exists before trying to load it.
         if os.path.exists(ort_path):
             import ctypes
+
             _ = ctypes.CDLL(ort_path)
 
     elif _is_linux() or _is_macos():
-        import importlib.util
         import ctypes
         import glob
+        import importlib.util
 
         ort_package = importlib.util.find_spec("onnxruntime")
         if not ort_package:
             raise ImportError("Could not find the onnxruntime package.")
-        
+
         # Load the onnxruntime shared library here since we can find the path in python with ease.
         # This avoids needing to know the exact path of the shared library from native code.
         ort_package_path = ort_package.submodule_search_locations[0]
@@ -75,7 +79,7 @@ def add_onnxruntime_dependency(package_id: str):
 
 def add_cuda_dependency():
     """Add the CUDA DLL directory to the DLL search path.
-    
+
     This function is a no-op on non-Windows platforms.
     """
     if _is_windows():
