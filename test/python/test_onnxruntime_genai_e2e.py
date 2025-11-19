@@ -11,9 +11,7 @@ import sys
 import onnxruntime_genai as og
 from _test_utils import get_ci_data_path, run_subprocess
 
-logging.basicConfig(
-    format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG
-)
+logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("onnxruntime-genai-tests")
 
 
@@ -56,7 +54,7 @@ def run_whisper():
         "The cut on his chest is still dripping blood. The ache of his overstrained eyes. Even the soaring arena around him with thousands of spectators, retrievalidies not worth thinking about.",
     )
 
-    for (precision, execution_provider) in [("fp16", "cuda"), ("fp32", "cuda"), ("fp32", "cpu")]:
+    for precision, execution_provider in [("fp16", "cuda"), ("fp32", "cuda"), ("fp32", "cpu")]:
         if execution_provider == "cuda" and not og.is_cuda_available():
             continue
 

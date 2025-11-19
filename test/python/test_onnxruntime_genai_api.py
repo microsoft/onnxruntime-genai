@@ -324,9 +324,7 @@ def test_phi3_chat_template(device, phi3_for):
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
 
-    messages = (
-        """[{"role": "system", "content": "This is a test."}, {"role": "user", "content": "Hi, how are you?"}]"""
-    )
+    messages = """[{"role": "system", "content": "This is a test."}, {"role": "user", "content": "Hi, how are you?"}]"""
 
     try:
         tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
@@ -346,9 +344,7 @@ def test_phi2_chat_template(device, phi2_for):
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
 
-    messages = (
-        """[{"role": "system", "content": "This is a test."}, {"role": "user", "content": "Hi, how are you?"}]"""
-    )
+    messages = """[{"role": "system", "content": "This is a test."}, {"role": "user", "content": "Hi, how are you?"}]"""
 
     # Note: this should work, even though phi-2 has no official chat template, as we override it and pass one in
     template = """{% for message in messages %}{% if message['role'] == 'system' %}{{'<|system|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'user' %}{{'<|user|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'assistant' %}{{'<|assistant|>\n' + message['content'] + '<|end|>\n'}}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\n' }}{% else %}{{ eos_token }}{% endif %}"""

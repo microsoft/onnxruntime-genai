@@ -22,61 +22,40 @@ def test_tool_calling():
 
     payload1 = {
         "messages": [
-            {
-                "role": "system",
-                "content": "You are a helpful assistant with these tools."
-            },
+            {"role": "system", "content": "You are a helpful assistant with these tools."},
             {
                 "role": "user",
-                "content": "book flight ticket from Beijing to Paris(using airport code) in 2025-12-04 to 2025-12-10 , then book hotel from 2025-12-04 to 2025-12-10 in Paris"
-            }
+                "content": "book flight ticket from Beijing to Paris(using airport code) in 2025-12-04 to 2025-12-10 , then book hotel from 2025-12-04 to 2025-12-10 in Paris",
+            },
         ],
         "tools": [
             {
                 "name": "booking_flight_tickets",
                 "description": "booking flights",
                 "parameters": {
-                    "origin_airport_code": {
-                        "description": "The name of Departure airport code",
-                        "type": "string"
-                    },
+                    "origin_airport_code": {"description": "The name of Departure airport code", "type": "string"},
                     "destination_airport_code": {
                         "description": "The name of Destination airport code",
-                        "type": "string"
+                        "type": "string",
                     },
-                    "departure_date": {
-                        "description": "The date of outbound flight",
-                        "type": "string"
-                    },
-                    "return_date": {
-                        "description": "The date of return flight",
-                        "type": "string"
-                    }
-                }
+                    "departure_date": {"description": "The date of outbound flight", "type": "string"},
+                    "return_date": {"description": "The date of return flight", "type": "string"},
+                },
             },
             {
                 "name": "booking_hotels",
                 "description": "booking hotel",
                 "parameters": {
-                    "destination": {
-                        "description": "The name of the city",
-                        "type": "string"
-                    },
-                    "check_in_date": {
-                        "description": "The date of check in",
-                        "type": "string"
-                    },
-                    "checkout_date": {
-                        "description": "The date of check out",
-                        "type": "string"
-                    }
-                }
-            }
+                    "destination": {"description": "The name of the city", "type": "string"},
+                    "check_in_date": {"description": "The date of check in", "type": "string"},
+                    "checkout_date": {"description": "The date of check out", "type": "string"},
+                },
+            },
         ],
         "temperature": 0.00001,
         "max_tokens": 4096,
         "top_p": 1.0,
-        "do_sample": False
+        "do_sample": False,
     }
 
     try:
@@ -98,43 +77,31 @@ def test_tool_calling():
     # Test case 2: Flight only
     payload2 = {
         "messages": [
-            {
-                "role": "system",
-                "content": "You are a helpful travel assistant."
-            },
+            {"role": "system", "content": "You are a helpful travel assistant."},
             {
                 "role": "user",
-                "content": "I need to book a flight from JFK to LHR on 2025-08-15, returning on 2025-08-22"
-            }
+                "content": "I need to book a flight from JFK to LHR on 2025-08-15, returning on 2025-08-22",
+            },
         ],
         "tools": [
             {
                 "name": "booking_flight_tickets",
                 "description": "booking flights",
                 "parameters": {
-                    "origin_airport_code": {
-                        "description": "The name of Departure airport code",
-                        "type": "string"
-                    },
+                    "origin_airport_code": {"description": "The name of Departure airport code", "type": "string"},
                     "destination_airport_code": {
                         "description": "The name of Destination airport code",
-                        "type": "string"
+                        "type": "string",
                     },
-                    "departure_date": {
-                        "description": "The date of outbound flight",
-                        "type": "string"
-                    },
-                    "return_date": {
-                        "description": "The date of return flight",
-                        "type": "string"
-                    }
-                }
+                    "departure_date": {"description": "The date of outbound flight", "type": "string"},
+                    "return_date": {"description": "The date of return flight", "type": "string"},
+                },
             }
         ],
         "temperature": 0.1,
         "max_tokens": 2048,
         "top_p": 0.9,
-        "do_sample": True
+        "do_sample": True,
     }
 
     try:
@@ -156,39 +123,24 @@ def test_tool_calling():
     # Test case 3: Hotel only
     payload3 = {
         "messages": [
-            {
-                "role": "system",
-                "content": "You are a helpful hotel booking assistant."
-            },
-            {
-                "role": "user",
-                "content": "I need to book a hotel in Tokyo from 2025-09-01 to 2025-09-05"
-            }
+            {"role": "system", "content": "You are a helpful hotel booking assistant."},
+            {"role": "user", "content": "I need to book a hotel in Tokyo from 2025-09-01 to 2025-09-05"},
         ],
         "tools": [
             {
                 "name": "booking_hotels",
                 "description": "booking hotel",
                 "parameters": {
-                    "destination": {
-                        "description": "The name of the city",
-                        "type": "string"
-                    },
-                    "check_in_date": {
-                        "description": "The date of check in",
-                        "type": "string"
-                    },
-                    "checkout_date": {
-                        "description": "The date of check out",
-                        "type": "string"
-                    }
-                }
+                    "destination": {"description": "The name of the city", "type": "string"},
+                    "check_in_date": {"description": "The date of check in", "type": "string"},
+                    "checkout_date": {"description": "The date of check out", "type": "string"},
+                },
             }
         ],
         "temperature": 0.2,
         "max_tokens": 1024,
         "top_p": 0.95,
-        "do_sample": True
+        "do_sample": True,
     }
 
     try:
@@ -206,6 +158,7 @@ def test_tool_calling():
     print("\n" + "=" * 70)
     print("All tool calling tests completed!")
     print("=" * 70)
+
 
 if __name__ == "__main__":
     print("Starting SLM Server Tool Calling Tests...")

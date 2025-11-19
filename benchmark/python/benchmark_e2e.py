@@ -37,12 +37,18 @@ try:
 except Exception:
     IS_NVIDIA_SYSTEM = False
 
+
 # Monitor the GPU memory usage
 def monitor_gpu_memory():
     global peak_gpu_memory
 
     while not stop_monitoring:
-        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader,nounits'], check=False, capture_output=True, text=True)
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
 
         memory_usage = result.stdout.splitlines()
 
@@ -66,20 +72,22 @@ def monitor_cpu_memory():
             peak_cpu_memory = max(peak_cpu_memory, current_used_memory)
         time.sleep(0.1)
 
+
 # Use input model to generate prompt
 def generate_prompt(model, tokenizer, prompt_length) -> str:
     text = "a"
-    prompt = f'{args.chat_template.format(input=text)}'
+    prompt = f"{args.chat_template.format(input=text)}"
     tokens = tokenizer.encode(prompt)
-    params=og.GeneratorParams(model)
+    params = og.GeneratorParams(model)
     max_length_to_use = prompt_length + len(tokens)
     params.set_search_options(max_length=max_length_to_use, min_length=prompt_length)
 
-    generator=og.Generator(model, params)
+    generator = og.Generator(model, params)
     generator.append_tokens(tokens)
     while not generator.is_done():
         generator.generate_next_token()
     return tokenizer.decode(generator.get_sequence(0))
+
 
 # Use prompt length to get pre-defined prompt
 def get_prompt_by_length(prompt_length):
@@ -87,6 +95,7 @@ def get_prompt_by_length(prompt_length):
     with open(json_path) as file:
         data = json.load(file)
     return data[f"{prompt_length}"]
+
 
 def get_target_pip_package_version(target_pip_package_name_list):
     # get package name and version
@@ -107,24 +116,25 @@ def get_target_pip_package_version(target_pip_package_name_list):
         pkg_version = installed_packages_list[0].split("==")[1]
     return pkg_name, pkg_version
 
+
 def save_results(args, results, filename, print_memory_usage=False):
     import pandas as pd
 
-    columns=[
-    "Batch Size",
-    "Prompt Length",
-    "Tokens Generated",
-    "Max Length",
-    "Tokenization Throughput (tps)",
-    "Tokenization Latency (ms)",
-    "Prompt Processing Throughput (tps)",
-    "Prompt Processing Latency (ms)",
-    "Token Generation Throughput (tps)",
-    "Token Generation Latency (ms)",
-    "Sampling Throughput (tps)",
-    "Sampling Latency (ms)",
-    "Wall Clock Throughput (tps)",
-    "Wall Clock Time (s)",
+    columns = [
+        "Batch Size",
+        "Prompt Length",
+        "Tokens Generated",
+        "Max Length",
+        "Tokenization Throughput (tps)",
+        "Tokenization Latency (ms)",
+        "Prompt Processing Throughput (tps)",
+        "Prompt Processing Latency (ms)",
+        "Token Generation Throughput (tps)",
+        "Token Generation Latency (ms)",
+        "Sampling Throughput (tps)",
+        "Sampling Latency (ms)",
+        "Wall Clock Throughput (tps)",
+        "Wall Clock Time (s)",
     ]
 
     if print_memory_usage:
@@ -139,11 +149,20 @@ def save_results(args, results, filename, print_memory_usage=False):
     )
     # df = df.transpose()  # This line swaps the rows and columns
 
-    genai_package_name, genai_package_version = get_target_pip_package_version(["onnxruntime-genai", "onnxruntime-genai-cuda", "onnxruntime-genai-directml"])
+    genai_package_name, genai_package_version = get_target_pip_package_version(
+        ["onnxruntime-genai", "onnxruntime-genai-cuda", "onnxruntime-genai-directml"]
+    )
 
     records = []
     for _, row in df.iterrows():
-        record = BenchmarkRecord(args.model_name, args.precision, "onnxruntime-genai", args.execution_provider, genai_package_name, genai_package_version )
+        record = BenchmarkRecord(
+            args.model_name,
+            args.precision,
+            "onnxruntime-genai",
+            args.execution_provider,
+            genai_package_name,
+            genai_package_version,
+        )
         record.config.batch_size = row["Batch Size"]
         record.config.customized["prompt_length"] = row["Prompt Length"]
         record.config.customized["tokens_generated"] = row["Tokens Generated"]
@@ -170,6 +189,7 @@ def save_results(args, results, filename, print_memory_usage=False):
     # df.to_csv(filename, header=True, index=False)
     BenchmarkRecord.save_as_json(filename.replace(".csv", ".json"), records)
     print(f"Results saved in {filename}!")
+
 
 def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max_length):
     """
@@ -203,24 +223,28 @@ def run_benchmark_memory(args, batch_size, prompt_length, generation_length, max
 
     return metrics
 
-def run_benchmark(args, batch_size, prompt_length, generation_length, max_length):
 
+def run_benchmark(args, batch_size, prompt_length, generation_length, max_length):
     # Get user arguments
     num_repetitions = args.repetitions
     temperature = 1.0
 
     # Get tokenizer, and model
-    if args.verbose: print("Getting config")
-    config = og.Config(f'{args.input_folder}')
+    if args.verbose:
+        print("Getting config")
+    config = og.Config(f"{args.input_folder}")
     config.overlay(f'{{"search": {{"batch_size": {batch_size}}}}}')
     if args.execution_provider != "follow_config":
         config.clear_providers()
         if args.execution_provider != "cpu":
-            if args.verbose: print(f"Setting model to {args.execution_provider}")
+            if args.verbose:
+                print(f"Setting model to {args.execution_provider}")
             config.append_provider(args.execution_provider)
-    if args.verbose: print("Loading model... ")
+    if args.verbose:
+        print("Loading model... ")
     model = og.Model(config)
-    if args.verbose: print("Model loaded")
+    if args.verbose:
+        print("Model loaded")
     tokenizer = og.Tokenizer(model)
 
     # Get model type
@@ -234,24 +258,28 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
     # Set chat template
     if args.chat_template:
-        if args.chat_template.count('{') != 1 or args.chat_template.count('}') != 1:
-            raise ValueError("Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'")
+        if args.chat_template.count("{") != 1 or args.chat_template.count("}") != 1:
+            raise ValueError(
+                "Chat template must have exactly one pair of curly braces with input word in it, e.g. '<|user|>\n{input} <|end|>\n<|assistant|>'"
+            )
     else:
         if model_type.startswith("phi2") or model_type.startswith("phi3"):
-            args.chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
+            args.chat_template = "<|user|>\n{input} <|end|>\n<|assistant|>"
         elif model_type.startswith("phi4"):
-            args.chat_template = '<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>'
+            args.chat_template = "<|im_start|>user<|im_sep|>\n{input}<|im_end|>\n<|im_start|>assistant<|im_sep|>"
         elif model_type.startswith("llama"):
-            args.chat_template = '<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>'
+            args.chat_template = "<|start_header_id|>user<|end_header_id|>\n{input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"
         elif model_type.startswith("llama2"):
-            args.chat_template = '<s>{input}'
+            args.chat_template = "<s>{input}"
         elif model_type.startswith("qwen2"):
-            args.chat_template = '<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n'
+            args.chat_template = "<|im_start|>user\n{input}<|im_end|>\n<|im_start|>assistant\n"
         elif model_type.startswith("gemma"):
             # Gemma and Gemma2 models use this format
-            args.chat_template = '<start_of_turn>user\n{input}<end_of_turn>\n<start_of_turn>model\n'
+            args.chat_template = "<start_of_turn>user\n{input}<end_of_turn>\n<start_of_turn>model\n"
         else:
-            raise ValueError(f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template")
+            raise ValueError(
+                f"Chat Template for model type {model_type} is not known. Please provide chat template using --chat_template"
+            )
 
     # Generate prompt
     if args.use_random_tokens:
@@ -259,30 +287,40 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
         _random_tokens = np.random.randint(100, size=(batch_size, prompt_length))
         tokens = _random_tokens
         text = [tokenizer.decode(tokens[0])] * batch_size
-        prompt = f'{args.chat_template.format(input=text)}'
-        prompt_length = batch_size*prompt_length
+        prompt = f"{args.chat_template.format(input=text)}"
+        prompt_length = batch_size * prompt_length
     elif args.use_prompt_set:
         text = [get_prompt_by_length(prompt_length)] * batch_size
-        prompt = f'{args.chat_template.format(input=text)}'
+        prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
     else:
         text = [generate_prompt(model, tokenizer, prompt_length)] * batch_size
-        prompt = f'{args.chat_template.format(input=text)}'
+        prompt = f"{args.chat_template.format(input=text)}"
         tokens = tokenizer.encode(prompt)
         prompt_length = len(tokens)
         max_length = prompt_length + generation_length
 
     params = og.GeneratorParams(model)
     do_sample = args.top_k > 1 or (args.top_p != 1.0 and args.top_p > 0.0)
-    params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length, batch_size=batch_size)
+    params.set_search_options(
+        do_sample=do_sample,
+        top_k=args.top_k,
+        top_p=args.top_p,
+        temperature=temperature,
+        max_length=max_length,
+        min_length=max_length,
+        batch_size=batch_size,
+    )
 
-    if args.verbose: print("Running warmup runs...")
+    if args.verbose:
+        print("Running warmup runs...")
     for _ in tqdm(range(args.warmup)):
         generator = og.Generator(model, params)
         generator.append_tokens(tokens)
         while not generator.is_done():
             generator.generate_next_token()
-        if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
+        if args.print_model_output:
+            print(tokenizer.decode(generator.get_sequence(0)))
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
 
@@ -291,7 +329,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     token_gen_times = []
     sampling_times = []
     wall_clock_times = []
-    if args.verbose: print(f"Running benchmark for batch size = {batch_size}, prompt length = {prompt_length}")
+    if args.verbose:
+        print(f"Running benchmark for batch size = {batch_size}, prompt length = {prompt_length}")
     for _ in tqdm(range(num_repetitions)):
         wall_clock_start_time = time.time()
 
@@ -306,7 +345,15 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
         # Prepare run
         params = og.GeneratorParams(model)
-        params.set_search_options(do_sample=do_sample, top_k=args.top_k, top_p=args.top_p, temperature=temperature, max_length=max_length, min_length=max_length, batch_size=batch_size)
+        params.set_search_options(
+            do_sample=do_sample,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            temperature=temperature,
+            max_length=max_length,
+            min_length=max_length,
+            batch_size=batch_size,
+        )
 
         generator = og.Generator(model, params)
 
@@ -335,7 +382,8 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
 
         wall_clock_end_time = time.time()
         wall_clock_times.append(wall_clock_end_time - wall_clock_start_time)
-        if args.print_model_output: print(tokenizer.decode(generator.get_sequence(0)))
+        if args.print_model_output:
+            print(tokenizer.decode(generator.get_sequence(0)))
 
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
@@ -412,14 +460,17 @@ def main(args):
                     max_length = args.max_lengths[0] if len(args.max_lengths) == 1 else args.max_lengths[m]
                 else:
                     max_length = prompt_length + gen_length
-                print(f"\nArgs: batch_size = {batch_size}, prompt_length = {prompt_length}, tokens = {gen_length}, max_length = {max_length}")
+                print(
+                    f"\nArgs: batch_size = {batch_size}, prompt_length = {prompt_length}, tokens = {gen_length}, max_length = {max_length}"
+                )
                 if args.print_memory_usage:
                     metrics = run_benchmark_memory(args, batch_size, prompt_length, gen_length, max_length)
                 else:
                     metrics = run_benchmark(args, batch_size, prompt_length, gen_length, max_length)
                 all_csv_metrics.append(metrics)
     # Add metrics to CSV
-    if args.verbose: print("Adding results to CSV")
+    if args.verbose:
+        print("Adding results to CSV")
     filename = args.output
 
     if args.print_memory_usage:
@@ -427,36 +478,80 @@ def main(args):
     else:
         save_results(args, all_csv_metrics, filename)
 
+
 def str2intlist(value):
-    return [int(v) for v in value.split(',')]
+    return [int(v) for v in value.split(",")]
+
 
 def str2strlist(value):
-    return [str(v) for v in value.split(',')]
+    return [str(v) for v in value.split(",")]
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="End-to-end benchmarking for gen-ai")
-    parser.add_argument('-i', '--input_folder', type=str, required=True, help='Onnx model folder path (must contain genai_config.json and model.onnx)')
-    parser.add_argument('-b', '--batch_sizes', type=str2intlist, default=[1], help='Number of sequences to generate in parallel')
-    parser.add_argument('-l', '--prompt_lengths', type=str2intlist, default=[16], help='Number of tokens for prompt')
-    parser.add_argument('-g', '--generation_lengths', type=str2intlist, default=[256], help='Number of tokens to generate after prompt')
-    parser.add_argument('-m', '--max_lengths', type=str2intlist, default=[], help='Max length is either a combination of prompt and generation length or one value broadcasting for all.')
-    parser.add_argument('-r', '--repetitions', type=int, default=10, help='Number of times to repeat the benchmark')
-    parser.add_argument('-w', '--warmup', type=int, default=5, help='Number of warmup runs before benchmarking')
-    parser.add_argument('-k', '--top_k', type=int, default=50, help='Top k tokens to sample from')
-    parser.add_argument('-p', '--top_p', type=float, default=1.0, help='Top p probability to sample with')
-    parser.add_argument('-o', '--output', type=str, default='genai_e2e', help='Output CSV file name or path (with .csv extension)')
-    parser.add_argument('-v', '--verbose', action='store_true', help='Print extra information')
-    parser.add_argument('-mo', '--print_model_output', action='store_true', help='Print model output')
-    parser.add_argument('-pm', '--print_memory_usage', default=False, help='Print memory footprint')
-    parser.add_argument('-mn', '--model_name', type=str, default='model_name', help='Model name defined by users')
-    parser.add_argument('-pr', '--precision', type=str, default='fp16', help='Model precision for metrics info')
-    parser.add_argument('--use_random_tokens', action='store_true', help='Use random tokens instead of generating a prompt')
-    parser.add_argument('--use_prompt_set', action='store_true', help='Use pre-generated prompt set instead of generating a prompt')
-    parser.add_argument('--chat_template', type=str, default='', help='Chat template to use for the prompt. User input will be injected into {input}')
-    parser.add_argument('-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
+    parser.add_argument(
+        "-i",
+        "--input_folder",
+        type=str,
+        required=True,
+        help="Onnx model folder path (must contain genai_config.json and model.onnx)",
+    )
+    parser.add_argument(
+        "-b", "--batch_sizes", type=str2intlist, default=[1], help="Number of sequences to generate in parallel"
+    )
+    parser.add_argument("-l", "--prompt_lengths", type=str2intlist, default=[16], help="Number of tokens for prompt")
+    parser.add_argument(
+        "-g", "--generation_lengths", type=str2intlist, default=[256], help="Number of tokens to generate after prompt"
+    )
+    parser.add_argument(
+        "-m",
+        "--max_lengths",
+        type=str2intlist,
+        default=[],
+        help="Max length is either a combination of prompt and generation length or one value broadcasting for all.",
+    )
+    parser.add_argument("-r", "--repetitions", type=int, default=10, help="Number of times to repeat the benchmark")
+    parser.add_argument("-w", "--warmup", type=int, default=5, help="Number of warmup runs before benchmarking")
+    parser.add_argument("-k", "--top_k", type=int, default=50, help="Top k tokens to sample from")
+    parser.add_argument("-p", "--top_p", type=float, default=1.0, help="Top p probability to sample with")
+    parser.add_argument(
+        "-o", "--output", type=str, default="genai_e2e", help="Output CSV file name or path (with .csv extension)"
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="Print extra information")
+    parser.add_argument("-mo", "--print_model_output", action="store_true", help="Print model output")
+    parser.add_argument("-pm", "--print_memory_usage", default=False, help="Print memory footprint")
+    parser.add_argument("-mn", "--model_name", type=str, default="model_name", help="Model name defined by users")
+    parser.add_argument("-pr", "--precision", type=str, default="fp16", help="Model precision for metrics info")
+    parser.add_argument(
+        "--use_random_tokens", action="store_true", help="Use random tokens instead of generating a prompt"
+    )
+    parser.add_argument(
+        "--use_prompt_set", action="store_true", help="Use pre-generated prompt set instead of generating a prompt"
+    )
+    parser.add_argument(
+        "--chat_template",
+        type=str,
+        default="",
+        help="Chat template to use for the prompt. User input will be injected into {input}",
+    )
+    parser.add_argument(
+        "-e",
+        "--execution_provider",
+        type=str,
+        required=False,
+        default="follow_config",
+        choices=["cpu", "cuda", "dml", "follow_config"],
+        help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
+    )
     args = parser.parse_args()
 
     # check max_lengths
-    is_max_lengths_valid = not args.max_lengths or len(args.max_lengths) == 1 or len(args.max_lengths) == len(args.prompt_lengths) * len(args.generation_lengths)
-    assert is_max_lengths_valid, "len(args.max_lengths) is either a combination of args.prompt_lengths and args.generation_lengths or 1 that broadcasts for all"
+    is_max_lengths_valid = (
+        not args.max_lengths
+        or len(args.max_lengths) == 1
+        or len(args.max_lengths) == len(args.prompt_lengths) * len(args.generation_lengths)
+    )
+    assert is_max_lengths_valid, (
+        "len(args.max_lengths) is either a combination of args.prompt_lengths and args.generation_lengths or 1 that broadcasts for all"
+    )
     main(args)

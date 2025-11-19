@@ -38,10 +38,10 @@ def get_sdk_tool_paths(sdk_root: Path):
         adb=str((sdk_root / "platform-tools" / filename("adb", "exe")).resolve(strict=True)),
         sdkmanager=str(
             (sdk_root / "cmdline-tools" / "latest" / "bin" / filename("sdkmanager", "bat")).resolve(strict=True)
-            ),
+        ),
         avdmanager=str(
             (sdk_root / "cmdline-tools" / "latest" / "bin" / filename("avdmanager", "bat")).resolve(strict=True)
-            )
+        ),
     )
 
 

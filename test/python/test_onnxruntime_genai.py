@@ -11,9 +11,7 @@ import sysconfig
 import onnxruntime_genai as og
 from _test_utils import download_models, run_subprocess
 
-logging.basicConfig(
-    format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG
-)
+logging.basicConfig(format="%(asctime)s %(name)s [%(levelname)s] - %(message)s", level=logging.DEBUG)
 log = logging.getLogger("onnxruntime-genai-tests")
 
 
@@ -62,8 +60,7 @@ def parse_arguments():
     parser.add_argument(
         "--test_models",
         help="Path to the test_models directory",
-        default=pathlib.Path(__file__).parent.parent.resolve().absolute()
-        / "test_models",
+        default=pathlib.Path(__file__).parent.parent.resolve().absolute() / "test_models",
     )
     parser.add_argument(
         "--e2e",
@@ -80,9 +77,7 @@ def main():
 
     # Get INT4 ONNX models
     output_paths = []
-    if not (
-        sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8
-    ):
+    if not (sysconfig.get_platform().endswith("arm64") or sys.version_info.minor < 8):
         output_paths += download_models(os.path.abspath(args.test_models), "int4", "cpu", log)
         if og.is_cuda_available():
             output_paths += download_models(os.path.abspath(args.test_models), "int4", "cuda", log)

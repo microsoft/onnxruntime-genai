@@ -19,13 +19,24 @@ class PhiModel(Model):
     def make_layer(self, layer_id, layer):
         # Each Phi decoder layer is defined as:
         # input_layernorm --> attention --> MLP --> residual_add
-        self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
+        self.make_layernorm(
+            layer_id,
+            layer.input_layernorm,
+            skip=not self.layernorm_attrs["first_layernorm"],
+            simple=self.layernorm_attrs["simple"],
+            location="input",
+        )
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
         residual_add_name = f"/model/layers.{layer_id}/residual_add/Add"
-        residual_add_inputs = [self.layernorm_attrs['skip_input'], self.mlp_attrs["output_0"]]
-        self.make_add(residual_add_name, residual_add_inputs, dtype=self.io_dtype, shape=['batch_size', 'sequence_length', self.hidden_size])
+        residual_add_inputs = [self.layernorm_attrs["skip_input"], self.mlp_attrs["output_0"]]
+        self.make_add(
+            residual_add_name,
+            residual_add_inputs,
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.hidden_size],
+        )
 
         self.layernorm_attrs["first_layernorm"] = False
         if layer_id == self.num_layers - 1:
@@ -34,6 +45,7 @@ class PhiModel(Model):
 
         # Assign output 0 of residual Add as skip input to next SkipLayerNorm
         self.layernorm_attrs["skip_input"] = f"{residual_add_name}/output_0"
+
 
 class Phi3MiniModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -48,7 +60,9 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         # Set position_ids_name based on whether position_ids is available as an input
         if "position_ids" in self.input_names:
             position_ids_result = self.make_position_ids_reformatting()
-            self.position_ids_name = f"{position_ids_result}/output_0" if position_ids_result != "position_ids" else "position_ids"
+            self.position_ids_name = (
+                f"{position_ids_result}/output_0" if position_ids_result != "position_ids" else "position_ids"
+            )
         else:
             # When position_ids is not an input (use_rope_in_attn is True),
             # position_ids won't be used since rotary embeddings are handled in GQA
@@ -92,14 +106,19 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         input_tensor = "position_ids"
         if is_webgpu:
             cast_input_name = f"{basename}/Cast_input"
-            self.make_cast(cast_input_name, input_tensor, dtype=ir.DataType.INT32, shape=["batch_size", "sequence_length"])
+            self.make_cast(
+                cast_input_name, input_tensor, dtype=ir.DataType.INT32, shape=["batch_size", "sequence_length"]
+            )
             input_tensor = f"{cast_input_name}/output_0"
 
         reduce_max_name = f"{basename}/ReduceMax"
         reduce_max_inputs = [input_tensor]
         self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=compute_dtype, shape=[1])
         greater_or_equal_name = f"{basename}/GreaterOrEqual"
-        greater_or_equal_inputs = [f"{reduce_max_name}/output_0", f"/model/constants/{compute_str_dtype}/{self.original_context_length}"]
+        greater_or_equal_inputs = [
+            f"{reduce_max_name}/output_0",
+            f"/model/constants/{compute_str_dtype}/{self.original_context_length}",
+        ]
         self.make_greater_or_equal(greater_or_equal_name, greater_or_equal_inputs, shape=[])
         cast_name = f"{basename}/Cast"
         self.make_cast(cast_name, f"{greater_or_equal_name}/output_0", dtype=compute_dtype, shape=None)
@@ -114,7 +133,12 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         result_name = add_1_name
         if is_webgpu:
             cast_output_name = f"{basename}/Cast_output"
-            self.make_cast(cast_output_name, f"{add_1_name}/output_0", dtype=ir.DataType.INT64, shape=["batch_size", "sequence_length"])
+            self.make_cast(
+                cast_output_name,
+                f"{add_1_name}/output_0",
+                dtype=ir.DataType.INT64,
+                shape=["batch_size", "sequence_length"],
+            )
             result_name = cast_output_name
 
         return result_name
@@ -124,6 +148,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
             super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
         else:
             super().make_attention(layer_id, attention, root_input, **kwargs)
+
 
 class Phi3SmallModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -158,7 +183,7 @@ class Phi3SmallModel(Model):
             q_pos = torch.arange(N_BLOCK)[:, None]
             k_pos = torch.arange(N_BLOCK)[None]
             mask_vert_strided = (torch.arange(N_BLOCK) + 1) % vert_stride == 0
-            block_mask_dense = ((q_pos >= k_pos) & ((q_pos - k_pos < local_blocks) | mask_vert_strided))
+            block_mask_dense = (q_pos >= k_pos) & ((q_pos - k_pos < local_blocks) | mask_vert_strided)
             N_BLOCK_Q = self.calculate_cdiv(q_len, BLOCK)
             block_mask_dense_output = block_mask_dense[-N_BLOCK_Q:].to_sparse_csr()
 
@@ -171,9 +196,11 @@ class Phi3SmallModel(Model):
             q_pos = torch.arange(N_BLOCK)[None, :, None]
             k_pos = torch.arange(N_BLOCK)[None, None]
             head_sliding_step = max(1, int(vert_stride / n_heads))  # if vert_stride <= n_heads, rotating the heads
-            mask_vert_strided = [(torch.arange(N_BLOCK) + h * head_sliding_step + 1) % vert_stride == 0 for h in range(n_heads)]
+            mask_vert_strided = [
+                (torch.arange(N_BLOCK) + h * head_sliding_step + 1) % vert_stride == 0 for h in range(n_heads)
+            ]
             mask_vert_strided = torch.vstack(mask_vert_strided).unsqueeze(1)
-            block_mask_dense = ((q_pos >= k_pos) & ((q_pos - k_pos < local_blocks) | mask_vert_strided))
+            block_mask_dense = (q_pos >= k_pos) & ((q_pos - k_pos < local_blocks) | mask_vert_strided)
             N_BLOCK_Q = self.calculate_cdiv(q_len, BLOCK)
             block_mask_dense_output = block_mask_dense[:, -N_BLOCK_Q:]
 
@@ -214,20 +241,42 @@ class Phi3SmallModel(Model):
         q_size = self.num_attn_heads * self.head_size
         kv_size = self.num_kv_heads * self.head_size
 
-        qkv_weight = attention.query_key_value.weight.T.view(self.hidden_size, self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
-        qkv_bias = attention.query_key_value.bias.view(self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size)
+        qkv_weight = attention.query_key_value.weight.T.view(
+            self.hidden_size, self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size
+        )
+        qkv_bias = attention.query_key_value.bias.view(
+            self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size
+        )
 
         attention.q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
-        attention.q_proj.weight = torch.nn.Parameter(qkv_weight[:, :, :-2].reshape(q_size, q_size).T, requires_grad=False)
-        attention.q_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, :-2].flatten(), requires_grad=False)
+        attention.q_proj.weight = torch.nn.Parameter(
+            qkv_weight[:, :, :-2].reshape(q_size, q_size).T, requires_grad=False
+        )
+        attention.q_proj.bias = (
+            None
+            if attention.query_key_value.bias is None
+            else torch.nn.Parameter(qkv_bias[:, :-2].flatten(), requires_grad=False)
+        )
 
         attention.k_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
-        attention.k_proj.weight = torch.nn.Parameter(qkv_weight[:, :, [-2]].reshape(q_size, kv_size).T, requires_grad=False)
-        attention.k_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, [-2]].flatten(), requires_grad=False)
+        attention.k_proj.weight = torch.nn.Parameter(
+            qkv_weight[:, :, [-2]].reshape(q_size, kv_size).T, requires_grad=False
+        )
+        attention.k_proj.bias = (
+            None
+            if attention.query_key_value.bias is None
+            else torch.nn.Parameter(qkv_bias[:, [-2]].flatten(), requires_grad=False)
+        )
 
         attention.v_proj = torch.nn.Linear(in_features=q_size, out_features=kv_size)
-        attention.v_proj.weight = torch.nn.Parameter(qkv_weight[:, :, [-1]].reshape(q_size, kv_size).T, requires_grad=False)
-        attention.v_proj.bias = None if attention.query_key_value.bias is None else torch.nn.Parameter(qkv_bias[:, [-1]].flatten(), requires_grad=False)
+        attention.v_proj.weight = torch.nn.Parameter(
+            qkv_weight[:, :, [-1]].reshape(q_size, kv_size).T, requires_grad=False
+        )
+        attention.v_proj.bias = (
+            None
+            if attention.query_key_value.bias is None
+            else torch.nn.Parameter(qkv_bias[:, [-1]].flatten(), requires_grad=False)
+        )
 
         del qkv_weight
         del qkv_bias
@@ -276,43 +325,105 @@ class Phi3SmallModel(Model):
 
         # Left path
         slice_1_name = f"/model/layers.{layer_id}/mlp/gelu/Slice"
-        slice_1_inputs = [f"{up_add_name}/output_0", "/model/constants/INT64/[0]", f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]", "/model/constants/INT64/[-1]", "/model/constants/INT64/[2]"]
-        self.make_slice(slice_1_name, slice_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        slice_1_inputs = [
+            f"{up_add_name}/output_0",
+            "/model/constants/INT64/[0]",
+            f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]",
+            "/model/constants/INT64/[-1]",
+            "/model/constants/INT64/[2]",
+        ]
+        self.make_slice(
+            slice_1_name,
+            slice_1_inputs,
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.intermediate_size],
+        )
         cast_1_name = f"/model/layers.{layer_id}/mlp/gelu/Cast"
-        self.make_cast(cast_1_name, f"{slice_1_name}/output_0", dtype=ir.DataType.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_cast(
+            cast_1_name,
+            f"{slice_1_name}/output_0",
+            dtype=ir.DataType.FLOAT,
+            shape=["batch_size", "sequence_length", self.intermediate_size],
+        )
         isinf_1_name = f"/model/layers.{layer_id}/mlp/gelu/IsInf"
-        self.make_isinf(isinf_1_name, f"{cast_1_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_isinf(
+            isinf_1_name, f"{cast_1_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size]
+        )
         clip_1_name = f"/model/layers.{layer_id}/mlp/gelu/Clip"
-        clip_1_inputs = [f"{slice_1_name}/output_0", "", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.clamp_limit}"]
-        self.make_clip(clip_1_name, clip_1_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        clip_1_inputs = [
+            f"{slice_1_name}/output_0",
+            "",
+            f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.clamp_limit}",
+        ]
+        self.make_clip(
+            clip_1_name, clip_1_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size]
+        )
         where_1_name = f"/model/layers.{layer_id}/mlp/gelu/Where"
         where_1_inputs = [f"{isinf_1_name}/output_0", f"{slice_1_name}/output_0", f"{clip_1_name}/output_0"]
-        self.make_where(where_1_name, where_1_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_where(
+            where_1_name,
+            where_1_inputs,
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.intermediate_size],
+        )
         # Make activation
         act_fn_name = self.make_activation(layer_id, root_input=f"{where_1_name}/output_0")
 
         # Right path
         slice_2_name = f"/model/layers.{layer_id}/mlp/linear/Slice"
-        slice_2_inputs = [f"{up_add_name}/output_0", "/model/constants/INT64/[1]", f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]", "/model/constants/INT64/[-1]", "/model/constants/INT64/[2]"]
-        self.make_slice(slice_2_name, slice_2_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        slice_2_inputs = [
+            f"{up_add_name}/output_0",
+            "/model/constants/INT64/[1]",
+            f"/model/constants/INT64/[{torch.iinfo(torch.int64).max}]",
+            "/model/constants/INT64/[-1]",
+            "/model/constants/INT64/[2]",
+        ]
+        self.make_slice(
+            slice_2_name,
+            slice_2_inputs,
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.intermediate_size],
+        )
         cast_2_name = f"/model/layers.{layer_id}/mlp/linear/Cast"
-        self.make_cast(cast_2_name, f"{slice_2_name}/output_0", dtype=ir.DataType.FLOAT, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_cast(
+            cast_2_name,
+            f"{slice_2_name}/output_0",
+            dtype=ir.DataType.FLOAT,
+            shape=["batch_size", "sequence_length", self.intermediate_size],
+        )
         isinf_2_name = f"/model/layers.{layer_id}/mlp/linear/IsInf"
-        self.make_isinf(isinf_2_name, f"{cast_2_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_isinf(
+            isinf_2_name, f"{cast_2_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size]
+        )
         clip_2_name = f"/model/layers.{layer_id}/mlp/linear/Clip"
-        clip_2_inputs = [f"{slice_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/-{self.clamp_limit}", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.clamp_limit}"]
-        self.make_clip(clip_2_name, clip_2_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        clip_2_inputs = [
+            f"{slice_2_name}/output_0",
+            f"/model/constants/{self.to_str_dtype(self.io_dtype)}/-{self.clamp_limit}",
+            f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.clamp_limit}",
+        ]
+        self.make_clip(
+            clip_2_name, clip_2_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size]
+        )
         where_2_name = f"/model/layers.{layer_id}/mlp/linear/Where"
         where_2_inputs = [f"{isinf_2_name}/output_0", f"{slice_2_name}/output_0", f"{clip_2_name}/output_0"]
-        self.make_where(where_2_name, where_2_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_where(
+            where_2_name,
+            where_2_inputs,
+            dtype=self.io_dtype,
+            shape=["batch_size", "sequence_length", self.intermediate_size],
+        )
         add_name = f"/model/layers.{layer_id}/mlp/linear/Add"
         add_inputs = [f"{where_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/1"]
-        self.make_add(add_name, add_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_add(
+            add_name, add_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size]
+        )
 
         # Make Mul node after activation
         mul_name = f"/model/layers.{layer_id}/mlp/Mul"
         mul_inputs = [f"{act_fn_name}/output_0", f"{add_name}/output_0"]
-        self.make_mul(mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size])
+        self.make_mul(
+            mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size]
+        )
 
         # Make output MatMul and Add nodes
         down_matmul_name = f"/model/layers.{layer_id}/mlp/down_proj/MatMul"
@@ -346,9 +457,21 @@ class Phi3MoELongRoPEModel(MistralModel):
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
         # input_layernorm --> attention --> output_layernorm --> MoE
-        self.make_layernorm(layer_id, layer.input_layernorm, skip=not self.layernorm_attrs["first_layernorm"], simple=self.layernorm_attrs["simple"], location="input")
+        self.make_layernorm(
+            layer_id,
+            layer.input_layernorm,
+            skip=not self.layernorm_attrs["first_layernorm"],
+            simple=self.layernorm_attrs["simple"],
+            location="input",
+        )
         self.make_attention(layer_id, layer.self_attn, root_input=self.layernorm_attrs["output_0"])
-        self.make_layernorm(layer_id, layer.post_attention_layernorm, skip=True, simple=self.layernorm_attrs["simple"], location="post_attention")
+        self.make_layernorm(
+            layer_id,
+            layer.post_attention_layernorm,
+            skip=True,
+            simple=self.layernorm_attrs["simple"],
+            location="post_attention",
+        )
         self.make_block_sparse_moe(layer_id, layer.block_sparse_moe, root_input=self.layernorm_attrs["output_0"])
 
         self.layernorm_attrs["first_layernorm"] = False

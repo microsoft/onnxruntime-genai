@@ -35,11 +35,7 @@ def run(args: argparse.Namespace):
 
         request = og.Request(params)
         request.add_tokens(
-            tokenizer.encode(
-                tokenizer.apply_chat_template(
-                    messages=messages, add_generation_prompt=True
-                )
-            ),
+            tokenizer.encode(tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)),
         )
         streaming_tokenizer = tokenizer.create_stream()
 

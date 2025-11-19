@@ -161,32 +161,31 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--android_home", type=Path, default=_path_from_env_var("ANDROID_HOME"),
-        help="Path to the Android SDK."
+        "--android_home", type=Path, default=_path_from_env_var("ANDROID_HOME"), help="Path to the Android SDK."
     )
 
     parser.add_argument(
-        "--android_ndk_path", type=Path, default=_path_from_env_var("ANDROID_NDK_HOME"),
-        help="Path to the Android NDK."
+        "--android_ndk_path", type=Path, default=_path_from_env_var("ANDROID_NDK_HOME"), help="Path to the Android NDK."
     )
 
     parser.add_argument(
-        "--build_dir", type=Path, default=(REPO_ROOT / "build" / "android_aar"),
+        "--build_dir",
+        type=Path,
+        default=(REPO_ROOT / "build" / "android_aar"),
         help="Provide the root directory for build output",
     )
 
     parser.add_argument(
-        "--config", type=str, default="Release",
+        "--config",
+        type=str,
+        default="Release",
         choices=["Debug", "MinSizeRel", "Release", "RelWithDebInfo"],
         help="Configuration to build.",
     )
 
-    parser.add_argument("--ort_home", type=Path, default=None,
-                        help="Path to an unzipped onnxruntime AAR.")
+    parser.add_argument("--ort_home", type=Path, default=None, help="Path to an unzipped onnxruntime AAR.")
 
-    parser.add_argument(
-        "build_settings_file", type=Path, help="Provide the file contains settings for building AAR"
-    )
+    parser.add_argument("build_settings_file", type=Path, help="Provide the file contains settings for building AAR")
 
     return parser.parse_args()
 

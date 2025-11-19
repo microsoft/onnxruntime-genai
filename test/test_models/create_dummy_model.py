@@ -66,15 +66,15 @@ def get_args():
         "-i",
         "--inputs",
         metavar="(NAME; DTYPE; SHAPE)",
-        nargs='+',
-        help="Inputs of the form '(input_name; input_dtype; input_shape)' for model"
+        nargs="+",
+        help="Inputs of the form '(input_name; input_dtype; input_shape)' for model",
     )
     parser.add_argument(
         "-o",
         "--outputs",
         metavar="(NAME; DTYPE; SHAPE)",
-        nargs='+',
-        help="Outputs of the form '(output_name; output_dtype; output_shape)' for model"
+        nargs="+",
+        help="Outputs of the form '(output_name; output_dtype; output_shape)' for model",
     )
     parser.add_argument(
         "-f",
@@ -86,6 +86,7 @@ def get_args():
     args = parser.parse_args()
     return args
 
+
 def parse_args(input_or_output):
     list_of_inputs_or_outputs = []
     for input_str in input_or_output:
@@ -93,6 +94,7 @@ def parse_args(input_or_output):
         input_or_output_to_add = [elm.strip() for elm in input_or_output_to_add]
         list_of_inputs_or_outputs.append(input_or_output_to_add)
     return list_of_inputs_or_outputs
+
 
 def get_input_or_output_value_infos(input_or_outputs):
     value_infos = []
@@ -102,6 +104,7 @@ def get_input_or_output_value_infos(input_or_outputs):
         value_info = helper.make_tensor_value_info(name, dtype, shape)
         value_infos.append(value_info)
     return value_infos
+
 
 def get_dummy_tensor_shape(shape):
     np_shape = ()
@@ -114,6 +117,7 @@ def get_dummy_tensor_shape(shape):
             raise NotImplementedError(f"Unknown dim type: {type(dim)}")
     return np_shape
 
+
 def get_output_initializers(outputs):
     initializers = []
     for output in outputs:
@@ -125,6 +129,7 @@ def get_output_initializers(outputs):
         initializers.append(tensor)
     return initializers
 
+
 def main():
     args = get_args()
     args.inputs = parse_args(args.inputs)
@@ -132,7 +137,7 @@ def main():
 
     # Create dummy model
     model = helper.make_model(
-        opset_imports=[helper.make_operatorsetid('', 14)],
+        opset_imports=[helper.make_operatorsetid("", 14)],
         ir_version=7,
         producer_name="onnxruntime-genai",
         producer_version="0.0.0",
@@ -143,12 +148,13 @@ def main():
             initializer=get_output_initializers(args.outputs),
             value_info=[],
             nodes=[],
-        )
+        ),
     )
     onnx.save_model(
         model,
         args.filename,
     )
+
 
 if __name__ == "__main__":
     # Map TensorProto dtypes to NumPy dtypes

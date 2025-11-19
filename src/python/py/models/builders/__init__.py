@@ -49,5 +49,5 @@ __all__ = [
     "PhiModel",
     "Qwen3Model",
     "QwenModel",
-    "SmolLM3Model"
+    "SmolLM3Model",
 ]

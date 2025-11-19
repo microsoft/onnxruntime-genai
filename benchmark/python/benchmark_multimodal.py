@@ -43,7 +43,10 @@ def monitor_gpu_memory():
 
     while not stop_monitoring:
         result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"], check=False, capture_output=True, text=True
+            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+            check=False,
+            capture_output=True,
+            text=True,
         )
 
         memory_usage = result.stdout.splitlines()

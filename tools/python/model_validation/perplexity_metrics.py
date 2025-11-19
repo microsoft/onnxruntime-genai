@@ -7,14 +7,15 @@ from datasets import load_dataset
 
 
 def get_wikitext2():
-    test = load_dataset('wikitext', 'wikitext-2-raw-v1', split='test')
+    test = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
     # Concatenate the text with "\n\n" separator,
     result = "\n\n".join(text for text in test["text"])
     return result
 
+
 def perplexity_eval(model_dir):
     # Load the model and tokenizer
-    model = og.Model(f'{model_dir}')
+    model = og.Model(f"{model_dir}")
     tokenizer = og.Tokenizer(model)
 
     total_log_probs = 0
@@ -30,10 +31,10 @@ def perplexity_eval(model_dir):
 
     # Need to retreive the Model's maximum via the ORT GenAI configuration
     ## Explore the biggest max length vs the context length in genai config and calculate the lower of the two
-    with open(model_dir+'/genai_config.json') as file:
+    with open(model_dir + "/genai_config.json") as file:
         config = json.load(file)
 
-    max_length = config["model"]["context_length"]-1 # This is the default for qwen
+    max_length = config["model"]["context_length"] - 1  # This is the default for qwen
     stride = 8192
     # Just get the perplexity for one position
     seq_len = input_ids.size(1)

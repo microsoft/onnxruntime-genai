@@ -74,7 +74,7 @@ def filter_files(subpath: str, all_file_patterns: list[str], excluded_file_patte
     """
     # get all files matching the patterns in all_file_patterns
     if subpath:
-        src_root = repo_root /  subpath
+        src_root = repo_root / subpath
     else:
         src_root = repo_root
 
@@ -99,7 +99,7 @@ def copy_repo_relative_to_dir(subpath: str, patterns: list[str], dest_dir: pathl
     :param dest_dir The destination directory.
     """
     if subpath:
-        src_root = repo_root /  subpath
+        src_root = repo_root / subpath
     else:
         src_root = repo_root
     paths = [path for pattern in patterns for path in src_root.glob(pattern)]

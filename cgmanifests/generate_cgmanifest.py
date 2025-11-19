@@ -115,7 +115,9 @@ proc = subprocess.run(
 submodule_lines = proc.stdout.splitlines()
 for submodule_line in submodule_lines:
     (absolute_path, url, commit) = submodule_line.split(" ")
-    git_deps[GitDep(commit, url)] = f"git submodule at {normalize_path_separators(os.path.relpath(absolute_path, REPO_DIR))}"
+    git_deps[GitDep(commit, url)] = (
+        f"git submodule at {normalize_path_separators(os.path.relpath(absolute_path, REPO_DIR))}"
+    )
 
 with open(os.path.join(SCRIPT_DIR, "..", "cmake", "deps.txt")) as f:
     depfile_reader = csv.reader(f, delimiter=";")

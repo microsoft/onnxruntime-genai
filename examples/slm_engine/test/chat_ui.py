@@ -60,9 +60,7 @@ def reset_chat():
 
 
 with gr.Blocks() as demo:
-    kpi_grid = gr.Dataframe(
-        headers=["KPI", "Value"], datatype=["str", "str"], render=False
-    )
+    kpi_grid = gr.Dataframe(headers=["KPI", "Value"], datatype=["str", "str"], render=False)
     gr.Markdown("<center><h1>Chat with ONNX SLM Engine</h1></center>")
     with gr.Row():
         with gr.Column():
