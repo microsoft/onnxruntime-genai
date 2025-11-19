@@ -1,10 +1,12 @@
-#!/bin/bash
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.  See License.txt in the project root for
+# license information.
+# --------------------------------------------------------------------------
 
-# ---
-# This script builds and tests either an fp32, bf16 or fp16 model. Append -f to force export.
-#
+#!/bin/bash
+# This script builds and tests either an fp32, bf16 or fp16 Qwen2.5-VL-3B-Instruct model. Append -f to force export.
 # Usage: ./run.sh [fp32|bf16|fp16] [-f]
-# ---
 
 # Exit immediately if a command fails
 set -e
