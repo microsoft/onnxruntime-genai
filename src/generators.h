@@ -81,9 +81,10 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
 
-  std::string guidance_type;  // e.g. json_schema or regex
-  std::string guidance_data;  // e.g. rules data in json_schema or regex
-  void SetGuidance(std::string_view type, std::string_view data);
+  std::string guidance_type;               // e.g. json_schema or regex
+  std::string guidance_data;               // e.g. rules data in json_schema or regex
+  bool guidance_ff_tokens_enabled{false};  // Whether to enable ff_tokens during constrained decoding
+  void SetGuidance(std::string_view type, std::string_view data, bool enable_ff_tokens);
 
   // Determines if past_present_share_buffer is actually enabled based on config and runtime conditions
   // Returns true only if config option is true AND (num_beams == 1 OR model is Whisper)
@@ -93,7 +94,7 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
-  bool IsDone() const;
+  bool IsDone();
   void AppendTokens(cpu_span<const int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length

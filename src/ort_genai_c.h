@@ -420,9 +420,10 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatch
  * \param[in] params The generator params to set the guidance on
  * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar
  * \param[in] data The input string, which is the guidance data. Examples are present in test/test_models/grammars folder
+ * \param[in] enable_ff_tokens Whether to enable ff_tokens generation. This feature allows guidance to force-forward tokens that satisfy input grammar without calling model, hence speeding up generation process. Only valid when guidance type is set and batch_size is 1 and beam_size is 1.
  * \return OgaResult containing the error message if the setting of the guidance failed
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens);
 
 /**
  * \brief Creates a generator from the given model and generator params.
@@ -444,7 +445,7 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
  * \param[in] generator The generator to check if it is done with generating all sequences.
  * \return True if the generator has finished generating all the sequences, false otherwise.
  */
-OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
+OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator);
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator);
 
 /**

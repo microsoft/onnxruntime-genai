@@ -146,10 +146,26 @@ def main(args):
 
         generator = og.Generator(model, params)
         if args.verbose: print("Generator created")
-        if guidance_type == "json_schema" or guidance_type == "lark_grammar":
-            messages = f"""[{{"role": "system", "content": "{system_prompt}", "tools": "{prompt_tool_input}"}}, {{"role": "user", "content": "{text}"}}]"""
+        
+        # Create messages with proper JSON encoding
+        # Gemma2 models don't support system role, so we prepend system prompt to user message
+        if model.type == "gemma2":
+            combined_message = f"{system_prompt}\n\n{text}" if system_prompt else text
+            messages_list = [{"role": "user", "content": combined_message}]
+        elif guidance_type == "json_schema" or guidance_type == "lark_grammar":
+            messages_list = [
+                {"role": "system", "content": system_prompt, "tools": prompt_tool_input},
+                {"role": "user", "content": text}
+            ]
         else:
-            messages = f"""[{{"role": "system", "content": "{system_prompt}"}}, {{"role": "user", "content": "{text}"}}]"""
+            messages_list = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": text}
+            ]
+        
+        # Convert to JSON string for tokenizer
+        messages = json.dumps(messages_list)
+        
         # Apply Chat Template
         if model.type == "marian-ssru":
             prompt = text
@@ -168,12 +184,15 @@ def main(args):
         print("Output: ", end='', flush=True)
 
         try:
-            while not generator.is_done():
+            while True:
                 generator.generate_next_token()
                 if args.timings:
                     if first:
                         first_token_timestamp = time.time()
                         first = False
+
+                if generator.is_done():
+                    break
 
                 new_token = generator.get_next_tokens()[0]
                 print(tokenizer_stream.decode(new_token), end='', flush=True)

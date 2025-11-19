@@ -115,7 +115,8 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern IntPtr /* OgaResult* */ OgaGeneratorParamsSetGuidance(IntPtr /* OgaGeneratorParams* */ generatorParams,
                                                                                    byte[] /* const char* */ type,
-                                                                                   byte[] /* const char* */ data);
+                                                                                   byte[] /* const char* */ data,
+                                                                                   bool /* boolean */ enable_ff_tokens);
 
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern void OgaDestroyGenerator(IntPtr /* OgaGenerator* */ generator);
@@ -123,6 +124,11 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
         // This function is used to check if the generator has finished generating all sequences.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
         public static extern byte OgaGenerator_IsDone(IntPtr /* const OgaGenerator* */ generator);
+
+        [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]
+        public static extern IntPtr /* OgaResult* */ OgaGenerator_GetNextTokens(IntPtr /* const OgaGenerator* */ generator,
+                                                                                out IntPtr /* const int32_t** */ outTokenIds,
+                                                                                out UIntPtr /* size_t* */ outTokenCount);
 
         // This function is used to generate the next token in the sequence using the greedy search algorithm.
         [DllImport(NativeLib.DllName, CallingConvention = CallingConvention.Winapi)]

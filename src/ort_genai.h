@@ -430,8 +430,8 @@ struct OgaGeneratorParams : OgaAbstract {
     printf("TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release\n");
   }
 
-  void SetGuidance(const char* type, const char* data) {
-    OgaCheckResult(OgaGeneratorParamsSetGuidance(this, type, data));
+  void SetGuidance(const char* type, const char* data, bool enable_ff_tokens = false) {
+    OgaCheckResult(OgaGeneratorParamsSetGuidance(this, type, data, enable_ff_tokens));
   }
 
   static void operator delete(void* p) { OgaDestroyGeneratorParams(reinterpret_cast<OgaGeneratorParams*>(p)); }
@@ -444,7 +444,7 @@ struct OgaGenerator : OgaAbstract {
     return std::unique_ptr<OgaGenerator>(p);
   }
 
-  bool IsDone() const {
+  bool IsDone() {
     return OgaGenerator_IsDone(this);
   }
 

@@ -138,6 +138,8 @@ struct GenaiInterfaceImpl : GenaiInterface {
 struct LibraryHandle {
   LibraryHandle(const char* filename) {
     auto path = CurrentModulePath() + filename;
+    if (!fs::path(path).exists())
+      path = filename;
     handle_ = LoadLibrary(path.c_str());
     if (!handle_)
       throw std::runtime_error(std::string("Failed to load library: ") + DetermineLoadLibraryError(filename));
@@ -263,9 +265,10 @@ GeneratorParams::GeneratorParams(const Model& model)
   }
 }
 
-void GeneratorParams::SetGuidance(std::string_view type, std::string_view data) {
+void GeneratorParams::SetGuidance(std::string_view type, std::string_view data, bool enable_ff_tokens = false) {
   guidance_type = type;
   guidance_data = data;
+  guidance_ff_tokens_enabled = enable_ff_tokens;
 }
 
 bool GeneratorParams::IsPastPresentShareBufferEnabled(const std::string& model_type) const {
@@ -399,10 +402,12 @@ void Generator::SetInputs(const NamedTensors& named_tensors) {
 void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
+
   if (last_action_ == Action::generated && guidance_logits_processor_) {
     auto next_tokens_span = next_tokens.CopyDeviceToCpu();
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
+
   auto logits = state_->Run(search_->GetSequenceLength(), next_tokens, search_->GetNextIndices());
   if (g_log.enabled && g_log.model_logits) {
     auto& stream = Log("model_logits");
@@ -410,6 +415,27 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
     stream << std::endl;
   }
   SetLogits(logits);
+
+  if (last_action_ == Action::generated && guidance_logits_processor_) {
+    auto ff_tokens = guidance_logits_processor_->GetFFTokens(0);
+    if (!ff_tokens.empty()) {
+      // process fast-forward tokens
+      std::span<int32_t> forced_tokens_span{ff_tokens};
+      auto forced_tokens = AllocateInputIdsOnDevice(forced_tokens_span);
+      search_->AppendTokens(forced_tokens);
+
+      std::span<int32_t> new_next_token_span{ff_tokens};
+      auto new_next_token = AllocateInputIdsOnDevice(new_next_token_span);
+      logits = state_->Run(search_->GetSequenceLength(), new_next_token, search_->GetNextIndices());
+      if (g_log.enabled && g_log.model_logits) {
+        auto& stream_ = Log("model_logits");
+        DumpValues(stream_, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
+        stream_ << std::endl;
+      }
+      SetLogits(logits);
+    }
+  }
+
   last_action_ = Action::standard;
   computed_logits_ = true;
 }
@@ -418,7 +444,7 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
   state_->SetRunOption(key, value);
 }
 
-bool Generator::IsDone() const {
+bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (computed_logits_) {
     return false;
@@ -427,6 +453,10 @@ bool Generator::IsDone() const {
   bool is_done = search_->IsDone();
   if (is_done) {
     state_->Finalize(search_->GetSequenceLength());
+    if (guidance_logits_processor_) {
+      guidance_logits_processor_->Reset();
+      last_action_ = Action::standard;
+    }
   }
 
   return is_done;
@@ -446,7 +476,7 @@ void Generator::GenerateNextToken() {
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
-    throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");
+    throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");
 
   // TRT-RTX and DML EPs use a single rope factor for all tokens: https://github.com/microsoft/onnxruntime-genai/blob/d5dc8cb02fd02b0dce99c6938449566371da0d28/src/python/py/models/builder.py#L1464-L1473
   // TODO: change this when these EPs support multi rope factors
