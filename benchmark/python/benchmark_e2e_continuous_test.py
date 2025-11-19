@@ -6,17 +6,19 @@
 
 # This is an end-to-end benchmarking script for any ONNX model.
 #
-# Prerequisites: 
+# Prerequisites:
 # 0) Install onnxruntime-genai and onnxruntime
 #
 # 1) Use builder.py to build the desired ONNX model
 #
 # 2) Run this script with the desired arguments. Run benchmark_e2e.py -h for help.
 
-import onnxruntime_genai as og
-import time
 import argparse
+import time
+
+import onnxruntime_genai as og
 from tqdm import tqdm
+
 
 def main(args):
     # Get user arguments

@@ -1,7 +1,8 @@
-import gradio as gr
-import requests
-import pandas as pd
 import json
+
+import gradio as gr
+import pandas as pd
+import requests
 
 SLM_ENDPOINT = "http://localhost:8080/completions"
 SYSTEM_PROMPT = (

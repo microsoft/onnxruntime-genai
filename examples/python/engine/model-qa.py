@@ -45,7 +45,7 @@ def run(args: argparse.Namespace):
 
         engine.add_request(request)
 
-        print(f"🤖 :", end="", flush=True)
+        print("🤖 :", end="", flush=True)
 
         while ready_request := engine.step():
             while ready_request.has_unseen_tokens():

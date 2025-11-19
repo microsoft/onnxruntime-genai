@@ -13,18 +13,18 @@
 #
 # 2) Run this script with the desired arguments. Run benchmark_e2e.py -h for help.
 
-import onnxruntime_genai as og
-import time
 import argparse
-from tqdm import tqdm
+import json
+import os
 import subprocess
 import threading
-import psutil
-import os
-import json
-from metrics import BenchmarkRecord
+import time
 
 import numpy as np
+import onnxruntime_genai as og
+import psutil
+from metrics import BenchmarkRecord
+from tqdm import tqdm
 
 peak_cpu_memory = 0.0
 peak_gpu_memory = 0.0
@@ -42,7 +42,7 @@ def monitor_gpu_memory():
     global peak_gpu_memory
 
     while not stop_monitoring:
-        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader,nounits'], capture_output=True, text=True)
+        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used', '--format=csv,noheader,nounits'], check=False, capture_output=True, text=True)
 
         memory_usage = result.stdout.splitlines()
 
@@ -84,7 +84,7 @@ def generate_prompt(model, tokenizer, prompt_length) -> str:
 # Use prompt length to get pre-defined prompt
 def get_prompt_by_length(prompt_length):
     json_path = "prompts.json"
-    with open(json_path, "r") as file:
+    with open(json_path) as file:
         data = json.load(file)
     return data[f"{prompt_length}"]
 
@@ -228,7 +228,7 @@ def run_benchmark(args, batch_size, prompt_length, generation_length, max_length
     if hasattr(model, "type"):
         model_type = model.type
     else:
-        with open(os.path.join(args.input_folder, "genai_config.json"), "r") as f:
+        with open(os.path.join(args.input_folder, "genai_config.json")) as f:
             genai_config = json.load(f)
             model_type = genai_config["model"]["type"]
 

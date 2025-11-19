@@ -2,6 +2,7 @@
 
 import argparse
 import json
+
 import requests
 
 BLUE = "\033[34m"
@@ -37,7 +38,7 @@ def launch_server(server_binary: str, model_path: str):
                     f"{MAGENTA}Engine State: {json_response['response']['engine_state']}{CLEAR}"
                 )
                 started = True
-        except Exception as ex:
+        except Exception:
             # Initially the server may not be ready to accept requests
             # We want to ignore and retry
             pass  # Ignore all exceptions

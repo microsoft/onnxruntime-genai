@@ -2,13 +2,14 @@ import gc
 import logging
 import os
 import sys
+
 import onnxruntime_genai as og
 from app_modules.utils import convert_to_markdown, is_stop_word_or_prefix, shared_state
 
 current_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(current_dir, "..", "..", ".."))
 
-class ONNXModel():
+class ONNXModel:
     """A wrapper for OnnxRuntime-GenAI to run ONNX LLM model."""
 
     def __init__(self, model_path, execution_provider):
@@ -38,10 +39,10 @@ You are a helpful AI assistant.<|eot_id|>"""
             self.history_template = """<|start_header_id|>user<|end_header_id|>
 {input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 {response}<|eot_id|>"""
-            
+
             self.chat_template = """<|start_header_id|>user<|end_header_id|>
 {input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"""
-            
+
             #self.chat_template = llama3_template
         else:
             self.enable_history_max = 2
@@ -184,10 +185,10 @@ You are a helpful AI assistant.<|eot_id|>"""
             print(type(e).__name__, e)
 
         return
-    
+
     def shutdown(self):
         pass
-    
+
     def retry(self, chatbot, history, max_length_tokens, max_context_length_tokens, token_printing_step):
         if len(history) == 0:
             yield chatbot, history, "Empty context"

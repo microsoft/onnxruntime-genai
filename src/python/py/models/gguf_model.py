@@ -11,11 +11,11 @@ to share the same attributes so that the original Hugging Face --> ONNX code rem
 no matter where the weights actually come from.
 """
 
-from functools import reduce
-from gguf.gguf_reader import GGUFReader
-
 import re
+from functools import reduce
+
 import torch
+from gguf.gguf_reader import GGUFReader
 
 
 class GGUFTensorModule:
@@ -215,14 +215,14 @@ class GGUFModel:
                     module.post_feedforward_layernorm.bias = data
                 else:
                     raise NotImplementedError(f"{name} in your GGUF model is not recognized")
-        
+
         # Set LM head weights + biases if not already set
         if self.lm_head.weight is None:
             # Embedding and LM head share same weights + biases (lm_head.weight == embedding.weight and lm_head.bias == embedding.bias)
             self.lm_head.weight = self.embedding.weight
             if self.lm_head.bias is not None:
                 self.lm_head.bias = self.embedding.bias
-    
+
         # Sort list of layers by layer id
         self.layers = list(self.layers.values())
         self.layers.sort(key=lambda m: m.layer_id)

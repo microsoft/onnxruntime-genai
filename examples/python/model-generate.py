@@ -1,7 +1,9 @@
-import onnxruntime_genai as og
 import argparse
-import time
 import json
+import time
+
+import onnxruntime_genai as og
+
 
 def main(args):
     if args.verbose: print("Loading model...")
@@ -66,7 +68,7 @@ def main(args):
 
     params = og.GeneratorParams(model)
 
-    search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args} 
+    search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
 
     if (args.verbose): print(f'Args: {args}')
     if (args.verbose): print(f'Search options: {search_options}')
@@ -76,7 +78,7 @@ def main(args):
 
     generator = og.Generator(model, params)
     if args.verbose: print("Generator created")
-    
+
     generator.append_tokens(input_tokens)
     if args.verbose: print("Input tokens added")
 

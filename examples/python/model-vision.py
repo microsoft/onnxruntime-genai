@@ -2,14 +2,16 @@
 # Licensed under the MIT License
 
 import argparse
-import os
 import glob
-import time
 import json
+import os
+import time
 from pathlib import Path
 
 import onnxruntime_genai as og
+
 # og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
+
 
 def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
     curr_path = Path(current_dir).absolute()
@@ -20,7 +22,7 @@ def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
         if curr_path.parent == curr_path:
             # Root dir
             return None
-        return _find_dir_contains_sub_dir(curr_path / '..', target_dir_name)
+        return _find_dir_contains_sub_dir(curr_path / "..", target_dir_name)
 
 
 def _complete(text, state):
@@ -48,6 +50,7 @@ def run(args: argparse.Namespace):
         if interactive:
             try:
                 import readline
+
                 readline.set_completer_delims(" \t\n;")
                 readline.parse_and_bind("tab: complete")
                 readline.set_completer(_complete)
@@ -56,15 +59,20 @@ def run(args: argparse.Namespace):
                 pass
             image_paths = [
                 image_path.strip()
-                for image_path in input(
-                    "Image Path (comma separated; leave empty if no image): "
-                ).split(",")
+                for image_path in input("Image Path (comma separated; leave empty if no image): ").split(",")
             ]
         else:
             if args.image_paths:
                 image_paths = args.image_paths
             else:
-                image_paths = [str(_find_dir_contains_sub_dir(Path(__file__).parent, "test") / "test_models" / "images" / "australia.jpg")]
+                image_paths = [
+                    str(
+                        _find_dir_contains_sub_dir(Path(__file__).parent, "test")
+                        / "test_models"
+                        / "images"
+                        / "australia.jpg"
+                    )
+                ]
 
         image_paths = [image_path for image_path in image_paths if image_path]
 
@@ -86,12 +94,12 @@ def run(args: argparse.Namespace):
                 text = args.prompt
             else:
                 text = "What is shown in this image?"
-        
+
         # Construct the "messages" argument passed to apply_chat_template
         messages = []
         if model.type == "phi3v":
             # Combine all image tags and text into one user message
-            content = "".join([f"<|image_{i+1}|>\n" for i in range(len(image_paths))]) + text
+            content = "".join([f"<|image_{i + 1}|>\n" for i in range(len(image_paths))]) + text
             messages.append({"role": "user", "content": content})
         else:
             # Gemma3-style multimodal: structured content
@@ -138,20 +146,27 @@ def run(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("-m", "--model_path", type=str, required=True, help="Path to the folder containing the model")
     parser.add_argument(
-        "-m", "--model_path", type=str, required=True, help="Path to the folder containing the model"
+        "-e",
+        "--execution_provider",
+        type=str,
+        required=False,
+        default="follow_config",
+        choices=["cpu", "cuda", "dml", "follow_config"],
+        help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
     )
     parser.add_argument(
-        "-e", "--execution_provider", type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead."
+        "--image_paths", nargs="*", type=str, required=False, help="Path to the images, mainly for CI usage"
     )
     parser.add_argument(
-        "--image_paths", nargs='*', type=str, required=False, help="Path to the images, mainly for CI usage"
+        "-pr", "--prompt", required=False, help="Input prompts to generate tokens from, mainly for CI usage"
     )
     parser.add_argument(
-        '-pr', '--prompt', required=False, help='Input prompts to generate tokens from, mainly for CI usage'
-    )
-    parser.add_argument(
-        '--non-interactive', action=argparse.BooleanOptionalAction, required=False, help='Non-interactive mode, mainly for CI usage'
+        "--non-interactive",
+        action=argparse.BooleanOptionalAction,
+        required=False,
+        help="Non-interactive mode, mainly for CI usage",
     )
     args = parser.parse_args()
     run(args)

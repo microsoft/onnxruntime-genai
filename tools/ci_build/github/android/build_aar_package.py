@@ -7,7 +7,6 @@ import json
 import os
 import subprocess
 import sys
-
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parents[4]
@@ -97,7 +96,7 @@ def _build_aar(args):
     jnilibs_dir = intermediates_dir / "jnilibs" / build_config
     base_build_command = [sys.executable, str(BUILD_PY), f"--config={build_config}"]
     if args.ort_home:
-        base_build_command += [f"--ort_home={str(args.ort_home)}"]
+        base_build_command += [f"--ort_home={args.ort_home!s}"]
     base_build_command += build_settings["build_params"]
 
     header_files_path = None

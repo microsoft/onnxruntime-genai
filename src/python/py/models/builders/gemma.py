@@ -3,8 +3,10 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-from .mistral import MistralModel
 import numpy as np
+
+from .mistral import MistralModel
+
 
 class GemmaModel(MistralModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):

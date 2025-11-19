@@ -7,7 +7,6 @@ import os
 import pathlib
 import sys
 import sysconfig
-from typing import Union, List
 
 import onnxruntime_genai as og
 from _test_utils import download_models, run_subprocess
@@ -19,9 +18,9 @@ log = logging.getLogger("onnxruntime-genai-tests")
 
 
 def run_onnxruntime_genai_api_tests(
-    cwd: Union[str, bytes, os.PathLike],
+    cwd: str | bytes | os.PathLike,
     log: logging.Logger,
-    test_models: Union[str, bytes, os.PathLike],
+    test_models: str | bytes | os.PathLike,
 ):
     log.debug("Running: ONNX Runtime GenAI API Tests")
 
@@ -38,9 +37,9 @@ def run_onnxruntime_genai_api_tests(
 
 
 def run_onnxruntime_genai_e2e_tests(
-    cwd: Union[str, bytes, os.PathLike],
+    cwd: str | bytes | os.PathLike,
     log: logging.Logger,
-    output_paths: List[Union[str, bytes, os.PathLike]],
+    output_paths: list[str | bytes | os.PathLike],
 ):
     log.debug("Running: ONNX Runtime GenAI E2E Tests")
 

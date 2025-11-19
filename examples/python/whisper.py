@@ -7,6 +7,7 @@ import os
 import readline
 
 import onnxruntime_genai as og
+
 # og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
 
 def _complete(text, state):
@@ -75,7 +76,7 @@ def run(args: argparse.Namespace):
             tokens = generator.get_sequence(i)
             transcription = processor.decode(tokens)
 
-            print(f"Transcription:")
+            print("Transcription:")
             print(
                 f"    {Format.underline}batch {i // args.num_beams}, beam {i % args.num_beams}{Format.end}: {transcription}"
             )

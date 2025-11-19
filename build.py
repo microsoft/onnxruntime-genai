@@ -11,13 +11,11 @@ import shlex
 import shutil
 import sys
 import textwrap
-
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent
 sys.path.append(str(REPO_ROOT / "tools" / "python"))
 import util  # ./tools/python/util noqa: E402
-
 
 log = util.get_logger("build.py")
 
@@ -133,7 +131,7 @@ def _parse_args():
     parser.add_argument("--use_dml", action="store_true", help="Whether to use DML. Default is to not use DML.")
 
     parser.add_argument("--use_guidance", action="store_true", help="Whether to add guidance support. Default is False.")
-    
+
     # The following options are mutually exclusive (cross compiling options such as android, ios, etc.)
     platform_group = parser.add_mutually_exclusive_group()
     platform_group.add_argument("--android", action="store_true", help="Build for Android")
@@ -337,7 +335,7 @@ def _validate_ios_args(args: argparse.Namespace):
             raise ValueError(
                 "iOS build on MacOS canceled due to missing arguments: "
                 + ", ".join(
-                val for val, cond in zip(arg_names, needed_args) if not cond
+                val for val, cond in zip(arg_names, needed_args, strict=False) if not cond
                 )
             )
 
@@ -791,7 +789,7 @@ if __name__ == "__main__":
 
     if arguments.build:
         build(arguments, environment)
-    
+
     if arguments.package:
         package(arguments, environment)
 

@@ -19,9 +19,7 @@ def get_random_prompts(num_questions: int, split="validation") -> list[str]:
 
 
 class ClientRequest:
-    def __init__(
-        self, prompt: str, model: og.Model, tokenizer: og.Tokenizer, opaque_data: any
-    ):
+    def __init__(self, prompt: str, model: og.Model, tokenizer: og.Tokenizer, opaque_data: any):
         self.prompt = prompt
         self.params = og.GeneratorParams(model)
         self.params.set_search_options(
@@ -37,11 +35,7 @@ class ClientRequest:
 
         self.request = og.Request(self.params)
         self.request.add_tokens(
-            tokenizer.encode(
-                tokenizer.apply_chat_template(
-                    messages=messages, add_generation_prompt=True
-                )
-            )
+            tokenizer.encode(tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True))
         )
         self.request.set_opaque_data(opaque_data)
         self.streaming_tokenizer = tokenizer.create_stream()
@@ -76,9 +70,7 @@ class RequestPool:
             self.engine.add_request(request.request)
 
     def fill(self):
-        for i, prompt in enumerate(
-            self.prompts[int(len(self.prompts) * self.load_factor) :]
-        ):
+        for i, prompt in enumerate(self.prompts[int(len(self.prompts) * self.load_factor) :]):
             request = ClientRequest(prompt, self.model, self.tokenizer, self)
             with self.lock:
                 self.requests.append(request)
@@ -87,19 +79,13 @@ class RequestPool:
 
     def drain(self, request: og.Request):
         with self.lock:
-            client_request = next(
-                (r for r in self.requests if r.request == request), None
-            )
+            client_request = next((r for r in self.requests if r.request == request), None)
             while request.has_unseen_tokens():
                 token = request.get_unseen_token()
-                client_request.token_stream += (
-                    client_request.streaming_tokenizer.decode(token)
-                )
+                client_request.token_stream += client_request.streaming_tokenizer.decode(token)
 
             if request.is_done():
-                assert (
-                    client_request is not None
-                ), "Client request not found in the pool"
+                assert client_request is not None, "Client request not found in the pool"
 
                 if self.debug:
                     print(f"🫵  : {client_request.prompt}")

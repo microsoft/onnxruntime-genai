@@ -3,10 +3,11 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
-from .base import Model
-
 import onnx_ir as ir
 import torch
+
+from .base import Model
+
 
 class GPTOSSModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -56,7 +57,7 @@ class GPTOSSModel(Model):
 
     def make_moe(self, layer_id, mlp, root_input):
         if self.ep in {"cpu", "cuda"}:
-            self.make_moe_fused(layer_id, mlp, root_input)            
+            self.make_moe_fused(layer_id, mlp, root_input)
         else:
             self.make_moe_decomposed(layer_id, mlp, root_input)
 
@@ -364,7 +365,7 @@ class GPTOSSModel(Model):
             pack_size = 8 // self.moe_attrs["expert_weight_bits"]
             self.make_initializer(gate_up_proj_qweight_tensor.view(self.moe_attrs["num_experts"], -1, self.hidden_size // pack_size), gate_up_proj_weight)
             self.make_initializer(down_proj_qweight_tensor.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size // pack_size), down_proj_weight)
-            
+
             # scales tensors have different shapes depending on quantization method
             self.make_initializer(gate_up_proj_scales_tensor, gate_up_proj_scales, to=self.io_dtype)
             self.make_initializer(down_proj_scales_tensor, down_proj_scales, to=self.io_dtype)

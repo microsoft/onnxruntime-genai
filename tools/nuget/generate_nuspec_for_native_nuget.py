@@ -109,15 +109,15 @@ def generate_dependencies(xml_text, package_version, ort_package_name, ort_packa
 def generate_files(lines, args):
     lines.append('<files>')
 
-    lines.append(f'<file src="{args.sources_path}\LICENSE" target="LICENSE" />')
-    lines.append(f'<file src="{args.sources_path}\\nuget\PACKAGE.md" target="PACKAGE.md" />')
-    lines.append(f'<file src="{args.sources_path}\ThirdPartyNotices.txt" target="ThirdPartyNotices.txt" />')
+    lines.append(rf'<file src="{args.sources_path}\LICENSE" target="LICENSE" />')
+    lines.append(f'<file src="{args.sources_path}\\nuget\\PACKAGE.md" target="PACKAGE.md" />')
+    lines.append(rf'<file src="{args.sources_path}\ThirdPartyNotices.txt" target="ThirdPartyNotices.txt" />')
 
     def add_native_artifact_if_exists(xml_lines, runtime, artifact):
         p = Path(f"{args.sources_path}/{args.native_build_path}/{runtime}/{args.build_config}/{artifact}")
         if p.exists():
             xml_lines.append(
-                f'<file src="{p.absolute()}" target="runtimes\{runtime}\\native" />'
+                f'<file src="{p.absolute()}" target="runtimes\\{runtime}\\native" />'
             )
 
     runtimes = ["win-x64", "win-arm64", "linux-x64", "osx-x64", "osx-arm64", "ios", "android"]
@@ -140,22 +140,22 @@ def generate_files(lines, args):
 
     # targets
     for dotnet in ["netstandard2.0", "net8.0", "native"]:
-        lines.append(f'<file src="targets\\netstandard\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\{dotnet}\{args.package_name}.targets" />')
-        lines.append(f'<file src="targets\\netstandard\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\{dotnet}\{args.package_name}.props" />')
+        lines.append(f'<file src="targets\\netstandard\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\{dotnet}\\{args.package_name}.targets" />')
+        lines.append(f'<file src="targets\\netstandard\\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\\{dotnet}\\{args.package_name}.props" />')
 
     # mobile targets
-    lines.append(f'<file src="targets\\net9.0-android\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\net9.0-android31.0\{args.package_name}.targets" />')
-    lines.append(f'<file src="targets\\net9.0-android\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitive\\net9.0-android31.0\{args.package_name}.targets" />')
+    lines.append(f'<file src="targets\\net9.0-android\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\net9.0-android31.0\\{args.package_name}.targets" />')
+    lines.append(f'<file src="targets\\net9.0-android\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitive\\net9.0-android31.0\\{args.package_name}.targets" />')
 
-    lines.append(f'<file src="targets\\net9.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\net9.0-ios15.4\{args.package_name}.targets" />')
-    lines.append(f'<file src="targets\\net9.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitive\\net9.0-ios15.4\{args.package_name}.targets" />')
+    lines.append(f'<file src="targets\\net9.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\net9.0-ios15.4\\{args.package_name}.targets" />')
+    lines.append(f'<file src="targets\\net9.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitive\\net9.0-ios15.4\\{args.package_name}.targets" />')
 
-    lines.append(f'<file src="targets\\net9.0-maccatalyst\\_._" target="build\\net9.0-maccatalyst14.0\_._" />')
-    lines.append(f'<file src="targets\\net9.0-maccatalyst\\_._" target="buildTransitive\\net9.0-maccatalyst14.0\_._" />')
+    lines.append('<file src="targets\\net9.0-maccatalyst\\_._" target="build\\net9.0-maccatalyst14.0\\_._" />')
+    lines.append('<file src="targets\\net9.0-maccatalyst\\_._" target="buildTransitive\\net9.0-maccatalyst14.0\\_._" />')
 
     # include
-    lines.append(f'<file src="{args.sources_path}\src\ort_genai_c.h" target="build\\native\include" />')
-    lines.append(f'<file src="{args.sources_path}\src\ort_genai.h" target="build\\native\include" />')
+    lines.append(f'<file src="{args.sources_path}\\src\\ort_genai_c.h" target="build\\native\\include" />')
+    lines.append(f'<file src="{args.sources_path}\\src\\ort_genai.h" target="build\\native\\include" />')
     lines.append('</files>')
 
 

@@ -1,11 +1,12 @@
 ﻿# Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-import onnxruntime_genai as og
 import argparse
-import time
 import json
-import numpy as np
+import time
+
+import onnxruntime_genai as og
+
 
 def get_tools_list(input_tools):
     # input_tools format: '[{"name": "fn1", "description": "fn details", "parameters": {"p1": {"description": "details", "type": "string"}}},
@@ -42,7 +43,7 @@ def get_lark_grammar(input_tools):
     prompt_tool_input = create_prompt_tool_input(tools_list)
     if len(tools_list) == 1:
         # output = ("start: TEXT | fun_call\n" "TEXT: /[^{](.|\\n)*/\n" " fun_call: <|tool_call|> %json " + json.dumps(tools_list[0]))
-        output = ("start: TEXT | fun_call\n" "TEXT: /[^{](.|\\n)*/\n" " fun_call: <|tool_call|> %json " + json.dumps(convert_tool_to_grammar_input(tools_list[0])))
+        output = ("start: TEXT | fun_call\nTEXT: /[^{](.|\\n)*/\n fun_call: <|tool_call|> %json " + json.dumps(convert_tool_to_grammar_input(tools_list[0])))
         return prompt_tool_input, output
     else:
         return prompt_tool_input, "start: TEXT | fun_call \n TEXT: /[^{](.|\n)*/ \n fun_call: <|tool_call|> %json {\"anyOf\": [" + ','.join([json.dumps(tool) for tool in tools_list]) + "]}"
@@ -90,7 +91,7 @@ def main(args):
     model = og.Model(config)
 
     if args.verbose: print("Model loaded")
-    
+
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
     if args.verbose: print("Tokenizer created")
@@ -146,7 +147,7 @@ def main(args):
 
         generator = og.Generator(model, params)
         if args.verbose: print("Generator created")
-        
+
         # Create messages with proper JSON encoding
         # Gemma2 models don't support system role, so we prepend system prompt to user message
         if model.type == "gemma2":
@@ -162,10 +163,10 @@ def main(args):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": text}
             ]
-        
+
         # Convert to JSON string for tokenizer
         messages = json.dumps(messages_list)
-        
+
         # Apply Chat Template
         if model.type == "marian-ssru":
             prompt = text

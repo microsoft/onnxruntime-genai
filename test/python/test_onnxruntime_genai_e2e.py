@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import logging
+import os
 import sys
 
 import onnxruntime_genai as og
@@ -37,7 +37,7 @@ def run_model(model_path: str | bytes | os.PathLike):
         generator.generate_next_token()
         if generator.is_done():
             break
-    
+
     for i in range(3):
         assert generator.get_sequence(i) is not None
 

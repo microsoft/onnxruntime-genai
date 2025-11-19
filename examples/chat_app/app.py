@@ -258,7 +258,7 @@ if __name__ == "__main__":
         # check if genai_config.json in the model foler
         if "genai_config.json" not in os.listdir(model_path):
             raise ValueError(f"Your model_path folder do not include 'genai.json' file, please double check your model_path '{model_path}'")
-        
+
     if args.model_name:
         model_name = args.model_name
 

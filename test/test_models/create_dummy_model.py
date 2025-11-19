@@ -54,9 +54,11 @@ Whisper:
 """
 
 import argparse
+
 import numpy as np
 import onnx
-from onnx import helper, numpy_helper, TensorProto
+from onnx import TensorProto, helper, numpy_helper
+
 
 def get_args():
     parser = argparse.ArgumentParser()

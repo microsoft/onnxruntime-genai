@@ -2,8 +2,8 @@
 # Licensed under the MIT License
 
 import argparse
-import os
 import glob
+import os
 import time
 from pathlib import Path
 
@@ -117,7 +117,7 @@ def run(args: argparse.Namespace):
             else:
                 text = "Does the audio summarize what is shown in the image? If not, what is different?"
         prompt += f"{text}<|end|>\n<|assistant|>\n"
-        
+
         print("Processing inputs...")
         inputs = processor(prompt, images=images, audios=audios)
         print("Processor complete.")

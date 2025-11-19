@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
+import argparse
 import glob
 import os
-import argparse
 import platform
 import shutil
 import subprocess
@@ -290,14 +290,14 @@ def build_ort(args, build_dir, artifacts_dir):
         # lib directory as well
         if platform.system() == "Windows":
             copy_files_keeping_symlinks(
-                glob.glob(f"bin/*.dll"),
-                f"lib",
+                glob.glob("bin/*.dll"),
+                "lib",
             )
 
     # Copy the include/onnxruntime/* to include directory
     copy_files_keeping_symlinks(
-        glob.glob(f"include/onnxruntime/*"),
-        f"include",
+        glob.glob("include/onnxruntime/*"),
+        "include",
     )
 
     print(f"{MAGENTA}Copying ORT artifacts to 3P Artifacts: \n{artifacts_dir}{CLEAR}")
@@ -324,7 +324,7 @@ def build_ort_genai(args, artifacts_dir, ort_home):
 
     # Go to the toplevel directory. To determine the top level directory, we need to
     # find the directory of this python file and then go from there
-    top_level_dir = f"../../../"
+    top_level_dir = "../../../"
     os.chdir(top_level_dir)
 
     if subprocess.call(["git", "submodule", "update", "--init", "--recursive"]) != 0:
@@ -378,7 +378,7 @@ def build_ort_genai(args, artifacts_dir, ort_home):
         # Remove --use_guidance from cmd_args
         if "--use_guidance" in cmd_args:
             cmd_args.remove("--use_guidance")
-        
+
         print(f"{MAGENTA}Running build.py with fallback args: {cmd_args}{CLEAR}")
         result = subprocess.call([python_executable, "build.py"] + cmd_args)
         if result != 0:
@@ -598,7 +598,7 @@ def main():
 
     os.makedirs(artifacts_dir, exist_ok=True)
 
-    common_artifacts_dir = os.path.abspath(f"slm_deps/artifacts/common")
+    common_artifacts_dir = os.path.abspath("slm_deps/artifacts/common")
     os.makedirs(common_artifacts_dir, exist_ok=True)
 
     time_build_start = time.time()

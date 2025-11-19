@@ -3,11 +3,12 @@
 # Licensed under the MIT License.  See License.txt in the project root for
 # license information.
 # --------------------------------------------------------------------------
+import onnx_ir as ir
+import torch
+
 from .base import Model
 from .mistral import MistralModel
 
-import onnx_ir as ir
-import torch
 
 class PhiModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):

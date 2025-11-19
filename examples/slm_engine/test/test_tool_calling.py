@@ -4,20 +4,22 @@ Test script for SLM server with tool calling functionality
 This script tests the booking_flight_tickets and booking_hotels tools
 """
 
-import requests
 import json
+
+import requests
+
 
 def test_tool_calling():
     """Test tool calling functionality with flight and hotel booking"""
-    
+
     url = "http://localhost:8080/completions"
     headers = {"Content-Type": "application/json"}
-    
+
     # Test case 1: Flight and Hotel booking
     print("=" * 70)
     print("Test 1: Flight and Hotel booking from Beijing to Paris")
     print("=" * 70)
-    
+
     payload1 = {
         "messages": [
             {
@@ -76,7 +78,7 @@ def test_tool_calling():
         "top_p": 1.0,
         "do_sample": False
     }
-    
+
     try:
         response1 = requests.post(url, headers=headers, json=payload1, timeout=30)
         print(f"Status Code: {response1.status_code}")
@@ -88,11 +90,11 @@ def test_tool_calling():
             print(f"Error: {response1.text}")
     except requests.exceptions.RequestException as e:
         print(f"Request failed: {e}")
-    
+
     print("\n" + "=" * 70)
     print("Test 2: Flight booking only (JFK to LHR)")
     print("=" * 70)
-    
+
     # Test case 2: Flight only
     payload2 = {
         "messages": [
@@ -134,7 +136,7 @@ def test_tool_calling():
         "top_p": 0.9,
         "do_sample": True
     }
-    
+
     try:
         response2 = requests.post(url, headers=headers, json=payload2, timeout=30)
         print(f"Status Code: {response2.status_code}")
@@ -146,11 +148,11 @@ def test_tool_calling():
             print(f"Error: {response2.text}")
     except requests.exceptions.RequestException as e:
         print(f"Request failed: {e}")
-    
+
     print("\n" + "=" * 70)
     print("Test 3: Hotel booking only (Tokyo)")
     print("=" * 70)
-    
+
     # Test case 3: Hotel only
     payload3 = {
         "messages": [
@@ -188,7 +190,7 @@ def test_tool_calling():
         "top_p": 0.95,
         "do_sample": True
     }
-    
+
     try:
         response3 = requests.post(url, headers=headers, json=payload3, timeout=30)
         print(f"Status Code: {response3.status_code}")
@@ -200,7 +202,7 @@ def test_tool_calling():
             print(f"Error: {response3.text}")
     except requests.exceptions.RequestException as e:
         print(f"Request failed: {e}")
-    
+
     print("\n" + "=" * 70)
     print("All tool calling tests completed!")
     print("=" * 70)
