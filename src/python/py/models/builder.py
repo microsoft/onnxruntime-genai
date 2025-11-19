@@ -14,10 +14,6 @@ from typing import Any
 
 import onnx_ir as ir
 import torch
-from transformers import (
-    AutoConfig,
-)
-
 from builders import (
     ChatGLMModel,
     ErnieModel,
@@ -39,10 +35,13 @@ from builders import (
     Phi3VModel,
     Phi4MMModel,
     PhiModel,
-    Qwen25VLTextModel,
     Qwen3Model,
+    Qwen25VLTextModel,
     QwenModel,
     SmolLM3Model,
+)
+from transformers import (
+    AutoConfig,
 )
 
 
@@ -162,7 +161,15 @@ def set_onnx_dtype(precision: str, extra_options: dict[str, Any]) -> ir.DataType
 
 
 @torch.no_grad
-def create_model(model_name, input_path, output_dir, precision, execution_provider, cache_dir, **extra_options):
+def create_model(
+    model_name,
+    input_path,
+    output_dir,
+    precision,
+    execution_provider,
+    cache_dir,
+    **extra_options,
+):
     if execution_provider == "NvTensorRtRtx":
         execution_provider = "trt-rtx"
         extra_options["use_qdq"] = True
@@ -182,7 +189,10 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         from peft import PeftConfig
 
         peft_config = PeftConfig.from_pretrained(
-            extra_options["adapter_path"], token=hf_token, trust_remote_code=hf_remote, **extra_kwargs
+            extra_options["adapter_path"],
+            token=hf_token,
+            trust_remote_code=hf_remote,
+            **extra_kwargs,
         )
         config.update(peft_config.__dict__)
 
@@ -307,7 +317,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     if not config_only:
         # Make ONNX model
-        onnx_model.make_model(input_path, config)
+        onnx_model.make_model(input_path)
 
         # Save ONNX model
         onnx_model.save_model(output_dir)
