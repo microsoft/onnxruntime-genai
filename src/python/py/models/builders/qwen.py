@@ -5,11 +5,11 @@
 # --------------------------------------------------------------------------
 
 import os
-from .base import Model # Changed this to match your new inheritance
+from .base import Model
 import onnx_ir as ir
 import torch
 
-class QwenModel(Model): # Changed this to match your new inheritance
+class QwenModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
@@ -39,7 +39,7 @@ class Qwen25VLTextModel(QwenModel):
         config.rope_scaling = text_config_dict["rope_scaling"]
         # Need this for attention_scaling calculation
         if "original_max_position_embeddings" in text_config_dict:
-             config.original_max_position_embeddings = text_config_dict["original_max_position_embeddings"]
+            config.original_max_position_embeddings = text_config_dict["original_max_position_embeddings"]
 
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
@@ -98,7 +98,7 @@ class Qwen25VLTextModel(QwenModel):
             orig_max_pos = config.original_max_position_embeddings
             self.rope_attrs["attention_scaling"] = config.rope_scaling.get("attention_factor", torch.sqrt(1 + torch.log(torch.tensor(factor)) / torch.log(torch.tensor(orig_max_pos))).item())
         else:
-             self.rope_attrs["attention_scaling"] = 1.0
+            self.rope_attrs["attention_scaling"] = 1.0
         
         # Qwen 2.5 VL applies RoPE manually before attention, not fused in the op
         self.attention_attrs["use_rope_in_attn"] = False
@@ -121,8 +121,8 @@ class Qwen25VLTextModel(QwenModel):
         self.mrope_splits = self.mrope_sections * 2
         
         if sum(self.mrope_splits) != self.head_size:
-             # The sum (128) should now correctly match self.head_size (128)
-             raise ValueError(f"MRoPE splits {self.mrope_splits} sum ({sum(self.mrope_splits)}) does not match head size ({self.head_size})")
+            # The sum (128) should now correctly match self.head_size (128)
+            raise ValueError(f"MRoPE splits {self.mrope_splits} sum ({sum(self.mrope_splits)}) does not match head size ({self.head_size})")
 
         # Force GroupQueryAttention for fp32 cuda,
         # as base.py's make_attention_init doesn't include this combo.
@@ -131,7 +131,7 @@ class Qwen25VLTextModel(QwenModel):
             print("Forcing GroupQueryAttention (GQA) for FP32 CUDA.")
         
         if self.attention_attrs["op_type"] != "GroupQueryAttention":
-             raise ValueError(f"Qwen2.5-VL requires GroupQueryAttention, but op_type is {self.attention_attrs['op_type']}. This may be due to an unsupported EP/precision combo.")
+            raise ValueError(f"Qwen2.5-VL requires GroupQueryAttention, but op_type is {self.attention_attrs['op_type']}. This may be due to an unsupported EP/precision combo.")
 
         # Create and save the inv_freq tensor
         self.make_inv_freq_tensor()
@@ -146,8 +146,8 @@ class Qwen25VLTextModel(QwenModel):
         
         # The HF model expects H/2, not R/2
         if dim != self.head_size:
-             print(f"Warning: partial_rotary_factor ({self.rope_attrs['partial_rotary_factor']}) is not 1. This might be unsupported.")
-             inv_freq = inv_freq[:(self.head_size // 2)]
+            print(f"Warning: partial_rotary_factor ({self.rope_attrs['partial_rotary_factor']}) is not 1. This might be unsupported.")
+            inv_freq = inv_freq[:(self.head_size // 2)]
         
         self.make_initializer(inv_freq, "model.inv_freq", to=ir.DataType.FLOAT)
         print("Created and saved 'model.inv_freq' initializer.")
