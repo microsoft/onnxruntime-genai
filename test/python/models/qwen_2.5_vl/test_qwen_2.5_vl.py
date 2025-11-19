@@ -95,8 +95,7 @@ def ort_io_binding_helper(
     for name, tensor in input_tensors.items():
         if not tensor.is_contiguous():
             print(f"Warning: Input tensor {name} is not contiguous. Making it contiguous.")
-            tensor = tensor.contiguous()
-            input_tensors[name] = tensor  # Update dict entry for future runs (decode)
+            input_tensors[name] = tensor.contiguous()
 
         bind.bind_input(
             name,
@@ -110,8 +109,7 @@ def ort_io_binding_helper(
     for name, tensor in output_tensors.items():
         if not tensor.is_contiguous():
             print(f"Warning: Output tensor {name} is not contiguous. Making it contiguous.")
-            tensor = tensor.contiguous()
-            output_tensors[name] = tensor  # Update dict entry
+            output_tensors[name] = tensor.contiguous()
 
         bind.bind_output(
             name,
@@ -160,7 +158,7 @@ def test_parity(
         # Standard FP32 tolerances
         rtol, atol = 1e-1, 1e-1
 
-    allow_bf16_logits = os.getenv("allow_bf16_logits") in ["1", "true", "True"]
+    allow_bf16_logits = os.getenv("ALLOW_BF16_LOGITS") in ["1", "true", "True"]
 
     if allow_bf16_logits:
         logits_dtype = torch_dtype
