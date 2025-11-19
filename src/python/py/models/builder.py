@@ -39,6 +39,7 @@ from builders import (
     Phi3VModel,
     Phi4MMModel,
     PhiModel,
+    Qwen25VLTextModel,
     Qwen3Model,
     QwenModel,
     SmolLM3Model,
@@ -292,6 +293,12 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
         onnx_model = Qwen3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config.architectures[0] == "SmolLM3ForCausalLM":
         onnx_model = SmolLM3Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
+    elif config.architectures[0] == "Qwen2_5_VLForConditionalGeneration":
+        print(
+            "WARNING: This is only generating the text component of the model. Setting `--extra_options exclude_embeds=true` by default."
+        )
+        extra_options["exclude_embeds"] = True
+        onnx_model = Qwen25VLTextModel(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
     elif config_only:
         # Create base Model class to guess model attributes
         onnx_model = Model(config, io_dtype, onnx_dtype, execution_provider, cache_dir, extra_options)
@@ -300,7 +307,7 @@ def create_model(model_name, input_path, output_dir, precision, execution_provid
 
     if not config_only:
         # Make ONNX model
-        onnx_model.make_model(input_path)
+        onnx_model.make_model(input_path, config)
 
         # Save ONNX model
         onnx_model.save_model(output_dir)

@@ -6,7 +6,7 @@
 from .base import Model
 from .llama import LlamaModel
 from .mistral import MistralModel
-from .qwen import QwenModel, Qwen3Model
+from .qwen import QwenModel, Qwen3Model, Qwen25VLTextModel
 from .phi import (
     PhiModel, Phi3MiniModel, Phi3MiniLongRoPEModel, Phi3SmallModel, 
     Phi3SmallLongRoPEModel, Phi3VModel, Phi3MoELongRoPEModel, Phi4MMModel
@@ -22,7 +22,7 @@ from .gptoss import GPTOSSModel
 
 __all__ = [
     "Model",
-    "LlamaModel", "MistralModel", "QwenModel", "Qwen3Model", "PhiModel",
+    "LlamaModel", "MistralModel", "QwenModel", "Qwen3Model", "Qwen25VLTextModel", "PhiModel",
     "Phi3MiniModel", "Phi3MiniLongRoPEModel", "Phi3SmallModel", 
     "Phi3SmallLongRoPEModel", "Phi3VModel", "Phi3MoELongRoPEModel", "Phi4MMModel",
     "GemmaModel", "Gemma2Model", "Gemma3Model", "NemotronModel", "ChatGLMModel", 

@@ -360,6 +360,11 @@ class Model:
                 "ntk_alpha": beta_slow,
                 "ntk_beta": beta_fast,
             }
+        elif "mrope_section" in config.rope_scaling:
+            # For models that use MRoPE (e.g. Qwen 2.5 VL)
+            self.rope_attrs["mrope"] = {
+                "sections": config.rope_scaling["mrope_section"],  # Sections for MRoPE
+            }
 
     def make_attention_init(self):
         valid_gqa_configurations = {
@@ -2989,7 +2994,6 @@ class Model:
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
             model = QuantModel.from_pretrained(self.quant_type, input_path=input_path, quant_attrs=self.quant_attrs, q_size=q_size, kv_size=kv_size, intermediate_size=self.intermediate_size, num_layers=self.num_layers)
-
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
