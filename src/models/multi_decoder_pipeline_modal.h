@@ -85,8 +85,7 @@ struct EmbeddingPipelineState : State {
   DefaultInputIDs input_ids_{*this};                          // Model input
   std::unique_ptr<MultiModalFeatures> image_features_;        // Optional model input
   std::unique_ptr<MultiModalFeatures> audio_features_;        // Optional model input
-  Embeddings inputs_embeds_{*this, Embeddings::Mode::Output,  // Model output
-                            "/model/embed_tokens/Mul/output_0_QuantizeLinear_Output"};
+  std::unique_ptr <Embeddings> inputs_embeds_;
 };
 
 struct IntermediateDecoderPipelineState : State {
@@ -130,8 +129,7 @@ DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
 
   std::unique_ptr<MultiModalFeatures> image_features_;  // model input
 
-    Embeddings full_inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
-                                    "/model/embed_tokens/Mul/output_0_QuantizeLinear_Output"};
+  std::unique_ptr <Embeddings> full_inputs_embeds_;
  private:
   void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices, Embeddings& embeddings,
                            int total_length);
@@ -156,8 +154,7 @@ DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
   std::unique_ptr<InputIDs> input_ids_;
 
 
-  WindowedEmbeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
-                            "/model/embed_tokens/Mul/output_0_QuantizeLinear_Output"};
+  std::unique_ptr <WindowedEmbeddings> inputs_embeds_;
   Logits logits_{*this};
 
   std::unique_ptr<KeyValueCache> key_value_cache_;

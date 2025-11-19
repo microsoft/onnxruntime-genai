@@ -228,9 +228,13 @@ DeviceSpan<float> SpeechPipelineState::Run(int current_length, DeviceSpan<int32_
 
 EmbeddingPipelineState::EmbeddingPipelineState(const MultiModalPipelineLanguageModel& model, const GeneratorParams& params)
     : State{params, model},
-      model_{model} {
+      model_{model},
+      inputs_embeds_{
+          std::make_unique<WindowedEmbeddings>(
+              *this, Embeddings::Mode::Output, model.config_->model.embedding.outputs.embeddings)}
+{
   input_ids_.Add();
-  inputs_embeds_.Add();
+  inputs_embeds_->Add();
 }
 
 void EmbeddingPipelineState::SetExtraInputs(const int64_t num_images, const int64_t num_image_tokens, const int64_t num_audio_tokens) {
@@ -356,13 +360,18 @@ DecoderPipelineState::DecoderPipelineState(const MultiModalPipelineLanguageModel
                                                    DeviceSpan<int32_t> sequence_lengths,
                                                    const GeneratorParams& params)
     : State{params, model},
+      full_inputs_embeds_{std::make_unique<WindowedEmbeddings>(*this, Embeddings::Mode::Input,
+                                                               model.config_->model.embedding.outputs.embeddings)},
       model_{model},
       input_ids_{CreateInputIDs(*this)},
+      inputs_embeds_ {
+          std::make_unique<WindowedEmbeddings>(
+              *this, Embeddings::Mode::Input, model.config_->model.embedding.outputs.embeddings)},
       key_value_cache_{CreateKeyValueCache(*this)},
       do_key_value_cache_partial_update_{key_value_cache_ && key_value_cache_->IsPartialUpdateSupported()},
       position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_->Add();
-  inputs_embeds_.Add();
+  inputs_embeds_->Add();
   position_inputs_->Add();
   logits_.Add();
   if (key_value_cache_) {
@@ -587,7 +596,7 @@ void DecoderPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>& ne
                                                 DeviceSpan<int32_t> next_indices) {
   DurationTrace trace{"DecoderPipelineState::Run"};
 
-  UpdateInputsOutputs(next_tokens, next_indices, full_inputs_embeds_, total_length);
+  UpdateInputsOutputs(next_tokens, next_indices, *full_inputs_embeds_, total_length);
 
   size_t num_chunks{1};
   if (first_run_ && model_.config_->model.decoder.sliding_window.has_value()) {
@@ -601,7 +610,7 @@ void DecoderPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>& ne
     if (model_.config_->model.decoder.sliding_window.has_value() && i < num_chunks - 1) {
       // Sliding the window over the input_ids, key_cache, and value_cache, position_ids, and attention_mask
       input_ids_->Update(next_tokens);
-      inputs_embeds_.Update(full_inputs_embeds_);
+      inputs_embeds_->Update(*full_inputs_embeds_);
       UpdateKeyValueCache(next_indices, total_length);
       position_inputs_->Update(next_tokens, total_length, static_cast<int>(input_ids_->GetShape()[1]));
       logits_.Update(WrapTensor<int32_t>(*model_.p_device_inputs_, *input_ids_->Get()),
@@ -648,7 +657,7 @@ void DecoderPipelineState::UpdateKeyValueCache(DeviceSpan<int32_t> beam_indices,
 void DecoderPipelineState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens,
                                                DeviceSpan<int32_t> beam_indices, Embeddings& embeddings, int total_length) {
   input_ids_->Update(next_tokens);
-  inputs_embeds_.Update(embeddings);
+  inputs_embeds_->Update(embeddings);
   size_t new_length = input_ids_->GetShape()[1];
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
   UpdateKeyValueCache(beam_indices, total_length);
@@ -719,9 +728,9 @@ DeviceSpan<float> MultiModalDecoderPipelineState::Run(int current_length, Device
   //   - input_ids -> |decoder_model| -> logits
 
   embedding_state_->UpdateInputsOutputs(next_tokens, is_prompt_);
-  int batch_size = static_cast<int>(decoder_pipeline_state_->full_inputs_embeds_.GetShape()[0]);
+  int batch_size = static_cast<int>(decoder_pipeline_state_->full_inputs_embeds_->GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
-  decoder_pipeline_state_->full_inputs_embeds_.UpdateSequenceLength(new_length);
+  decoder_pipeline_state_->full_inputs_embeds_->UpdateSequenceLength(new_length);
 
   if (is_prompt_) {
     if (num_image_tokens_ > 0 && vision_state_) {
@@ -733,7 +742,7 @@ DeviceSpan<float> MultiModalDecoderPipelineState::Run(int current_length, Device
     vision_state_->image_features_->Add();
     if (vision_state_) embedding_state_->image_features_->ReuseFeaturesBuffer(*vision_state_->image_features_);
     if (speech_state_) embedding_state_->audio_features_->ReuseFeaturesBuffer(*speech_state_->audio_features_);
-    embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_pipeline_state_->full_inputs_embeds_);
+    embedding_state_->inputs_embeds_->ReuseEmbeddingsBuffer(*decoder_pipeline_state_->full_inputs_embeds_);
     embedding_state_->Run(current_length, next_tokens, next_indices);
 
     auto logits = decoder_pipeline_state_->Run(current_length, next_tokens, next_indices);
@@ -745,7 +754,7 @@ DeviceSpan<float> MultiModalDecoderPipelineState::Run(int current_length, Device
     return logits;
   }
 
-  embedding_state_->inputs_embeds_.ReuseEmbeddingsBuffer(decoder_pipeline_state_->full_inputs_embeds_);
+  embedding_state_->inputs_embeds_->ReuseEmbeddingsBuffer(*decoder_pipeline_state_->full_inputs_embeds_);
   embedding_state_->Run(current_length, next_tokens, next_indices);
   return decoder_pipeline_state_->Run(current_length, next_tokens, next_indices);
 }
