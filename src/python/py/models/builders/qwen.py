@@ -158,7 +158,7 @@ class Qwen25VLTextModel(QwenModel):
         self.input_shapes["position_ids"] = [3, "batch_size", "sequence_length"]
         
         # Call the base Model's make_inputs_and_outputs (skipping MistralModel's)
-        super(QwenModel, self).make_inputs_and_outputs()
+        super().make_inputs_and_outputs()
 
     def make_dynamic_rope_caches(self, layer_id, basename):
         """
@@ -459,7 +459,7 @@ class Qwen25VLTextModel(QwenModel):
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         
         # 1. Unpack QKV if necessary (e.g. qkv_proj)
-        super(QwenModel, self).make_attention_unpacked(layer_id, attention, root_input, **kwargs)
+        super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
         
         # 2. Build Q/K/V MatMul and Add nodes
         q_matmul_basename = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
@@ -613,6 +613,3 @@ class Qwen25VLTextModel(QwenModel):
             # The LM head is part of the parent Qwen2_5_VLForConditionalGeneration model
             print("Reading LM head")
             self.make_lm_head(hf_model.lm_head)
-        
-        del model
-        del hf_model

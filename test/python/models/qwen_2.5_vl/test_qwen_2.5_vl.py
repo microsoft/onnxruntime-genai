@@ -8,12 +8,9 @@ import argparse
 import torch
 import numpy as np
 import onnxruntime as ort
-from onnx import TensorProto # Import TensorProto
-# The modeling script is in the transformers library, so we import it
+from onnx import TensorProto
 from transformers import Qwen2_5_VLForConditionalGeneration
-from typing import Tuple, Dict, Any, List
-
-# --- Helper Functions ---
+from typing import Tuple, Dict, List
 
 def torch_dtype_to_onnx_tensor_proto(dtype: torch.dtype) -> int:
     """Maps torch.dtype to onnx.TensorProto.DataType"""
@@ -69,10 +66,7 @@ def compare_outputs(
     assert len(hf_presents_list) == len(ort_presents), \
         f"HF presents count ({len(hf_presents_list)}) != ORT presents count ({len(ort_presents)})"
 
-    for i in range(len(hf_presents_list)):
-        layer = i // 2
-        kv_type = "key" if i % 2 == 0 else "value"
-        
+    for i in range(len(hf_presents_list)):       
         hf_tensor = hf_presents_list[i]
         ort_tensor = ort_presents[i]
         
@@ -211,9 +205,6 @@ def test_parity(hf_model_name: str, cache_dir: str, onnx_model_path: str, use_gp
     providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     sess = ort.InferenceSession(onnx_model_path, providers=providers)
     
-    # Get all ONNX output names
-    output_names = [o.name for o in sess.get_outputs()]
-
     # =================================================================
     # 1. PREFILL STEP
     # =================================================================
