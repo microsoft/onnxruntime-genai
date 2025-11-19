@@ -391,11 +391,20 @@ def get_args():
                     Use this option when you want to exclude certain nodes from being quantized.
                     Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
                 int4_algo_config = Method for int4 quantization. Default is 'default'.
-                    Currently supported options are: 'default', 'rtn', 'k_quant_mixed', 'k_quant_last'.
+                    Currently supported options are: 'default', 'rtn', 'rtn_last', 'k_quant', 'k_quant_mixed', 'k_quant_last'.
+                    rtn = RTN algorithm for int4 quantization.
+                    rtn_last = RTN algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
+                    k_quant = k_quant algorithm for int4 quantization.
                     k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
                     k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
-                int4_tied_embeddings = Enable weight sharing for quantization. Default is false.
-                    Use this option when you want to share the weights in the embedding and unembedding.
+                int4_tied_embeddings = Enable weight sharing for quantized models (INT4/UINT4/INT8/UINT8). Default is false.
+                    Use this option when you want to share the quantized weights between embedding and LM head layers.
+                    Only works with rtn and k_quant quantization algorithms.
+                    Cannot be used if LM head is excluded from quantization (use shared_embeddings instead).
+                shared_embeddings = Enable weight sharing for FP16/FP32/BF16 weights. Default is false.
+                    Use this option when you want to share the float weights between embedding and LM head layers.
+                    Works for pure FP models or INT4 models where LM head is excluded from quantization.
+                    This reduces model size by eliminating duplicate weights.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model.
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
