@@ -30,10 +30,7 @@ class PhiModel(Model):
         self.make_mlp(layer_id, layer.mlp, root_input=self.layernorm_attrs["output_0"])
 
         residual_add_name = f"/model/layers.{layer_id}/residual_add/Add"
-        residual_add_inputs = [
-            self.layernorm_attrs["skip_input"],
-            self.mlp_attrs["output_0"],
-        ]
+        residual_add_inputs = [self.layernorm_attrs["skip_input"], self.mlp_attrs["output_0"]]
         self.make_add(
             residual_add_name,
             residual_add_inputs,
@@ -110,10 +107,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         if is_webgpu:
             cast_input_name = f"{basename}/Cast_input"
             self.make_cast(
-                cast_input_name,
-                input_tensor,
-                dtype=ir.DataType.INT32,
-                shape=["batch_size", "sequence_length"],
+                cast_input_name, input_tensor, dtype=ir.DataType.INT32, shape=["batch_size", "sequence_length"]
             )
             input_tensor = f"{cast_input_name}/output_0"
 
@@ -267,15 +261,10 @@ class Phi3SmallModel(Model):
         kv_size = self.num_kv_heads * self.head_size
 
         qkv_weight = attention.query_key_value.weight.T.view(
-            self.hidden_size,
-            self.num_kv_heads,
-            (self.num_attn_heads // self.num_kv_heads) + 2,
-            self.head_size,
+            self.hidden_size, self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size
         )
         qkv_bias = attention.query_key_value.bias.view(
-            self.num_kv_heads,
-            (self.num_attn_heads // self.num_kv_heads) + 2,
-            self.head_size,
+            self.num_kv_heads, (self.num_attn_heads // self.num_kv_heads) + 2, self.head_size
         )
 
         attention.q_proj = torch.nn.Linear(in_features=q_size, out_features=q_size)
@@ -377,9 +366,7 @@ class Phi3SmallModel(Model):
         )
         isinf_1_name = f"/model/layers.{layer_id}/mlp/gelu/IsInf"
         self.make_isinf(
-            isinf_1_name,
-            f"{cast_1_name}/output_0",
-            shape=["batch_size", "sequence_length", self.intermediate_size],
+            isinf_1_name, f"{cast_1_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size]
         )
         clip_1_name = f"/model/layers.{layer_id}/mlp/gelu/Clip"
         clip_1_inputs = [
@@ -388,17 +375,10 @@ class Phi3SmallModel(Model):
             f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.clamp_limit}",
         ]
         self.make_clip(
-            clip_1_name,
-            clip_1_inputs,
-            self.io_dtype,
-            shape=["batch_size", "sequence_length", self.intermediate_size],
+            clip_1_name, clip_1_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size]
         )
         where_1_name = f"/model/layers.{layer_id}/mlp/gelu/Where"
-        where_1_inputs = [
-            f"{isinf_1_name}/output_0",
-            f"{slice_1_name}/output_0",
-            f"{clip_1_name}/output_0",
-        ]
+        where_1_inputs = [f"{isinf_1_name}/output_0", f"{slice_1_name}/output_0", f"{clip_1_name}/output_0"]
         self.make_where(
             where_1_name,
             where_1_inputs,
@@ -432,9 +412,7 @@ class Phi3SmallModel(Model):
         )
         isinf_2_name = f"/model/layers.{layer_id}/mlp/linear/IsInf"
         self.make_isinf(
-            isinf_2_name,
-            f"{cast_2_name}/output_0",
-            shape=["batch_size", "sequence_length", self.intermediate_size],
+            isinf_2_name, f"{cast_2_name}/output_0", shape=["batch_size", "sequence_length", self.intermediate_size]
         )
         clip_2_name = f"/model/layers.{layer_id}/mlp/linear/Clip"
         clip_2_inputs = [
@@ -443,17 +421,10 @@ class Phi3SmallModel(Model):
             f"/model/constants/{self.to_str_dtype(self.io_dtype)}/{self.clamp_limit}",
         ]
         self.make_clip(
-            clip_2_name,
-            clip_2_inputs,
-            self.io_dtype,
-            shape=["batch_size", "sequence_length", self.intermediate_size],
+            clip_2_name, clip_2_inputs, self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size]
         )
         where_2_name = f"/model/layers.{layer_id}/mlp/linear/Where"
-        where_2_inputs = [
-            f"{isinf_2_name}/output_0",
-            f"{slice_2_name}/output_0",
-            f"{clip_2_name}/output_0",
-        ]
+        where_2_inputs = [f"{isinf_2_name}/output_0", f"{slice_2_name}/output_0", f"{clip_2_name}/output_0"]
         self.make_where(
             where_2_name,
             where_2_inputs,
@@ -461,25 +432,16 @@ class Phi3SmallModel(Model):
             shape=["batch_size", "sequence_length", self.intermediate_size],
         )
         add_name = f"/model/layers.{layer_id}/mlp/linear/Add"
-        add_inputs = [
-            f"{where_2_name}/output_0",
-            f"/model/constants/{self.to_str_dtype(self.io_dtype)}/1",
-        ]
+        add_inputs = [f"{where_2_name}/output_0", f"/model/constants/{self.to_str_dtype(self.io_dtype)}/1"]
         self.make_add(
-            add_name,
-            add_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.intermediate_size],
+            add_name, add_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size]
         )
 
         # Make Mul node after activation
         mul_name = f"/model/layers.{layer_id}/mlp/Mul"
         mul_inputs = [f"{act_fn_name}/output_0", f"{add_name}/output_0"]
         self.make_mul(
-            mul_name,
-            mul_inputs,
-            dtype=self.io_dtype,
-            shape=["batch_size", "sequence_length", self.intermediate_size],
+            mul_name, mul_inputs, dtype=self.io_dtype, shape=["batch_size", "sequence_length", self.intermediate_size]
         )
 
         # Make output MatMul and Add nodes
@@ -529,11 +491,7 @@ class Phi3MoELongRoPEModel(MistralModel):
             simple=self.layernorm_attrs["simple"],
             location="post_attention",
         )
-        self.make_block_sparse_moe(
-            layer_id,
-            layer.block_sparse_moe,
-            root_input=self.layernorm_attrs["output_0"],
-        )
+        self.make_block_sparse_moe(layer_id, layer.block_sparse_moe, root_input=self.layernorm_attrs["output_0"])
 
         self.layernorm_attrs["first_layernorm"] = False
         if layer_id == self.num_layers - 1:

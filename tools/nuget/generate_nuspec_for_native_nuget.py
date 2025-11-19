@@ -9,6 +9,7 @@ from pathlib import Path
 def get_env_var(key):
     return os.environ.get(key)
 
+
 def generate_nuspec(args):
     lines = ['<?xml version="1.0"?>']
     lines.append("<package>")
@@ -16,6 +17,7 @@ def generate_nuspec(args):
     generate_files(lines, args)
     lines.append("</package>")
     return lines
+
 
 def generate_metadata(line_list, args):
     tags = "ONNX;ONNX Runtime;ONNX Runtime Gen AI;Machine Learning"
@@ -36,6 +38,7 @@ def generate_metadata(line_list, args):
     metadata_list.append("</metadata>")
 
     line_list += metadata_list
+
 
 def generate_id(line_list, package_name):
     line_list.append("<id>" + package_name + "</id>")
@@ -73,8 +76,10 @@ def generate_icon(line_list, icon_file):
 def generate_license(line_list):
     line_list.append('<license type="file">LICENSE</license>')
 
+
 def generate_readme(line_list):
-    line_list.append('<readme>PACKAGE.md</readme>')
+    line_list.append("<readme>PACKAGE.md</readme>")
+
 
 def generate_project_url(line_list, project_url):
     line_list.append("<projectUrl>" + project_url + "</projectUrl>")
@@ -82,6 +87,7 @@ def generate_project_url(line_list, project_url):
 
 def generate_repo_url(line_list, repo_url, commit_id):
     line_list.append('<repository type="git" url="' + repo_url + '"' + ' commit="' + commit_id + '" />')
+
 
 def generate_release_notes(line_list):
     line_list.append("<releaseNotes>")
@@ -95,9 +101,17 @@ def generate_release_notes(line_list):
 
     line_list.append("</releaseNotes>")
 
+
 def generate_dependencies(xml_text, package_version, ort_package_name, ort_package_version):
     xml_text.append("<dependencies>")
-    target_frameworks = ["NETSTANDARD" , "NETCOREAPP", "NETFRAMEWORK", "net9.0-android31.0", "net9.0-ios15.4", "net9.0-maccatalyst14.0"]
+    target_frameworks = [
+        "NETSTANDARD",
+        "NETCOREAPP",
+        "NETFRAMEWORK",
+        "net9.0-android31.0",
+        "net9.0-ios15.4",
+        "net9.0-maccatalyst14.0",
+    ]
     for framework in target_frameworks:
         xml_text.append(f'<group targetFramework="{framework}">')
         xml_text.append(f'<dependency id="Microsoft.ML.OnnxRuntimeGenAI.Managed" version="{package_version}" />')
@@ -106,57 +120,70 @@ def generate_dependencies(xml_text, package_version, ort_package_name, ort_packa
 
     xml_text.append("</dependencies>")
 
-def generate_files(lines, args):
-    lines.append('<files>')
 
-    lines.append(f'<file src="{args.sources_path}\LICENSE" target="LICENSE" />')
-    lines.append(f'<file src="{args.sources_path}\\nuget\PACKAGE.md" target="PACKAGE.md" />')
-    lines.append(f'<file src="{args.sources_path}\ThirdPartyNotices.txt" target="ThirdPartyNotices.txt" />')
+def generate_files(lines, args):
+    lines.append("<files>")
+
+    lines.append(rf'<file src="{args.sources_path}\LICENSE" target="LICENSE" />')
+    lines.append(f'<file src="{args.sources_path}\\nuget\\PACKAGE.md" target="PACKAGE.md" />')
+    lines.append(rf'<file src="{args.sources_path}\ThirdPartyNotices.txt" target="ThirdPartyNotices.txt" />')
 
     def add_native_artifact_if_exists(xml_lines, runtime, artifact):
         p = Path(f"{args.sources_path}/{args.native_build_path}/{runtime}/{args.build_config}/{artifact}")
         if p.exists():
-            xml_lines.append(
-                f'<file src="{p.absolute()}" target="runtimes\{runtime}\\native" />'
-            )
+            xml_lines.append(f'<file src="{p.absolute()}" target="runtimes\\{runtime}\\native" />')
 
     runtimes = ["win-x64", "win-arm64", "linux-x64", "osx-x64", "osx-arm64", "ios", "android"]
     for runtime in runtimes:
-      if runtime.startswith("win"):
-          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.lib")
-          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.dll")
-          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai-cuda.lib")
-          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai-cuda.dll")
-          add_native_artifact_if_exists(lines, runtime, "d3d12core.dll")
-      elif runtime.startswith("linux"):
-          add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.so")
-          add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai-cuda.so")
-      elif runtime.startswith("osx"):
-          add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.dylib")
-      elif runtime.startswith("ios"):
-          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.xcframework.zip")
-      elif runtime.startswith("android"):
-          add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.aar")
+        if runtime.startswith("win"):
+            add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.lib")
+            add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.dll")
+            add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai-cuda.lib")
+            add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai-cuda.dll")
+            add_native_artifact_if_exists(lines, runtime, "d3d12core.dll")
+        elif runtime.startswith("linux"):
+            add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.so")
+            add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai-cuda.so")
+        elif runtime.startswith("osx"):
+            add_native_artifact_if_exists(lines, runtime, "libonnxruntime-genai.dylib")
+        elif runtime.startswith("ios"):
+            add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.xcframework.zip")
+        elif runtime.startswith("android"):
+            add_native_artifact_if_exists(lines, runtime, "onnxruntime-genai.aar")
 
     # targets
     for dotnet in ["netstandard2.0", "net8.0", "native"]:
-        lines.append(f'<file src="targets\\netstandard\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\{dotnet}\{args.package_name}.targets" />')
-        lines.append(f'<file src="targets\\netstandard\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\{dotnet}\{args.package_name}.props" />')
+        lines.append(
+            f'<file src="targets\\netstandard\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\{dotnet}\\{args.package_name}.targets" />'
+        )
+        lines.append(
+            f'<file src="targets\\netstandard\\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\\{dotnet}\\{args.package_name}.props" />'
+        )
 
     # mobile targets
-    lines.append(f'<file src="targets\\net9.0-android\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\net9.0-android31.0\{args.package_name}.targets" />')
-    lines.append(f'<file src="targets\\net9.0-android\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitive\\net9.0-android31.0\{args.package_name}.targets" />')
+    lines.append(
+        f'<file src="targets\\net9.0-android\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\net9.0-android31.0\\{args.package_name}.targets" />'
+    )
+    lines.append(
+        f'<file src="targets\\net9.0-android\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitive\\net9.0-android31.0\\{args.package_name}.targets" />'
+    )
 
-    lines.append(f'<file src="targets\\net9.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\net9.0-ios15.4\{args.package_name}.targets" />')
-    lines.append(f'<file src="targets\\net9.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitive\\net9.0-ios15.4\{args.package_name}.targets" />')
+    lines.append(
+        f'<file src="targets\\net9.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\net9.0-ios15.4\\{args.package_name}.targets" />'
+    )
+    lines.append(
+        f'<file src="targets\\net9.0-ios\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="buildTransitive\\net9.0-ios15.4\\{args.package_name}.targets" />'
+    )
 
-    lines.append(f'<file src="targets\\net9.0-maccatalyst\\_._" target="build\\net9.0-maccatalyst14.0\_._" />')
-    lines.append(f'<file src="targets\\net9.0-maccatalyst\\_._" target="buildTransitive\\net9.0-maccatalyst14.0\_._" />')
+    lines.append('<file src="targets\\net9.0-maccatalyst\\_._" target="build\\net9.0-maccatalyst14.0\\_._" />')
+    lines.append(
+        '<file src="targets\\net9.0-maccatalyst\\_._" target="buildTransitive\\net9.0-maccatalyst14.0\\_._" />'
+    )
 
     # include
-    lines.append(f'<file src="{args.sources_path}\src\ort_genai_c.h" target="build\\native\include" />')
-    lines.append(f'<file src="{args.sources_path}\src\ort_genai.h" target="build\\native\include" />')
-    lines.append('</files>')
+    lines.append(f'<file src="{args.sources_path}\\src\\ort_genai_c.h" target="build\\native\\include" />')
+    lines.append(f'<file src="{args.sources_path}\\src\\ort_genai.h" target="build\\native\\include" />')
+    lines.append("</files>")
 
 
 def parse_arguments():
@@ -175,6 +202,7 @@ def parse_arguments():
     parser.add_argument("--nuspec_output_path", required=True, type=str, help="nuget spec output path.")
     return parser.parse_args()
 
+
 def main():
     args = parse_arguments()
     print(args)
@@ -191,5 +219,5 @@ def main():
             f.write("\n")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

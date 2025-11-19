@@ -108,7 +108,7 @@ __global__ void CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, b
   }
 }
 
-void Launch_CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_seen, const int *eos_token_ids, int eos_token_count, int pad_token_id, bool* done_cpu, cudaStream_t stream) {
+void Launch_CheckForEOSAndPad(int32_t* next_tokens, int next_tokens_count, bool* eos_seen, const int* eos_token_ids, int eos_token_count, int pad_token_id, bool* done_cpu, cudaStream_t stream) {
   CheckForEOSAndPad<<<1, 1, 0, stream>>>(next_tokens, next_tokens_count, eos_seen, eos_token_ids, eos_token_count, pad_token_id, done_cpu);
 }
 

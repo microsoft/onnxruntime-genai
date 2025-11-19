@@ -5,6 +5,7 @@
 # --------------------------------------------------------------------------
 from .llama import LlamaModel
 
+
 class SmolLM3Model(LlamaModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
