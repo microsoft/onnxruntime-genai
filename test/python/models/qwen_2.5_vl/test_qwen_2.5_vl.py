@@ -94,8 +94,7 @@ def ort_io_binding_helper(
 
     for name, tensor in input_tensors.items():
         if not tensor.is_contiguous():
-            print(f"Warning: Input tensor {name} is not contiguous. Making it contiguous.")
-            input_tensors[name] = tensor.contiguous()
+            raise RuntimeError(f"Input tensor {name} is not contiguous.")
 
         bind.bind_input(
             name,
@@ -108,8 +107,7 @@ def ort_io_binding_helper(
 
     for name, tensor in output_tensors.items():
         if not tensor.is_contiguous():
-            print(f"Warning: Output tensor {name} is not contiguous. Making it contiguous.")
-            output_tensors[name] = tensor.contiguous()
+            raise RuntimeError(f"Output tensor {name} is not contiguous.")
 
         bind.bind_output(
             name,
@@ -193,7 +191,7 @@ def test_parity(
     num_layers = config.num_hidden_layers
     num_kv_heads = config.num_key_value_heads
     head_dim = config.hidden_size // config.num_attention_heads
-    vocab_size = config.vocab_size  # Get vocab size for output
+    vocab_size = config.vocab_size
 
     print("\n--- Model Parameters ---")
     print(f"Device: {device}")
@@ -224,7 +222,7 @@ def test_parity(
     # Qwen2.5-VL uses 3D position IDs (temporal, height, width).
     # For text tokens, all three dimensions typically use the same sequence index.
     pos_ids_1d_prefill = torch.arange(prefill_len, device=device).expand(batch_size, -1)
-    position_ids_prefill = pos_ids_1d_prefill.unsqueeze(0).expand(3, -1, -1)
+    position_ids_prefill = pos_ids_1d_prefill.unsqueeze(0).expand(3, -1, -1).contiguous()
 
     attention_mask_prefill = torch.ones((batch_size, prefill_len), dtype=torch.int64, device=device)
 
@@ -297,7 +295,7 @@ def test_parity(
 
     # Position IDs continue from prefill length
     pos_ids_1d_decode = torch.tensor([[prefill_len]], dtype=torch.int64, device=device)
-    position_ids_decode = pos_ids_1d_decode.unsqueeze(0).expand(3, -1, -1)
+    position_ids_decode = pos_ids_1d_decode.unsqueeze(0).expand(3, -1, -1).contiguous()
 
     attention_mask_decode = torch.ones((batch_size, prefill_len + decode_len), dtype=torch.int64, device=device)
 
