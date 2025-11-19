@@ -186,23 +186,23 @@ def test_parity(
     config = hf_text_model.config
 
     # Get model parameters
-    BATCH_SIZE = 1
-    PREFILL_LEN = 10
-    DECODE_LEN = 1
-    HIDDEN_SIZE = config.hidden_size
-    NUM_LAYERS = config.num_hidden_layers
-    NUM_KV_HEADS = config.num_key_value_heads
-    HEAD_DIM = config.hidden_size // config.num_attention_heads
-    VOCAB_SIZE = config.vocab_size  # Get vocab size for output
+    batch_size = 1
+    prefill_len = 10
+    decode_len = 1
+    hidden_size = config.hidden_size
+    num_layers = config.num_hidden_layers
+    num_kv_heads = config.num_key_value_heads
+    head_dim = config.hidden_size // config.num_attention_heads
+    vocab_size = config.vocab_size  # Get vocab size for output
 
     print("\n--- Model Parameters ---")
     print(f"Device: {device}")
     print(f"DType: {torch_dtype}")
     print(f"RTOL: {rtol}, ATOL: {atol}")
-    print(f"Layers: {NUM_LAYERS}")
-    print(f"Hidden Size: {HIDDEN_SIZE}")
-    print(f"KV Heads: {NUM_KV_HEADS}")
-    print(f"Head Dim: {HEAD_DIM}")
+    print(f"Layers: {num_layers}")
+    print(f"Hidden Size: {hidden_size}")
+    print(f"KV Heads: {num_kv_heads}")
+    print(f"Head Dim: {head_dim}")
     print("------------------------\n")
 
     print(f"Loading ONNX model: {onnx_model_path}")
@@ -212,23 +212,23 @@ def test_parity(
     # =================================================================
     # 1. PREFILL STEP
     # =================================================================
-    print(f"Running Prefill Step (Sequence Length = {PREFILL_LEN})...")
+    print(f"Running Prefill Step (Sequence Length = {prefill_len})...")
 
     # --- Create HF/Torch Inputs ---
     # Use randn (normal distribution) scaled down for better stability in FP16
     # inputs_embeds are normally centered around 0, unlike rand which is [0, 1]
     inputs_embeds_prefill = (
-        torch.randn((BATCH_SIZE, PREFILL_LEN, HIDDEN_SIZE), dtype=torch_dtype, device=device) * 0.001
+        torch.randn((batch_size, prefill_len, hidden_size), dtype=torch_dtype, device=device) * 0.001
     )
 
     # Qwen2.5-VL uses 3D position IDs (temporal, height, width).
     # For text tokens, all three dimensions typically use the same sequence index.
-    pos_ids_1d_prefill = torch.arange(PREFILL_LEN, device=device).expand(BATCH_SIZE, -1)
+    pos_ids_1d_prefill = torch.arange(prefill_len, device=device).expand(batch_size, -1)
     position_ids_prefill = pos_ids_1d_prefill.unsqueeze(0).expand(3, -1, -1)
 
-    attention_mask_prefill = torch.ones((BATCH_SIZE, PREFILL_LEN), dtype=torch.int64, device=device)
+    attention_mask_prefill = torch.ones((batch_size, prefill_len), dtype=torch.int64, device=device)
 
-    cache_position_prefill = torch.arange(PREFILL_LEN, device=device)
+    cache_position_prefill = torch.arange(prefill_len, device=device)
 
     # --- Create ONNX Input Tensors (on device) ---
     ort_inputs_prefill = {
@@ -238,19 +238,19 @@ def test_parity(
     }
 
     # Create dummy pasts with 0 sequence length
-    past_shape = (BATCH_SIZE, NUM_KV_HEADS, 0, HEAD_DIM)
+    past_shape = (batch_size, num_kv_heads, 0, head_dim)
     dummy_past = torch.empty(past_shape, dtype=torch_dtype, device=device)
-    for i in range(NUM_LAYERS):
+    for i in range(num_layers):
         ort_inputs_prefill[f"past_key_values.{i}.key"] = dummy_past
         ort_inputs_prefill[f"past_key_values.{i}.value"] = dummy_past
 
     # --- Create ONNX Output Tensors (on device) ---
-    ort_logits_prefill = torch.empty((BATCH_SIZE, PREFILL_LEN, VOCAB_SIZE), dtype=logits_dtype, device=device)
+    ort_logits_prefill = torch.empty((batch_size, prefill_len, vocab_size), dtype=logits_dtype, device=device)
     ort_presents_prefill = []
     ort_outputs_prefill = {"logits": ort_logits_prefill}
-    present_shape = (BATCH_SIZE, NUM_KV_HEADS, PREFILL_LEN, HEAD_DIM)
+    present_shape = (batch_size, num_kv_heads, prefill_len, head_dim)
 
-    for i in range(NUM_LAYERS):
+    for i in range(num_layers):
         ort_present_k = torch.empty(present_shape, dtype=torch_dtype, device=device)
         ort_present_v = torch.empty(present_shape, dtype=torch_dtype, device=device)
         ort_outputs_prefill[f"present.{i}.key"] = ort_present_k
@@ -289,19 +289,19 @@ def test_parity(
     # =================================================================
     # 2. DECODE STEP
     # =================================================================
-    print(f"Running Decode Step (Sequence Length = {DECODE_LEN})...")
+    print(f"Running Decode Step (Sequence Length = {decode_len})...")
 
     # --- Create HF/Torch Inputs ---
     # Use randn (normal distribution) scaled down
-    inputs_embeds_decode = torch.randn((BATCH_SIZE, DECODE_LEN, HIDDEN_SIZE), dtype=torch_dtype, device=device) * 0.001
+    inputs_embeds_decode = torch.randn((batch_size, decode_len, hidden_size), dtype=torch_dtype, device=device) * 0.001
 
     # Position IDs continue from prefill length
-    pos_ids_1d_decode = torch.tensor([[PREFILL_LEN]], dtype=torch.int64, device=device)
+    pos_ids_1d_decode = torch.tensor([[prefill_len]], dtype=torch.int64, device=device)
     position_ids_decode = pos_ids_1d_decode.unsqueeze(0).expand(3, -1, -1)
 
-    attention_mask_decode = torch.ones((BATCH_SIZE, PREFILL_LEN + DECODE_LEN), dtype=torch.int64, device=device)
+    attention_mask_decode = torch.ones((batch_size, prefill_len + decode_len), dtype=torch.int64, device=device)
 
-    cache_position_decode = torch.tensor([PREFILL_LEN], device=device)
+    cache_position_decode = torch.tensor([prefill_len], device=device)
 
     # Use the KV cache from the HF prefill run
     hf_past_key_values = hf_outputs_prefill.past_key_values
@@ -314,23 +314,23 @@ def test_parity(
     }
 
     # Use the KV cache from the ONNX prefill run (these are already torch tensors)
-    for i in range(NUM_LAYERS):
+    for i in range(num_layers):
         ort_inputs_decode[f"past_key_values.{i}.key"] = ort_presents_prefill[i * 2]
         ort_inputs_decode[f"past_key_values.{i}.value"] = ort_presents_prefill[i * 2 + 1]
 
     # --- Create ONNX Output Tensors (on device) ---
     # --- FIX: Logits from bf16 ONNX model are intentionally float32 for accuracy ---
-    ort_logits_decode = torch.empty((BATCH_SIZE, DECODE_LEN, VOCAB_SIZE), dtype=logits_dtype, device=device)
+    ort_logits_decode = torch.empty((batch_size, decode_len, vocab_size), dtype=logits_dtype, device=device)
     ort_presents_decode = []
     ort_outputs_decode = {"logits": ort_logits_decode}
     present_shape_decode = (
-        BATCH_SIZE,
-        NUM_KV_HEADS,
-        PREFILL_LEN + DECODE_LEN,
-        HEAD_DIM,
+        batch_size,
+        num_kv_heads,
+        prefill_len + decode_len,
+        head_dim,
     )
 
-    for i in range(NUM_LAYERS):
+    for i in range(num_layers):
         ort_present_k = torch.empty(present_shape_decode, dtype=torch_dtype, device=device)
         ort_present_v = torch.empty(present_shape_decode, dtype=torch_dtype, device=device)
         ort_outputs_decode[f"present.{i}.key"] = ort_present_k

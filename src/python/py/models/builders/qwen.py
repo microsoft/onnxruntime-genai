@@ -8,6 +8,7 @@ import os
 
 import onnx_ir as ir
 import torch
+from transformers import Qwen2_5_VLForConditionalGeneration
 
 from .base import Model
 
@@ -82,7 +83,7 @@ class Qwen25VLTextModel(Model):
         # SOLUTION: We must override the base model's decision and set the
         # output logits type to match the io_dtype (bfloat16).
         #
-        self.allow_bf16_logits = os.getenv("allow_bf16_logits") in ["1", "true", "True"]
+        self.allow_bf16_logits = os.getenv("ALLOW_BF16_LOGITS") in ["1", "true", "True"]
         if self.allow_bf16_logits and self.io_dtype == ir.DataType.BFLOAT16:
             print("Fixing output logits precision. Setting output_types['logits'] to BFLOAT16 to match HF model.")
             self.output_types["logits"] = ir.DataType.BFLOAT16
@@ -363,7 +364,7 @@ class Qwen25VLTextModel(Model):
             axis=-1,
             num_outputs=2,
         )
-        half_shape = x_shape[:-1] + [x_shape[-1] // 2]
+        half_shape = [*x_shape[:-1], x_shape[-1] // 2]
         self.make_value(split_output_0, compute_dtype, half_shape)
         self.make_value(split_output_1, compute_dtype, half_shape)
 
@@ -807,8 +808,6 @@ class Qwen25VLTextModel(Model):
         self.make_preprocessing_nodes()
 
         # Load the Hugging Face model
-        from transformers import Qwen2_5_VLForConditionalGeneration
-
         print("Loading Qwen2_5_VLForConditionalGeneration model...")
         hf_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             self.model_name_or_path,
