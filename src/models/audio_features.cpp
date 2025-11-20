@@ -12,7 +12,7 @@ AudioFeatures::AudioFeatures(State& state, const std::string& name, const std::v
       name_{name} {
   // Get audio features
   for (const auto& [input_name, value] : extra_inputs) {
-    if (input_name == Config::Defaults::AudioFeaturesName) {
+    if (input_name == name) {
       audio_features_ = model_.ExpandInputs(value->ort_tensor_, state_.params_->search.num_beams);
     }
   }
