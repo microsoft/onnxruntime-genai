@@ -398,6 +398,15 @@ inline OrtEnv& OrtEnv::CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info,
   return *this;
 }
 
+inline void OrtEnv::CopyTensors(const std::vector<const OrtValue*>& src_tensors,
+                                const std::vector<OrtValue*>& dst_tensors,
+                                OrtSyncStream* stream) const {
+  if (src_tensors.size() != dst_tensors.size()) {
+    throw std::runtime_error("Number of source and destination tensors must match");
+  }
+  Ort::ThrowOnError(Ort::api->CopyTensors(this, src_tensors.data(), dst_tensors.data(), stream, src_tensors.size()));
+}
+
 inline std::vector<const OrtEpDevice*> OrtEnv::GetEpDevices() {
   size_t num_devices = 0;
   const OrtEpDevice* const* device_ptrs = nullptr;
