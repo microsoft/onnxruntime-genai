@@ -293,20 +293,20 @@ class Model:
             self.quant_attrs["config"] = config.quantization_config
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
         
-        lm_head_excluded = "/lm_head/MatMul" in self.quant_attrs["int4"]["nodes_to_exclude"]
+        exclude_embeds = extra_options.get("exclude_embeds", False)
+        exclude_lm_head = extra_options.get("exclude_lm_head", False)
 
-        self.int4_tied_embeddings = extra_options.get("int4_tied_embeddings", config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False)
+        # Determine if lm_head is unquantized. int4/8 can have options to int4_nodes_to_exclude. FP models are always unquantized.
+        self.unquantized_lm_head = "/lm_head/MatMul" in self.quant_attrs["int4"]["nodes_to_exclude"] or self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}
+        self.shared_embeddings = extra_options.get("shared_embeddings", config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False)
         self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last", "rtn_last"}
-        # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
-        # tied_embeddings lm_head.MatMul.weight_Q{}G{} only works with rtn&k_quant on 4bit, or with int8 lm_head
-        self.int4_tied_embeddings = (
-            self.int4_tied_embeddings
-            and not lm_head_excluded
-            and (self.int8_lm_head or extra_options.get("int4_algo_config", "default") in {"rtn", "k_quant"})
-        )
         
-        # Check if shared embeddings are used for float embeddings and lm_head
-        self.shared_embeddings = extra_options.get("shared_embeddings", False)
+        # shared_embeddings conflicts with exclude_embeds and exclude_lm_head
+        if self.shared_embeddings and (exclude_embeds or exclude_lm_head):
+            self.shared_embeddings = False
+        elif self.shared_embeddings and not self.unquantized_lm_head:
+            # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
+            self.shared_embeddings = self.int8_lm_head or extra_options.get("int4_algo_config", "default") in {"rtn", "k_quant"}
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
@@ -1132,7 +1132,7 @@ class Model:
     def make_embedding(self, embedding):
         basename = "/model/embed_tokens"
         # Use GatherBlockQuantized if and only if tied embeddings are enabled and export model is quantized. quantized d_type in set_onnx_dtype is INT4/UINT4
-        if self.int4_tied_embeddings and self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
+        if self.shared_embeddings and self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
             gather_name = f"{basename}/GatherBlockQuantized"
             gather_output = f"{gather_name}/output_0"
 
@@ -1145,7 +1145,8 @@ class Model:
             # https://github.com/microsoft/onnxruntime/blob/0c9356cb986fd4cd2c5d510909d31186010ba226/onnxruntime/python/tools/quantization/neural_compressor/weight_only.py#L73        
             self.make_reshape(weight_reshape_name, weight_reshape_inputs, dtype=ir.DataType.UINT8, shape=[self.vocab_size, flat_dim])
             self.make_node('GatherBlockQuantized', inputs=[weight_reshape_output, 'input_ids', 'lm_head.MatMul.weight_scale', 'lm_head.MatMul.weight_zp'], outputs=[gather_output], name=gather_name, domain="com.microsoft", bits=bits, block_size=int(self.int4_block_size), gather_axis=0, quantize_axis=1)
-        elif self.shared_embeddings:
+        # Use Transpose + Gather for tied embeddings for float embedding layers
+        elif self.shared_embeddings and self.unquantized_lm_head:
             transpose_name = f"{basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
             self.make_transpose(transpose_name, "lm_head.MatMul.weight", self.io_dtype, [self.vocab_size, self.hidden_size], [1, 0])
