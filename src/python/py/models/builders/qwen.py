@@ -4,7 +4,6 @@
 # license information.
 # --------------------------------------------------------------------------
 
-import os
 
 import onnx_ir as ir
 import torch
@@ -30,23 +29,6 @@ class Qwen3Model(QwenModel):
 
 class Qwen25VLTextModel(Model):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        # We must extract the text_config for the text model's parameters
-        text_config_dict = config.text_config.to_dict()
-
-        # Update the main config with text-specific parameters
-        # The base.Model class reads from the top-level config object
-        config.hidden_size = text_config_dict["hidden_size"]
-        config.intermediate_size = text_config_dict["intermediate_size"]
-        config.num_attention_heads = text_config_dict["num_attention_heads"]
-        config.num_hidden_layers = text_config_dict["num_hidden_layers"]
-        config.num_key_value_heads = text_config_dict["num_key_value_heads"]
-        config.rms_norm_eps = text_config_dict["rms_norm_eps"]
-        config.sliding_window = text_config_dict["sliding_window"]
-        config.rope_scaling = text_config_dict["rope_scaling"]
-        # Need this for attention_scaling calculation
-        if "original_max_position_embeddings" in text_config_dict:
-            config.original_max_position_embeddings = text_config_dict["original_max_position_embeddings"]
-
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
 
         # The HF model (Qwen2RMSNorm) *always* computes LayerNorm in float32.
@@ -65,7 +47,7 @@ class Qwen25VLTextModel(Model):
         self.layernorm_attrs["cast"]["skip_input"] = True
         self.layernorm_attrs["cast"]["output_0"] = True
         self.layernorm_attrs["cast"]["output_3"] = True
-        #
+
         # Qwen2's RoPE *always* computes in float32.
         # We must replicate this behavior.
         print("Forcing RoPE computation to float32 for Qwen2.5-VL parity.")
@@ -73,48 +55,27 @@ class Qwen25VLTextModel(Model):
             self.attention_attrs["rope_cast"] = {}
         self.attention_attrs["rope_cast"]["use_fp32"] = True
 
-        # The base.Model.make_outputs_init() *always* casts logits to float32
-        # if the io_dtype is bfloat16. This is to improve accuracy in general.
-        #
-        # PROBLEM: The HF model (Qwen2_5_VL) *does not* do this. It computes
-        # the lm_head MatMul in bfloat16 and returns bfloat16 logits.
-        # This causes the parity test (which compares bf16 vs fp32) to fail.
-        #
-        # SOLUTION: We must override the base model's decision and set the
-        # output logits type to match the io_dtype (bfloat16).
-        #
-        self.allow_bf16_logits = os.getenv("ALLOW_BF16_LOGITS") in ["1", "true", "True"]
-        if self.allow_bf16_logits and self.io_dtype == ir.DataType.BFLOAT16:
-            print("Fixing output logits precision. Setting output_types['logits'] to BFLOAT16 to match HF model.")
-            self.output_types["logits"] = ir.DataType.BFLOAT16
-
-        # Manually get the attention_scaling from the rope_config
-        # This replicates the logic from transformers.models.rope_utils._config_to_init_values
+        # Manually get the rope_attention_scaling from the rope_config
+        # Support rope types: 'default' or 'yarn' according to model cards in huggingface. Examples:
+        #   "rope_scaling": {"type": "mrope", "mrope_section": [16, 24,24]}
+        #   "rope_scaling": {"type": "yarn", "mrope_section": [ 16, 24, 24 ], "factor": 4, "original_max_position_embeddings": 32768 }}
         rope_type = "default"
         if config.rope_scaling and "type" in config.rope_scaling:
             # The config re-maps 'mrope' to 'default'
             if config.rope_scaling["type"] != "mrope":
                 rope_type = config.rope_scaling["type"]
+        assert rope_type in ["default", "yarn"], f"Unsupported rope_type for this model: {rope_type}"
 
+        self.rope_attention_scaling = 1.0
         if rope_type == "yarn":
             factor = config.rope_scaling.get("factor", 1.0)
-            self.rope_attrs["attention_scaling"] = config.rope_scaling.get(
+            self.rope_attention_scaling = config.rope_scaling.get(
                 "attention_factor", (0.1 * torch.log(torch.tensor(factor)) + 1.0).item()
             )
-        elif rope_type == "longrope":
-            factor = config.rope_scaling.get("factor", 1.0)
-            orig_max_pos = config.original_max_position_embeddings
-            self.rope_attrs["attention_scaling"] = config.rope_scaling.get(
-                "attention_factor",
-                torch.sqrt(1 + torch.log(torch.tensor(factor)) / torch.log(torch.tensor(orig_max_pos))).item(),
-            )
-        else:
-            self.rope_attrs["attention_scaling"] = 1.0
 
         # Qwen 2.5 VL applies RoPE manually before attention, not fused in the op
         self.attention_attrs["use_rope_in_attn"] = False
 
-        # Your inheritance change fixed this, but this check is harmless and safe.
         if "position_ids" not in self.input_names:
             print("Re-adding 'position_ids' to self.input_names.")
             if "attention_mask" in self.input_names:
@@ -137,16 +98,11 @@ class Qwen25VLTextModel(Model):
                 f"MRoPE splits {self.mrope_splits} sum ({sum(self.mrope_splits)}) does not match head size ({self.head_size})"
             )
 
-        # Force GroupQueryAttention for fp32 cuda,
-        # as base.py's make_attention_init doesn't include this combo.
-        if self.ep == "cuda" and self.io_dtype == ir.DataType.FLOAT:
-            self.attention_attrs["op_type"] = "GroupQueryAttention"
-            print("Forcing GroupQueryAttention (GQA) for FP32 CUDA.")
+        # Force GroupQueryAttention since make_attention() below only implements GQA.
+        self.attention_attrs["op_type"] = "GroupQueryAttention"
 
-        if self.attention_attrs["op_type"] != "GroupQueryAttention":
-            raise ValueError(
-                f"Qwen2.5-VL requires GroupQueryAttention, but op_type is {self.attention_attrs['op_type']}. This may be due to an unsupported EP/precision combo."
-            )
+        if not self.is_gqa_supported():
+            print(f"Warning: {self.ep} does not support GQA for {self.io_dtype}, so GQA might fallback to CPU!")
 
         # Create and save the inv_freq tensor
         self.make_inv_freq_tensor()
@@ -180,21 +136,47 @@ class Qwen25VLTextModel(Model):
         super().make_inputs_and_outputs()
 
     def make_dynamic_rope_caches(self, layer_id, basename):
-        """
-        Re-implements Qwen2_5_VLRotaryEmbedding.forward using ONNX ops.
-        Takes 3D position_ids and inv_freq and dynamically creates
-        the cos/sin caches.
-        """
+        # Make nodes for the Dynamic RoPE Cache subgraph
+        #
+        # Re-implements Qwen2_5_VLRotaryEmbedding.forward using ONNX ops.
+        # Takes 3D position_ids and inv_freq and dynamically creates
+        # the cos/sin caches.
+        #
+        #         inv_freq (H/2)                                     position_ids (3, B, S)
+        #             |                                                      |
+        #         Unsqueeze                                              Unsqueeze
+        #             |                                                      |
+        #           Expand                                                  Cast
+        #      (3, B, H/2, 1)                                           (3, B, 1, S)
+        #             |                                                      |
+        #             +--------------------------+---------------------------+
+        #                                        |
+        #                                      MatMul
+        #                                   (3, B, H/2, S)
+        #                                        |
+        #                                    Transpose
+        #                                   (3, B, S, H/2)
+        #                                        |
+        #                                     Concat
+        #                                  (3, B, S, H)
+        #                                        |
+        #                          +-------------+-------------+
+        #                          |                           |
+        #                         Cos                         Sin
+        #                          |                           |
+        #                         Mul                         Mul
+        #                   (apply scaling)             (apply scaling)
+        #
         pos_ids_name = "position_ids"
         inv_freq_name = "model.inv_freq"
         head_dim_half = self.head_size // 2
 
         # Get Batch Size from position_ids.shape[1]
-        shape_pos_ids_name = f"{basename}/shape_pos_ids"
+        shape_pos_ids_name = f"{basename}/pos_ids/Shape"
         shape_pos_ids_output = f"{shape_pos_ids_name}/output_0"
         self.make_shape(shape_pos_ids_name, pos_ids_name, [3])
 
-        gather_batch_size_name = f"{basename}/gather_batch_size"
+        gather_batch_size_name = f"{basename}/pos_ids/Gather"
         gather_batch_size_output = f"{gather_batch_size_name}/output_0"
         self.make_gather(
             gather_batch_size_name,
@@ -205,7 +187,7 @@ class Qwen25VLTextModel(Model):
         )
 
         # Expand inv_freq: [H/2] -> [1, 1, H/2, 1]
-        unsqueeze_1_name = f"{basename}/inv_freq_unsqueeze_1"
+        unsqueeze_1_name = f"{basename}/inv_freq/Unsqueeze"
         unsqueeze_1_output = f"{unsqueeze_1_name}/output_0"
         self.make_unsqueeze(
             unsqueeze_1_name,
@@ -215,7 +197,7 @@ class Qwen25VLTextModel(Model):
         )
 
         # Create target shape for Expand: [3, B, H/2, 1]
-        concat_expand_shape_name = f"{basename}/concat_expand_shape"
+        concat_expand_shape_name = f"{basename}/expand_shape/Concat"
         concat_expand_shape_output = f"{concat_expand_shape_name}/output_0"
         self.make_concat(
             concat_expand_shape_name,
@@ -229,7 +211,7 @@ class Qwen25VLTextModel(Model):
             axis=0,
         )
 
-        expand_name = f"{basename}/inv_freq_expand"
+        expand_name = f"{basename}/inv_freq/Expand"
         expand_output = f"{expand_name}/output_0"
         self.make_expand(
             expand_name,
@@ -239,7 +221,7 @@ class Qwen25VLTextModel(Model):
         )
 
         # Expand position_ids: [3, B, S] -> [3, B, 1, S]
-        unsqueeze_2_name = f"{basename}/pos_ids_unsqueeze"
+        unsqueeze_2_name = f"{basename}/pos_ids/Unsqueeze"
         unsqueeze_2_output = f"{unsqueeze_2_name}/output_0"
         self.make_unsqueeze(
             unsqueeze_2_name,
@@ -249,7 +231,7 @@ class Qwen25VLTextModel(Model):
         )
 
         # Cast position_ids to float
-        cast_name = f"{basename}/pos_ids_cast"
+        cast_name = f"{basename}/pos_ids/Cast"
         cast_output = f"{cast_name}/output_0"
         self.make_cast(
             cast_name,
@@ -259,7 +241,7 @@ class Qwen25VLTextModel(Model):
         )
 
         # MatMul: [3, B, H/2, 1] @ [3, B, 1, S] -> [3, B, H/2, S]
-        matmul_name = f"{basename}/freqs_matmul"
+        matmul_name = f"{basename}/freqs/MatMul"
         matmul_output = f"{matmul_name}/output_0"
         self.make_node("MatMul", [expand_output, cast_output], [matmul_output], name=matmul_name)
         self.make_value(
@@ -269,7 +251,7 @@ class Qwen25VLTextModel(Model):
         )
 
         # Transpose: [3, B, H/2, S] -> [3, B, S, H/2]
-        transpose_name = f"{basename}/freqs_transpose"
+        transpose_name = f"{basename}/freqs/Transpose"
         transpose_output = f"{transpose_name}/output_0"
         self.make_transpose(
             transpose_name,
@@ -280,7 +262,7 @@ class Qwen25VLTextModel(Model):
         )
 
         # Concat (freqs, freqs): [3, B, S, H/2] -> [3, B, S, H]
-        concat_name = f"{basename}/emb_concat"
+        concat_name = f"{basename}/Concat"
         concat_output = f"{concat_name}/output_0"
         self.make_concat(
             concat_name,
@@ -291,7 +273,7 @@ class Qwen25VLTextModel(Model):
         )
 
         # Cos(emb) and Sin(emb)
-        cos_name = f"{basename}/cos"
+        cos_name = f"{basename}/Cos"
         cos_output = f"{cos_name}/output_0"
         self.make_node("Cos", [concat_output], [cos_output], name=cos_name)
         self.make_value(
@@ -300,7 +282,7 @@ class Qwen25VLTextModel(Model):
             [3, "batch_size", "sequence_length", self.head_size],
         )
 
-        sin_name = f"{basename}/sin"
+        sin_name = f"{basename}/Sin"
         sin_output = f"{sin_name}/output_0"
         self.make_node("Sin", [concat_output], [sin_output], name=sin_name)
         self.make_value(
@@ -309,15 +291,15 @@ class Qwen25VLTextModel(Model):
             [3, "batch_size", "sequence_length", self.head_size],
         )
 
-        # Apply attention_scaling
+        # Apply scaling when rope type is "yarn".
         cos_final_output = cos_output
         sin_final_output = sin_output
-        scale = self.rope_attrs.get("attention_scaling", 1.0)  # Get from rope_attrs
+        scale = self.rope_attention_scaling
 
         if scale != 1.0:
             scale_const_name = f"/model/constants/FLOAT/{scale}"
 
-            cos_mul_name = f"{basename}/cos_mul_scale"
+            cos_mul_name = f"{basename}/cos_scale/Mul"
             cos_final_output = f"{cos_mul_name}/output_0"
             self.make_node(
                 "Mul",
@@ -331,7 +313,7 @@ class Qwen25VLTextModel(Model):
                 [3, "batch_size", "sequence_length", self.head_size],
             )
 
-            sin_mul_name = f"{basename}/sin_mul_scale"
+            sin_mul_name = f"{basename}/sin_scale/Mul"
             sin_final_output = f"{sin_mul_name}/output_0"
             self.make_node(
                 "Mul",
@@ -382,11 +364,40 @@ class Qwen25VLTextModel(Model):
         return concat_output
 
     def apply_mrope_rotation(self, layer_id, q_or_k_path, q_or_k_shape, dyn_cos, dyn_sin, num_heads, basename):
-        """
-        Re-implements apply_multimodal_rotary_pos_emb using ONNX ops.
-        Takes Q/K tensor and the dynamically generated 3D caches
-        and applies the rotation.
-        """
+        # Make nodes for the MRoPE rotation subgraph
+        #
+        # Re-implements apply_multimodal_rotary_pos_emb using ONNX ops.
+        # Takes Q/K tensor and the dynamically generated 3D caches
+        # and applies the rotation.
+        #
+        #      dyn_cos (3, B, S, H)   dyn_sin (3, B, S, H)     q_or_k (B, S, N*H)
+        #              |                      |                        |
+        #            Split                  Split                   Reshape
+        #        (into 6 parts)         (into 6 parts)                 |
+        #              |                      |                    Transpose
+        #      +-------+-------+      +-------+-------+          (B, N, S, H)
+        #      |    ...loop... |      |    ...loop... |                |
+        #    Gather(dim_idx)   |    Gather(dim_idx)   |                |
+        #      |               |      |               |                |
+        #   Unsqueeze          |    Unsqueeze         |                |
+        #      |               |      |               |                |
+        #      +-------+-------+      +-------+-------+                |
+        #              |                      |                        |
+        #            Concat                 Concat                     |
+        #         (B, 1, S, H)           (B, 1, S, H)                  |
+        #              |                      |                        |
+        #              +-----------+----------+                        |
+        #                          |                                   |
+        #                  (Mixed Precision Casts)                     |
+        #                          |                                   |
+        #                          +-----------------------+-----------+
+        #                                                  |
+        #                                       (q * cos) + (rotate_half(q) * sin)
+        #                                                  |
+        #                                              Transpose
+        #                                                  |
+        #                                               Reshape
+        #
 
         # --- Handle precision for RoPE ---
         # Check if we need to force float32 computation
@@ -399,7 +410,7 @@ class Qwen25VLTextModel(Model):
 
         # Create a Constant node for mrope_splits
         # This holds the correct splits, e.g., [16, 24, 24, 16, 24, 24]
-        mrope_splits_node_name = f"{basename}/mrope_splits_node"
+        mrope_splits_node_name = f"{basename}/mrope_splits/Constant"
         mrope_splits_output_name = f"{basename}/mrope_splits"
         mrope_splits_tensor = ir.tensor(
             torch.tensor(self.mrope_splits, dtype=torch.int64),
@@ -418,7 +429,7 @@ class Qwen25VLTextModel(Model):
         # Caches (dyn_cos, dyn_sin) are already in float32
         num_splits = len(self.mrope_splits)
 
-        cos_split_name = f"{basename}/cos_split"
+        cos_split_name = f"{basename}/cos/Split"
         cos_split_outputs = [f"{cos_split_name}/output_{i}" for i in range(num_splits)]
         self.make_node(
             "Split",
@@ -428,7 +439,7 @@ class Qwen25VLTextModel(Model):
             axis=-1,
         )
 
-        sin_split_name = f"{basename}/sin_split"
+        sin_split_name = f"{basename}/sin/Split"
         sin_split_outputs = [f"{sin_split_name}/output_{i}" for i in range(num_splits)]
         self.make_node(
             "Split",
@@ -447,7 +458,7 @@ class Qwen25VLTextModel(Model):
 
             # Gather from dim 0 of the split cache chunk
             # input is [3, B, S, H_chunk], indices is [0, 1, or 2]
-            gather_cos_name = f"{basename}/cos_gather_{i}"
+            gather_cos_name = f"{basename}/cos_{i}/Gather"
             gather_cos_output = f"{gather_cos_name}/output_0"
             self.make_node(
                 "Gather",
@@ -462,7 +473,7 @@ class Qwen25VLTextModel(Model):
                 [1, "batch_size", "sequence_length", dim_chunk],
             )  # Shape [1, B, S, H_chunk]
 
-            gather_sin_name = f"{basename}/sin_gather_{i}"
+            gather_sin_name = f"{basename}/sin_{i}/Gather"
             gather_sin_output = f"{gather_sin_name}/output_0"
             self.make_node(
                 "Gather",
@@ -478,7 +489,7 @@ class Qwen25VLTextModel(Model):
             )  # Shape [1, B, S, H_chunk]
 
             # FIX: Squeeze the gathered cache to [B, S, H_chunk]
-            squeeze_cos_name = f"{basename}/cos_squeeze_{i}"
+            squeeze_cos_name = f"{basename}/cos_{i}/Squeeze"
             squeeze_cos_output = f"{squeeze_cos_name}/output_0"
             self.make_squeeze(
                 squeeze_cos_name,
@@ -487,7 +498,7 @@ class Qwen25VLTextModel(Model):
                 ["batch_size", "sequence_length", dim_chunk],
             )
 
-            squeeze_sin_name = f"{basename}/sin_squeeze_{i}"
+            squeeze_sin_name = f"{basename}/sin_{i}/Squeeze"
             squeeze_sin_output = f"{squeeze_sin_name}/output_0"
             self.make_squeeze(
                 squeeze_sin_name,
@@ -497,7 +508,7 @@ class Qwen25VLTextModel(Model):
             )
 
             # Unsqueeze to add the NumHeads dim: [B, 1, S, H_chunk]
-            unsqueeze_cos_name = f"{basename}/cos_unsqueeze_{i}"
+            unsqueeze_cos_name = f"{basename}/cos_{i}/Unsqueeze"
             unsqueeze_cos_output = f"{unsqueeze_cos_name}/output_0"
             self.make_unsqueeze(
                 unsqueeze_cos_name,
@@ -507,7 +518,7 @@ class Qwen25VLTextModel(Model):
             )
             cos_reordered.append(unsqueeze_cos_output)
 
-            unsqueeze_sin_name = f"{basename}/sin_unsqueeze_{i}"
+            unsqueeze_sin_name = f"{basename}/sin_{i}/Unsqueeze"
             unsqueeze_sin_output = f"{unsqueeze_sin_name}/output_0"
             self.make_unsqueeze(
                 unsqueeze_sin_name,
@@ -518,7 +529,7 @@ class Qwen25VLTextModel(Model):
             sin_reordered.append(unsqueeze_sin_output)
 
         # Concat re-ordered chunks back to [B, 1, S, H]
-        final_cos_concat_name = f"{basename}/cos_final_concat"
+        final_cos_concat_name = f"{basename}/cos_final/Concat"
         final_cos_concat_output = f"{final_cos_concat_name}/output_0"
         self.make_concat(
             final_cos_concat_name,
@@ -528,7 +539,7 @@ class Qwen25VLTextModel(Model):
             axis=-1,
         )
 
-        final_sin_concat_name = f"{basename}/sin_final_concat"
+        final_sin_concat_name = f"{basename}/sin_final/Concat"
         final_sin_concat_output = f"{final_sin_concat_name}/output_0"
         self.make_concat(
             final_sin_concat_name,
@@ -540,8 +551,8 @@ class Qwen25VLTextModel(Model):
 
         # Caches (final_cos_concat_output, final_sin_concat_output) are now in float32
 
-        # Reshape input Q/K: [B, S, N*H] -> [B, N, S, H]
-        reshape_1_name = f"{basename}/q_or_k_reshape_1"
+        # Reshape input Q/K: [B, S, N*H] -> [B, S, N, H]
+        reshape_1_name = f"{basename}/q_or_k_bsd_to_bsnh/Reshape"
         reshape_1_output = f"{reshape_1_name}/output_0"
         reshape_1_target_shape_onnx = f"/model/constants/INT64/[0, 0, {num_heads}, {self.head_size}]"
         reshape_1_target_shape_ort = [
@@ -558,7 +569,7 @@ class Qwen25VLTextModel(Model):
         )
 
         # Transpose Q/K: [B, S, N, H] -> [B, N, S, H]
-        transpose_1_name = f"{basename}/q_or_k_transpose_1"
+        transpose_1_name = f"{basename}/q_or_k_bsnh_to_bnsh/Transpose"
         transpose_1_output = f"{transpose_1_name}/output_0"
         transpose_1_target_shape = [
             "batch_size",
@@ -581,7 +592,7 @@ class Qwen25VLTextModel(Model):
 
         if force_fp32 and self.io_dtype != ir.DataType.FLOAT:
             # Cast Q/K (self.io_dtype) up to float32
-            q_or_k_cast_name = f"{basename}/q_or_k_cast_fp32"
+            q_or_k_cast_name = f"{basename}/q_or_k/Cast"
             q_or_k_cast_output = f"{q_or_k_cast_name}/output_0"
             self.make_cast(
                 q_or_k_cast_name,
@@ -592,7 +603,7 @@ class Qwen25VLTextModel(Model):
             q_or_k_compute_input = q_or_k_cast_output
         elif not force_fp32 and self.io_dtype != ir.DataType.FLOAT:
             # Cast Caches (float32) down to self.io_dtype
-            cos_cache_cast_name = f"{basename}/cos_final_cast"
+            cos_cache_cast_name = f"{basename}/cos_final/Cast"
             cos_cache_cast_output = f"{cos_cache_cast_name}/output_0"
             self.make_cast(
                 cos_cache_cast_name,
@@ -602,7 +613,7 @@ class Qwen25VLTextModel(Model):
             )
             cos_cache_compute_input = cos_cache_cast_output
 
-            sin_cache_cast_name = f"{basename}/sin_final_cast"
+            sin_cache_cast_name = f"{basename}/sin_final/Cast"
             sin_cache_cast_output = f"{sin_cache_cast_name}/output_0"
             self.make_cast(
                 sin_cache_cast_name,
@@ -615,7 +626,7 @@ class Qwen25VLTextModel(Model):
         # Apply rotation: (q * cos) + (rotate_half(q) * sin)
 
         # 1. (q * cos)
-        mul_1_name = f"{basename}/mul_1"
+        mul_1_name = f"{basename}/Mul_1"
         mul_1_output = f"{mul_1_name}/output_0"
         self.make_mul(
             mul_1_name,
@@ -628,7 +639,7 @@ class Qwen25VLTextModel(Model):
         rotated_half_q_name = self.rotate_half(q_or_k_compute_input, transpose_1_target_shape, basename, compute_dtype)
 
         # 3. (rotate_half(q) * sin)
-        mul_2_name = f"{basename}/mul_2"
+        mul_2_name = f"{basename}/Mul_2"
         mul_2_output = f"{mul_2_name}/output_0"
         self.make_mul(
             mul_2_name,
@@ -638,7 +649,7 @@ class Qwen25VLTextModel(Model):
         )
 
         # 4. (q * cos) + (rotate_half(q) * sin)
-        add_name = f"{basename}/add"
+        add_name = f"{basename}/add/Add"
         add_output = f"{add_name}/output_0"
         self.make_add(
             add_name,
@@ -652,13 +663,13 @@ class Qwen25VLTextModel(Model):
         add_output_final = add_output
         if force_fp32 and self.io_dtype != ir.DataType.FLOAT:
             # Cast result back down to self.io_dtype
-            add_cast_name = f"{basename}/add_cast_output"
+            add_cast_name = f"{basename}/add/Cast"
             add_cast_output = f"{add_cast_name}/output_0"
             self.make_cast(add_cast_name, add_output, output_dtype, transpose_1_target_shape)
             add_output_final = add_cast_output
 
         # Transpose back: [B, N, S, H] -> [B, S, N, H]
-        transpose_2_name = f"{basename}/q_or_k_transpose_2"
+        transpose_2_name = f"{basename}/q_or_k_bnsh_to_bsnh/Transpose"
         transpose_2_output = f"{transpose_2_name}/output_0"
         self.make_transpose(
             transpose_2_name,
@@ -669,7 +680,7 @@ class Qwen25VLTextModel(Model):
         )
 
         # Reshape back: [B, S, N, H] -> [B, S, N*H]
-        reshape_2_name = f"{basename}/q_or_k_reshape_2"
+        reshape_2_name = f"{basename}/q_or_k_bsnh_to_bsd/Reshape"
         reshape_2_output = f"{reshape_2_name}/output_0"
         self.make_reshape(
             reshape_2_name,
@@ -684,6 +695,39 @@ class Qwen25VLTextModel(Model):
         return reshape_2_output
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
+        # Make nodes for the Attention subgraph (with MRoPE)
+        #
+        #               root_input
+        #              /    |     \
+        #             /     |      \
+        #       Q_MatMul K_MatMul V_MatMul
+        #          |        |        |
+        #        Q_Add    K_Add    V_Add
+        #          |        |        |
+        #          |        |        +-----------------+
+        #          |        |                          |
+        #   (make_dynamic_rope_caches)                 |
+        #          |                                   |
+        #    +-----+-----+                             |
+        #    |           |                             |
+        # dyn_cos     dyn_sin                          |
+        #    |           |                             |
+        #    v           v                             |
+        # (apply_mrope_rotation for Q)                 |
+        #          |                                   |
+        #        Q_Rot                                 |
+        #          |     (apply_mrope_rotation for K)  |
+        #          |                 |                 |
+        #          |               K_Rot               |
+        #          |                 |                 |
+        #          +--------+--------+                 |
+        #                   |                          |
+        #           GroupQueryAttention <--------------+
+        #                   |
+        #                O_MatMul
+        #                   |
+        #                 O_Add
+
         # 1. Unpack QKV if necessary (e.g. qkv_proj)
         super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
 

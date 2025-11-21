@@ -466,7 +466,7 @@ class Model:
                 "sections": config.rope_scaling["mrope_section"],  # Sections for MRoPE
             }
 
-    def make_attention_init(self):
+    def is_gqa_supported(self) -> bool:
         valid_gqa_configurations = {
             ("cpu", ir.DataType.FLOAT),
             ("cuda", ir.DataType.FLOAT16),
@@ -476,7 +476,10 @@ class Model:
             ("webgpu", ir.DataType.FLOAT),
             ("trt-rtx", ir.DataType.FLOAT16),
         }
-        if (self.ep, self.io_dtype) in valid_gqa_configurations:
+        return (self.ep, self.io_dtype) in valid_gqa_configurations
+
+    def make_attention_init(self):
+        if self.is_gqa_supported():
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
             print("GroupQueryAttention (GQA) is used in this model.")
