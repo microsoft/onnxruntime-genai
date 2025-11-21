@@ -4196,7 +4196,7 @@ class Model:
 
         # Right branch: Squeeze to get int value for total_seq_len
         squeeze_name = f"{attn_mask_basename}/Squeeze"
-        squeeze_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/[0]"]
+        squeeze_inputs = [f"{reduce_sum_name}/output_0"]
         self.make_squeeze(squeeze_name, squeeze_inputs, dtype=ir.DataType.INT32, shape=[])
 
         self.mask_attrs["seqlens_k"] = sub_name
