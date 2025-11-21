@@ -293,9 +293,6 @@ class Model:
             # Create quantized attributes from quantization config
             self.quant_attrs["config"] = config.quantization_config
             self.quant_attrs["use_g_idx"] = config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
-        
-        exclude_embeds = extra_options.get("exclude_embeds", False)
-        exclude_lm_head = extra_options.get("exclude_lm_head", False)
 
         # Determine if lm_head is unquantized. int4/8 can have options to int4_nodes_to_exclude. FP models are always unquantized.
         self.unquantized_lm_head = "/lm_head/MatMul" in self.quant_attrs["int4"]["nodes_to_exclude"] or self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}
@@ -303,7 +300,7 @@ class Model:
         self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last", "rtn_last"}
         
         # shared_embeddings conflicts with exclude_embeds and exclude_lm_head
-        if self.shared_embeddings and (exclude_embeds or exclude_lm_head):
+        if self.shared_embeddings and (self.exclude_embeds or self.exclude_lm_head):
             self.shared_embeddings = False
         elif self.shared_embeddings and not self.unquantized_lm_head:
             # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
