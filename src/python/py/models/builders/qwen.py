@@ -33,9 +33,7 @@ class Qwen25VLTextModel(Model):
 
         # The HF model (Qwen2RMSNorm) *always* computes LayerNorm in float32.
         # By inheriting from `base.Model`, all `layernorm_attrs["cast"]` flags
-        # are `False`. This causes two problems:
-        # 1. Parity Error (FP32 model): The 47% mismatch you saw.
-        # 2. Type Mismatch Error (BF16 model): The `(float)` vs `(bfloat16)` error.
+        # are `False`. This causes parity loss and type mismatch error.
         #
         # SOLUTION: Manually set all `cast` flags to `True`. This forces the
         # builder to cast bf16 inputs -> fp32, compute LN, and cast fp32
@@ -330,10 +328,24 @@ class Qwen25VLTextModel(Model):
         return cos_final_output, sin_final_output
 
     def rotate_half(self, x_name, x_shape, basename, compute_dtype):
-        """
-        Builds ONNX nodes for rotate_half(x)
-        x_shape is [B, N, S, H]
-        """
+        # Make nodes for rotate_half subgraph
+        #
+        #       x (B, N, S, H)
+        #             |
+        #           Split
+        #          /     \
+        #         /       \
+        #    x1 (..., H/2)  x2 (..., H/2)
+        #        |          |
+        #        |         Neg
+        #        |          |
+        #        |         -x2
+        #        \         /
+        #         \       /
+        #          Concat
+        #            |
+        #      output (..., H)
+
         # Split: [B, N, S, H] -> [B, N, S, H/2], [B, N, S, H/2]
         split_name = f"{basename}/rotate_half/Split"
         split_output_0 = f"{split_name}/output_0"
