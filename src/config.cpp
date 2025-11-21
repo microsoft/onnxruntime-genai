@@ -965,6 +965,10 @@ struct Search_Element : JSON::Element {
       v_.past_present_share_buffer = JSON::Get<bool>(value);
     } else if (name == "early_stopping") {
       v_.early_stopping = JSON::Get<bool>(value);
+    } else if (name == "enable_context_truncation") {
+      v_.enable_context_truncation = JSON::Get<bool>(value);
+    } else if (name == "context_truncation_length") {
+      v_.context_truncation_length = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }

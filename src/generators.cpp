@@ -336,6 +336,47 @@ void Generator::AppendTokens(cpu_span<const int32_t> input_ids) {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (input_ids.size() == 0)
     throw std::runtime_error("input_ids is empty");
+  
+  // Check if we need to truncate before appending new tokens
+  // This handles the case where generation stopped at max_length and now we're appending new tokens
+  size_t current_seq_length = search_->GetSequenceLength();
+  size_t new_tokens_count = input_ids.size() / state_->params_->search.batch_size;
+  size_t total_after_append = current_seq_length + new_tokens_count;
+  
+  if (total_after_append > static_cast<size_t>(state_->params_->search.max_length)) {
+    // Need to truncate to make room for new tokens
+    if (state_->params_->search.enable_context_truncation) {
+      // Calculate how much space we need
+      size_t max_len = static_cast<size_t>(state_->params_->search.max_length);
+      size_t truncate_to = (max_len > new_tokens_count) ? (max_len - new_tokens_count) : 0;
+      
+      if (truncate_to == 0) {
+        throw std::runtime_error("Cannot append " + std::to_string(new_tokens_count) + 
+                                " tokens: exceeds max_length (" + std::to_string(max_len) + 
+                                "). Consider increasing max_length or reducing input size.");
+      }
+      
+      if (g_log.enabled && g_log.hit_max_length) {
+        Log("context_truncation", 
+            "Truncating before append: from " + std::to_string(current_seq_length) + 
+            " to " + std::to_string(truncate_to) + " tokens to make room for " + 
+            std::to_string(new_tokens_count) + " new tokens");
+      }
+      
+      // Perform truncation to make room
+      auto current_sequence = search_->GetSequence(0);
+      size_t tokens_to_skip = current_seq_length - truncate_to;
+      auto device_src = current_sequence.subspan(tokens_to_skip, truncate_to);
+      auto tokens_to_keep = device_src.CopyDeviceToCpu();
+      
+      RewindToLength(0);
+      AppendTokens(tokens_to_keep);
+      
+      // Update current length after truncation
+      current_seq_length = truncate_to;
+    }
+  }
+  
   if ((input_ids.size() / state_->params_->search.batch_size) + search_->GetSequenceLength() > state_->params_->search.max_length)
     throw std::runtime_error("input_ids size (" + std::to_string(input_ids.size()) + ") + current sequence length (" + std::to_string(search_->GetSequenceLength()) + ") exceeds max length (" + std::to_string(state_->params_->search.max_length) + ")");
   if (search_->GetSequenceLength() != 0 && state_->params_->search.batch_size > 1)
@@ -478,6 +519,9 @@ void Generator::GenerateNextToken() {
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
     throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");
 
+  // Check if context truncation is needed before generating next token
+  CheckAndApplyContextTruncation();
+
   // TRT-RTX and DML EPs use a single rope factor for all tokens: https://github.com/microsoft/onnxruntime-genai/blob/d5dc8cb02fd02b0dce99c6938449566371da0d28/src/python/py/models/builder.py#L1464-L1473
   // TODO: change this when these EPs support multi rope factors
   const bool epUsesSingleRopeFactor = model_->p_device_->GetType() == DeviceType::NvTensorRtRtx || model_->p_device_->GetType() == DeviceType::DML;
@@ -563,6 +607,65 @@ void Generator::RewindToLength(size_t new_length) {
   }
   computed_logits_ = false;
   last_action_ = Action::rewound;
+}
+
+int Generator::CheckAndApplyContextTruncation() {
+  DurationTrace trace{"Generator::CheckAndApplyContextTruncation"};
+  
+  auto& search_config = state_->params_->search;
+  
+  // Check if context truncation is enabled and needed
+  if (!search_config.enable_context_truncation) {
+    return static_cast<int>(search_->GetSequenceLength());
+  }
+  
+  size_t current_length = search_->GetSequenceLength();
+  
+  // Only truncate if we're at or near max_length
+  if (current_length < static_cast<size_t>(search_config.max_length)) {
+    return static_cast<int>(current_length);
+  }
+  
+  // Calculate truncation length
+  size_t truncate_to_length = search_config.context_truncation_length;
+  if (truncate_to_length == 0) {
+    // Default: keep half of max_length
+    truncate_to_length = search_config.max_length / 2;
+  }
+  
+  // Ensure truncation length is reasonable
+  if (truncate_to_length >= current_length || truncate_to_length == 0) {
+    return static_cast<int>(current_length);  // Nothing to truncate
+  }
+  
+  if (g_log.enabled && g_log.hit_max_length) {
+    Log("context_truncation", 
+        "Truncating context from " + std::to_string(current_length) + 
+        " to " + std::to_string(truncate_to_length) + " tokens (keeping most recent)");
+  }
+  
+  // Strategy: Keep the most recent truncate_to_length tokens
+  // 1. Extract the last N tokens from the current sequence
+  // 2. Reset to beginning using RewindToLength
+  // 3. Re-append the extracted tokens
+  
+  // Get the current sequence for batch 0 (single sequence case)
+  auto current_sequence = search_->GetSequence(0);
+  const size_t tokens_to_skip = current_length - truncate_to_length;
+  
+  // Copy the last truncate_to_length tokens to CPU for re-appending
+  auto device_src = current_sequence.subspan(tokens_to_skip, truncate_to_length);
+  auto tokens_to_keep = device_src.CopyDeviceToCpu();
+  
+  // Reset to the beginning (clears KV cache and sequences)
+  // Use RewindToLength which properly handles state reset
+  RewindToLength(0);
+  
+  // Re-append the most recent tokens
+  // Note: This will regenerate the KV cache for these tokens
+  AppendTokens(tokens_to_keep);
+  
+  return static_cast<int>(truncate_to_length);
 }
 
 DeviceSpan<float> Generator::GetLogits() {

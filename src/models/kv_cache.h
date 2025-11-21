@@ -16,6 +16,9 @@ struct KeyValueCache {
 
   virtual void RewindTo(size_t index) = 0;
 
+  // Truncate KV cache to specified length, used for context window management
+  virtual void TruncateTo(size_t new_length) { RewindTo(new_length); }
+
   // Note: PartialUpdate() is mainly for supporting DecoderOnlyPipelineState usage where we update
   // part of the KV cache after running part of the pipeline.
   // An alternative may be to have a dedicated KV cache per IntermediatePipelineState.
