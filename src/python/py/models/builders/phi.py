@@ -121,26 +121,13 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         ]
         self.make_greater_or_equal(greater_or_equal_name, greater_or_equal_inputs, shape=[])
         cast_name = f"{basename}/Cast"
-        self.make_cast(
-            cast_name,
-            f"{greater_or_equal_name}/output_0",
-            dtype=compute_dtype,
-            shape=None,
-        )
+        self.make_cast(cast_name, f"{greater_or_equal_name}/output_0", dtype=compute_dtype, shape=None)
         mul_name = f"{basename}/Mul"
-        mul_inputs = [
-            f"{cast_name}/output_0",
-            f"/model/constants/{compute_str_dtype}/{self.original_context_length}",
-        ]
+        mul_inputs = [f"{cast_name}/output_0", f"/model/constants/{compute_str_dtype}/{self.original_context_length}"]
         self.make_mul(mul_name, mul_inputs, dtype=compute_dtype, shape=None)
         add_1_name = f"{basename}/Add_1"
         add_1_inputs = [f"{mul_name}/output_0", input_tensor]
-        self.make_add(
-            add_1_name,
-            add_1_inputs,
-            dtype=compute_dtype,
-            shape=["batch_size", "sequence_length"],
-        )
+        self.make_add(add_1_name, add_1_inputs, dtype=compute_dtype, shape=["batch_size", "sequence_length"])
 
         # Cast back to int64 for WebGPU to maintain compatibility
         result_name = add_1_name
@@ -158,13 +145,7 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         if self.position_ids_name is not None:
-            super().make_attention(
-                layer_id,
-                attention,
-                root_input,
-                position_ids=self.position_ids_name,
-                **kwargs,
-            )
+            super().make_attention(layer_id, attention, root_input, position_ids=self.position_ids_name, **kwargs)
         else:
             super().make_attention(layer_id, attention, root_input, **kwargs)
 
