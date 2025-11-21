@@ -4,7 +4,6 @@
 # license information.
 # --------------------------------------------------------------------------
 import argparse
-import os
 
 import numpy as np
 import onnxruntime as ort
@@ -156,15 +155,10 @@ def test_parity(
         # Standard FP32 tolerances
         rtol, atol = 1e-1, 1e-1
 
-    allow_bf16_logits = os.getenv("ALLOW_BF16_LOGITS") in ["1", "true", "True"]
-
-    if allow_bf16_logits:
-        logits_dtype = torch_dtype
-    else:
-        # The builder script (base.Model) upcasts logits to float32
-        # ONLY when the io_dtype is bfloat16.
-        # For FP16 or FP32, it keeps the original dtype.
-        logits_dtype = torch.float32 if use_bf16 else torch_dtype
+    # The builder script (base.Model) upcasts logits to float32
+    # ONLY when the io_dtype is bfloat16.
+    # For FP16 or FP32, it keeps the original dtype.
+    logits_dtype = torch.float32 if use_bf16 else torch_dtype
 
     print(f"Allocating ONNX logits output buffer with dtype: {logits_dtype}")
 

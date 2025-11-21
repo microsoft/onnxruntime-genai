@@ -19,9 +19,10 @@ fi
 
 # 2. Define variables based on input
 PRECISION=$1
-OUTPUT_DIR="./qwen_${PRECISION}"
+TEST_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+OUTPUT_DIR="${TEST_DIR}/qwen_${PRECISION}"
 ONNX_MODEL_PATH="${OUTPUT_DIR}/model.onnx"
-CACHE_DIR="./cache"
+CACHE_DIR="${TEST_DIR}/cache"
 HF_MODEL="Qwen/Qwen2.5-VL-3B-Instruct"
 
 # Set the --bf16 or --fp16 flag for the test script
@@ -38,10 +39,13 @@ if  [ "$2" == "-f" ] && [ -d "${OUTPUT_DIR}" ]; then
     rm -rf "${OUTPUT_DIR}"
 fi
 
+BUILDER_DIR="$(cd ../../../../src/python/py/models && pwd)"
+
 # 4. Run the builder script if output directory does not exist.
 if ! [ -d "${OUTPUT_DIR}" ]; then
     echo "--- Building ${PRECISION} model ---"
-    python -m onnxruntime_genai.models.builder \
+    cd "${BUILDER_DIR}"
+    python builder.py \
         -m ${HF_MODEL} \
         -p ${PRECISION} \
         -o ${OUTPUT_DIR} \
@@ -50,6 +54,7 @@ if ! [ -d "${OUTPUT_DIR}" ]; then
 fi
 
 # 5. Run the parity test
+cd "${TEST_DIR}"
 echo "--- Testing ${PRECISION} model parity ---"
 python test_qwen_2.5_vl.py \
     --hf_model ${HF_MODEL} \
