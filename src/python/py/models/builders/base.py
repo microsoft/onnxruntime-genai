@@ -20,6 +20,7 @@ from onnxruntime.quantization.matmul_nbits_quantizer import (
     MatMulNBitsQuantizer,
     QuantFormat,
     RTNWeightOnlyQuantConfig,
+    KQuantWeightOnlyQuantConfig,
 )
 from tqdm import tqdm
 from transformers import (
@@ -529,7 +530,6 @@ class Model:
             int4_algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
         elif quant_method in {"k_quant", "k_quant_mixed", "k_quant_last"}:
-            from onnxruntime.quantization.matmul_nbits_quantizer import KQuantWeightOnlyQuantConfig
 
             if quant_method != "k_quant":
                 customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
@@ -1149,7 +1149,7 @@ class Model:
         elif self.shared_embeddings and self.unquantized_lm_head:
             transpose_name = f"{basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
-            self.make_transpose(transpose_name, "lm_head.MatMul.weight", self.io_dtype, [self.vocab_size, self.hidden_size], [1, 0])
+            self.make_transpose(transpose_name, "lm_head.MatMul.weight", self.io_dtype, shape=[self.vocab_size, self.hidden_size], perm=[1, 0])
 
             gather_name = f"{basename}/Gather"
             gather_output = f"{gather_name}/output_0"
