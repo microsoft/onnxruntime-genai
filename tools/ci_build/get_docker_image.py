@@ -22,15 +22,14 @@ log = get_logger("get_docker_image")
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Build a docker image and push it to a remote Azure Container Registry."
-                    "The content in the remote registry can be used as a cache when we need to build the thing again."
-                    "The user must be logged in to the container registry."
+        "The content in the remote registry can be used as a cache when we need to build the thing again."
+        "The user must be logged in to the container registry."
     )
 
     parser.add_argument("--dockerfile", default="Dockerfile", help="Path to the Dockerfile.")
     parser.add_argument("--context", default=".", help="Path to the build context.")
     parser.add_argument(
-        "--docker-build-args", default="",
-        help="Arguments that will be passed to the 'docker build' command."
+        "--docker-build-args", default="", help="Arguments that will be passed to the 'docker build' command."
     )
 
     parser.add_argument(
@@ -39,9 +38,7 @@ def parse_args():
     )
     parser.add_argument("--repository", required=True, help="The image repository name.")
 
-    parser.add_argument("--use_imagecache",
-                        action="store_true",
-                        help="use cached image in pipeline cache")
+    parser.add_argument("--use_imagecache", action="store_true", help="use cached image in pipeline cache")
 
     parser.add_argument("--docker-path", default="docker", help="Path to docker.")
 
@@ -59,11 +56,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    log.debug(
-        "Dockerfile: {}, context: {}, docker build args: '{}'".format(
-            args.dockerfile, args.context, args.docker_build_args
-        )
-    )
+    log.debug(f"Dockerfile: {args.dockerfile}, context: {args.context}, docker build args: '{args.docker_build_args}'")
 
     use_container_registry = args.container_registry is not None
 
@@ -100,8 +93,7 @@ def main():
             "patch",
             "-p1",
             "-i",
-            str((Path(
-                SCRIPT_DIR) / "github" / "linux" / "docker" / "manylinux" / "manylinux.patch").resolve()),
+            str((Path(SCRIPT_DIR) / "github" / "linux" / "docker" / "manylinux" / "manylinux.patch").resolve()),
             cwd=dest,
         )
 

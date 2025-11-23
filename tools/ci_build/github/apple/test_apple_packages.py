@@ -12,9 +12,8 @@ import subprocess
 import sys
 import tempfile
 
-from huggingface_hub import snapshot_download
-
 from c.assemble_c_pod_package import assemble_c_pod_package
+from huggingface_hub import snapshot_download
 from package_assembly_utils import PackageVariant, gen_file_from_template, get_ort_genai_version
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve(strict=True)
@@ -84,7 +83,7 @@ def _test_apple_packages(args):
             public_headers_dir=public_headers_dir,
             framework_dir=framework_dir,
             package_variant=PackageVariant[args.variant],
-            ort_version=args.ort_version
+            ort_version=args.ort_version,
         )
 
         # move podspec out to target_proj_path first
@@ -128,7 +127,7 @@ def _test_apple_packages(args):
         snapshot_download(
             repo_id="microsoft/Phi-3-mini-4k-instruct-onnx",
             allow_patterns="cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4/*",
-            local_dir=model_dir
+            local_dir=model_dir,
         )
 
         # run the tests
@@ -283,9 +282,7 @@ def parse_args():
         help="Run tests for mac catalyst variants. Specify this argument when build targets contains catalyst archs. ",
     )
 
-    parser.add_argument(
-        "--ort_version", required=True, help="The ORT version to depend on."
-    )
+    parser.add_argument("--ort_version", required=True, help="The ORT version to depend on.")
 
     return parser.parse_args()
 

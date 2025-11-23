@@ -14,10 +14,6 @@ from typing import Any
 
 import onnx_ir as ir
 import torch
-from transformers import (
-    AutoConfig,
-)
-
 from builders import (
     ChatGLMModel,
     ErnieModel,
@@ -42,6 +38,9 @@ from builders import (
     Qwen3Model,
     QwenModel,
     SmolLM3Model,
+)
+from transformers import (
+    AutoConfig,
 )
 
 

@@ -1,8 +1,8 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-from .logger import get_logger
-from .run import run
 from .android import *
-from .platform_helpers import is_linux, is_mac, is_windows, is_aix, is_windows_arm
-from .dependency_resolver import download_dependencies, copy_dependencies
+from .dependency_resolver import copy_dependencies, download_dependencies
+from .logger import get_logger
+from .platform_helpers import is_aix, is_linux, is_mac, is_windows, is_windows_arm
+from .run import run

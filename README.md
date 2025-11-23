@@ -156,6 +156,29 @@ This project has adopted the [Microsoft Open Source Code of Conduct](https://ope
 For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
 contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
 
+### Linting
+
+This project enables [lintrunner](https://github.com/suo/lintrunner) for linting. You can install the dependencies and initialize with
+
+```sh
+pip install -r requirements-lintrunner.txt
+lintrunner init
+```
+
+This will install lintrunner on your system and download all the necessary dependencies to run linters locally.
+
+To format local changes:
+
+```bash
+lintrunner -a
+```
+
+To format all files:
+
+```bash
+lintrunner -a --all-files
+```
+
 ## Trademarks
 
 This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft 

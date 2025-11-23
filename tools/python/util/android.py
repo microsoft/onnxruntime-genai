@@ -4,13 +4,10 @@
 import collections
 import contextlib
 import datetime
-import os
-import shutil
 import signal
 import subprocess
 import time
 import typing
-
 from pathlib import Path
 
 from .logger import get_logger
@@ -20,7 +17,7 @@ from .run import run
 # specify __all__ as we import using a wildcard in util/__init__.py so the function names have an 'android' prefix
 # to make it clear where they came from
 # e.g. usage is `util.android.start_emulator(...)` instead of `util.start_emulator(...)`
-__all__ = ["get_sdk_tool_paths", "create_virtual_device", "start_emulator", "stop_emulator"]
+__all__ = ["create_virtual_device", "get_sdk_tool_paths", "start_emulator", "stop_emulator"]
 
 _log = get_logger("util.android")
 
@@ -41,10 +38,10 @@ def get_sdk_tool_paths(sdk_root: Path):
         adb=str((sdk_root / "platform-tools" / filename("adb", "exe")).resolve(strict=True)),
         sdkmanager=str(
             (sdk_root / "cmdline-tools" / "latest" / "bin" / filename("sdkmanager", "bat")).resolve(strict=True)
-            ),
+        ),
         avdmanager=str(
             (sdk_root / "cmdline-tools" / "latest" / "bin" / filename("avdmanager", "bat")).resolve(strict=True)
-            )
+        ),
     )
 
 
@@ -111,7 +108,7 @@ def _stop_process_with_pid(pid: int):
 
 
 def start_emulator(
-    sdk_tool_paths: SdkToolPaths, avd_name: str, extra_args: typing.Optional[typing.Sequence[str]] = None
+    sdk_tool_paths: SdkToolPaths, avd_name: str, extra_args: typing.Sequence[str] | None = None
 ) -> subprocess.Popen:
     with contextlib.ExitStack() as emulator_stack, contextlib.ExitStack() as waiter_stack:
         emulator_args = [
@@ -214,7 +211,7 @@ def start_emulator(
         return emulator_process
 
 
-def stop_emulator(emulator_proc_or_pid: typing.Union[subprocess.Popen, int]):
+def stop_emulator(emulator_proc_or_pid: subprocess.Popen | int):
     if isinstance(emulator_proc_or_pid, subprocess.Popen):
         _stop_process(emulator_proc_or_pid)
     elif isinstance(emulator_proc_or_pid, int):

@@ -40,7 +40,7 @@ def assemble_c_pod_package(
     public_headers_dir: pathlib.Path,
     framework_dir: pathlib.Path,
     package_variant: PackageVariant,
-    ort_version: str
+    ort_version: str,
 ):
     """
     Assembles the files for the C/C++ pod package in a staging directory.
@@ -136,9 +136,7 @@ def parse_args():
         "--variant", choices=PackageVariant.release_variant_names(), required=True, help="Pod package variant."
     )
 
-    parser.add_argument(
-        "--ort-version", required=True, help="The ORT version to depend on."
-    )
+    parser.add_argument("--ort-version", required=True, help="The ORT version to depend on.")
 
     return parser.parse_args()
 
@@ -153,7 +151,7 @@ def main():
         public_headers_dir=args.public_headers_dir,
         framework_dir=args.framework_dir,
         package_variant=PackageVariant[args.variant],
-        ort_version=args.ort_version
+        ort_version=args.ort_version,
     )
 
     return 0
