@@ -212,6 +212,46 @@ python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p p
 
 Note that this is the same as outputting embeddings since the last hidden states are also known as the embeddings.
 
+#### Enable Shared Embeddings
+
+This scenario is for when you want to enable weight sharing between the embedding layer and the language modeling head. This reduces model size and can improve memory efficiency, especially useful for models with tied embeddings (where `tie_word_embeddings=true` in config.json). Shared embeddings are automatically enabled if `tie_word_embeddings=true` in the model's config.json (can be overridden with `shared_embeddings=false`), but cannot be used with `exclude_embeds=true` or `exclude_lm_head=true`. In `-p int4` case, works with RTN and K-quant quantization algorithms.
+
+##### option1: int4 
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true
+
+# From source:
+python3 builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true
+```
+
+##### option2: int4 + int8 embeddings 
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant_last
+
+# From source:
+python3 builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant_last
+```
+
+##### option3: int4 + fp16 embeddings
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_nodes_to_exclude=["/lm_head/MatMul"]
+
+# From source:
+python3 builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_nodes_to_exclude=["/lm_head/MatMul"]
+```
+
+##### option4: fp16(unquantized)
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p fp16 -e cuda --extra_options shared_embeddings=true
+
+# From source:
+python3 builder.py -m model_name -o path_to_output_folder -p fp16 -e cuda --extra_options shared_embeddings=true
+```
+
 #### Enable CUDA Graph
 
 This scenario is for when you want to enable CUDA graph for your ONNX model.

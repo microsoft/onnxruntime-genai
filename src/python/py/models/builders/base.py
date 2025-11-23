@@ -17,10 +17,10 @@ import onnx_ir as ir
 import torch
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
+    KQuantWeightOnlyQuantConfig,
     MatMulNBitsQuantizer,
     QuantFormat,
     RTNWeightOnlyQuantConfig,
-    KQuantWeightOnlyQuantConfig,
 )
 from tqdm import tqdm
 from transformers import (
@@ -379,16 +379,30 @@ class Model:
             )
 
         # Determine if lm_head is unquantized. int4/8 can have options to int4_nodes_to_exclude. FP models are always unquantized.
-        self.unquantized_lm_head = "/lm_head/MatMul" in self.quant_attrs["int4"]["nodes_to_exclude"] or self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}
-        self.shared_embeddings = extra_options.get("shared_embeddings", config.tie_word_embeddings if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None else False)
-        self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {"k_quant_mixed", "k_quant_last", "rtn_last"}
-        
+        self.unquantized_lm_head = "/lm_head/MatMul" in self.quant_attrs["int4"][
+            "nodes_to_exclude"
+        ] or self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}
+        self.shared_embeddings = extra_options.get(
+            "shared_embeddings",
+            config.tie_word_embeddings
+            if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None
+            else False,
+        )
+        self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {
+            "k_quant_mixed",
+            "k_quant_last",
+            "rtn_last",
+        }
+
         # shared_embeddings conflicts with exclude_embeds and exclude_lm_head
         if self.shared_embeddings and (self.exclude_embeds or self.exclude_lm_head):
             self.shared_embeddings = False
         elif self.shared_embeddings and not self.unquantized_lm_head:
             # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
-            self.shared_embeddings = self.int8_lm_head or extra_options.get("int4_algo_config", "default") in {"rtn", "k_quant"}
+            self.shared_embeddings = self.int8_lm_head or extra_options.get("int4_algo_config", "default") in {
+                "rtn",
+                "k_quant",
+            }
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
@@ -637,7 +651,6 @@ class Model:
             int4_algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
         elif quant_method in {"k_quant", "k_quant_mixed", "k_quant_last"}:
-
             if quant_method != "k_quant":
                 customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
 
@@ -1276,21 +1289,42 @@ class Model:
             weight_reshape_name = f"{basename}/Reshape"
             bits = 8 if self.int8_lm_head else 4
             flat_dim = self.hidden_size * bits // 8
-            weight_reshape_inputs = [f"lm_head.MatMul.weight_Q{bits}G{self.int4_block_size}", f"/model/constants/INT64/[{self.vocab_size}, {flat_dim}]"]
+            weight_reshape_inputs = [
+                f"lm_head.MatMul.weight_Q{bits}G{self.int4_block_size}",
+                f"/model/constants/INT64/[{self.vocab_size}, {flat_dim}]",
+            ]
             weight_reshape_output = f"{weight_reshape_name}/output_0"
             # quantized weight dtype is uint8, see here
-            # https://github.com/microsoft/onnxruntime/blob/0c9356cb986fd4cd2c5d510909d31186010ba226/onnxruntime/python/tools/quantization/neural_compressor/weight_only.py#L73        
-            self.make_reshape(weight_reshape_name, weight_reshape_inputs, dtype=ir.DataType.UINT8, shape=[self.vocab_size, flat_dim])
-            self.make_node('GatherBlockQuantized', inputs=[weight_reshape_output, 'input_ids', 'lm_head.MatMul.weight_scale', 'lm_head.MatMul.weight_zp'], outputs=[gather_output], name=gather_name, domain="com.microsoft", bits=bits, block_size=int(self.int4_block_size), gather_axis=0, quantize_axis=1)
+            # https://github.com/microsoft/onnxruntime/blob/0c9356cb986fd4cd2c5d510909d31186010ba226/onnxruntime/python/tools/quantization/neural_compressor/weight_only.py#L73
+            self.make_reshape(
+                weight_reshape_name, weight_reshape_inputs, dtype=ir.DataType.UINT8, shape=[self.vocab_size, flat_dim]
+            )
+            self.make_node(
+                "GatherBlockQuantized",
+                inputs=[weight_reshape_output, "input_ids", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"],
+                outputs=[gather_output],
+                name=gather_name,
+                domain="com.microsoft",
+                bits=bits,
+                block_size=int(self.int4_block_size),
+                gather_axis=0,
+                quantize_axis=1,
+            )
         # Use Transpose + Gather for tied embeddings for float embedding layers
         elif self.shared_embeddings and self.unquantized_lm_head:
             transpose_name = f"{basename}/Transpose"
             transpose_output = f"{transpose_name}/output_0"
-            self.make_transpose(transpose_name, "lm_head.MatMul.weight", self.io_dtype, shape=[self.vocab_size, self.hidden_size], perm=[1, 0])
+            self.make_transpose(
+                transpose_name,
+                "lm_head.MatMul.weight",
+                self.io_dtype,
+                shape=[self.vocab_size, self.hidden_size],
+                perm=[1, 0],
+            )
 
             gather_name = f"{basename}/Gather"
             gather_output = f"{gather_name}/output_0"
-            self.make_node('Gather', inputs=[transpose_output, 'input_ids'], outputs=[gather_output], name=gather_name)
+            self.make_node("Gather", inputs=[transpose_output, "input_ids"], outputs=[gather_output], name=gather_name)
         else:
             weight = "model.embed_tokens.weight"
             self.make_initializer(embedding, weight, to=self.io_dtype)
