@@ -95,6 +95,24 @@ def main(args):
         started_timestamp = 0
         first_token_timestamp = 0
 
+    # Register execution provider library if specified (for plug-in providers)
+    if args.ep_library_path:
+        if args.verbose:
+            print(f"Registering execution provider library: {args.ep_library_path}")
+
+        # Determine the provider registration name based on execution provider
+        provider_registration_name = None
+        if args.execution_provider == "cuda":
+            provider_registration_name = "CUDAExecutionProvider"
+        elif args.execution_provider == "NvTensorRtRtx":
+            provider_registration_name = "NvTensorRTRTXExecutionProvider"
+        else:
+            raise ValueError(f"Provider library registration not supported for '{args.execution_provider}'. Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries.")
+
+        og.register_execution_provider_library(provider_registration_name, args.ep_library_path)
+        if args.verbose:
+            print(f"Successfully registered {provider_registration_name} from {args.ep_library_path}")
+
     config = og.Config(args.model_path)
     if args.execution_provider != "follow_config":
         config.clear_providers()
@@ -257,6 +275,16 @@ if __name__ == "__main__":
         default="follow_config",
         choices=["cpu", "cuda", "dml", "NvTensorRtRtx", "follow_config"],
         help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
+    )
+    parser.add_argument(
+        "-epl",
+        "--ep_library_path",
+        type=str,
+        required=False,
+        default=None,
+        help="Path to the execution provider library DLL/SO for plug-in providers (e.g., onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll). "
+        "Use this to load CUDA or NvTensorRT as plug-in providers instead of built-in. "
+        "Example: -epl 'C:\\path\\to\\onnxruntime_providers_cuda.dll' or -epl '/usr/lib/libonnxruntime_providers_cuda.so'",
     )
     parser.add_argument("-i", "--min_length", type=int, help="Min number of tokens to generate including the prompt")
     parser.add_argument("-l", "--max_length", type=int, help="Max number of tokens to generate including the prompt")
