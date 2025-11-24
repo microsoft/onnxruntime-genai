@@ -153,7 +153,7 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
     }
   }
   if (ort_lib_handle) {
-#if !defined(__ANDROID__) && !defined(__APPLE__)  // RTLD_DI_ORIGIN not available on Android & Darwin
+#if defined(RTLD_DI_ORIGIN)  // unavailable in some environment eg. Android, Darwin or non-glibc
     char pathname[PATH_MAX];
     dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
     LOG_INFO("Loaded native library at %s", pathname);
