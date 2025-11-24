@@ -383,8 +383,40 @@ class Qwen25VLTextModel(Model):
         return flat_cos, flat_sin
 
     def apply_mrope_rotation(self, layer_id, q_or_k_path, q_or_k_shape, dyn_cos, dyn_sin, num_heads, basename):
-        # Use the optimized RotaryEmbedding operator with a single node.
+        # Make nodes for the MRoPE rotation subgraph using RotaryEmbedding op
         #
+        # 1. Flatten 3D caches [3, B, S, H] -> [B*S, H/2] (via make_mrope_flattened_caches)
+        # 2. Generate linear position IDs [B, S] (0 .. B*S-1)
+        # 3. Apply RotaryEmbedding
+        #
+        #      dyn_cos (3, B, S, H)   dyn_sin (3, B, S, H)
+        #              |                      |
+        #    make_mrope_flattened_caches (slice, split, gather, concat, flatten)
+        #              |                      |
+        #        flat_cos               flat_sin
+        #      (B*S, H/2)             (B*S, H/2)
+        #              |                      |
+        #              +-----------+----------+
+        #                          |
+        #      q_or_k              |              position_ids
+        #    (B, S, N*H)           |            (0 .. B*S-1)
+        #        |                 |                 |
+        #     Reshape              |              Reshape
+        #        |                 |                 |
+        #    Transpose             |                 |
+        #   (B, N, S, H)           |               (B, S)
+        #        |                 |                 |
+        #        +--------+--------+--------+--------+
+        #                 |                 |
+        #          RotaryEmbedding (com.microsoft)
+        #                 |
+        #            output (B, N, S, H)
+        #                 |
+        #             Transpose
+        #                 |
+        #              Reshape
+        #            (B, S, N*H)
+
         # 1. Prepare flattened MRoPE caches [B*S, H/2]
         #    This slices, splits, and re-assembles the 3D dynamic caches into the correct per-token layout.
         flat_cos, flat_sin = self.make_mrope_flattened_caches(layer_id, dyn_cos, dyn_sin)
@@ -398,13 +430,15 @@ class Qwen25VLTextModel(Model):
         # Extract B and S
         batch_size_node = f"{basename}/BatchSize/Gather"
         batch_size_out = f"{batch_size_node}/output_0"
-        self.make_gather(batch_size_node, [f"{shape_node}/output_0", "/model/constants/INT64/[0]"], ir.DataType.INT64,
-                         [], 0)
+        self.make_gather(
+            batch_size_node, [f"{shape_node}/output_0", "/model/constants/INT64/[0]"], ir.DataType.INT64, [], 0
+        )
 
         seq_len_node = f"{basename}/SeqLen/Gather"
         seq_len_out = f"{seq_len_node}/output_0"
-        self.make_gather(seq_len_node, [f"{shape_node}/output_0", "/model/constants/INT64/[1]"], ir.DataType.INT64, [],
-                         0)
+        self.make_gather(
+            seq_len_node, [f"{shape_node}/output_0", "/model/constants/INT64/[1]"], ir.DataType.INT64, [], 0
+        )
 
         # Calculate Total Tokens = B * S
         mul_len_node = f"{basename}/TotalLen/Mul"
@@ -415,22 +449,32 @@ class Qwen25VLTextModel(Model):
         # Range(0, TotalTokens)
         range_node = f"{basename}/Range"
         range_out = f"{range_node}/output_0"
-        self.make_node("Range", ["/model/constants/INT64/0", mul_len_out, "/model/constants/INT64/1"], [range_out],
-                       name=range_node)
+        self.make_node(
+            "Range", ["/model/constants/INT64/0", mul_len_out, "/model/constants/INT64/1"], [range_out], name=range_node
+        )
         self.make_value(range_out, ir.DataType.INT64, ["total_token_count"])
 
         # Slice Position IDs shape from input shape (take first 2 dims)
         slice_shape_node = f"{basename}/SliceShape"
         slice_shape_out = f"{slice_shape_node}/output_0"
-        self.make_slice(slice_shape_node,
-                        [f"{shape_node}/output_0", "/model/constants/INT64/[0]", "/model/constants/INT64/[2]",
-                         "/model/constants/INT64/[0]"], ir.DataType.INT64, [2])
+        self.make_slice(
+            slice_shape_node,
+            [
+                f"{shape_node}/output_0",
+                "/model/constants/INT64/[0]",
+                "/model/constants/INT64/[2]",
+                "/model/constants/INT64/[0]",
+            ],
+            ir.DataType.INT64,
+            [2],
+        )
 
         # Reshape Range output to [B, S]
         pos_ids_reshape_node = f"{basename}/PosIds/Reshape"
         pos_ids_out = f"{pos_ids_reshape_node}/output_0"
-        self.make_reshape(pos_ids_reshape_node, [range_out, slice_shape_out], ir.DataType.INT64,
-                          ["batch_size", "sequence_length"])
+        self.make_reshape(
+            pos_ids_reshape_node, [range_out, slice_shape_out], ir.DataType.INT64, ["batch_size", "sequence_length"]
+        )
 
         # 3. Prepare Q/K input [B, N, S, H]
         #    Input is [B, S, N*H]. Reshape -> [B, S, N, H] -> Transpose -> [B, N, S, H]
@@ -498,8 +542,13 @@ class Qwen25VLTextModel(Model):
 
         transpose_out_node = f"{basename}/Output/Transpose"
         transpose_out_out = f"{transpose_out_node}/output_0"
-        self.make_transpose(transpose_out_node, final_rope_output, self.io_dtype,
-                            ["batch_size", "sequence_length", num_heads, self.head_size], [0, 2, 1, 3])
+        self.make_transpose(
+            transpose_out_node,
+            final_rope_output,
+            self.io_dtype,
+            ["batch_size", "sequence_length", num_heads, self.head_size],
+            [0, 2, 1, 3],
+        )
 
         reshape_out_node = f"{basename}/Output/Reshape"
         reshape_out_out = f"{reshape_out_node}/output_0"
@@ -507,7 +556,7 @@ class Qwen25VLTextModel(Model):
             reshape_out_node,
             [transpose_out_out, f"/model/constants/INT64/[0, 0, {num_heads * self.head_size}]"],
             self.io_dtype,
-            q_or_k_shape
+            q_or_k_shape,
         )
 
         return reshape_out_out
