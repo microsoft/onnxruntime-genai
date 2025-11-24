@@ -66,6 +66,7 @@ struct WebGPUMemory final : DeviceBuffer {
     if (!ort_allocator_) {
       throw std::runtime_error("WebGPU allocator not initialized");
     }
+    assert(p_cpu_);
 
     // Get WebGPU allocator's memory info
     const OrtMemoryInfo* webgpu_mem_info = nullptr;
