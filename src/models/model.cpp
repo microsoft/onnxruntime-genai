@@ -553,12 +553,14 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         if (is_primary_session_options) {
           p_device = GetDeviceInterface(DeviceType::CUDA);
 
-          // Create and set our cudaStream_t
-          void* stream_ptr = p_device->GetCudaStream();
-          std::stringstream stream_value;
-          stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
-          std::string stream_value_str = stream_value.str();
-          options.insert({"user_compute_stream", stream_value_str});
+          if (p_device) {
+            // Create and set our cudaStream_t
+            void* stream_ptr = p_device->GetCudaStream();
+            std::stringstream stream_value;
+            stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
+            std::string stream_value_str = stream_value.str();
+            options.insert({"user_compute_stream", stream_value_str});
+          }
         }
 
         session_options.AppendExecutionProvider_V2(GetOrtEnv(), cuda_ep_devices_ptrs, options);
@@ -647,7 +649,89 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 #else
       throw std::runtime_error("DML provider requested, but the installed GenAI has not been built with DML support");
 #endif
+    } else if (provider_options.name == "NvTensorRtRtx") {
+      // Check if NvTensorRTRTXExecutionProvider was pre-registered (plug-in mechanism)
+      auto device_ptrs = GetOrtEnv().GetEpDevices();
+      std::vector<const OrtEpDevice*> nvtrt_ep_devices_ptrs;
+      for (size_t i = 0; i < device_ptrs.size(); ++i) {
+        if (device_ptrs[i]->Name() == "NvTensorRTRTXExecutionProvider") {
+          // The NvTensorRTRTXExecutionProvider library was registered with the ORT environment
+          // Use the pre-registered plug-in provider via the V2 API
+          nvtrt_ep_devices_ptrs.push_back(device_ptrs[i]);
+          break;
+        }
+      }
+
+      if (!nvtrt_ep_devices_ptrs.empty()) {
+        // PATH A: Use Pre-Registered Plug-in Provider
+        std::unordered_map<std::string, std::string> options;
+        for (auto& option : provider_options.options) {
+          options.insert(option);
+        }
+
+        // Configure multi-profile and graph capture settings
+        bool is_multi_profile_enabled = IsMultiProfileEnabled(config.model.decoder.session_options);
+        ConfigureNvTensorRtRtxProfile(config, session_options, is_multi_profile_enabled);
+        if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
+          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.enable_cuda_graph", "1");
+        }
+
+        // Device type determines the scoring device
+        if (is_primary_session_options) {
+          p_device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
+
+          if (p_device) {
+            // Create and set our cudaStream_t
+            void* stream_ptr = p_device->GetCudaStream();
+            std::stringstream stream_value;
+            stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
+            std::string stream_value_str = stream_value.str();
+            options.insert({"user_compute_stream", stream_value_str});
+          }
+        }
+
+        session_options.AppendExecutionProvider_V2(GetOrtEnv(), nvtrt_ep_devices_ptrs, options);
     } else {
+        // PATH B: Fallback to generic AppendExecutionProvider (built-in provider path)
+        // Configure NvTensorRT-specific settings
+        bool is_multi_profile_enabled = IsMultiProfileEnabled(config.model.decoder.session_options);
+        ConfigureNvTensorRtRtxProfile(config, session_options, is_multi_profile_enabled);
+        if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
+          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.enable_cuda_graph", "1");
+        }
+
+        if (is_primary_session_options) {
+          p_device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
+
+          if (p_device) {
+            void* stream_ptr = p_device->GetCudaStream();
+            std::stringstream stream_value;
+            stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
+            std::string stream_value_str = stream_value.str();
+            session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.user_compute_stream", stream_value_str.c_str());
+          }
+        }
+
+        // Let the generic provider registration code below handle the actual provider append
+      }
+    }
+
+    // Generic provider registration for all providers not handled by specific blocks above
+    // This handles: QNN, WebGPU, OpenVINO, VitisAI, and NvTensorRtRtx (when not pre-registered)
+    if (provider_options.name != "cuda" && provider_options.name != "rocm" && provider_options.name != "DML") {
+      // Check if this is NvTensorRtRtx with a pre-registered provider (already handled above)
+      bool nvtrt_already_handled = false;
+      if (provider_options.name == "NvTensorRtRtx") {
+        auto device_ptrs = GetOrtEnv().GetEpDevices();
+        for (size_t i = 0; i < device_ptrs.size(); ++i) {
+          if (device_ptrs[i]->Name() == "NvTensorRTRTXExecutionProvider") {
+            nvtrt_already_handled = true;
+            break;
+          }
+        }
+      }
+
+      if (!nvtrt_already_handled) {
       // For providers that go through the extensible AppendExecutionProvider API:
       if (provider_options.name == "QNN") {
         session_options.AddConfigEntry("ep.share_ep_contexts", "1");
@@ -666,21 +750,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       else if (provider_options.name == "VitisAI") {
         session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
         session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
-      } else if (provider_options.name == "NvTensorRtRtx") {
-        bool is_multi_profile_enabled = IsMultiProfileEnabled(config.model.decoder.session_options);
-        ConfigureNvTensorRtRtxProfile(config, session_options, is_multi_profile_enabled);
-        if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
-          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.enable_cuda_graph", "1");
-        }
-        p_device = GetDeviceInterface(DeviceType::NvTensorRtRtx);
-
-        if (is_primary_session_options && p_device) {
-          void* stream_ptr = p_device->GetCudaStream();
-          std::stringstream stream_value;
-          stream_value << reinterpret_cast<uintptr_t>(stream_ptr);
-          std::string stream_value_str = stream_value.str();
-          session_options.AddConfigEntry("ep.nvtensorrtrtxexecutionprovider.user_compute_stream", stream_value_str.c_str());
-        }
       }
 
 #if USE_WINML
@@ -814,7 +883,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
 
 #endif
-    }
+      }  // end if (!nvtrt_already_handled)
+    }  // end if (provider not cuda/rocm/DML)
   }
   return p_device;
 }
