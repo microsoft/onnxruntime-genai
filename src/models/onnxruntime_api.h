@@ -865,16 +865,10 @@ struct OrtSyncStream {
   /// \brief Create a sync stream for a specific execution provider device
   /// \param ep_device The execution provider device (from OrtEnv::GetEpDevices)
   /// \param stream_options Optional stream configuration options
-  static std::unique_ptr<OrtSyncStream> Create(const OrtEpDevice* ep_device, const OrtKeyValuePairs* stream_options = nullptr) {
-    OrtSyncStream* p_stream = nullptr;
-    Ort::ThrowOnError(Ort::api->CreateSyncStream(ep_device, stream_options, &p_stream));
-    return std::unique_ptr<OrtSyncStream>(p_stream);
-  }
+  static std::unique_ptr<OrtSyncStream> Create(const OrtEpDevice* ep_device, const OrtKeyValuePairs* stream_options = nullptr);
 
   /// \brief Get the native stream handle (e.g., cudaStream_t for CUDA)
-  void* GetHandle() const {
-    return Ort::api->SyncStream_GetHandle(const_cast<OrtSyncStream*>(this));
-  }
+  void* GetHandle() const;
 
   static void operator delete(void* p) {
     if (p) Ort::api->ReleaseSyncStream(reinterpret_cast<OrtSyncStream*>(p));

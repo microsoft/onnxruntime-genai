@@ -256,6 +256,16 @@ inline std::unique_ptr<OrtMemoryInfo> OrtMemoryInfo::Create(const char* name, Or
   return std::unique_ptr<OrtMemoryInfo>{p};
 }
 
+inline std::unique_ptr<OrtSyncStream> OrtSyncStream::Create(const OrtEpDevice* ep_device, const OrtKeyValuePairs* stream_options) {
+  OrtSyncStream* p_stream = nullptr;
+  Ort::ThrowOnError(Ort::api->CreateSyncStreamForEpDevice(ep_device, stream_options, &p_stream));
+  return std::unique_ptr<OrtSyncStream>(p_stream);
+}
+
+inline void* OrtSyncStream::GetHandle() const {
+  return Ort::api->SyncStream_GetHandle(const_cast<OrtSyncStream*>(this));
+}
+
 inline std::unique_ptr<OrtIoBinding> OrtIoBinding::Create(OrtSession& session) {
   OrtIoBinding* p;
   Ort::ThrowOnError(Ort::api->CreateIoBinding(&session, &p));
