@@ -53,23 +53,10 @@ class Qwen25VLTextModel(Model):
             self.attention_attrs["rope_cast"] = {}
         self.attention_attrs["rope_cast"]["use_fp32"] = True
 
-        # Manually get the rope_attention_scaling from the rope_config
-        # Support rope types: 'default' or 'yarn' according to model cards in huggingface. Examples:
-        #   "rope_scaling": {"type": "mrope", "mrope_section": [16, 24,24]}
-        #   "rope_scaling": {"type": "yarn", "mrope_section": [ 16, 24, 24 ], "factor": 4, "original_max_position_embeddings": 32768 }}
-        rope_type = "default"
+        # Check rope type since huggingface model supports yarn but that is not recommended as mentioned in model card. Example:
+        #    "rope_scaling": {"type": "mrope", "mrope_section": [16, 24,24]}
         if config.rope_scaling and "type" in config.rope_scaling:
-            # The config re-maps 'mrope' to 'default'
-            if config.rope_scaling["type"] != "mrope":
-                rope_type = config.rope_scaling["type"]
-        assert rope_type in ["default", "yarn"], f"Unsupported rope_type for this model: {rope_type}"
-
-        self.rope_attention_scaling = 1.0
-        if rope_type == "yarn":
-            factor = config.rope_scaling.get("factor", 1.0)
-            self.rope_attention_scaling = config.rope_scaling.get(
-                "attention_factor", (0.1 * torch.log(torch.tensor(factor)) + 1.0).item()
-            )
+            assert config.rope_scaling["type"] == "mrope"
 
         # Qwen 2.5 VL applies RoPE manually before attention, not fused in the op
         self.attention_attrs["use_rope_in_attn"] = False
@@ -289,43 +276,7 @@ class Qwen25VLTextModel(Model):
             [3, "batch_size", "sequence_length", self.head_size],
         )
 
-        # Apply scaling when rope type is "yarn".
-        cos_final_output = cos_output
-        sin_final_output = sin_output
-        scale = self.rope_attention_scaling
-
-        if scale != 1.0:
-            scale_const_name = f"/model/constants/FLOAT/{scale}"
-
-            cos_mul_name = f"{basename}/cos_scale/Mul"
-            cos_final_output = f"{cos_mul_name}/output_0"
-            self.make_node(
-                "Mul",
-                [cos_output, scale_const_name],
-                [cos_final_output],
-                name=cos_mul_name,
-            )
-            self.make_value(
-                cos_final_output,
-                ir.DataType.FLOAT,
-                [3, "batch_size", "sequence_length", self.head_size],
-            )
-
-            sin_mul_name = f"{basename}/sin_scale/Mul"
-            sin_final_output = f"{sin_mul_name}/output_0"
-            self.make_node(
-                "Mul",
-                [sin_output, scale_const_name],
-                [sin_final_output],
-                name=sin_mul_name,
-            )
-            self.make_value(
-                sin_final_output,
-                ir.DataType.FLOAT,
-                [3, "batch_size", "sequence_length", self.head_size],
-            )
-
-        return cos_final_output, sin_final_output
+        return cos_output, sin_output
 
     def rotate_half(self, x_name, x_shape, basename, compute_dtype):
         # Make nodes for rotate_half subgraph
