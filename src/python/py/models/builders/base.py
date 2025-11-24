@@ -4209,6 +4209,7 @@ class Model:
         #                attention_mask
         #               /              \
         #          ReduceSum          Shape
+        #         (keepdims=0)          |
         #              |                |
         #             Sub             Gather
         #              |                |
@@ -4220,12 +4221,12 @@ class Model:
         # Left path
         reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
         reduce_sum_inputs = ["attention_mask", "/model/constants/INT64/[1]"]
-        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
+        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size"], keepdims=False)
         sub_name = f"{attn_mask_basename}/Sub"
         sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/[1]"]
-        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
+        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT64, shape=["batch_size"])
         cast_1_name = f"{attn_mask_basename}/Sub/Cast"
-        self.make_cast(cast_1_name, f"{sub_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        self.make_cast(cast_1_name, f"{sub_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size"])
 
         # Right path
         shape_name = f"{attn_mask_basename}/Shape"
