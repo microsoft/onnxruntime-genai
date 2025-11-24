@@ -191,6 +191,17 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     
     int64_t height_patches = height / kPatchSize;
     int64_t width_patches = width / kPatchSize;
+    
+    // Validate that patch dimensions are compatible with 2x2 merging
+    if (height_patches % kMergeSize != 0 || width_patches % kMergeSize != 0) {
+      throw std::runtime_error(
+          "Image dimensions " + std::to_string(width) + "x" + std::to_string(height) + 
+          " produce patch grid " + std::to_string(width_patches) + "x" + std::to_string(height_patches) + 
+          " which is not compatible with " + std::to_string(kMergeSize) + "x" + std::to_string(kMergeSize) + " merging. " +
+          "Both dimensions must be divisible by " + std::to_string(kPatchSize * kMergeSize) + " (patch_size * merge_size). " +
+          "Please ensure your image processor resizes images to compatible dimensions.");
+    }
+    
     int64_t total_patches = height_patches * width_patches;
     int64_t patch_dim = channels * kTemporalPatchSize * kPatchSize * kPatchSize;
     
