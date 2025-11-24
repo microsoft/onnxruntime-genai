@@ -4172,10 +4172,10 @@ class Model:
         #               |
         #         Cast to int32
         #               |
-        #           ReduceSum
+        #           ReduceSum (keepdims=0)
         #              /    \
         #             /      \
-        #           Sub    Squeeze
+        #           Sub    ReduceMax
         #            |        |
         #       seqlens_k  total_seq_len
         #         (1D)       (int)
@@ -4187,20 +4187,20 @@ class Model:
         )
         reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
         reduce_sum_inputs = [f"{cast_1_name}/output_0", "/model/constants/INT64/[1]"]
-        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT32, shape=["batch_size"], keepdims=False)
 
         # Left branch: Calculate seqlens_k = ReduceSum - 1
         sub_name = f"{attn_mask_basename}/Sub"
         sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT32/[1]"]
-        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
 
-        # Right branch: Squeeze to get int value for total_seq_len
-        squeeze_name = f"{attn_mask_basename}/Squeeze"
-        squeeze_inputs = [f"{reduce_sum_name}/output_0"]
-        self.make_squeeze(squeeze_name, squeeze_inputs, dtype=ir.DataType.INT32, shape=[])
+        # Right branch: ReduceMax to get maximum int value for total_seq_len
+        reduce_max_name = f"{attn_mask_basename}/ReduceMax"
+        reduce_max_inputs = [f"{reduce_sum_name}/output_0"]
+        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=ir.DataType.INT32, shape=[])
 
         self.mask_attrs["seqlens_k"] = sub_name
-        self.mask_attrs["total_seq_len"] = squeeze_name
+        self.mask_attrs["total_seq_len"] = reduce_max_name
 
     def make_attention_mask_standard_reformatting_for_gqa(self, attn_mask_basename):
         # Make nodes for the attention mask subgraph that calculates
