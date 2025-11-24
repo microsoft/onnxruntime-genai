@@ -179,8 +179,69 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   const int64_t* computed_grid_data = nullptr;
   int64_t computed_grid_num_images = 0;
   
+  // Check if pixel_values is already patched (3D: [batch, num_patches, patch_dim])
+  if (pixel_values_num_dims == 3 && (status != kOrtxOK || !image_grid_thw)) {
+    constexpr int64_t kPatchSize = 14;
+    constexpr int64_t kTemporalPatchSize = 2;
+    constexpr int64_t kChannels = 3;
+    
+    int64_t batch = pixel_values_shape[0];
+    int64_t num_patches = pixel_values_shape[1];
+    int64_t patch_dim = pixel_values_shape[2];
+    
+    // Verify patch_dim matches expected value (C * temporal_patch_size * patch_size * patch_size)
+    int64_t expected_patch_dim = kChannels * kTemporalPatchSize * kPatchSize * kPatchSize;
+    if (patch_dim != expected_patch_dim) {
+      throw std::runtime_error(
+          "Unexpected patch dimension " + std::to_string(patch_dim) + 
+          ", expected " + std::to_string(expected_patch_dim));
+    }
+    
+    // For patched data, we need to infer grid dimensions from num_patches
+    // num_patches = grid_t * grid_h * grid_w
+    // For single images: grid_t = 1, so num_patches = grid_h * grid_w
+    // We need to factor num_patches into grid_h and grid_w
+    // The grid dimensions must be divisible by merge_size (2)
+    
+    // Try to find the grid dimensions by factoring num_patches
+    // Prefer square-ish grids
+    int64_t grid_h = 0;
+    int64_t grid_w = 0;
+    int64_t grid_t = 1;  // Single image = 1 temporal frame
+    
+    // Find factors of num_patches that are both divisible by merge_size
+    for (int64_t h = 1; h * h <= num_patches; ++h) {
+      if (num_patches % h == 0) {
+        int64_t w = num_patches / h;
+        if (h % kMergeSize == 0 && w % kMergeSize == 0) {
+          grid_h = h;
+          grid_w = w;
+        }
+      }
+    }
+    
+    if (grid_h == 0 || grid_w == 0) {
+      throw std::runtime_error(
+          "Could not determine valid grid dimensions from " + std::to_string(num_patches) + 
+          " patches. Grid dimensions must be divisible by merge_size (" + std::to_string(kMergeSize) + ")");
+    }
+    
+    // Create image_grid_thw: [batch, 3]
+    computed_image_grid_thw = OrtValue::CreateTensor<int64_t>(
+        allocator, std::vector<int64_t>{batch, 3});
+    auto* grid_data = computed_image_grid_thw->GetTensorMutableData<int64_t>();
+    
+    for (int64_t b = 0; b < batch; ++b) {
+      grid_data[b * 3 + 0] = grid_t;
+      grid_data[b * 3 + 1] = grid_h;
+      grid_data[b * 3 + 2] = grid_w;
+    }
+    
+    computed_grid_data = grid_data;
+    computed_grid_num_images = batch;
+  }
   // Check if pixel_values needs patching (shape should be [1, height, width, channels] in HWC format)
-  if (pixel_values_num_dims == 4 && pixel_values_shape[0] == 1) {
+  else if (pixel_values_num_dims == 4 && pixel_values_shape[0] == 1) {
     constexpr int64_t kPatchSize = 14;
     constexpr int64_t kTemporalPatchSize = 2;
     constexpr int64_t kChannels = 3;
@@ -290,17 +351,77 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
                              std::make_shared<Tensor>(std::move(patched_pixel_values)));
     }
   } else if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-    named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                           std::make_shared<Tensor>(ProcessTensor<float>(pixel_values, allocator)));
+    // For Qwen, pixel_values from PatchImage may have shape [1, num_patches, patch_dim]
+    // but the model expects [num_patches, patch_dim], so squeeze batch dim if present
+    if (pixel_values_num_dims == 3 && pixel_values_shape[0] == 1) {
+      // Squeeze the batch dimension
+      std::vector<int64_t> squeezed_shape{pixel_values_shape[1], pixel_values_shape[2]};
+      auto squeezed_tensor = OrtValue::CreateTensor<float>(allocator, squeezed_shape);
+      
+      const float* src_data{};
+      CheckResult(OrtxGetTensorData(pixel_values, reinterpret_cast<const void**>(&src_data), 
+                                    &pixel_values_shape, &pixel_values_num_dims));
+      
+      size_t total_elements = squeezed_shape[0] * squeezed_shape[1];
+      std::copy(src_data, src_data + total_elements, squeezed_tensor->GetTensorMutableData<float>());
+      
+      named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                             std::make_shared<Tensor>(std::move(squeezed_tensor)));
+    } else {
+      named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                             std::make_shared<Tensor>(ProcessTensor<float>(pixel_values, allocator)));
+    }
   } else if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
-    named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                           std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(pixel_values, allocator)));
+    // For Qwen, pixel_values from PatchImage may have shape [1, num_patches, patch_dim]
+    // but the model expects [num_patches, patch_dim], so squeeze batch dim if present
+    if (pixel_values_num_dims == 3 && pixel_values_shape[0] == 1) {
+      // Squeeze the batch dimension and convert to bfloat16
+      std::vector<int64_t> squeezed_shape{pixel_values_shape[1], pixel_values_shape[2]};
+      auto squeezed_tensor = OrtValue::CreateTensor<Ort::BFloat16_t>(allocator, squeezed_shape);
+      
+      const float* src_data{};
+      CheckResult(OrtxGetTensorData(pixel_values, reinterpret_cast<const void**>(&src_data), 
+                                    &pixel_values_shape, &pixel_values_num_dims));
+      
+      auto* dst = static_cast<uint16_t*>(squeezed_tensor->GetTensorMutableData<void>());
+      size_t total_elements = squeezed_shape[0] * squeezed_shape[1];
+      for (size_t i = 0; i < total_elements; ++i) {
+        dst[i] = Float32ToBFloat16(src_data[i]);
+      }
+      
+      named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                             std::make_shared<Tensor>(std::move(squeezed_tensor)));
+    } else {
+      named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                             std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(pixel_values, allocator)));
+    }
   } else {
-    named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
-                           std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(pixel_values, allocator)));
+    // Float16 case
+    if (pixel_values_num_dims == 3 && pixel_values_shape[0] == 1) {
+      // Squeeze the batch dimension and convert to float16
+      std::vector<int64_t> squeezed_shape{pixel_values_shape[1], pixel_values_shape[2]};
+      auto squeezed_tensor = OrtValue::CreateTensor<Ort::Float16_t>(allocator, squeezed_shape);
+      
+      const float* src_data{};
+      CheckResult(OrtxGetTensorData(pixel_values, reinterpret_cast<const void**>(&src_data), 
+                                    &pixel_values_shape, &pixel_values_num_dims));
+      
+      auto* dst = static_cast<uint16_t*>(squeezed_tensor->GetTensorMutableData<void>());
+      size_t total_elements = squeezed_shape[0] * squeezed_shape[1];
+      for (size_t i = 0; i < total_elements; ++i) {
+        dst[i] = FastFloat32ToFloat16(src_data[i]);
+      }
+      
+      named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                             std::make_shared<Tensor>(std::move(squeezed_tensor)));
+    } else {
+      named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                             std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(pixel_values, allocator)));
+    }
   }
 
   // Add image_grid_thw tensor (either from processor or computed)
+  // Keep as [1, 3] shape - model expects rank 2
   if (image_grid_thw) {
     named_tensors->emplace("image_grid_thw",
                            std::make_shared<Tensor>(ProcessTensor<int64_t>(image_grid_thw, allocator)));
