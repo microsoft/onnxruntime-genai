@@ -56,7 +56,7 @@ class Qwen25VLTextModel(Model):
         # Check rope type since huggingface model supports yarn but that is not recommended as mentioned in model card. Example:
         #    "rope_scaling": {"type": "mrope", "mrope_section": [16, 24,24]}
         if config.rope_scaling and "type" in config.rope_scaling:
-            assert config.rope_scaling["type"] == "mrope"
+            assert config.rope_scaling["type"] in ["mrope", "default"]
 
         # Qwen 2.5 VL applies RoPE manually before attention, not fused in the op
         self.attention_attrs["use_rope_in_attn"] = False
@@ -278,384 +278,239 @@ class Qwen25VLTextModel(Model):
 
         return cos_output, sin_output
 
-    def rotate_half(self, x_name, x_shape, basename, compute_dtype):
-        # Make nodes for rotate_half subgraph
-        #
-        #       x (B, N, S, H)
-        #             |
-        #           Split
-        #          /     \
-        #         /       \
-        #    x1 (..., H/2)  x2 (..., H/2)
-        #        |          |
-        #        |         Neg
-        #        |          |
-        #        |         -x2
-        #        \         /
-        #         \       /
-        #          Concat
-        #            |
-        #      output (..., H)
+    def make_mrope_flattened_caches(self, layer_id, dyn_cos, dyn_sin):
+        """
+        Converts the 3D MRoPE caches [3, B, S, H] into flattened, interleaved caches [B*S, H/2]
+        suitable for the RotaryEmbedding operator.
+        The logic is:
+        1. Slice dynamic caches to H/2.
+        2. Split into 3 chunks based on mrope_sections (e.g. 16, 24, 24).
+        3. Gather Temporal(0), Height(1), Width(2) specific slices for each chunk.
+        4. Concat back to H/2.
+        5. Flatten to [B*S, H/2].
+        """
+        basename = f"/model/layers.{layer_id}/attn/mrope_flattened_cache"
 
-        # Split: [B, N, S, H] -> [B, N, S, H/2], [B, N, S, H/2]
-        split_name = f"{basename}/rotate_half/Split"
-        split_output_0 = f"{split_name}/output_0"
-        split_output_1 = f"{split_name}/output_1"
-        self.make_node(
-            "Split",
-            [x_name],
-            [split_output_0, split_output_1],
-            name=split_name,
-            axis=-1,
-            num_outputs=2,
-        )
-        half_shape = [*x_shape[:-1], x_shape[-1] // 2]
-        self.make_value(split_output_0, compute_dtype, half_shape)
-        self.make_value(split_output_1, compute_dtype, half_shape)
+        def process_cache(input_name, name_suffix):
+            # 1. Slice to H/2: [3, B, S, H] -> [3, B, S, H/2]
+            slice_name = f"{basename}/{name_suffix}/Slice_Half"
+            slice_output = f"{slice_name}/output_0"
+            self.make_slice(
+                slice_name,
+                [
+                    input_name,
+                    "/model/constants/INT64/[0]",
+                    f"/model/constants/INT64/[{self.head_size // 2}]",
+                    "/model/constants/INT64/[-1]",
+                ],
+                ir.DataType.FLOAT,
+                [3, "batch_size", "sequence_length", self.head_size // 2],
+            )
 
-        # Negate x2
-        neg_name = f"{basename}/rotate_half/Neg"
-        neg_output = f"{neg_name}/output_0"
-        self.make_node("Neg", [split_output_1], [neg_output], name=neg_name)
-        self.make_value(neg_output, compute_dtype, half_shape)
+            # Create a Constant node for mrope_sections: [16, 24, 24]
+            sections_name = f"{basename}/mrope_sections/Constant"
+            sections_output = f"{basename}/mrope_sections"
+            self.make_node(
+                "Constant",
+                [],
+                [sections_output],
+                name=sections_name,
+                value=ir.tensor(torch.tensor(self.mrope_sections, dtype=torch.int64), name=sections_output),
+            )
+            self.make_value(sections_output, ir.DataType.INT64, [3])
 
-        # Concat (-x2, x1)
-        concat_name = f"{basename}/rotate_half/Concat"
-        concat_output = f"{concat_name}/output_0"
-        self.make_concat(concat_name, [neg_output, split_output_0], compute_dtype, x_shape, axis=-1)
+            # 2. Split: [3, B, S, H/2] -> 3 * [3, B, S, section_dim]
+            split_name = f"{basename}/{name_suffix}/Split"
+            split_outputs = [f"{split_name}/output_{i}" for i in range(3)]
+            self.make_node(
+                "Split",
+                [slice_output, sections_output],
+                split_outputs,
+                name=split_name,
+                axis=-1,
+            )
 
-        return concat_output
+            # 3. Gather + Squeeze: Reorder T, H, W
+            gathered_chunks = []
+            for i in range(3):
+                # Chunk 0->T(0), Chunk 1->H(1), Chunk 2->W(2)
+                gather_name = f"{basename}/{name_suffix}/chunk_{i}/Gather"
+                gather_output = f"{gather_name}/output_0"
+                self.make_node(
+                    "Gather",
+                    [split_outputs[i], f"/model/constants/INT64/[{i}]"],
+                    [gather_output],
+                    name=gather_name,
+                    axis=0,
+                )
+                # Gather output is [1, B, S, dim]
+
+                squeeze_name = f"{basename}/{name_suffix}/chunk_{i}/Squeeze"
+                squeeze_output = f"{squeeze_name}/output_0"
+                self.make_squeeze(
+                    squeeze_name,
+                    [gather_output, "/model/constants/INT64/[0]"],
+                    ir.DataType.FLOAT,
+                    ["batch_size", "sequence_length", self.mrope_sections[i]],
+                )
+                gathered_chunks.append(squeeze_output)
+
+            # 4. Concat: -> [B, S, H/2]
+            concat_name = f"{basename}/{name_suffix}/Concat"
+            concat_output = f"{concat_name}/output_0"
+            self.make_concat(
+                concat_name,
+                gathered_chunks,
+                ir.DataType.FLOAT,
+                ["batch_size", "sequence_length", self.head_size // 2],
+                axis=-1,
+            )
+
+            # 5. Flatten: -> [B*S, H/2]
+            reshape_name = f"{basename}/{name_suffix}_flat/Reshape"
+            reshape_output = f"{reshape_name}/output_0"
+            self.make_reshape(
+                reshape_name,
+                [concat_output, f"/model/constants/INT64/[-1, {self.head_size // 2}]"],
+                ir.DataType.FLOAT,
+                ["total_token_count", self.head_size // 2],
+            )
+            return reshape_output
+
+        flat_cos = process_cache(dyn_cos, "cos")
+        flat_sin = process_cache(dyn_sin, "sin")
+
+        return flat_cos, flat_sin
 
     def apply_mrope_rotation(self, layer_id, q_or_k_path, q_or_k_shape, dyn_cos, dyn_sin, num_heads, basename):
-        # Make nodes for the MRoPE rotation subgraph
+        # Use the optimized RotaryEmbedding operator with a single node.
         #
-        # Re-implements apply_multimodal_rotary_pos_emb using ONNX ops.
-        # Takes Q/K tensor and the dynamically generated 3D caches
-        # and applies the rotation.
-        #
-        #      dyn_cos (3, B, S, H)   dyn_sin (3, B, S, H)     q_or_k (B, S, N*H)
-        #              |                      |                        |
-        #            Split                  Split                   Reshape
-        #        (into 6 parts)         (into 6 parts)                 |
-        #              |                      |                    Transpose
-        #      +-------+-------+      +-------+-------+          (B, N, S, H)
-        #      |    ...loop... |      |    ...loop... |                |
-        #    Gather(dim_idx)   |    Gather(dim_idx)   |                |
-        #      |               |      |               |                |
-        #   Unsqueeze          |    Unsqueeze         |                |
-        #      |               |      |               |                |
-        #      +-------+-------+      +-------+-------+                |
-        #              |                      |                        |
-        #            Concat                 Concat                     |
-        #         (B, 1, S, H)           (B, 1, S, H)                  |
-        #              |                      |                        |
-        #              +-----------+----------+                        |
-        #                          |                                   |
-        #                  (Mixed Precision Casts)                     |
-        #                          |                                   |
-        #                          +-----------------------+-----------+
-        #                                                  |
-        #                                       (q * cos) + (rotate_half(q) * sin)
-        #                                                  |
-        #                                              Transpose
-        #                                                  |
-        #                                               Reshape
-        #
+        # 1. Prepare flattened MRoPE caches [B*S, H/2]
+        #    This slices, splits, and re-assembles the 3D dynamic caches into the correct per-token layout.
+        flat_cos, flat_sin = self.make_mrope_flattened_caches(layer_id, dyn_cos, dyn_sin)
 
-        # --- Handle precision for RoPE ---
-        # Check if we need to force float32 computation
+        # 2. Prepare position_ids [B, S] (values 0 to B*S - 1)
+        #    RotaryEmbedding will use these indices to access the flattened cache.
+        #    Get B*S from q_or_k shape. q_or_k is [B, S, N*H].
+        shape_node = f"{basename}/Shape"
+        self.make_shape(shape_node, q_or_k_path, [3])
+
+        # Extract B and S
+        batch_size_node = f"{basename}/BatchSize/Gather"
+        batch_size_out = f"{batch_size_node}/output_0"
+        self.make_gather(batch_size_node, [f"{shape_node}/output_0", "/model/constants/INT64/[0]"], ir.DataType.INT64,
+                         [], 0)
+
+        seq_len_node = f"{basename}/SeqLen/Gather"
+        seq_len_out = f"{seq_len_node}/output_0"
+        self.make_gather(seq_len_node, [f"{shape_node}/output_0", "/model/constants/INT64/[1]"], ir.DataType.INT64, [],
+                         0)
+
+        # Calculate Total Tokens = B * S
+        mul_len_node = f"{basename}/TotalLen/Mul"
+        mul_len_out = f"{mul_len_node}/output_0"
+        self.make_node("Mul", [batch_size_out, seq_len_out], [mul_len_out], name=mul_len_node)
+        self.make_value(mul_len_out, ir.DataType.INT64, [])
+
+        # Range(0, TotalTokens)
+        range_node = f"{basename}/Range"
+        range_out = f"{range_node}/output_0"
+        self.make_node("Range", ["/model/constants/INT64/0", mul_len_out, "/model/constants/INT64/1"], [range_out],
+                       name=range_node)
+        self.make_value(range_out, ir.DataType.INT64, ["total_token_count"])
+
+        # Slice Position IDs shape from input shape (take first 2 dims)
+        slice_shape_node = f"{basename}/SliceShape"
+        slice_shape_out = f"{slice_shape_node}/output_0"
+        self.make_slice(slice_shape_node,
+                        [f"{shape_node}/output_0", "/model/constants/INT64/[0]", "/model/constants/INT64/[2]",
+                         "/model/constants/INT64/[0]"], ir.DataType.INT64, [2])
+
+        # Reshape Range output to [B, S]
+        pos_ids_reshape_node = f"{basename}/PosIds/Reshape"
+        pos_ids_out = f"{pos_ids_reshape_node}/output_0"
+        self.make_reshape(pos_ids_reshape_node, [range_out, slice_shape_out], ir.DataType.INT64,
+                          ["batch_size", "sequence_length"])
+
+        # 3. Prepare Q/K input [B, N, S, H]
+        #    Input is [B, S, N*H]. Reshape -> [B, S, N, H] -> Transpose -> [B, N, S, H]
+        reshape_in_node = f"{basename}/Input/Reshape"
+        reshape_in_out = f"{reshape_in_node}/output_0"
+        self.make_reshape(
+            reshape_in_node,
+            [q_or_k_path, f"/model/constants/INT64/[0, 0, {num_heads}, {self.head_size}]"],
+            self.io_dtype,
+            ["batch_size", "sequence_length", num_heads, self.head_size],
+        )
+
+        transpose_in_node = f"{basename}/Input/Transpose"
+        transpose_in_out = f"{transpose_in_node}/output_0"
+        target_shape_bnsh = ["batch_size", num_heads, "sequence_length", self.head_size]
+        self.make_transpose(transpose_in_node, reshape_in_out, self.io_dtype, target_shape_bnsh, [0, 2, 1, 3])
+
+        # 4. Handle Type Casting
+        #    RotaryEmbedding requires input, cos, sin to be same type.
+        #    Qwen2.5-VL forces float32 computation.
         force_fp32 = self.attention_attrs.get("rope_cast", {}).get("use_fp32", False)
-
-        # Set compute_dtype (precision for math) and output_dtype (final precision)
         compute_dtype = ir.DataType.FLOAT if force_fp32 else self.io_dtype
-        output_dtype = self.io_dtype
-        # --------------------------------
 
-        # Create a Constant node for mrope_splits
-        # This holds the correct splits, e.g., [16, 24, 24, 16, 24, 24]
-        mrope_splits_node_name = f"{basename}/mrope_splits/Constant"
-        mrope_splits_output_name = f"{basename}/mrope_splits"
-        mrope_splits_tensor = ir.tensor(
-            torch.tensor(self.mrope_splits, dtype=torch.int64),
-            name=mrope_splits_output_name,
-        )
-        self.make_node(
-            "Constant",
-            inputs=[],
-            outputs=[mrope_splits_output_name],
-            name=mrope_splits_node_name,
-            value=mrope_splits_tensor,
-        )
-        self.make_value(mrope_splits_output_name, ir.DataType.INT64, [len(self.mrope_splits)])
-
-        # Split the dynamic caches [3, B, S, H] into 6 chunks on axis -1
-        # Caches (dyn_cos, dyn_sin) are already in float32
-        num_splits = len(self.mrope_splits)
-
-        cos_split_name = f"{basename}/cos/Split"
-        cos_split_outputs = [f"{cos_split_name}/output_{i}" for i in range(num_splits)]
-        self.make_node(
-            "Split",
-            [dyn_cos, mrope_splits_output_name],
-            cos_split_outputs,
-            name=cos_split_name,
-            axis=-1,
-        )
-
-        sin_split_name = f"{basename}/sin/Split"
-        sin_split_outputs = [f"{sin_split_name}/output_{i}" for i in range(num_splits)]
-        self.make_node(
-            "Split",
-            [dyn_sin, mrope_splits_output_name],
-            sin_split_outputs,
-            name=sin_split_name,
-            axis=-1,
-        )
-
-        # Re-order the caches: [T, H, W, T, H, W]
-        cos_reordered = []
-        sin_reordered = []
-        for i in range(num_splits):
-            dim_chunk = self.mrope_splits[i]
-            cache_dim_to_use = i % 3  # 0 for T, 1 for H, 2 for W
-
-            # Gather from dim 0 of the split cache chunk
-            # input is [3, B, S, H_chunk], indices is [0, 1, or 2]
-            gather_cos_name = f"{basename}/cos_{i}/Gather"
-            gather_cos_output = f"{gather_cos_name}/output_0"
-            self.make_node(
-                "Gather",
-                [cos_split_outputs[i], f"/model/constants/INT64/[{cache_dim_to_use}]"],
-                [gather_cos_output],
-                name=gather_cos_name,
-                axis=0,
-            )
-            self.make_value(
-                gather_cos_output,
-                ir.DataType.FLOAT,
-                [1, "batch_size", "sequence_length", dim_chunk],
-            )  # Shape [1, B, S, H_chunk]
-
-            gather_sin_name = f"{basename}/sin_{i}/Gather"
-            gather_sin_output = f"{gather_sin_name}/output_0"
-            self.make_node(
-                "Gather",
-                [sin_split_outputs[i], f"/model/constants/INT64/[{cache_dim_to_use}]"],
-                [gather_sin_output],
-                name=gather_sin_name,
-                axis=0,
-            )
-            self.make_value(
-                gather_sin_output,
-                ir.DataType.FLOAT,
-                [1, "batch_size", "sequence_length", dim_chunk],
-            )  # Shape [1, B, S, H_chunk]
-
-            # FIX: Squeeze the gathered cache to [B, S, H_chunk]
-            squeeze_cos_name = f"{basename}/cos_{i}/Squeeze"
-            squeeze_cos_output = f"{squeeze_cos_name}/output_0"
-            self.make_squeeze(
-                squeeze_cos_name,
-                [gather_cos_output, "/model/constants/INT64/[0]"],
-                ir.DataType.FLOAT,
-                ["batch_size", "sequence_length", dim_chunk],
-            )
-
-            squeeze_sin_name = f"{basename}/sin_{i}/Squeeze"
-            squeeze_sin_output = f"{squeeze_sin_name}/output_0"
-            self.make_squeeze(
-                squeeze_sin_name,
-                [gather_sin_output, "/model/constants/INT64/[0]"],
-                ir.DataType.FLOAT,
-                ["batch_size", "sequence_length", dim_chunk],
-            )
-
-            # Unsqueeze to add the NumHeads dim: [B, 1, S, H_chunk]
-            unsqueeze_cos_name = f"{basename}/cos_{i}/Unsqueeze"
-            unsqueeze_cos_output = f"{unsqueeze_cos_name}/output_0"
-            self.make_unsqueeze(
-                unsqueeze_cos_name,
-                [squeeze_cos_output, "/model/constants/INT64/[1]"],
-                ir.DataType.FLOAT,
-                ["batch_size", 1, "sequence_length", dim_chunk],
-            )
-            cos_reordered.append(unsqueeze_cos_output)
-
-            unsqueeze_sin_name = f"{basename}/sin_{i}/Unsqueeze"
-            unsqueeze_sin_output = f"{unsqueeze_sin_name}/output_0"
-            self.make_unsqueeze(
-                unsqueeze_sin_name,
-                [squeeze_sin_output, "/model/constants/INT64/[1]"],
-                ir.DataType.FLOAT,
-                ["batch_size", 1, "sequence_length", dim_chunk],
-            )
-            sin_reordered.append(unsqueeze_sin_output)
-
-        # Concat re-ordered chunks back to [B, 1, S, H]
-        final_cos_concat_name = f"{basename}/cos_final/Concat"
-        final_cos_concat_output = f"{final_cos_concat_name}/output_0"
-        self.make_concat(
-            final_cos_concat_name,
-            cos_reordered,
-            ir.DataType.FLOAT,
-            ["batch_size", 1, "sequence_length", self.head_size],
-            axis=-1,
-        )
-
-        final_sin_concat_name = f"{basename}/sin_final/Concat"
-        final_sin_concat_output = f"{final_sin_concat_name}/output_0"
-        self.make_concat(
-            final_sin_concat_name,
-            sin_reordered,
-            ir.DataType.FLOAT,
-            ["batch_size", 1, "sequence_length", self.head_size],
-            axis=-1,
-        )
-
-        # Caches (final_cos_concat_output, final_sin_concat_output) are now in float32
-
-        # Reshape input Q/K: [B, S, N*H] -> [B, S, N, H]
-        reshape_1_name = f"{basename}/q_or_k_bsd_to_bsnh/Reshape"
-        reshape_1_output = f"{reshape_1_name}/output_0"
-        reshape_1_target_shape_onnx = f"/model/constants/INT64/[0, 0, {num_heads}, {self.head_size}]"
-        reshape_1_target_shape_ort = [
-            "batch_size",
-            "sequence_length",
-            num_heads,
-            self.head_size,
-        ]
-        self.make_reshape(
-            reshape_1_name,
-            [q_or_k_path, reshape_1_target_shape_onnx],
-            self.io_dtype,
-            reshape_1_target_shape_ort,
-        )
-
-        # Transpose Q/K: [B, S, N, H] -> [B, N, S, H]
-        transpose_1_name = f"{basename}/q_or_k_bsnh_to_bnsh/Transpose"
-        transpose_1_output = f"{transpose_1_name}/output_0"
-        transpose_1_target_shape = [
-            "batch_size",
-            num_heads,
-            "sequence_length",
-            self.head_size,
-        ]
-        self.make_transpose(
-            transpose_1_name,
-            reshape_1_output,
-            self.io_dtype,
-            transpose_1_target_shape,
-            perm=[0, 2, 1, 3],
-        )
-
-        # --- Start RoPE computation ---
-        q_or_k_compute_input = transpose_1_output
-        cos_cache_compute_input = final_cos_concat_output
-        sin_cache_compute_input = final_sin_concat_output
-
+        rope_input = transpose_in_out
         if force_fp32 and self.io_dtype != ir.DataType.FLOAT:
-            # Cast Q/K (self.io_dtype) up to float32
-            q_or_k_cast_name = f"{basename}/q_or_k/Cast"
-            q_or_k_cast_output = f"{q_or_k_cast_name}/output_0"
-            self.make_cast(
-                q_or_k_cast_name,
-                transpose_1_output,
-                compute_dtype,
-                transpose_1_target_shape,
-            )
-            q_or_k_compute_input = q_or_k_cast_output
-        elif not force_fp32 and self.io_dtype != ir.DataType.FLOAT:
-            # Cast Caches (float32) down to self.io_dtype
-            cos_cache_cast_name = f"{basename}/cos_final/Cast"
-            cos_cache_cast_output = f"{cos_cache_cast_name}/output_0"
-            self.make_cast(
-                cos_cache_cast_name,
-                final_cos_concat_output,
-                compute_dtype,
-                ["batch_size", 1, "sequence_length", self.head_size],
-            )
-            cos_cache_compute_input = cos_cache_cast_output
+            cast_in_node = f"{basename}/Input/Cast"
+            rope_input = f"{cast_in_node}/output_0"
+            self.make_cast(cast_in_node, transpose_in_out, compute_dtype, target_shape_bnsh)
 
-            sin_cache_cast_name = f"{basename}/sin_final/Cast"
-            sin_cache_cast_output = f"{sin_cache_cast_name}/output_0"
-            self.make_cast(
-                sin_cache_cast_name,
-                final_sin_concat_output,
-                compute_dtype,
-                ["batch_size", 1, "sequence_length", self.head_size],
-            )
-            sin_cache_compute_input = sin_cache_cast_output
+        rope_cos = flat_cos
+        rope_sin = flat_sin
+        # Note: dyn_cos is Float. flat_cos is Float. If compute_dtype is not Float (e.g. fp16), we must cast cache.
+        if compute_dtype != ir.DataType.FLOAT:
+            # Cache is Float, we need FP16
+            cast_cos_node = f"{basename}/Cos/Cast"
+            rope_cos = f"{cast_cos_node}/output_0"
+            self.make_cast(cast_cos_node, flat_cos, compute_dtype, ["total_token_count", self.head_size // 2])
 
-        # Apply rotation: (q * cos) + (rotate_half(q) * sin)
+            cast_sin_node = f"{basename}/Sin/Cast"
+            rope_sin = f"{cast_sin_node}/output_0"
+            self.make_cast(cast_sin_node, flat_sin, compute_dtype, ["total_token_count", self.head_size // 2])
 
-        # 1. (q * cos)
-        mul_1_name = f"{basename}/Mul_1"
-        mul_1_output = f"{mul_1_name}/output_0"
-        self.make_mul(
-            mul_1_name,
-            [q_or_k_compute_input, cos_cache_compute_input],
-            compute_dtype,
-            transpose_1_target_shape,
+        # 5. RotaryEmbedding Node
+        rope_node = f"{basename}/RotaryEmbedding"
+        rope_output = f"{rope_node}/output_0"
+        self.make_node(
+            "RotaryEmbedding",
+            [rope_input, pos_ids_out, rope_cos, rope_sin],
+            [rope_output],
+            name=rope_node,
+            domain="com.microsoft",
+            rotary_embedding_dim=self.head_size,
+            num_heads=num_heads,
+            interleaved=0,  # False, matches rotate_half logic
         )
+        self.make_value(rope_output, compute_dtype, target_shape_bnsh)
 
-        # 2. rotate_half(q)
-        rotated_half_q_name = self.rotate_half(q_or_k_compute_input, transpose_1_target_shape, basename, compute_dtype)
-
-        # 3. (rotate_half(q) * sin)
-        mul_2_name = f"{basename}/Mul_2"
-        mul_2_output = f"{mul_2_name}/output_0"
-        self.make_mul(
-            mul_2_name,
-            [rotated_half_q_name, sin_cache_compute_input],
-            compute_dtype,
-            transpose_1_target_shape,
-        )
-
-        # 4. (q * cos) + (rotate_half(q) * sin)
-        add_name = f"{basename}/add/Add"
-        add_output = f"{add_name}/output_0"
-        self.make_add(
-            add_name,
-            [mul_1_output, mul_2_output],
-            compute_dtype,
-            transpose_1_target_shape,
-        )
-
-        # --- End RoPE computation ---
-
-        add_output_final = add_output
+        # 6. Post-process Output
+        #    Cast back if needed -> Transpose -> Reshape
+        final_rope_output = rope_output
         if force_fp32 and self.io_dtype != ir.DataType.FLOAT:
-            # Cast result back down to self.io_dtype
-            add_cast_name = f"{basename}/add/Cast"
-            add_cast_output = f"{add_cast_name}/output_0"
-            self.make_cast(add_cast_name, add_output, output_dtype, transpose_1_target_shape)
-            add_output_final = add_cast_output
+            cast_out_node = f"{basename}/Output/Cast"
+            final_rope_output = f"{cast_out_node}/output_0"
+            self.make_cast(cast_out_node, rope_output, self.io_dtype, target_shape_bnsh)
 
-        # Transpose back: [B, N, S, H] -> [B, S, N, H]
-        transpose_2_name = f"{basename}/q_or_k_bnsh_to_bsnh/Transpose"
-        transpose_2_output = f"{transpose_2_name}/output_0"
-        self.make_transpose(
-            transpose_2_name,
-            add_output_final,
-            output_dtype,
-            reshape_1_target_shape_ort,
-            perm=[0, 2, 1, 3],
-        )
+        transpose_out_node = f"{basename}/Output/Transpose"
+        transpose_out_out = f"{transpose_out_node}/output_0"
+        self.make_transpose(transpose_out_node, final_rope_output, self.io_dtype,
+                            ["batch_size", "sequence_length", num_heads, self.head_size], [0, 2, 1, 3])
 
-        # Reshape back: [B, S, N, H] -> [B, S, N*H]
-        reshape_2_name = f"{basename}/q_or_k_bsnh_to_bsd/Reshape"
-        reshape_2_output = f"{reshape_2_name}/output_0"
+        reshape_out_node = f"{basename}/Output/Reshape"
+        reshape_out_out = f"{reshape_out_node}/output_0"
         self.make_reshape(
-            reshape_2_name,
-            [
-                transpose_2_output,
-                f"/model/constants/INT64/[0, 0, {num_heads * self.head_size}]",
-            ],
-            output_dtype,
-            q_or_k_shape,
+            reshape_out_node,
+            [transpose_out_out, f"/model/constants/INT64/[0, 0, {num_heads * self.head_size}]"],
+            self.io_dtype,
+            q_or_k_shape
         )
 
-        return reshape_2_output
+        return reshape_out_out
 
     def make_attention(self, layer_id, attention, root_input, **kwargs):
         # Make nodes for the Attention subgraph (with MRoPE)
