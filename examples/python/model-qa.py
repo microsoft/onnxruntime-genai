@@ -282,9 +282,9 @@ if __name__ == "__main__":
         type=str,
         required=False,
         default=None,
-        help="Path to the execution provider library DLL/SO for plug-in providers (e.g., onnxruntime_providers_cuda.dll or onnxruntime_providers_tensorrt.dll). "
+        help="Path to the execution provider library DLL for plug-in providers. "
         "Use this to load CUDA or NvTensorRT as plug-in providers instead of built-in. "
-        "Example: -epl 'C:\\path\\to\\onnxruntime_providers_cuda.dll' or -epl '/usr/lib/libonnxruntime_providers_cuda.so'",
+        "Example: -epl 'C:\\path\\to\\onnxruntime_providers_cuda.dll'",
     )
     parser.add_argument("-i", "--min_length", type=int, help="Min number of tokens to generate including the prompt")
     parser.add_argument("-l", "--max_length", type=int, help="Max number of tokens to generate including the prompt")

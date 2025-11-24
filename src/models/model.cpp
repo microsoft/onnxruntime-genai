@@ -663,7 +663,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
 
       GetRyzenAIInterface()->SetupProvider(session_options, provider_options.options);
     } else if (provider_options.name == "NvTensorRtRtx") {
-      // Check if NvTensorRTRTXExecutionProvider was pre-registered (plug-in mechanism)
+      // Check if NvTensorRTRTXExecutionProvider was pre-registered
       auto device_ptrs = GetOrtEnv().GetEpDevices();
       std::vector<const OrtEpDevice*> nvtrt_ep_devices_ptrs;
       for (size_t i = 0; i < device_ptrs.size(); ++i) {
@@ -681,8 +681,6 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         for (auto& option : provider_options.options) {
           options.insert(option);
         }
-
-        // Configure multi-profile and graph capture settings
         bool is_multi_profile_enabled = IsMultiProfileEnabled(config.model.decoder.session_options);
         ConfigureNvTensorRtRtxProfile(config, session_options, is_multi_profile_enabled);
         if (IsGraphCaptureEnabled(config.model.decoder.session_options)) {
