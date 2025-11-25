@@ -123,7 +123,7 @@ void VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, co
                                                          model_.config_->model.vision.outputs.image_features,
                                                          num_images_, num_image_tokens_);
   image_features_->Add();
-  
+
   // For pipeline models, delegate to vision pipeline state
   if (vision_pipeline_state_) {
     vision_pipeline_state_->SetExtraInputs(extra_inputs, num_images, num_image_tokens);
@@ -137,19 +137,19 @@ DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next
   if (model_.config_->model.vision.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.vision.run_options.value());
   }
-  
+
   // Check if using pipeline
   if (vision_pipeline_state_) {
     // Delegate to vision pipeline state
     vision_pipeline_state_->Run(current_length, next_tokens, next_indices);
-    
+
     // Copy final output to image_features_ if needed
     // The image_features_ buffer will be used by embedding state
   } else {
     // Single vision model (legacy)
     State::Run(*model_.vision_session_);
   }
-  
+
   return {};
 }
 
