@@ -8,7 +8,12 @@
 
 // C++ API Example
 
-void CXX_API(const char* model_path, const char* execution_provider) {
+void CXX_API(const char* model_path, const char* execution_provider, const char* ep_library_path) {
+  // Register execution provider library if specified (for plug-in providers)
+  std::string provider(execution_provider);
+  std::string library_path(ep_library_path);
+  register_provider_library(provider, library_path);
+
   std::cout << "Creating config..." << std::endl;
   auto config = OgaConfig::Create(model_path);
 
@@ -102,8 +107,8 @@ void CXX_API(const char* model_path, const char* execution_provider) {
 }
 
 int main(int argc, char** argv) {
-  std::string model_path, ep;
-  if (!parse_args(argc, argv, model_path, ep)) {
+  std::string model_path, ep, ep_library_path;
+  if (!parse_args(argc, argv, model_path, ep, &ep_library_path)) {
     return -1;
   }
 
@@ -112,7 +117,7 @@ int main(int argc, char** argv) {
   std::cout << "-----------------------------" << std::endl;
 
   std::cout << "C++ API" << std::endl;
-  CXX_API(model_path.c_str(), ep.c_str());
+  CXX_API(model_path.c_str(), ep.c_str(), ep_library_path.c_str());
 
   return 0;
 }

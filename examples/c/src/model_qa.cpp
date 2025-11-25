@@ -115,7 +115,7 @@ void CXX_API(const char* model_path, const char* execution_provider, const char*
 
 int main(int argc, char** argv) {
   std::string model_path, ep, ep_library_path;
-  if (!parse_args(argc, argv, model_path, ep, ep_library_path)) {
+  if (!parse_args(argc, argv, model_path, ep, &ep_library_path)) {
     return -1;
   }
 
