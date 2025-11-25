@@ -42,8 +42,8 @@ std::string Trim(const std::string& str);
 // Returns true if model_path, ep, and ep_library_path were able to be set from user cmd-line args.
 // Returns false if insufficient cmd-line arguments were passed.
 // Note: ep will be set to "follow_config" if user only gives model_path
-// Note: ep_library_path will be empty if not provided
-bool parse_args(int /*argc*/, char** argv, std::string& model_path, std::string& ep, std::string& ep_library_path);
+// Note: ep_library_path will be empty if not provided (or if nullptr is passed)
+bool parse_args(int /*argc*/, char** argv, std::string& model_path, std::string& ep, std::string* ep_library_path = nullptr);
 
 // Append provider / options to config.
 // This is a no-op if provider=="follow_config"
