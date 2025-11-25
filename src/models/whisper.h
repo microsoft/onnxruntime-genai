@@ -12,6 +12,9 @@ namespace Generators {
 struct WhisperModel : Model {
   WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
+  bool EncoderHasCrossPresentKVOutputs() const { return session_info_.HasOutput("present_key_cross_0") &&
+                                                        session_info_.HasOutput("present_key_cross_1"); }
+
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
   std::unique_ptr<OrtSession> session_encoder_;  // audio_features -> encoder_hidden_states, cross_kv_cache
@@ -62,7 +65,7 @@ struct WhisperDecoderState : State {
   const WhisperModel& model_;
 
   DefaultInputIDs input_ids_{*this};                        // Model input
-  DefaultKeyValueCache kv_cache_{*this};                    // Model input and output
+  std::unique_ptr<KeyValueCache> kv_cache_;
   
   // Inputs for beam search attention
   std::unique_ptr<OrtValue> past_sequence_length_;          // Model input
