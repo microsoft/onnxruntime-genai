@@ -3,6 +3,7 @@
 
 #include "../generators.h"
 #include "multi_modal.h"
+#include <numeric>
 
 namespace Generators {
 
@@ -178,10 +179,12 @@ DeviceSpan<float> EmbeddingState::Run(int current_length, DeviceSpan<int32_t>& n
   return {};
 }
 
-DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params)
+DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int32_t> sequence_lengths,
+                           const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
+      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)}
+{
   inputs_embeds_.Add();
   position_inputs_->Add();
   logits_.Add();
@@ -202,6 +205,13 @@ void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int tot
   int batch_size = static_cast<int>(inputs_embeds_.GetShape()[0]);
   size_t new_length = next_tokens.size() / batch_size;
   position_inputs_->Update(next_tokens, total_length, static_cast<int>(new_length));
+  kv_cache_.Update(beam_indices, total_length);
+  logits_.Update(next_tokens, new_length);
+  inputs_embeds_.UpdateSequenceLength(new_length);
+}
+
+// Overload for pipeline to call
+void DecoderState::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int total_length, DeviceSpan<int32_t> beam_indices, size_t new_length) {
   kv_cache_.Update(beam_indices, total_length);
   logits_.Update(next_tokens, new_length);
   inputs_embeds_.UpdateSequenceLength(new_length);
@@ -243,6 +253,25 @@ void MultiModalPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extr
     speech_state_->SetExtraInputs(extra_inputs, num_audio_tokens_);
   }
   embedding_state_->SetExtraInputs(num_images_, num_image_tokens_, num_audio_tokens_);
+
+  // Set the grid tensors for Qwen2-VL if present
+  if (auto* qwen_pos_inputs = dynamic_cast<Qwen2VLPositionInputs*>(decoder_state_->position_inputs_.get())) {
+    std::shared_ptr<Tensor> img_grid, vid_grid, sec_grid;
+
+    for (const auto& input : extra_inputs) {
+      if (input.name == Config::Defaults::ImageGridThwName) {
+        img_grid = input.tensor;
+      } else if (input.name == "video_grid_thw") {
+        vid_grid = input.tensor;
+      } else if (input.name == "second_per_grid_ts") {
+        sec_grid = input.tensor;
+      }
+    }
+
+    if (img_grid || vid_grid) {
+      qwen_pos_inputs->SetGridTensors(img_grid, vid_grid, sec_grid);
+    }
+  }
 }
 
 DeviceSpan<float> MultiModalPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {

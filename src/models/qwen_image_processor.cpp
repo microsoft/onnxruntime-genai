@@ -10,13 +10,12 @@ namespace Generators {
 
 namespace {
 
-constexpr int64_t kMergeSize = 2;  // Qwen2-VL merge size for vision tokens
-
+// constexpr int64_t kMergeSize = 2;  // Qwen2-VL merge size for vision tokens
 std::tuple<std::unique_ptr<OrtValue>, std::unique_ptr<OrtValue>>
 ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& prompt,
                    OrtxTensor* pixel_values, OrtxTensor* image_grid_thw, 
                    const int64_t* computed_grid_data, int64_t computed_grid_num_images,
-                   Ort::Allocator& allocator) {
+                   Ort::Allocator& allocator, int64_t spatial_merge_size) {
   constexpr char vision_start_token[] = "<|vision_start|>";
   constexpr char vision_end_token[] = "<|vision_end|>";
   constexpr char image_pad_token[] = "<|image_pad|>";
@@ -50,7 +49,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
       int64_t t = image_grid_thw_data[i * 3 + 0];
       int64_t h = image_grid_thw_data[i * 3 + 1];
       int64_t w = image_grid_thw_data[i * 3 + 2];
-      total_image_tokens += (t * h * w) / (kMergeSize * kMergeSize);
+      total_image_tokens += (t * h * w) / (spatial_merge_size * spatial_merge_size);
     }
   }
 
@@ -96,7 +95,7 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
       int64_t t = image_grid_thw_data[image_idx * 3 + 0];
       int64_t h = image_grid_thw_data[image_idx * 3 + 1];
       int64_t w = image_grid_thw_data[image_idx * 3 + 2];
-      int64_t num_pads = (t * h * w) / (kMergeSize * kMergeSize);
+      int64_t num_pads = (t * h * w) / (spatial_merge_size * spatial_merge_size);
       
       // Add vision_start, image_pad tokens, and vision_end
       modified_text += vision_start_token;
@@ -136,7 +135,8 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
 }  // namespace
 
 QwenImageProcessor::QwenImageProcessor(Config& config, const SessionInfo& session_info)
-    : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)} {
+    : pixel_values_type_{session_info.GetInputDataType(config.model.vision.inputs.pixel_values)},
+      spatial_merge_size_{config.model.vision.spatial_merge_size} {
   const auto processor_config = (config.config_path / fs::path(config.model.vision.config_filename)).string();
   CheckResult(OrtxCreateProcessor(processor_.ToBeAssigned(), processor_config.c_str()));
 
@@ -151,7 +151,7 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   auto named_tensors = std::make_unique<NamedTensors>();
 
   if (!images) {
-    [[maybe_unused]] auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, nullptr, nullptr, nullptr, 0, allocator);
+    [[maybe_unused]] auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, nullptr, nullptr, nullptr, 0, allocator, spatial_merge_size_);
     named_tensors->emplace(Config::Defaults::InputIdsName, std::make_shared<Tensor>(std::move(input_ids)));
     return named_tensors;
   }
@@ -244,7 +244,7 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   }
 
   auto [input_ids, num_img_tokens] = ProcessImagePrompt(tokenizer, prompt, pixel_values, 
-                                                          image_grid_thw, computed_grid_data, computed_grid_num_images, allocator);
+                                                          image_grid_thw, computed_grid_data, computed_grid_num_images, allocator, spatial_merge_size_);
   named_tensors->emplace(std::string(Config::Defaults::InputIdsName), std::make_shared<Tensor>(std::move(input_ids)));
 
   // Use patched pixel_values if we computed it, otherwise use processor output
