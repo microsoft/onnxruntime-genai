@@ -19,6 +19,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Exclude Embedding Layer](#exclude-embedding-layer)
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
     - [Include Last Hidden States Output](#include-last-hidden-states-output)
+    - [Enable Shared Embeddings](#enable-shared-embeddings)
     - [Enable CUDA Graph](#enable-cuda-graph)
     - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
     - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
@@ -214,18 +215,18 @@ Note that this is the same as outputting embeddings since the last hidden states
 
 #### Enable Shared Embeddings
 
-This scenario is for when you want to enable weight sharing between the embedding layer and the language modeling head. This reduces model size and can improve memory efficiency, especially useful for models with tied embeddings (where `tie_word_embeddings=true` in config.json). Shared embeddings are automatically enabled if `tie_word_embeddings=true` in the model's config.json (can be overridden with `shared_embeddings=false`), but cannot be used with `exclude_embeds=true` or `exclude_lm_head=true`. In `-p int4` case, works with RTN and K-quant quantization algorithms.
+This scenario is for when you want to enable weight sharing between the embedding layer and the language modeling head. This reduces model size and can improve memory efficiency, especially useful for models with tied embeddings (where `tie_word_embeddings=true` in config.json). Shared embeddings are automatically enabled if `tie_word_embeddings=true` in the model's config.json (can be overridden with `shared_embeddings=false`), but cannot be used with `exclude_embeds=true` or `exclude_lm_head=true`. 
 
-##### option1: int4 
+##### Option 1: INT4 (for RTN and K-Quant)
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true
+python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true
+python3 builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant
 ```
 
-##### option2: int4 + int8 embeddings 
+##### Option 2: INT4 + INT8 embeddings (for RTN Last and K-Quant Last)
 ```
 # From wheel:
 python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant_last
@@ -234,16 +235,16 @@ python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_fold
 python3 builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=k_quant_last
 ```
 
-##### option3: int4 + fp16 embeddings
+##### Option 3: INT4 embeddings + FP16 embeddings
 ```
 # From wheel:
-python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_nodes_to_exclude=["/lm_head/MatMul"]
+python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=rtn int4_nodes_to_exclude=/lm_head/MatMul
 
 # From source:
-python3 builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_nodes_to_exclude=["/lm_head/MatMul"]
+python3 builder.py -m model_name -o path_to_output_folder -p int4 -e cuda --extra_options shared_embeddings=true int4_algo_config=rtn int4_nodes_to_exclude=/lm_head/MatMul
 ```
 
-##### option4: fp16(unquantized)
+##### Option 4: FP16 embeddings
 ```
 # From wheel:
 python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_folder -p fp16 -e cuda --extra_options shared_embeddings=true
