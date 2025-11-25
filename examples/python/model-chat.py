@@ -108,7 +108,9 @@ def main(args):
         elif args.execution_provider == "NvTensorRtRtx":
             provider_registration_name = "NvTensorRTRTXExecutionProvider"
         else:
-            raise ValueError(f"Provider library registration not supported for '{args.execution_provider}'. Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries.")
+            raise ValueError(
+                f"Provider library registration not supported for '{args.execution_provider}'. Only 'cuda' and 'NvTensorRtRtx' support plug-in libraries."
+            )
 
         og.register_execution_provider_library(provider_registration_name, args.ep_library_path)
         if args.verbose:
