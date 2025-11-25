@@ -256,6 +256,16 @@ inline std::unique_ptr<OrtMemoryInfo> OrtMemoryInfo::Create(const char* name, Or
   return std::unique_ptr<OrtMemoryInfo>{p};
 }
 
+inline std::unique_ptr<OrtSyncStream> OrtSyncStream::Create(const OrtEpDevice* ep_device, const OrtKeyValuePairs* stream_options) {
+  OrtSyncStream* p_stream = nullptr;
+  Ort::ThrowOnError(Ort::api->CreateSyncStreamForEpDevice(ep_device, stream_options, &p_stream));
+  return std::unique_ptr<OrtSyncStream>(p_stream);
+}
+
+inline void* OrtSyncStream::GetHandle() const {
+  return Ort::api->SyncStream_GetHandle(const_cast<OrtSyncStream*>(this));
+}
+
 inline std::unique_ptr<OrtIoBinding> OrtIoBinding::Create(OrtSession& session) {
   OrtIoBinding* p;
   Ort::ThrowOnError(Ort::api->CreateIoBinding(&session, &p));
@@ -396,6 +406,15 @@ inline OrtEnv& OrtEnv::DisableTelemetryEvents() {
 inline OrtEnv& OrtEnv::CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info, const OrtArenaCfg& arena_cfg) {
   Ort::ThrowOnError(Ort::api->CreateAndRegisterAllocator(this, &mem_info, &arena_cfg));
   return *this;
+}
+
+inline void OrtEnv::CopyTensors(const std::vector<const OrtValue*>& src_tensors,
+                                const std::vector<OrtValue*>& dst_tensors,
+                                OrtSyncStream* stream) const {
+  if (src_tensors.size() != dst_tensors.size()) {
+    throw std::runtime_error("Number of source and destination tensors must match");
+  }
+  Ort::ThrowOnError(Ort::api->CopyTensors(this, src_tensors.data(), dst_tensors.data(), stream, src_tensors.size()));
 }
 
 inline std::vector<const OrtEpDevice*> OrtEnv::GetEpDevices() {
