@@ -12,8 +12,7 @@ namespace Generators {
 struct WhisperModel : Model {
   WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
-  bool EncoderHasCrossPresentKVOutputs() const { return session_info_.HasOutput("present_key_cross_0") &&
-                                                        session_info_.HasOutput("present_key_cross_1"); }
+  bool EncoderHasCrossPresentKVOutputs() const;
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
