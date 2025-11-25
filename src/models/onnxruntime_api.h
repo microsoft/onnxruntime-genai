@@ -153,7 +153,7 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
     }
   }
   if (ort_lib_handle) {
-#if !defined(__ANDROID__) && !defined(__APPLE__)  // RTLD_DI_ORIGIN not available on Android & Darwin
+#if defined(RTLD_DI_ORIGIN)  // unavailable in some environment eg. Android, Darwin or non-glibc
     char pathname[PATH_MAX];
     dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
     LOG_INFO("Loaded native library at %s", pathname);
@@ -476,6 +476,14 @@ struct OrtEnv {
   OrtEnv& DisableTelemetryEvents();  ///< Wraps OrtApi::DisableTelemetryEvents
 
   OrtEnv& CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info, const OrtArenaCfg& arena_cfg);  ///< Wraps OrtApi::CreateAndRegisterAllocator
+
+  /// \brief Copy tensors between devices. Wraps OrtApi::CopyTensors
+  /// \param src_tensors Array of source OrtValue tensors
+  /// \param dst_tensors Array of destination OrtValue tensors (must be pre-allocated)
+  /// \param stream Optional sync stream for asynchronous copy (can be nullptr for synchronous)
+  void CopyTensors(const std::vector<const OrtValue*>& src_tensors,
+                   const std::vector<OrtValue*>& dst_tensors,
+                   OrtSyncStream* stream = nullptr) const;
 
   std::vector<const OrtEpDevice*> GetEpDevices();
 
@@ -846,6 +854,26 @@ struct OrtSparseValuesParam {
 struct OrtShape {
   const int64_t* shape;
   size_t shape_len;
+};
+
+/** \brief Wrapper around ::OrtSyncStream
+ *
+ * Used for asynchronous operations like CopyTensors.
+ * Requires ONNX Runtime 1.23.0 or later.
+ */
+struct OrtSyncStream {
+  /// \brief Create a sync stream for a specific execution provider device
+  /// \param ep_device The execution provider device (from OrtEnv::GetEpDevices)
+  /// \param stream_options Optional stream configuration options
+  static std::unique_ptr<OrtSyncStream> Create(const OrtEpDevice* ep_device, const OrtKeyValuePairs* stream_options = nullptr);
+
+  /// \brief Get the native stream handle (e.g., cudaStream_t for CUDA)
+  void* GetHandle() const;
+
+  static void operator delete(void* p) {
+    if (p) Ort::api->ReleaseSyncStream(reinterpret_cast<OrtSyncStream*>(p));
+  }
+  Ort::Abstract make_abstract;
 };
 
 /** \brief Wrapper around ::OrtValue
