@@ -10,6 +10,7 @@
 #include "logits.h"
 #include "kv_cache.h"
 #include "position_inputs.h"
+#include "vision_pipeline.h"
 
 namespace Generators {
 
@@ -20,7 +21,8 @@ struct MultiModalLanguageModel : Model {
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const;
 
-  std::unique_ptr<OrtSession> vision_session_;     // pixel_values, [image_attention_mask], image_sizes -> image_features
+  std::unique_ptr<OrtSession> vision_session_;     // pixel_values, [image_attention_mask], image_sizes -> image_features (legacy single model)
+  std::unique_ptr<VisionPipelineModel> vision_pipeline_model_;  // Multi-stage vision pipeline
   std::unique_ptr<OrtSession> speech_session_;     // audio_embeds, audio_sizes, audio_projection_mode -> audio_features
   std::unique_ptr<OrtSession> embedding_session_;  // input_ids, image_features, audio_features -> inputs_embeds
   std::unique_ptr<OrtSession> decoder_session_;    // inputs_embeds, attention_mask, kv_cache -> logits
@@ -28,6 +30,7 @@ struct MultiModalLanguageModel : Model {
   std::unique_ptr<OrtSessionOptions> vision_session_options_;
   std::unique_ptr<OrtSessionOptions> speech_session_options_;
   std::unique_ptr<OrtSessionOptions> embedding_session_options_;
+  OrtEnv& ort_env_;
 };
 
 struct VisionState : State {
@@ -46,6 +49,9 @@ struct VisionState : State {
   int64_t num_images_{};
   ExtraInputs extra_inputs_{*this};  // Model inputs
   std::unique_ptr<MultiModalFeatures> image_features_;
+  
+  // Vision pipeline state (for multi-stage models)
+  std::unique_ptr<VisionPipelineState> vision_pipeline_state_;
 };
 
 struct SpeechState : State {

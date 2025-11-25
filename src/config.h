@@ -170,6 +170,29 @@ struct Config {
       struct Outputs {
         std::string image_features{Defaults::ImageFeaturesName};
       } outputs;
+
+      // Vision Pipeline: Support for multi-stage vision models (e.g., Qwen2.5-VL)
+      struct PipelineModel {
+        std::string filename;
+        std::optional<SessionOptions> session_options;
+        std::optional<RunOptions> run_options;
+
+        std::string model_id;  // e.g., "patch_embed", "vision_attn", "patch_merger"
+        std::vector<std::string> inputs;
+        std::vector<std::string> outputs;
+        std::unordered_map<std::string, std::string> output_names_forwarder;
+        bool run_on_cpu{false};  // If true, force CPU execution for this stage
+      };
+
+      std::vector<PipelineModel> pipeline;
+
+      // Window Indexing: For models that require patch reordering (e.g., Qwen2.5-VL)
+      struct WindowIndexing {
+        std::string filename{"wnd_idx.npy"};  // Path to window index file
+        int spatial_merge_size{2};            // Spatial merge size for reshaping
+      };
+      std::optional<WindowIndexing> window_indexing;
+
     } vision;
 
     struct Speech {
