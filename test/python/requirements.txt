@@ -7,5 +7,5 @@ sympy
 pytest
 onnx
 onnx_ir>=0.1.3
-transformers
+transformers==4.57.1
 huggingface_hub[cli]
