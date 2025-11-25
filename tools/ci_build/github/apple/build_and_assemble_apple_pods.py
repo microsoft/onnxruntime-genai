@@ -11,8 +11,9 @@ import sys
 import tempfile
 
 from c.assemble_c_pod_package import assemble_c_pod_package
-from objectivec.assemble_objc_pod_package import assemble_objc_pod_package
 from package_assembly_utils import PackageVariant, get_ort_genai_version
+
+from objectivec.assemble_objc_pod_package import assemble_objc_pod_package
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve()
 SCRIPT_DIR = SCRIPT_PATH.parent
@@ -87,13 +88,9 @@ def parse_args():
         help="Skip macos platform tests. Specify this argument when build targets only contain ios archs. ",
     )
 
-    parser.add_argument(
-        "--ort-version", required=True, help="The ORT version to depend on."
-    )
+    parser.add_argument("--ort-version", required=True, help="The ORT version to depend on.")
 
-    parser.add_argument(
-        "--ort-home", required=False, help="The ORT home for building dependency."
-    )
+    parser.add_argument("--ort-home", required=False, help="The ORT home for building dependency.")
 
     args = parser.parse_args()
 
@@ -129,7 +126,7 @@ def main():
     ]
 
     if args.ort_home:
-        build_apple_framework_args.append('--ort_home')
+        build_apple_framework_args.append("--ort_home")
         build_apple_framework_args.append(args.ort_home)
 
     if args.include_ops_by_config is not None:
@@ -151,8 +148,8 @@ def main():
             str(build_dir / "framework_out"),
             "--variant",
             package_variant.name,
-            '--ort_version',
-            args.ort_version
+            "--ort_version",
+            args.ort_version,
         ]
         if args.skip_macos_test:
             test_apple_packages_args.append("--skip_macos_test")
@@ -174,7 +171,7 @@ def main():
             framework_dir=build_dir / "framework_out" / "onnxruntime-genai.xcframework",
             public_headers_dir=build_dir / "framework_out" / "Headers",
             package_variant=package_variant,
-            ort_version=args.ort_version
+            ort_version=args.ort_version,
         )
 
         if args.test:
@@ -192,7 +189,7 @@ def main():
             staging_dir=objc_pod_staging_dir,
             pod_version=args.pod_version,
             framework_info_file=framework_info_file,
-            package_variant=package_variant
+            package_variant=package_variant,
         )
 
         if args.test:

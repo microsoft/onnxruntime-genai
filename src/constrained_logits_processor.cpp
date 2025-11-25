@@ -229,6 +229,9 @@ void GuidanceLogitsProcessor::ResetWithoutCompute() {
     }
     llg_constraints_[i] = std::unique_ptr<LlgConstraint, LlgConstraintDeleter>(constraint_ptr);
   }
+  for (int i = 0; i < ff_tokens_batch_.size(); i++) {
+    ff_tokens_batch_[i].clear();
+  }
 }
 
 // Reset the masks and llguidance constraints and then recompute the mask

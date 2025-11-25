@@ -31,12 +31,14 @@ def change_model_listener(new_model_name):
     if "vision" in new_model_name:
         print("Configuring for multi-modal model")
         interface = MultiModal_ONNXModel(
-            model_path=d["model_dir"], execution_provider=d["provider"],
+            model_path=d["model_dir"],
+            execution_provider=d["provider"],
         )
     else:
         print("Configuring for language-only model")
         interface = ONNXModel(
-            model_path=d["model_dir"], execution_provider=d["provider"],
+            model_path=d["model_dir"],
+            execution_provider=d["provider"],
         )
 
     # interface.initialize()
@@ -92,7 +94,10 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
         for ep_name in os.listdir(optimized_directory):
             sub_optimized_directory = os.path.join(optimized_directory, ep_name)
             for model_name in os.listdir(sub_optimized_directory):
-                available_models[model_name] = {"model_dir": os.path.join(sub_optimized_directory, model_name), "provider": get_ep_name(ep_name)}
+                available_models[model_name] = {
+                    "model_dir": os.path.join(sub_optimized_directory, model_name),
+                    "provider": get_ep_name(ep_name),
+                }
 
     if model_path:
         available_models[model_name] = {"model_dir": model_path, "provider": get_ep_name(model_path)}
@@ -147,13 +152,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
                     label="Max History Token Length",
                 )
                 token_printing_step = gr.Slider(
-                    minimum=1,
-                    maximum=50,
-                    value=4,
-                    step=1,
-                    interactive=True,
-                    label="Token Printing Step",
-                    visible=False
+                    minimum=1, maximum=50, value=4, step=1, interactive=True, label="Token Printing Step", visible=False
                 )
                 images = gr.File(file_count="multiple", file_types=["image"], label="Upload image(s)", visible=False)
                 images.change(
@@ -186,14 +185,7 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
         }
         retry_args = {
             "fn": interface_retry,
-            "inputs": [
-                chatbot,
-                history,
-                max_length_tokens,
-                max_context_length_tokens,
-                token_printing_step,
-                images
-            ],
+            "inputs": [chatbot, history, max_length_tokens, max_context_length_tokens, token_printing_step, images],
             "outputs": [chatbot, history, status_display],
             "show_progress": True,
         }
@@ -245,7 +237,9 @@ def launch_chat_app(expose_locally: bool = False, model_name: str = "", model_pa
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--expose_locally", action="store_true")
-    parser.add_argument("--model_path", "-m", type=str, required=False, help="The location where your model is located.")
+    parser.add_argument(
+        "--model_path", "-m", type=str, required=False, help="The location where your model is located."
+    )
     parser.add_argument("--model_name", "-n", type=str, required=False, help="The name of your model")
     args = parser.parse_args()
     model_path = args.model_path
@@ -257,8 +251,10 @@ if __name__ == "__main__":
         model_name = os.path.basename(model_path)
         # check if genai_config.json in the model foler
         if "genai_config.json" not in os.listdir(model_path):
-            raise ValueError(f"Your model_path folder do not include 'genai.json' file, please double check your model_path '{model_path}'")
-        
+            raise ValueError(
+                f"Your model_path folder do not include 'genai.json' file, please double check your model_path '{model_path}'"
+            )
+
     if args.model_name:
         model_name = args.model_name
 
