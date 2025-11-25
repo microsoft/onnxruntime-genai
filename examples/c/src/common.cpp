@@ -67,7 +67,7 @@ static void print_usage(int /*argc*/, char** argv) {
   std::cerr << "  " << argv[0] << " /path/to/model NvTensorRtRtx /path/to/onnxruntime_providers_tensorrt.dll" << std::endl;
 }
 
-bool parse_args(int argc, char** argv, std::string& model_path, std::string& ep, std::string& ep_library_path) {
+bool parse_args(int argc, char** argv, std::string& model_path, std::string& ep, std::string* ep_library_path) {
   if (argc < 2) {
     print_usage(argc, argv);
     return false;
@@ -78,10 +78,12 @@ bool parse_args(int argc, char** argv, std::string& model_path, std::string& ep,
   } else {
     ep = "follow_config";
   }
-  if (argc > 3) {
-    ep_library_path = argv[3];
-  } else {
-    ep_library_path = "";
+  if (ep_library_path) {
+    if (argc > 3) {
+      *ep_library_path = argv[3];
+    } else {
+      *ep_library_path = "";
+    }
   }
   return true;
 }
