@@ -183,8 +183,7 @@ DecoderState::DecoderState(const MultiModalLanguageModel& model, DeviceSpan<int3
                            const GeneratorParams& params)
     : State{params, model},
       model_{model},
-      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)}
-{
+      position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {
   inputs_embeds_.Add();
   position_inputs_->Add();
   logits_.Add();

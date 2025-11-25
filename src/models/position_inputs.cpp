@@ -4,7 +4,7 @@
 #include "model_type.h"
 #include <vector>
 #include <numeric>
-#include <cmath> // For std::round
+#include <cmath>  // For std::round
 
 namespace Generators {
 
@@ -574,7 +574,7 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
 
   std::span<const int64_t> video_grid_thw_span;
   if (video_grid_thw_) {
-    video_grid_thw_span = std::span(video_grid_thw_->GetData<int64_t>(), video_grid_thw_->GetElementCount())  ;
+    video_grid_thw_span = std::span(video_grid_thw_->GetData<int64_t>(), video_grid_thw_->GetElementCount());
   }
 
   std::span<const float> second_per_grid_ts_span;
@@ -584,7 +584,7 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
       throw std::runtime_error("second_per_grid_ts must be float32.");
     second_per_grid_ts_span = std::span(second_per_grid_ts_->GetData<float>(), second_per_grid_ts_->GetElementCount());
   }
-  
+
   auto input_ids_span = next_tokens.CpuSpan();
   int image_index = 0;
   int video_index = 0;
@@ -767,8 +767,8 @@ void Qwen2VLPositionInputs::CreateAndInitializeAttentionMask(DeviceSpan<int32_t>
     for (int64_t s = 0; s < seq_len; ++s) {
       int64_t current_token_idx = b * seq_len + s;
       mask_data[current_token_idx] = (input_ids_span[current_token_idx] == model_.config_->model.pad_token_id)
-                                          ? static_cast<T>(0)
-                                          : static_cast<T>(1);
+                                         ? static_cast<T>(0)
+                                         : static_cast<T>(1);
     }
   }
 
@@ -783,7 +783,7 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
   // base_pos is cache_position[0]
   auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, position_ids_shape_, type_);
   int64_t batch_size = position_ids_shape_[1];  // This is already expanded (batch*beams)
-  int64_t seq_len = position_ids_shape_[2];    // This will be 1 for generation
+  int64_t seq_len = position_ids_shape_[2];     // This will be 1 for generation
 
   if (rope_deltas_.size() != batch_size) {
     throw std::runtime_error("rope_deltas size mismatch with batch_size * num_beams.");

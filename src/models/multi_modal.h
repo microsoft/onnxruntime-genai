@@ -107,8 +107,8 @@ struct DecoderState : State {
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
   std::unique_ptr<PositionInputs> position_inputs_;  // Model input
-  DefaultKeyValueCache kv_cache_{*this};   // Model input
-  Logits logits_{*this};                   // Model output
+  DefaultKeyValueCache kv_cache_{*this};             // Model input
+  Logits logits_{*this};                             // Model output
 };
 
 struct MultiModalPipelineState : State {
