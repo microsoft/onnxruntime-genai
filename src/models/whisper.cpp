@@ -346,10 +346,11 @@ DeviceSpan<float> WhisperState::Run(int current_length, DeviceSpan<int32_t>& nex
     // Otherwise the GetOutput(present_key_{self/cross}_{i}) method returns transposed K caches.
     TransposeKCaches(cross_cache_->GetValues());
 
-    // Only transpose caches if kv_cache_ is a DefaultKeyValueCache
-    if (auto default_kv_cache_ptr = dynamic_cast<DefaultKeyValueCache*>(decoder_state_->kv_cache_.get())) {
-      TransposeKCaches(default_kv_cache_ptr->GetPresents());
+    auto default_kv_cache_ptr = dynamic_cast<DefaultKeyValueCache*>(decoder_state_->kv_cache_.get());
+    if (!default_kv_cache_ptr) {
+      throw std::runtime_error("Unable to convert KeyValueCache to DefaultKeyValueCache");
     }
+    TransposeKCaches(default_kv_cache_ptr->GetPresents());
   }
 
   // Update inputs and outputs for decoder
