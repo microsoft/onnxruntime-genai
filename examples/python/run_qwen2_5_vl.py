@@ -5,6 +5,7 @@ Example script to run Qwen2.5-VL multimodal model with ONNX Runtime GenAI
 
 import argparse
 import time
+from pathlib import Path
 
 import onnxruntime_genai as og
 
@@ -21,12 +22,15 @@ def main():
         "-p", "--prompt", type=str, default="Describe this image in detail.", help="Text prompt for the model"
     )
     parser.add_argument(
+        "-s", "--system_prompt", type=str, default=None, help="System prompt (optional, for role-based prompting)"
+    )
+    parser.add_argument(
         "-e",
         "--execution_provider",
         type=str,
-        default="cuda",
-        choices=["cpu", "cuda", "dml", "rocm"],
-        help="Execution provider (default: cuda)",
+        default="follow_config",
+        choices=["follow_config", "cpu", "cuda", "dml", "rocm", "qnn"],
+        help="Override execution provider (default: follow_config, use providers defined in genai_config.json)",
     )
     parser.add_argument("--max_length", type=int, default=2048, help="Maximum generation length (default: 2048)")
 
@@ -43,8 +47,33 @@ def main():
             print(f"Error: Image file not found: {img_path}")
             return
 
-    # Load model
-    model = og.Model(args.model_path)
+    # Load model via config so folder paths (containing genai_config.json) resolve correctly
+    print("Loading model = ", args.model_path)
+    model_dir = Path(args.model_path).expanduser().resolve()
+    if not model_dir.exists():
+        print(f"Error: Model directory does not exist: {model_dir}")
+        return
+
+    config_file = model_dir / "genai_config.json"
+    if not config_file.exists():
+        print(f"Error: genai_config.json not found at: {config_file}")
+        print("Directory contents:")
+        for child in sorted(model_dir.iterdir()):
+            print(f"  - {child.name}")
+        return
+
+    config = og.Config(str(model_dir))
+    if args.execution_provider != "follow_config":
+        config.clear_providers()
+        config.append_provider(args.execution_provider)
+    try:
+        model = og.Model(config)
+    except RuntimeError as err:
+        print(f"Error: Failed to create model from {model_dir}\n{err}")
+        print("Directory contents:")
+        for child in sorted(model_dir.iterdir()):
+            print(f"  - {child.name}")
+        raise
     print(f"Model type: {model.type}")
 
     # Create processor and tokenizer
@@ -65,21 +94,34 @@ def main():
         del model
         return
 
-    # Prepare messages in Qwen2VL format
-    # For Qwen2VL, we use structured content with image/text types
+    # Prepare messages in Qwen2VL format (similar to Fara demo)
+    messages = []
+    
+    # Add system prompt if provided (like Fara demo's web agent system prompt)
+    if args.system_prompt:
+        messages.append({
+            "role": "system",
+            "content": [{"type": "text", "text": args.system_prompt}]
+        })
+    
+    # Build user message with images and text
     content_list = []
     for _ in args.image_paths:
         content_list.append({"type": "image"})
     content_list.append({"type": "text", "text": args.prompt})
 
-    messages = [{"role": "user", "content": content_list}]
+    messages.append({"role": "user", "content": content_list})
 
     # Apply chat template to get formatted prompt with vision tokens
     import json
 
     message_json = json.dumps(messages)
     prompt = tokenizer.apply_chat_template(message_json, add_generation_prompt=True)
-    print(f"\nPrompt: {args.prompt}")
+    
+    print(f"\n=== User Query ===")
+    print(args.prompt)
+    if args.system_prompt:
+        print(f"\nSystem Prompt: {args.system_prompt[:100]}..." if len(args.system_prompt) > 100 else args.system_prompt)
 
     # Process images and prompt
     # Note: The prompt already contains vision tokens from the chat template
@@ -113,7 +155,7 @@ def main():
     # Generate
     start_time = time.time()
 
-    print("\nResponse: ", end="", flush=True)
+    print("\n=== Answer ===")
     while not generator.is_done():
         generator.generate_next_token()
 

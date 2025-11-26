@@ -244,7 +244,6 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   else if (pixel_values_num_dims == 4 && pixel_values_shape[0] == 1) {
     constexpr int64_t kPatchSize = 14;
     constexpr int64_t kTemporalPatchSize = 2;
-    constexpr int64_t kChannels = 3;
 
     int64_t height = pixel_values_shape[1];  // HWC: [batch, height, width, channels]
     int64_t width = pixel_values_shape[2];

@@ -38,7 +38,7 @@ VisionPipelineModel::VisionPipelineModel(std::unique_ptr<Config> config, OrtEnv&
         config_->model.vision.pipeline[0].model_id == "patch_embed") {
       first_stage_index_ = 1;  // Skip patch_embed stage
     }
-  } catch (const std::exception& e) {
+  } catch ([[maybe_unused]] const std::exception& e) {
     // If extensions initialization fails, fall back to using all pipeline stages
     // This provides backward compatibility
     first_stage_index_ = 0;
@@ -82,9 +82,29 @@ VisionPipelineModel::VisionPipelineModel(std::unique_ptr<Config> config, OrtEnv&
   // Load vision pipeline sessions
   for (const auto& model : config_->model.vision.pipeline) {
     auto session_options = OrtSessionOptions::Create();
-    CreateSessionOptionsFromConfig(
-        model.session_options.has_value() ? model.session_options.value() : config_->model.decoder.session_options,
-        *session_options, true, true);
+    
+    // Override to CPU if run_on_cpu flag is set for this specific stage
+    if (model.run_on_cpu) {
+      // When run_on_cpu is true, don't set any providers - ORT will default to CPU
+      // Just apply basic session options without provider configuration
+      session_options->SetIntraOpNumThreads(1);
+    } else {
+      // Use model-specific session options if provided, otherwise fall back to decoder options
+      Config::SessionOptions options_to_use;
+      if (model.session_options.has_value()) {
+        options_to_use = model.session_options.value();
+        // Auto-populate providers from provider_options if not already set
+        if (options_to_use.providers.empty() && !options_to_use.provider_options.empty()) {
+          for (const auto& provider_option : options_to_use.provider_options) {
+            options_to_use.providers.push_back(provider_option.name);
+          }
+        }
+      } else {
+        options_to_use = config_->model.decoder.session_options;
+      }
+      
+      CreateSessionOptionsFromConfig(options_to_use, *session_options, true, true);
+    }
 
     sessions_.emplace_back(CreateSession(ort_env, model.filename, session_options.get()));
     session_options_.emplace_back(std::move(session_options));
@@ -134,7 +154,7 @@ OrtValue* VisionPipelineState::ProcessImagesWithExtensions(const NamedTensors& i
   }
 
   // Return the preprocessed tensor directly (extensions already did patching)
-  return it->second->GetOrtValue();
+  return it->second->GetOrtTensor();
 }
 
 DeviceSpan<float> VisionPipelineState::Run(int current_length, DeviceSpan<int32_t>& next_tokens,
