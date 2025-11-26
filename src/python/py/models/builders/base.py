@@ -2783,7 +2783,11 @@ class Model:
         #                O_MatMul
         #                    |
         #                  O_Add
+        self.make_attention_input_proj(layer_id, attention, root_input, **kwargs)
+        self.make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
+        self.make_attention_output_proj(layer_id, attention, root_input, **kwargs)
 
+    def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
         # Unpack attention weights if needed
         self.make_attention_unpacked(layer_id, attention, root_input, **kwargs)
 
@@ -2859,6 +2863,7 @@ class Model:
                 )
                 self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
 
+    def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
         # Make Q/K SimplifiedLayerNorm nodes
         if self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"]:
             self.make_qk_norm(layer_id, attention)
@@ -2920,11 +2925,15 @@ class Model:
             **kwargs,
         )
 
+    def make_attention_output_proj(self, layer_id, attention, root_input, **kwargs):
+        attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
+        attn_output = f"{attn_name}/output_0"
+
         # Make MatMul node (output projection weight node)
         o_proj = "o_proj" if hasattr(attention, "o_proj") else "dense"
         o_matmul_basename = f"/model/layers.{layer_id}/attn/o_proj/MatMul"
         o_weight = getattr(attention, o_proj)
-        o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, f"{attn_name}/output_0")
+        o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, attn_output)
 
         # Make Add node (output projection bias node if bias exists)
         o_bias_exists = getattr(attention, o_proj).bias is not None
@@ -3799,13 +3808,7 @@ class Model:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
 
-    def make_model(self, input_path):
-        # Make inputs and outputs to ONNX model
-        self.make_inputs_and_outputs()
-
-        # Make pre-processing nodes
-        self.make_preprocessing_nodes()
-
+    def load_weights(self, input_path):
         # Load weights of original model
         if input_path.endswith(".gguf"):
             # Load GGUF model
@@ -3859,6 +3862,17 @@ class Model:
             model = PeftModel.from_pretrained(
                 model, self.extra_options["adapter_path"], cache_dir=self.cache_dir, token=self.hf_token
             )
+    
+        return model
+    
+    def make_model(self, input_path):
+        # Make inputs and outputs to ONNX model
+        self.make_inputs_and_outputs()
+
+        # Make pre-processing nodes
+        self.make_preprocessing_nodes()
+
+        model = self.load_weights(input_path)
 
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0

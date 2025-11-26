@@ -279,16 +279,36 @@ class Qwen25VLTextModel(Model):
         return cos_output, sin_output
 
     def make_mrope_flattened_caches(self, layer_id, dyn_cos, dyn_sin):
-        """
-        Converts the 3D MRoPE caches [3, B, S, H] into flattened, interleaved caches [B*S, H/2]
-        suitable for the RotaryEmbedding operator.
-        The logic is:
-        1. Slice dynamic caches to H/2.
-        2. Split into 3 chunks based on mrope_sections (e.g. 16, 24, 24).
-        3. Gather Temporal(0), Height(1), Width(2) specific slices for each chunk.
-        4. Concat back to H/2.
-        5. Flatten to [B*S, H/2].
-        """
+        # Converts the 3D MRoPE caches [3, B, S, H] into flattened, interleaved caches [B*S, H/2]
+        # suitable for the RotaryEmbedding operator.
+        # The logic is:
+        #   1. Slice dynamic caches to H/2.
+        #   2. Split into 3 chunks based on mrope_sections (e.g. 16, 24, 24).
+        #   3. Gather Temporal(0), Height(1), Width(2) specific slices for each chunk.
+        #   4. Concat back to H/2.
+        #   5. Flatten to [B*S, H/2].
+        # The subgraph looks like:
+        #      dyn_cos (3, B, S, H)
+        #             |
+        #         Slice_Half
+        #      (3, B, S, H/2)
+        #             |
+        #           Split 
+        #   (3, B, S, sections[i])
+        #       /     |     \
+        #  Gather  Gather  Gather
+        #   idx=0   idx=1   idx=2
+        #    /        |       \
+        # Squeeze  Squeeze  Squeeze
+        #    \        |       /
+        #     \       |      /
+        #      \      |     /
+        #          Concat 
+        #       (B, S, H/2)
+        #             |
+        #          Reshape
+        #        (B*S, H/2)
+        
         basename = f"/model/layers.{layer_id}/attn/mrope_flattened_cache"
 
         def process_cache(input_name, name_suffix):
@@ -561,15 +581,10 @@ class Qwen25VLTextModel(Model):
 
         return reshape_out_out
 
-    def make_attention(self, layer_id, attention, root_input, **kwargs):
+    def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
         # Make nodes for the Attention subgraph (with MRoPE)
         #
-        #               root_input
-        #              /    |     \
-        #             /     |      \
-        #       Q_MatMul K_MatMul V_MatMul
-        #          |        |        |
-        #        Q_Add    K_Add    V_Add
+        #        q_path    k_path    v_path
         #          |        |        |
         #          |        |        +-----------------+
         #          |        |                          |
@@ -591,63 +606,20 @@ class Qwen25VLTextModel(Model):
         #                   |                          |
         #           GroupQueryAttention <--------------+
         #                   |
-        #                O_MatMul
-        #                   |
-        #                 O_Add
-
-        # 1. Unpack QKV if necessary (e.g. qkv_proj)
-        super().make_attention_unpacked(layer_id, attention, root_input, **kwargs)
-
-        # 2. Build Q/K/V MatMul and Add nodes
-        q_matmul_basename = f"/model/layers.{layer_id}/attn/q_proj/MatMul"
-        q_matmul_name = self.make_matmul(attention.q_proj, q_matmul_basename, root_input)
-        self.attention_attrs["q_path"] = f"{q_matmul_name}/output_0"
+        
+        # 1. Calculate shapes for MRoPE rotation
         q_shape = [
             "batch_size",
             "sequence_length",
             self.num_attn_heads * self.head_size,
         ]
+        k_shape = [
+            "batch_size",
+            "sequence_length",
+            self.num_kv_heads * self.head_size,
+        ]
 
-        k_matmul_basename = f"/model/layers.{layer_id}/attn/k_proj/MatMul"
-        k_matmul_name = self.make_matmul(attention.k_proj, k_matmul_basename, root_input)
-        self.attention_attrs["k_path"] = f"{k_matmul_name}/output_0"
-        k_shape = ["batch_size", "sequence_length", self.num_kv_heads * self.head_size]
-
-        v_matmul_basename = f"/model/layers.{layer_id}/attn/v_proj/MatMul"
-        v_matmul_name = self.make_matmul(attention.v_proj, v_matmul_basename, root_input)
-        self.attention_attrs["v_path"] = f"{v_matmul_name}/output_0"
-
-        # Handle biases
-        q_bias_exists = attention.q_proj.bias is not None and torch.count_nonzero(attention.q_proj.bias) > 0
-        k_bias_exists = attention.k_proj.bias is not None and torch.count_nonzero(attention.k_proj.bias) > 0
-        v_bias_exists = attention.v_proj.bias is not None and torch.count_nonzero(attention.v_proj.bias) > 0
-
-        if q_bias_exists:
-            q_add_name = f"/model/layers.{layer_id}/attn/q_proj/Add"
-            self.make_add_bias(
-                attention.q_proj.bias,
-                q_add_name,
-                root_input=self.attention_attrs["q_path"],
-            )
-            self.attention_attrs["q_path"] = f"{q_add_name}/output_0"
-        if k_bias_exists:
-            k_add_name = f"/model/layers.{layer_id}/attn/k_proj/Add"
-            self.make_add_bias(
-                attention.k_proj.bias,
-                k_add_name,
-                root_input=self.attention_attrs["k_path"],
-            )
-            self.attention_attrs["k_path"] = f"{k_add_name}/output_0"
-        if v_bias_exists:
-            v_add_name = f"/model/layers.{layer_id}/attn/v_proj/Add"
-            self.make_add_bias(
-                attention.v_proj.bias,
-                v_add_name,
-                root_input=self.attention_attrs["v_path"],
-            )
-            self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
-
-        # 3. Apply 3D RoPE (MRoPE)
+        # 2. Apply 3D RoPE (MRoPE)
         cos_dynamic, sin_dynamic = self.make_dynamic_rope_caches(
             layer_id, basename=f"/model/layers.{layer_id}/attn/mrope_dynamic_cache"
         )
@@ -674,7 +646,7 @@ class Qwen25VLTextModel(Model):
             basename=f"/model/layers.{layer_id}/attn/k_mrope",
         )
 
-        # 4. Call GroupQueryAttention op
+        # 3. Call GroupQueryAttention op
         past_k = f"past_key_values.{layer_id}.key"
         past_v = f"past_key_values.{layer_id}.value"
         present_k = f"present.{layer_id}.key"
@@ -696,28 +668,7 @@ class Qwen25VLTextModel(Model):
             **kwargs,
         )
 
-        # 5. Build O-proj
-        o_proj = "o_proj" if hasattr(attention, "o_proj") else "dense"
-        o_matmul_basename = f"/model/layers.{layer_id}/attn/o_proj/MatMul"
-        o_weight = getattr(attention, o_proj)
-        o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, f"{attn_name}/output_0")
-
-        o_bias_exists = getattr(attention, o_proj).bias is not None
-        if o_bias_exists:
-            o_add_name = f"/model/layers.{layer_id}/attn/o_proj/Add"
-            o_bias = getattr(attention, o_proj).bias
-            self.make_add_bias(o_bias, o_add_name, root_input=f"{o_matmul_name}/output_0")
-            self.layernorm_attrs["skip_input"] = f"{o_add_name}/output_0"
-        else:
-            self.layernorm_attrs["skip_input"] = f"{o_matmul_name}/output_0"
-
-    def make_model(self, input_path):
-        # Make inputs and outputs to ONNX model
-        self.make_inputs_and_outputs()
-
-        # Make pre-processing nodes
-        self.make_preprocessing_nodes()
-
+    def load_weights(self, input_path):
         # Load the Hugging Face model
         print("Loading Qwen2_5_VLForConditionalGeneration model...")
         hf_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
@@ -728,10 +679,19 @@ class Qwen25VLTextModel(Model):
             trust_remote_code=self.hf_remote,
         )
 
+    def make_model(self, input_path):
+        # Make inputs and outputs to ONNX model
+        self.make_inputs_and_outputs()
+
+        # Make pre-processing nodes
+        self.make_preprocessing_nodes()
+
+        hf_model = self.load_weights(input_path)
+
         # We only want to export the text model
         model = hf_model.language_model
         print(f"Isolated language_model ({model.__class__.__name__}) for ONNX export.")
-
+        
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
 
