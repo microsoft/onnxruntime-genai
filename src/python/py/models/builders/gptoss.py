@@ -519,7 +519,6 @@ class GPTOSSModel(Model):
             reduce_sum_inputs,
             dtype=ir.DataType.FLOAT,
             shape=["batch_size", "sequence_length", self.intermediate_size, 1],
-            keepdims=False,
         )
         weighted_sum_squeeze_name = f"{basename}/weighted_sum/Squeeze"
         weighted_sum_squeeze_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/[-1]"]
