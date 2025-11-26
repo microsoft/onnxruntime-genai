@@ -36,7 +36,7 @@ struct ModelType {
 
   inline static bool IsPipe(const std::string& model_type) {
     // Pipeline (Pipe)
-    static constexpr std::array<std::string_view, 1> Pipe = {"decoder-pipeline"};
+    static constexpr std::array<std::string_view, 2> Pipe = {"decoder-pipeline", "qwen2_5_vl_pipeline"};
     return std::find(Pipe.begin(), Pipe.end(), model_type) != Pipe.end();
   }
 };

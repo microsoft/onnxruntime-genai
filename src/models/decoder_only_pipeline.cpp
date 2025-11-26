@@ -6,6 +6,7 @@
 #include "../tracing.h"
 #include "decoder_only_pipeline.h"
 #include "windowed_kv_cache.h"
+#include "vision_pipeline.h"
 
 namespace Generators {
 
@@ -190,6 +191,39 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
 }
 
 void DecoderOnlyPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  std::cout << "[SetExtraInputs] Called with " << extra_inputs.size() << " extra inputs" << std::endl;
+  // Check if we have vision inputs (pixel_values and image_grid_thw)
+  // If so, process them through the vision pipeline
+  OrtValue* pixel_values = nullptr;
+  OrtValue* image_grid_thw = nullptr;
+  
+  for (const auto& extra_input : extra_inputs) {
+    std::cout << "[SetExtraInputs] Checking input: " << extra_input.name << std::endl;
+    if (extra_input.name == model_.config_->model.vision.inputs.pixel_values) {
+      pixel_values = extra_input.tensor->ort_tensor_.get();
+      std::cout << "[SetExtraInputs] Found pixel_values" << std::endl;
+    } else if (extra_input.name == model_.config_->model.vision.inputs.image_grid_thw) {
+      image_grid_thw = extra_input.tensor->ort_tensor_.get();
+      std::cout << "[SetExtraInputs] Found image_grid_thw" << std::endl;
+    }
+  }
+  
+  // If we have vision inputs, process them through the vision pipeline
+  if (pixel_values != nullptr && image_grid_thw != nullptr && 
+      !model_.config_->model.vision.pipeline.empty()) {
+    std::cout << "[SetExtraInputs] Processing vision inputs through pipeline..." << std::endl;
+    // Create vision pipeline state and process the image
+    VisionPipelineState vision_pipeline(model_, *params_);
+    std::cout << "[SetExtraInputs] Vision pipeline created, calling ProcessImage..." << std::endl;
+    auto image_embeddings = vision_pipeline.ProcessImage(pixel_values, image_grid_thw);
+    std::cout << "[SetExtraInputs] ProcessImage completed" << std::endl;
+    
+    // Store the image embeddings for injection during generation
+    SetImageEmbeddings(std::move(image_embeddings));
+    std::cout << "[SetExtraInputs] Image embeddings stored" << std::endl;
+  }
+  
+  // Add extra inputs to all pipeline sessions (excluding vision inputs which are now processed)
   for (auto& session : model_.sessions_) {
     extra_inputs_.Add(extra_inputs, session->GetInputNames());
   }
@@ -338,6 +372,26 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
         } else {
           ortvalue_store_[pipeline_state->output_names_[i]] = std::unique_ptr<OrtValue>(pipeline_state->outputs_[i]);
         }
+        
+        // Check if this output is input_hidden_states and we have image embeddings to inject
+        const std::string& output_name = pipeline_state->output_names_[i];
+        if (output_name == model_.config_->model.decoder.inputs.input_hidden_states && 
+            image_embeds_cache_ != nullptr && first_run_) {
+          // Inject image embeddings into the hidden states
+          // We need the input_ids to know where the image tokens are
+          std::vector<int32_t> input_ids_vec;
+          if (input_ids_) {
+            OrtValue* input_ids_ort = input_ids_->Get();
+            auto shape_info = input_ids_ort->GetTensorTypeAndShapeInfo();
+            size_t num_elements = shape_info->GetElementCount();
+            const int32_t* input_ids_data = input_ids_ort->GetTensorData<int32_t>();
+            input_ids_vec.assign(input_ids_data, input_ids_data + num_elements);
+          }
+          
+          if (!input_ids_vec.empty()) {
+            InjectImageEmbeddings(*ortvalue_store_[output_name], input_ids_vec);
+          }
+        }
       }
     }
   }
@@ -427,6 +481,81 @@ OrtValue* DecoderOnlyPipelineState::GetOutput(const char* name) {
 
   // Search managed outputs saved in this State.
   return State::GetOutput(name);
+}
+
+void DecoderOnlyPipelineState::SetImageEmbeddings(std::unique_ptr<OrtValue> image_embeds) {
+  image_embeds_cache_ = std::move(image_embeds);
+  img_emd_start_idx_ = 0;
+  img_emd_end_idx_ = -1;
+}
+
+void DecoderOnlyPipelineState::InjectImageEmbeddings(OrtValue& input_embeds, const std::vector<int32_t>& input_ids) {
+  if (!image_embeds_cache_ || model_.config_->model.image_token_id == 0) {
+    std::cout << "[InjectImageEmbeddings] Skipping - no cache or no image_token_id" << std::endl;
+    return;  // No image embeddings to inject or no image token configured
+  }
+
+  // Find positions where image tokens occur
+  std::vector<size_t> image_positions;
+  for (size_t i = 0; i < input_ids.size(); ++i) {
+    if (input_ids[i] == model_.config_->model.image_token_id) {
+      image_positions.push_back(i);
+    }
+  }
+
+  std::cout << "[InjectImageEmbeddings] Found " << image_positions.size() << " image token positions" << std::endl;
+
+  if (image_positions.empty()) {
+    return;  // No image tokens in this chunk
+  }
+
+  // Get tensor info
+  auto input_embeds_info = input_embeds.GetTensorTypeAndShapeInfo();
+  auto input_shape = input_embeds_info->GetShape();
+  auto* input_data = input_embeds.GetTensorMutableData<float>();
+
+  auto image_embeds_info = image_embeds_cache_->GetTensorTypeAndShapeInfo();
+  auto image_shape = image_embeds_info->GetShape();
+  auto* image_data = image_embeds_cache_->GetTensorData<float>();
+
+  std::cout << "[InjectImageEmbeddings] Input embeddings shape: [" << input_shape[0] << ", " << input_shape[1] << ", " << input_shape[2] << "]" << std::endl;
+  std::cout << "[InjectImageEmbeddings] Image embeddings shape: [";
+  for (size_t i = 0; i < image_shape.size(); ++i) {
+    std::cout << image_shape[i];
+    if (i < image_shape.size() - 1) std::cout << ", ";
+  }
+  std::cout << "]" << std::endl;
+
+  int64_t hidden_size = input_shape[2];
+  int64_t total_image_tokens = image_shape[0];
+
+  std::cout << "[InjectImageEmbeddings] hidden_size=" << hidden_size << ", total_image_tokens=" << total_image_tokens << std::endl;
+  std::cout << "[InjectImageEmbeddings] img_emd_start_idx_=" << img_emd_start_idx_ << std::endl;
+
+  // Update end index for sliding window over image embeddings
+  img_emd_end_idx_ = img_emd_start_idx_ + static_cast<int>(image_positions.size());
+  
+  if (img_emd_end_idx_ > total_image_tokens) {
+    img_emd_end_idx_ = static_cast<int>(total_image_tokens);
+  }
+
+  std::cout << "[InjectImageEmbeddings] Injecting " << (img_emd_end_idx_ - img_emd_start_idx_) << " image embeddings" << std::endl;
+
+  // Inject image embeddings at image token positions
+  for (int idx = 0; idx < static_cast<int>(image_positions.size()) && (img_emd_start_idx_ + idx) < total_image_tokens; ++idx) {
+    size_t pos = image_positions[idx];
+    int image_embed_idx = static_cast<int>(img_emd_start_idx_ + idx);
+    
+    std::cout << "[InjectImageEmbeddings] Injecting at pos " << pos << " from image_embed " << image_embed_idx << std::endl;
+    
+    // Copy image embedding to input embedding at position
+    std::memcpy(input_data + pos * hidden_size,
+                image_data + image_embed_idx * hidden_size,
+                hidden_size * sizeof(float));
+  }
+
+  // Update start index for next chunk
+  img_emd_start_idx_ = img_emd_end_idx_;
 }
 
 }  // namespace Generators

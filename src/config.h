@@ -41,6 +41,7 @@ struct Config {
     static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
     static constexpr std::string_view ImageFeaturesName = "image_features";
     static constexpr std::string_view NumImageTokens = "num_image_tokens";
+    static constexpr std::string_view ImageGridThwName = "image_grid_thw";
 
     // Embedding names
     static constexpr std::string_view AudioEmbedsName = "audio_embeds";
@@ -108,6 +109,7 @@ struct Config {
     int decoder_start_token_id{};   // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
     int vocab_size{};
     int context_length{};
+    int image_token_id{};           // The id of the image placeholder token (for vision-language models like Qwen 2.5 VL).
 
     struct Encoder {
       std::string filename;
@@ -163,11 +165,31 @@ struct Config {
         std::string pixel_values{Defaults::PixelValuesName};
         std::string image_sizes{Defaults::ImageSizesName};
         std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
+        std::string image_grid_thw{Defaults::ImageGridThwName};  // Qwen spatial dimensions
       } inputs;
 
       struct Outputs {
         std::string image_features{Defaults::ImageFeaturesName};
       } outputs;
+
+      // Multi-stage vision pipeline (for models like Qwen 2.5 VL)
+      struct PipelineModel {
+        std::string filename;
+        std::string model_id;
+        std::vector<std::string> inputs;
+        std::vector<std::string> outputs;
+        bool run_on_cpu{false};
+        std::optional<SessionOptions> session_options;
+        std::optional<RunOptions> run_options;
+      };
+      std::vector<PipelineModel> pipeline;
+
+      // Window indexing for spatial reordering (Qwen)
+      struct WindowIndexing {
+        std::string filename;  // Path to wnd_idx.npy
+        int spatial_merge_size{2};
+      };
+      std::optional<WindowIndexing> window_indexing;
     } vision;
 
     struct Speech {
@@ -214,6 +236,7 @@ struct Config {
       struct Inputs {
         std::string input_ids{Defaults::InputIdsName};
         std::string embeddings{Defaults::InputsEmbedsName};
+        std::string input_hidden_states;  // For pipeline models with separate embedding stage
         std::string attention_mask{Defaults::AttentionMaskName};
         std::string position_ids{Defaults::PositionIdsName};
         std::string past_key_names{Defaults::PastKeyName};
@@ -235,6 +258,7 @@ struct Config {
 
       struct Outputs {
         std::string logits{Defaults::LogitsName};
+        std::string output_hidden_states;  // For pipeline models with separate lm_head stage
         std::string present_key_names{Defaults::PresentKeyName};
         std::string present_value_names{Defaults::PresentValueName};
         std::string present_names;  // When key/value pairs are combined

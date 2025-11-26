@@ -1132,6 +1132,14 @@ void Model::CreateSessionOptions() {
     }
   }
 
+  // Also create session options for vision pipeline models
+  for (auto& pipeline_model : config_->model.vision.pipeline) {
+    if (pipeline_model.session_options.has_value()) {
+      auto emplaced = pipeline_session_options_.emplace(pipeline_model.model_id, OrtSessionOptions::Create());
+      CreateSessionOptionsFromConfig(*pipeline_model.session_options, *emplaced.first->second, false, false);
+    }
+  }
+
   // Fallback to CPU if no provider specific interface was set
   if (!p_device_)
     p_device_ = GetDeviceInterface(DeviceType::CPU);
@@ -1288,7 +1296,8 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"phi3v", Processor::Create<PhiImageProcessor>},
           {"whisper", Processor::Create<WhisperProcessor>},
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
-          {"gemma3", Processor::Create<GemmaImageProcessor>}} {
+          {"gemma3", Processor::Create<GemmaImageProcessor>},
+          {"qwen2_5_vl_pipeline", Processor::Create<QwenImageProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info);

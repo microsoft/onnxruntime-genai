@@ -69,6 +69,10 @@ struct DecoderOnlyPipelineState : State {
   void RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
                    DeviceSpan<int32_t> next_indices, bool is_last_chunk);
 
+  // Image embedding injection for VLMs (like Qwen 2.5 VL)
+  void SetImageEmbeddings(std::unique_ptr<OrtValue> image_embeds);
+  void InjectImageEmbeddings(OrtValue& input_embeds, const std::vector<int32_t>& input_ids);
+
  private:
   void UpdateKeyValueCache(DeviceSpan<int32_t> beam_indices, int total_length);
 
@@ -98,6 +102,11 @@ struct DecoderOnlyPipelineState : State {
 
   std::unique_ptr<PositionInputs> position_inputs_;
   ExtraInputs extra_inputs_{*this};
+
+  // Image embedding support for VLMs
+  std::unique_ptr<OrtValue> image_embeds_cache_;
+  int img_emd_start_idx_{0};
+  int img_emd_end_idx_{-1};
 };
 
 }  // namespace Generators

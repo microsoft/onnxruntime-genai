@@ -279,6 +279,8 @@ struct DecoderInputs_Element : JSON::Element {
       v_.input_ids = JSON::Get<std::string_view>(value);
     } else if (name == "inputs_embeds") {
       v_.embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "input_hidden_states") {
+      v_.input_hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else if (name == "position_ids") {
@@ -295,9 +297,13 @@ struct DecoderInputs_Element : JSON::Element {
       v_.cross_past_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_sequence_length") {
       v_.past_sequence_length = JSON::Get<std::string_view>(value);
+    } else if (name == "past_seq_len") {  // Alias for past_sequence_length
+      v_.past_sequence_length = JSON::Get<std::string_view>(value);
     } else if (name == "current_sequence_length") {
       v_.current_sequence_length = JSON::Get<std::string_view>(value);
     } else if (name == "total_sequence_length") {
+      v_.total_sequence_length = JSON::Get<std::string_view>(value);
+    } else if (name == "total_seq_len") {  // Alias for total_sequence_length
       v_.total_sequence_length = JSON::Get<std::string_view>(value);
     } else if (name == "encoder_hidden_states") {
       v_.encoder_hidden_states = JSON::Get<std::string_view>(value);
@@ -330,6 +336,8 @@ struct DecoderOutputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "logits") {
       v_.logits = JSON::Get<std::string_view>(value);
+    } else if (name == "output_hidden_states") {
+      v_.output_hidden_states = JSON::Get<std::string_view>(value);
     } else if (name == "present_key_names") {
       v_.present_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_value_names") {
@@ -388,6 +396,9 @@ struct PipelineModel_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "model_id") {
+      // model_id is already set from the outer key name, but allow it in JSON for clarity
+      // Optionally could validate: if (v_.model_id.empty()) v_.model_id = JSON::Get<std::string_view>(value);
     } else if (name == "run_on_prompt") {
       v_.run_on_prompt = JSON::Get<bool>(value);
     } else if (name == "run_on_token_gen") {
@@ -617,6 +628,8 @@ struct VisionInputs_Element : JSON::Element {
       v_.image_sizes = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
+    } else if (name == "image_grid_thw") {
+      v_.image_grid_thw = JSON::Get<std::string_view>(value);
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -639,6 +652,100 @@ struct VisionOutputs_Element : JSON::Element {
 
  private:
   Config::Model::Vision::Outputs& v_;
+};
+
+struct VisionPipelineModel_Element : JSON::Element {
+  explicit VisionPipelineModel_Element(Config::Model::Vision::PipelineModel& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "model_id") {
+      // model_id can be present in JSON but we use the array index or outer key if available
+      if (v_.model_id.empty()) {
+        v_.model_id = JSON::Get<std::string_view>(value);
+      }
+    } else if (name == "run_on_cpu") {
+      v_.run_on_cpu = JSON::Get<bool>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "inputs") {
+      return inputs_;
+    }
+    if (name == "outputs") {
+      return outputs_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Vision::PipelineModel& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+  StringArray_Element inputs_{v_.inputs};
+  StringArray_Element outputs_{v_.outputs};
+};
+
+struct VisionPipelineArray_Element : JSON::Element {
+  explicit VisionPipelineArray_Element(std::vector<Config::Model::Vision::PipelineModel>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    auto& model = v_.emplace_back();
+    model.model_id = name;
+    pipeline_model_elements_.emplace_back(model);
+    return pipeline_model_elements_.back();
+  }
+
+ private:
+  std::vector<Config::Model::Vision::PipelineModel>& v_;
+  std::vector<VisionPipelineModel_Element> pipeline_model_elements_;
+};
+
+struct VisionPipeline_Element : JSON::Element {
+  explicit VisionPipeline_Element(std::vector<Config::Model::Vision::PipelineModel>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    return array_;
+  }
+
+ private:
+  std::vector<Config::Model::Vision::PipelineModel>& v_;
+  VisionPipelineArray_Element array_{v_};
+};
+
+struct VisionWindowIndexing_Element : JSON::Element {
+  explicit VisionWindowIndexing_Element(Config::Model::Vision::WindowIndexing& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "spatial_merge_size") {
+      v_.spatial_merge_size = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Vision::WindowIndexing& v_;
 };
 
 struct Vision_Element : JSON::Element {
@@ -673,6 +780,19 @@ struct Vision_Element : JSON::Element {
     if (name == "outputs") {
       return outputs_;
     }
+    if (name == "window_indexing") {
+      v_.window_indexing = Config::Model::Vision::WindowIndexing{};
+      window_indexing_ = std::make_unique<VisionWindowIndexing_Element>(*v_.window_indexing);
+      return *window_indexing_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "pipeline") {
+      pipeline_ = std::make_unique<VisionPipeline_Element>(v_.pipeline);
+      return *pipeline_;
+    }
     throw JSON::unknown_value_error{};
   }
 
@@ -680,6 +800,8 @@ struct Vision_Element : JSON::Element {
   Config::Model::Vision& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
   std::unique_ptr<RunOptions_Element> run_options_;
+  std::unique_ptr<VisionWindowIndexing_Element> window_indexing_;
+  std::unique_ptr<VisionPipeline_Element> pipeline_;
   VisionInputs_Element inputs_{v_.inputs};
   VisionOutputs_Element outputs_{v_.outputs};
 };
@@ -856,6 +978,8 @@ struct Model_Element : JSON::Element {
       v_.decoder_start_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "sep_token_id") {
       v_.sep_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "image_token_id") {
+      v_.image_token_id = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
