@@ -465,7 +465,7 @@ def main(args):
     if args.ep_library_path:
         if args.execution_provider == "follow_config":
             raise ValueError(
-                "Cannot use --ep_library_path with --execution_provider=follow_config. "
+                "Cannot use --ep_library_path with --execution_provider=follow_config."
                 "Please specify an execution provider using -e (e.g., -e cuda or -e NvTensorRtRtx)"
             )
 
