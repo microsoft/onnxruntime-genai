@@ -17,22 +17,6 @@ WhisperModel::WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
   session_info_.Add(*session_encoder_);
 }
 
-bool WhisperModel::EncoderHasCrossPresentKVOutputs() const {
-  // clang-format off
-  std::vector<std::string> cross_kv_templates = {
-      config_->model.encoder.outputs.cross_present_key_names,
-      config_->model.encoder.outputs.cross_present_value_names
-  };
-  // clang-format on
-  for (auto& name_template : cross_kv_templates) {
-    auto name0 = ComposeKeyValueName(name_template, 0);
-    if (session_info_.HasOutput(name0)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 std::unique_ptr<State> WhisperModel::CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const {
   return std::make_unique<WhisperState>(*this, params, sequence_lengths);
 }
@@ -190,7 +174,7 @@ WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& par
   encoder_state_ = std::make_unique<AudioEncoderState>(model, params);
   decoder_state_ = std::make_unique<WhisperDecoderState>(model, params, encoder_state_->GetNumFrames());
 
-  if (model.EncoderHasCrossPresentKVOutputs()) {
+  if (encoder_state_->HasCrossKVCacheOutputs()) {
     cross_cache_ = std::make_unique<CrossCache>(*this, encoder_state_->GetNumFrames() / 2);
     encoder_state_->AddCrossCache(cross_cache_);
     decoder_state_->AddCrossCache(cross_cache_);
@@ -201,7 +185,7 @@ WhisperState::WhisperState(const WhisperModel& model, const GeneratorParams& par
 void WhisperState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
   encoder_state_->SetExtraInputs(extra_inputs);
 
-  if (!model_.EncoderHasCrossPresentKVOutputs()) {
+  if (!encoder_state_->HasCrossKVCacheOutputs()) {
     decoder_state_->inputs_.push_back(encoder_state_->hidden_states_.get());
     decoder_state_->input_names_.push_back(model_.config_->model.decoder.inputs.encoder_hidden_states.c_str());
   }

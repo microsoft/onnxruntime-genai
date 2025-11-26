@@ -12,8 +12,6 @@ namespace Generators {
 struct WhisperModel : Model {
   WhisperModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
-  bool EncoderHasCrossPresentKVOutputs() const;
-
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
   std::unique_ptr<OrtSession> session_encoder_;  // audio_features -> encoder_hidden_states, cross_kv_cache
@@ -32,6 +30,8 @@ struct AudioEncoderState : State {
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
 
   int GetNumFrames() { return num_frames_; }
+
+  bool HasCrossKVCacheOutputs() { return model_.session_info_.HasOutput(ComposeKeyValueName(model_.config_->model.encoder.outputs.cross_present_key_names, 0)); }
 
  private:
   friend struct WhisperState;
