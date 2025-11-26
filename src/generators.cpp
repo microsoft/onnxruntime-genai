@@ -65,6 +65,11 @@ OrtGlobals::OrtGlobals()
   GetDeviceInterface(DeviceType::CPU)->InitOrt(*Ort::api, allocator_cpu);
 }
 
+OrtGlobals::~OrtGlobals() {
+  // Explicitly clear cast sessions before env_ is destroyed
+  cast_sessions_.clear();
+}
+
 // Ensure Shutdown() has been called before process exit
 struct EnsureShutdown {
   ~EnsureShutdown() {

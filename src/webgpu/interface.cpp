@@ -14,49 +14,39 @@ namespace WebGPU {
 static Ort::Allocator* ort_allocator_{};
 const char* device_label = "WebGPU";
 
-// Cache for Cast inference sessions, keyed by input and output types
-struct CastSessionCache {
-  std::unordered_map<uint64_t, std::unique_ptr<OrtSession>> sessions;
-  std::mutex mutex;
-
-  static uint64_t MakeKey(ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type) {
-    return (static_cast<uint64_t>(input_type) << 32) | static_cast<uint64_t>(output_type);
+// Helper to get element size for a given ONNX data type
+static size_t GetElementSize(ONNXTensorElementDataType type) {
+  switch (type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+      return sizeof(float);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+      return sizeof(uint8_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+      return sizeof(int8_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+      return sizeof(uint16_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+      return sizeof(int16_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+      return sizeof(int32_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+      return sizeof(int64_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+      return sizeof(bool);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+      return sizeof(uint16_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+      return sizeof(double);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+      return sizeof(uint32_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
+      return sizeof(uint64_t);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
+      return sizeof(uint16_t);
+    default:
+      throw std::runtime_error("Unsupported ONNX data type");
   }
-
-  OrtSession* GetOrCreate(ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type) {
-    uint64_t key = MakeKey(input_type, output_type);
-
-    std::lock_guard<std::mutex> lock(mutex);
-
-    auto it = sessions.find(key);
-    if (it != sessions.end()) {
-      return it->second.get();
-    }
-
-    // Create new session with Cast model
-    auto model_bytes = CreateCastModelBytes(input_type, output_type);
-
-    auto session_options = OrtSessionOptions::Create();
-    session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-
-    // Add WebGPU execution provider
-    if (ort_allocator_) {
-      const OrtMemoryInfo* mem_info = nullptr;
-      Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &mem_info));
-
-      // Append WebGPU execution provider with no options
-      session_options->AppendExecutionProvider("WebGPU", nullptr, nullptr, 0);
-    }
-
-    auto session = OrtSession::Create(GetOrtEnv(), model_bytes.data(), model_bytes.size(), session_options.get());
-
-    auto* result = session.get();
-    sessions[key] = std::move(session);
-    return result;
-  }
-};
-
-static CastSessionCache g_cast_session_cache;
+}
 
 struct WebGPUMemory final : DeviceBuffer {
   WebGPUMemory(size_t size) : owned_{true} {
@@ -229,10 +219,30 @@ struct InterfaceImpl : DeviceInterface {
       throw std::runtime_error("WebGPU allocator not initialized");
     }
 
-    // Get or create cached session for this type pair
-    OrtSession* session = g_cast_session_cache.GetOrCreate(input_type, output_type);
-    if (!session) {
-      return false;
+    // Use the global cast session cache from OrtGlobals
+    auto& globals = GetOrtGlobals();
+    uint64_t key = (static_cast<uint64_t>(input_type) << 32) | static_cast<uint64_t>(output_type);
+
+    OrtSession* session = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(globals->cast_sessions_mutex_);
+      auto it = globals->cast_sessions_.find(key);
+      if (it == globals->cast_sessions_.end()) {
+        // Create new session with Cast model
+        auto model_bytes = CreateCastModelBytes(input_type, output_type);
+
+        auto session_options = OrtSessionOptions::Create();
+        session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+        // Append WebGPU execution provider with no options
+        session_options->AppendExecutionProvider("WebGPU", nullptr, nullptr, 0);
+
+        auto new_session = OrtSession::Create(GetOrtEnv(), model_bytes.data(), model_bytes.size(), session_options.get());
+        session = new_session.get();
+        globals->cast_sessions_[key] = std::move(new_session);
+      } else {
+        session = it->second.get();
+      }
     }
 
     // Get WebGPU allocator's memory info
@@ -262,39 +272,6 @@ struct InterfaceImpl : DeviceInterface {
     session->Run(nullptr, *io_binding);
 
     return true;
-  }
-
- private:
-  // Helper to get element size for a given ONNX data type
-  static size_t GetElementSize(ONNXTensorElementDataType type) {
-    switch (type) {
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-        return sizeof(float);
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
-        return sizeof(uint8_t);
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
-        return sizeof(int8_t);
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
-        return sizeof(uint16_t);
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
-        return sizeof(int16_t);
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
-        return sizeof(int32_t);
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
-        return sizeof(int64_t);
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
-        return sizeof(bool);
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-        return 2;
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
-        return sizeof(double);
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
-        return sizeof(uint32_t);
-      case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
-        return sizeof(uint64_t);
-      default:
-        throw std::runtime_error("Unsupported ONNX data type");
-    }
   }
 };
 
