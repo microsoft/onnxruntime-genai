@@ -34,9 +34,12 @@ VisionPipelineModel::VisionPipelineModel(std::unique_ptr<Config> config, OrtEnv&
 
     // When extensions are available, skip the first stage if it's patch_embed
     // Extensions output becomes input to the second stage (vision_attn)
-    if (!config_->model.vision.pipeline.empty() &&
-        config_->model.vision.pipeline[0].model_id == "patch_embed") {
-      first_stage_index_ = 1;  // Skip patch_embed stage
+    if (!config_->model.vision.pipeline.empty()) {
+      const auto& first_stage = config_->model.vision.pipeline[0];
+      if (first_stage.model_id == "patch_embed" && first_stage.skip_with_extensions &&
+          config_->model.vision.pipeline.size() > 1) {
+        first_stage_index_ = 1;  // Skip patch_embed stage when extensions already produced its output
+      }
     }
   } catch ([[maybe_unused]] const std::exception& e) {
     // If extensions initialization fails, fall back to using all pipeline stages
@@ -132,7 +135,15 @@ void VisionPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_in
   // If extensions are available, we start at first_stage_index_ (possibly skipping patch_embed)
   size_t input_stage = model_.image_processor_ ? model_.first_stage_index_ : 0;
   if (input_stage < model_.sessions_.size()) {
-    extra_inputs_.Add(extra_inputs, model_.sessions_[input_stage]->GetInputNames());
+    auto required_inputs = model_.sessions_[input_stage]->GetInputNames();
+    if (model_.image_processor_) {
+      const auto& pixel_name = model_.config_->model.vision.inputs.pixel_values;
+      if (std::none_of(required_inputs.begin(), required_inputs.end(),
+                       [&pixel_name](const std::string& name) { return name == pixel_name; })) {
+        required_inputs.push_back(pixel_name);
+      }
+    }
+    extra_inputs_.Add(extra_inputs, required_inputs);
   }
 }
 

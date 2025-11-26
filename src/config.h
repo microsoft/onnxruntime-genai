@@ -182,6 +182,7 @@ struct Config {
         std::vector<std::string> outputs;
         std::unordered_map<std::string, std::string> output_names_forwarder;
         bool run_on_cpu{false};  // If true, force CPU execution for this stage
+        bool skip_with_extensions{true};  // If true, skip this stage when extensions already produced its output
       };
 
       std::vector<PipelineModel> pipeline;

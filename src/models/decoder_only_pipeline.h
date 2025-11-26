@@ -5,6 +5,7 @@
 
 #include <future>
 #include <optional>
+#include <limits>
 
 #include "../worker_thread.h"
 #include "model.h"
@@ -14,8 +15,12 @@
 #include "windowed_kv_cache.h"
 #include "position_inputs.h"
 #include "extra_inputs.h"
+#include "vision_pipeline.h"
 
 namespace Generators {
+
+struct VisionPipelineModel;
+struct VisionPipelineState;
 
 struct DecoderOnlyPipelineModel : Model {
   DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
@@ -98,6 +103,46 @@ struct DecoderOnlyPipelineState : State {
 
   std::unique_ptr<PositionInputs> position_inputs_;
   ExtraInputs extra_inputs_{*this};
+};
+
+struct VisionDecoderPipelineModel : DecoderOnlyPipelineModel {
+  VisionDecoderPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
+
+  VisionDecoderPipelineModel(const VisionDecoderPipelineModel&) = delete;
+  VisionDecoderPipelineModel& operator=(const VisionDecoderPipelineModel&) = delete;
+
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths,
+                                     const GeneratorParams& params) const override;
+
+  bool DecoderConsumesImageFeatures() const { return decoder_expects_image_features_; }
+  const std::string& ImageFeaturesName() const { return image_features_name_; }
+
+  std::unique_ptr<VisionPipelineModel> vision_pipeline_model_;
+  bool decoder_expects_image_features_{false};
+  std::string image_features_name_;
+};
+
+struct VisionDecoderPipelineState : DecoderOnlyPipelineState {
+  VisionDecoderPipelineState(const VisionDecoderPipelineModel& model, DeviceSpan<int32_t> sequence_lengths,
+                             const GeneratorParams& params);
+
+  VisionDecoderPipelineState(const VisionDecoderPipelineState&) = delete;
+  VisionDecoderPipelineState& operator=(const VisionDecoderPipelineState&) = delete;
+
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+
+  DeviceSpan<float> Run(int total_length, DeviceSpan<int32_t>& next_tokens,
+                        DeviceSpan<int32_t> next_indices) override;
+
+ private:
+  void AttachVisionFeatures();
+
+  const VisionDecoderPipelineModel& model_;
+  std::unique_ptr<VisionPipelineState> vision_state_;
+  int64_t num_image_tokens_{0};
+  std::string image_features_input_name_{};
+  size_t image_features_input_index_{std::numeric_limits<size_t>::max()};
+  bool decoder_consumes_image_features_{false};
 };
 
 }  // namespace Generators

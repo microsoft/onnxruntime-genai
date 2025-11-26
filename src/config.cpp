@@ -664,6 +664,8 @@ struct VisionPipelineModel_Element : JSON::Element {
       v_.model_id = JSON::Get<std::string_view>(value);
     } else if (name == "run_on_cpu") {
       v_.run_on_cpu = JSON::Get<bool>(value);
+    } else if (name == "skip_with_extensions") {
+      v_.skip_with_extensions = JSON::Get<bool>(value);
     } else {
       throw JSON::unknown_value_error{};
     }

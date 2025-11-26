@@ -9,6 +9,49 @@
 
 namespace Generators {
 
+namespace {
+
+int64_t GetNumImageTokens(const std::vector<ExtraInput>& extra_inputs) {
+  for (const auto& extra_input : extra_inputs) {
+    if (extra_input.name == Config::Defaults::NumImageTokens) {
+      assert(extra_input.tensor->ort_tensor_);
+      const int64_t* data = extra_input.tensor->ort_tensor_->GetTensorData<int64_t>();
+      auto type_and_shape = extra_input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo();
+      return std::accumulate(data, data + type_and_shape->GetElementCount(), 0LL);
+    }
+  }
+
+  return 0;
+}
+
+int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
+  for (const auto& extra_input : extra_inputs) {
+    if (extra_input.name == Config::Defaults::PixelValuesName) {
+      assert(extra_input.tensor->ort_tensor_);
+      const auto shape = extra_input.tensor->ort_tensor_->GetTensorTypeAndShapeInfo()->GetShape();
+      if (shape.size() < 3) {
+        return 0;
+      }
+      return shape.front();
+    }
+  }
+
+  return 0;
+}
+
+bool PipelineConsumesInput(const Config& config, const std::string& input_name) {
+  if (input_name.empty()) {
+    return false;
+  }
+
+  return std::any_of(config.model.decoder.pipeline.begin(), config.model.decoder.pipeline.end(),
+                     [&input_name](const Config::Model::Decoder::PipelineModel& stage) {
+                       return std::find(stage.inputs.begin(), stage.inputs.end(), input_name) != stage.inputs.end();
+                     });
+}
+
+}  // namespace
+
 DecoderOnlyPipelineModel::DecoderOnlyPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
     : Model{std::move(config)}, ort_env_{ort_env} {
   for (const auto& model : config_->model.decoder.pipeline) {
@@ -427,6 +470,87 @@ OrtValue* DecoderOnlyPipelineState::GetOutput(const char* name) {
 
   // Search managed outputs saved in this State.
   return State::GetOutput(name);
+}
+
+VisionDecoderPipelineModel::VisionDecoderPipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
+    : DecoderOnlyPipelineModel(std::move(config), ort_env) {
+  if (config_->model.vision.pipeline.empty()) {
+    throw std::runtime_error("Vision decoder pipeline model requires a vision.pipeline definition.");
+  }
+
+  image_features_name_ = config_->model.vision.outputs.image_features;
+  decoder_expects_image_features_ = PipelineConsumesInput(*config_, image_features_name_);
+
+  vision_pipeline_model_ = std::make_unique<VisionPipelineModel>(std::make_unique<Config>(*config_), ort_env);
+}
+
+std::unique_ptr<State> VisionDecoderPipelineModel::CreateState(DeviceSpan<int32_t> sequence_lengths,
+                                                               const GeneratorParams& params) const {
+  return std::make_unique<VisionDecoderPipelineState>(*this, sequence_lengths, params);
+}
+
+VisionDecoderPipelineState::VisionDecoderPipelineState(const VisionDecoderPipelineModel& model,
+                                                       DeviceSpan<int32_t> sequence_lengths,
+                                                       const GeneratorParams& params)
+    : DecoderOnlyPipelineState(model, sequence_lengths, params),
+      model_{model},
+      decoder_consumes_image_features_{model.DecoderConsumesImageFeatures()} {
+  if (decoder_consumes_image_features_ && !model_.ImageFeaturesName().empty()) {
+    image_features_input_name_ = model_.ImageFeaturesName();
+    image_features_input_index_ = input_names_.size();
+    input_names_.push_back(image_features_input_name_.c_str());
+    inputs_.push_back(nullptr);
+  }
+
+  if (decoder_consumes_image_features_) {
+    vision_state_ = std::make_unique<VisionPipelineState>(*model_.vision_pipeline_model_, params);
+  }
+}
+
+void VisionDecoderPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
+  DecoderOnlyPipelineState::SetExtraInputs(extra_inputs);
+
+  if (!decoder_consumes_image_features_ || !vision_state_) {
+    return;
+  }
+
+  num_image_tokens_ = GetNumImageTokens(extra_inputs);
+
+  if (num_image_tokens_ == 0) {
+    if (image_features_input_index_ != std::numeric_limits<size_t>::max()) {
+      inputs_[image_features_input_index_] = nullptr;
+    }
+    return;
+  }
+
+  const int64_t num_images = GetImageFeatureBatchSize(extra_inputs);
+  vision_state_->SetExtraInputs(extra_inputs, num_images, num_image_tokens_);
+}
+
+DeviceSpan<float> VisionDecoderPipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens,
+                                                  DeviceSpan<int32_t> next_indices) {
+  const bool prompt_phase = first_run_;
+
+  if (prompt_phase && decoder_consumes_image_features_ && vision_state_ && num_image_tokens_ > 0) {
+    vision_state_->Run(total_length, next_tokens, next_indices);
+    AttachVisionFeatures();
+  }
+
+  return DecoderOnlyPipelineState::Run(total_length, next_tokens, next_indices);
+}
+
+void VisionDecoderPipelineState::AttachVisionFeatures() {
+  if (!decoder_consumes_image_features_ || image_features_input_index_ == std::numeric_limits<size_t>::max()) {
+    return;
+  }
+
+  auto* features = vision_state_->GetOutput(image_features_input_name_.c_str());
+  if (!features) {
+    throw std::runtime_error("Vision pipeline did not produce required image_features output.");
+  }
+
+  inputs_[image_features_input_index_] = features;
+  vision_state_.reset();
 }
 
 }  // namespace Generators
