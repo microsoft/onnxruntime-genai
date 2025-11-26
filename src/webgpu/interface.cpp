@@ -261,9 +261,6 @@ struct InterfaceImpl : DeviceInterface {
     // Run inference
     session->Run(nullptr, *io_binding);
 
-    // Synchronize to ensure completion
-    io_binding->SynchronizeOutputs();
-
     return true;
   }
 
