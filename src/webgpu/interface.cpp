@@ -4,12 +4,59 @@
 #include "../generators.h"
 #include "../search.h"
 #include "interface.h"
+#include "cast_model_builder.h"
+#include <unordered_map>
+#include <mutex>
 
 namespace Generators {
 namespace WebGPU {
 
 static Ort::Allocator* ort_allocator_{};
 const char* device_label = "WebGPU";
+
+// Cache for Cast inference sessions, keyed by input and output types
+struct CastSessionCache {
+  std::unordered_map<uint64_t, std::unique_ptr<OrtSession>> sessions;
+  std::mutex mutex;
+
+  static uint64_t MakeKey(ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type) {
+    return (static_cast<uint64_t>(input_type) << 32) | static_cast<uint64_t>(output_type);
+  }
+
+  OrtSession* GetOrCreate(ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type) {
+    uint64_t key = MakeKey(input_type, output_type);
+
+    std::lock_guard<std::mutex> lock(mutex);
+
+    auto it = sessions.find(key);
+    if (it != sessions.end()) {
+      return it->second.get();
+    }
+
+    // Create new session with Cast model
+    auto model_bytes = CreateCastModelBytes(input_type, output_type);
+
+    auto session_options = OrtSessionOptions::Create();
+    session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+    // Add WebGPU execution provider
+    if (ort_allocator_) {
+      const OrtMemoryInfo* mem_info = nullptr;
+      Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &mem_info));
+
+      // Append WebGPU execution provider with no options
+      session_options->AppendExecutionProvider("WebGPU", nullptr, nullptr, 0);
+    }
+
+    auto session = OrtSession::Create(GetOrtEnv(), model_bytes.data(), model_bytes.size(), session_options.get());
+
+    auto* result = session.get();
+    sessions[key] = std::move(session);
+    return result;
+  }
+};
+
+static CastSessionCache g_cast_session_cache;
 
 struct WebGPUMemory final : DeviceBuffer {
   WebGPUMemory(size_t size) : owned_{true} {
@@ -176,6 +223,82 @@ struct InterfaceImpl : DeviceInterface {
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
 
   void Synchronize() override {}  // Nothing to do?
+
+  bool Cast(void* input, void* output, ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type, size_t element_count) override {
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
+
+    // Get or create cached session for this type pair
+    OrtSession* session = g_cast_session_cache.GetOrCreate(input_type, output_type);
+    if (!session) {
+      return false;
+    }
+
+    // Get WebGPU allocator's memory info
+    const OrtMemoryInfo* webgpu_mem_info = nullptr;
+    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
+
+    // Create input tensor with proper shape [element_count]
+    int64_t shape_val = static_cast<int64_t>(element_count);
+    std::span<const int64_t> shape{&shape_val, 1};
+
+    // Create input OrtValue
+    auto input_tensor = OrtValue::CreateTensor(*webgpu_mem_info, input, element_count * GetElementSize(input_type), shape, input_type);
+
+    // Create output OrtValue
+    auto output_tensor = OrtValue::CreateTensor(*webgpu_mem_info, output, element_count * GetElementSize(output_type), shape, output_type);
+
+    // Use IOBinding for efficient execution
+    auto io_binding = OrtIoBinding::Create(*session);
+
+    // Bind input
+    io_binding->BindInput("input", *input_tensor);
+
+    // Bind output
+    io_binding->BindOutput("output", *output_tensor);
+
+    // Run inference
+    session->Run(nullptr, *io_binding);
+
+    // Synchronize to ensure completion
+    io_binding->SynchronizeOutputs();
+
+    return true;
+  }
+
+ private:
+  // Helper to get element size for a given ONNX data type
+  static size_t GetElementSize(ONNXTensorElementDataType type) {
+    switch (type) {
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+        return sizeof(float);
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
+        return sizeof(uint8_t);
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
+        return sizeof(int8_t);
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
+        return sizeof(uint16_t);
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
+        return sizeof(int16_t);
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+        return sizeof(int32_t);
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
+        return sizeof(int64_t);
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+        return sizeof(bool);
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+        return 2;
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
+        return sizeof(double);
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
+        return sizeof(uint32_t);
+      case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
+        return sizeof(uint64_t);
+      default:
+        throw std::runtime_error("Unsupported ONNX data type");
+    }
+  }
 };
 
 }  // namespace WebGPU
