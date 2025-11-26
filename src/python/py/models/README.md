@@ -20,6 +20,7 @@ This folder contains the model builder for quickly creating optimized and quanti
     - [Exclude Language Modeling Head](#exclude-language-modeling-head)
     - [Include Last Hidden States Output](#include-last-hidden-states-output)
     - [Enable Shared Embeddings](#enable-shared-embeddings)
+    - [Disable QKV Projections Fusion](#disable-qkv-projections-fusion)
     - [Enable CUDA Graph](#enable-cuda-graph)
     - [Use 8 Bits Quantization in QMoE](#use-8-bits-quantization-in-qmoe)
     - [Use QDQ Pattern for Quantization](#use-qdq-pattern-for-quantization)
@@ -251,6 +252,18 @@ python3 -m onnxruntime_genai.models.builder -m model_name -o path_to_output_fold
 
 # From source:
 python3 builder.py -m model_name -o path_to_output_folder -p fp16 -e cuda --extra_options shared_embeddings=true
+```
+
+#### Disable QKV Projections Fusion
+
+This scenario is for when you want to keep Q/K/V projections in the attention layer separate instead of fusing them into a single packed MatMul operation. 
+
+```
+# From wheel:
+python3 -m onnxruntime_genai.models.builder -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
+
+# From source:
+python3 builder.py -i path_to_local_folder_on_disk -o path_to_output_folder -p precision -e execution_provider -c cache_dir_to_store_temp_files --extra_options disable_qkv_fusion=true
 ```
 
 #### Enable CUDA Graph
