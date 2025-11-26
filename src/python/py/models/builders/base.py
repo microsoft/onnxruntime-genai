@@ -17,6 +17,7 @@ import onnx_ir as ir
 import torch
 from onnx_ir.tensor_adapters import TorchTensor, to_torch_dtype
 from onnxruntime.quantization.matmul_nbits_quantizer import (
+    KQuantWeightOnlyQuantConfig,
     MatMulNBitsQuantizer,
     QuantFormat,
     RTNWeightOnlyQuantConfig,
@@ -378,19 +379,31 @@ class Model:
                 config.quantization_config["desc_act"] if "desc_act" in config.quantization_config else False
             )
 
-        self.int4_tied_embeddings = (
+        # Determine if lm_head is unquantized. int4/8 can have options to int4_nodes_to_exclude. FP models are always unquantized.
+        self.unquantized_lm_head = "/lm_head/MatMul" in self.quant_attrs["int4"][
+            "nodes_to_exclude"
+        ] or self.onnx_dtype in {ir.DataType.FLOAT, ir.DataType.FLOAT16, ir.DataType.BFLOAT16}
+        self.shared_embeddings = extra_options.get(
+            "shared_embeddings",
             config.tie_word_embeddings
             if hasattr(config, "tie_word_embeddings") and config.tie_word_embeddings is not None
-            else False
+            else False,
         )
-        self.int4_tied_embeddings = extra_options.get("int4_tied_embeddings", self.int4_tied_embeddings)
         self.int8_lm_head = extra_options.get("int4_algo_config", "default") in {
             "k_quant_mixed",
             "k_quant_last",
+            "rtn_last",
         }
-        if not self.int8_lm_head:
+
+        # shared_embeddings conflicts with exclude_embeds and exclude_lm_head
+        if self.shared_embeddings and (self.exclude_embeds or self.exclude_lm_head):
+            self.shared_embeddings = False
+        elif self.shared_embeddings and not self.unquantized_lm_head:
             # matmul_nbits_quantizer.py has a different naming for default quantization, so lm_head.MatMul.weight_Q{}G{} does not match.
-            self.int4_tied_embeddings = False
+            self.shared_embeddings = self.int8_lm_head or extra_options.get("int4_algo_config", "default") in {
+                "rtn",
+                "k_quant",
+            }
 
     def to_str_dtype(self, dtype: ir.DataType) -> str:
         return dtype.name
@@ -646,13 +659,14 @@ class Model:
         customized_weight_config = {}
         int4_algo_config = None
 
-        if quant_method == "rtn":
-            int4_algo_config = RTNWeightOnlyQuantConfig()
+        if quant_method in {"rtn", "rtn_last"}:
+            if quant_method == "rtn_last":
+                customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
+            int4_algo_config = RTNWeightOnlyQuantConfig(customized_weight_config=customized_weight_config)
 
-        elif quant_method in {"k_quant_mixed", "k_quant_last"}:
-            from onnxruntime.quantization.matmul_nbits_quantizer import (
-                KQuantWeightOnlyQuantConfig,
-            )
+        elif quant_method in {"k_quant", "k_quant_mixed", "k_quant_last"}:
+            if quant_method != "k_quant":
+                customized_weight_config["/lm_head/MatMul"] = {"bits": 8}
 
             if quant_method == "k_quant_mixed":
                 # k_quant_mixed is from llama.cpp.
@@ -964,7 +978,7 @@ class Model:
         self.make_node("Expand", inputs=inputs, outputs=[output], name=name)
         self.make_value(output, dtype, shape=shape)
 
-    def make_reduce_sum(self, name, inputs, dtype, shape, keepdims=True):
+    def make_reduce_sum(self, name, inputs, dtype, shape, keepdims=False):
         output = f"{name}/output_0"
         self.make_node("ReduceSum", inputs=inputs, outputs=[output], name=name, keepdims=keepdims)
         self.make_value(output, dtype, shape=shape)
@@ -1323,23 +1337,24 @@ class Model:
 
     def make_embedding(self, embedding):
         basename = "/model/embed_tokens"
-        if self.int4_tied_embeddings:
+        # Use GatherBlockQuantized if and only if tied embeddings are enabled and export model is quantized. quantized d_type in set_onnx_dtype is INT4/UINT4
+        if self.shared_embeddings and self.onnx_dtype in {ir.DataType.INT4, ir.DataType.UINT4}:
             gather_name = f"{basename}/GatherBlockQuantized"
             gather_output = f"{gather_name}/output_0"
 
             weight_reshape_name = f"{basename}/Reshape"
             bits = 8 if self.int8_lm_head else 4
+            flat_dim = self.hidden_size * bits // 8
             weight_reshape_inputs = [
                 f"lm_head.MatMul.weight_Q{bits}G{self.int4_block_size}",
-                f"/model/constants/INT64/[{self.vocab_size}, {self.hidden_size}]",
+                f"/model/constants/INT64/[{self.vocab_size}, {flat_dim}]",
             ]
             weight_reshape_output = f"{weight_reshape_name}/output_0"
             # quantized weight dtype is uint8, see here
             # https://github.com/microsoft/onnxruntime/blob/0c9356cb986fd4cd2c5d510909d31186010ba226/onnxruntime/python/tools/quantization/neural_compressor/weight_only.py#L73
             self.make_reshape(
-                weight_reshape_name, weight_reshape_inputs, dtype=ir.DataType.UINT8, shape=["vocab_size", "hidden_size"]
+                weight_reshape_name, weight_reshape_inputs, dtype=ir.DataType.UINT8, shape=[self.vocab_size, flat_dim]
             )
-
             self.make_node(
                 "GatherBlockQuantized",
                 inputs=[weight_reshape_output, "input_ids", "lm_head.MatMul.weight_scale", "lm_head.MatMul.weight_zp"],
@@ -1348,7 +1363,24 @@ class Model:
                 domain="com.microsoft",
                 bits=bits,
                 block_size=int(self.int4_block_size),
+                gather_axis=0,
+                quantize_axis=1,
             )
+        # Use Transpose + Gather for tied embeddings for float embedding layers
+        elif self.shared_embeddings and self.unquantized_lm_head:
+            transpose_name = f"{basename}/Transpose"
+            transpose_output = f"{transpose_name}/output_0"
+            self.make_transpose(
+                transpose_name,
+                "lm_head.MatMul.weight",
+                self.io_dtype,
+                shape=[self.vocab_size, self.hidden_size],
+                perm=[1, 0],
+            )
+
+            gather_name = f"{basename}/Gather"
+            gather_output = f"{gather_name}/output_0"
+            self.make_node("Gather", inputs=[transpose_output, "input_ids"], outputs=[gather_output], name=gather_name)
         else:
             weight = "model.embed_tokens.weight"
             self.make_initializer(embedding, weight, to=self.io_dtype)
@@ -4368,10 +4400,10 @@ class Model:
         #               |
         #         Cast to int32
         #               |
-        #           ReduceSum
+        #           ReduceSum (keepdims=0)
         #              /    \
         #             /      \
-        #           Sub    Squeeze
+        #           Sub    ReduceMax
         #            |        |
         #       seqlens_k  total_seq_len
         #         (1D)       (int)
@@ -4383,25 +4415,20 @@ class Model:
         )
         reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
         reduce_sum_inputs = [f"{cast_1_name}/output_0", "/model/constants/INT64/[1]"]
-        self.make_reduce_sum(
-            reduce_sum_name,
-            reduce_sum_inputs,
-            dtype=ir.DataType.INT32,
-            shape=["batch_size", 1],
-        )
+        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
 
         # Left branch: Calculate seqlens_k = ReduceSum - 1
         sub_name = f"{attn_mask_basename}/Sub"
         sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT32/[1]"]
-        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size", 1])
+        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT32, shape=["batch_size"])
 
-        # Right branch: Squeeze to get int value for total_seq_len
-        squeeze_name = f"{attn_mask_basename}/Squeeze"
-        squeeze_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/[0]"]
-        self.make_squeeze(squeeze_name, squeeze_inputs, dtype=ir.DataType.INT32, shape=[])
+        # Right branch: ReduceMax to get maximum int value for total_seq_len
+        reduce_max_name = f"{attn_mask_basename}/ReduceMax"
+        reduce_max_inputs = [f"{reduce_sum_name}/output_0"]
+        self.make_reduce_max(reduce_max_name, reduce_max_inputs, dtype=ir.DataType.INT32, shape=[])
 
         self.mask_attrs["seqlens_k"] = sub_name
-        self.mask_attrs["total_seq_len"] = squeeze_name
+        self.mask_attrs["total_seq_len"] = reduce_max_name
 
     def make_attention_mask_standard_reformatting_for_gqa(self, attn_mask_basename):
         # Make nodes for the attention mask subgraph that calculates
@@ -4410,6 +4437,7 @@ class Model:
         #                attention_mask
         #               /              \
         #          ReduceSum          Shape
+        #         (keepdims=0)          |
         #              |                |
         #             Sub             Gather
         #              |                |
@@ -4421,22 +4449,12 @@ class Model:
         # Left path
         reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
         reduce_sum_inputs = ["attention_mask", "/model/constants/INT64/[1]"]
-        self.make_reduce_sum(
-            reduce_sum_name,
-            reduce_sum_inputs,
-            dtype=ir.DataType.INT64,
-            shape=["batch_size", 1],
-        )
+        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size"])
         sub_name = f"{attn_mask_basename}/Sub"
         sub_inputs = [f"{reduce_sum_name}/output_0", "/model/constants/INT64/[1]"]
-        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT64, shape=["batch_size", 1])
+        self.make_sub(sub_name, sub_inputs, dtype=ir.DataType.INT64, shape=["batch_size"])
         cast_1_name = f"{attn_mask_basename}/Sub/Cast"
-        self.make_cast(
-            cast_1_name,
-            f"{sub_name}/output_0",
-            dtype=ir.DataType.INT32,
-            shape=["batch_size", 1],
-        )
+        self.make_cast(cast_1_name, f"{sub_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size"])
 
         # Right path
         shape_name = f"{attn_mask_basename}/Shape"
@@ -4468,6 +4486,7 @@ class Model:
         #                attention_mask
         #               /              \
         #          ReduceSum          Shape
+        #         (keepdims=0)          |
         #              |                |
         #        Cast to int32        Gather
         #              |                |
@@ -4482,19 +4501,9 @@ class Model:
         # Left path
         reduce_sum_name = f"{attn_mask_basename}/ReduceSum"
         reduce_sum_inputs = ["attention_mask", "/model/constants/INT64/[1]"]
-        self.make_reduce_sum(
-            reduce_sum_name,
-            reduce_sum_inputs,
-            dtype=ir.DataType.INT64,
-            shape=["batch_size", 1],
-        )
+        self.make_reduce_sum(reduce_sum_name, reduce_sum_inputs, dtype=ir.DataType.INT64, shape=["batch_size"])
         cast_1_name = f"{attn_mask_basename}/ReduceSum/Cast"
-        self.make_cast(
-            cast_1_name,
-            f"{reduce_sum_name}/output_0",
-            dtype=ir.DataType.INT32,
-            shape=["batch_size", 1],
-        )
+        self.make_cast(cast_1_name, f"{reduce_sum_name}/output_0", dtype=ir.DataType.INT32, shape=["batch_size"])
 
         # Right path
         shape_name = f"{attn_mask_basename}/Shape"
