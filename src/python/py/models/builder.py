@@ -59,7 +59,7 @@ def check_extra_options(kv_pairs, execution_provider):
         "use_qdq",
         "use_webgpu_fp32",
         "use_cuda_bf16",
-        "int4_tied_embeddings",
+        "shared_embeddings",
         "hf_remote",
     ]
     for key in bools:
@@ -390,11 +390,17 @@ def get_args():
                     Use this option when you want to exclude certain nodes from being quantized.
                     Separate the node names with a ',' when passing them here (e.g. int4_nodes_to_exclude=/lm_head/MatMul,/model/embed_tokens/Gather)
                 int4_algo_config = Method for int4 quantization. Default is 'default'.
-                    Currently supported options are: 'default', 'rtn', 'k_quant_mixed', 'k_quant_last'.
+                    Currently supported options are: 'default', 'rtn', 'rtn_last', 'k_quant', 'k_quant_mixed', 'k_quant_last'.
+                    default = algo_config passed to MatMulNBitsQuantizer is None. Quantizer uses default RTN algorithm. All MatMuls are quantized as int4.(different node naming conventions to `rtn`)
+                    rtn = RTN algorithm for int4 quantization.
+                    rtn_last = RTN algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
+                    k_quant = k_quant algorithm for int4 quantization.
                     k_quant_mixed = k_quant algorithm with mixed precision (int4 + int8).
                     k_quant_last = k_quant algorithm where only the last MatMul (/lm_head/MatMul) is quantized as int8. Other MatMuls are quantized as int4.
-                int4_tied_embeddings = Enable weight sharing for quantization. Default is false.
-                    Use this option when you want to share the weights in the embedding and unembedding.
+                shared_embeddings = Enable weight sharing between embedding and LM head layers. Default is false.
+                    Use this option to share weights and reduce model size by eliminating duplicate weights.
+                    For quantized models (INT4/UINT4): Shares quantized weights using GatherBlockQuantized. Only works with rtn and k_quant algorithms, and cannot be used if LM head is excluded.
+                    For float models (FP16/FP32/BF16): Shares float weights using Gather. Works for pure FP models or INT4 models where LM head is excluded from quantization.
                 num_hidden_layers = Manually specify the number of layers in your ONNX model.
                     Used for unit testing purposes.
                 filename = Filename for ONNX model (default is 'model.onnx').
