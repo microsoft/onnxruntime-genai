@@ -5,48 +5,12 @@
 #include "../search.h"
 #include "interface.h"
 #include "cast_model_builder.h"
-#include <unordered_map>
-#include <mutex>
 
 namespace Generators {
 namespace WebGPU {
 
 static Ort::Allocator* ort_allocator_{};
 const char* device_label = "WebGPU";
-
-// Helper to get element size for a given ONNX data type
-static size_t GetElementSize(ONNXTensorElementDataType type) {
-  switch (type) {
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-      return sizeof(float);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
-      return sizeof(uint8_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8:
-      return sizeof(int8_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
-      return sizeof(uint16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16:
-      return sizeof(int16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
-      return sizeof(int32_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64:
-      return sizeof(int64_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
-      return sizeof(bool);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-      return sizeof(uint16_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_DOUBLE:
-      return sizeof(double);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
-      return sizeof(uint32_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
-      return sizeof(uint64_t);
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16:
-      return sizeof(uint16_t);
-    default:
-      throw std::runtime_error("Unsupported ONNX data type");
-  }
-}
 
 struct WebGPUMemory final : DeviceBuffer {
   WebGPUMemory(size_t size) : owned_{true} {
@@ -254,10 +218,10 @@ struct InterfaceImpl : DeviceInterface {
     std::span<const int64_t> shape{&shape_val, 1};
 
     // Create input OrtValue
-    auto input_tensor = OrtValue::CreateTensor(*webgpu_mem_info, input, element_count * GetElementSize(input_type), shape, input_type);
+    auto input_tensor = OrtValue::CreateTensor(*webgpu_mem_info, input, element_count * Ort::SizeOf(input_type), shape, input_type);
 
     // Create output OrtValue
-    auto output_tensor = OrtValue::CreateTensor(*webgpu_mem_info, output, element_count * GetElementSize(output_type), shape, output_type);
+    auto output_tensor = OrtValue::CreateTensor(*webgpu_mem_info, output, element_count * Ort::SizeOf(output_type), shape, output_type);
 
     // Use IOBinding for efficient execution
     auto io_binding = OrtIoBinding::Create(*session);
