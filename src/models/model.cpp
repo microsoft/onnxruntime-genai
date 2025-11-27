@@ -885,6 +885,7 @@ void EnsureDeviceOrtInit(DeviceInterface& device, const Config& config, std::uni
 }
 
 void SessionInfo::Add(OrtSession& session) {
+  sessions_.push_back(&session);
   auto input_names = session.GetInputNames();
   for (size_t i = 0; i < input_names.size(); i++) {
     auto type_info = session.GetInputTypeInfo(i);
@@ -1173,6 +1174,23 @@ std::unique_ptr<OrtSession> Model::CreateSession(OrtEnv& ort_env, const std::str
 
   // Otherwise, load the model from the file system
   return OrtSession::Create(ort_env, (config_->config_path / fs::path(model_filename)).c_str(), session_options);
+}
+
+void Model::StartProfiling() const {
+  for (auto* session : session_info_.GetSessions()) {
+    session->StartProfiling();
+  }
+}
+
+std::string Model::EndProfiling() const {
+  std::string result;
+  for (auto* session : session_info_.GetSessions()) {
+    if (!result.empty()) {
+      result += ",";
+    }
+    result += session->EndProfiling();
+  }
+  return result;
 }
 
 std::shared_ptr<Tokenizer> Model::CreateTokenizer() const {

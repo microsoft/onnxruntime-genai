@@ -133,8 +133,11 @@ struct SessionInfo {
   std::vector<const char*> GetInputSymbolicShape(const std::string& name) const;
   std::vector<const char*> GetOutputSymbolicShape(const std::string& name) const;
 
+  const std::vector<OrtSession*>& GetSessions() const { return sessions_; }
+
  private:
   std::unordered_map<std::string, std::unique_ptr<OrtTypeInfo>> inputs_, outputs_;
+  std::vector<OrtSession*> sessions_;
 };
 
 struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, ExternalRefCounted<Model> {
@@ -146,6 +149,9 @@ struct Model : std::enable_shared_from_this<Model>, LeakChecked<Model>, External
   std::shared_ptr<MultiModalProcessor> CreateMultiModalProcessor() const;
 
   virtual std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const = 0;
+
+  void StartProfiling() const;
+  std::string EndProfiling() const;
 
   std::unique_ptr<OrtValue> ExpandInputs(std::unique_ptr<OrtValue>& input, int num_beams) const;
 

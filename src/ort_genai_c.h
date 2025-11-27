@@ -386,6 +386,21 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetType(const OgaModel* model, const 
 OGA_EXPORT OgaResult* OGA_API_CALL OgaModelGetDeviceType(const OgaModel* model, const char** out);
 
 /**
+ * \brief Starts profiling for the model.
+ * \param[in] model The model to start profiling for.
+ * \return OgaResult containing the error message if the starting of profiling failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelStartProfiling(OgaModel* model);
+
+/**
+ * \brief Ends profiling for the model.
+ * \param[in] model The model to end profiling for.
+ * \param[out] out The path to the profile file. Must be destroyed with OgaDestroyString
+ * \return OgaResult containing the error message if the ending of profiling failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaModelEndProfiling(OgaModel* model, const char** out);
+
+/**
  * \brief Destroys the given config
  * \param[in] config The config to be destroyed.
  */
