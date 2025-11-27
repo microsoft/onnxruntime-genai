@@ -7,6 +7,8 @@
 #include "model.h"
 #include <fstream>
 #include <cstring>
+#include <cmath>
+#include <algorithm>
 
 namespace Generators {
 
@@ -152,52 +154,7 @@ std::unique_ptr<OrtValue> VisionPipelineState::ProcessImage(OrtValue* pixel_valu
   // Stage 2: Apply window indexing reordering  
   if (!window_indices_.empty()) {
     std::cout << "[ProcessImage] Stage 2: Applying window indexing..." << std::endl;
-    
-    // Get current shape
-    auto shape_info = patch_embed_output_->GetTensorTypeAndShapeInfo();
-    auto shape = shape_info->GetShape();
-    int64_t batch_size = shape[0];
-    int64_t seq_len = shape[1];
-    int64_t hidden_dim = shape[2];
-    
-    std::cout << "[ProcessImage] Current seq_len=" << seq_len << ", window_indices size=" << window_indices_.size() << std::endl;
-    
-    // The window indices select patches and each selected patch is expanded by spatial_merge_size^2
-    // window_indices_ has 493 elements, each expanded to 4 patches = 1972 total
-    int64_t patches_per_index = spatial_merge_size_ * spatial_merge_size_;  // 2*2 = 4
-    int64_t output_seq_len = window_indices_.size() * patches_per_index;    // 493 * 4 = 1972
-    
-    std::cout << "[ProcessImage] Expanding via window indices: " << window_indices_.size() 
-              << " indices * " << patches_per_index << " patches/index = " << output_seq_len << " output patches" << std::endl;
-    
-    std::vector<int64_t> output_shape = {batch_size, output_seq_len, hidden_dim};
-    reordered_patches_ = OrtValue::CreateTensor<float>(*allocator_cpu_, std::span<const int64_t>(output_shape));
-    
-    const float* src_data = patch_embed_output_->GetTensorData<float>();
-    float* dst_data = reordered_patches_->GetTensorMutableData<float>();
-    
-    // For each window index, copy the corresponding source patch to 4 output positions
-    for (int64_t b = 0; b < batch_size; ++b) {
-      for (size_t i = 0; i < window_indices_.size(); ++i) {
-        int64_t src_idx = window_indices_[i];
-        
-        // Bounds check
-        if (src_idx < 0 || src_idx >= seq_len) {
-          throw std::runtime_error("Window index " + std::to_string(src_idx) + " out of bounds [0, " + std::to_string(seq_len) + ")");
-        }
-        
-        const float* src_patch = &src_data[b * seq_len * hidden_dim + src_idx * hidden_dim];
-        
-        // Duplicate this patch to 4 consecutive output positions
-        for (int64_t rep = 0; rep < patches_per_index; ++rep) {
-          int64_t dst_idx = i * patches_per_index + rep;
-          float* dst_patch = &dst_data[b * output_seq_len * hidden_dim + dst_idx * hidden_dim];
-          std::memcpy(dst_patch, src_patch, hidden_dim * sizeof(float));
-        }
-      }
-    }
-    
-    std::cout << "[ProcessImage] Expanded sequence from " << seq_len << " to " << output_seq_len << std::endl;
+    ApplyWindowIndexing();
     std::cout << "[ProcessImage] Stage 2 completed" << std::endl;
   } else {
     reordered_patches_ = std::move(patch_embed_output_);
@@ -230,6 +187,38 @@ std::unique_ptr<OrtValue> VisionPipelineState::ProcessImage(OrtValue* pixel_valu
 void VisionPipelineState::RunPatchEmbed(OrtValue* pixel_values) {
   const auto& pipeline_config = model_.config_->model.vision.pipeline[0];
   
+  // Log pixel_values statistics BEFORE patch embed
+  {
+    auto input_shape_info = pixel_values->GetTensorTypeAndShapeInfo();
+    auto input_shape = input_shape_info->GetShape();
+    const float* input_data = pixel_values->GetTensorData<float>();
+    size_t input_total = 1;
+    for (auto dim : input_shape) input_total *= dim;
+    
+    float input_min = input_data[0], input_max = input_data[0], input_sum = 0.0f;
+    for (size_t i = 0; i < input_total; ++i) {
+      input_min = std::min(input_min, input_data[i]);
+      input_max = std::max(input_max, input_data[i]);
+      input_sum += input_data[i];
+    }
+    float input_mean = input_sum / input_total;
+    
+    std::cout << "[C++] pixel_values input shape: [";
+    for (size_t i = 0; i < input_shape.size(); ++i) {
+      std::cout << input_shape[i];
+      if (i < input_shape.size() - 1) std::cout << ", ";
+    }
+    std::cout << "]" << std::endl;
+    std::cout << "[C++] pixel_values statistics: Min=" << input_min 
+              << ", Max=" << input_max << ", Mean=" << input_mean << std::endl;
+    std::cout << "[C++] pixel_values first 10 values: [";
+    for (int i = 0; i < 10 && i < static_cast<int>(input_total); ++i) {
+      std::cout << input_data[i];
+      if (i < 9) std::cout << ", ";
+    }
+    std::cout << "]" << std::endl;
+  }
+  
   std::vector<const char*> input_names;
   std::vector<OrtValue*> input_values;
   std::vector<const char*> output_names;
@@ -253,6 +242,13 @@ void VisionPipelineState::RunPatchEmbed(OrtValue* pixel_values) {
   auto shape_info = patch_embed_output_->GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
   
+  std::cout << "[PatchEmbed] Output shape: [";
+  for (size_t i = 0; i < shape.size(); ++i) {
+    std::cout << shape[i];
+    if (i < shape.size() - 1) std::cout << ", ";
+  }
+  std::cout << "]" << std::endl;
+  
   if (shape.size() == 2) {
     // Need to reshape from [seq_len, hidden_dim] to [1, seq_len, hidden_dim]
     int64_t seq_len = shape[0];
@@ -269,6 +265,30 @@ void VisionPipelineState::RunPatchEmbed(OrtValue* pixel_values) {
     
     patch_embed_output_ = std::move(reshaped);
   }
+  
+  // Log statistics
+  auto final_shape_info = patch_embed_output_->GetTensorTypeAndShapeInfo();
+  auto final_shape = final_shape_info->GetShape();
+  const float* data = patch_embed_output_->GetTensorData<float>();
+  size_t total_elements = 1;
+  for (auto dim : final_shape) total_elements *= dim;
+  
+  float min_val = data[0], max_val = data[0], sum = 0.0f;
+  for (size_t i = 0; i < total_elements; ++i) {
+    min_val = std::min(min_val, data[i]);
+    max_val = std::max(max_val, data[i]);
+    sum += data[i];
+  }
+  float mean = sum / total_elements;
+  
+  std::cout << "[PatchEmbed] Statistics: Min=" << min_val << ", Max=" << max_val 
+            << ", Mean=" << mean << std::endl;
+  std::cout << "[PatchEmbed] First 10 values: [";
+  for (int i = 0; i < 10 && i < static_cast<int>(total_elements); ++i) {
+    std::cout << data[i];
+    if (i < 9) std::cout << ", ";
+  }
+  std::cout << "]" << std::endl;
 }
 
 void VisionPipelineState::ApplyWindowIndexing() {
@@ -296,8 +316,20 @@ void VisionPipelineState::ApplyWindowIndexing() {
             << ", hidden_dim=" << hidden_dim << ", spatial_merge_size=" << spatial_merge_size_ << std::endl;
   std::cout << "[ApplyWindowIndexing] window_indices_.size()=" << window_indices_.size() << std::endl;
   
-  // Window indices contain the reordering for the entire sequence, not per-block
-  // The indices map from original position to new position
+  // CRITICAL: Window indices work on GROUPS of patches, not individual patches!
+  // Python logic: hidden.reshape((493, 4, 1280))[wnd_idx].reshape((1972, 1280))
+  // This selects which groups of 4 patches to use, then flattens back
+  
+  int64_t patches_per_group = spatial_merge_size_ * spatial_merge_size_;  // 4
+  int64_t num_groups = seq_len / patches_per_group;  // 1972 / 4 = 493
+  
+  std::cout << "[ApplyWindowIndexing] patches_per_group=" << patches_per_group 
+            << ", num_groups=" << num_groups << std::endl;
+  
+  if (static_cast<int64_t>(window_indices_.size()) != num_groups) {
+    throw std::runtime_error("window_indices size (" + std::to_string(window_indices_.size()) + 
+                           ") must equal num_groups (" + std::to_string(num_groups) + ")");
+  }
   
   std::cout << "[ApplyWindowIndexing] Getting input data..." << std::endl;
   const float* input_data = patch_embed_output_->GetTensorData<float>();
@@ -308,32 +340,52 @@ void VisionPipelineState::ApplyWindowIndexing() {
   reordered_patches_ = OrtValue::CreateTensor<float>(*allocator_cpu_, std::span<const int64_t>(output_shape));
   float* output_data = reordered_patches_->GetTensorMutableData<float>();
   
-  std::cout << "[ApplyWindowIndexing] Starting reordering loop..." << std::endl;
-  // Apply reordering: window_indices_[i] tells us where element i should go
+  std::cout << "[ApplyWindowIndexing] Applying group-based reordering (matching baseline logic)..." << std::endl;
+  // For each batch
   for (int64_t b = 0; b < batch_size; ++b) {
-    for (int64_t i = 0; i < seq_len && i < static_cast<int64_t>(window_indices_.size()); ++i) {
-      int64_t dst_pos = window_indices_[i];
+    // For each group in the OUTPUT
+    for (int64_t out_group_idx = 0; out_group_idx < num_groups; ++out_group_idx) {
+      // window_indices_[out_group_idx] tells us which INPUT group to copy from
+      int64_t in_group_idx = window_indices_[out_group_idx];
       
       // Bounds check
-      if (dst_pos < 0 || dst_pos >= seq_len) {
-        std::cout << "[ApplyWindowIndexing] ERROR: Invalid dst_pos=" << dst_pos 
-                  << " for i=" << i << ", seq_len=" << seq_len << std::endl;
-        throw std::runtime_error("Window index out of bounds");
+      if (in_group_idx < 0 || in_group_idx >= num_groups) {
+        throw std::runtime_error("Window index out of bounds: " + std::to_string(in_group_idx) + 
+                               " for group " + std::to_string(out_group_idx));
       }
       
-      // Copy hidden_dim values from position i to dst_pos
-      std::memcpy(&output_data[b * seq_len * hidden_dim + dst_pos * hidden_dim],
-                  &input_data[b * seq_len * hidden_dim + i * hidden_dim],
-                  hidden_dim * sizeof(float));
-    }
-    
-    // If window_indices_ is shorter than seq_len, copy remaining elements unchanged
-    for (int64_t i = window_indices_.size(); i < seq_len; ++i) {
-      std::memcpy(&output_data[b * seq_len * hidden_dim + i * hidden_dim],
-                  &input_data[b * seq_len * hidden_dim + i * hidden_dim],
-                  hidden_dim * sizeof(float));
+      // Copy all patches in this group (patches_per_group = 4 patches)
+      for (int64_t patch_in_group = 0; patch_in_group < patches_per_group; ++patch_in_group) {
+        int64_t in_patch_idx = in_group_idx * patches_per_group + patch_in_group;
+        int64_t out_patch_idx = out_group_idx * patches_per_group + patch_in_group;
+        
+        // Copy hidden_dim values
+        std::memcpy(&output_data[b * seq_len * hidden_dim + out_patch_idx * hidden_dim],
+                    &input_data[b * seq_len * hidden_dim + in_patch_idx * hidden_dim],
+                    hidden_dim * sizeof(float));
+      }
     }
   }
+  
+  // Log statistics of reordered output
+  const float* output = reordered_patches_->GetTensorData<float>();
+  size_t total_elements = batch_size * seq_len * hidden_dim;
+  float min_val = output[0], max_val = output[0], sum = 0.0f;
+  for (size_t i = 0; i < total_elements; ++i) {
+    min_val = std::min(min_val, output[i]);
+    max_val = std::max(max_val, output[i]);
+    sum += output[i];
+  }
+  float mean = sum / total_elements;
+  
+  std::cout << "[WindowExpansion] Statistics: Min=" << min_val << ", Max=" << max_val 
+            << ", Mean=" << mean << std::endl;
+  std::cout << "[WindowExpansion] First 10 values: [";
+  for (int i = 0; i < 10 && i < static_cast<int>(total_elements); ++i) {
+    std::cout << output[i];
+    if (i < 9) std::cout << ", ";
+  }
+  std::cout << "]" << std::endl;
   std::cout << "[ApplyWindowIndexing] Completed successfully" << std::endl;
 }
 
@@ -389,6 +441,31 @@ void VisionPipelineState::RunVisionAttention() {
                             output_names.data(), outputs.data(), output_names.size());
   
   vision_attn_output_ = std::unique_ptr<OrtValue>(outputs[0]);
+  
+  // Log vision attention output statistics BEFORE reshaping
+  {
+    auto temp_shape_info = vision_attn_output_->GetTensorTypeAndShapeInfo();
+    auto temp_shape = temp_shape_info->GetShape();
+    const float* attn_data = vision_attn_output_->GetTensorData<float>();
+    size_t attn_total = 1;
+    for (auto dim : temp_shape) attn_total *= dim;
+    
+    float attn_min = attn_data[0], attn_max = attn_data[0], attn_sum = 0.0f;
+    for (size_t i = 0; i < attn_total; ++i) {
+      attn_min = std::min(attn_min, attn_data[i]);
+      attn_max = std::max(attn_max, attn_data[i]);
+      attn_sum += attn_data[i];
+    }
+    float attn_mean = attn_sum / attn_total;
+    
+    std::cout << "[VisionAttention] NPU Output Statistics: Min=" << attn_min 
+              << ", Max=" << attn_max << ", Mean=" << attn_mean << std::endl;
+    std::cout << "[VisionAttention] First 10 values: [";
+    for (int i = 0; i < 10 && i < static_cast<int>(attn_total); ++i) {
+      std::cout << attn_data[i] << (i < 9 ? ", " : "");
+    }
+    std::cout << "]" << std::endl;
+  }
   
   // Check output shape and reshape back to 3D if needed
   auto output_shape_info = vision_attn_output_->GetTensorTypeAndShapeInfo();
@@ -518,41 +595,93 @@ void VisionPipelineState::RunPatchMerger() {
   }
   std::cout << std::endl;
   
-  // Apply reverse window indexing to restore original spatial order
-  // The merger outputs embeddings in window-indexed order [wnd_idx[0], wnd_idx[1], ...]
-  // We need to reorder them back to [0, 1, 2, ...] using reverse_indices_
-  if (!window_indices_.empty() && reverse_indices_.size() == static_cast<size_t>(output_shape[0])) {
-    std::cout << "[RunPatchMerger] Applying reverse window indexing to restore original order..." << std::endl;
-    
-    int64_t num_patches = output_shape[0];
-    int64_t output_hidden_dim = output_shape[1];
-    
-    const float* src_data = merger_output->GetTensorData<float>();
-    
-    // Create reordered output
-    std::vector<int64_t> reordered_shape = {num_patches, output_hidden_dim};
-    final_embeddings_ = OrtValue::CreateTensor<float>(*allocator_cpu_, std::span<const int64_t>(reordered_shape));
-    float* dst_data = final_embeddings_->GetTensorMutableData<float>();
-    
-    // Apply reverse reordering: element at position i goes to position reverse_indices_[i]
-    for (int64_t i = 0; i < num_patches; ++i) {
-      int64_t dst_pos = reverse_indices_[i];
-      
-      // Bounds check
-      if (dst_pos < 0 || dst_pos >= num_patches) {
-        throw std::runtime_error("Reverse window index out of bounds: " + std::to_string(dst_pos));
-      }
-      
-      // Copy embedding from position i in src to position dst_pos in output
-      std::memcpy(&dst_data[dst_pos * output_hidden_dim],
-                  &src_data[i * output_hidden_dim],
-                  output_hidden_dim * sizeof(float));
-    }
-    
-    std::cout << "[RunPatchMerger] Reverse indexing completed, restored original spatial order" << std::endl;
-  } else {
-    final_embeddings_ = std::move(merger_output);
+  // Log statistics before reverse indexing
+  const float* merger_data = merger_output->GetTensorData<float>();
+  size_t merger_total = 1;
+  for (auto dim : output_shape) merger_total *= dim;
+  
+  float merger_min = merger_data[0], merger_max = merger_data[0], merger_sum = 0.0f;
+  for (size_t i = 0; i < merger_total; ++i) {
+    merger_min = std::min(merger_min, merger_data[i]);
+    merger_max = std::max(merger_max, merger_data[i]);
+    merger_sum += merger_data[i];
   }
+  float merger_mean = merger_sum / merger_total;
+  
+  std::cout << "[PatchMerger] Statistics (before reverse indexing): Min=" << merger_min 
+            << ", Max=" << merger_max << ", Mean=" << merger_mean << std::endl;
+  std::cout << "[PatchMerger] First 10 values: [";
+  for (int i = 0; i < 10 && i < static_cast<int>(merger_total); ++i) {
+    std::cout << merger_data[i] << (i < 9 ? ", " : "");
+  }
+  std::cout << "]" << std::endl;
+  
+  // RE-ENABLED: Reverse indexing after patch merger (baseline DOES use it: merged[rev])
+  // Apply reverse window indexing to restore original spatial order
+  std::cout << "[RunPatchMerger] Applying reverse window indexing..." << std::endl;
+  
+  size_t num_embeddings = static_cast<size_t>(output_shape[0]);
+  size_t embedding_dim = static_cast<size_t>(output_shape[1]);
+  
+  // Create reversed embeddings tensor
+  final_embeddings_ = OrtValue::CreateTensor<float>(*allocator_cpu_, 
+                                                     std::span<const int64_t>(output_shape));
+  
+  const float* merger_data_src = merger_output->GetTensorData<float>();
+  auto* final_data = final_embeddings_->GetTensorMutableData<float>();
+  
+  // Apply reverse indexing: rev = np.argsort(wnd_idx)
+  // For each position in final output, copy from the position indicated by reverse_indices_
+  for (size_t i = 0; i < num_embeddings && i < reverse_indices_.size(); ++i) {
+    size_t src_idx = reverse_indices_[i];
+    if (src_idx < num_embeddings) {
+      std::memcpy(final_data + i * embedding_dim,
+                  merger_data_src + src_idx * embedding_dim,
+                  embedding_dim * sizeof(float));
+    }
+  }
+  
+  std::cout << "[RunPatchMerger] Reverse indexing completed" << std::endl;
+  
+  // Print statistics for comparison with baseline
+  auto* data = final_embeddings_->GetTensorMutableData<float>();
+  auto stats_shape_info = final_embeddings_->GetTensorTypeAndShapeInfo();
+  auto stats_shape = stats_shape_info->GetShape();
+  size_t total_elements = stats_shape[0] * stats_shape[1];
+  size_t embed_dim = stats_shape[1];
+  
+  float min_val = data[0], max_val = data[0], sum = 0.0f;
+  for (size_t i = 0; i < total_elements; ++i) {
+    float val = data[i];
+    min_val = std::min(min_val, val);
+    max_val = std::max(max_val, val);
+    sum += val;
+  }
+  float mean = sum / total_elements;
+  
+  float variance_sum = 0.0f;
+  for (size_t i = 0; i < total_elements; ++i) {
+    float diff = data[i] - mean;
+    variance_sum += diff * diff;
+  }
+  float std_dev = std::sqrt(variance_sum / total_elements);
+  
+  std::cout << "\n=== [C++] Final Vision Embeddings Stats ===" << std::endl;
+  std::cout << "Shape: (" << stats_shape[0] << ", " << stats_shape[1] << ")" << std::endl;
+  std::cout << "Min: " << min_val << ", Max: " << max_val << std::endl;
+  std::cout << "Mean: " << mean << ", Std: " << std_dev << std::endl;
+  std::cout << "First embedding (first 10 values): [";
+  for (int i = 0; i < 10 && i < static_cast<int>(embed_dim); ++i) {
+    std::cout << data[i] << (i < 9 ? ", " : "");
+  }
+  std::cout << "]" << std::endl;
+  std::cout << "Last embedding (first 10 values): [";
+  size_t last_offset = (stats_shape[0] - 1) * embed_dim;
+  for (int i = 0; i < 10 && i < static_cast<int>(embed_dim); ++i) {
+    std::cout << data[last_offset + i] << (i < 9 ? ", " : "");
+  }
+  std::cout << "]" << std::endl;
+  std::cout << "===" << std::endl;
   
   std::cout << "[RunPatchMerger] Completed" << std::endl;
 }

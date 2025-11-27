@@ -151,7 +151,12 @@ void GreedySearch_Cpu::SelectTop() {
     }
 
     std::span<float> const scores = next_token_scores_.CpuSpan().subspan(batch_id * params_->config.model.vocab_size, params_->config.model.vocab_size);
-    auto const token = static_cast<int32_t>(std::distance(scores.begin(), std::max_element(scores.begin(), scores.end())));
+    auto max_it = std::max_element(scores.begin(), scores.end());
+    auto const token = static_cast<int32_t>(std::distance(scores.begin(), max_it));
+    
+    std::cout << "[C++] SelectTop: batch_id=" << batch_id << ", selected token=" << token 
+              << ", logit=" << *max_it << std::endl;
+    
     SetNextToken(batch_id, token);
   }
 
@@ -222,6 +227,7 @@ void GreedySearch_Cpu::SampleTopP(float p, float temperature) {
 
 void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
   assert(temperature > 0.0f);
+  std::cout << "[C++] SampleTopKTopP called: k=" << k << ", p=" << p << ", temperature=" << temperature << std::endl;
 
   // --- Buffers allocated once to avoid re-allocations in the batch loop ---
   std::vector<int32_t> indices(params_->config.model.vocab_size);
@@ -274,6 +280,10 @@ void GreedySearch_Cpu::SampleTopKTopP(int k, float p, float temperature) {
 
     // The final token is the one from the original vocab indices.
     int32_t token = indices[sampled_k_index];
+    
+    std::cout << "[C++] SampleTopKTopP: batch_id=" << batch_id << ", sampled token=" << token 
+              << " (k_index=" << sampled_k_index << ", cutoff=" << cutoff_index << ")" << std::endl;
+    
     SetNextToken(batch_id, token);
   }
   if (!done_)

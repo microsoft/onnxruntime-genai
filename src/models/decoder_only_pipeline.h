@@ -107,6 +107,16 @@ struct DecoderOnlyPipelineState : State {
   std::unique_ptr<OrtValue> image_embeds_cache_;
   int img_emd_start_idx_{0};
   int img_emd_end_idx_{-1};
+  std::vector<int32_t> original_input_ids_;  // Store full input sequence for image token lookup
+  size_t current_chunk_index_{0};  // Track which window we're processing
+  
+  // Sliding window position tracking
+  std::unique_ptr<Tensor> past_seq_len_tensor_;   // For models that need explicit past sequence length
+  std::unique_ptr<Tensor> total_seq_len_tensor_;  // For models that need explicit total sequence length
+  bool has_past_seq_len_input_{false};
+  bool has_total_seq_len_input_{false};
+  int past_seq_len_input_index_{-1};
+  int total_seq_len_input_index_{-1};
 };
 
 }  // namespace Generators

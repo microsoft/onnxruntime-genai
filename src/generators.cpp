@@ -414,6 +414,41 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
     DumpValues(stream, Ort::TypeToTensorType<float>, logits.CopyDeviceToCpu().data(), logits.size());
     stream << std::endl;
   }
+  
+  // Debug: Log logits statistics
+  {
+    auto logits_cpu = logits.CopyDeviceToCpu();
+    float min_val = *std::min_element(logits_cpu.begin(), logits_cpu.end());
+    float max_val = *std::max_element(logits_cpu.begin(), logits_cpu.end());
+    float sum = std::accumulate(logits_cpu.begin(), logits_cpu.end(), 0.0f);
+    float mean = sum / logits_cpu.size();
+    
+    // Find top 10 tokens
+    std::vector<std::pair<int, float>> token_logits;
+    for (size_t i = 0; i < logits_cpu.size(); ++i) {
+      token_logits.push_back({static_cast<int>(i), logits_cpu[i]});
+    }
+    std::partial_sort(token_logits.begin(), token_logits.begin() + 10, token_logits.end(),
+                     [](const auto& a, const auto& b) { return a.second > b.second; });
+    
+    std::cout << "\n=== [C++] Logits Stats (token " << search_->GetSequenceLength() << ") ===" << std::endl;
+    std::cout << "Logits shape: (" << logits_cpu.size() << ")" << std::endl;
+    std::cout << "Min: " << min_val << ", Max: " << max_val << ", Mean: " << mean << std::endl;
+    std::cout << "Top 10 token IDs: [";
+    for (int i = 0; i < 10; ++i) {
+      std::cout << token_logits[i].first;
+      if (i < 9) std::cout << ", ";
+    }
+    std::cout << "]" << std::endl;
+    std::cout << "Top 10 logits: [";
+    for (int i = 0; i < 10; ++i) {
+      std::cout << token_logits[i].second;
+      if (i < 9) std::cout << ", ";
+    }
+    std::cout << "]" << std::endl;
+    std::cout << "===\n" << std::endl;
+  }
+  
   SetLogits(logits);
 
   if (last_action_ == Action::generated && guidance_logits_processor_) {

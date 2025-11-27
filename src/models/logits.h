@@ -14,6 +14,9 @@ struct Logits {
 
   // Resize logits to [bz, token_count, vocab_size] if necessary.
   void Update(const DeviceSpan<int32_t>& next_tokens, size_t new_kv_length);
+  
+  // Manually set the input sequence length (for handling padded sequences)
+  void SetInputSequenceLength(int batch_index, int length);
 
  private:
   State& state_;
