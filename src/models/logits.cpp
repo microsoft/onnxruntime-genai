@@ -3,6 +3,16 @@
 #include "../generators.h"
 #include "model.h"
 #include "logits.h"
+#include "../logging.h"
+#include <iostream>
+
+// Fallback logging macros to avoid build failures when LOGS_DEFAULT/VERBOSE are unavailable
+#ifndef LOGS_DEFAULT
+#define LOGS_DEFAULT(level) std::cout
+#endif
+#ifndef VERBOSE
+#define VERBOSE 0
+#endif
 #include "../openvino/interface.h"
 
 namespace Generators {
@@ -55,18 +65,9 @@ DeviceSpan<float> Logits::Get() {
     for (int batch_index = 0; batch_index < state_.params_->search.batch_size; batch_index++) {
       // Find the first non pad token from the end
       size_t token_index = input_sequence_lengths[batch_index] - 1;
-      std::cout << "[Logits::Get] batch=" << batch_index 
-                << ", input_sequence_lengths[batch]=" << input_sequence_lengths[batch_index]
-                << ", token_index=" << token_index 
-                << ", seq_length=" << seq_length 
-                << ", vocab_size=" << vocab_size << std::endl;
       for (int beam_index = 0; beam_index < num_beams; beam_index++) {
         auto target = logits_last_tokens.subspan(vocab_index * element_size, vocab_size * element_size);
         auto source = logits_raw.subspan((vocab_index * seq_length + token_index * vocab_size) * element_size, vocab_size * element_size);
-        std::cout << "[Logits::Get] Extracting from offset: vocab_index=" << vocab_index 
-                  << ", source_offset_tokens=" << (vocab_index * seq_length + token_index * vocab_size)
-                  << " (vocab_idx * seq_len + token_idx * vocab_size = " 
-                  << vocab_index << "*" << seq_length << " + " << token_index << "*" << vocab_size << ")" << std::endl;
         target.CopyFrom(source);
         vocab_index += vocab_size;
       }
@@ -127,8 +128,6 @@ void Logits::Add() {
 void Logits::SetInputSequenceLength(int batch_index, int length) {
   if (batch_index >= 0 && batch_index < static_cast<int>(input_sequence_lengths.size())) {
     input_sequence_lengths[batch_index] = length;
-    std::cout << "[Logits::SetInputSequenceLength] Set batch " << batch_index 
-              << " sequence length to " << length << std::endl;
   }
 }
 

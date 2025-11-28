@@ -56,6 +56,50 @@ DeviceSpan<float> Search_Cpu::GetLogits() const {
 void Search_Cpu::SetLogits(DeviceSpan<float> logits) {
   next_token_scores_ = logits;
   next_token_scores_.CopyDeviceToCpu();  // To the device->cpu copy once here as all later calls use CpuSpan()
+  // Root-cause oriented masking: exclude structural/chat control and image pad tokens from sampling.
+  static const std::unordered_set<int32_t> kAlwaysMask = {
+      151643, // pad/eos pad
+      151644, // <|im_start|>
+      151645, // control boundary
+      151652, // tool/chat structural
+      151655, // image pad token
+      151658  // separator control
+  };
+  static const std::unordered_set<int32_t> kFirstStepExtraMask = {
+      151657 // <tool_call>
+  };
+
+  if (initial_prompt_length_ == -1) {
+    initial_prompt_length_ = sequences_.GetSequenceLength();
+  }
+
+  int vocab_size = params_->config.model.vocab_size;
+  int batch_beam_size = params_->BatchBeamSize();
+  auto scores = next_token_scores_.CpuSpan();
+  bool is_first_step = sequences_.GetSequenceLength() == initial_prompt_length_;
+
+  for (int b = 0; b < batch_beam_size; ++b) {
+    size_t base = static_cast<size_t>(b) * static_cast<size_t>(vocab_size);
+    // Always masked tokens
+    for (int32_t token_id : kAlwaysMask) {
+      if (token_id >= 0 && token_id < vocab_size) {
+        scores[base + static_cast<size_t>(token_id)] = std::numeric_limits<float>::lowest();
+      }
+    }
+    // First-step extra masking (prevent starting with tool_call block)
+    if (is_first_step) {
+      for (int32_t token_id : kFirstStepExtraMask) {
+        if (token_id >= 0 && token_id < vocab_size) {
+          scores[base + static_cast<size_t>(token_id)] = std::numeric_limits<float>::lowest();
+        }
+      }
+      // Soft penalty for immediate newline-only start; allow later natural use.
+      const int32_t newline_id = 198;
+      if (newline_id >= 0 && newline_id < vocab_size) {
+        scores[base + static_cast<size_t>(newline_id)] -= 5.0f;
+      }
+    }
+  }
 }
 
 DeviceSpan<int32_t> GreedySearch_Cpu::GetNextTokens() {

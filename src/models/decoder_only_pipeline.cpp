@@ -7,6 +7,9 @@
 #include "decoder_only_pipeline.h"
 #include "windowed_kv_cache.h"
 #include "vision_pipeline.h"
+#include <unordered_set>
+#include <limits>
+#include <algorithm>
 
 namespace Generators {
 
@@ -132,7 +135,6 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
     past_seq_len_input_index_ = static_cast<int>(inputs_.size());
     input_names_.push_back(model_.config_->model.decoder.inputs.past_sequence_length.c_str());
     inputs_.push_back(past_seq_len_tensor_->GetOrtTensor());
-    std::cout << "[DecoderOnlyPipelineState] Added past_seq_len input at index " << past_seq_len_input_index_ << std::endl;
   }
   
   if (has_total_seq_len_input_) {
@@ -144,7 +146,6 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
     total_seq_len_input_index_ = static_cast<int>(inputs_.size());
     input_names_.push_back(model_.config_->model.decoder.inputs.total_sequence_length.c_str());
     inputs_.push_back(total_seq_len_tensor_->GetOrtTensor());
-    std::cout << "[DecoderOnlyPipelineState] Added total_seq_len input at index " << total_seq_len_input_index_ << " (kv_cache_size=" << kv_cache_size << ")" << std::endl;
   }
   
   input_ids_->Add();
@@ -220,36 +221,28 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
 }
 
 void DecoderOnlyPipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {
-  std::cout << "[SetExtraInputs] Called with " << extra_inputs.size() << " extra inputs" << std::endl;
   // Check if we have vision inputs (pixel_values and image_grid_thw)
   // If so, process them through the vision pipeline
   OrtValue* pixel_values = nullptr;
   OrtValue* image_grid_thw = nullptr;
   
   for (const auto& extra_input : extra_inputs) {
-    std::cout << "[SetExtraInputs] Checking input: " << extra_input.name << std::endl;
     if (extra_input.name == model_.config_->model.vision.inputs.pixel_values) {
       pixel_values = extra_input.tensor->ort_tensor_.get();
-      std::cout << "[SetExtraInputs] Found pixel_values" << std::endl;
     } else if (extra_input.name == model_.config_->model.vision.inputs.image_grid_thw) {
       image_grid_thw = extra_input.tensor->ort_tensor_.get();
-      std::cout << "[SetExtraInputs] Found image_grid_thw" << std::endl;
     }
   }
   
   // If we have vision inputs, process them through the vision pipeline
   if (pixel_values != nullptr && image_grid_thw != nullptr && 
       !model_.config_->model.vision.pipeline.empty()) {
-    std::cout << "[SetExtraInputs] Processing vision inputs through pipeline..." << std::endl;
     // Create vision pipeline state and process the image
     VisionPipelineState vision_pipeline(model_, *params_);
-    std::cout << "[SetExtraInputs] Vision pipeline created, calling ProcessImage..." << std::endl;
     auto image_embeddings = vision_pipeline.ProcessImage(pixel_values, image_grid_thw);
-    std::cout << "[SetExtraInputs] ProcessImage completed" << std::endl;
     
     // Store the image embeddings for injection during generation
     SetImageEmbeddings(std::move(image_embeddings));
-    std::cout << "[SetExtraInputs] Image embeddings stored" << std::endl;
   }
   
   // Add extra inputs to all pipeline sessions (excluding vision inputs which are now processed)
@@ -445,14 +438,8 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
       }
     }
     
-    std::cout << "[DecoderOnlyPipelineState] Total tokens: " << span.size() 
-              << ", detected pad_token_id: " << potential_pad_token
-              << ", padding offset: " << real_start << std::endl;
-    
     // Store only the real (non-padded) tokens
     original_input_ids_.assign(span.begin() + real_start, span.end());
-    std::cout << "[DecoderOnlyPipelineState] Stored " << original_input_ids_.size() 
-              << " real tokens (after removing " << real_start << " pad tokens)" << std::endl;
   }
 
   UpdateInputsOutputs(next_tokens, next_indices, total_length);
@@ -469,23 +456,30 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
     
     // Update past_seq_len and total_seq_len for sliding window GQA models
     if (first_run_ && (has_past_seq_len_input_ || has_total_seq_len_input_)) {
-      // For chunk i, past_seq_len = (i+1) * window_size - 1
-      // This tells the model: "you've processed this many tokens already"
-      int past_seq_len = static_cast<int>((i + 1) * window_size - 1);
-      // Use the KV cache actual size (window_size * 4 = 2048), not config context_length (4096)
+      // Correct past_seq_len: number of real (non-pad) tokens processed up to and including this chunk minus 1.
+      // Previous logic over-counted on the final partial chunk (e.g., reported 2047 when only 1583 tokens exist).
+      int real_prompt_length = static_cast<int>(original_input_ids_.size());
+      int tokens_processed = static_cast<int>(std::min(static_cast<size_t>((i + 1) * window_size), original_input_ids_.size()));
+      int past_seq_len = tokens_processed - 1;  // last valid index
+      // KV cache capacity (window_size * 4) remains constant
       int total_seq_len = static_cast<int>(window_size * 4);
-      
+
       if (has_past_seq_len_input_) {
         *past_seq_len_tensor_->GetMutableData<int32_t>() = past_seq_len;
         inputs_[past_seq_len_input_index_] = past_seq_len_tensor_->GetOrtTensor();
-        std::cout << "[Chunk " << i << "] Set past_seq_len=" << past_seq_len << std::endl;
       }
-      
+
       if (has_total_seq_len_input_) {
         *total_seq_len_tensor_->GetMutableData<int32_t>() = total_seq_len;
         inputs_[total_seq_len_input_index_] = total_seq_len_tensor_->GetOrtTensor();
-        std::cout << "[Chunk " << i << "] Set total_seq_len=" << total_seq_len << std::endl;
       }
+
+      // Debug: show corrected seq len feeding into model
+      std::cout << "[SlidingWindow] chunk=" << i
+                << " tokens_processed=" << tokens_processed
+                << " past_seq_len=" << past_seq_len
+                << " real_prompt_length=" << real_prompt_length
+                << " total_seq_len(capacity)=" << total_seq_len << std::endl;
     }
     
     RunPipeline(total_length, next_tokens, next_indices, (i == num_chunks - 1));
@@ -521,22 +515,25 @@ DeviceSpan<float> DecoderOnlyPipelineState::Run(int total_length, DeviceSpan<int
     // The model should predict the FIRST token of the assistant's response AFTER this prefix.
     // So we extract logits from the LAST token position (the final newline after "assistant").
     
-    size_t last_content_token_pos = original_input_ids_.size() - 1;
-    
-    int win_size = model_.config_->model.decoder.sliding_window->window_size;  // 512
-    size_t final_window_start = ((num_chunks - 1) * win_size);  // 1536 for window 3
-    size_t within_window_pos = last_content_token_pos - final_window_start;
-    
-    std::cout << "[LOGITS FIX DEBUG] original_input_ids_.size()=" << original_input_ids_.size() << std::endl;
-    std::cout << "[LOGITS FIX DEBUG] last_content_token_pos=" << last_content_token_pos 
-              << " (token_id=" << original_input_ids_[last_content_token_pos] << ")" << std::endl;
-    std::cout << "[LOGITS FIX DEBUG] final_window_start=" << final_window_start << std::endl;
-    std::cout << "[LOGITS FIX DEBUG] within_window_pos=" << within_window_pos << std::endl;
-    
+    // Determine the last valid token position within the final window
+    const size_t last_content_token_pos = original_input_ids_.size() - 1;
+    const int win_size = model_.config_->model.decoder.sliding_window->window_size;  // typically 512
+    const size_t final_window_start = (num_chunks - 1) * win_size;  // e.g., 1536 for window 3
+    const size_t within_window_pos = last_content_token_pos - final_window_start; // e.g., 46
+
+    // Effective sequence length is within_window_pos + 1
+    const int effective_seq_len = static_cast<int>(within_window_pos + 1);
+
     for (int b = 0; b < params_->search.batch_size; b++) {
-      // Set to position within the last window + 1 (since Get() subtracts 1)
-      logits_.SetInputSequenceLength(b, static_cast<int>(within_window_pos + 1));
+      // Ensure logits extractor respects the effective sequence length
+      logits_.SetInputSequenceLength(b, effective_seq_len);
     }
+
+    // Debug: print effective sequence info to compare indexing with baseline
+    std::cout << "[Logits Indexing] last_content_token_pos=" << last_content_token_pos
+          << ", final_window_start=" << final_window_start
+          << ", within_window_pos=" << within_window_pos
+          << ", effective_seq_len=" << effective_seq_len << std::endl;
   }
   
   first_run_ = false;
@@ -592,12 +589,10 @@ void DecoderOnlyPipelineState::SetImageEmbeddings(std::unique_ptr<OrtValue> imag
 
 void DecoderOnlyPipelineState::InjectImageEmbeddings(OrtValue& input_embeds, const std::vector<int32_t>& input_ids) {
   if (!image_embeds_cache_ || model_.config_->model.image_token_id == 0) {
-    std::cout << "[InjectImageEmbeddings] Skipping - no cache or no image_token_id" << std::endl;
     return;  // No image embeddings to inject or no image token configured
   }
 
-  std::cout << "[InjectImageEmbeddings] Called with input_ids.size()=" << input_ids.size() 
-            << ", current_chunk_index_=" << current_chunk_index_ << std::endl;
+  // Removed broken debug stream output
 
   // Get the current window info from the input_embeds tensor
   auto input_embeds_info = input_embeds.GetTensorTypeAndShapeInfo();
@@ -606,7 +601,6 @@ void DecoderOnlyPipelineState::InjectImageEmbeddings(OrtValue& input_embeds, con
   
   // Calculate the starting position in the full sequence for the current window
   size_t window_start = current_chunk_index_ * window_size;
-  std::cout << "[InjectImageEmbeddings] window_size=" << window_size << ", window_start=" << window_start << std::endl;
   
   // Find image token positions in the FULL input_ids sequence
   std::vector<size_t> global_image_positions;
@@ -616,27 +610,9 @@ void DecoderOnlyPipelineState::InjectImageEmbeddings(OrtValue& input_embeds, con
     }
   }
   
-  std::cout << "[InjectImageEmbeddings] Found " << global_image_positions.size() 
-            << " total image tokens in input_ids" << std::endl;
+  // Removed broken debug stream output
   if (!global_image_positions.empty()) {
-    std::cout << "[InjectImageEmbeddings] First image token at global position: " << global_image_positions[0] << std::endl;
-    std::cout << "[InjectImageEmbeddings] Last image token at global position: " << global_image_positions.back() << std::endl;
   }
-  
-  // Debug: Print first 20 and last 20 tokens to see padding
-  std::cout << "[InjectImageEmbeddings] First 20 tokens: [";
-  for (size_t i = 0; i < std::min(size_t(20), input_ids.size()); ++i) {
-    std::cout << input_ids[i];
-    if (i < std::min(size_t(20), input_ids.size()) - 1) std::cout << ", ";
-  }
-  std::cout << "]" << std::endl;
-  std::cout << "[InjectImageEmbeddings] Last 20 tokens: [";
-  size_t start_idx = input_ids.size() > 20 ? input_ids.size() - 20 : 0;
-  for (size_t i = start_idx; i < input_ids.size(); ++i) {
-    std::cout << input_ids[i];
-    if (i < input_ids.size() - 1) std::cout << ", ";
-  }
-  std::cout << "]" << std::endl;
   
   if (global_image_positions.empty()) {
     return;  // No image tokens anywhere
@@ -652,7 +628,6 @@ void DecoderOnlyPipelineState::InjectImageEmbeddings(OrtValue& input_embeds, con
     }
   }
   
-  std::cout << "[InjectImageEmbeddings] Found " << window_image_positions.size() << " image token positions" << std::endl;
 
   if (window_image_positions.empty()) {
     return;  // No image tokens in this window
@@ -664,27 +639,15 @@ void DecoderOnlyPipelineState::InjectImageEmbeddings(OrtValue& input_embeds, con
   auto image_shape = image_embeds_info->GetShape();
   auto* image_data = image_embeds_cache_->GetTensorData<float>();
 
-  std::cout << "[InjectImageEmbeddings] Input embeddings shape: [" << input_shape[0] << ", " << input_shape[1] << ", " << input_shape[2] << "]" << std::endl;
-  std::cout << "[InjectImageEmbeddings] Image embeddings shape: [";
-  for (size_t i = 0; i < image_shape.size(); ++i) {
-    std::cout << image_shape[i];
-    if (i < image_shape.size() - 1) std::cout << ", ";
-  }
-  std::cout << "]" << std::endl;
-
   int64_t hidden_size = input_shape[2];
   int64_t total_image_tokens = image_shape[0];
 
-  std::cout << "[InjectImageEmbeddings] hidden_size=" << hidden_size << ", total_image_tokens=" << total_image_tokens << std::endl;
-  std::cout << "[InjectImageEmbeddings] img_emd_start_idx_=" << img_emd_start_idx_ << std::endl;
-  std::cout << "[InjectImageEmbeddings] Injecting " << window_image_positions.size() << " image embeddings" << std::endl;
   
   // Calculate end index for this chunk
   int num_image_positions = static_cast<int>(window_image_positions.size());
   img_emd_end_idx_ = img_emd_start_idx_ + num_image_positions;
   
-  std::cout << "[InjectImageEmbeddings] img_emd_start_idx_=" << img_emd_start_idx_ 
-            << ", img_emd_end_idx_=" << img_emd_end_idx_ << std::endl;
+  // Removed broken debug stream output
 
   // Inject image embeddings using sliding window approach (matching baseline)
   for (size_t i = 0; i < window_image_positions.size(); ++i) {
@@ -694,51 +657,17 @@ void DecoderOnlyPipelineState::InjectImageEmbeddings(OrtValue& input_embeds, con
     int image_embed_idx = img_emd_start_idx_ + static_cast<int>(i);
     
     if (image_embed_idx >= total_image_tokens) {
-      std::cout << "[InjectImageEmbeddings] ERROR: image_embed_idx " << image_embed_idx 
-                << " exceeds total_image_tokens " << total_image_tokens << std::endl;
       break;  // Safety check
     }
-    
-    // Debug: Print embedding values before injection (first position only)
-    if (i == 0) {
-      std::cout << "[InjectImageEmbeddings] Before injection at window_pos " << window_pos << ": [";
-      for (int k = 0; k < 5; ++k) {
-        std::cout << input_data[window_pos * hidden_size + k];
-        if (k < 4) std::cout << ", ";
-      }
-      std::cout << "]" << std::endl;
-      
-      std::cout << "[InjectImageEmbeddings] Image embedding " << image_embed_idx << " (first 5 values): [";
-      for (int k = 0; k < 5; ++k) {
-        std::cout << image_data[image_embed_idx * hidden_size + k];
-        if (k < 4) std::cout << ", ";
-      }
-      std::cout << "]" << std::endl;
-    }
-    
-    std::cout << "[InjectImageEmbeddings] Injecting at window_pos " << window_pos 
-              << " from image_embed " << image_embed_idx 
-              << " (global_image_idx=" << global_image_idx << ")" << std::endl;
     
     // Copy image embedding to input embedding at window-relative position
     std::memcpy(input_data + window_pos * hidden_size,
                 image_data + image_embed_idx * hidden_size,
                 hidden_size * sizeof(float));
-    
-    // Debug: Print embedding values after injection (first position only)
-    if (i == 0) {
-      std::cout << "[InjectImageEmbeddings] After injection at window_pos " << window_pos << ": [";
-      for (int k = 0; k < 5; ++k) {
-        std::cout << input_data[window_pos * hidden_size + k];
-        if (k < 4) std::cout << ", ";
-      }
-      std::cout << "]" << std::endl;
-    }
   }
 
   // Update start index to track sliding window progress
   img_emd_start_idx_ = img_emd_end_idx_;
-  std::cout << "[InjectImageEmbeddings] Updated img_emd_start_idx_ to " << img_emd_start_idx_ << std::endl;
 }
 
 }  // namespace Generators

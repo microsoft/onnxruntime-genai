@@ -3,6 +3,16 @@
 
 #include "../generators.h"
 #include "vision_pipeline.h"
+#include "../logging.h"
+#include <iostream>
+
+// Fallback logging macros to avoid build failures when LOGS_DEFAULT/VERBOSE are unavailable
+#ifndef LOGS_DEFAULT
+#define LOGS_DEFAULT(level) std::cout
+#endif
+#ifndef VERBOSE
+#define VERBOSE 0
+#endif
 #include "decoder_only_pipeline.h"
 #include "model.h"
 #include <fstream>
@@ -16,79 +26,62 @@ VisionPipelineState::VisionPipelineState(const Model& model, const GeneratorPara
     : State{params, model},
       model_{model} {
   
-  std::cout << "[VisionPipeline] Constructor started" << std::endl;
   
   allocator_cpu_ = &model.allocator_cpu_;
   allocator_device_ = model.p_device_;
 
-  std::cout << "[VisionPipeline] Allocators set" << std::endl;
 
   // Load window indexing if configured
   if (model.config_->model.vision.window_indexing.has_value()) {
-    std::cout << "[VisionPipeline] Loading window indexing..." << std::endl;
     spatial_merge_size_ = model.config_->model.vision.window_indexing.value().spatial_merge_size;
     
     // Load window index file
     auto wnd_idx_filename = model.config_->model.vision.window_indexing.value().filename;
     fs::path wnd_idx_path = model.config_->config_path / fs::path(wnd_idx_filename);
-    std::cout << "[VisionPipeline] Window index path: " << wnd_idx_path.string() << std::endl;
     LoadWindowIndexing(wnd_idx_path);
-    std::cout << "[VisionPipeline] Window indexing loaded successfully" << std::endl;
   }
   
-  std::cout << "[VisionPipeline] Getting decoder model..." << std::endl;
   // Get the OrtEnv from the decoder model
   const auto* decoder_model = dynamic_cast<const DecoderOnlyPipelineModel*>(&model);
   if (!decoder_model) {
     throw std::runtime_error("Vision pipeline requires DecoderOnlyPipelineModel");
   }
   
-  std::cout << "[VisionPipeline] Creating sessions for vision pipeline stages..." << std::endl;
   // Create sessions for each stage of the vision pipeline
   for (size_t stage_idx = 0; stage_idx < model.config_->model.vision.pipeline.size(); ++stage_idx) {
     const auto& pipeline_model = model.config_->model.vision.pipeline[stage_idx];
-    std::cout << "[VisionPipeline] Creating session " << stage_idx << ": " << pipeline_model.filename << std::endl;
     // CreateSession expects just the filename, not the full path
     // It will prepend config_path internally
     const std::string& model_filename = pipeline_model.filename;
     
-    std::cout << "[VisionPipeline] Getting session options..." << std::endl;
     // Get or create session options for this pipeline model
     OrtSessionOptions* session_options = nullptr;
     
     if (pipeline_model.run_on_cpu) {
-      std::cout << "[VisionPipeline] Using CPU session options" << std::endl;
       // For CPU execution, create minimal session options with CPU provider
       session_options = model.session_options_.get();  // Use default session options which will fall back to CPU
     } else {
-      std::cout << "[VisionPipeline] Using model-specific session options for: " << pipeline_model.model_id << std::endl;
       // For non-CPU execution (e.g., QNN), use the model-specific session options
       session_options = model.GetSessionOptions(pipeline_model.model_id);
     }
     
-    std::cout << "[VisionPipeline] Creating ORT session..." << std::endl;
     // Create session - pass just the filename
     auto session = const_cast<DecoderOnlyPipelineModel*>(decoder_model)->CreateSession(
         const_cast<OrtEnv&>(decoder_model->ort_env_), 
         model_filename, 
         session_options);
     
-    std::cout << "[VisionPipeline] Session created successfully" << std::endl;
     
     // Store session based on order: patch_embed, vision_attn, patch_merger
     if (!patch_embed_session_) {
       patch_embed_session_ = std::move(session);
-      std::cout << "[VisionPipeline] Stored as patch_embed_session" << std::endl;
     } else if (!vision_attn_session_) {
       vision_attn_session_ = std::move(session);
-      std::cout << "[VisionPipeline] Stored as vision_attn_session" << std::endl;
     } else if (!patch_merger_session_) {
       patch_merger_session_ = std::move(session);
-      std::cout << "[VisionPipeline] Stored as patch_merger_session" << std::endl;
     }
   }
   
-  std::cout << "[VisionPipeline] Constructor completed successfully" << std::endl;
 }
 
 void VisionPipelineState::LoadWindowIndexing(const fs::path& wnd_idx_path) {
@@ -146,41 +139,30 @@ void VisionPipelineState::LoadWindowIndexing(const fs::path& wnd_idx_path) {
 }
 
 std::unique_ptr<OrtValue> VisionPipelineState::ProcessImage(OrtValue* pixel_values, OrtValue* image_grid_thw) {
-  std::cout << "[ProcessImage] Stage 1: Running patch embed..." << std::endl;
   // Stage 1: Patch Embed
   RunPatchEmbed(pixel_values);
-  std::cout << "[ProcessImage] Stage 1 completed" << std::endl;
   
   // Stage 2: Apply window indexing reordering  
   if (!window_indices_.empty()) {
-    std::cout << "[ProcessImage] Stage 2: Applying window indexing..." << std::endl;
     ApplyWindowIndexing();
-    std::cout << "[ProcessImage] Stage 2 completed" << std::endl;
   } else {
     reordered_patches_ = std::move(patch_embed_output_);
   }
   
   // Stage 3: Vision Attention
-  std::cout << "[ProcessImage] Stage 3: Running vision attention..." << std::endl;
   RunVisionAttention();
-  std::cout << "[ProcessImage] Stage 3 completed" << std::endl;
   
   // Stage 4: Skip reverse window indexing - patch merger handles the reduction
   if (!window_indices_.empty()) {
-    std::cout << "[ProcessImage] Stage 4: Skipping reverse window indexing (patch merger will handle reduction)..." << std::endl;
     // Pass the 1972-patch sequence directly to patch merger
     restored_patches_ = std::move(vision_attn_output_);
-    std::cout << "[ProcessImage] Stage 4 completed" << std::endl;
   } else {
     restored_patches_ = std::move(vision_attn_output_);
   }
   
   // Stage 5: Patch Merger
-  std::cout << "[ProcessImage] Stage 5: Running patch merger..." << std::endl;
   RunPatchMerger();
-  std::cout << "[ProcessImage] Stage 5 completed" << std::endl;
   
-  std::cout << "[ProcessImage] All stages completed successfully" << std::endl;
   return std::move(final_embeddings_);
 }
 
@@ -202,21 +184,7 @@ void VisionPipelineState::RunPatchEmbed(OrtValue* pixel_values) {
       input_sum += input_data[i];
     }
     float input_mean = input_sum / input_total;
-    
-    std::cout << "[C++] pixel_values input shape: [";
-    for (size_t i = 0; i < input_shape.size(); ++i) {
-      std::cout << input_shape[i];
-      if (i < input_shape.size() - 1) std::cout << ", ";
-    }
-    std::cout << "]" << std::endl;
-    std::cout << "[C++] pixel_values statistics: Min=" << input_min 
-              << ", Max=" << input_max << ", Mean=" << input_mean << std::endl;
-    std::cout << "[C++] pixel_values first 10 values: [";
-    for (int i = 0; i < 10 && i < static_cast<int>(input_total); ++i) {
-      std::cout << input_data[i];
-      if (i < 9) std::cout << ", ";
-    }
-    std::cout << "]" << std::endl;
+    (void)input_mean; // silence unused variable warning
   }
   
   std::vector<const char*> input_names;
@@ -242,12 +210,8 @@ void VisionPipelineState::RunPatchEmbed(OrtValue* pixel_values) {
   auto shape_info = patch_embed_output_->GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
   
-  std::cout << "[PatchEmbed] Output shape: [";
   for (size_t i = 0; i < shape.size(); ++i) {
-    std::cout << shape[i];
-    if (i < shape.size() - 1) std::cout << ", ";
   }
-  std::cout << "]" << std::endl;
   
   if (shape.size() == 2) {
     // Need to reshape from [seq_len, hidden_dim] to [1, seq_len, hidden_dim]
@@ -280,23 +244,13 @@ void VisionPipelineState::RunPatchEmbed(OrtValue* pixel_values) {
     sum += data[i];
   }
   float mean = sum / total_elements;
-  
-  std::cout << "[PatchEmbed] Statistics: Min=" << min_val << ", Max=" << max_val 
-            << ", Mean=" << mean << std::endl;
-  std::cout << "[PatchEmbed] First 10 values: [";
-  for (int i = 0; i < 10 && i < static_cast<int>(total_elements); ++i) {
-    std::cout << data[i];
-    if (i < 9) std::cout << ", ";
-  }
-  std::cout << "]" << std::endl;
+  (void)mean; // silence unused variable warning
 }
 
 void VisionPipelineState::ApplyWindowIndexing() {
-  std::cout << "[ApplyWindowIndexing] Starting..." << std::endl;
   // Get shape of patch_embed_output: [batch, seq_len, hidden_dim]
   auto shape_info = patch_embed_output_->GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
-  std::cout << "[ApplyWindowIndexing] Shape: [" << shape[0] << ", " << shape[1] << ", " << shape[2] << "]" << std::endl;
   
   if (shape.size() != 3) {
     std::string shape_str = "[";
@@ -311,36 +265,26 @@ void VisionPipelineState::ApplyWindowIndexing() {
   int64_t batch_size = shape[0];
   int64_t seq_len = shape[1];
   int64_t hidden_dim = shape[2];
-  
-  std::cout << "[ApplyWindowIndexing] batch_size=" << batch_size << ", seq_len=" << seq_len 
-            << ", hidden_dim=" << hidden_dim << ", spatial_merge_size=" << spatial_merge_size_ << std::endl;
-  std::cout << "[ApplyWindowIndexing] window_indices_.size()=" << window_indices_.size() << std::endl;
-  
+    
   // CRITICAL: Window indices work on GROUPS of patches, not individual patches!
   // Python logic: hidden.reshape((493, 4, 1280))[wnd_idx].reshape((1972, 1280))
   // This selects which groups of 4 patches to use, then flattens back
   
   int64_t patches_per_group = spatial_merge_size_ * spatial_merge_size_;  // 4
   int64_t num_groups = seq_len / patches_per_group;  // 1972 / 4 = 493
-  
-  std::cout << "[ApplyWindowIndexing] patches_per_group=" << patches_per_group 
-            << ", num_groups=" << num_groups << std::endl;
-  
+    
   if (static_cast<int64_t>(window_indices_.size()) != num_groups) {
     throw std::runtime_error("window_indices size (" + std::to_string(window_indices_.size()) + 
                            ") must equal num_groups (" + std::to_string(num_groups) + ")");
   }
   
-  std::cout << "[ApplyWindowIndexing] Getting input data..." << std::endl;
   const float* input_data = patch_embed_output_->GetTensorData<float>();
   
-  std::cout << "[ApplyWindowIndexing] Creating output tensor..." << std::endl;
   // Create output tensor with same shape
   std::vector<int64_t> output_shape = {batch_size, seq_len, hidden_dim};
   reordered_patches_ = OrtValue::CreateTensor<float>(*allocator_cpu_, std::span<const int64_t>(output_shape));
   float* output_data = reordered_patches_->GetTensorMutableData<float>();
   
-  std::cout << "[ApplyWindowIndexing] Applying group-based reordering (matching baseline logic)..." << std::endl;
   // For each batch
   for (int64_t b = 0; b < batch_size; ++b) {
     // For each group in the OUTPUT
@@ -377,26 +321,15 @@ void VisionPipelineState::ApplyWindowIndexing() {
     sum += output[i];
   }
   float mean = sum / total_elements;
-  
-  std::cout << "[WindowExpansion] Statistics: Min=" << min_val << ", Max=" << max_val 
-            << ", Mean=" << mean << std::endl;
-  std::cout << "[WindowExpansion] First 10 values: [";
-  for (int i = 0; i < 10 && i < static_cast<int>(total_elements); ++i) {
-    std::cout << output[i];
-    if (i < 9) std::cout << ", ";
-  }
-  std::cout << "]" << std::endl;
-  std::cout << "[ApplyWindowIndexing] Completed successfully" << std::endl;
+  (void)mean; // silence unused variable warning
 }
 
 void VisionPipelineState::RunVisionAttention() {
-  std::cout << "[RunVisionAttention] Starting..." << std::endl;
   const auto& pipeline_config = model_.config_->model.vision.pipeline[1];
   
   // Get shape of reordered_patches: [batch, seq_len, hidden_dim]
   auto shape_info = reordered_patches_->GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
-  std::cout << "[RunVisionAttention] Input shape: [" << shape[0] << ", " << shape[1] << ", " << shape[2] << "]" << std::endl;
   
   // Vision attention model expects 2D input [seq_len, hidden_dim], so squeeze batch dimension
   int64_t batch_size = shape[0];
@@ -405,8 +338,6 @@ void VisionPipelineState::RunVisionAttention() {
   
   std::unique_ptr<OrtValue> input_2d;
   if (batch_size == 1 && shape.size() == 3) {
-    std::cout << "[RunVisionAttention] Reshaping from 3D [1, " << seq_len << ", " << hidden_dim 
-              << "] to 2D [" << seq_len << ", " << hidden_dim << "]" << std::endl;
     // Reshape to 2D by removing batch dimension
     std::vector<int64_t> new_shape = {seq_len, hidden_dim};
     input_2d = OrtValue::CreateTensor<float>(*allocator_cpu_, std::span<const int64_t>(new_shape));
@@ -429,13 +360,10 @@ void VisionPipelineState::RunVisionAttention() {
   
   // Get actual output names from the session instead of config
   auto session_output_names = vision_attn_session_->GetOutputNames();
-  std::cout << "[RunVisionAttention] Model has " << session_output_names.size() << " outputs:" << std::endl;
   for (size_t i = 0; i < session_output_names.size(); ++i) {
-    std::cout << "[RunVisionAttention]   Output " << i << ": " << session_output_names[i].c_str() << std::endl;
     output_names.push_back(session_output_names[i].c_str());
   }
   
-  std::cout << "[RunVisionAttention] Running session..." << std::endl;
   std::vector<OrtValue*> outputs(output_names.size(), nullptr);
   vision_attn_session_->Run(nullptr, input_names.data(), input_values.data(), input_names.size(),
                             output_names.data(), outputs.data(), output_names.size());
@@ -457,29 +385,17 @@ void VisionPipelineState::RunVisionAttention() {
       attn_sum += attn_data[i];
     }
     float attn_mean = attn_sum / attn_total;
-    
-    std::cout << "[VisionAttention] NPU Output Statistics: Min=" << attn_min 
-              << ", Max=" << attn_max << ", Mean=" << attn_mean << std::endl;
-    std::cout << "[VisionAttention] First 10 values: [";
-    for (int i = 0; i < 10 && i < static_cast<int>(attn_total); ++i) {
-      std::cout << attn_data[i] << (i < 9 ? ", " : "");
-    }
-    std::cout << "]" << std::endl;
+    (void)attn_mean; // silence unused variable warning
   }
   
   // Check output shape and reshape back to 3D if needed
   auto output_shape_info = vision_attn_output_->GetTensorTypeAndShapeInfo();
   auto output_shape = output_shape_info->GetShape();
-  std::cout << "[RunVisionAttention] Output shape: ";
   for (size_t i = 0; i < output_shape.size(); ++i) {
-    std::cout << output_shape[i];
-    if (i < output_shape.size() - 1) std::cout << ", ";
   }
-  std::cout << std::endl;
   
   // If output is 2D [seq_len, hidden_dim], add batch dimension back
   if (output_shape.size() == 2) {
-    std::cout << "[RunVisionAttention] Reshaping output from 2D to 3D" << std::endl;
     int64_t out_seq_len = output_shape[0];
     int64_t out_hidden_dim = output_shape[1];
     std::vector<int64_t> new_shape = {1, out_seq_len, out_hidden_dim};
@@ -492,7 +408,6 @@ void VisionPipelineState::RunVisionAttention() {
     vision_attn_output_ = std::move(reshaped);
   }
   
-  std::cout << "[RunVisionAttention] Completed" << std::endl;
 }
 
 void VisionPipelineState::ReverseWindowIndexing() {
@@ -537,13 +452,11 @@ void VisionPipelineState::ReverseWindowIndexing() {
 }
 
 void VisionPipelineState::RunPatchMerger() {
-  std::cout << "[RunPatchMerger] Starting..." << std::endl;
   const auto& pipeline_config = model_.config_->model.vision.pipeline[2];
   
   // Get shape of restored_patches: [batch, seq_len, hidden_dim]
   auto shape_info = restored_patches_->GetTensorTypeAndShapeInfo();
   auto shape = shape_info->GetShape();
-  std::cout << "[RunPatchMerger] Input shape: [" << shape[0] << ", " << shape[1] << ", " << shape[2] << "]" << std::endl;
   
   // Patch merger model expects 2D input [seq_len, hidden_dim], so squeeze batch dimension
   int64_t batch_size = shape[0];
@@ -552,8 +465,6 @@ void VisionPipelineState::RunPatchMerger() {
   
   std::unique_ptr<OrtValue> input_2d;
   if (batch_size == 1 && shape.size() == 3) {
-    std::cout << "[RunPatchMerger] Reshaping from 3D [1, " << seq_len << ", " << hidden_dim 
-              << "] to 2D [" << seq_len << ", " << hidden_dim << "]" << std::endl;
     // Reshape to 2D by removing batch dimension
     std::vector<int64_t> new_shape = {seq_len, hidden_dim};
     input_2d = OrtValue::CreateTensor<float>(*allocator_cpu_, std::span<const int64_t>(new_shape));
@@ -578,7 +489,6 @@ void VisionPipelineState::RunPatchMerger() {
     output_names.push_back(output_name.c_str());
   }
   
-  std::cout << "[RunPatchMerger] Running session..." << std::endl;
   std::vector<OrtValue*> outputs(output_names.size(), nullptr);
   patch_merger_session_->Run(nullptr, input_names.data(), input_values.data(), input_names.size(),
                              output_names.data(), outputs.data(), output_names.size());
@@ -588,12 +498,8 @@ void VisionPipelineState::RunPatchMerger() {
   // Check output shape
   auto output_shape_info = merger_output->GetTensorTypeAndShapeInfo();
   auto output_shape = output_shape_info->GetShape();
-  std::cout << "[RunPatchMerger] Output shape: ";
   for (size_t i = 0; i < output_shape.size(); ++i) {
-    std::cout << output_shape[i];
-    if (i < output_shape.size() - 1) std::cout << ", ";
   }
-  std::cout << std::endl;
   
   // Log statistics before reverse indexing
   const float* merger_data = merger_output->GetTensorData<float>();
@@ -607,18 +513,10 @@ void VisionPipelineState::RunPatchMerger() {
     merger_sum += merger_data[i];
   }
   float merger_mean = merger_sum / merger_total;
-  
-  std::cout << "[PatchMerger] Statistics (before reverse indexing): Min=" << merger_min 
-            << ", Max=" << merger_max << ", Mean=" << merger_mean << std::endl;
-  std::cout << "[PatchMerger] First 10 values: [";
-  for (int i = 0; i < 10 && i < static_cast<int>(merger_total); ++i) {
-    std::cout << merger_data[i] << (i < 9 ? ", " : "");
-  }
-  std::cout << "]" << std::endl;
-  
+  (void)merger_mean; // silence unused variable warning
+
   // RE-ENABLED: Reverse indexing after patch merger (baseline DOES use it: merged[rev])
   // Apply reverse window indexing to restore original spatial order
-  std::cout << "[RunPatchMerger] Applying reverse window indexing..." << std::endl;
   
   size_t num_embeddings = static_cast<size_t>(output_shape[0]);
   size_t embedding_dim = static_cast<size_t>(output_shape[1]);
@@ -641,7 +539,6 @@ void VisionPipelineState::RunPatchMerger() {
     }
   }
   
-  std::cout << "[RunPatchMerger] Reverse indexing completed" << std::endl;
   
   // Print statistics for comparison with baseline
   auto* data = final_embeddings_->GetTensorMutableData<float>();
@@ -665,25 +562,15 @@ void VisionPipelineState::RunPatchMerger() {
     variance_sum += diff * diff;
   }
   float std_dev = std::sqrt(variance_sum / total_elements);
+  (void)std_dev; // silence unused variable warning
   
-  std::cout << "\n=== [C++] Final Vision Embeddings Stats ===" << std::endl;
-  std::cout << "Shape: (" << stats_shape[0] << ", " << stats_shape[1] << ")" << std::endl;
-  std::cout << "Min: " << min_val << ", Max: " << max_val << std::endl;
-  std::cout << "Mean: " << mean << ", Std: " << std_dev << std::endl;
-  std::cout << "First embedding (first 10 values): [";
   for (int i = 0; i < 10 && i < static_cast<int>(embed_dim); ++i) {
-    std::cout << data[i] << (i < 9 ? ", " : "");
   }
-  std::cout << "]" << std::endl;
-  std::cout << "Last embedding (first 10 values): [";
   size_t last_offset = (stats_shape[0] - 1) * embed_dim;
+  (void)last_offset; // silence unused variable warning
   for (int i = 0; i < 10 && i < static_cast<int>(embed_dim); ++i) {
-    std::cout << data[last_offset + i] << (i < 9 ? ", " : "");
   }
-  std::cout << "]" << std::endl;
-  std::cout << "===" << std::endl;
   
-  std::cout << "[RunPatchMerger] Completed" << std::endl;
 }
 
 DeviceSpan<float> VisionPipelineState::Run(int total_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {

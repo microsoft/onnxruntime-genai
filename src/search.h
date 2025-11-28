@@ -61,6 +61,9 @@ struct Search_Cpu : Search {
   DeviceSpan<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
 
   bool done_{};
+
+  // Length of the prompt (set on first logits pass) to allow context-aware masking for the first generated token.
+  int initial_prompt_length_{-1};
 };
 
 struct GreedySearch_Cpu : Search_Cpu {
