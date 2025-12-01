@@ -61,13 +61,13 @@ class Qwen25VLTextModel(Model):
         # Qwen 2.5 VL applies RoPE manually before attention, not fused in the op
         self.attention_attrs["use_rope_in_attn"] = False
 
+        # We need separate Q, K, V tensors to apply MRoPE manually.
+        # Packed MatMul provides a single output which would require splitting.
+        self.attention_attrs["use_packed_matmul"] = False
+
         if "position_ids" not in self.input_names:
             print("Re-adding 'position_ids' to self.input_names.")
-            if "attention_mask" in self.input_names:
-                idx = self.input_names.index("attention_mask")
-                self.input_names.insert(idx + 1, "position_ids")
-            else:
-                self.input_names.append("position_ids")
+            self.input_names.append("position_ids")
 
         self.mrope_sections = self.rope_attrs.get("mrope", {}).get("sections", [])
         if not self.mrope_sections:
@@ -290,10 +290,10 @@ class Qwen25VLTextModel(Model):
         # The subgraph looks like:
         #      dyn_cos (3, B, S, H)
         #             |
-        #         Slice_Half
+        #           Slice
         #      (3, B, S, H/2)
         #             |
-        #           Split 
+        #           Split
         #   (3, B, S, sections[i])
         #       /     |     \
         #  Gather  Gather  Gather
@@ -303,17 +303,17 @@ class Qwen25VLTextModel(Model):
         #    \        |       /
         #     \       |      /
         #      \      |     /
-        #          Concat 
+        #          Concat
         #       (B, S, H/2)
         #             |
         #          Reshape
         #        (B*S, H/2)
-        
+
         basename = f"/model/layers.{layer_id}/attn/mrope_flattened_cache"
 
         def process_cache(input_name, name_suffix):
             # 1. Slice to H/2: [3, B, S, H] -> [3, B, S, H/2]
-            slice_name = f"{basename}/{name_suffix}/Slice_Half"
+            slice_name = f"{basename}/{name_suffix}/half/Slice"
             slice_output = f"{slice_name}/output_0"
             self.make_slice(
                 slice_name,
@@ -606,7 +606,7 @@ class Qwen25VLTextModel(Model):
         #                   |                          |
         #           GroupQueryAttention <--------------+
         #                   |
-        
+
         # 1. Calculate shapes for MRoPE rotation
         q_shape = [
             "batch_size",
@@ -671,7 +671,7 @@ class Qwen25VLTextModel(Model):
     def load_weights(self, input_path):
         # Load the Hugging Face model
         print("Loading Qwen2_5_VLForConditionalGeneration model...")
-        hf_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        return Qwen2_5_VLForConditionalGeneration.from_pretrained(
             self.model_name_or_path,
             config=self.config,
             cache_dir=self.cache_dir,
@@ -691,7 +691,7 @@ class Qwen25VLTextModel(Model):
         # We only want to export the text model
         model = hf_model.language_model
         print(f"Isolated language_model ({model.__class__.__name__}) for ONNX export.")
-        
+
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
 
