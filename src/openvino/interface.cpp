@@ -213,14 +213,14 @@ static inline std::optional<std::string> add_cache_dir_to_load_config(const std:
 
     //few sanity checks..
     if (load_config_raw.ends_with(".json")) {
-      // TODO: Change to proper warning log message
-      std::cout << "add_cache_dir_to_load_config: Warning! Unable to merge cache_dir into load_config if it's set as a .json" << std::endl;
+      if (g_log.enabled)
+        Log("warning", "add_cache_dir_to_load_config: Warning! Unable to merge cache_dir into load_config if it's set as a .json");
       return load_config_option;
     }
 
     if (load_config_raw.find("CACHE_DIR") != std::string::npos) {
-      // TODO: Change to proper warning log message
-      std::cout << "add_cache_dir_to_load_config: Warning! Unable to merge cache_dir into load_config, as it already defined CACHE_DIR" << std::endl;
+      if (g_log.enabled)
+         Log("warning", "add_cache_dir_to_load_config: Warning! Unable to merge cache_dir into load_config, as it already defined CACHE_DIR");
       return load_config_option;
     }
 
@@ -229,8 +229,8 @@ static inline std::optional<std::string> add_cache_dir_to_load_config(const std:
     remove_all_whitespace(load_config_raw);
 
     if (!load_config_raw.starts_with("{")) {
-      // TODO: Change to proper warning log message
-      std::cout << "add_cache_dir_to_load_config: Warning! Expected load_config to begin with '{'" << std::endl;
+      if (g_log.enabled)
+        Log("warning", "add_cache_dir_to_load_config: Warning! Expected load_config to begin with '{'");
       return load_config_option;
     }
 
