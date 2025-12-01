@@ -19,7 +19,6 @@ void CXX_API(const char* model_path, const char* execution_provider, const char*
   std::cout << "Creating config..." << std::endl;
   auto config = OgaConfig::Create(model_path);
 
-  std::string provider(execution_provider);
   append_provider(*config, provider);
 
   std::cout << "Creating model..." << std::endl;
