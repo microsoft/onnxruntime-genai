@@ -673,62 +673,7 @@ class Qwen25VLTextModel(Model):
         print("Loading Qwen2_5_VLForConditionalGeneration model...")
         return Qwen2_5_VLForConditionalGeneration.from_pretrained(
             self.model_name_or_path,
-            config=self.config,
             cache_dir=self.cache_dir,
             token=self.hf_token,
             trust_remote_code=self.hf_remote,
         )
-
-    def make_model(self, input_path):
-        # Make inputs and outputs to ONNX model
-        self.make_inputs_and_outputs()
-
-        # Make pre-processing nodes
-        self.make_preprocessing_nodes()
-
-        hf_model = self.load_weights(input_path)
-
-        # We only want to export the text model
-        model = hf_model.language_model
-        print(f"Isolated language_model ({model.__class__.__name__}) for ONNX export.")
-
-        # Loop through model and map each module to ONNX/ORT ops
-        self.layer_id = 0
-
-        # The base.Model.make_model() loop expects modules from a standard causal LM,
-        # so we replicate its logic here but point to the correct modules in the hf_model
-
-        # Handle Embeddings
-        if not self.exclude_embeds:
-            print("Reading embedding layer")
-            # The text model's embeddings are at model.embed_tokens
-            self.make_embedding(model.embed_tokens.weight)
-        else:
-            # When excluding embeds, the input is `inputs_embeds`
-            print("Skipping embedding layer, model will expect 'inputs_embeds'.")
-            self.layernorm_attrs["root_input"] = "inputs_embeds"
-            self.layernorm_attrs["skip_input"] = "inputs_embeds"
-
-        # Handle Decoder Layers
-        for layer in model.layers:
-            if self.layer_id < self.num_layers:
-                print(f"Reading decoder layer {self.layer_id}")
-                self.make_layer(self.layer_id, layer)
-                self.layer_id += 1
-
-        # Handle Final Norm
-        if self.layer_id == self.num_layers and hasattr(model, "norm"):
-            print("Reading final norm")
-            self.make_layernorm(
-                self.layer_id,
-                model.norm,
-                skip=True,
-                simple=self.layernorm_attrs["simple"],
-                location="final_norm",
-            )
-
-        # Handle LM Head
-        if not self.exclude_lm_head:
-            # The LM head is part of the parent Qwen2_5_VLForConditionalGeneration model
-            print("Reading LM head")
-            self.make_lm_head(hf_model.lm_head)

@@ -50,7 +50,6 @@ def parse_hf_token(hf_token):
 
 class Model:
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
-        self.config = config
         self.context_length = config.seq_length if hasattr(config, "seq_length") else config.max_position_embeddings
         self.original_context_length = (
             config.original_max_position_embeddings
