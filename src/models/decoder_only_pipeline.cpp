@@ -205,7 +205,7 @@ void DecoderOnlyPipelineState::RunPipeline(int total_length, DeviceSpan<int32_t>
     } else if (!first_run_ && !model_.config_->model.decoder.pipeline[pipeline_state->id_].run_on_token_gen) {
       continue;
     }
-    
+
     DurationTrace trace{MakeString("DecoderOnlyPipelineState::RunPipeline[", pipeline_state->id_, "]")};
 
     if (model_.config_->model.decoder.pipeline[pipeline_state->id_].reset_session_idx > -1) {
