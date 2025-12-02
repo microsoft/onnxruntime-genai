@@ -201,7 +201,6 @@ static inline void remove_all_whitespace(std::string& s) {
   s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); }), s.end());
 }
 
-
 static inline bool starts_with(const std::string& str, const std::string& prefix) {
   return str.size() >= prefix.size() &&
          str.compare(0, prefix.size(), prefix) == 0;
@@ -213,7 +212,7 @@ static inline bool ends_with(const std::string& str, const std::string& suffix) 
 }
 
 static inline std::optional<std::string> add_cache_dir_to_load_config(const std::string& cache_dir,
-  std::optional<std::string> load_config_option, const std::string &ov_device) {
+                                                                      std::optional<std::string> load_config_option, const std::string& ov_device) {
   // convert raw cache_dir path into OpenVINO key/value pair
   std::string cache_dir_option = "\"CACHE_DIR\":\"" + cache_dir + "\"";
 
@@ -231,7 +230,7 @@ static inline std::optional<std::string> add_cache_dir_to_load_config(const std:
 
     if (load_config_raw.find("CACHE_DIR") != std::string::npos) {
       if (g_log.enabled)
-         Log("warning", "add_cache_dir_to_load_config: Warning! Unable to merge cache_dir into load_config, as it already defined CACHE_DIR");
+        Log("warning", "add_cache_dir_to_load_config: Warning! Unable to merge cache_dir into load_config, as it already defined CACHE_DIR");
       return load_config_option;
     }
 
@@ -277,9 +276,8 @@ static inline std::optional<std::string> add_cache_dir_to_load_config(const std:
 }
 
 void OpenVINO_AppendProviderOptions(OrtSessionOptions& session_options,
-    const Generators::Config& config,
-    const Generators::Config::ProviderOptions& provider_options)
-{
+                                    const Generators::Config& config,
+                                    const Generators::Config::ProviderOptions& provider_options) {
   if (provider_options.name != "OpenVINO") {
     throw std::runtime_error("OpenVINO_AppendProviderOptions called with provider_options.name = " + provider_options.name);
   }

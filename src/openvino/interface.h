@@ -10,8 +10,8 @@ DeviceInterface* GetOpenVINOInterface();
 struct Model;
 bool IsOpenVINOStatefulModel(const Model& model);
 
-void OpenVINO_AppendProviderOptions(OrtSessionOptions &session_options,
-                                    const Generators::Config &config,
+void OpenVINO_AppendProviderOptions(OrtSessionOptions& session_options,
+                                    const Generators::Config& config,
                                     const Generators::Config::ProviderOptions& provider_options);
 
 }  // namespace Generators
