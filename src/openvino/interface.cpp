@@ -334,9 +334,21 @@ void OpenVINO_AppendProviderOptions(OrtSessionOptions& session_options,
 
 #else
   std::vector<const char*> keys, values;
+  std::optional<std::string> cache_dir_option;
   for (auto& option : provider_options.options) {
+    // For cache_dir, we will perform some manipulation before setting.
+    if (option.first == "cache_dir") {
+      cache_dir_option = option.second;
+      continue;
+    }
     keys.emplace_back(option.first.c_str());
     values.emplace_back(option.second.c_str());
+  }
+
+  if (cache_dir_option) {
+    cache_dir_option = make_cache_dir_absolute(*cache_dir_option, config.config_path);
+    keys.emplace_back("cache_dir");
+    values.emplace_back((*cache_dir_option).c_str());
   }
   session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
 #endif
