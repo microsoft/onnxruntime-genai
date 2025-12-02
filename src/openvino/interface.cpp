@@ -72,7 +72,7 @@ static inline std::string get_ov_device_string_from_ort_device(const OrtEpDevice
   const char* const* keys = nullptr;
   const char* const* values = nullptr;
   Ort::api->GetKeyValuePairs(keyvals, &keys, &values, &num_entries);
-  for (int kvi = 0; kvi < num_entries; kvi++) {
+  for (size_t kvi = 0; kvi < num_entries; kvi++) {
     const std::string key = keys[kvi];
     const std::string val = values[kvi];
     if (key == "ov_device") {
@@ -177,7 +177,7 @@ static inline std::string make_cache_dir_absolute(std::string cache_dir, fs::pat
   if (cache_dir_path.is_relative()) {
     fs::path abs_cache_dir = config_path / cache_dir_path;
     std::string abs_cache_dir_str = abs_cache_dir.string();
-    // convert '/' to '//'
+    // convert '\' to '\\'
     escape_backslashes(abs_cache_dir_str);
     return abs_cache_dir_str;
   }
@@ -212,7 +212,8 @@ static inline bool ends_with(const std::string& str, const std::string& suffix) 
 }
 
 static inline std::optional<std::string> add_cache_dir_to_load_config(const std::string& cache_dir,
-                                                                      std::optional<std::string> load_config_option, const std::string& ov_device) {
+                                                                      std::optional<std::string> load_config_option,
+                                                                      const std::string& ov_device) {
   // convert raw cache_dir path into OpenVINO key/value pair
   std::string cache_dir_option = "\"CACHE_DIR\":\"" + cache_dir + "\"";
 
@@ -254,7 +255,7 @@ static inline std::optional<std::string> add_cache_dir_to_load_config(const std:
       load_config_raw.replace(device_config_pos, search_str.length(), replacement_string);
     } else {
       // there doesn't seem to be an entry for this device in the config. So, we'll just add one.
-      // Here, we'll find the first occurance of '{' and replace it with '{"CPU":{"CACHE_DIR":"<cache_path>"},'
+      // Here, we'll find the first occurrence of '{' and replace it with '{"CPU":{"CACHE_DIR":"<cache_path>"},'
       size_t brace_pos = load_config_raw.find("{");
       if (brace_pos != std::string::npos) {
         std::string replacement_string = "{" + search_str + cache_dir_option + "},";
@@ -289,14 +290,14 @@ void OpenVINO_AppendProviderOptions(OrtSessionOptions& session_options,
     throw std::runtime_error("OpenVINO_AppendProviderOptions: Unable to find suitable OpenVINOExecutionProvider OrtEpDevice");
   }
 
-  // get the OpenVINO device string, from the selected device (e.g. "CPU", "GPU, "NPU", etc.)
+  // get the OpenVINO device string, from the selected device (e.g. "CPU", "GPU", "NPU", etc.)
   auto selected_ov_device = get_ov_device_string_from_ort_device(openvino_ep_device);
 
   std::vector<const char*> keys, values;
   std::optional<std::string> cache_dir_option;
   std::optional<std::string> load_config_option;
   for (auto& option : provider_options.options) {
-    // device type isn't a support provider option when using SessionOptionsAppendExecutionProvider_V2
+    // device type isn't a supported provider option when using SessionOptionsAppendExecutionProvider_V2
     // (It's set via the OrtDevice ptr which we selected above)
     if (option.first == "device_type") {
       continue;
