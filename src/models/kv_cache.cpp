@@ -203,7 +203,9 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       shape_[2] = std::min(max_length, sliding_window_size);
     }
   } else {
-    // Default capacity: use requested max_length regardless of buffer sharing
+    // Default capacity: allocate full max_length upfront
+    // - With past_present_share_buffer: buffers are reused, so full capacity needed
+    // - Without past_present_share_buffer: buffers are reallocated each step but still sized to max_length
     shape_[2] = state_.params_->search.max_length;
   }
 
@@ -271,18 +273,32 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
   }
 
   if (!layer_shapes_.empty()) {
-    // Allocate present tensors to full per-layer capacity; runtime uses effective length internally
+    // Per-layer allocation with per-layer capacity constraints
     for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
-      const std::array<int64_t, 4> capacity_shape = layer_shapes_[layer_idx];
+      std::array<int64_t, 4> current_shape = layer_shapes_[layer_idx];
+      
+      // With buffer sharing: use full capacity (buffers are reused)
+      // Without buffer sharing: use actual length for memory efficiency
+      if (!past_present_share_buffer_) {
+        const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
+        current_shape[2] = std::min(total_length, max_cache_length);
+      }
+
       // Key tensor
-      presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), capacity_shape, type_);
+      presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
       state_.outputs_[output_index_ + layer_idx * 2] = presents_[layer_idx * 2].get();
+
       // Value tensor
-      presents_[layer_idx * 2 + 1] = OrtValue::CreateTensor(Allocator(), capacity_shape, type_);
+      presents_[layer_idx * 2 + 1] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
       state_.outputs_[output_index_ + layer_idx * 2 + 1] = presents_[layer_idx * 2 + 1].get();
     }
   } else {
-    // Uniform capacity allocation (shape_[2] set at construction to max_length)
+    // Uniform allocation
+    // With buffer sharing: use full capacity (buffers are reused)
+    // Without buffer sharing: use actual length for memory efficiency
+    if (!past_present_share_buffer_) {
+      shape_[2] = total_length;
+    }
     for (int i = 0; i < layer_count_ * 2; i++) {
       presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
       state_.outputs_[output_index_ + i] = presents_[i].get();
