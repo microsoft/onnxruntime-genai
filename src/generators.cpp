@@ -318,14 +318,15 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
 
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
-  auto padding_begin = cpu_span.begin();
-  auto data_end = cpu_span.end();
-  if (model_->config_->model.decoder.sliding_window.has_value() && model_->config_->model.decoder.sliding_window->alignment == "left") {
-    padding_begin = cpu_span.begin() + input_ids.size();
-    data_end = padding_begin;
+  
+  // For sliding windows during prompt processing:
+  // - Copy actual tokens starting at position 0
+  // - Fill remaining positions with padding
+  // The alignment setting affects KV cache behavior, not token placement
+  std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
+  if (padded_input_ids_size > input_ids.size()) {
+    std::fill(cpu_span.begin() + input_ids.size(), cpu_span.end(), model_->config_->model.pad_token_id);
   }
-  std::fill_n(padding_begin, padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
-  std::copy_backward(input_ids.begin(), input_ids.end(), data_end);
   input_ids_device.CopyCpuToDevice();
   return input_ids_device;
 }

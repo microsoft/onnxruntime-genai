@@ -16,9 +16,9 @@ DecoderOnly_State::DecoderOnly_State(const DecoderOnly_Model& model, DeviceSpan<
     : State{params, model},
       model_{model},
       kv_cache_(CreateKeyValueCache(*this)),
-      position_inputs_{model, *this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask} {
+      position_inputs_{CreatePositionInputs(*this, sequence_lengths_unk, model_.config_->model.decoder.inputs.attention_mask)} {
   input_ids_.Add();
-  position_inputs_.Add();
+  position_inputs_->Add();
   logits_.Add();
   kv_cache_->Add();
 }
@@ -79,15 +79,22 @@ DeviceSpan<float> DecoderOnly_State::RunWithChunking(int total_length, DeviceSpa
 }
 
 void DecoderOnly_State::RewindTo(size_t index) {
-  position_inputs_.RewindTo(index);
+  position_inputs_->RewindTo(index);
   kv_cache_->RewindTo(index);
 }
 
 void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
   input_ids_.Update(next_tokens);
   size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);
-  position_inputs_.Update(next_tokens, total_length, static_cast<int>(new_length));
-  kv_cache_->Update(beam_indices, total_length);
+  // Clamp KV cache length to sliding window size if configured
+  int effective_total_length = total_length;
+  if (model_.config_->model.decoder.sliding_window.has_value() &&
+      model_.config_->model.decoder.sliding_window->window_size > 0) {
+    effective_total_length = std::min(effective_total_length, model_.config_->model.decoder.sliding_window->window_size);
+  }
+
+  position_inputs_->Update(next_tokens, effective_total_length, static_cast<int>(new_length));
+  kv_cache_->Update(beam_indices, effective_total_length);
   logits_.Update(next_tokens, new_length);
 }
 
