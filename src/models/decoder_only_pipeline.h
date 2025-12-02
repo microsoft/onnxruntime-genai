@@ -69,6 +69,17 @@ struct DecoderOnlyPipelineState : State {
   void RunPipeline(int total_length, DeviceSpan<int32_t>& next_tokens,
                    DeviceSpan<int32_t> next_indices, bool is_last_chunk);
 
+ protected:
+  // Virtual hook called after each pipeline stage completes, before next stage starts.
+  // Allows derived classes to modify stage outputs (e.g., inject vision embeddings).
+  // stage_id: ID of the stage that just completed
+  // next_tokens: current input tokens for pipeline
+  virtual void OnStageComplete(size_t stage_id, DeviceSpan<int32_t>& next_tokens) {}
+
+  // Stores all the outputs from the previous pipeline state(s)
+  std::unordered_map<std::string, std::unique_ptr<OrtValue>> ortvalue_store_;
+  std::unique_ptr<InputIDs> input_ids_;  // Made protected for derived class access
+
  private:
   void UpdateKeyValueCache(DeviceSpan<int32_t> beam_indices, int total_length);
 
@@ -86,10 +97,6 @@ struct DecoderOnlyPipelineState : State {
   std::map<size_t, size_t> pipeline_state_id_to_partial_kv_cache_update_record_idx_;
   std::vector<PartialKeyValueCacheUpdateRecord> partial_kv_cache_update_records_;
 
-  // Stores all the outputs from the previous pipeline state(s)
-  std::unordered_map<std::string, std::unique_ptr<OrtValue>> ortvalue_store_;
-
-  std::unique_ptr<InputIDs> input_ids_;
   Logits logits_{*this};
 
   std::unique_ptr<KeyValueCache> key_value_cache_;

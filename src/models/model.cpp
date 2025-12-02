@@ -19,6 +19,7 @@
 #include "multi_modal.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
+#include "qwen_vl_model.h"
 #include "../dml/interface.h"
 
 #if defined(_WIN32)
@@ -1193,6 +1194,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  if (config->model.type == "qwen2_5_vl")
+    return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))

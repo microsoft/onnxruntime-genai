@@ -202,7 +202,8 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       // Uniform sliding window allocation (backward compatibility)
       shape_[2] = std::min(max_length, sliding_window_size);
     }
-  } else if (past_present_share_buffer_) {
+  } else {
+    // Default capacity: use requested max_length regardless of buffer sharing
     shape_[2] = state_.params_->search.max_length;
   }
 
@@ -270,25 +271,18 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
   }
 
   if (!layer_shapes_.empty()) {
-    // Update per-layer shapes based on total_length, but respect max allocations
+    // Allocate present tensors to full per-layer capacity; runtime uses effective length internally
     for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
-      const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
-      const int actual_length = std::min(total_length, max_cache_length);
-
-      std::array<int64_t, 4> current_shape = layer_shapes_[layer_idx];
-      current_shape[2] = actual_length;
-
+      const std::array<int64_t, 4> capacity_shape = layer_shapes_[layer_idx];
       // Key tensor
-      presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
+      presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), capacity_shape, type_);
       state_.outputs_[output_index_ + layer_idx * 2] = presents_[layer_idx * 2].get();
-
       // Value tensor
-      presents_[layer_idx * 2 + 1] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
+      presents_[layer_idx * 2 + 1] = OrtValue::CreateTensor(Allocator(), capacity_shape, type_);
       state_.outputs_[output_index_ + layer_idx * 2 + 1] = presents_[layer_idx * 2 + 1].get();
     }
   } else {
-    // Uniform shape update (existing behavior)
-    shape_[2] = total_length;
+    // Uniform capacity allocation (shape_[2] set at construction to max_length)
     for (int i = 0; i < layer_count_ * 2; i++) {
       presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
       state_.outputs_[output_index_ + i] = presents_[i].get();
