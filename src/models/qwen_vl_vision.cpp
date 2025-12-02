@@ -144,160 +144,86 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   if (!patch_embed_session_ || !vision_attn_session_ || !patch_merger_session_) {
     throw std::runtime_error("Vision pipeline sessions not initialized");
   }
-  // Create input tensor for patch embed
+  
   size_t pixel_count = 1;
   for (auto d : pixel_shape) pixel_count *= static_cast<size_t>(d);
-  
   auto pixel_tensor = CreateTensor(pixel_data, pixel_count, pixel_shape);
   
   const char* pe_input_names[] = {"pixel_values"};
   OrtValue* pe_inputs[] = { pixel_tensor.get() };
 
-  // Compute expected output shape based on input
-  // Input: [batch=1, num_patches, patch_dim]
-  // Output: [num_patches, hidden_dim=1280]
-  int64_t num_patches = pixel_shape[1];  // 1972
-  int64_t hidden_dim = 1280;  // Qwen2.5-VL hidden dimension
-  std::vector<int64_t> pe_out_shape_vec{num_patches, hidden_dim};
-  size_t pe_out_count = static_cast<size_t>(num_patches * hidden_dim);
+  const int64_t num_patches = pixel_shape[1];
+  const int64_t hidden_dim = 1280;
+  std::vector<int64_t> pe_out_shape{num_patches, hidden_dim};
+  std::vector<float> pe_out_buf(num_patches * hidden_dim);
+  auto pe_out_tensor = CreateTensor(pe_out_buf.data(), pe_out_buf.size(), pe_out_shape);
   
-  std::vector<float> pe_out_buf(pe_out_count);
-  auto pe_out_tensor = CreateTensor(pe_out_buf.data(), pe_out_count, pe_out_shape_vec);
-  
-  // Prepare output name
-  auto pe_out_name_str = patch_embed_session_->GetOutputName(0);
-  const char* pe_output_names[] = { pe_out_name_str.c_str() };
+  auto pe_out_name = patch_embed_session_->GetOutputName(0);
+  const char* pe_output_names[] = { pe_out_name.c_str() };
   OrtValue* pe_outputs[] = { pe_out_tensor.get() };
 
   patch_embed_session_->Run(nullptr, pe_input_names, pe_inputs, 1, pe_output_names, pe_outputs, 1);
 
-  // Debug: Log patch_embed output
-  float min_pe = pe_out_buf[0], max_pe = pe_out_buf[0], sum_pe = 0.0f;
-  for (const auto& val : pe_out_buf) {
-    min_pe = std::min(min_pe, val);
-    max_pe = std::max(max_pe, val);
-    sum_pe += val;
+  const int64_t seq_len = num_patches;
+  const int64_t window_area = spatial_merge_size_ * spatial_merge_size_;
+  const int64_t num_windows = seq_len / window_area;
+  
+  if (seq_len % window_area != 0 || static_cast<int64_t>(wnd_idx_.size()) != num_windows) {
+    throw std::runtime_error("Invalid window configuration for vision pipeline");
   }
 
-  // hidden now in pe_out_buf with shape [seq_len, hidden_size]
-  int64_t seq_len = pe_out_shape_vec[0];
-  int64_t hidden_size = pe_out_shape_vec[1];
-  int64_t window_area = spatial_merge_size_ * spatial_merge_size_;
-  if (seq_len % window_area != 0) {
-    throw std::runtime_error("Sequence length not divisible by spatial_merge_size^2 in vision pipeline");
-  }
-  int64_t num_windows = seq_len / window_area;
-  // Reshape logically: [num_windows, window_area, hidden_size] then reorder by wnd_idx_
-  if (static_cast<int64_t>(wnd_idx_.size()) != num_windows) {
-    throw std::runtime_error("wnd_idx size does not match number of windows");
-  }
-
-  // Temporary buffer for reordered hidden
-  std::vector<float> reordered(seq_len * hidden_size);
-  // For each window index w: copy its window_area * hidden_size block in order
+  std::vector<float> reordered(seq_len * hidden_dim);
   for (int64_t dst_w = 0; dst_w < num_windows; ++dst_w) {
     int64_t src_w = wnd_idx_[dst_w];
     if (src_w < 0 || src_w >= num_windows) throw std::runtime_error("wnd_idx value out of range");
-    // source offset in original flattened: src_w * window_area * hidden_size
-    size_t src_offset = static_cast<size_t>(src_w) * static_cast<size_t>(window_area) * static_cast<size_t>(hidden_size);
-    size_t dst_offset = static_cast<size_t>(dst_w) * static_cast<size_t>(window_area) * static_cast<size_t>(hidden_size);
-    std::memcpy(reordered.data() + dst_offset, pe_out_buf.data() + src_offset,
-                window_area * static_cast<size_t>(hidden_size) * sizeof(float));
+    size_t offset_size = window_area * hidden_dim;
+    std::memcpy(reordered.data() + dst_w * offset_size, 
+                pe_out_buf.data() + src_w * offset_size,
+                offset_size * sizeof(float));
   }
 
-  float min_wnd = reordered[0], max_wnd = reordered[0], sum_wnd = 0.0f;
-  for (const auto& val : reordered) {
-    min_wnd = std::min(min_wnd, val);
-    max_wnd = std::max(max_wnd, val);
-    sum_wnd += val;
-  }
-
-  // Flatten reordered is still [seq_len, hidden_size]
-  std::vector<int64_t> attn_in_shape{seq_len, hidden_size};
-  auto attn_in_tensor = CreateTensor(reordered.data(), reordered.size(), attn_in_shape);
+  std::vector<int64_t> attn_shape{seq_len, hidden_dim};
+  auto attn_in_tensor = CreateTensor(reordered.data(), reordered.size(), attn_shape);
   const char* attn_input_names[] = {"hidden"};
   OrtValue* attn_inputs[] = { attn_in_tensor.get() };
 
-  // Prepare attention output - shape should be same as input
-  std::vector<int64_t> attn_out_shape_vec{seq_len, hidden_size};
-  size_t attn_out_count = static_cast<size_t>(seq_len * hidden_size);
-  std::vector<float> attn_out_buf(attn_out_count);
-  auto attn_out_tensor = CreateTensor(attn_out_buf.data(), attn_out_count, attn_out_shape_vec);
-  auto attn_out_name_str = vision_attn_session_->GetOutputName(0);
-  const char* attn_output_names[] = { attn_out_name_str.c_str() };
+  std::vector<float> attn_out_buf(seq_len * hidden_dim);
+  auto attn_out_tensor = CreateTensor(attn_out_buf.data(), attn_out_buf.size(), attn_shape);
+  auto attn_out_name = vision_attn_session_->GetOutputName(0);
+  const char* attn_output_names[] = { attn_out_name.c_str() };
   OrtValue* attn_outputs[] = { attn_out_tensor.get() };
   
   vision_attn_session_->Run(nullptr, attn_input_names, attn_inputs, 1, attn_output_names, attn_outputs, 1);
 
-  float min_attn = attn_out_buf[0], max_attn = attn_out_buf[0], sum_attn = 0.0f;
-  for (const auto& val : attn_out_buf) {
-    min_attn = std::min(min_attn, val);
-    max_attn = std::max(max_attn, val);
-    sum_attn += val;
-  }
-  // Merger input (attention output)
-  auto merger_in_tensor = CreateTensor(attn_out_buf.data(), attn_out_buf.size(), attn_out_shape_vec);
+  auto merger_in_tensor = CreateTensor(attn_out_buf.data(), attn_out_buf.size(), attn_shape);
   const char* merger_input_names[] = {"hidden"};
   OrtValue* merger_inputs[] = { merger_in_tensor.get() };
   
-  // Patch merger output shape: [seq_len / 4, 3584] 
-  // The merger reduces spatial dimensions and projects to final vision hidden size
-  int64_t merged_seq_len = seq_len / (spatial_merge_size_ * spatial_merge_size_);
-  int64_t merged_hidden_size = 3584;  // Qwen2.5-VL final vision embedding dimension
-  std::vector<int64_t> merger_out_shape_vec{merged_seq_len, merged_hidden_size};
-  size_t merger_out_count = static_cast<size_t>(merged_seq_len * merged_hidden_size);
-  std::vector<float> merger_out_buf(merger_out_count);
-  auto merger_out_tensor = CreateTensor(merger_out_buf.data(), merger_out_count, merger_out_shape_vec);
-  auto merger_out_name_str = patch_merger_session_->GetOutputName(0);
-  const char* merger_output_names[] = { merger_out_name_str.c_str() };
+  const int64_t merged_seq_len = num_windows;  // One token per window after merging
+  const int64_t merged_hidden = 3584;
+  std::vector<int64_t> merger_shape{merged_seq_len, merged_hidden};
+  std::vector<float> merger_out_buf(merged_seq_len * merged_hidden);
+  auto merger_out_tensor = CreateTensor(merger_out_buf.data(), merger_out_buf.size(), merger_shape);
+  auto merger_out_name = patch_merger_session_->GetOutputName(0);
+  const char* merger_output_names[] = { merger_out_name.c_str() };
   OrtValue* merger_outputs[] = { merger_out_tensor.get() };
   
   patch_merger_session_->Run(nullptr, merger_input_names, merger_inputs, 1, merger_output_names, merger_outputs, 1);
 
-  float min_merger = merger_out_buf[0], max_merger = merger_out_buf[0], sum_merger = 0.0f;
-  for (const auto& val : merger_out_buf) {
-    min_merger = std::min(min_merger, val);
-    max_merger = std::max(max_merger, val);
-    sum_merger += val;
-  }
-
-  // Final reverse ordering using rev_idx_ (argsort of wnd_idx). Expect same number of windows mapping.
-  // Merger output shape assumed [num_windows * window_area, hidden_size] or potentially [num_windows, hidden_size].
-  // After merger, sequence length is reduced by spatial_merge_size^2
-  if (merger_out_shape_vec.size() != 2) {
-    throw std::runtime_error("Patch merger output must be rank-2");
-  }
-  int64_t final_seq_len = merger_out_shape_vec[0];  // 493 (merged)
-  int64_t final_hidden = merger_out_shape_vec[1];     // 3584 (merged)
-  
-  // Validate final dimensions match expected after merging
-  if (final_seq_len != merged_seq_len) {
-    throw std::runtime_error("Unexpected final sequence length after merger");
-  }
-  if (final_hidden != merged_hidden_size) {
-    throw std::runtime_error("Final hidden size mismatch after merger");
-  }
   if (static_cast<int64_t>(rev_idx_.size()) != num_windows) {
-    // Each window maps back; reorder at window granularity.
-    throw std::runtime_error("rev_idx size does not match number of windows");
+    throw std::runtime_error("Vision pipeline reverse index size mismatch");
   }
 
-  // Apply reverse indexing at merged window granularity
-  // After merging, we have merged_seq_len tokens, one per original window
   std::vector<float> final_embeddings(merger_out_buf.size());
   for (int64_t dst_w = 0; dst_w < num_windows; ++dst_w) {
-    int64_t src_w = rev_idx_[dst_w];
-    // Each "window" in merged output is now just 1 token with merged_hidden_size features
-    size_t src_offset = static_cast<size_t>(src_w) * static_cast<size_t>(final_hidden);
-    size_t dst_offset = static_cast<size_t>(dst_w) * static_cast<size_t>(final_hidden);
-    std::memcpy(final_embeddings.data() + dst_offset, merger_out_buf.data() + src_offset,
-                static_cast<size_t>(final_hidden) * sizeof(float));
+    std::memcpy(final_embeddings.data() + dst_w * merged_hidden,
+                merger_out_buf.data() + rev_idx_[dst_w] * merged_hidden,
+                merged_hidden * sizeof(float));
   }
 
-  // Save final shape
-  last_seq_len_ = final_seq_len;
-  last_hidden_size_ = final_hidden;
-  return final_embeddings; // shape: [final_seq_len=493, final_hidden=3584]
+  last_seq_len_ = merged_seq_len;
+  last_hidden_size_ = merged_hidden;
+  return final_embeddings;
 }
 
 } // namespace Generators
