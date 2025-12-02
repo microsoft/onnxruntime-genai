@@ -173,7 +173,7 @@ static inline void escape_backslashes(std::string& s) {
 static inline std::string make_cache_dir_absolute(std::string cache_dir, fs::path config_path) {
   fs::path cache_dir_path(cache_dir);
 
-  //if cache_dir is a relative path, then make it absolute.
+  // if cache_dir is a relative path, then make it absolute.
   if (cache_dir_path.is_relative()) {
     fs::path abs_cache_dir = config_path / cache_dir_path;
     std::string abs_cache_dir_str = abs_cache_dir.string();
@@ -201,6 +201,17 @@ static inline void remove_all_whitespace(std::string& s) {
   s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); }), s.end());
 }
 
+
+static inline bool starts_with(const std::string& str, const std::string& prefix) {
+  return str.size() >= prefix.size() &&
+         str.compare(0, prefix.size(), prefix) == 0;
+}
+
+static inline bool ends_with(const std::string& str, const std::string& suffix) {
+  return str.size() >= suffix.size() &&
+         str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 static inline std::optional<std::string> add_cache_dir_to_load_config(const std::string& cache_dir,
   std::optional<std::string> load_config_option, const std::string &ov_device) {
   // convert raw cache_dir path into OpenVINO key/value pair
@@ -211,8 +222,8 @@ static inline std::optional<std::string> add_cache_dir_to_load_config(const std:
     // load_config is set. We need to add the cache_dir OV option to the existing load_config.
     auto& load_config_raw = *load_config_option;
 
-    //few sanity checks..
-    if (load_config_raw.ends_with(".json")) {
+    // few sanity checks..
+    if (ends_with(load_config_raw, ".json")) {
       if (g_log.enabled)
         Log("warning", "add_cache_dir_to_load_config: Warning! Unable to merge cache_dir into load_config if it's set as a .json");
       return load_config_option;
@@ -228,7 +239,7 @@ static inline std::optional<std::string> add_cache_dir_to_load_config(const std:
     // First, strip all whitespace to aid in any future pattern matching.
     remove_all_whitespace(load_config_raw);
 
-    if (!load_config_raw.starts_with("{")) {
+    if (!starts_with(load_config_raw, "{")) {
       if (g_log.enabled)
         Log("warning", "add_cache_dir_to_load_config: Warning! Expected load_config to begin with '{'");
       return load_config_option;
