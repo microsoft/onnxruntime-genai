@@ -3,96 +3,8 @@ import json
 import sys
 import numpy as np
 from pathlib import Path
-from PIL import Image
-from transformers import AutoTokenizer
 
-import onnxruntime_genai as og  # Requires built/installed onnxruntime-genai Python package
-
-# ----------------------------------------------------------------------------
-# Helper: build expanded image token sequence matching vision embeddings count
-# ----------------------------------------------------------------------------
-IMAGE_PAD_TOKEN = "<|image_pad|>"
-VISION_START = "<|vision_start|>"
-VISION_END = "<|vision_end|>"
-IM_START = "<|im_start|>"
-IM_END = "<|im_end|>"
-
-# Image preprocessing constants (from Qwen2.5-VL config)
-IMAGE_FACTOR = 28
-MIN_PIXELS = 4 * 28 * 28
-MAX_PIXELS = 16384 * 28 * 28
-PATCH_SIZE = 14
-MERGE_SIZE = 2
-TEMPORAL_PATCH_SIZE = 2
-MAX_RATIO = 200
-
-def smart_resize(height: int, width: int, factor: int = 28, min_pixels: int = MIN_PIXELS, max_pixels: int = MAX_PIXELS):
-    """Rescale image maintaining aspect ratio within pixel bounds."""
-    import math
-    
-    if max(height, width) / min(height, width) > MAX_RATIO:
-        raise ValueError(f"Aspect ratio must be smaller than {MAX_RATIO}")
-    
-    h_bar = max(factor, round(height / factor) * factor)
-    w_bar = max(factor, round(width / factor) * factor)
-    
-    if h_bar * w_bar > max_pixels:
-        beta = math.sqrt((height * width) / max_pixels)
-        h_bar = math.floor(height / beta / factor) * factor
-        w_bar = math.floor(width / beta / factor) * factor
-    elif h_bar * w_bar < min_pixels:
-        beta = math.sqrt(min_pixels / (height * width))
-        h_bar = math.ceil(height * beta / factor) * factor
-        w_bar = math.ceil(width * beta / factor) * factor
-    
-    return h_bar, w_bar
-
-def load_prepatched_embeddings(image_path: Path, resize_width=800, resize_height=480):
-    """Load and preprocess image into pre-patched format for vision pipeline."""
-    img = Image.open(image_path).convert("RGB")
-    patch_merge_size = PATCH_SIZE * MERGE_SIZE
-    
-    # Two-stage resize with factor constraint
-    h1, w1 = smart_resize(resize_height, resize_width, factor=patch_merge_size)
-    img = img.resize((w1, h1), Image.BICUBIC)
-    h2, w2 = smart_resize(h1, w1, factor=patch_merge_size)
-    img = img.resize((w2, h2), Image.BICUBIC)
-    
-    # Normalize with ImageNet stats
-    pixel_array = np.array(img).astype(np.float32) / 255.0
-    mean = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
-    std = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
-    pixel_array = (pixel_array - mean) / std
-    
-    # Convert to (B, C, H, W) format
-    patches = np.array([pixel_array]).transpose(0, 3, 1, 2)
-    
-    # Pad temporal dimension if needed
-    if patches.shape[0] % TEMPORAL_PATCH_SIZE != 0:
-        pad_frames = np.repeat(patches[-1:], TEMPORAL_PATCH_SIZE - 1, axis=0)
-        patches = np.concatenate([patches, pad_frames], axis=0)
-    
-    channel, grid_t = patches.shape[1], patches.shape[0] // TEMPORAL_PATCH_SIZE
-    grid_h, grid_w = h2 // PATCH_SIZE, w2 // PATCH_SIZE
-    
-    # Reshape and flatten patches
-    patches = patches.reshape(
-        grid_t,
-        TEMPORAL_PATCH_SIZE,
-        channel,
-        grid_h // MERGE_SIZE,
-        MERGE_SIZE,
-        PATCH_SIZE,
-        grid_w // MERGE_SIZE,
-        MERGE_SIZE,
-        PATCH_SIZE,
-    )
-    
-    patches = patches.transpose(0, 3, 6, 4, 7, 2, 1, 5, 8)
-    flatten_patches = patches.reshape(grid_t * grid_h * grid_w, 
-                                     channel * TEMPORAL_PATCH_SIZE * PATCH_SIZE * PATCH_SIZE)
-    
-    return flatten_patches[np.newaxis, :], np.array([[grid_t, grid_h, grid_w]], dtype=np.int64)
+import onnxruntime_genai as og
 
 TOOL_CALL_SYSTEM_PROMPT = """You are a web agent trying to complete user tasks on websites using function calls.
 
@@ -114,63 +26,69 @@ def run_inference(config_dir: Path, image_path: Path, prompt_text: str, max_new_
     if not image_path.is_file():
         raise FileNotFoundError(f"Image file not found: {image_path}")
 
-    pixel_values, grid_thw_array = load_prepatched_embeddings(image_path)
-    grid_thw = grid_thw_array[0]
-    
+    # Load model and create multimodal processor (uses C++ Qwen2_5VLImageProcessor)
     model = og.Model(str(config_dir))
-    tokenizer_hf = AutoTokenizer.from_pretrained(str(config_dir), trust_remote_code=True)
-    tokenizer_ort = og.Tokenizer(model)
-
-    # Build prompt with image tokens
-    num_image_tokens = (grid_thw[0] * grid_thw[1] * grid_thw[2]) // (MERGE_SIZE ** 2)
-    image_text = VISION_START + IMAGE_PAD_TOKEN * num_image_tokens + VISION_END
+    
+    tokenizer = og.Tokenizer(model)
+    
+    processor = model.create_multimodal_processor()
+    tokenizer_stream = processor.create_stream()
+    
+    # Load image using GenAI's image loader (internally uses onnxruntime-extensions)
+    images = og.Images.open(str(image_path))
+    
+    # Build conversation with prompt
     conversation = [
         {"role": "system", "content": TOOL_CALL_SYSTEM_PROMPT},
-        {"role": "user", "content": image_text + prompt_text},
+        {"role": "user", "content": prompt_text},
     ]
-    prompt = tokenizer_hf.apply_chat_template(conversation, tokenize=False, add_generation_prompt=True)
-    prompt = prompt.replace(IMAGE_PAD_TOKEN, IMAGE_PAD_TOKEN * num_image_tokens, 1)
-    input_ids = np.array(tokenizer_hf.encode(prompt), dtype=np.int32)
+    
+    # Apply chat template to format the conversation
+    message_json = json.dumps(conversation)
+    prompt = tokenizer.apply_chat_template(message_json, add_generation_prompt=True)
+    
+    # Process prompt and images together
+    # The C++ processor will automatically:
+    # 1. Preprocess images using processor_config.json pipeline
+    # 2. Insert image tokens in the correct places
+    # 3. Return properly formatted inputs (pixel_values, image_grid_thw, input_ids)
+    inputs = processor(prompt, images=images)
 
     # Setup generation parameters
     try:
         with open(config_dir / "genai_config.json", "r") as f:
             config = json.load(f)
-            context_len = config.get("model", {}).get("context_length", input_ids.shape[0] + max_new_tokens)
+            context_len = config.get("model", {}).get("context_length", 2048)
             eos_val = config.get("model", {}).get("eos_token_id", [])
             eos_ids = eos_val if isinstance(eos_val, list) else [eos_val] if eos_val else []
     except Exception:
-        context_len = input_ids.shape[0] + max_new_tokens
+        context_len = 2048
         eos_ids = []
     
-    params = og.GeneratorParams(model)
-    params.set_search_options(max_length=context_len, temperature=temperature, top_k=top_k, top_p=top_p,
-                              do_sample=do_sample, min_length=min_length, repetition_penalty=repetition_penalty)
-
-    generator = og.Generator(model, params)
-    generator.set_model_input("pixel_values", np.ascontiguousarray(pixel_values.astype(np.float32)))
-    generator.set_model_input("image_grid_thw", np.ascontiguousarray(grid_thw_array.astype(np.int64)))
-    generator.append_tokens(input_ids)
+    # Use max_length from config if available, otherwise use context_length
+    max_length = min(context_len, 2048)  # Cap at 2048 for generation
     
-    # Generate and extract tool_call
-    stream = tokenizer_ort.create_stream()
+    params = og.GeneratorParams(model)
+    params.set_search_options(max_length=max_length, temperature=temperature, top_k=top_k, top_p=top_p,
+                              do_sample=do_sample, min_length=min_length, repetition_penalty=repetition_penalty)
+    
+    # Generate
+    generator = og.Generator(model, params)
+    generator.set_inputs(inputs)
     output_tokens = []
     accum_text = ""
     started_toolcall = False
     print("\n=== Generating ===")
     
-    for step in range(max_new_tokens):
-        if generator.is_done():
-            break
-        
+    while not generator.is_done():
         generator.generate_next_token()
         token = generator.get_next_tokens()[0]
         output_tokens.append(token)
         
-        if eos_ids and token in eos_ids and step >= min_length:
+        if eos_ids and token in eos_ids and len(output_tokens) >= min_length:
             break
         
-        decoded = stream.decode(token)
+        decoded = tokenizer_stream.decode(token)
         accum_text += decoded
         
         if not started_toolcall and "<tool_call>" in accum_text:
@@ -184,7 +102,7 @@ def run_inference(config_dir: Path, image_path: Path, prompt_text: str, max_new_
                 break
     
     print("\n=== Generation Complete ===")
-    full_output = tokenizer_hf.decode(np.array(output_tokens, dtype=np.int32))
+    full_output = processor.decode(output_tokens)
     
     if started_toolcall and "</tool_call>" not in accum_text:
         print("[WARNING] Incomplete <tool_call> structure")
