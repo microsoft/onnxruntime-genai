@@ -26,7 +26,7 @@ def run_inference(config_dir: Path, image_path: Path, prompt_text: str, max_new_
     if not image_path.is_file():
         raise FileNotFoundError(f"Image file not found: {image_path}")
 
-    # Load model and create multimodal processor (uses C++ Qwen2_5VLImageProcessor)
+    # Load model and create multimodal processor (uses C++ FaraImageProcessor)
     model = og.Model(str(config_dir))
     
     tokenizer = og.Tokenizer(model)
@@ -112,7 +112,7 @@ def run_inference(config_dir: Path, image_path: Path, prompt_text: str, max_new_
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Qwen2.5-VL inference using onnxruntime-genai")
+    parser = argparse.ArgumentParser(description="Fara VLM inference using onnxruntime-genai")
     parser.add_argument("--config_dir", "--model_path", type=Path, required=True, help="Directory with genai_config.json")
     parser.add_argument("--image", type=Path, required=True, help="Path to input image")
     parser.add_argument("--prompt", type=str, default="Describe the image.", help="User text prompt")

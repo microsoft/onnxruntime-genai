@@ -1,14 +1,14 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 //
-// Qwen VL Vision pipeline support (initial skeleton).
+// Fara VLM Vision pipeline support (initial skeleton).
 // Executes three ONNX models in sequence:
 //   1) Patch Embedding  : pixel_values -> hidden
 //   2) Vision Attention : hidden -> hidden
 //   3) Patch Merger      : hidden -> merged embeddings
 // Performs window expansion/reordering using wnd_idx, then final reverse ordering.
 //
-// This is a minimal starting point to integrate Qwen2.5-VL vision processing
+// This is a minimal starting point to integrate Fara VLM vision processing
 // into onnxruntime-genai. Further work will: (a) connect to Config parsing,
 // (b) expose via MultiModal pipeline, (c) add EP selection, (d) reuse buffers.
 

@@ -1,4 +1,4 @@
-#include "qwen_vl_model.h"
+#include "fara_vl_model.h"
 #include "model.h"
 #include "onnxruntime_api.h"
 #include "../logging.h"
@@ -7,7 +7,7 @@
 
 namespace Generators {
 
-Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
+Fara_PipelineModel::Fara_PipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
   : DecoderOnlyPipelineModel(std::move(config), ort_env) {  
   if (config_->model.vision.pipeline.empty() || !config_->model.vision.window_indexing.has_value()) return;
 
@@ -42,18 +42,18 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
     spatial_merge, wnd_idx_path, use_qnn_attn);
 }
 
-std::unique_ptr<State> Qwen2_5_VL_PipelineModel::CreateState(DeviceSpan<int32_t> sequence_lengths,
-                                                             const GeneratorParams& params) const {
-  return std::make_unique<Qwen2_5_VL_PipelineState>(*this, sequence_lengths, params);
+std::unique_ptr<State> Fara_PipelineModel::CreateState(DeviceSpan<int32_t> sequence_lengths,
+                                                               const GeneratorParams& params) const {
+  return std::make_unique<Fara_PipelineState>(*this, sequence_lengths, params);
 }
 
-Qwen2_5_VL_PipelineState::Qwen2_5_VL_PipelineState(const Qwen2_5_VL_PipelineModel& model,
+Fara_PipelineState::Fara_PipelineState(const Fara_PipelineModel& model,
                                                    DeviceSpan<int32_t> sequence_lengths,
                                                    const GeneratorParams& params)
   : DecoderOnlyPipelineState(model, sequence_lengths, params), vl_model_{model} {
 }
 
-void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {  
+void Fara_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) {  
   DecoderOnlyPipelineState::SetExtraInputs(extra_inputs);
   
   if (vision_ran_ || !vl_model_.vision_pipeline_) return;
@@ -91,7 +91,7 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
   vision_ran_ = true;
 }
 
-void Qwen2_5_VL_PipelineState::OnStageComplete(size_t stage_id, DeviceSpan<int32_t>& next_tokens) {
+void Fara_PipelineState::OnStageComplete(size_t stage_id, DeviceSpan<int32_t>& next_tokens) {
   if (stage_id != 0 || !vision_ran_) return;
   
   const auto& embeddings_config = vl_model_.config_->model.decoder.pipeline[0];
@@ -100,7 +100,7 @@ void Qwen2_5_VL_PipelineState::OnStageComplete(size_t stage_id, DeviceSpan<int32
   }
 }
 
-void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddings_output_name,
+void Fara_PipelineState::InjectVisionEmbeddings(const std::string& embeddings_output_name,
                                                      DeviceSpan<int32_t>& input_token_ids) {
   auto it = ortvalue_store_.find(embeddings_output_name);
   if (it == ortvalue_store_.end() || !it->second) return;

@@ -9,8 +9,8 @@
 
 namespace Generators {
 
-struct Qwen2_5VLImageProcessor : Processor {
-  Qwen2_5VLImageProcessor(Config& config, const SessionInfo& session_info);
+struct FaraImageProcessor : Processor {
+  FaraImageProcessor(Config& config, const SessionInfo& session_info);
 
   std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
 
