@@ -66,7 +66,7 @@ bool IsOpenVINOStatefulModel(const Model& model) {
   return false;
 }
 
-static inline std::string get_ov_device_string_from_ort_device(const OrtEpDevice* device_ptr) {
+static inline std::string GetOVDeviceStringFromOrtDevice(const OrtEpDevice* device_ptr) {
   const OrtKeyValuePairs* keyvals = Ort::api->EpDevice_EpMetadata(device_ptr);
   size_t num_entries;
   const char* const* keys = nullptr;
@@ -80,10 +80,10 @@ static inline std::string get_ov_device_string_from_ort_device(const OrtEpDevice
     }
   }
 
-  throw std::runtime_error("get_ov_device_string_from_ort_device: OrtEpDevice doesn't have ov_device meta field.");
+  throw std::runtime_error("OrtEpDevice doesn't have ov_device meta field.");
 }
 
-static inline const OrtEpDevice* select_ep_device_from_provider_options(const Generators::Config::ProviderOptions& provider_options) {
+static inline const OrtEpDevice* SelectEpDeviceFromProviderOptions(const Generators::Config::ProviderOptions& provider_options) {
   // Get device filtering config
   Config::DeviceFilteringOptions resolved_device_filtering;
   if (provider_options.device_filtering_options.has_value()) {
@@ -137,7 +137,7 @@ static inline const OrtEpDevice* select_ep_device_from_provider_options(const Ge
       if (!config_ov_device_type.has_value()) {
         return true;
       } else {
-        auto meta_ov_device = get_ov_device_string_from_ort_device(device_ptr);
+        auto meta_ov_device = GetOVDeviceStringFromOrtDevice(device_ptr);
         if (meta_ov_device.find(*config_ov_device_type) != std::string::npos) {
           return true;
         }
@@ -162,7 +162,7 @@ static inline const OrtEpDevice* select_ep_device_from_provider_options(const Ge
   return nullptr;
 }
 
-static inline void escape_backslashes(std::string& s) {
+static inline void EscapeBackslahes(std::string& s) {
   size_t pos = 0;
   while ((pos = s.find("\\", pos)) != std::string::npos) {
     s.replace(pos, 1, "\\\\");
@@ -170,7 +170,7 @@ static inline void escape_backslashes(std::string& s) {
   }
 }
 
-static inline std::string make_cache_dir_absolute(std::string cache_dir, fs::path config_path) {
+static inline std::string MakeCacheDirAbsolute(std::string cache_dir, fs::path config_path) {
   fs::path cache_dir_path(cache_dir);
 
   // if cache_dir is a relative path, then make it absolute.
@@ -178,15 +178,15 @@ static inline std::string make_cache_dir_absolute(std::string cache_dir, fs::pat
     fs::path abs_cache_dir = config_path / cache_dir_path;
     std::string abs_cache_dir_str = abs_cache_dir.string();
     // convert '\' to '\\'
-    escape_backslashes(abs_cache_dir_str);
+    EscapeBackslahes(abs_cache_dir_str);
     return abs_cache_dir_str;
   }
 
-  escape_backslashes(cache_dir);
+  EscapeBackslahes(cache_dir);
   return cache_dir;
 }
 
-static inline void replace_comma_brace(std::string& s) {
+static inline void ReplaceCommaBrace(std::string& s) {
   const std::string from = ",}";
   const std::string to = "}";
 
@@ -197,21 +197,21 @@ static inline void replace_comma_brace(std::string& s) {
   }
 }
 
-static inline void remove_all_whitespace(std::string& s) {
+static inline void RemoveAllWhitespace(std::string& s) {
   s.erase(std::remove_if(s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); }), s.end());
 }
 
-static inline bool starts_with(const std::string& str, const std::string& prefix) {
+static inline bool StartsWith(const std::string& str, const std::string& prefix) {
   return str.size() >= prefix.size() &&
          str.compare(0, prefix.size(), prefix) == 0;
 }
 
-static inline bool ends_with(const std::string& str, const std::string& suffix) {
+static inline bool EndsWith(const std::string& str, const std::string& suffix) {
   return str.size() >= suffix.size() &&
          str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-static inline std::optional<std::string> add_cache_dir_to_load_config(const std::string& cache_dir,
+static inline std::optional<std::string> AddCacheDirToLoadConfig(const std::string& cache_dir,
                                                                       std::optional<std::string> load_config_option,
                                                                       const std::string& ov_device) {
   // convert raw cache_dir path into OpenVINO key/value pair
@@ -223,25 +223,25 @@ static inline std::optional<std::string> add_cache_dir_to_load_config(const std:
     auto& load_config_raw = *load_config_option;
 
     // few sanity checks..
-    if (ends_with(load_config_raw, ".json")) {
+    if (EndsWith(load_config_raw, ".json")) {
       if (g_log.enabled)
-        Log("warning", "add_cache_dir_to_load_config: Warning! Unable to merge cache_dir into load_config if it's set as a .json");
+        Log("warning", "Unable to merge cache_dir into load_config when it references a .json file");
       return load_config_option;
     }
 
     if (load_config_raw.find("CACHE_DIR") != std::string::npos) {
       if (g_log.enabled)
-        Log("warning", "add_cache_dir_to_load_config: Warning! Unable to merge cache_dir into load_config, as it already defined CACHE_DIR");
+        Log("warning", "Unable to merge cache_dir into load_config, as it already defines CACHE_DIR");
       return load_config_option;
     }
 
     // let's go ahead and try to merge in our load_config
     // First, strip all whitespace to aid in any future pattern matching.
-    remove_all_whitespace(load_config_raw);
+    RemoveAllWhitespace(load_config_raw);
 
-    if (!starts_with(load_config_raw, "{")) {
+    if (!StartsWith(load_config_raw, "{")) {
       if (g_log.enabled)
-        Log("warning", "add_cache_dir_to_load_config: Warning! Expected load_config to begin with '{'");
+        Log("warning", "Expected load_config to begin with '{'");
       return load_config_option;
     }
 
@@ -265,7 +265,7 @@ static inline std::optional<std::string> add_cache_dir_to_load_config(const std:
 
     // last step. In rare cases, it's possible that we added a ',' where we shouldn't have -- resulting in ',}'
     // So replace ',}' with '}'
-    replace_comma_brace(load_config_raw);
+    ReplaceCommaBrace(load_config_raw);
     return load_config_raw;
   } else {
     // In this case, load_config hasn't been set. So it's pretty easy -- we just create one using
@@ -285,13 +285,13 @@ void OpenVINO_AppendProviderOptions(OrtSessionOptions& session_options,
 
 #if USE_WINML
   // from the given provider options, select the right OVEP OrtDevice to use.
-  auto openvino_ep_device = select_ep_device_from_provider_options(provider_options);
+  auto openvino_ep_device = SelectEpDeviceFromProviderOptions(provider_options);
   if (!openvino_ep_device) {
     throw std::runtime_error("OpenVINO_AppendProviderOptions: Unable to find suitable OpenVINOExecutionProvider OrtEpDevice");
   }
 
   // get the OpenVINO device string, from the selected device (e.g. "CPU", "GPU", "NPU", etc.)
-  auto selected_ov_device = get_ov_device_string_from_ort_device(openvino_ep_device);
+  auto selected_ov_device = GetOVDeviceStringFromOrtDevice(openvino_ep_device);
 
   std::vector<const char*> keys, values;
   std::optional<std::string> cache_dir_option;
@@ -323,11 +323,11 @@ void OpenVINO_AppendProviderOptions(OrtSessionOptions& session_options,
   // if cache_dir option is set
   if (cache_dir_option) {
     // make it absolute
-    cache_dir_option = make_cache_dir_absolute(*cache_dir_option, config.config_path);
+    cache_dir_option = MakeCacheDirAbsolute(*cache_dir_option, config.config_path);
 
     // for SessionOptionsAppendExecutionProvider_V2, cache_dir isn't supported as a provider option,
     // so add it to load_config.
-    load_config_option = add_cache_dir_to_load_config(*cache_dir_option, load_config_option, selected_ov_device);
+    load_config_option = AddCacheDirToLoadConfig(*cache_dir_option, load_config_option, selected_ov_device);
   }
 
   if (load_config_option.has_value()) {
@@ -356,7 +356,7 @@ void OpenVINO_AppendProviderOptions(OrtSessionOptions& session_options,
   }
 
   if (cache_dir_option) {
-    cache_dir_option = make_cache_dir_absolute(*cache_dir_option, config.config_path);
+    cache_dir_option = MakeCacheDirAbsolute(*cache_dir_option, config.config_path);
     keys.emplace_back("cache_dir");
     values.emplace_back((*cache_dir_option).c_str());
   }
