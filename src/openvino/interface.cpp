@@ -162,7 +162,7 @@ static inline const OrtEpDevice* SelectEpDeviceFromProviderOptions(const Generat
   return nullptr;
 }
 
-static inline void EscapeBackslahes(std::string& s) {
+static inline void EscapeBackslashes(std::string& s) {
   size_t pos = 0;
   while ((pos = s.find("\\", pos)) != std::string::npos) {
     s.replace(pos, 1, "\\\\");
@@ -178,11 +178,11 @@ static inline std::string MakeCacheDirAbsolute(std::string cache_dir, fs::path c
     fs::path abs_cache_dir = config_path / cache_dir_path;
     std::string abs_cache_dir_str = abs_cache_dir.string();
     // convert '\' to '\\'
-    EscapeBackslahes(abs_cache_dir_str);
+    EscapeBackslashes(abs_cache_dir_str);
     return abs_cache_dir_str;
   }
 
-  EscapeBackslahes(cache_dir);
+  EscapeBackslashes(cache_dir);
   return cache_dir;
 }
 
