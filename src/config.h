@@ -180,6 +180,7 @@ struct Config {
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
         std::string image_sizes{Defaults::ImageSizesName};
+        std::string image_grid_thw{Defaults::ImageSizesName};  // Qwen2.5-VL uses image_grid_thw, defaults to image_sizes
         std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
       } inputs;
 

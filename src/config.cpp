@@ -621,8 +621,8 @@ struct VisionInputs_Element : JSON::Element {
       v_.pixel_values = JSON::Get<std::string_view>(value);
     } else if (name == "image_sizes") {
       v_.image_sizes = JSON::Get<std::string_view>(value);
-    } else if (name == "image_grid_thw") { // accept alternate naming, map to image_sizes
-      v_.image_sizes = JSON::Get<std::string_view>(value);
+    } else if (name == "image_grid_thw") {
+      v_.image_grid_thw = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else {

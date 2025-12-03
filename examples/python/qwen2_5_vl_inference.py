@@ -5,7 +5,6 @@ print(winml.register_execution_providers(ort=False, ort_genai=True))
 import argparse
 import json
 import sys
-import numpy as np
 from pathlib import Path
 
 import onnxruntime_genai as og
