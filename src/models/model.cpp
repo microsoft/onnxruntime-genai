@@ -670,6 +670,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       else if (provider_options.name == "VitisAI") {
         session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
         session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
+        session_options.AddConfigEntry("model_root", config.config_path.string().c_str());
       } else if (provider_options.name == "NvTensorRtRtx") {
         bool is_multi_profile_enabled = IsMultiProfileEnabled(config.model.decoder.session_options);
         ConfigureNvTensorRtRtxProfile(config, session_options, is_multi_profile_enabled);
