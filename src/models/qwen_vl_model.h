@@ -1,16 +1,16 @@
 #pragma once
 
 #include "decoder_only_pipeline.h"
-#include "fara_vl_vision.h"
+#include "qwen_vl_vision.h"
 
 namespace Generators {
 
-// Fara VLM pipeline model integrating vision pipeline + decoder pipeline.
+// Qwen2.5-VL pipeline model integrating vision pipeline + decoder pipeline.
 // Loads decoder pipeline sessions (handled by base) and constructs vision pipeline sessions.
 // State runs vision once (on first SetExtraInputs when pixel_values arrives) to produce image_features
 // which are injected into embeddings output via existing injection logic in DecoderOnlyPipelineState.
-struct Fara_PipelineModel : public DecoderOnlyPipelineModel {
-  Fara_PipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
+struct Qwen2_5_VL_PipelineModel : public DecoderOnlyPipelineModel {
+  Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env);
 
   std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths,
                                      const GeneratorParams& params) const override;
@@ -19,8 +19,8 @@ struct Fara_PipelineModel : public DecoderOnlyPipelineModel {
   std::unique_ptr<FaraVisionPipeline> vision_pipeline_;
 };
 
-struct Fara_PipelineState : public DecoderOnlyPipelineState {
-  Fara_PipelineState(const Fara_PipelineModel& model,
+struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
+  Qwen2_5_VL_PipelineState(const Qwen2_5_VL_PipelineModel& model,
                            DeviceSpan<int32_t> sequence_lengths,
                            const GeneratorParams& params);
 
@@ -33,7 +33,7 @@ struct Fara_PipelineState : public DecoderOnlyPipelineState {
   void InjectVisionEmbeddings(const std::string& embeddings_output_name,
                              DeviceSpan<int32_t>& input_token_ids);
   
-  const Fara_PipelineModel& vl_model_;
+  const Qwen2_5_VL_PipelineModel& vl_model_;
   bool vision_ran_{false};
   std::unique_ptr<OrtValue> image_features_value_;
   std::vector<float> image_features_buffer_; // backing storage for OrtValue

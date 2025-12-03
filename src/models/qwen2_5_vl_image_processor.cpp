@@ -3,12 +3,12 @@
 
 #include "../generators.h"
 #include "model.h"
-#include "fara_image_processor.h"
+#include "qwen2_5_vl_image_processor.h"
 #include <numeric>
 
 namespace Generators {
 
-FaraImageProcessor::FaraImageProcessor(Config& config, const SessionInfo& session_info) {
+Qwen2_5VLImageProcessor::Qwen2_5VLImageProcessor(Config& config, const SessionInfo& session_info) {
   const auto processor_config = (config.config_path / fs::path("processor_config.json")).string();
   if (!fs::exists(config.config_path / fs::path("processor_config.json"))) {
     throw std::runtime_error("processor_config.json not found at: " + processor_config);
@@ -26,9 +26,9 @@ FaraImageProcessor::FaraImageProcessor(Config& config, const SessionInfo& sessio
   }
 }
 
-std::unique_ptr<NamedTensors> FaraImageProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
+std::unique_ptr<NamedTensors> Qwen2_5VLImageProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
   if (!payload.images) {
-    throw std::runtime_error("No images provided to FaraImageProcessor");
+    throw std::runtime_error("No images provided to Qwen2.5VLImageProcessor");
   }
 
   std::string prompt = std::string(payload.prompt);

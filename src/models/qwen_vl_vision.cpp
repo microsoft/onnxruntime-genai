@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-// Fara VLM Vision pipeline implementation with optional QNN EP for vision attention stage.
+// Qwen VL Vision pipeline implementation with optional QNN EP for vision attention stage.
 
-#include "fara_vl_vision.h"
+#include "qwen_vl_vision.h"
 
 #include <fstream>
 #include <stdexcept>
