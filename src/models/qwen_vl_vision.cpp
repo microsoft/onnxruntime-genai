@@ -106,41 +106,42 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
 
   if (use_qnn_attn_) {
     // Ensure QNN provider is available
-    // auto providers = Ort::GetAvailableProviders();
-    // bool has_qnn = std::find(providers.begin(), providers.end(), std::string("QNNExecutionProvider")) != providers.end();
-    // if (!has_qnn) {
-    //   throw std::runtime_error("QNNExecutionProvider requested for vision attention but not available in this build");
-    // }
     auto so = OrtSessionOptions::Create();
-
-      size_t num_devices = 0;
-      const OrtEpDevice* const* device_ptrs = nullptr;
-      Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
-
-      std::vector<const OrtEpDevice*> ep_devices_ptrs;
-      ep_devices_ptrs.reserve(num_devices);
-
-      for (size_t i = 0; i < num_devices; ++i) {
-        if (Ort::api->EpDevice_EpName(device_ptrs[i]) == std::string("QNNExecutionProvider")) {
-          ep_devices_ptrs.push_back(device_ptrs[i]);
-          // std::cout << "added QNN EP for vision" << std::endl;
-        }
-      }
-
-      if (ep_devices_ptrs.empty()) {
-        throw std::runtime_error("QNNExecutionProvider requested for vision attention but not registered.");
-      }
 
     so->SetIntraOpNumThreads(2).SetInterOpNumThreads(1);
     // QNN provider options
     const char* keys[] = {"backend_path", "htp_performance_mode", "htp_graph_finalization_optimization_mode", "soc_model"};
     const char* values[] = { qnn_backend_path_.c_str(), "burst", "3", "60" };
 
-    Ort::api->SessionOptionsAppendExecutionProvider_V2(
-      so.get(),
-      &GetOrtEnv(),
-      ep_devices_ptrs.data(), ep_devices_ptrs.size(),
-      keys, values, 4);
+    auto providers = Ort::GetAvailableProviders();
+    bool has_qnn = std::find(providers.begin(), providers.end(), std::string("QNNExecutionProvider")) != providers.end();
+    if (has_qnn) {
+      so->AppendExecutionProvider("QNNExecutionProvider", keys, values, 4);
+    }
+    else {
+      // Use registered QNN EP
+      size_t num_devices = 0;
+      const OrtEpDevice* const* device_ptrs = nullptr;
+      Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
+      std::vector<const OrtEpDevice*> ep_devices_ptrs;
+      ep_devices_ptrs.reserve(num_devices);
+      for (size_t i = 0; i < num_devices; ++i) {
+        if (Ort::api->EpDevice_EpName(device_ptrs[i]) == std::string("QNNExecutionProvider")) {
+          ep_devices_ptrs.push_back(device_ptrs[i]);
+        }
+      }
+
+      if (ep_devices_ptrs.empty()) {
+        throw std::runtime_error("QNNExecutionProvider requested for vision attention but not registered.");
+      } else {
+        Ort::api->SessionOptionsAppendExecutionProvider_V2(
+          so.get(),
+          &GetOrtEnv(),
+          ep_devices_ptrs.data(), ep_devices_ptrs.size(),
+          keys, values, 4
+        );
+      }
+    }
 
     vision_attn_session_ = OrtSession::Create(env_, attn_path.c_str(), so.get());
   } else {
