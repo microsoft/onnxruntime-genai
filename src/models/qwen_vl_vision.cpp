@@ -77,7 +77,7 @@ std::vector<int64_t> Load1DNpyIndices(const std::string& file_path) {
   return result;
 }
 
-FaraVisionPipeline::FaraVisionPipeline(OrtEnv& env,
+QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
                                        const std::string& patch_embed_model,
                                        const std::string& vision_attn_model,
                                        const std::string& patch_merger_model,
@@ -131,7 +131,7 @@ FaraVisionPipeline::FaraVisionPipeline(OrtEnv& env,
   for (size_t i = 0; i < pairs.size(); ++i) rev_idx_[i] = static_cast<int64_t>(pairs[i].second);
 }
 
-std::unique_ptr<OrtValue> FaraVisionPipeline::CreateTensor(const float* data, size_t count, const std::vector<int64_t>& shape) const {
+std::unique_ptr<OrtValue> QwenVisionPipeline::CreateTensor(const float* data, size_t count, const std::vector<int64_t>& shape) const {
   auto memory_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   std::span<float> data_span(const_cast<float*>(data), count);
   std::span<const int64_t> shape_span(shape.data(), shape.size());
@@ -140,7 +140,7 @@ std::unique_ptr<OrtValue> FaraVisionPipeline::CreateTensor(const float* data, si
 
 // Removed CreateEmptyTensor (previous implementation returned tensor with dangling backing store).
 
-std::vector<float> FaraVisionPipeline::Run(const float* pixel_data, const std::vector<int64_t>& pixel_shape) {
+std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::vector<int64_t>& pixel_shape) {
   if (!patch_embed_session_ || !vision_attn_session_ || !patch_merger_session_) {
     throw std::runtime_error("Vision pipeline sessions not initialized");
   }

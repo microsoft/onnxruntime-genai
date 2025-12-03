@@ -37,7 +37,7 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
   auto wnd_idx_path = (config_->config_path / fs::path(config_->model.vision.window_indexing->filename)).string();
   int spatial_merge = config_->model.vision.window_indexing->spatial_merge_size;
   
-  vision_pipeline_ = std::make_unique<FaraVisionPipeline>(
+  vision_pipeline_ = std::make_unique<QwenVisionPipeline>(
     ort_env, patch_embed_path, vision_attn_path, patch_merger_path,
     spatial_merge, wnd_idx_path, use_qnn_attn);
 }
