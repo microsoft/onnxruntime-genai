@@ -28,8 +28,8 @@ namespace Generators {
 std::vector<int64_t> Load1DNpyIndices(const std::string& file_path);
 
 // Internal vision pipeline (no external DLL interface required after Python binding removal).
-struct QwenVisionPipeline {
-  QwenVisionPipeline(OrtEnv& env,
+struct FaraVisionPipeline {
+  FaraVisionPipeline(OrtEnv& env,
                      const std::string& patch_embed_model,
                      const std::string& vision_attn_model,
                      const std::string& patch_merger_model,
@@ -40,8 +40,8 @@ struct QwenVisionPipeline {
   bool use_qnn_attn_{};
   std::string qnn_backend_path_{};
 
-  QwenVisionPipeline(const QwenVisionPipeline&) = delete;
-  QwenVisionPipeline& operator=(const QwenVisionPipeline&) = delete;
+  FaraVisionPipeline(const FaraVisionPipeline&) = delete;
+  FaraVisionPipeline& operator=(const FaraVisionPipeline&) = delete;
 
   // Run vision pipeline.
   // pixel_values: float32 tensor with shape [S, C] or [B, C, H, W] depending on export (caller provides shape).
