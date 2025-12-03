@@ -212,8 +212,8 @@ static inline bool EndsWith(const std::string& str, const std::string& suffix) {
 }
 
 static inline std::optional<std::string> AddCacheDirToLoadConfig(const std::string& cache_dir,
-                                                                      std::optional<std::string> load_config_option,
-                                                                      const std::string& ov_device) {
+                                                                 std::optional<std::string> load_config_option,
+                                                                 const std::string& ov_device) {
   // convert raw cache_dir path into OpenVINO key/value pair
   std::string cache_dir_option = "\"CACHE_DIR\":\"" + cache_dir + "\"";
 
