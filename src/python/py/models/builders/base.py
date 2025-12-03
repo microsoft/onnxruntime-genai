@@ -359,10 +359,10 @@ class Model:
         int4_algo_config = self.make_int4_algo_config(extra_options.get("int4_algo_config", "default"))
         self.int4_block_size = extra_options.get("int4_block_size", 32)
         
-        # Validate that CUDA EP doesn't use int4_block_size for QMoE
-        if self.ep == "cuda" and "int4_block_size" in extra_options and moe_op_type == "QMoE":
+        # Validate that only CPU and WebGPU EPs support int4_block_size for QMoE
+        if self.ep not in ["cpu", "webgpu"] and "int4_block_size" in extra_options and moe_op_type == "QMoE":
             raise ValueError(
-                "The 'int4_block_size' option is not supported for CUDA execution provider with QMoE. "
+                f"The 'int4_block_size' option is not supported for {self.ep} execution provider with QMoE. "
                 "Block-wise quantization (block_size attribute) is only supported for CPU and WebGPU execution providers."
             )
         
@@ -3254,9 +3254,9 @@ class Model:
         qweight, scales = None, None
 
         # For QMoE, only use block-wise quantization when explicitly requested
-        # via int4_block_size and when using the CPU execution provider, since
-        # block_size is only supported for CPU EP in the QMoE operator.
-        use_blockwise_quant = "int4_block_size" in self.extra_options and self.ep == "cpu"
+        # via int4_block_size and when using CPU or WebGPU execution providers, since
+        # block_size is only supported for these EPs in the QMoE operator.
+        use_blockwise_quant = "int4_block_size" in self.extra_options and self.ep in ["cpu", "webgpu"]
 
         if use_blockwise_quant:
             block_size = self.quant_attrs["int4"]["block_size"]
