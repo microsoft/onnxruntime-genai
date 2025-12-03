@@ -58,6 +58,12 @@ def run_inference(config_dir: Path, image_path: Path, prompt_text: str, max_new_
     # 3. Return properly formatted inputs (pixel_values, image_grid_thw, input_ids)
     inputs = processor(prompt, images=images)
 
+    if "input_ids" in inputs:
+        input_ids_tensor = inputs["input_ids"]
+        input_length = input_ids_tensor.shape()[1]
+    else:
+        input_length = len(tokenizer.encode(prompt))
+
     # Setup generation parameters
     try:
         with open(config_dir / "genai_config.json", "r") as f:
@@ -69,8 +75,7 @@ def run_inference(config_dir: Path, image_path: Path, prompt_text: str, max_new_
         context_len = 2048
         eos_ids = []
     
-    # Use max_length from config if available, otherwise use context_length
-    max_length = min(context_len, 2048)  # Cap at 2048 for generation
+    max_length = min(input_length + max_new_tokens, context_len)
     
     params = og.GeneratorParams(model)
     params.set_search_options(max_length=max_length, temperature=temperature, top_k=top_k, top_p=top_p,

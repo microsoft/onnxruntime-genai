@@ -73,6 +73,13 @@ struct QwenVisionPipeline {
   OrtEnv& env_;
   int64_t last_seq_len_{0};
   int64_t last_hidden_size_{0};
+
+  // Reusable buffers to avoid repeated allocation/deallocation
+  mutable std::vector<float> pe_out_buf_;
+  mutable std::vector<float> reordered_buf_;
+  mutable std::vector<float> attn_out_buf_;
+  mutable std::vector<float> merger_out_buf_;
+  mutable std::vector<float> final_embeddings_buf_;
 };
 
 } // namespace Generators

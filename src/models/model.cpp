@@ -236,6 +236,10 @@ State::~State() {
 std::vector<int32_t> PadInputs(std::span<std::span<const int32_t>> sequences, int32_t pad_token_id) {
   bool pad_right_{true};
 
+  if (pad_token_id == 0 && g_log.enabled) {
+    Log("warning", "pad_token_id is 0, which may be uninitialized. Verify genai_config.json contains 'pad_token_id' field.");
+  }
+
   size_t max_length = 0;
   for (auto& sequence : sequences)
     max_length = std::max(max_length, sequence.size());

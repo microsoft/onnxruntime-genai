@@ -136,6 +136,14 @@ void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddi
       image_embed_consumed_++;
     }
   }
+  
+  // Warn if there's a mismatch between image tokens and vision features
+  if (image_embed_consumed_ != static_cast<size_t>(num_vision_tokens)) {
+    Log("warning", "Vision embedding mismatch: consumed " + std::to_string(image_embed_consumed_) + 
+                   " of " + std::to_string(num_vision_tokens) + " available vision tokens. " +
+                   "This may indicate a mismatch between the number of image placeholders in the prompt " +
+                   "and the number of images provided.");
+  }
 }
 
 } // namespace Generators

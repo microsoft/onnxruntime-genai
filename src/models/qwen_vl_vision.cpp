@@ -61,7 +61,20 @@ std::vector<int64_t> Load1DNpyIndices(const std::string& file_path) {
   if (shape_str.empty()) throw std::runtime_error("Empty shape in npy header");
   if (shape_str.back() == ',') shape_str.pop_back();
   int64_t N = std::stoll(shape_str);
-  if (N <= 0) throw std::runtime_error("Invalid shape size in npy header");
+
+  // Validate array size to prevent OOM or malicious files
+  constexpr int64_t MAX_REASONABLE_SIZE = 100000000;  // 100M elements max
+  if (N <= 0 || N > MAX_REASONABLE_SIZE) {
+    throw std::runtime_error("Invalid or excessive array size in npy header: N=" + std::to_string(N) + 
+                           " (max allowed: " + std::to_string(MAX_REASONABLE_SIZE) + ")");
+  }
+
+  // Verify system is little-endian (matches npy file format expectation)
+  constexpr uint32_t endian_test = 0x01020304;
+  const bool is_little_endian = (*reinterpret_cast<const uint8_t*>(&endian_test) == 0x04);
+  if (!is_little_endian) {
+    throw std::runtime_error("System is not little-endian; cannot safely parse <i4/<i8 npy files");
+  }
 
   std::vector<int64_t> result;
   result.resize(static_cast<size_t>(N));
@@ -182,8 +195,8 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   const int64_t num_patches = pixel_shape[1];
   const int64_t hidden_dim = 1280;
   std::vector<int64_t> pe_out_shape{num_patches, hidden_dim};
-  std::vector<float> pe_out_buf(num_patches * hidden_dim);
-  auto pe_out_tensor = CreateTensor(pe_out_buf.data(), pe_out_buf.size(), pe_out_shape);
+  pe_out_buf_.resize(num_patches * hidden_dim);
+  auto pe_out_tensor = CreateTensor(pe_out_buf_.data(), pe_out_buf_.size(), pe_out_shape);
   
   auto pe_out_name = patch_embed_session_->GetOutputName(0);
   const char* pe_output_names[] = { pe_out_name.c_str() };
@@ -199,38 +212,38 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
     throw std::runtime_error("Invalid window configuration for vision pipeline");
   }
 
-  std::vector<float> reordered(seq_len * hidden_dim);
+  reordered_buf_.resize(seq_len * hidden_dim);
   for (int64_t dst_w = 0; dst_w < num_windows; ++dst_w) {
     int64_t src_w = wnd_idx_[dst_w];
     if (src_w < 0 || src_w >= num_windows) throw std::runtime_error("wnd_idx value out of range");
     size_t offset_size = window_area * hidden_dim;
-    std::memcpy(reordered.data() + dst_w * offset_size, 
-                pe_out_buf.data() + src_w * offset_size,
+    std::memcpy(reordered_buf_.data() + dst_w * offset_size, 
+                pe_out_buf_.data() + src_w * offset_size,
                 offset_size * sizeof(float));
   }
 
   std::vector<int64_t> attn_shape{seq_len, hidden_dim};
-  auto attn_in_tensor = CreateTensor(reordered.data(), reordered.size(), attn_shape);
+  auto attn_in_tensor = CreateTensor(reordered_buf_.data(), reordered_buf_.size(), attn_shape);
   const char* attn_input_names[] = {"hidden"};
   OrtValue* attn_inputs[] = { attn_in_tensor.get() };
 
-  std::vector<float> attn_out_buf(seq_len * hidden_dim);
-  auto attn_out_tensor = CreateTensor(attn_out_buf.data(), attn_out_buf.size(), attn_shape);
+  attn_out_buf_.resize(seq_len * hidden_dim);
+  auto attn_out_tensor = CreateTensor(attn_out_buf_.data(), attn_out_buf_.size(), attn_shape);
   auto attn_out_name = vision_attn_session_->GetOutputName(0);
   const char* attn_output_names[] = { attn_out_name.c_str() };
   OrtValue* attn_outputs[] = { attn_out_tensor.get() };
   
   vision_attn_session_->Run(nullptr, attn_input_names, attn_inputs, 1, attn_output_names, attn_outputs, 1);
 
-  auto merger_in_tensor = CreateTensor(attn_out_buf.data(), attn_out_buf.size(), attn_shape);
+  auto merger_in_tensor = CreateTensor(attn_out_buf_.data(), attn_out_buf_.size(), attn_shape);
   const char* merger_input_names[] = {"hidden"};
   OrtValue* merger_inputs[] = { merger_in_tensor.get() };
   
   const int64_t merged_seq_len = num_windows;  // One token per window after merging
   const int64_t merged_hidden = 3584;
   std::vector<int64_t> merger_shape{merged_seq_len, merged_hidden};
-  std::vector<float> merger_out_buf(merged_seq_len * merged_hidden);
-  auto merger_out_tensor = CreateTensor(merger_out_buf.data(), merger_out_buf.size(), merger_shape);
+  merger_out_buf_.resize(merged_seq_len * merged_hidden);
+  auto merger_out_tensor = CreateTensor(merger_out_buf_.data(), merger_out_buf_.size(), merger_shape);
   auto merger_out_name = patch_merger_session_->GetOutputName(0);
   const char* merger_output_names[] = { merger_out_name.c_str() };
   OrtValue* merger_outputs[] = { merger_out_tensor.get() };
@@ -241,16 +254,16 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
     throw std::runtime_error("Vision pipeline reverse index size mismatch");
   }
 
-  std::vector<float> final_embeddings(merger_out_buf.size());
+  final_embeddings_buf_.resize(merger_out_buf_.size());
   for (int64_t dst_w = 0; dst_w < num_windows; ++dst_w) {
-    std::memcpy(final_embeddings.data() + dst_w * merged_hidden,
-                merger_out_buf.data() + rev_idx_[dst_w] * merged_hidden,
+    std::memcpy(final_embeddings_buf_.data() + dst_w * merged_hidden,
+                merger_out_buf_.data() + rev_idx_[dst_w] * merged_hidden,
                 merged_hidden * sizeof(float));
   }
 
   last_seq_len_ = merged_seq_len;
   last_hidden_size_ = merged_hidden;
-  return final_embeddings;
+  return final_embeddings_buf_;
 }
 
 } // namespace Generators
