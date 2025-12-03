@@ -320,7 +320,7 @@ struct DecoderInputs_Element : JSON::Element {
     }
   }
 
-private:
+ private:
   Config::Model::Decoder::Inputs& v_;
 };
 
@@ -610,7 +610,7 @@ struct Decoder_Element : JSON::Element {
   DecoderOutputs_Element outputs_{v_.outputs};
   Pipeline_Element pipeline_{v_.pipeline};
   SlidingWindow_Element sliding_window_{v_.sliding_window};
-  std::unique_ptr<PipelineModelObject_Element> pipeline_object_; // object-style pipeline support
+  std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
 };
 
 struct VisionInputs_Element : JSON::Element {
@@ -621,7 +621,7 @@ struct VisionInputs_Element : JSON::Element {
       v_.pixel_values = JSON::Get<std::string_view>(value);
     } else if (name == "image_sizes") {
       v_.image_sizes = JSON::Get<std::string_view>(value);
-    } else if (name == "image_grid_thw") { // accept alternate naming, map to image_sizes
+    } else if (name == "image_grid_thw") {  // accept alternate naming, map to image_sizes
       v_.image_sizes = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
@@ -797,7 +797,7 @@ struct Vision_Element : JSON::Element {
   VisionOutputs_Element outputs_{v_.outputs};
   std::unique_ptr<WindowIndexing_Element> window_indexing_element_;
   VisionPipeline_Element pipeline_element_{v_.pipeline};
-  std::unique_ptr<VisionPipelineModelObject_Element> vision_pipeline_object_; // object-style pipeline support
+  std::unique_ptr<VisionPipelineModelObject_Element> vision_pipeline_object_;  // object-style pipeline support
 };
 
 struct SpeechInputs_Element : JSON::Element {

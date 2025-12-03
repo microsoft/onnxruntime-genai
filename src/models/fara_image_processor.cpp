@@ -56,7 +56,7 @@ std::unique_ptr<NamedTensors> FaraImageProcessor::Process(const Tokenizer& token
   const int64_t* pixel_values_shape{};
   size_t pixel_values_dims{};
   CheckResult(OrtxGetTensorData(pixel_values, &pixel_values_data, &pixel_values_shape, &pixel_values_dims));
-  
+
   if (pixel_values_dims >= 2) {
     int64_t batch_size = pixel_values_shape[0];
     int64_t num_patches = pixel_values_shape[1];
@@ -64,15 +64,15 @@ std::unique_ptr<NamedTensors> FaraImageProcessor::Process(const Tokenizer& token
     int64_t grid_t = 1;  // Single frame
     int64_t grid_h = static_cast<int64_t>(std::sqrt(num_patches));
     int64_t grid_w = num_patches / grid_h;
-    
+
     std::vector<int64_t> grid_thw_shape = {batch_size, 3};
     auto grid_thw_tensor = OrtValue::CreateTensor<int64_t>(allocator, grid_thw_shape);
-    
+
     auto* dst = grid_thw_tensor->GetTensorMutableData<int64_t>();
     dst[0] = grid_t;
     dst[1] = grid_h;
     dst[2] = grid_w;
-    
+
     named_tensors->emplace(image_grid_thw_name_, std::make_shared<Tensor>(std::move(grid_thw_tensor)));
   }
 

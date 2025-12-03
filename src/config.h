@@ -164,18 +164,18 @@ struct Config {
         std::string filename;
         std::optional<SessionOptions> session_options;
         std::optional<RunOptions> run_options;
-        std::string model_id;               // Identifier used to link outputs to subsequent stages
-        std::vector<std::string> inputs;    // Graph input names
-        std::vector<std::string> outputs;   // Graph output names
-        bool run_on_cpu{true};              // If true force CPU EP when multiple EPs are configured
+        std::string model_id;              // Identifier used to link outputs to subsequent stages
+        std::vector<std::string> inputs;   // Graph input names
+        std::vector<std::string> outputs;  // Graph output names
+        bool run_on_cpu{true};             // If true force CPU EP when multiple EPs are configured
       };
       std::vector<PipelineModel> pipeline;  // Ordered pipeline models
 
       struct WindowIndexing {
-        std::string filename;       // Path to wnd_idx.npy
-        int spatial_merge_size{};   // Spatial merge size used for window expansion
+        std::string filename;      // Path to wnd_idx.npy
+        int spatial_merge_size{};  // Spatial merge size used for window expansion
       };
-      std::optional<WindowIndexing> window_indexing; // Optional window indexing configuration
+      std::optional<WindowIndexing> window_indexing;  // Optional window indexing configuration
 
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};

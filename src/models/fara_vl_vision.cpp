@@ -25,11 +25,12 @@ std::vector<int64_t> Load1DNpyIndices(const std::string& file_path) {
     throw std::runtime_error("Invalid npy header (magic mismatch) for: " + file_path);
   }
   // Version
-  unsigned char ver_major; unsigned char ver_minor;
+  unsigned char ver_major;
+  unsigned char ver_minor;
   fin.read(reinterpret_cast<char*>(&ver_major), 1);
   fin.read(reinterpret_cast<char*>(&ver_minor), 1);
   uint16_t header_len_le;
-  fin.read(reinterpret_cast<char*>(&header_len_le), 2); // little endian
+  fin.read(reinterpret_cast<char*>(&header_len_le), 2);  // little endian
   const uint16_t header_len = header_len_le;
   std::string header(header_len, '\0');
   fin.read(header.data(), header_len);
@@ -85,12 +86,11 @@ FaraVisionPipeline::FaraVisionPipeline(OrtEnv& env,
                                        const std::string& wnd_idx_path,
                                        bool use_qnn_attn,
                                        const std::string& qnn_backend_path)
-  // Match declaration order to avoid MSVC C5038 warning-as-error
-  : use_qnn_attn_(use_qnn_attn),
-    qnn_backend_path_(qnn_backend_path),
-    spatial_merge_size_(spatial_merge_size),
-    env_(env) {
-
+    // Match declaration order to avoid MSVC C5038 warning-as-error
+    : use_qnn_attn_(use_qnn_attn),
+      qnn_backend_path_(qnn_backend_path),
+      spatial_merge_size_(spatial_merge_size),
+      env_(env) {
   // Convert std::string model paths to ORTCHAR_T for cross-platform (char or wchar_t)
   auto toOrtPath = [](const std::string& s) -> std::basic_string<ORTCHAR_T> {
     return std::basic_string<ORTCHAR_T>(s.begin(), s.end());
@@ -114,7 +114,7 @@ FaraVisionPipeline::FaraVisionPipeline(OrtEnv& env,
     so->SetIntraOpNumThreads(2).SetInterOpNumThreads(1);
     // QNN provider options
     const char* keys[] = {"backend_path", "htp_performance_mode", "htp_graph_finalization_optimization_mode", "soc_model"};
-    const char* values[] = { qnn_backend_path_.c_str(), "burst", "3", "60" };
+    const char* values[] = {qnn_backend_path_.c_str(), "burst", "3", "60"};
     so->AppendExecutionProvider("QNNExecutionProvider", keys, values, 4);
     vision_attn_session_ = OrtSession::Create(env_, attn_path.c_str(), so.get());
   } else {
@@ -127,7 +127,7 @@ FaraVisionPipeline::FaraVisionPipeline(OrtEnv& env,
   std::vector<std::pair<int64_t, size_t>> pairs;
   pairs.reserve(wnd_idx_.size());
   for (size_t i = 0; i < wnd_idx_.size(); ++i) pairs.emplace_back(wnd_idx_[i], i);
-  std::sort(pairs.begin(), pairs.end(), [](auto& a, auto& b){ return a.first < b.first; });
+  std::sort(pairs.begin(), pairs.end(), [](auto& a, auto& b) { return a.first < b.first; });
   for (size_t i = 0; i < pairs.size(); ++i) rev_idx_[i] = static_cast<int64_t>(pairs[i].second);
 }
 
@@ -144,30 +144,30 @@ std::vector<float> FaraVisionPipeline::Run(const float* pixel_data, const std::v
   if (!patch_embed_session_ || !vision_attn_session_ || !patch_merger_session_) {
     throw std::runtime_error("Vision pipeline sessions not initialized");
   }
-  
+
   size_t pixel_count = 1;
   for (auto d : pixel_shape) pixel_count *= static_cast<size_t>(d);
   auto pixel_tensor = CreateTensor(pixel_data, pixel_count, pixel_shape);
-  
+
   const char* pe_input_names[] = {"pixel_values"};
-  OrtValue* pe_inputs[] = { pixel_tensor.get() };
+  OrtValue* pe_inputs[] = {pixel_tensor.get()};
 
   const int64_t num_patches = pixel_shape[1];
   const int64_t hidden_dim = 1280;
   std::vector<int64_t> pe_out_shape{num_patches, hidden_dim};
   std::vector<float> pe_out_buf(num_patches * hidden_dim);
   auto pe_out_tensor = CreateTensor(pe_out_buf.data(), pe_out_buf.size(), pe_out_shape);
-  
+
   auto pe_out_name = patch_embed_session_->GetOutputName(0);
-  const char* pe_output_names[] = { pe_out_name.c_str() };
-  OrtValue* pe_outputs[] = { pe_out_tensor.get() };
+  const char* pe_output_names[] = {pe_out_name.c_str()};
+  OrtValue* pe_outputs[] = {pe_out_tensor.get()};
 
   patch_embed_session_->Run(nullptr, pe_input_names, pe_inputs, 1, pe_output_names, pe_outputs, 1);
 
   const int64_t seq_len = num_patches;
   const int64_t window_area = spatial_merge_size_ * spatial_merge_size_;
   const int64_t num_windows = seq_len / window_area;
-  
+
   if (seq_len % window_area != 0 || static_cast<int64_t>(wnd_idx_.size()) != num_windows) {
     throw std::runtime_error("Invalid window configuration for vision pipeline");
   }
@@ -177,7 +177,7 @@ std::vector<float> FaraVisionPipeline::Run(const float* pixel_data, const std::v
     int64_t src_w = wnd_idx_[dst_w];
     if (src_w < 0 || src_w >= num_windows) throw std::runtime_error("wnd_idx value out of range");
     size_t offset_size = window_area * hidden_dim;
-    std::memcpy(reordered.data() + dst_w * offset_size, 
+    std::memcpy(reordered.data() + dst_w * offset_size,
                 pe_out_buf.data() + src_w * offset_size,
                 offset_size * sizeof(float));
   }
@@ -185,29 +185,29 @@ std::vector<float> FaraVisionPipeline::Run(const float* pixel_data, const std::v
   std::vector<int64_t> attn_shape{seq_len, hidden_dim};
   auto attn_in_tensor = CreateTensor(reordered.data(), reordered.size(), attn_shape);
   const char* attn_input_names[] = {"hidden"};
-  OrtValue* attn_inputs[] = { attn_in_tensor.get() };
+  OrtValue* attn_inputs[] = {attn_in_tensor.get()};
 
   std::vector<float> attn_out_buf(seq_len * hidden_dim);
   auto attn_out_tensor = CreateTensor(attn_out_buf.data(), attn_out_buf.size(), attn_shape);
   auto attn_out_name = vision_attn_session_->GetOutputName(0);
-  const char* attn_output_names[] = { attn_out_name.c_str() };
-  OrtValue* attn_outputs[] = { attn_out_tensor.get() };
-  
+  const char* attn_output_names[] = {attn_out_name.c_str()};
+  OrtValue* attn_outputs[] = {attn_out_tensor.get()};
+
   vision_attn_session_->Run(nullptr, attn_input_names, attn_inputs, 1, attn_output_names, attn_outputs, 1);
 
   auto merger_in_tensor = CreateTensor(attn_out_buf.data(), attn_out_buf.size(), attn_shape);
   const char* merger_input_names[] = {"hidden"};
-  OrtValue* merger_inputs[] = { merger_in_tensor.get() };
-  
+  OrtValue* merger_inputs[] = {merger_in_tensor.get()};
+
   const int64_t merged_seq_len = num_windows;  // One token per window after merging
   const int64_t merged_hidden = 3584;
   std::vector<int64_t> merger_shape{merged_seq_len, merged_hidden};
   std::vector<float> merger_out_buf(merged_seq_len * merged_hidden);
   auto merger_out_tensor = CreateTensor(merger_out_buf.data(), merger_out_buf.size(), merger_shape);
   auto merger_out_name = patch_merger_session_->GetOutputName(0);
-  const char* merger_output_names[] = { merger_out_name.c_str() };
-  OrtValue* merger_outputs[] = { merger_out_tensor.get() };
-  
+  const char* merger_output_names[] = {merger_out_name.c_str()};
+  OrtValue* merger_outputs[] = {merger_out_tensor.get()};
+
   patch_merger_session_->Run(nullptr, merger_input_names, merger_inputs, 1, merger_output_names, merger_outputs, 1);
 
   if (static_cast<int64_t>(rev_idx_.size()) != num_windows) {
@@ -226,4 +226,4 @@ std::vector<float> FaraVisionPipeline::Run(const float* pixel_data, const std::v
   return final_embeddings;
 }
 
-} // namespace Generators
+}  // namespace Generators

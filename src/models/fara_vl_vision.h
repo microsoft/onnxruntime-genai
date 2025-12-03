@@ -75,4 +75,4 @@ struct FaraVisionPipeline {
   int64_t last_hidden_size_{0};
 };
 
-} // namespace Generators
+}  // namespace Generators

@@ -1,7 +1,6 @@
 import argparse
 import json
 import sys
-import numpy as np
 from pathlib import Path
 
 import onnxruntime_genai as og
@@ -19,8 +18,19 @@ To make a function call, you should output a json object inside <tool_call></too
 </tool_call>
 """
 
-def run_inference(config_dir: Path, image_path: Path, prompt_text: str, max_new_tokens: int, temperature: float, top_k: int, top_p: float,
-                  do_sample: bool = False, min_length: int = 0, repetition_penalty: float = 1.0):
+
+def run_inference(
+    config_dir: Path,
+    image_path: Path,
+    prompt_text: str,
+    max_new_tokens: int,
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    do_sample: bool = False,
+    min_length: int = 0,
+    repetition_penalty: float = 1.0,
+):
     if not config_dir.is_dir():
         raise FileNotFoundError(f"Config directory not found: {config_dir}")
     if not image_path.is_file():
@@ -28,25 +38,25 @@ def run_inference(config_dir: Path, image_path: Path, prompt_text: str, max_new_
 
     # Load model and create multimodal processor (uses C++ FaraImageProcessor)
     model = og.Model(str(config_dir))
-    
+
     tokenizer = og.Tokenizer(model)
-    
+
     processor = model.create_multimodal_processor()
     tokenizer_stream = processor.create_stream()
-    
+
     # Load image using GenAI's image loader (internally uses onnxruntime-extensions)
     images = og.Images.open(str(image_path))
-    
+
     # Build conversation with prompt
     conversation = [
         {"role": "system", "content": TOOL_CALL_SYSTEM_PROMPT},
         {"role": "user", "content": prompt_text},
     ]
-    
+
     # Apply chat template to format the conversation
     message_json = json.dumps(conversation)
     prompt = tokenizer.apply_chat_template(message_json, add_generation_prompt=True)
-    
+
     # Process prompt and images together
     # The C++ processor will automatically:
     # 1. Preprocess images using processor_config.json pipeline
@@ -56,7 +66,7 @@ def run_inference(config_dir: Path, image_path: Path, prompt_text: str, max_new_
 
     # Setup generation parameters
     try:
-        with open(config_dir / "genai_config.json", "r") as f:
+        with open(config_dir / "genai_config.json") as f:
             config = json.load(f)
             context_len = config.get("model", {}).get("context_length", 2048)
             eos_val = config.get("model", {}).get("eos_token_id", [])
@@ -64,14 +74,21 @@ def run_inference(config_dir: Path, image_path: Path, prompt_text: str, max_new_
     except Exception:
         context_len = 2048
         eos_ids = []
-    
+
     # Use max_length from config if available, otherwise use context_length
     max_length = min(context_len, 2048)  # Cap at 2048 for generation
-    
+
     params = og.GeneratorParams(model)
-    params.set_search_options(max_length=max_length, temperature=temperature, top_k=top_k, top_p=top_p,
-                              do_sample=do_sample, min_length=min_length, repetition_penalty=repetition_penalty)
-    
+    params.set_search_options(
+        max_length=max_length,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        do_sample=do_sample,
+        min_length=min_length,
+        repetition_penalty=repetition_penalty,
+    )
+
     # Generate
     generator = og.Generator(model, params)
     generator.set_inputs(inputs)
@@ -79,41 +96,43 @@ def run_inference(config_dir: Path, image_path: Path, prompt_text: str, max_new_
     accum_text = ""
     started_toolcall = False
     print("\n=== Generating ===")
-    
+
     while not generator.is_done():
         generator.generate_next_token()
         token = generator.get_next_tokens()[0]
         output_tokens.append(token)
-        
+
         if eos_ids and token in eos_ids and len(output_tokens) >= min_length:
             break
-        
+
         decoded = tokenizer_stream.decode(token)
         accum_text += decoded
-        
+
         if not started_toolcall and "<tool_call>" in accum_text:
             started_toolcall = True
-            sys.stdout.write(accum_text[accum_text.index("<tool_call>"):])
+            sys.stdout.write(accum_text[accum_text.index("<tool_call>") :])
             sys.stdout.flush()
         elif started_toolcall:
             sys.stdout.write(decoded)
             sys.stdout.flush()
             if "</tool_call>" in accum_text:
                 break
-    
+
     print("\n=== Generation Complete ===")
     full_output = processor.decode(output_tokens)
-    
+
     if started_toolcall and "</tool_call>" not in accum_text:
         print("[WARNING] Incomplete <tool_call> structure")
-    
+
     print("\nFINAL OUTPUT:", full_output)
     return full_output
 
 
 def main():
     parser = argparse.ArgumentParser(description="Fara VLM inference using onnxruntime-genai")
-    parser.add_argument("--config_dir", "--model_path", type=Path, required=True, help="Directory with genai_config.json")
+    parser.add_argument(
+        "--config_dir", "--model_path", type=Path, required=True, help="Directory with genai_config.json"
+    )
     parser.add_argument("--image", type=Path, required=True, help="Path to input image")
     parser.add_argument("--prompt", type=str, default="Describe the image.", help="User text prompt")
     parser.add_argument("--max_new_tokens", type=int, default=4096)
@@ -137,6 +156,7 @@ def main():
         min_length=args.min_length,
         repetition_penalty=args.repetition_penalty,
     )
+
 
 if __name__ == "__main__":
     main()
