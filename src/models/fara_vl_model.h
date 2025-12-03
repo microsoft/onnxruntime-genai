@@ -16,7 +16,7 @@ struct Fara_PipelineModel : public DecoderOnlyPipelineModel {
                                      const GeneratorParams& params) const override;
 
   // Vision pipeline shared across states (sessions reused).
-  std::unique_ptr<QwenVisionPipeline> vision_pipeline_;
+  std::unique_ptr<FaraVisionPipeline> vision_pipeline_;
 };
 
 struct Fara_PipelineState : public DecoderOnlyPipelineState {
