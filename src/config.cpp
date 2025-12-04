@@ -615,6 +615,8 @@ struct VisionInputs_Element : JSON::Element {
       v_.pixel_values = JSON::Get<std::string_view>(value);
     } else if (name == "image_sizes") {
       v_.image_sizes = JSON::Get<std::string_view>(value);
+    } else if (name == "image_grid_thw") {
+      v_.image_grid_thw = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
     } else {
@@ -651,6 +653,10 @@ struct Vision_Element : JSON::Element {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
       v_.adapter_filename = JSON::Get<std::string_view>(value);
+    } else if (name == "spatial_merge_size") {
+      v_.spatial_merge_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "tokens_per_second") {
+      v_.tokens_per_second = static_cast<float>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
@@ -856,6 +862,12 @@ struct Model_Element : JSON::Element {
       v_.decoder_start_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "sep_token_id") {
       v_.sep_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "image_token_id") {
+      v_.image_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "video_token_id") {
+      v_.video_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "vision_start_token_id") {
+      v_.vision_start_token_id = static_cast<int>(JSON::Get<double>(value));
     } else {
       throw JSON::unknown_value_error{};
     }
