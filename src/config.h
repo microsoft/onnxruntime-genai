@@ -171,12 +171,6 @@ struct Config {
       };
       std::vector<PipelineModel> pipeline;  // Ordered pipeline models
 
-      struct WindowIndexing {
-        std::string filename;       // Path to wnd_idx.npy
-        int spatial_merge_size{};   // Spatial merge size used for window expansion
-      };
-      std::optional<WindowIndexing> window_indexing; // Optional window indexing configuration
-
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
         std::string image_sizes{Defaults::ImageSizesName};

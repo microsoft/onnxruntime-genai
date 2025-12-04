@@ -720,23 +720,6 @@ struct VisionPipeline_Element : JSON::Element {
   VisionPipelineModelObject_Element object_{v_};
 };
 
-struct WindowIndexing_Element : JSON::Element {
-  explicit WindowIndexing_Element(Config::Model::Vision::WindowIndexing& v) : v_{v} {}
-
-  void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "filename") {
-      v_.filename = JSON::Get<std::string_view>(value);
-    } else if (name == "spatial_merge_size") {
-      v_.spatial_merge_size = static_cast<int>(JSON::Get<double>(value));
-    } else {
-      throw JSON::unknown_value_error{};
-    }
-  }
-
- private:
-  Config::Model::Vision::WindowIndexing& v_;
-};
-
 struct Vision_Element : JSON::Element {
   explicit Vision_Element(Config::Model::Vision& v) : v_{v} {}
 
@@ -769,11 +752,6 @@ struct Vision_Element : JSON::Element {
     if (name == "outputs") {
       return outputs_;
     }
-    if (name == "window_indexing") {
-      v_.window_indexing = Config::Model::Vision::WindowIndexing{};
-      window_indexing_element_ = std::make_unique<WindowIndexing_Element>(*v_.window_indexing);
-      return *window_indexing_element_;
-    }
     // Support object-style pipeline for vision: "pipeline": { "patch_embed": { ... }, ... }
     if (name == "pipeline") {
       vision_pipeline_object_ = std::make_unique<VisionPipelineModelObject_Element>(v_.pipeline);
@@ -795,7 +773,6 @@ struct Vision_Element : JSON::Element {
   std::unique_ptr<RunOptions_Element> run_options_;
   VisionInputs_Element inputs_{v_.inputs};
   VisionOutputs_Element outputs_{v_.outputs};
-  std::unique_ptr<WindowIndexing_Element> window_indexing_element_;
   VisionPipeline_Element pipeline_element_{v_.pipeline};
   std::unique_ptr<VisionPipelineModelObject_Element> vision_pipeline_object_; // object-style pipeline support
 };

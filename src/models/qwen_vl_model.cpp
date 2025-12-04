@@ -9,7 +9,7 @@ namespace Generators {
 
 Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> config, OrtEnv& ort_env)
   : DecoderOnlyPipelineModel(std::move(config), ort_env) {  
-  if (config_->model.vision.pipeline.empty() || !config_->model.vision.window_indexing.has_value()) return;
+  if (config_->model.vision.pipeline.empty()) return;
 
   // Find vision pipeline stage paths
   auto find_stage = [&](const std::string& id) -> std::string {
@@ -34,12 +34,12 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
     }
   }
 
-  auto wnd_idx_path = (config_->config_path / fs::path(config_->model.vision.window_indexing->filename)).string();
-  int spatial_merge = config_->model.vision.window_indexing->spatial_merge_size;
+  // Default spatial merge size
+  constexpr int spatial_merge = 2;
   
   vision_pipeline_ = std::make_unique<QwenVisionPipeline>(
     ort_env, patch_embed_path, vision_attn_path, patch_merger_path,
-    spatial_merge, wnd_idx_path, use_qnn_attn);
+    spatial_merge, use_qnn_attn);
 }
 
 std::unique_ptr<State> Qwen2_5_VL_PipelineModel::CreateState(DeviceSpan<int32_t> sequence_lengths,
@@ -59,12 +59,15 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
   if (vision_ran_ || !vl_model_.vision_pipeline_) return;
 
   OrtValue* pixel_values_val = nullptr;
+  OrtValue* image_grid_thw_val = nullptr;
   const auto& pixel_name = vl_model_.config_->model.vision.inputs.pixel_values;
+  const auto& grid_thw_name = vl_model_.config_->model.vision.inputs.image_grid_thw;
   
   for (const auto& input : extra_inputs) {
     if (input.name == pixel_name) {
       pixel_values_val = input.tensor->GetOrtTensor();
-      break;
+    } else if (input.name == grid_thw_name) {
+      image_grid_thw_val = input.tensor->GetOrtTensor();
     }
   }
   if (!pixel_values_val) return;
@@ -74,8 +77,36 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
   const float* pixel_data = pixel_values_val->GetTensorMutableData<float>();
   if (!pixel_data) return;
 
+  // Extract grid_thw if provided
+  std::vector<int64_t> grid_thw;
+  if (image_grid_thw_val) {
+    auto grid_shape = image_grid_thw_val->GetTensorTypeAndShapeInfo()->GetShape();
+    auto element_type = image_grid_thw_val->GetTensorTypeAndShapeInfo()->GetElementType();
+    
+    if (element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
+      const int64_t* grid_data = image_grid_thw_val->GetTensorData<int64_t>();
+      size_t grid_count = 1;
+      for (auto dim : grid_shape) grid_count *= dim;
+      
+      // Expect [batch, 3] or [3] shape - take last 3 values as [t, h, w]
+      if (grid_count >= 3) {
+        grid_thw = {grid_data[grid_count - 3], grid_data[grid_count - 2], grid_data[grid_count - 1]};
+      }
+    } else if (element_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+      const int32_t* grid_data = image_grid_thw_val->GetTensorData<int32_t>();
+      size_t grid_count = 1;
+      for (auto dim : grid_shape) grid_count *= dim;
+      
+      if (grid_count >= 3) {
+        grid_thw = {static_cast<int64_t>(grid_data[grid_count - 3]), 
+                    static_cast<int64_t>(grid_data[grid_count - 2]), 
+                    static_cast<int64_t>(grid_data[grid_count - 1])};
+      }
+    }
+  }
+
   try {
-    image_features_buffer_ = vl_model_.vision_pipeline_->Run(pixel_data, pixel_shape_vec);
+    image_features_buffer_ = vl_model_.vision_pipeline_->Run(pixel_data, pixel_shape_vec, grid_thw);
   } catch (const std::exception&) {
     return;  // Silent failure - pipeline already logs errors
   }

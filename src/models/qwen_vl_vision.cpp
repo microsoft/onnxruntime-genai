@@ -13,96 +13,21 @@
 
 namespace Generators {
 
-// Minimal .npy reader for 1D integer arrays.
-// Only handles C-order, little-endian, shape (N,), for dtypes '<i4' or '<i8'.
-std::vector<int64_t> Load1DNpyIndices(const std::string& file_path) {
-  std::ifstream fin(file_path, std::ios::binary);
-  if (!fin) throw std::runtime_error("Failed to open npy file: " + file_path);
-
-  // Read magic string
-  char magic[6];
-  fin.read(magic, 6);
-  if (std::strncmp(magic, "\x93NUMPY", 6) != 0) {
-    throw std::runtime_error("Invalid npy header (magic mismatch) for: " + file_path);
-  }
-  // Version
-  unsigned char ver_major; unsigned char ver_minor;
-  fin.read(reinterpret_cast<char*>(&ver_major), 1);
-  fin.read(reinterpret_cast<char*>(&ver_minor), 1);
-  uint16_t header_len_le;
-  fin.read(reinterpret_cast<char*>(&header_len_le), 2); // little endian
-  const uint16_t header_len = header_len_le;
-  std::string header(header_len, '\0');
-  fin.read(header.data(), header_len);
-
-  auto find_field = [&](const std::string& key) {
-    auto pos = header.find(key);
-    if (pos == std::string::npos) return std::string();
-    return header.substr(pos, header.size() - pos);
-  };
-
-  // dtype
-  auto descr_pos = header.find("'descr':");
-  if (descr_pos == std::string::npos) throw std::runtime_error("Missing 'descr' in npy header");
-  auto descr_start = header.find("'", descr_pos + 8);
-  auto descr_end = header.find("'", descr_start + 1);
-  std::string dtype = header.substr(descr_start + 1, descr_end - descr_start - 1);
-  bool is_int32 = (dtype == "<i4");
-  bool is_int64 = (dtype == "<i8");
-  if (!is_int32 && !is_int64) throw std::runtime_error("Unsupported dtype in npy (expected <i4 or <i8): " + dtype);
-
-  auto shape_pos = header.find("'shape':");
-  if (shape_pos == std::string::npos) throw std::runtime_error("Missing 'shape' in npy header");
-  auto paren_start = header.find("(", shape_pos);
-  auto paren_end = header.find(")", paren_start);
-  std::string shape_str = header.substr(paren_start + 1, paren_end - paren_start - 1);
-  // shape like "1234," or "1234" depending on version
-  shape_str.erase(std::remove(shape_str.begin(), shape_str.end(), ' '), shape_str.end());
-  if (shape_str.empty()) throw std::runtime_error("Empty shape in npy header");
-  if (shape_str.back() == ',') shape_str.pop_back();
-  int64_t N = std::stoll(shape_str);
-
-  // Validate array size to prevent OOM or malicious files
-  constexpr int64_t MAX_REASONABLE_SIZE = 100000000;  // 100M elements max
-  if (N <= 0 || N > MAX_REASONABLE_SIZE) {
-    throw std::runtime_error("Invalid or excessive array size in npy header: N=" + std::to_string(N) + 
-                           " (max allowed: " + std::to_string(MAX_REASONABLE_SIZE) + ")");
-  }
-
-  // Verify system is little-endian (matches npy file format expectation)
-  constexpr uint32_t endian_test = 0x01020304;
-  const bool is_little_endian = (*reinterpret_cast<const uint8_t*>(&endian_test) == 0x04);
-  if (!is_little_endian) {
-    throw std::runtime_error("System is not little-endian; cannot safely parse <i4/<i8 npy files");
-  }
-
-  std::vector<int64_t> result;
-  result.resize(static_cast<size_t>(N));
-
-  if (is_int32) {
-    std::vector<int32_t> tmp(N);
-    fin.read(reinterpret_cast<char*>(tmp.data()), N * sizeof(int32_t));
-    if (fin.gcount() != static_cast<std::streamsize>(N * sizeof(int32_t))) throw std::runtime_error("Unexpected EOF reading npy data");
-    for (int64_t i = 0; i < N; ++i) result[static_cast<size_t>(i)] = static_cast<int64_t>(tmp[static_cast<size_t>(i)]);
-  } else {
-    fin.read(reinterpret_cast<char*>(result.data()), N * sizeof(int64_t));
-    if (fin.gcount() != static_cast<std::streamsize>(N * sizeof(int64_t))) throw std::runtime_error("Unexpected EOF reading npy data");
-  }
-  return result;
-}
-
 QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
                                        const std::string& patch_embed_model,
                                        const std::string& vision_attn_model,
                                        const std::string& patch_merger_model,
                                        int64_t spatial_merge_size,
-                                       const std::string& wnd_idx_path,
                                        bool use_qnn_attn,
-                                       const std::string& qnn_backend_path)
+                                       const std::string& qnn_backend_path,
+                                       int64_t patch_size,
+                                       int64_t window_size)
   // Match declaration order to avoid MSVC C5038 warning-as-error
   : use_qnn_attn_(use_qnn_attn),
     qnn_backend_path_(qnn_backend_path),
     spatial_merge_size_(spatial_merge_size),
+    patch_size_(patch_size),
+    window_size_(window_size),
     env_(env) {
 
   // Convert std::string model paths to ORTCHAR_T for cross-platform (char or wchar_t)
@@ -160,15 +85,6 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
   } else {
     vision_attn_session_ = OrtSession::Create(env_, attn_path.c_str(), nullptr);
   }
-
-  wnd_idx_ = Load1DNpyIndices(wnd_idx_path);
-  // Build reverse index (argsort)
-  rev_idx_.resize(wnd_idx_.size());
-  std::vector<std::pair<int64_t, size_t>> pairs;
-  pairs.reserve(wnd_idx_.size());
-  for (size_t i = 0; i < wnd_idx_.size(); ++i) pairs.emplace_back(wnd_idx_[i], i);
-  std::sort(pairs.begin(), pairs.end(), [](auto& a, auto& b){ return a.first < b.first; });
-  for (size_t i = 0; i < pairs.size(); ++i) rev_idx_[i] = static_cast<int64_t>(pairs[i].second);
 }
 
 std::unique_ptr<OrtValue> QwenVisionPipeline::CreateTensor(const float* data, size_t count, const std::vector<int64_t>& shape) const {
@@ -180,9 +96,23 @@ std::unique_ptr<OrtValue> QwenVisionPipeline::CreateTensor(const float* data, si
 
 // Removed CreateEmptyTensor (previous implementation returned tensor with dangling backing store).
 
-std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::vector<int64_t>& pixel_shape) {
+std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::vector<int64_t>& pixel_shape, 
+                                           const std::vector<int64_t>& grid_thw) {
   if (!patch_embed_session_ || !vision_attn_session_ || !patch_merger_session_) {
     throw std::runtime_error("Vision pipeline sessions not initialized");
+  }
+  
+  // Calculate window indices dynamically if grid_thw provided
+  if (!grid_thw.empty() && grid_thw.size() == 3) {
+    wnd_idx_ = CalculateWindowIndex(grid_thw[0], grid_thw[1], grid_thw[2]);
+    
+    // Build reverse index (argsort)
+    rev_idx_.resize(wnd_idx_.size());
+    std::vector<std::pair<int64_t, size_t>> pairs;
+    pairs.reserve(wnd_idx_.size());
+    for (size_t i = 0; i < wnd_idx_.size(); ++i) pairs.emplace_back(wnd_idx_[i], i);
+    std::sort(pairs.begin(), pairs.end(), [](auto& a, auto& b){ return a.first < b.first; });
+    for (size_t i = 0; i < pairs.size(); ++i) rev_idx_[i] = static_cast<int64_t>(pairs[i].second);
   }
   
   size_t pixel_count = 1;
@@ -208,18 +138,27 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   const int64_t window_area = spatial_merge_size_ * spatial_merge_size_;
   const int64_t num_windows = seq_len / window_area;
   
-  if (seq_len % window_area != 0 || static_cast<int64_t>(wnd_idx_.size()) != num_windows) {
-    throw std::runtime_error("Invalid window configuration for vision pipeline");
-  }
-
+  // Apply window reordering if indices available
   reordered_buf_.resize(seq_len * hidden_dim);
-  for (int64_t dst_w = 0; dst_w < num_windows; ++dst_w) {
-    int64_t src_w = wnd_idx_[dst_w];
-    if (src_w < 0 || src_w >= num_windows) throw std::runtime_error("wnd_idx value out of range");
-    size_t offset_size = window_area * hidden_dim;
-    std::memcpy(reordered_buf_.data() + dst_w * offset_size, 
-                pe_out_buf_.data() + src_w * offset_size,
-                offset_size * sizeof(float));
+  
+  if (!wnd_idx_.empty()) {
+    // Validate window configuration
+    if (seq_len % window_area != 0 || static_cast<int64_t>(wnd_idx_.size()) != num_windows) {
+      throw std::runtime_error("Invalid window configuration for vision pipeline");
+    }
+    
+    // Apply window reordering
+    for (int64_t dst_w = 0; dst_w < num_windows; ++dst_w) {
+      int64_t src_w = wnd_idx_[dst_w];
+      if (src_w < 0 || src_w >= num_windows) throw std::runtime_error("wnd_idx value out of range");
+      size_t offset_size = window_area * hidden_dim;
+      std::memcpy(reordered_buf_.data() + dst_w * offset_size, 
+                  pe_out_buf_.data() + src_w * offset_size,
+                  offset_size * sizeof(float));
+    }
+  } else {
+    // No window reordering - use sequential order
+    std::memcpy(reordered_buf_.data(), pe_out_buf_.data(), seq_len * hidden_dim * sizeof(float));
   }
 
   std::vector<int64_t> attn_shape{seq_len, hidden_dim};
@@ -239,7 +178,7 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   const char* merger_input_names[] = {"hidden"};
   OrtValue* merger_inputs[] = { merger_in_tensor.get() };
   
-  const int64_t merged_seq_len = num_windows;  // One token per window after merging
+  const int64_t merged_seq_len = seq_len / window_area;  // One token per window after merging
   const int64_t merged_hidden = 3584;
   std::vector<int64_t> merger_shape{merged_seq_len, merged_hidden};
   merger_out_buf_.resize(merged_seq_len * merged_hidden);
@@ -250,20 +189,87 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   
   patch_merger_session_->Run(nullptr, merger_input_names, merger_inputs, 1, merger_output_names, merger_outputs, 1);
 
-  if (static_cast<int64_t>(rev_idx_.size()) != num_windows) {
-    throw std::runtime_error("Vision pipeline reverse index size mismatch");
-  }
-
   final_embeddings_buf_.resize(merger_out_buf_.size());
-  for (int64_t dst_w = 0; dst_w < num_windows; ++dst_w) {
-    std::memcpy(final_embeddings_buf_.data() + dst_w * merged_hidden,
-                merger_out_buf_.data() + rev_idx_[dst_w] * merged_hidden,
-                merged_hidden * sizeof(float));
+  
+  if (!rev_idx_.empty()) {
+    // Apply reverse reordering
+    if (static_cast<int64_t>(rev_idx_.size()) != num_windows) {
+      throw std::runtime_error("Vision pipeline reverse index size mismatch");
+    }
+    for (int64_t dst_w = 0; dst_w < num_windows; ++dst_w) {
+      std::memcpy(final_embeddings_buf_.data() + dst_w * merged_hidden,
+                  merger_out_buf_.data() + rev_idx_[dst_w] * merged_hidden,
+                  merged_hidden * sizeof(float));
+    }
+  } else {
+    // No reverse reordering - use sequential order
+    std::memcpy(final_embeddings_buf_.data(), merger_out_buf_.data(), 
+                merger_out_buf_.size() * sizeof(float));
   }
 
   last_seq_len_ = merged_seq_len;
   last_hidden_size_ = merged_hidden;
   return final_embeddings_buf_;
+}
+
+// Calculate window indices dynamically based on grid dimensions
+// Matches HuggingFace transformers implementation:
+// https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L367
+std::vector<int64_t> QwenVisionPipeline::CalculateWindowIndex(int64_t grid_t, int64_t grid_h, int64_t grid_w) {
+  // Calculate LLM grid dimensions after spatial merging
+  int64_t llm_grid_h = grid_h / spatial_merge_size_;
+  int64_t llm_grid_w = grid_w / spatial_merge_size_;
+  
+  // Calculate window size at the merged resolution
+  int64_t vit_merger_window_size = window_size_ / spatial_merge_size_ / patch_size_;
+  
+  // Calculate padding needed to fit into windows
+  int64_t pad_h = (vit_merger_window_size - (llm_grid_h % vit_merger_window_size)) % vit_merger_window_size;
+  int64_t pad_w = (vit_merger_window_size - (llm_grid_w % vit_merger_window_size)) % vit_merger_window_size;
+  
+  int64_t num_windows_h = (llm_grid_h + pad_h) / vit_merger_window_size;
+  int64_t num_windows_w = (llm_grid_w + pad_w) / vit_merger_window_size;
+  
+  std::vector<int64_t> window_index;
+  window_index.reserve(grid_t * llm_grid_h * llm_grid_w);
+  
+  // Create initial index grid
+  std::vector<int64_t> index(grid_t * (llm_grid_h + pad_h) * (llm_grid_w + pad_w), -100);
+  
+  // Fill non-padded positions with sequential indices
+  for (int64_t t = 0; t < grid_t; ++t) {
+    for (int64_t h = 0; h < llm_grid_h; ++h) {
+      for (int64_t w = 0; w < llm_grid_w; ++w) {
+        int64_t idx = t * llm_grid_h * llm_grid_w + h * llm_grid_w + w;
+        int64_t padded_idx = t * (llm_grid_h + pad_h) * (llm_grid_w + pad_w) + h * (llm_grid_w + pad_w) + w;
+        index[padded_idx] = idx;
+      }
+    }
+  }
+  
+  // Reshape into windows: (grid_t, num_windows_h, window_size, num_windows_w, window_size)
+  // Then permute to (grid_t, num_windows_h, num_windows_w, window_size, window_size)
+  // This groups patches by window instead of by spatial position
+  for (int64_t t = 0; t < grid_t; ++t) {
+    for (int64_t wh = 0; wh < num_windows_h; ++wh) {
+      for (int64_t ww = 0; ww < num_windows_w; ++ww) {
+        for (int64_t ph = 0; ph < vit_merger_window_size; ++ph) {
+          for (int64_t pw = 0; pw < vit_merger_window_size; ++pw) {
+            int64_t h = wh * vit_merger_window_size + ph;
+            int64_t w = ww * vit_merger_window_size + pw;
+            int64_t padded_idx = t * (llm_grid_h + pad_h) * (llm_grid_w + pad_w) + h * (llm_grid_w + pad_w) + w;
+            
+            // Only add non-padded indices
+            if (index[padded_idx] != -100) {
+              window_index.push_back(index[padded_idx]);
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  return window_index;
 }
 
 } // namespace Generators
