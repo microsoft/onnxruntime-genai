@@ -47,6 +47,27 @@ jobs:
         with:
           gradle-version: '8.6'
 
+      - name: Setup .NET 9.0
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '9.0.x'
+          dotnet-quality: 'ga'
+
+      - name: Create global.json to lock .NET SDK version
+        run: |
+          echo '{
+            "sdk": {
+              "version": "9.0.306",
+              "rollForward": "latestFeature"
+            }
+          }' > global.json
+          cat global.json
+
+      - name: Verify .NET version
+        run: |
+          dotnet --version
+          dotnet --list-sdks
+
       - name: Get the Latest OnnxRuntime Nightly Version
         run: |
           ORT_NIGHTLY_VERSION=$(curl -s "${{ env.ORT_NIGHTLY_REST_API }}" | jq -r '.value[0].versions[0].normalizedVersion')
@@ -135,3 +156,4 @@ jobs:
           export ORTGENAI_LOG_ORT_LIB=1
           export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:$GITHUB_WORKSPACE/build/cpu/osx-arm64
           ./build/cpu/osx-arm64/unit_tests
+ 
