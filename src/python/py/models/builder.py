@@ -62,6 +62,7 @@ def check_extra_options(kv_pairs, execution_provider):
         "use_cuda_bf16",
         "shared_embeddings",
         "hf_remote",
+        "disable_qkv_fusion",
     ]
     for key in bools:
         if key in kv_pairs:

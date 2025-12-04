@@ -31,6 +31,8 @@ struct AudioEncoderState : State {
 
   int GetNumFrames() { return num_frames_; }
 
+  bool HasCrossKVCacheOutputs() { return model_.session_info_.HasOutput(ComposeKeyValueName(model_.config_->model.encoder.outputs.cross_present_key_names, 0)); }
+
  private:
   friend struct WhisperState;
 
@@ -62,7 +64,7 @@ struct WhisperDecoderState : State {
   const WhisperModel& model_;
 
   DefaultInputIDs input_ids_{*this};                        // Model input
-  DefaultKeyValueCache kv_cache_{*this};                    // Model input and output
+  std::unique_ptr<KeyValueCache> kv_cache_;
   
   // Inputs for beam search attention
   std::unique_ptr<OrtValue> past_sequence_length_;          // Model input
