@@ -774,7 +774,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
       if (provider_options.name == "VitisAI") {
         if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
-                                             [](const auto& pair) { return pair.first == "external_ep_library"; });
+                                             [](const auto& pair) { return pair.first == "external_ep_libray"; });
             opt_it != provider_options.options.end()) {
           auto lib_name = opt_it->second;
           auto lib = LoadLibrary(lib_name.c_str());
