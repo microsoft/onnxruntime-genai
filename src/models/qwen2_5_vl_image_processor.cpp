@@ -63,7 +63,7 @@ std::unique_ptr<NamedTensors> Qwen2_5VLImageProcessor::Process(const Tokenizer& 
 
     int64_t grid_t = 1;  // Single frame
     int64_t grid_h = static_cast<int64_t>(std::sqrt(num_patches));
-    int64_t grid_w = num_patches / grid_h;
+    int64_t grid_w = grid_h;
     
     std::vector<int64_t> grid_thw_shape = {batch_size, 3};
     auto grid_thw_tensor = OrtValue::CreateTensor<int64_t>(allocator, grid_thw_shape);

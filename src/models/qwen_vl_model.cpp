@@ -70,12 +70,55 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
       image_grid_thw_val = input.tensor->GetOrtTensor();
     }
   }
-  if (!pixel_values_val) return;
+  if (!pixel_values_val) {
+    if (g_log.enabled && g_log.warning) {
+      Log("warning", "Vision pipeline: pixel_values input not found in extra_inputs");
+    }
+    return;
+  }
 
-  auto pixel_shape = pixel_values_val->GetTensorTypeAndShapeInfo()->GetShape();
+  auto pixel_type_info = pixel_values_val->GetTensorTypeAndShapeInfo();
+  auto pixel_shape = pixel_type_info->GetShape();
+  auto pixel_type = pixel_type_info->GetElementType();
+  
   std::vector<int64_t> pixel_shape_vec(pixel_shape.begin(), pixel_shape.end());
-  const float* pixel_data = pixel_values_val->GetTensorMutableData<float>();
-  if (!pixel_data) return;
+  const float* pixel_data = nullptr;
+  std::vector<float> converted_data;
+  
+  // Convert pixel values to float32 if needed
+  if (pixel_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
+    pixel_data = pixel_values_val->GetTensorData<float>();
+  } else if (pixel_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
+    // Convert float16 to float32
+    const Ort::Float16_t* fp16_data = pixel_values_val->GetTensorData<Ort::Float16_t>();
+    size_t num_elements = pixel_values_val->GetTensorTypeAndShapeInfo()->GetElementCount();
+    converted_data.resize(num_elements);
+    for (size_t i = 0; i < num_elements; ++i) {
+      converted_data[i] = Float16ToFloat32(fp16_data[i]);
+    }
+    pixel_data = converted_data.data();
+  } else if (pixel_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
+    // Convert bfloat16 to float32
+    const Ort::BFloat16_t* bf16_data = pixel_values_val->GetTensorData<Ort::BFloat16_t>();
+    size_t num_elements = pixel_values_val->GetTensorTypeAndShapeInfo()->GetElementCount();
+    converted_data.resize(num_elements);
+    for (size_t i = 0; i < num_elements; ++i) {
+      converted_data[i] = BFloat16ToFloat32(bf16_data[i]);
+    }
+    pixel_data = converted_data.data();
+  } else {
+    if (g_log.enabled && g_log.warning) {
+      Log("warning", "Vision pipeline: unsupported pixel_values type " + std::to_string(pixel_type));
+    }
+    return;
+  }
+  
+  if (!pixel_data) {
+    if (g_log.enabled && g_log.warning) {
+      Log("warning", "Vision pipeline: failed to access pixel_values tensor data");
+    }
+    return;
+  }
 
   // Extract grid_thw if provided
   std::vector<int64_t> grid_thw;
@@ -112,7 +155,12 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
   }
 
   auto out_shape = vl_model_.vision_pipeline_->GetLastOutputShape();
-  if (out_shape.size() != 2) return;
+  if (out_shape.size() != 2) {
+    if (g_log.enabled && g_log.warning) {
+      Log("warning", "Vision pipeline: expected output shape rank 2, got " + std::to_string(out_shape.size()));
+    }
+    return;
+  }
   
   auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   std::span<float> data_span(image_features_buffer_.data(), image_features_buffer_.size());
@@ -134,7 +182,12 @@ void Qwen2_5_VL_PipelineState::OnStageComplete(size_t stage_id, DeviceSpan<int32
 void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddings_output_name,
                                                      DeviceSpan<int32_t>& input_token_ids) {
   auto it = ortvalue_store_.find(embeddings_output_name);
-  if (it == ortvalue_store_.end() || !it->second) return;
+  if (it == ortvalue_store_.end() || !it->second) {
+    if (g_log.enabled && g_log.warning) {
+      Log("warning", "Vision embedding injection: embeddings output '" + embeddings_output_name + "' not found in ortvalue_store");
+    }
+    return;
+  }
   
   OrtValue* embeddings_ortvalue = it->second.get();
   auto shape = embeddings_ortvalue->GetTensorTypeAndShapeInfo()->GetShape();
@@ -146,11 +199,22 @@ void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddi
   const int64_t embedding_dim = shape[2];
   const int64_t num_vision_tokens = vision_shape[0];
   const int64_t vision_dim = vision_shape[1];
-  if (vision_dim != embedding_dim) return;
+  if (vision_dim != embedding_dim) {
+    if (g_log.enabled && g_log.warning) {
+      Log("warning", "Vision embedding injection: dimension mismatch - vision_dim=" + std::to_string(vision_dim) + 
+                   ", embedding_dim=" + std::to_string(embedding_dim));
+    }
+    return;
+  }
   
-  const int32_t image_token_id = vl_model_.config_->model.image_token_id;
+  constexpr int32_t image_token_id = 151655;
   
-  if (!input_ids_ || !input_ids_->Get()) return;
+  if (!input_ids_ || !input_ids_->Get()) {
+    if (g_log.enabled && g_log.warning) {
+      Log("warning", "Vision embedding injection: input_ids not available");
+    }
+    return;
+  }
   
   OrtValue* input_ids_ortvalue = input_ids_->Get();
   auto input_ids_shape = input_ids_ortvalue->GetTensorTypeAndShapeInfo()->GetShape();

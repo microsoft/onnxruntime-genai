@@ -75,7 +75,7 @@
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         <Visible>false</Visible>
     </None>
-    <None Condition="Exists('$(NativeBuildOutputDir)\libonnxruntime.dylib')" Include="$(NativeBuildOutputDir)\libonnxruntime.dylib">
+    <None Condition="Exists('$(OrtLibDir)\libonnxruntime.dylib')" Include="$(OrtLibDir)\libonnxruntime.dylib">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         <Visible>false</Visible>
     </None>
