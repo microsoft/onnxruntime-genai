@@ -320,7 +320,7 @@ struct DecoderInputs_Element : JSON::Element {
     }
   }
 
-private:
+ private:
   Config::Model::Decoder::Inputs& v_;
 };
 
@@ -610,7 +610,7 @@ struct Decoder_Element : JSON::Element {
   DecoderOutputs_Element outputs_{v_.outputs};
   Pipeline_Element pipeline_{v_.pipeline};
   SlidingWindow_Element sliding_window_{v_.sliding_window};
-  std::unique_ptr<PipelineModelObject_Element> pipeline_object_; // object-style pipeline support
+  std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
 };
 
 struct VisionInputs_Element : JSON::Element {
@@ -774,7 +774,7 @@ struct Vision_Element : JSON::Element {
   VisionInputs_Element inputs_{v_.inputs};
   VisionOutputs_Element outputs_{v_.outputs};
   VisionPipeline_Element pipeline_element_{v_.pipeline};
-  std::unique_ptr<VisionPipelineModelObject_Element> vision_pipeline_object_; // object-style pipeline support
+  std::unique_ptr<VisionPipelineModelObject_Element> vision_pipeline_object_;  // object-style pipeline support
 };
 
 struct SpeechInputs_Element : JSON::Element {

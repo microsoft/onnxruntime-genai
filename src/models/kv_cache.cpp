@@ -276,7 +276,7 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
     // Per-layer allocation with per-layer capacity constraints
     for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
       std::array<int64_t, 4> current_shape = layer_shapes_[layer_idx];
-      
+
       // With buffer sharing: use full capacity (buffers are reused)
       // Without buffer sharing: use actual length for memory efficiency
       if (!past_present_share_buffer_) {

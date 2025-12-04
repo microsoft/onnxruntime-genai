@@ -31,13 +31,13 @@ struct Qwen2_5_VL_PipelineState : public DecoderOnlyPipelineState {
 
  private:
   void InjectVisionEmbeddings(const std::string& embeddings_output_name,
-                             DeviceSpan<int32_t>& input_token_ids);
-  
+                              DeviceSpan<int32_t>& input_token_ids);
+
   const Qwen2_5_VL_PipelineModel& vl_model_;
   bool vision_ran_{false};
   std::unique_ptr<OrtValue> image_features_value_;
-  std::vector<float> image_features_buffer_; // backing storage for OrtValue
-  size_t image_embed_consumed_{0}; // Track how many vision embeddings we've injected
+  std::vector<float> image_features_buffer_;  // backing storage for OrtValue
+  size_t image_embed_consumed_{0};            // Track how many vision embeddings we've injected
 };
 
-} // namespace Generators
+}  // namespace Generators

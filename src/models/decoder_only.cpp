@@ -86,20 +86,20 @@ void DecoderOnly_State::RewindTo(size_t index) {
 void DecoderOnly_State::UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> beam_indices, int total_length) {
   input_ids_.Update(next_tokens);
   size_t new_length = static_cast<size_t>(input_ids_.GetShape()[1]);
-  
+
   // Determine effective lengths for position_ids and KV cache based on sliding window config
   int position_length = total_length;
   int kv_cache_length = total_length;
-  
+
   if (model_.config_->model.decoder.sliding_window.has_value() &&
       model_.config_->model.decoder.sliding_window->window_size > 0) {
     const int window_size = model_.config_->model.decoder.sliding_window->window_size;
-    
+
     // Position IDs are clamped when slide_inputs is true
     if (model_.config_->model.decoder.sliding_window->slide_inputs) {
       position_length = std::min(total_length, window_size);
     }
-    
+
     // KV cache is clamped when slide_key_value_cache is true
     if (model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
       kv_cache_length = std::min(total_length, window_size);

@@ -34,8 +34,8 @@ struct QwenVisionPipeline {
   // grid_thw: optional grid dimensions [temporal, height, width] for dynamic window indexing
   // The ONNX model is assumed to accept the provided shape directly as 'pixel_values'.
   // Returns final merged embeddings (shape: [num_image_tokens, hidden_size]).
-  std::vector<float> Run(const float* pixel_data, const std::vector<int64_t>& pixel_shape, 
-                        const std::vector<int64_t>& grid_thw = {});
+  std::vector<float> Run(const float* pixel_data, const std::vector<int64_t>& pixel_shape,
+                         const std::vector<int64_t>& grid_thw = {});
 
   // Shape info from last Run (seq_len, hidden_size). Returns empty vector if Run not called yet.
   std::vector<int64_t> GetLastOutputShape() const {
@@ -46,7 +46,7 @@ struct QwenVisionPipeline {
  private:
   // Internal helpers
   std::unique_ptr<OrtValue> CreateTensor(const float* data, size_t count, const std::vector<int64_t>& shape) const;
-  
+
   // Calculate window indices dynamically based on grid dimensions
   // Returns window_index (reordering indices for windowing)
   std::vector<int64_t> CalculateWindowIndex(int64_t grid_t, int64_t grid_h, int64_t grid_w);
@@ -58,8 +58,8 @@ struct QwenVisionPipeline {
   std::vector<int64_t> wnd_idx_;  // window reordering indices (computed dynamically)
   std::vector<int64_t> rev_idx_;  // reverse ordering indices (argsort of wnd_idx)
   int64_t spatial_merge_size_{};
-  int64_t patch_size_{14};        // Vision patch size (typically 14)
-  int64_t window_size_{56};       // Window size for attention (typically 56)
+  int64_t patch_size_{14};   // Vision patch size (typically 14)
+  int64_t window_size_{56};  // Window size for attention (typically 56)
   OrtEnv& env_;
   int64_t last_seq_len_{0};
   int64_t last_hidden_size_{0};
@@ -72,4 +72,4 @@ struct QwenVisionPipeline {
   mutable std::vector<float> final_embeddings_buf_;
 };
 
-} // namespace Generators
+}  // namespace Generators
