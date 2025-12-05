@@ -270,13 +270,11 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
   }
 
   if (!layer_shapes_.empty()) {
-    // Update per-layer shapes based on total_length, but respect max allocations
+    // Per-layer allocation with per-layer capacity constraints
     for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
-      const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
-      const int actual_length = std::min(total_length, max_cache_length);
-
       std::array<int64_t, 4> current_shape = layer_shapes_[layer_idx];
-      current_shape[2] = actual_length;
+      const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
+      current_shape[2] = std::min(total_length, max_cache_length);
 
       // Key tensor
       presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
@@ -287,7 +285,7 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
       state_.outputs_[output_index_ + layer_idx * 2 + 1] = presents_[layer_idx * 2 + 1].get();
     }
   } else {
-    // Uniform shape update (existing behavior)
+    // Uniform allocation
     shape_[2] = total_length;
     for (int i = 0; i < layer_count_ * 2; i++) {
       presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);

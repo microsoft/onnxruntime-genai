@@ -19,6 +19,8 @@
 #include "multi_modal.h"
 #include "marian.h"
 #include "decoder_only_pipeline.h"
+#include "qwen_vl_model.h"
+#include "qwen2_5_vl_image_processor.h"
 #include "../dml/interface.h"
 
 #if defined(_WIN32)
@@ -1193,6 +1195,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
+  if (config->model.type == "fara" || config->model.type == "qwen2_5_vl")
+    return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
   if (ModelType::IsLLM(config->model.type))
@@ -1288,7 +1292,9 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"phi3v", Processor::Create<PhiImageProcessor>},
           {"whisper", Processor::Create<WhisperProcessor>},
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
-          {"gemma3", Processor::Create<GemmaImageProcessor>}} {
+          {"gemma3", Processor::Create<GemmaImageProcessor>},
+          {"fara", Processor::Create<Qwen2_5VLImageProcessor>},
+          {"qwen2_5_vl", Processor::Create<Qwen2_5VLImageProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info);
