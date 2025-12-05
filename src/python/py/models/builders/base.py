@@ -472,8 +472,13 @@ class Model:
                 "ntk_alpha": beta_slow,
                 "ntk_beta": beta_fast,
             }
+        elif "mrope_section" in config.rope_scaling:
+            # For models that use MRoPE (e.g. Qwen 2.5 VL)
+            self.rope_attrs["mrope"] = {
+                "sections": config.rope_scaling["mrope_section"],  # Sections for MRoPE
+            }
 
-    def make_attention_init(self):
+    def is_gqa_supported(self) -> bool:
         valid_gqa_configurations = {
             ("cpu", ir.DataType.FLOAT),
             ("cuda", ir.DataType.FLOAT16),
@@ -483,7 +488,10 @@ class Model:
             ("webgpu", ir.DataType.FLOAT),
             ("trt-rtx", ir.DataType.FLOAT16),
         }
-        if (self.ep, self.io_dtype) in valid_gqa_configurations:
+        return (self.ep, self.io_dtype) in valid_gqa_configurations
+
+    def make_attention_init(self):
+        if self.is_gqa_supported():
             # Change model settings for GroupQueryAttention
             self.attention_attrs["op_type"] = "GroupQueryAttention"
             print("GroupQueryAttention (GQA) is used in this model.")
@@ -2684,7 +2692,11 @@ class Model:
         #                O_MatMul
         #                    |
         #                  O_Add
+        self.make_attention_input_proj(layer_id, attention, root_input, **kwargs)
+        self.make_attention_qk_subgraph(layer_id, attention, root_input, **kwargs)
+        self.make_attention_output_proj(layer_id, attention, root_input, **kwargs)
 
+    def make_attention_input_proj(self, layer_id, attention, root_input, **kwargs):
         # Unpack attention weights if needed
         self.make_attention_unpacked(layer_id, attention, root_input, **kwargs)
 
@@ -2748,6 +2760,7 @@ class Model:
                 self.make_add_bias(attention.v_proj.bias, v_add_name, root_input=self.attention_attrs["v_path"])
                 self.attention_attrs["v_path"] = f"{v_add_name}/output_0"
 
+    def make_attention_qk_subgraph(self, layer_id, attention, root_input, **kwargs):
         # Make Q/K SimplifiedLayerNorm nodes
         if self.attention_attrs["q_norm"] and self.attention_attrs["k_norm"]:
             self.make_qk_norm(layer_id, attention)
@@ -2809,11 +2822,15 @@ class Model:
             **kwargs,
         )
 
+    def make_attention_output_proj(self, layer_id, attention, root_input, **kwargs):
+        attn_name = f"/model/layers.{layer_id}/attn/{self.attention_attrs['op_type']}"
+        attn_output = f"{attn_name}/output_0"
+
         # Make MatMul node (output projection weight node)
         o_proj = "o_proj" if hasattr(attention, "o_proj") else "dense"
         o_matmul_basename = f"/model/layers.{layer_id}/attn/o_proj/MatMul"
         o_weight = getattr(attention, o_proj)
-        o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, f"{attn_name}/output_0")
+        o_matmul_name = self.make_matmul(o_weight, o_matmul_basename, attn_output)
 
         # Make Add node (output projection bias node if bias exists)
         o_bias_exists = getattr(attention, o_proj).bias is not None
@@ -3664,13 +3681,7 @@ class Model:
             # Norm after last decoder layer of model (last layer --> norm)
             self.layernorm_attrs["last_layernorm"] = True
 
-    def make_model(self, input_path):
-        # Make inputs and outputs to ONNX model
-        self.make_inputs_and_outputs()
-
-        # Make pre-processing nodes
-        self.make_preprocessing_nodes()
-
+    def load_weights(self, input_path):
         # Load weights of original model
         if input_path.endswith(".gguf"):
             # Load GGUF model
@@ -3707,7 +3718,6 @@ class Model:
                 intermediate_size=self.intermediate_size,
                 num_layers=self.num_layers,
             )
-
         else:
             # Load PyTorch model
             extra_kwargs = {"num_hidden_layers": self.num_layers} if "num_hidden_layers" in self.extra_options else {}
@@ -3725,6 +3735,17 @@ class Model:
             model = PeftModel.from_pretrained(
                 model, self.extra_options["adapter_path"], cache_dir=self.cache_dir, token=self.hf_token
             )
+
+        return model
+
+    def make_model(self, input_path):
+        # Make inputs and outputs to ONNX model
+        self.make_inputs_and_outputs()
+
+        # Make pre-processing nodes
+        self.make_preprocessing_nodes()
+
+        model = self.load_weights(input_path)
 
         # Loop through model and map each module to ONNX/ORT ops
         self.layer_id = 0
