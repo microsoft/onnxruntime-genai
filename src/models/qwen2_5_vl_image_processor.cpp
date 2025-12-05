@@ -58,7 +58,7 @@ std::unique_ptr<NamedTensors> Qwen2_5VLImageProcessor::Process(const Tokenizer& 
   // Check if processor returns grid_thw as second output
   OrtxTensor* grid_thw_tensor = nullptr;
   auto grid_thw_result = OrtxTensorResultGetAt(result.get(), 1, &grid_thw_tensor);
-  
+
   if (grid_thw_result == extError_t::kOrtxOK && grid_thw_tensor != nullptr) {
     named_tensors->emplace(image_grid_thw_name_, std::make_shared<Tensor>(ProcessTensor<int64_t>(grid_thw_tensor, allocator)));
   } else {
@@ -74,13 +74,13 @@ std::unique_ptr<NamedTensors> Qwen2_5VLImageProcessor::Process(const Tokenizer& 
       while (grid_h > 0 && num_patches % grid_h != 0) {
         grid_h--;
       }
-      
+
       if (grid_h == 0) {
         throw std::runtime_error("Failed to factorize num_patches for grid calculation");
       }
-      
+
       grid_w = num_patches / grid_h;
-      
+
       std::vector<int64_t> grid_thw_shape = {batch_size, 3};
       auto grid_thw_output = OrtValue::CreateTensor<int64_t>(allocator, grid_thw_shape);
 

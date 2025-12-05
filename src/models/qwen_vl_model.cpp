@@ -28,10 +28,10 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
 
   // Check if QNN should be used for vision attention
   bool use_qnn_attn = std::any_of(config_->model.vision.pipeline.begin(),
-                                   config_->model.vision.pipeline.end(),
-                                   [](const auto& stage) {
-                                     return stage.model_id == "vision_attn" && !stage.run_on_cpu;
-                                   });
+                                  config_->model.vision.pipeline.end(),
+                                  [](const auto& stage) {
+                                    return stage.model_id == "vision_attn" && !stage.run_on_cpu;
+                                  });
 
   // Default spatial merge size
   constexpr int spatial_merge = 2;
@@ -79,12 +79,12 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
   auto pixel_type_info = pixel_values_val->GetTensorTypeAndShapeInfo();
   auto pixel_shape = pixel_type_info->GetShape();
   auto pixel_type = pixel_type_info->GetElementType();
-  
+
   std::vector<int64_t> pixel_shape_vec(pixel_shape.begin(), pixel_shape.end());
   const float* pixel_data = nullptr;
   // Convert pixel values to float32 if needed (handles float16, bfloat16, float32)
   std::unique_ptr<OrtValue> pixel_values_fp32;
-  
+
   if (pixel_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     pixel_data = pixel_values_val->GetTensorData<float>();
   } else {
@@ -92,7 +92,7 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
     Cast(*pixel_values_val, pixel_values_fp32, *vl_model_.p_device_inputs_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
     pixel_data = pixel_values_fp32->GetTensorData<float>();
   }
-  
+
   if (!pixel_data) {
     if (g_log.enabled && g_log.warning) {
       Log("warning", "Vision pipeline: failed to access pixel_values tensor data");
@@ -141,7 +141,7 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
     }
     return;
   }
-  
+
   auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
   std::span<float> data_span(image_features_buffer_.data(), image_features_buffer_.size());
   std::span<const int64_t> shape_span(out_shape.data(), out_shape.size());
@@ -168,7 +168,7 @@ void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddi
     }
     return;
   }
-  
+
   OrtValue* embeddings_ortvalue = it->second.get();
   auto shape = embeddings_ortvalue->GetTensorTypeAndShapeInfo()->GetShape();
   float* embeddings_data = embeddings_ortvalue->GetTensorMutableData<float>();
@@ -181,21 +181,21 @@ void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddi
   const int64_t vision_dim = vision_shape[1];
   if (vision_dim != embedding_dim) {
     if (g_log.enabled && g_log.warning) {
-      Log("warning", "Vision embedding injection: dimension mismatch - vision_dim=" + std::to_string(vision_dim) + 
-                   ", embedding_dim=" + std::to_string(embedding_dim));
+      Log("warning", "Vision embedding injection: dimension mismatch - vision_dim=" + std::to_string(vision_dim) +
+                         ", embedding_dim=" + std::to_string(embedding_dim));
     }
     return;
   }
-  
+
   constexpr int32_t image_token_id = 151655;
-  
+
   if (!input_ids_ || !input_ids_->Get()) {
     if (g_log.enabled && g_log.warning) {
       Log("warning", "Vision embedding injection: input_ids not available");
     }
     return;
   }
-  
+
   OrtValue* input_ids_ortvalue = input_ids_->Get();
   auto input_ids_shape = input_ids_ortvalue->GetTensorTypeAndShapeInfo()->GetShape();
   const int32_t* token_ids_cpu = input_ids_ortvalue->GetTensorData<int32_t>();

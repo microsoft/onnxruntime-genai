@@ -3,6 +3,7 @@
 
 try:
     import winml
+
     print(winml.register_execution_providers(ort=False, ort_genai=True))
 except ImportError:
     print("WinML not available, using default execution providers")
@@ -13,6 +14,7 @@ import argparse
 import glob
 import json
 import os
+import readline
 import time
 from pathlib import Path
 
@@ -48,7 +50,7 @@ def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
 
 
 def _complete(text, state):
-    return (glob.glob(text + "*") + [None])[state]
+    return [*glob.glob(text + "*"), None][state]
 
 
 def run(args: argparse.Namespace):
@@ -71,8 +73,6 @@ def run(args: argparse.Namespace):
     while True:
         if interactive:
             try:
-                import readline
-
                 readline.set_completer_delims(" \t\n;")
                 readline.parse_and_bind("tab: complete")
                 readline.set_completer(_complete)
@@ -102,7 +102,7 @@ def run(args: argparse.Namespace):
         if len(image_paths) == 0:
             print("No image provided")
         else:
-            for i, image_path in enumerate(image_paths):
+            for _, image_path in enumerate(image_paths):
                 if not os.path.exists(image_path):
                     raise FileNotFoundError(f"Image file not found: {image_path}")
                 print(f"Using image: {image_path}")
@@ -125,7 +125,7 @@ def run(args: argparse.Namespace):
             messages.append({"role": "user", "content": content})
         elif model.type in ["qwen2_5_vl", "fara"]:
             messages.append({"role": "system", "content": TOOL_CALL_SYSTEM_PROMPT})
-            content = "".join([f"<|vision_start|><|image_pad|><|vision_end|>" for _ in image_paths]) + text
+            content = "".join(["<|vision_start|><|image_pad|><|vision_end|>" for _ in image_paths]) + text
             messages.append({"role": "user", "content": content})
         else:
             # Gemma3-style multimodal: structured content
@@ -190,8 +190,11 @@ if __name__ == "__main__":
         "-pr", "--prompt", required=False, help="Input prompts to generate tokens from, mainly for CI usage"
     )
     parser.add_argument(
-        "--max_length", type=int, required=False, default=None,
-        help="Maximum generation length. Defaults to model's context_length from config."
+        "--max_length",
+        type=int,
+        required=False,
+        default=None,
+        help="Maximum generation length. Defaults to model's context_length from config.",
     )
     parser.add_argument(
         "--non-interactive",

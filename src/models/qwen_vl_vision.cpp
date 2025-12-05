@@ -59,7 +59,7 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
       auto ep_devices = GetOrtEnv().GetEpDevices();
       std::vector<const OrtEpDevice*> qnn_devices;
       qnn_devices.reserve(ep_devices.size());
-      
+
       for (const auto* device : ep_devices) {
         if (device->Name() == "QNNExecutionProvider") {
           qnn_devices.push_back(device);
@@ -162,10 +162,10 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   auto attn_input_info = vision_attn_session_->GetInputTypeInfo(0);
   auto& attn_input_tensor_info = attn_input_info->GetTensorTypeAndShapeInfo();
   auto attn_expected_shape = attn_input_tensor_info.GetShape();
-  
+
   int64_t expected_seq_len = (attn_expected_shape.size() >= 2 && attn_expected_shape[0] > 0) ? attn_expected_shape[0] : seq_len;
   int64_t actual_seq_len = seq_len;  // Mutable copy for padding adjustments
-  
+
   if (expected_seq_len != seq_len) {
     // Model expects fixed sequence length - need to pad or error
     if (expected_seq_len > seq_len) {
@@ -177,7 +177,7 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
       throw std::runtime_error("Vision attention model input size mismatch");
     }
   }
-  
+
   std::vector<int64_t> attn_shape{actual_seq_len, hidden_dim};
   auto attn_in_tensor = CreateTensor(reordered_buf_.data(), reordered_buf_.size(), attn_shape);
   auto attn_in_name = vision_attn_session_->GetInputName(0);
