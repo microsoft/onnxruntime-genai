@@ -273,13 +273,8 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
     // Per-layer allocation with per-layer capacity constraints
     for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
       std::array<int64_t, 4> current_shape = layer_shapes_[layer_idx];
-
-      // With buffer sharing: use full capacity (buffers are reused)
-      // Without buffer sharing: use actual length for memory efficiency
-      if (!past_present_share_buffer_) {
-        const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
-        current_shape[2] = std::min(total_length, max_cache_length);
-      }
+      const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
+      current_shape[2] = std::min(total_length, max_cache_length);
 
       // Key tensor
       presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
@@ -291,11 +286,7 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
     }
   } else {
     // Uniform allocation
-    // With buffer sharing: use full capacity (buffers are reused)
-    // Without buffer sharing: use actual length for memory efficiency
-    if (!past_present_share_buffer_) {
-      shape_[2] = total_length;
-    }
+    shape_[2] = total_length;
     for (int i = 0; i < layer_count_ * 2; i++) {
       presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
       state_.outputs_[output_index_ + i] = presents_[i].get();
