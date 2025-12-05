@@ -159,9 +159,22 @@ struct Config {
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
 
+      // Vision pipeline support (patch embed -> vision attn -> patch merger)
+      struct PipelineModel {
+        std::string filename;
+        std::optional<SessionOptions> session_options;
+        std::optional<RunOptions> run_options;
+        std::string model_id;              // Identifier used to link outputs to subsequent stages
+        std::vector<std::string> inputs;   // Graph input names
+        std::vector<std::string> outputs;  // Graph output names
+        bool run_on_cpu{false};            // If true force CPU EP when multiple EPs are configured
+      };
+      std::vector<PipelineModel> pipeline;  // Ordered pipeline models
+
       struct Inputs {
         std::string pixel_values{Defaults::PixelValuesName};
         std::string image_sizes{Defaults::ImageSizesName};
+        std::string image_grid_thw{Defaults::ImageSizesName};          // Qwen2.5-VL uses image_grid_thw, defaults to image_sizes
         std::string attention_mask{Defaults::ImageAttentionMaskName};  // image attention mask
       } inputs;
 
