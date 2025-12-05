@@ -202,10 +202,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
       // Uniform sliding window allocation (backward compatibility)
       shape_[2] = std::min(max_length, sliding_window_size);
     }
-  } else {
-    // Default capacity: allocate full max_length upfront
-    // - With past_present_share_buffer: buffers are reused, so full capacity needed
-    // - Without past_present_share_buffer: buffers are reallocated each step but still sized to max_length
+  } else if (past_present_share_buffer_) {
     shape_[2] = state_.params_->search.max_length;
   }
 
