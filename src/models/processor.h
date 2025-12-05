@@ -53,6 +53,28 @@ std::unique_ptr<OrtValue> ProcessTensor(OrtxTensor* tensor, Ort::Allocator& allo
 
 template <typename SrcT, typename DstT>
 std::unique_ptr<OrtValue> ProcessTensor(OrtxTensor* tensor, Ort::Allocator& allocator);
+
+// Helper function to convert OgaTensor to OrtxTensor, sometimes needed as an input to onnxruntime-extensions methods.
+template <typename T>
+OrtxTensor* MakeOrtxTensor(Generators::Tensor* src);
+
+// Helper function to convert const OgaTensor to const OrtxTensor, sometimes needed as an input to onnxruntime-extensions methods.
+template <typename T>
+const OrtxTensor* MakeOrtxTensorConst(const Generators::Tensor* src);
+
+void* SplitSignalSegments(
+    const Generators::Tensor* input,
+    const Generators::Tensor* sr_tensor,
+    const Generators::Tensor* frame_ms_tensor,
+    const Generators::Tensor* hop_ms_tensor,
+    const Generators::Tensor* energy_threshold_db_tensor,
+    Generators::Tensor* output0);
+
+void* MergeSignalSegments(
+    const Generators::Tensor* segments_tensor,
+    const Generators::Tensor* merge_gap_ms_tensor,
+    Generators::Tensor* output0);
+
 struct Processor {
   Processor() = default;
   Processor(const Processor&) = delete;
