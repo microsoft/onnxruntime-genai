@@ -1,15 +1,6 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-try:
-    import winml
-
-    print(winml.register_execution_providers(ort=False, ort_genai=True))
-except ImportError:
-    print("WinML not available, using default execution providers")
-except Exception as e:
-    print(f"Failed to register WinML execution providers: {e}")
-
 import argparse
 import glob
 import json
@@ -23,7 +14,7 @@ import onnxruntime_genai as og
 # og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
 
 # Tool-calling system prompt for Qwen/Fara models
-TOOL_CALL_SYSTEM_PROMPT = """You are a web agent trying to complete user tasks on websites using function calls.
+FARA_SYSTEM_PROMPT = """You are a web agent trying to complete user tasks on websites using function calls.
 
 The functions at your disposal are:
 <tools>
@@ -54,6 +45,16 @@ def _complete(text, state):
 
 
 def run(args: argparse.Namespace):
+    if args.use_winml:
+        try:
+            import winml
+
+            print(winml.register_execution_providers(ort=False, ort_genai=True))
+        except ImportError:
+            print("WinML not available, using default execution providers")
+        except Exception as e:
+            print(f"Failed to register WinML execution providers: {e}")
+
     print("Loading model...")
     config = og.Config(args.model_path)
     if args.execution_provider != "follow_config":
@@ -124,7 +125,7 @@ def run(args: argparse.Namespace):
             content = "".join([f"<|image_{i + 1}|>\n" for i in range(len(image_paths))]) + text
             messages.append({"role": "user", "content": content})
         elif model.type in ["qwen2_5_vl", "fara"]:
-            messages.append({"role": "system", "content": TOOL_CALL_SYSTEM_PROMPT})
+            messages.append({"role": "system", "content": FARA_SYSTEM_PROMPT})
             content = "".join(["<|vision_start|><|image_pad|><|vision_end|>" for _ in image_paths]) + text
             messages.append({"role": "user", "content": content})
         else:
@@ -201,6 +202,12 @@ if __name__ == "__main__":
         action=argparse.BooleanOptionalAction,
         required=False,
         help="Non-interactive mode, mainly for CI usage",
+    )
+    parser.add_argument(
+        "--use-winml",
+        action="store_true",
+        required=False,
+        help="Register WinML execution providers before loading the model",
     )
     args = parser.parse_args()
     run(args)

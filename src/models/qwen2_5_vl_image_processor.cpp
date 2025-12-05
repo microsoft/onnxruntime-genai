@@ -51,47 +51,16 @@ std::unique_ptr<NamedTensors> Qwen2_5VLImageProcessor::Process(const Tokenizer& 
   CheckResult(OrtxTensorResultGetAt(result.get(), 0, &pixel_values));
 
   auto pixel_values_ortvalue = ProcessTensor<float>(pixel_values, allocator);
-  auto pixel_values_type_shape_info = pixel_values_ortvalue->GetTensorTypeAndShapeInfo();
-  auto pixel_values_shape = pixel_values_type_shape_info->GetShape();
   named_tensors->emplace(pixel_values_name_, std::make_shared<Tensor>(std::move(pixel_values_ortvalue)));
 
-  // Check if processor returns grid_thw as second output
   OrtxTensor* grid_thw_tensor = nullptr;
-  auto grid_thw_result = OrtxTensorResultGetAt(result.get(), 1, &grid_thw_tensor);
-
-  if (grid_thw_result == extError_t::kOrtxOK && grid_thw_tensor != nullptr) {
-    named_tensors->emplace(image_grid_thw_name_, std::make_shared<Tensor>(ProcessTensor<int64_t>(grid_thw_tensor, allocator)));
-  } else {
-    // Fallback: calculate grid_thw from pixel_values shape
-    if (pixel_values_shape.size() >= 2) {
-      int64_t batch_size = pixel_values_shape[0];
-      int64_t num_patches = pixel_values_shape[1];
-
-      int64_t grid_t = 1;  // Single frame for static images
-      int64_t grid_h, grid_w;
-
-      grid_h = static_cast<int64_t>(std::sqrt(static_cast<double>(num_patches)));
-      while (grid_h > 0 && num_patches % grid_h != 0) {
-        grid_h--;
-      }
-
-      if (grid_h == 0) {
-        throw std::runtime_error("Failed to factorize num_patches for grid calculation");
-      }
-
-      grid_w = num_patches / grid_h;
-
-      std::vector<int64_t> grid_thw_shape = {batch_size, 3};
-      auto grid_thw_output = OrtValue::CreateTensor<int64_t>(allocator, grid_thw_shape);
-
-      auto* dst = grid_thw_output->GetTensorMutableData<int64_t>();
-      dst[0] = grid_t;
-      dst[1] = grid_h;
-      dst[2] = grid_w;
-
-      named_tensors->emplace(image_grid_thw_name_, std::make_shared<Tensor>(std::move(grid_thw_output)));
-    }
+  CheckResult(OrtxTensorResultGetAt(result.get(), 1, &grid_thw_tensor));
+  
+  if (grid_thw_tensor == nullptr) {
+    throw std::runtime_error("grid_thw output not provided");
   }
+  
+  named_tensors->emplace(image_grid_thw_name_, std::make_shared<Tensor>(ProcessTensor<int64_t>(grid_thw_tensor, allocator)));
 
   return named_tensors;
 }

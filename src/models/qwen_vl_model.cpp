@@ -70,10 +70,7 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
     }
   }
   if (!pixel_values_val) {
-    if (g_log.enabled && g_log.warning) {
-      Log("warning", "Vision pipeline: pixel_values input not found in extra_inputs");
-    }
-    return;
+    throw std::runtime_error("Vision pipeline: pixel_values input not found in extra_inputs");
   }
 
   auto pixel_type_info = pixel_values_val->GetTensorTypeAndShapeInfo();
@@ -94,10 +91,7 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
   }
 
   if (!pixel_data) {
-    if (g_log.enabled && g_log.warning) {
-      Log("warning", "Vision pipeline: failed to access pixel_values tensor data");
-    }
-    return;
+    throw std::runtime_error("Vision pipeline: failed to access pixel_values tensor data");
   }
 
   // Extract grid_thw if provided
@@ -136,10 +130,7 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
 
   auto out_shape = vl_model_.vision_pipeline_->GetLastOutputShape();
   if (out_shape.size() != 2) {
-    if (g_log.enabled && g_log.warning) {
-      Log("warning", "Vision pipeline: expected output shape rank 2, got " + std::to_string(out_shape.size()));
-    }
-    return;
+    throw std::runtime_error("Vision pipeline: expected output shape rank 2, got " + std::to_string(out_shape.size()));
   }
 
   auto mem_info = OrtMemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeCPU);
@@ -163,10 +154,7 @@ void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddi
                                                       DeviceSpan<int32_t>& input_token_ids) {
   auto it = ortvalue_store_.find(embeddings_output_name);
   if (it == ortvalue_store_.end() || !it->second) {
-    if (g_log.enabled && g_log.warning) {
-      Log("warning", "Vision embedding injection: embeddings output '" + embeddings_output_name + "' not found in ortvalue_store");
-    }
-    return;
+    throw std::runtime_error("Vision embedding injection: embeddings output '" + embeddings_output_name + "' not found in ortvalue_store");
   }
 
   OrtValue* embeddings_ortvalue = it->second.get();
@@ -180,20 +168,14 @@ void Qwen2_5_VL_PipelineState::InjectVisionEmbeddings(const std::string& embeddi
   const int64_t num_vision_tokens = vision_shape[0];
   const int64_t vision_dim = vision_shape[1];
   if (vision_dim != embedding_dim) {
-    if (g_log.enabled && g_log.warning) {
-      Log("warning", "Vision embedding injection: dimension mismatch - vision_dim=" + std::to_string(vision_dim) +
-                         ", embedding_dim=" + std::to_string(embedding_dim));
-    }
-    return;
+    throw std::runtime_error("Vision embedding injection: dimension mismatch - vision_dim=" + std::to_string(vision_dim) +
+                             ", embedding_dim=" + std::to_string(embedding_dim));
   }
 
   constexpr int32_t image_token_id = 151655;
 
   if (!input_ids_ || !input_ids_->Get()) {
-    if (g_log.enabled && g_log.warning) {
-      Log("warning", "Vision embedding injection: input_ids not available");
-    }
-    return;
+    throw std::runtime_error("Vision embedding injection: input_ids not available");
   }
 
   OrtValue* input_ids_ortvalue = input_ids_->Get();

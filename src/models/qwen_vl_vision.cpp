@@ -46,13 +46,20 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
     auto so = OrtSessionOptions::Create();
 
     so->SetIntraOpNumThreads(2).SetInterOpNumThreads(1);
+    
     // QNN provider options
-    const char* keys[] = {"backend_path", "htp_performance_mode", "htp_graph_finalization_optimization_mode", "soc_model"};
-    const char* values[] = {qnn_backend_path_.c_str(), "burst", "3", "60"};
+    std::unordered_map<std::string, std::string> qnn_options = {
+        {"backend_path", qnn_backend_path_},
+        {"htp_performance_mode", "burst"},
+        {"htp_graph_finalization_optimization_mode", "3"},
+        {"soc_model", "60"}
+    };
 
     auto providers = Ort::GetAvailableProviders();
     bool has_qnn = std::find(providers.begin(), providers.end(), std::string("QNNExecutionProvider")) != providers.end();
     if (has_qnn) {
+      const char* keys[] = {"backend_path", "htp_performance_mode", "htp_graph_finalization_optimization_mode", "soc_model"};
+      const char* values[] = {qnn_backend_path_.c_str(), "burst", "3", "60"};
       so->AppendExecutionProvider("QNNExecutionProvider", keys, values, 4);
     } else {
       // Use registered QNN EP - use GenAI wrapper APIs
@@ -68,13 +75,8 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
 
       if (qnn_devices.empty()) {
         throw std::runtime_error("QNNExecutionProvider requested for vision attention but not registered.");
-      } else {
-        Ort::api->SessionOptionsAppendExecutionProvider_V2(
-            so.get(),
-            &GetOrtEnv(),
-            qnn_devices.data(), qnn_devices.size(),
-            keys, values, 4);
       }
+      so->AppendExecutionProvider_V2(GetOrtEnv(), qnn_devices, qnn_options);
     }
 
     vision_attn_session_ = OrtSession::Create(env_, attn_path.c_str(), so.get());
