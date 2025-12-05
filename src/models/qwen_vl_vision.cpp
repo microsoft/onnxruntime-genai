@@ -55,25 +55,24 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
     if (has_qnn) {
       so->AppendExecutionProvider("QNNExecutionProvider", keys, values, 4);
     } else {
-      // Use registered QNN EP
-      size_t num_devices = 0;
-      const OrtEpDevice* const* device_ptrs = nullptr;
-      Ort::GetEpDevices(&GetOrtEnv(), &device_ptrs, &num_devices);
-      std::vector<const OrtEpDevice*> ep_devices_ptrs;
-      ep_devices_ptrs.reserve(num_devices);
-      for (size_t i = 0; i < num_devices; ++i) {
-        if (Ort::api->EpDevice_EpName(device_ptrs[i]) == std::string("QNNExecutionProvider")) {
-          ep_devices_ptrs.push_back(device_ptrs[i]);
+      // Use registered QNN EP - use GenAI wrapper APIs
+      auto ep_devices = GetOrtEnv().GetEpDevices();
+      std::vector<const OrtEpDevice*> qnn_devices;
+      qnn_devices.reserve(ep_devices.size());
+      
+      for (const auto* device : ep_devices) {
+        if (device->Name() == "QNNExecutionProvider") {
+          qnn_devices.push_back(device);
         }
       }
 
-      if (ep_devices_ptrs.empty()) {
+      if (qnn_devices.empty()) {
         throw std::runtime_error("QNNExecutionProvider requested for vision attention but not registered.");
       } else {
         Ort::api->SessionOptionsAppendExecutionProvider_V2(
             so.get(),
             &GetOrtEnv(),
-            ep_devices_ptrs.data(), ep_devices_ptrs.size(),
+            qnn_devices.data(), qnn_devices.size(),
             keys, values, 4);
       }
     }
@@ -116,7 +115,8 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   for (auto d : pixel_shape) pixel_count *= static_cast<size_t>(d);
   auto pixel_tensor = CreateTensor(pixel_data, pixel_count, pixel_shape);
 
-  const char* pe_input_names[] = {"pixel_values"};
+  auto pe_in_name = patch_embed_session_->GetInputName(0);
+  const char* pe_input_names[] = {pe_in_name.c_str()};
   OrtValue* pe_inputs[] = {pixel_tensor.get()};
 
   const int64_t num_patches = pixel_shape[1];
@@ -158,12 +158,33 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
     std::memcpy(reordered_buf_.data(), pe_out_buf_.data(), seq_len * hidden_dim * sizeof(float));
   }
 
-  std::vector<int64_t> attn_shape{seq_len, hidden_dim};
+  // Check if vision_attn session expects a different sequence length (fixed shape model)
+  auto attn_input_info = vision_attn_session_->GetInputTypeInfo(0);
+  auto& attn_input_tensor_info = attn_input_info->GetTensorTypeAndShapeInfo();
+  auto attn_expected_shape = attn_input_tensor_info.GetShape();
+  
+  int64_t expected_seq_len = (attn_expected_shape.size() >= 2 && attn_expected_shape[0] > 0) ? attn_expected_shape[0] : seq_len;
+  int64_t actual_seq_len = seq_len;  // Mutable copy for padding adjustments
+  
+  if (expected_seq_len != seq_len) {
+    // Model expects fixed sequence length - need to pad or error
+    if (expected_seq_len > seq_len) {
+      // Pad the reordered buffer with zeros to match model's expected size
+      reordered_buf_.resize(expected_seq_len * hidden_dim, 0.0f);
+      actual_seq_len = expected_seq_len;  // Update actual_seq_len for subsequent operations
+    } else {
+      // Model expects smaller input - this is an error (image too large for fixed-shape model)
+      throw std::runtime_error("Vision attention model input size mismatch");
+    }
+  }
+  
+  std::vector<int64_t> attn_shape{actual_seq_len, hidden_dim};
   auto attn_in_tensor = CreateTensor(reordered_buf_.data(), reordered_buf_.size(), attn_shape);
-  const char* attn_input_names[] = {"hidden"};
+  auto attn_in_name = vision_attn_session_->GetInputName(0);
+  const char* attn_input_names[] = {attn_in_name.c_str()};
   OrtValue* attn_inputs[] = {attn_in_tensor.get()};
 
-  attn_out_buf_.resize(seq_len * hidden_dim);
+  attn_out_buf_.resize(actual_seq_len * hidden_dim);
   auto attn_out_tensor = CreateTensor(attn_out_buf_.data(), attn_out_buf_.size(), attn_shape);
   auto attn_out_name = vision_attn_session_->GetOutputName(0);
   const char* attn_output_names[] = {attn_out_name.c_str()};
@@ -172,10 +193,11 @@ std::vector<float> QwenVisionPipeline::Run(const float* pixel_data, const std::v
   vision_attn_session_->Run(nullptr, attn_input_names, attn_inputs, 1, attn_output_names, attn_outputs, 1);
 
   auto merger_in_tensor = CreateTensor(attn_out_buf_.data(), attn_out_buf_.size(), attn_shape);
-  const char* merger_input_names[] = {"hidden"};
+  auto merger_in_name = patch_merger_session_->GetInputName(0);
+  const char* merger_input_names[] = {merger_in_name.c_str()};
   OrtValue* merger_inputs[] = {merger_in_tensor.get()};
 
-  const int64_t merged_seq_len = seq_len / window_area;  // One token per window after merging
+  const int64_t merged_seq_len = actual_seq_len / window_area;  // One token per window after merging
   const int64_t merged_hidden = 3584;
   std::vector<int64_t> merger_shape{merged_seq_len, merged_hidden};
   merger_out_buf_.resize(merged_seq_len * merged_hidden);

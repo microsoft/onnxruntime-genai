@@ -1,8 +1,13 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License
 
-import winml
-print(winml.register_execution_providers(ort=False, ort_genai=True))
+try:
+    import winml
+    print(winml.register_execution_providers(ort=False, ort_genai=True))
+except ImportError:
+    print("WinML not available, using default execution providers")
+except Exception as e:
+    print(f"Failed to register WinML execution providers: {e}")
 
 import argparse
 import glob
@@ -137,16 +142,7 @@ def run(args: argparse.Namespace):
 
         print("Generating response...")
         params = og.GeneratorParams(model)
-        if args.max_length:
-            max_length = args.max_length
-        else:
-            try:
-                config_path = Path(args.model_path) / "genai_config.json"
-                with open(config_path, "r") as f:
-                    config = json.load(f)
-                    max_length = config.get("model", {}).get("context_length", 7680)
-            except Exception:
-                max_length = 7680
+        max_length = args.max_length if args.max_length else 7680
         params.set_search_options(max_length=max_length)
 
         generator = og.Generator(model, params)

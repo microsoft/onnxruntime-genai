@@ -4,6 +4,7 @@
 #include "../logging.h"
 #include <iostream>
 #include <cstring>
+#include <algorithm>
 
 namespace Generators {
 
@@ -26,13 +27,11 @@ Qwen2_5_VL_PipelineModel::Qwen2_5_VL_PipelineModel(std::unique_ptr<Config> confi
   if (patch_embed_path.empty() || vision_attn_path.empty() || patch_merger_path.empty()) return;
 
   // Check if QNN should be used for vision attention
-  bool use_qnn_attn = false;
-  for (const auto& stage : config_->model.vision.pipeline) {
-    if (stage.model_id == "vision_attn" && !stage.run_on_cpu) {
-      use_qnn_attn = true;
-      break;
-    }
-  }
+  bool use_qnn_attn = std::any_of(config_->model.vision.pipeline.begin(),
+                                   config_->model.vision.pipeline.end(),
+                                   [](const auto& stage) {
+                                     return stage.model_id == "vision_attn" && !stage.run_on_cpu;
+                                   });
 
   // Default spatial merge size
   constexpr int spatial_merge = 2;
@@ -83,34 +82,15 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
   
   std::vector<int64_t> pixel_shape_vec(pixel_shape.begin(), pixel_shape.end());
   const float* pixel_data = nullptr;
-  std::vector<float> converted_data;
+  // Convert pixel values to float32 if needed (handles float16, bfloat16, float32)
+  std::unique_ptr<OrtValue> pixel_values_fp32;
   
-  // Convert pixel values to float32 if needed
   if (pixel_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     pixel_data = pixel_values_val->GetTensorData<float>();
-  } else if (pixel_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16) {
-    // Convert float16 to float32
-    const Ort::Float16_t* fp16_data = pixel_values_val->GetTensorData<Ort::Float16_t>();
-    size_t num_elements = pixel_values_val->GetTensorTypeAndShapeInfo()->GetElementCount();
-    converted_data.resize(num_elements);
-    for (size_t i = 0; i < num_elements; ++i) {
-      converted_data[i] = Float16ToFloat32(fp16_data[i]);
-    }
-    pixel_data = converted_data.data();
-  } else if (pixel_type == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
-    // Convert bfloat16 to float32
-    const Ort::BFloat16_t* bf16_data = pixel_values_val->GetTensorData<Ort::BFloat16_t>();
-    size_t num_elements = pixel_values_val->GetTensorTypeAndShapeInfo()->GetElementCount();
-    converted_data.resize(num_elements);
-    for (size_t i = 0; i < num_elements; ++i) {
-      converted_data[i] = BFloat16ToFloat32(bf16_data[i]);
-    }
-    pixel_data = converted_data.data();
   } else {
-    if (g_log.enabled && g_log.warning) {
-      Log("warning", "Vision pipeline: unsupported pixel_values type " + std::to_string(pixel_type));
-    }
-    return;
+    // Use existing Cast() function to convert to float32
+    Cast(*pixel_values_val, pixel_values_fp32, *vl_model_.p_device_inputs_, ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
+    pixel_data = pixel_values_fp32->GetTensorData<float>();
   }
   
   if (!pixel_data) {
@@ -150,8 +130,8 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
 
   try {
     image_features_buffer_ = vl_model_.vision_pipeline_->Run(pixel_data, pixel_shape_vec, grid_thw);
-  } catch (const std::exception&) {
-    return;  // Silent failure - pipeline already logs errors
+  } catch (const std::exception& e) {
+    throw std::runtime_error(std::string("Vision pipeline failed: ") + e.what());
   }
 
   auto out_shape = vl_model_.vision_pipeline_->GetLastOutputShape();
