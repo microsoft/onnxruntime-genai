@@ -695,19 +695,18 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       std::optional<uint32_t> config_device_id = resolved_device_filtering.hardware_device_id;
       std::optional<uint32_t> config_vendor_id = resolved_device_filtering.hardware_vendor_id;
       std::optional<OrtHardwareDeviceType> config_device_type_enum = resolved_device_filtering.hardware_device_type;
-      // for OpenVINO, use "device_type" in provider_options exclusively if it's provided
+      // for OpenVINO, fallback to "device_type" in provider_options if no device filtering is specified
       std::optional<std::string> config_ov_device_type = std::nullopt;
-      if (provider_options.name == "OpenVINO") {
+      if (provider_options.name == "OpenVINO" &&
+          !config_device_id.has_value() &&
+          !config_vendor_id.has_value() &&
+          !config_device_type_enum.has_value()) {
         for (auto& option : provider_options.options) {
           if (option.first == "device_type") {
             config_ov_device_type = option.second;
           }
         }
-        if (config_ov_device_type.has_value()) {
-          config_device_id = std::nullopt;
-          config_vendor_id = std::nullopt;
-          config_device_type_enum = std::nullopt;
-        } else if (!(config_device_id.has_value() || config_vendor_id.has_value() || config_device_type_enum.has_value())) {
+        if (!config_ov_device_type.has_value()) {
           config_ov_device_type = "CPU";
         }
       }
