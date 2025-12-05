@@ -55,11 +55,11 @@ std::unique_ptr<NamedTensors> Qwen2_5VLImageProcessor::Process(const Tokenizer& 
 
   OrtxTensor* grid_thw_tensor = nullptr;
   CheckResult(OrtxTensorResultGetAt(result.get(), 1, &grid_thw_tensor));
-  
+
   if (grid_thw_tensor == nullptr) {
     throw std::runtime_error("grid_thw output not provided");
   }
-  
+
   named_tensors->emplace(image_grid_thw_name_, std::make_shared<Tensor>(ProcessTensor<int64_t>(grid_thw_tensor, allocator)));
 
   return named_tensors;

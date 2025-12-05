@@ -46,14 +46,13 @@ QwenVisionPipeline::QwenVisionPipeline(OrtEnv& env,
     auto so = OrtSessionOptions::Create();
 
     so->SetIntraOpNumThreads(2).SetInterOpNumThreads(1);
-    
+
     // QNN provider options
     std::unordered_map<std::string, std::string> qnn_options = {
         {"backend_path", qnn_backend_path_},
         {"htp_performance_mode", "burst"},
         {"htp_graph_finalization_optimization_mode", "3"},
-        {"soc_model", "60"}
-    };
+        {"soc_model", "60"}};
 
     auto providers = Ort::GetAvailableProviders();
     bool has_qnn = std::find(providers.begin(), providers.end(), std::string("QNNExecutionProvider")) != providers.end();
