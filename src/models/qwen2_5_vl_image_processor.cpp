@@ -27,10 +27,6 @@ Qwen2_5VLImageProcessor::Qwen2_5VLImageProcessor(Config& config, const SessionIn
 }
 
 std::unique_ptr<NamedTensors> Qwen2_5VLImageProcessor::Process(const Tokenizer& tokenizer, const Payload& payload) const {
-  if (!payload.images) {
-    throw std::runtime_error("No images provided to Qwen2.5VLImageProcessor");
-  }
-
   std::string prompt = std::string(payload.prompt);
   Ort::Allocator& allocator{Ort::Allocator::GetWithDefaultOptions()};
   auto named_tensors = std::make_unique<NamedTensors>();
@@ -40,6 +36,11 @@ std::unique_ptr<NamedTensors> Qwen2_5VLImageProcessor::Process(const Tokenizer& 
       allocator, std::vector<int64_t>{1, static_cast<int64_t>(input_ids.size())});
   std::copy(input_ids.begin(), input_ids.end(), input_ids_value->GetTensorMutableData<int32_t>());
   named_tensors->emplace(Config::Defaults::InputIdsName, std::make_shared<Tensor>(std::move(input_ids_value)));
+
+  if (!payload.images) {
+    // No images provided - return text-only tensors
+    return named_tensors;
+  }
 
   // Run image preprocessing using onnxruntime-extensions
   // This will execute the full pipeline from processor_config.json:
