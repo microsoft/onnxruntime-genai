@@ -206,6 +206,16 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     shape_[2] = state_.params_->search.max_length;
   }
 
+  if (past_present_share_buffer_) {  // AMD-specific override
+    for (const auto& [key, val] : state_.params_->config.model.decoder.session_options.config_entries) {
+      if (key == "max_length_for_kv_cache") try {
+        shape_[2] = std::atoi(val.c_str());
+      } catch (const std::exception& ex) {
+        throw std::runtime_error{std::string{"config_entries/max_length_for_kv_cache format error: "} + ex.what()};
+      }
+    }
+  }
+        
   try {
     // Allocate KV cache tensors - 2 per layer (key and value)
     // For per-layer shapes: alternates between key and value for each layer
