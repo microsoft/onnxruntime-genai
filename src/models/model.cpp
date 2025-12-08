@@ -670,6 +670,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
       else if (provider_options.name == "VitisAI") {
         session_options.AddConfigEntry("session.inter_op.allow_spinning", "0");
         session_options.AddConfigEntry("session.intra_op.allow_spinning", "0");
+        session_options.AddConfigEntry("model_root", config.config_path.string().c_str());
       } else if (provider_options.name == "NvTensorRtRtx") {
         bool is_multi_profile_enabled = IsMultiProfileEnabled(config.model.decoder.session_options);
         ConfigureNvTensorRtRtxProfile(config, session_options, is_multi_profile_enabled);
@@ -771,6 +772,27 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         values.emplace_back(option.second.c_str());
       }
       session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
+      if (provider_options.name == "VitisAI") {
+        if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
+                                             [](const auto& pair) { return pair.first == "external_ep_library"; });
+            opt_it != provider_options.options.end()) {
+          auto lib_name = opt_it->second;
+          auto lib = LoadLibrary(lib_name.c_str());
+          if (const auto func = (void (*)(void*, const OrtApiBase*, void*, OrtEpFactory**, size_t, size_t*))GetProcAddress(lib, "CreateEpFactories")) {
+            OrtEpFactory* factory = nullptr;
+            size_t num = 1;
+
+            func(nullptr, OrtGetApiBase(), nullptr, &factory, num, &num);
+          }
+          if (const auto func = (void (*)(OrtSessionOptions*))GetProcAddress(lib, "RyzenAI_SetSessionOptions"))
+            func(&session_options);
+
+          if (const auto api = OrtGetApiBase()->GetApi(ORT_API_VERSION)) {
+            void* unused;
+            api->RegisterCustomOpsLibrary(&session_options, lib_name.c_str(), &unused);
+          }
+        }
+      }
 
 #endif
     }
