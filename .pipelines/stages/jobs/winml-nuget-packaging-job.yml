@@ -8,9 +8,6 @@ parameters:
   - name: ort_winml_version
     type: string
 
-  - name: ort_nuget_winml_package_reference_version
-    type: string
-
 jobs:
   - job: winml_nuget_packaging
     displayName: 'WinML NuGet Packaging'
@@ -84,7 +81,8 @@ jobs:
           Write-Host $artifacts
 
           Write-Host "${{ parameters.ort_winml_version }}"
-          Write-Host "${{ parameters.ort_nuget_winml_package_reference_version }}"  
+
+          $ort_winml_version = "${{ parameters.ort_winml_version }}"
 
           $outputDir = '$(Build.BinariesDirectory)/artifact-downloads'
           Write-Host "List extracted artifacts"
@@ -126,13 +124,13 @@ jobs:
           addToPath: true
 
       - powershell: |
-          # Package dependencie
+          # Package dependencies
 
           $ort_nuget_package_name = "Microsoft.WindowsAppSDK.ML"
-          $ort_nuget_winml_package_reference_version = "${{ parameters.ort_nuget_winml_package_reference_version }}"
+          $ort_nuget_winml_package_reference_version = "${{ parameters.ort_winml_version }}"
 
-          Write-Host "ort_nuget_package_name: $ort_nuget_package_name "
-          Write-Host "ort_nuget_winml_package_reference_version: $ort_nuget_winml_package_reference_version "
+          Write-Host "ort_nuget_package_name: $ort_nuget_package_name"
+          Write-Host "ort_nuget_winml_package_reference_version: $ort_nuget_winml_package_reference_version"
 
           $genai_nuget_package_name = "Microsoft.ML.OnnxRuntimeGenAI.WinML"
           Write-Host "##vso[task.setvariable variable=genai_nuget_package_name;]$genai_nuget_package_name"

@@ -68,11 +68,6 @@ parameters:
     type: string
     default: '1.8.2091'
 
-  - name: ort_nuget_winml_package_reference_version
-    displayName: 'Reference verison for Microsoft.WindowsAppSDK.ML.'
-    type: string
-    default: '[1.8.2001,1.8.3000]'
-
   - name: ort_cuda_version
     displayName: 'OnnxRuntime GPU version'
     type: string
@@ -178,7 +173,6 @@ extends:
           nuget_version_type: ${{ parameters.nuget_version_type }}
           enable_winml: ${{ parameters.enable_winml }}
           ort_winml_version: ${{ parameters.ort_winml_version }}
-          ort_nuget_winml_package_reference_version: ${{ parameters.ort_nuget_winml_package_reference_version }}
 
       - ${{ if eq(parameters.enable_post_packaging_validation, true) }}:
           - template: stages/nuget-validation-stage.yml
