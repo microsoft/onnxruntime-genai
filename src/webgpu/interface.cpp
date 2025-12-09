@@ -4,6 +4,7 @@
 #include "../generators.h"
 #include "../search.h"
 #include "interface.h"
+#include "cast_model_builder.h"
 
 namespace Generators {
 namespace WebGPU {
@@ -176,6 +177,66 @@ struct InterfaceImpl : DeviceInterface {
   std::unique_ptr<Search> CreateBeam(const GeneratorParams& params) override { return std::make_unique<BeamSearch_Cpu>(params); }
 
   void Synchronize() override {}  // Nothing to do?
+
+  bool Cast(void* input, void* output, ONNXTensorElementDataType input_type, ONNXTensorElementDataType output_type, size_t element_count) override {
+    if (!ort_allocator_) {
+      throw std::runtime_error("WebGPU allocator not initialized");
+    }
+
+    // Use the global cast session cache from OrtGlobals
+    auto& globals = GetOrtGlobals();
+    uint64_t key = (static_cast<uint64_t>(input_type) << 32) | static_cast<uint64_t>(output_type);
+
+    OrtSession* session = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(globals->cast_sessions_mutex_);
+      auto it = globals->cast_sessions_.find(key);
+      if (it == globals->cast_sessions_.end()) {
+        // Create new session with Cast model
+        auto model_bytes = CreateCastModelBytes(input_type, output_type);
+
+        auto session_options = OrtSessionOptions::Create();
+        session_options->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+
+        // Append WebGPU execution provider with no options
+        session_options->AppendExecutionProvider("WebGPU", nullptr, nullptr, 0);
+
+        auto new_session = OrtSession::Create(GetOrtEnv(), model_bytes.data(), model_bytes.size(), session_options.get());
+        session = new_session.get();
+        globals->cast_sessions_[key] = std::move(new_session);
+      } else {
+        session = it->second.get();
+      }
+    }
+
+    // Get WebGPU allocator's memory info
+    const OrtMemoryInfo* webgpu_mem_info = nullptr;
+    Ort::ThrowOnError(Ort::api->AllocatorGetInfo(ort_allocator_, &webgpu_mem_info));
+
+    // Create input tensor with proper shape [element_count]
+    int64_t shape_val = static_cast<int64_t>(element_count);
+    std::span<const int64_t> shape{&shape_val, 1};
+
+    // Create input OrtValue
+    auto input_tensor = OrtValue::CreateTensor(*webgpu_mem_info, input, element_count * Ort::SizeOf(input_type), shape, input_type);
+
+    // Create output OrtValue
+    auto output_tensor = OrtValue::CreateTensor(*webgpu_mem_info, output, element_count * Ort::SizeOf(output_type), shape, output_type);
+
+    // Use IOBinding for efficient execution
+    auto io_binding = OrtIoBinding::Create(*session);
+
+    // Bind input
+    io_binding->BindInput("input", *input_tensor);
+
+    // Bind output
+    io_binding->BindOutput("output", *output_tensor);
+
+    // Run inference
+    session->Run(nullptr, *io_binding);
+
+    return true;
+  }
 };
 
 }  // namespace WebGPU

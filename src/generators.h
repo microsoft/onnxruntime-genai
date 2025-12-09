@@ -13,6 +13,7 @@
 #include <iostream>
 #include "span.h"
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <queue>
@@ -128,6 +129,7 @@ struct Generator : LeakChecked<Generator> {
 
 struct OrtGlobals {
   OrtGlobals();
+  ~OrtGlobals();  // Need destructor to clean up cast_sessions_
 
   std::unique_ptr<OrtEnv> env_;
 
@@ -136,6 +138,10 @@ struct OrtGlobals {
     std::unique_ptr<OrtSession> session_;
   };
   Allocator device_allocators_[static_cast<int>(DeviceType::MAX)];
+
+  // Cast session cache - must be destroyed before env_
+  std::unordered_map<uint64_t, std::unique_ptr<OrtSession>> cast_sessions_;
+  std::mutex cast_sessions_mutex_;
 
  private:
   OrtGlobals(const OrtGlobals&) = delete;
