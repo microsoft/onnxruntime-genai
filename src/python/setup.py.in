@@ -58,7 +58,7 @@ def _get_install_requires():
     return install_requires
 
 setup(
-    name=package_name,
+    name=package_name + '-ryzenai',
     version='@VERSION_INFO@',
     description='ONNX Runtime GenAI',
     long_description=long_description,
@@ -66,7 +66,9 @@ setup(
     packages=['onnxruntime_genai', 'onnxruntime_genai.models', 'onnxruntime_genai.models.builders'],
     include_package_data=True,
     package_data={'': ['*.pyd', '*.dll', '*.so*', '*.dylib'] + extras},
-    install_requires=_get_install_requires(),
+    install_requires=[
+        'numpy>=1.21.6',
+    ],
     distclass=BinaryDistribution,
     author="Microsoft Corporation",
     author_email="onnxruntime-genai@microsoft.com",
