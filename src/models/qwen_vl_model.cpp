@@ -70,7 +70,7 @@ void Qwen2_5_VL_PipelineState::SetExtraInputs(const std::vector<ExtraInput>& ext
     }
   }
   if (!pixel_values_val) {
-    throw std::runtime_error("Vision pipeline: pixel_values input not found in extra_inputs");
+    return;
   }
 
   auto pixel_type_info = pixel_values_val->GetTensorTypeAndShapeInfo();
