@@ -421,10 +421,66 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
   }
 
   // Add image_grid_thw tensor (either from processor or computed)
-  // Keep as [1, 3] shape - model expects rank 2
+  // Model expects rank 2 shape [num_images, 3] where each row is [temporal, height, width]
   if (image_grid_thw) {
-    named_tensors->emplace("image_grid_thw",
-                           std::make_shared<Tensor>(ProcessTensor<int64_t>(image_grid_thw, allocator)));
+    // Get shape info from image_grid_thw
+    const int64_t* grid_thw_data{};
+    const int64_t* grid_thw_shape{};
+    size_t grid_thw_num_dims;
+    CheckResult(OrtxGetTensorData(image_grid_thw, reinterpret_cast<const void**>(&grid_thw_data),
+                                  &grid_thw_shape, &grid_thw_num_dims));
+    
+    // If rank is 3, reshape to rank 2 by removing singleton dimensions appropriately
+    if (grid_thw_num_dims == 3) {
+      // Calculate the target shape [num_images, 3]
+      // The last dimension should be 3 (for t, h, w)
+      // Find which dimension is 3 and which is the batch/image dimension
+      std::vector<int64_t> target_shape;
+      
+      // Expected output: [num_images, 3]
+      // Common input shapes: [1, 1, 3], [1, 3, 1], [num_images, 1, 3], etc.
+      int64_t num_images = 1;
+      int64_t feature_dim = 3;
+      
+      // Find dimension with value 3 (the feature dimension)
+      int feature_dim_idx = -1;
+      for (size_t i = 0; i < grid_thw_num_dims; ++i) {
+        if (grid_thw_shape[i] == 3) {
+          feature_dim_idx = i;
+          break;
+        }
+      }
+      
+      if (feature_dim_idx == -1) {
+        throw std::runtime_error("image_grid_thw tensor must have a dimension of size 3 for [t, h, w]");
+      }
+      
+      // Calculate num_images from non-feature, non-singleton dimensions
+      for (size_t i = 0; i < grid_thw_num_dims; ++i) {
+        if (i != static_cast<size_t>(feature_dim_idx) && grid_thw_shape[i] > 1) {
+          num_images *= grid_thw_shape[i];
+        }
+      }
+      
+      target_shape = {num_images, feature_dim};
+      
+      // Create reshaped tensor
+      auto reshaped_tensor = OrtValue::CreateTensor<int64_t>(allocator, target_shape);
+      int64_t* dst_data = reshaped_tensor->GetTensorMutableData<int64_t>();
+      
+      // Copy data (total elements remain the same)
+      size_t total_elements = num_images * feature_dim;
+      std::copy(grid_thw_data, grid_thw_data + total_elements, dst_data);
+      
+      named_tensors->emplace("image_grid_thw",
+                             std::make_shared<Tensor>(std::move(reshaped_tensor)));
+    } else if (grid_thw_num_dims == 2) {
+      // Already rank 2, use as-is
+      named_tensors->emplace("image_grid_thw",
+                             std::make_shared<Tensor>(ProcessTensor<int64_t>(image_grid_thw, allocator)));
+    } else {
+      throw std::runtime_error("image_grid_thw tensor has unexpected rank: " + std::to_string(grid_thw_num_dims));
+    }
   } else if (computed_image_grid_thw) {
     named_tensors->emplace("image_grid_thw",
                            std::make_shared<Tensor>(std::move(computed_image_grid_thw)));
