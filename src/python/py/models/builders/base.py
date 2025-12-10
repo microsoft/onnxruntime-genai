@@ -358,14 +358,14 @@ class Model:
         # Quantization-specific variables (INT4, INT8, etc.)
         int4_algo_config = self.make_int4_algo_config(extra_options.get("int4_algo_config", "default"))
         self.int4_block_size = extra_options.get("int4_block_size", 32)
-        
+
         # Validate that only CPU and WebGPU EPs support int4_block_size for QMoE
         if self.ep not in ["cpu", "webgpu"] and "int4_block_size" in extra_options and moe_op_type == "QMoE":
             raise ValueError(
                 f"The 'int4_block_size' option is not supported for {self.ep} execution provider with QMoE. "
                 "Block-wise quantization (block_size attribute) is only supported for CPU and WebGPU execution providers."
             )
-        
+
         self.quant_attrs = {
             "int4": {
                 "accuracy_level": int(
@@ -379,6 +379,12 @@ class Model:
             },
             "use_qdq": extra_options.get("use_qdq", False),
         }
+
+        # Propagate block_size to MoE/QMoE op when supported and requested.
+        # QMoE on CPU/WebGPU supports block-wise quantization via the 'block_size' attribute.
+        # Ensure the attribute is set on the MoE op so runtime kernels can honor it.
+        if self.moe_attrs.get("op_type") == "QMoE" and self.ep in ["cpu", "webgpu"]:
+            self.moe_attrs["block_size"] = int(self.int4_block_size)
         if self.quant_type is not None:
             # Create quantized attributes from quantization config
             self.quant_attrs["config"] = config.quantization_config
