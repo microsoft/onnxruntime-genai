@@ -576,19 +576,26 @@ class GPTOSSModel(Model):
         down_proj_scales = f"model.layers.{layer_id}.moe.experts.down_proj.scales"
         down_proj_bias = f"model.layers.{layer_id}.moe.experts.down_proj.bias"
 
-        # Apply transpose once for both branches
-        gate_up_proj_transposed = mlp.experts.gate_up_proj.transpose(-1, -2)
-        down_proj_transposed = mlp.experts.down_proj.transpose(-1, -2)
+        # Apply transpose depending on EP/op requirements
+        # For quantized QMoE on CUDA, kernels expect scales along the hidden_size axis,
+        # so we keep original orientation (last axis = hidden_size) when quantizing.
+        # For non-quantized MoE or non-CUDA EPs, transpose to align MatMul layout.
+        if op_type == "QMoE" and self.ep == "cuda":
+            gate_up_proj_layout = mlp.experts.gate_up_proj
+            down_proj_layout = mlp.experts.down_proj
+        else:
+            gate_up_proj_layout = mlp.experts.gate_up_proj.transpose(-1, -2)
+            down_proj_layout = mlp.experts.down_proj.transpose(-1, -2)
 
         if op_type == "MoE":
             # Save non-quantized MoE weights as initializers
             self.make_initializer(
-                gate_up_proj_transposed.view(self.moe_attrs["num_experts"], -1, self.hidden_size),
+                gate_up_proj_layout.view(self.moe_attrs["num_experts"], -1, self.hidden_size),
                 gate_up_proj_weight,
                 to=self.io_dtype,
             )
             self.make_initializer(
-                down_proj_transposed.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size),
+                down_proj_layout.view(self.moe_attrs["num_experts"], self.hidden_size, self.intermediate_size),
                 down_proj_weight,
                 to=self.io_dtype,
             )
@@ -598,10 +605,10 @@ class GPTOSSModel(Model):
             down_proj_qweight_list, down_proj_scales_list = [], []
 
             for i in range(self.moe_attrs["num_experts"]):
-                qweight1, scales1 = self.make_qmoe_weights(gate_up_proj_transposed[i])
+                qweight1, scales1 = self.make_qmoe_weights(gate_up_proj_layout[i])
                 gate_up_proj_qweight_list.append(qweight1)
                 gate_up_proj_scales_list.append(scales1)
-                qweight2, scales2 = self.make_qmoe_weights(down_proj_transposed[i])
+                qweight2, scales2 = self.make_qmoe_weights(down_proj_layout[i])
                 down_proj_qweight_list.append(qweight2)
                 down_proj_scales_list.append(scales2)
 
