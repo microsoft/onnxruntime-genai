@@ -110,7 +110,7 @@ file(MAKE_DIRECTORY ${ORT_PACKAGE_LIB_DIR})
 if(WIN32 OR ANDROID OR IOS)
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                       COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                        $<TARGET_FILE_NAME:onnxruntime-genai> ${JAVA_PACKAGE_LIB_DIR})
+                        $<TARGET_FILE:onnxruntime-genai> ${JAVA_PACKAGE_LIB_DIR})
 else()
   add_custom_command(TARGET onnxruntime-genai-jni POST_BUILD
                       COMMAND ${CMAKE_COMMAND} -E copy_if_different
