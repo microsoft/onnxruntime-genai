@@ -3,7 +3,6 @@
 
 #include "../generators.h"
 #include "multi_modal.h"
-#include "vision_pipeline.h"
 
 namespace Generators {
 
@@ -61,19 +60,12 @@ int64_t GetImageFeatureBatchSize(const std::vector<ExtraInput>& extra_inputs) {
 }  // namespace
 
 MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config, OrtEnv& ort_env, bool vision, bool speech)
-    : Model(std::move(config)), ort_env_{ort_env} {
+    : Model(std::move(config)) {
   // The non-decoder models don't support graph capture because of control flow nodes, so disable graph capture for them
   if (vision) {
-    // Check if vision uses pipeline or single model
-    if (!config_->model.vision.pipeline.empty()) {
-      // Vision pipeline mode - create dedicated vision pipeline model
-      vision_pipeline_model_ = std::make_unique<VisionPipelineModel>(std::make_unique<Config>(*config_), ort_env);
-    } else {
-      // Single vision model (legacy mode)
-      vision_session_options_ = OrtSessionOptions::Create();
-      CreateSessionOptionsFromConfig(config_->model.vision.session_options.has_value() ? config_->model.vision.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, true);
-      vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get());
-    }
+    vision_session_options_ = OrtSessionOptions::Create();
+    CreateSessionOptionsFromConfig(config_->model.vision.session_options.has_value() ? config_->model.vision.session_options.value() : config_->model.decoder.session_options, *vision_session_options_, true, true);
+    vision_session_ = CreateSession(ort_env, config_->model.vision.filename, vision_session_options_.get());
   }
 
   if (speech) {
@@ -94,11 +86,7 @@ MultiModalLanguageModel::MultiModalLanguageModel(std::unique_ptr<Config> config,
     session_info_.Add(*speech_session_);
   }
   if (vision) {
-    if (vision_pipeline_model_) {
-      // Vision pipeline sessions are already added to session_info_ in VisionPipelineModel constructor
-    } else if (vision_session_) {
-      session_info_.Add(*vision_session_);
-    }
+    session_info_.Add(*vision_session_);
   }
 }
 
@@ -108,12 +96,7 @@ std::unique_ptr<State> MultiModalLanguageModel::CreateState(DeviceSpan<int32_t> 
 
 VisionState::VisionState(const MultiModalLanguageModel& model, const GeneratorParams& params)
     : State{params, model},
-      model_{model} {
-  // Create vision pipeline state if using pipeline model
-  if (model_.vision_pipeline_model_) {
-    vision_pipeline_state_ = std::make_unique<VisionPipelineState>(*model_.vision_pipeline_model_, params);
-  }
-}
+      model_{model} {}
 
 void VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_images, const int64_t num_image_tokens) {
   num_image_tokens_ = num_image_tokens;
@@ -123,33 +106,14 @@ void VisionState::SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, co
                                                          model_.config_->model.vision.outputs.image_features,
                                                          num_images_, num_image_tokens_);
   image_features_->Add();
-  
-  // For pipeline models, delegate to vision pipeline state
-  if (vision_pipeline_state_) {
-    vision_pipeline_state_->SetExtraInputs(extra_inputs, num_images, num_image_tokens);
-  } else {
-    // Single vision model (legacy)
-    extra_inputs_.Add(extra_inputs, model_.vision_session_->GetInputNames());
-  }
+  extra_inputs_.Add(extra_inputs, model_.vision_session_->GetInputNames());
 }
 
 DeviceSpan<float> VisionState::Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) {
   if (model_.config_->model.vision.run_options.has_value()) {
     State::SetRunOptions(model_.config_->model.vision.run_options.value());
   }
-  
-  // Check if using pipeline
-  if (vision_pipeline_state_) {
-    // Delegate to vision pipeline state
-    vision_pipeline_state_->Run(current_length, next_tokens, next_indices);
-    
-    // Copy final output to image_features_ if needed
-    // The image_features_ buffer will be used by embedding state
-  } else {
-    // Single vision model (legacy)
-    State::Run(*model_.vision_session_);
-  }
-  
+  State::Run(*model_.vision_session_);
   return {};
 }
 
@@ -247,7 +211,7 @@ MultiModalPipelineState::MultiModalPipelineState(const MultiModalLanguageModel& 
     : State{params, model},
       model_{model},
       adapters_{std::make_shared<Adapters>(&model_)} {
-  if (model_.vision_session_ || model_.vision_pipeline_model_) {
+  if (model_.vision_session_) {
     vision_state_ = std::make_unique<VisionState>(model_, params);
   }
   if (model_.speech_session_) {
