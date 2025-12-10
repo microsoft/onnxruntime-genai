@@ -176,7 +176,7 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   // Set the size after empty_past_ has been created with 0 for this field
-  if (model_.config_->model.decoder.sliding_window.has_value() &&
+  if (state_.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx && model_.config_->model.decoder.sliding_window.has_value() &&
       model_.config_->model.decoder.sliding_window->window_size > 0) {
     const int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
     const int max_length = state_.params_->search.max_length;
@@ -270,13 +270,11 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
   }
 
   if (!layer_shapes_.empty()) {
-    // Update per-layer shapes based on total_length, but respect max allocations
+    // Per-layer allocation with per-layer capacity constraints
     for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
-      const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
-      const int actual_length = std::min(total_length, max_cache_length);
-
       std::array<int64_t, 4> current_shape = layer_shapes_[layer_idx];
-      current_shape[2] = actual_length;
+      const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
+      current_shape[2] = std::min(total_length, max_cache_length);
 
       // Key tensor
       presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
@@ -287,7 +285,7 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
       state_.outputs_[output_index_ + layer_idx * 2 + 1] = presents_[layer_idx * 2 + 1].get();
     }
   } else {
-    // Uniform shape update (existing behavior)
+    // Uniform allocation
     shape_[2] = total_length;
     for (int i = 0; i < layer_count_ * 2; i++) {
       presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);

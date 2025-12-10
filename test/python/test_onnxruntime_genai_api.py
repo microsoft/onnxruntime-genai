@@ -4,14 +4,13 @@
 from __future__ import annotations
 
 import os
-import sys
-import sysconfig
-from pathlib import Path
 import shutil
+import sysconfig
 import tempfile
-import onnxruntime
+from pathlib import Path
 
 import numpy as np
+import onnxruntime
 import onnxruntime_genai as og
 import pytest
 
@@ -37,9 +36,7 @@ if og.is_openvino_available():
 
 
 def test_config(test_data_path):
-    model_path = os.fspath(
-        Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32"
-    )
+    model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
     config = og.Config(model_path)
     config.clear_providers()
     config.append_provider("cuda")
@@ -47,6 +44,7 @@ def test_config(test_data_path):
     config.set_provider_option("cuda", "infinite_clock", "1")
     config.set_provider_option("quantum", "break_universe", "true")
     config.append_provider("slide rule")
+
 
 def test_log_callback(test_data_path):
     callback_invoked = False
@@ -72,6 +70,7 @@ def test_log_callback(test_data_path):
     og.set_log_callback(None)
     og.set_log_options(enabled=False)
 
+
 def test_log_filename(test_data_path):
     callback_invoked = False
 
@@ -81,7 +80,7 @@ def test_log_filename(test_data_path):
 
     og.set_log_callback(_log_callback)
 
-    with tempfile.NamedTemporaryFile(mode='w+', suffix='.txt', delete=False) as log_file:
+    with tempfile.NamedTemporaryFile(mode="w+", suffix=".txt", delete=False) as log_file:
         og.set_log_options(enabled=True, generate_next_token=True, filename=log_file.name)
 
         model_path = os.fspath(Path(test_data_path) / "hf-internal-testing" / "tiny-random-gpt2-fp32")
@@ -95,19 +94,18 @@ def test_log_filename(test_data_path):
 
         assert os.path.exists(log_file.name), f"Log file {log_file.name} was not created"
         assert os.path.getsize(log_file.name) > 0, f"Log file {log_file.name} is empty"
-        assert not callback_invoked, "Log callback was invoked. It should not have been since it was overridden by the log file."
+        assert not callback_invoked, (
+            "Log callback was invoked. It should not have been since it was overridden by the log file."
+        )
 
     og.set_log_options(enabled=False, filename="")
     og.set_log_callback(None)
 
+
 def test_NamedTensors():
     named_tensors = og.NamedTensors()
-    named_tensors["input_ids"] = np.array(
-        [[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32
-    )
-    named_tensors["attention_mask"] = np.array(
-        [[1, 1, 1, 1], [1, 1, 1, 1]], dtype=np.int32
-    )
+    named_tensors["input_ids"] = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
+    named_tensors["attention_mask"] = np.array([[1, 1, 1, 1], [1, 1, 1, 1]], dtype=np.int32)
     named_tensors["test1"] = og.Tensor(np.random.rand(2, 2).astype(np.float32))
     named_tensors["test2"] = og.Tensor(np.random.rand(2, 2).astype(np.float32))
 
@@ -146,19 +144,19 @@ def test_greedy_search(test_data_path, relative_model_path):
     search_params = og.GeneratorParams(model)
     batch_size = 2
     search_params = og.GeneratorParams(model)
-    search_params.set_search_options(
-        do_sample=False, max_length=10, batch_size=batch_size
-    )
+    search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32))
-    while not generator.is_done():
+    while True:
         # Test getting/setting logits
         logits = generator.get_logits()
         generator.set_logits(logits)
         generator.set_logits(logits)  # twice just to be sure buffer is still valid
 
         generator.generate_next_token()
+        if generator.is_done():
+            break
 
     expected_sequence = np.array(
         [
@@ -191,38 +189,38 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     # Batch size 1 (continuous decoding) case
     batch_size = 1
     search_params = og.GeneratorParams(model)
-    search_params.set_search_options(
-        do_sample=False, max_length=10, batch_size=batch_size
-    )
+    search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
-    while not generator.is_done():
+    while True:
         generator.generate_next_token()
+        if generator.is_done():
+            break
 
     assert generator.get_sequence(0) is not None
 
     generator.rewind_to(3)
 
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
-    while not generator.is_done():
+    while True:
         generator.generate_next_token()
+        if generator.is_done():
+            break
 
     assert generator.get_sequence(0) is not None
 
     # Batch size > 1 case
     batch_size = 3
     search_params = og.GeneratorParams(model)
-    search_params.set_search_options(
-        do_sample=False, max_length=10, batch_size=batch_size
-    )
+    search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
 
     generator = og.Generator(model, search_params)
-    generator.append_tokens(
-        np.array([[0, 0, 0, 52], [0, 0, 195, 731], [64, 65, 66, 67]], dtype=np.int32)
-    )
-    while not generator.is_done():
+    generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731], [64, 65, 66, 67]], dtype=np.int32))
+    while True:
         generator.generate_next_token()
+        if generator.is_done():
+            break
 
     for i in range(batch_size):
         assert generator.get_sequence(i) is not None
@@ -235,8 +233,10 @@ def test_rewind_cuda(test_data_path, relative_model_path):
             dtype=np.int32,
         )
     )
-    while not generator.is_done():
+    while True:
         generator.generate_next_token()
+        if generator.is_done():
+            break
 
     for i in range(batch_size):
         assert generator.get_sequence(i) is not None
@@ -255,30 +255,33 @@ def test_rewind(test_data_path, relative_model_path):
         [0, 0, 195, 731, 731, 114, 114, 114, 114, 114],
         dtype=np.int32,
     )
-    
+
     batch_size = 1
     search_params = og.GeneratorParams(model)
-    search_params.set_search_options(
-        do_sample=False, max_length=10, batch_size=batch_size
-    )
+    search_params.set_search_options(do_sample=False, max_length=10, batch_size=batch_size)
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
-    while not generator.is_done():
+    while True:
         generator.generate_next_token()
+        if generator.is_done():
+            break
 
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
 
     generator.rewind_to(3)
 
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
-    while not generator.is_done():
+    while True:
         generator.generate_next_token()
+        if generator.is_done():
+            break
 
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
 
 
 # Test Model Loading with No Chat Template
+
 
 @pytest.mark.skipif(
     sysconfig.get_platform().endswith("arm64"),
@@ -321,7 +324,7 @@ def test_phi3_chat_template(device, phi3_for):
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
 
-    messages = f"""[{{"role": "system", "content": "This is a test."}}, {{"role": "user", "content": "Hi, how are you?"}}]"""
+    messages = """[{"role": "system", "content": "This is a test."}, {"role": "user", "content": "Hi, how are you?"}]"""
 
     try:
         tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
@@ -341,15 +344,13 @@ def test_phi2_chat_template(device, phi2_for):
     model = og.Model(model_path)
     tokenizer = og.Tokenizer(model)
 
-    messages = f"""[{{"role": "system", "content": "This is a test."}}, {{"role": "user", "content": "Hi, how are you?"}}]"""
+    messages = """[{"role": "system", "content": "This is a test."}, {"role": "user", "content": "Hi, how are you?"}]"""
 
     # Note: this should work, even though phi-2 has no official chat template, as we override it and pass one in
     template = """{% for message in messages %}{% if message['role'] == 'system' %}{{'<|system|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'user' %}{{'<|user|>\n' + message['content'] + '<|end|>\n'}}{% elif message['role'] == 'assistant' %}{{'<|assistant|>\n' + message['content'] + '<|end|>\n'}}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|assistant|>\n' }}{% else %}{{ eos_token }}{% endif %}"""
     template_string = f"""{template}"""
     try:
-        tokenizer.apply_chat_template(
-            template_str=template_string, messages=messages, add_generation_prompt=True
-        )
+        tokenizer.apply_chat_template(template_str=template_string, messages=messages, add_generation_prompt=True)
     except Exception as e:
         assert False, f"Error while trying to override chat template: {e}"
 
@@ -378,6 +379,7 @@ def test_tokenizer_stream(device, phi2_for):
 
         assert decoded_string == prompt
 
+
 @pytest.mark.skipif(
     sysconfig.get_platform().endswith("arm64"),
     reason="Model is not available on arm64.",
@@ -401,10 +403,13 @@ def test_batching(device, phi2_for):
 
     generator = og.Generator(model, params)
     generator.append_tokens(tokenizer.encode_batch(prompts))
-    while not generator.is_done():
+    while True:
         generator.generate_next_token()
+        if generator.is_done():
+            break
     for i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
+
 
 @pytest.mark.skipif(
     sysconfig.get_platform().endswith("arm64"),
@@ -429,10 +434,13 @@ def test_e2e(device, phi2_for):
 
     generator = og.Generator(model, params)
     generator.append_tokens(tokenizer.encode_batch(prompts))
-    while not generator.is_done():
+    while True:
         generator.generate_next_token()
+        if generator.is_done():
+            break
     for i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
+
 
 @pytest.mark.skipif(
     sysconfig.get_platform().endswith("arm64"),
@@ -444,7 +452,7 @@ def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
     model_path = phi2_for(device)
     config = og.Config(model_path)
     model_data = None
-    with open(os.path.join(model_path, "model.onnx"), 'rb') as model_file:
+    with open(os.path.join(model_path, "model.onnx"), "rb") as model_file:
         model_data = wrapper_bytes_function(model_file.read())
 
     config.add_model_data("model.onnx", model_data)
@@ -461,10 +469,13 @@ def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
 
     generator = og.Generator(model, params)
     generator.append_tokens(tokenizer.encode_batch(prompts))
-    while not generator.is_done():
+    while True:
         generator.generate_next_token()
+        if generator.is_done():
+            break
     for i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
+
 
 @pytest.mark.parametrize(
     "relative_model_path",
@@ -507,9 +518,7 @@ def test_get_output(test_data_path, relative_model_path):
 
     search_params = og.GeneratorParams(model)
     input_ids = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
-    search_params.set_search_options(
-        do_sample=False, max_length=10, batch_size=input_ids.shape[0]
-    )
+    search_params.set_search_options(do_sample=False, max_length=10, batch_size=input_ids.shape[0])
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(input_ids)
@@ -546,9 +555,7 @@ def test_get_output(test_data_path, relative_model_path):
         ]
     )
     logits = generator.get_output("logits")
-    assert np.allclose(
-        logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3
-    )
+    assert np.allclose(logits[:, :, ::200], expected_sampled_logits_token_gen, atol=1e-3)
 
 
 @pytest.mark.skipif(
@@ -561,9 +568,7 @@ def test_hidden_states(qwen_for, device):
 
     search_params = og.GeneratorParams(model)
     input_ids = np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32)
-    search_params.set_search_options(
-        do_sample=False, max_length=10, batch_size=input_ids.shape[0]
-    )
+    search_params.set_search_options(do_sample=False, max_length=10, batch_size=input_ids.shape[0])
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(input_ids)
@@ -575,9 +580,7 @@ def test_hidden_states(qwen_for, device):
     assert hidden_states.shape == (2, 1, 896)
 
 
-@pytest.mark.skipif(
-    not og.is_cuda_available(), reason="Pipeline model uses a mix of CPU and CUDA EP."
-)
+@pytest.mark.skipif(not og.is_cuda_available(), reason="Pipeline model uses a mix of CPU and CUDA EP.")
 @pytest.mark.parametrize("relative_model_path", [Path("pipeline-model")])
 def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
     def _extract_subgraph(
@@ -610,19 +613,10 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
             (["input_ids"], ["/model/embed_tokens/Gather/output_0"]),
             (
                 ["/model/embed_tokens/Gather/output_0", "attention_mask"]
-                + [
-                    f"past_key_values.{i}.{kv}"
-                    for kv in ["key", "value"]
-                    for i in range(num_layers)
-                ],
-                ["hidden_states"]
-                + [
-                    f"present.{i}.{kv}"
-                    for kv in ["key", "value"]
-                    for i in range(num_layers)
-                ],
+                + [f"past_key_values.{i}.{kv}" for kv in ["key", "value"] for i in range(num_layers)],
+                ["hidden_states"] + [f"present.{i}.{kv}" for kv in ["key", "value"] for i in range(num_layers)],
             ),
-            ([f"hidden_states"], ["logits"]),
+            (["hidden_states"], ["logits"]),
         ]
 
         for i, split_name in enumerate(["embeds", "transformer", "lm_head"]):
@@ -654,8 +648,10 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
 
     generator = og.Generator(model, params)
     generator.append_tokens(tokenizer.encode_batch(prompts))
-    while not generator.is_done():
+    while True:
         generator.generate_next_token()
+        if generator.is_done():
+            break
 
     expected_output = [
         "This is a test.\n        # TOD import * doct proofingrad",
@@ -668,8 +664,8 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
 
         if not equal:
             print("test_pipeline_model:", flush=True)
-            print(f"expected = {repr(expected_output[i])}", flush=True)
-            print(f"actual = {repr(actual_output)}", flush=True)
+            print(f"expected = {expected_output[i]!r}", flush=True)
+            print(f"actual = {actual_output!r}", flush=True)
         assert equal
 
 
@@ -690,9 +686,7 @@ def test_vision_preprocessing(test_data_path, relative_model_path, relative_imag
 
 @pytest.mark.parametrize("relative_model_path", [Path("vision-preprocessing")])
 @pytest.mark.parametrize("relative_image_path", [Path("images") / "sheet.png"])
-def test_vision_preprocessing_load_image_from_bytes(
-    test_data_path, relative_model_path, relative_image_path
-):
+def test_vision_preprocessing_load_image_from_bytes(test_data_path, relative_model_path, relative_image_path):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
     model = og.Model(model_path)
 
@@ -713,23 +707,20 @@ def test_vision_preprocessing_load_image_from_bytes(
     "relative_image_paths",
     [[Path("images") / "australia.jpg", Path("images") / "sheet.png"]],
 )
-def test_vision_preprocessing_multiple_images(
-    test_data_path, relative_model_path, relative_image_paths
-):
+def test_vision_preprocessing_multiple_images(test_data_path, relative_model_path, relative_image_paths):
     model_path = os.fspath(Path(test_data_path) / relative_model_path)
     model = og.Model(model_path)
 
     processor = model.create_multimodal_processor()
 
     image_paths = [
-        os.fspath(Path(test_data_path) / relative_image_path)
-        for relative_image_path in relative_image_paths
+        os.fspath(Path(test_data_path) / relative_image_path) for relative_image_path in relative_image_paths
     ]
     images = og.Images.open(*image_paths)
 
     prompt = "<|user|>\n"
     for i in range(len(relative_image_paths)):
-        prompt += f"<|image_{i+1}|>\n"
+        prompt += f"<|image_{i + 1}|>\n"
 
     prompt += " What is shown in this two images?\n<|end|>\n<|assistant|>\n"
     _ = processor(prompt, images=images)
@@ -774,9 +765,7 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
         model.graph.input.extend([adapter_a, adapter_b])
 
         for adapter_name in ["adapter_a", "adapter_b"]:
-            adapter_weight = np.zeros(
-                [vocab_size], dtype=(np.float32 if device == "cpu" else np.float16)
-            )
+            adapter_weight = np.zeros([vocab_size], dtype=(np.float32 if device == "cpu" else np.float16))
             adapter_weight_tensor = onnx.helper.make_tensor(
                 adapter_name,
                 onnx.TensorProto.FLOAT if device == "cpu" else onnx.TensorProto.FLOAT16,
@@ -785,9 +774,7 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
             )
             model.graph.initializer.append(adapter_weight_tensor)
 
-        add_node = onnx.helper.make_node(
-            "Add", ["adapter_a", "adapter_b"], ["adapter_output"], name="adapter_add"
-        )
+        add_node = onnx.helper.make_node("Add", ["adapter_a", "adapter_b"], ["adapter_output"], name="adapter_add")
         add_to_logits_node = onnx.helper.make_node(
             "Add", ["adapter_output", "logits_0"], ["logits"], name="add_to_logits"
         )
@@ -811,12 +798,8 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
 
         onnx_dtype = 1 if device == "cpu" else 10
         adapters = {
-            "adapter_a": onnxruntime.OrtValue.ortvalue_from_numpy_with_onnx_type(
-                a, onnx_dtype
-            ),
-            "adapter_b": onnxruntime.OrtValue.ortvalue_from_numpy_with_onnx_type(
-                b, onnx_dtype
-            ),
+            "adapter_a": onnxruntime.OrtValue.ortvalue_from_numpy_with_onnx_type(a, onnx_dtype),
+            "adapter_b": onnxruntime.OrtValue.ortvalue_from_numpy_with_onnx_type(b, onnx_dtype),
         }
         if multiple_adapters:
             adapters = [{key: value} for key, value in adapters.items()]
@@ -831,9 +814,7 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
         adapter_paths = []
         if multiple_adapters:
             for i, adapter in enumerate(adapters):
-                adapter_file_name = str(
-                    Path(adapter_model_path) / f"adapter_{i}.onnx_adapter"
-                )
+                adapter_file_name = str(Path(adapter_model_path) / f"adapter_{i}.onnx_adapter")
                 _export_adapter(adapter, adapter_file_name)
                 adapter_paths.append(adapter_file_name)
         else:
@@ -867,8 +848,10 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
         generator.set_active_adapter(adapters, f"adapter_{i}")
 
     generator.append_tokens(tokenizer.encode_batch(prompts))
-    while not generator.is_done():
+    while True:
         generator.generate_next_token()
+        if generator.is_done():
+            break
 
 
 @pytest.mark.parametrize("device", devices)
@@ -952,8 +935,10 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
     else:
         generator.append_tokens(tokenizer.encode_batch(prompts))
 
-        while not generator.is_done():
+        while True:
             generator.generate_next_token()
+            if generator.is_done():
+                break
 
 
 @pytest.mark.parametrize("relative_model_path", [Path("audio-preprocessing")])
@@ -985,8 +970,7 @@ def test_audio_preprocessing_multiple_audios(test_data_path, relative_model_path
     processor = model.create_multimodal_processor()
 
     audio_paths = [
-        os.fspath(Path(test_data_path) / relative_audio_path)
-        for relative_audio_path in relative_audio_paths
+        os.fspath(Path(test_data_path) / relative_audio_path) for relative_audio_path in relative_audio_paths
     ]
     audios = og.Audios.open(*audio_paths)
 

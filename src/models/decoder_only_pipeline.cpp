@@ -112,8 +112,8 @@ DecoderOnlyPipelineState::DecoderOnlyPipelineState(const DecoderOnlyPipelineMode
                                                    DeviceSpan<int32_t> sequence_lengths,
                                                    const GeneratorParams& params)
     : State{params, model},
-      model_{model},
       input_ids_{CreateInputIDs(*this)},
+      model_{model},
       key_value_cache_{CreateKeyValueCache(*this)},
       do_key_value_cache_partial_update_{key_value_cache_ && key_value_cache_->IsPartialUpdateSupported()},
       position_inputs_{CreatePositionInputs(*this, sequence_lengths, model_.config_->model.decoder.inputs.attention_mask)} {

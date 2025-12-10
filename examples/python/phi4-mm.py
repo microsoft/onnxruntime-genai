@@ -2,14 +2,15 @@
 # Licensed under the MIT License
 
 import argparse
-import os
 import glob
+import os
 import time
 from pathlib import Path
 
 import onnxruntime_genai as og
 
 # og.set_log_options(enabled=True, model_input_values=True, model_output_values=True)
+
 
 def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
     curr_path = Path(current_dir).absolute()
@@ -20,7 +21,7 @@ def _find_dir_contains_sub_dir(current_dir: Path, target_dir_name):
         if curr_path.parent == curr_path:
             # Root dir
             return None
-        return _find_dir_contains_sub_dir(curr_path / '..', target_dir_name)
+        return _find_dir_contains_sub_dir(curr_path / "..", target_dir_name)
 
 
 def _complete(text, state):
@@ -33,6 +34,7 @@ def get_paths(modality, user_provided_paths, default_paths, interactive):
     if interactive:
         try:
             import readline
+
             readline.set_completer_delims(" \t\n;")
             readline.parse_and_bind("tab: complete")
             readline.set_completer(_complete)
@@ -41,9 +43,9 @@ def get_paths(modality, user_provided_paths, default_paths, interactive):
             pass
         paths = [
             path.strip()
-            for path in input(
-                f"{modality.capitalize()} Path (comma separated; leave empty if no {modality}): "
-            ).split(",")
+            for path in input(f"{modality.capitalize()} Path (comma separated; leave empty if no {modality}): ").split(
+                ","
+            )
         ]
     else:
         paths = user_provided_paths if user_provided_paths else default_paths
@@ -72,14 +74,28 @@ def run(args: argparse.Namespace):
         image_paths = get_paths(
             modality="image",
             user_provided_paths=args.image_paths,
-            default_paths=[str(_find_dir_contains_sub_dir(Path(__file__).parent, "test") / "test_models" / "images" / "australia.jpg")],
-            interactive=interactive
+            default_paths=[
+                str(
+                    _find_dir_contains_sub_dir(Path(__file__).parent, "test")
+                    / "test_models"
+                    / "images"
+                    / "australia.jpg"
+                )
+            ],
+            interactive=interactive,
         )
         audio_paths = get_paths(
             modality="audio",
             user_provided_paths=args.audio_paths,
-            default_paths=[str(_find_dir_contains_sub_dir(Path(__file__).parent, "test") / "test_models" / "audios" / "1272-141231-0002.mp3")],
-            interactive=interactive
+            default_paths=[
+                str(
+                    _find_dir_contains_sub_dir(Path(__file__).parent, "test")
+                    / "test_models"
+                    / "audios"
+                    / "1272-141231-0002.mp3"
+                )
+            ],
+            interactive=interactive,
         )
 
         images = None
@@ -94,7 +110,7 @@ def run(args: argparse.Namespace):
                 if not os.path.exists(image_path):
                     raise FileNotFoundError(f"Image file not found: {image_path}")
                 print(f"Using image: {image_path}")
-                prompt += f"<|image_{i+1}|>\n"
+                prompt += f"<|image_{i + 1}|>\n"
             images = og.Images.open(*image_paths)
 
         # Get audios
@@ -105,9 +121,8 @@ def run(args: argparse.Namespace):
                 if not os.path.exists(audio_path):
                     raise FileNotFoundError(f"Audio file not found: {audio_path}")
                 print(f"Using audio: {audio_path}")
-                prompt += f"<|audio_{i+1}|>\n"
+                prompt += f"<|audio_{i + 1}|>\n"
             audios = og.Audios.open(*audio_paths)
-
 
         if interactive:
             text = input("Prompt: ")
@@ -117,7 +132,7 @@ def run(args: argparse.Namespace):
             else:
                 text = "Does the audio summarize what is shown in the image? If not, what is different?"
         prompt += f"{text}<|end|>\n<|assistant|>\n"
-        
+
         print("Processing inputs...")
         inputs = processor(prompt, images=images, audios=audios)
         print("Processor complete.")
@@ -130,8 +145,10 @@ def run(args: argparse.Namespace):
         generator.set_inputs(inputs)
         start_time = time.time()
 
-        while not generator.is_done():
+        while True:
             generator.generate_next_token()
+            if generator.is_done():
+                break
 
             new_token = generator.get_next_tokens()[0]
             print(tokenizer_stream.decode(new_token), end="", flush=True)
@@ -152,23 +169,30 @@ def run(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("-m", "--model_path", type=str, required=True, help="Path to the folder containing the model")
     parser.add_argument(
-        "-m", "--model_path", type=str, required=True, help="Path to the folder containing the model"
+        "-e",
+        "--execution_provider",
+        type=str,
+        required=False,
+        default="follow_config",
+        choices=["cpu", "cuda", "dml", "follow_config"],
+        help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.",
     )
     parser.add_argument(
-        "-e", "--execution_provider", type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead."
+        "--image_paths", nargs="*", type=str, required=False, help="Path to the images, mainly for CI usage"
     )
     parser.add_argument(
-        "--image_paths", nargs='*', type=str, required=False, help="Path to the images, mainly for CI usage"
+        "--audio_paths", nargs="*", type=str, required=False, help="Path to the audios, mainly for CI usage"
     )
     parser.add_argument(
-        "--audio_paths", nargs='*', type=str, required=False, help="Path to the audios, mainly for CI usage"
+        "-pr", "--prompt", required=False, help="Input prompts to generate tokens from, mainly for CI usage"
     )
     parser.add_argument(
-        '-pr', '--prompt', required=False, help='Input prompts to generate tokens from, mainly for CI usage'
-    )
-    parser.add_argument(
-        '--non-interactive', action=argparse.BooleanOptionalAction, required=False, help='Non-interactive mode, mainly for CI usage'
+        "--non-interactive",
+        action=argparse.BooleanOptionalAction,
+        required=False,
+        help="Non-interactive mode, mainly for CI usage",
     )
     args = parser.parse_args()
     run(args)

@@ -318,14 +318,24 @@ DeviceSpan<int32_t> Generator::AllocateInputIdsOnDevice(cpu_span<const int32_t> 
 
   auto input_ids_device = state_->params_->p_device->Allocate<int32_t>(padded_input_ids_size);
   auto cpu_span = input_ids_device.CpuSpan();
-  auto padding_begin = cpu_span.begin();
-  auto data_end = cpu_span.end();
-  if (model_->config_->model.decoder.sliding_window.has_value() && model_->config_->model.decoder.sliding_window->alignment == "left") {
-    padding_begin = cpu_span.begin() + input_ids.size();
-    data_end = padding_begin;
+
+  // Handle padding based on alignment setting for sliding window models
+  if (padded_input_ids_size > input_ids.size()) {
+    const bool left_align = model_->config_->model.decoder.sliding_window.has_value() &&
+                            model_->config_->model.decoder.sliding_window->alignment == "left";
+
+    if (left_align) {
+      // Left alignment: padding first, then data
+      std::fill_n(cpu_span.begin(), padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
+      std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin() + (padded_input_ids_size - input_ids.size()));
+    } else {
+      // Right alignment (default): data first, then padding
+      std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
+      std::fill(cpu_span.begin() + input_ids.size(), cpu_span.end(), model_->config_->model.pad_token_id);
+    }
+  } else {
+    std::copy(input_ids.begin(), input_ids.end(), cpu_span.begin());
   }
-  std::fill_n(padding_begin, padded_input_ids_size - input_ids.size(), model_->config_->model.pad_token_id);
-  std::copy_backward(input_ids.begin(), input_ids.end(), data_end);
   input_ids_device.CopyCpuToDevice();
   return input_ids_device;
 }
@@ -444,7 +454,7 @@ void Generator::SetRuntimeOption(const char* key, const char* value) {
   state_->SetRunOption(key, value);
 }
 
-bool Generator::IsDone() const {
+bool Generator::IsDone() {
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (computed_logits_) {
     return false;
@@ -453,6 +463,10 @@ bool Generator::IsDone() const {
   bool is_done = search_->IsDone();
   if (is_done) {
     state_->Finalize(search_->GetSequenceLength());
+    if (guidance_logits_processor_) {
+      guidance_logits_processor_->Reset();
+      last_action_ = Action::standard;
+    }
   }
 
   return is_done;
@@ -472,7 +486,7 @@ void Generator::GenerateNextToken() {
 
   ThrowErrorIfSessionTerminated(state_->session_terminated_);
   if (search_->GetSequenceLength() == 0 && !computed_logits_)
-    throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or params.SetInputs before calling GenerateNextToken.");
+    throw std::runtime_error("GenerateNextToken called with no prior state. Please call AppendTokens, SetLogits, or SetInputs before calling GenerateNextToken.");
 
   // TRT-RTX and DML EPs use a single rope factor for all tokens: https://github.com/microsoft/onnxruntime-genai/blob/d5dc8cb02fd02b0dce99c6938449566371da0d28/src/python/py/models/builder.py#L1464-L1473
   // TODO: change this when these EPs support multi rope factors

@@ -85,6 +85,10 @@ if(MSVC)
     "$<$<COMPILE_LANGUAGE:C>:/wd4100>"
     "$<$<COMPILE_LANGUAGE:CXX>:/wd4100>"
 
+    # Suppress warning C4819: file contains character that cannot be represented in current code page
+    "$<$<COMPILE_LANGUAGE:C>:/wd4819>"
+    "$<$<COMPILE_LANGUAGE:CXX>:/wd4819>"
+
     # Enable warning level 4 (more aggressive than default /W3)
     # Captures more potential bugs or code smells
     "$<$<COMPILE_LANGUAGE:C>:/W4>"

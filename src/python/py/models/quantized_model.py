@@ -13,11 +13,11 @@ so that the original Hugging Face --> ONNX code can store the quantized weights 
 ONNX Runtime's format no matter where the quantized weights actually come from.
 """
 
-from safetensors.torch import load_file
-import torch
-
 import os
 import re
+
+import torch
+from safetensors.torch import load_file
 
 
 class QuantizedTensorModule:
@@ -60,6 +60,7 @@ class TensorModule:
         self.weight = None
         self.bias = None
 
+
 class QuantizedAttention:
     def __init__(self):
         self.q_proj = QuantizedTensorModule()
@@ -69,6 +70,7 @@ class QuantizedAttention:
         self.rotary_emb = TensorModule()
         self.k_norm = TensorModule()
         self.q_norm = TensorModule()
+
 
 class QuantizedMLP:
     def __init__(self):
@@ -110,7 +112,6 @@ class QuantizedModel:
 
                 # Map weights to modules
                 for name, tensor in weights.items():
-
                     # Per-layer quantization support
                     local_bits = self.get_layer_bits(name)  # codeql[py/init-calls-subclass]
                     local_group_size = self.get_layer_group_size(name)  # codeql[py/init-calls-subclass]
@@ -228,27 +229,43 @@ class QuantizedModel:
                         elif bool(re.match(r"^model.layers\.\d+\.self_attn.v_proj\.bias$", name)):
                             # model.layers.layer_id.self_attn.v_proj.bias
                             tensor_map["self_attn.v_proj.bias"] = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.q?weight$", name)):
+                        elif bool(
+                            re.match(r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.q?weight$", name)
+                        ):
                             # model.layers.layer_id.self_attn.o_proj.qweight
                             # model.layers.layer_id.self_attention.dense.qweight
                             tensor_map["self_attn.o_proj.qweight"] = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.(scales|weight_scale)$", name)):
+                        elif bool(
+                            re.match(
+                                r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.(scales|weight_scale)$",
+                                name,
+                            )
+                        ):
                             # model.layers.layer_id.self_attn.o_proj.scales
                             # model.layers.layer_id.self_attention.dense.scales
                             # model.layers.layer_id.self_attn.o_proj.weight_scale
                             # model.layers.layer_id.self_attention.dense.weight_scale
                             tensor_map["self_attn.o_proj.scales"] = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.(qzeros|weight_zero_point)$", name)):
+                        elif bool(
+                            re.match(
+                                r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.(qzeros|weight_zero_point)$",
+                                name,
+                            )
+                        ):
                             # model.layers.layer_id.self_attn.o_proj.qzeros
                             # model.layers.layer_id.self_attention.dense.qzeros
                             # model.layers.layer_id.self_attn.o_proj.weight_zero_point
                             # model.layers.layer_id.self_attention.dense.weight_zero_point
                             tensor_map["self_attn.o_proj.qzeros"] = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.g_idx$", name)):
+                        elif bool(
+                            re.match(r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.g_idx$", name)
+                        ):
                             # model.layers.layer_id.self_attn.o_proj.g_idx
                             # model.layers.layer_id.self_attention.dense.g_idx
                             tensor_map["self_attn.o_proj.g_idx"] = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.bias$", name)):
+                        elif bool(
+                            re.match(r"^model.layers\.\d+\.(self_attn.o_proj|self_attention.dense)\.bias$", name)
+                        ):
                             # model.layers.layer_id.self_attn.o_proj.bias
                             # model.layers.layer_id.self_attention.dense.bias
                             tensor_map["self_attn.o_proj.bias"] = tensor
@@ -312,13 +329,19 @@ class QuantizedModel:
                             # model.layers.layer_id.mlp.down_proj.weight
                             # model.layers.layer_id.mlp.dense_4h_to_h.weight
                             tensor_map["mlp.down_proj.qweight"] = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(down_proj|dense_4h_to_h)\.(scales|weight_scale)$", name)):
+                        elif bool(
+                            re.match(r"^model.layers\.\d+\.mlp.(down_proj|dense_4h_to_h)\.(scales|weight_scale)$", name)
+                        ):
                             # model.layers.layer_id.mlp.down_proj.scales
                             # model.layers.layer_id.mlp.dense_4h_to_h.scales
                             # model.layers.layer_id.mlp.down_proj.weight_scale
                             # model.layers.layer_id.mlp.dense_4h_to_h.weight_scale
                             tensor_map["mlp.down_proj.scales"] = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(down_proj|dense_4h_to_h)\.(qzeros|weight_zero_point)$", name)):
+                        elif bool(
+                            re.match(
+                                r"^model.layers\.\d+\.mlp.(down_proj|dense_4h_to_h)\.(qzeros|weight_zero_point)$", name
+                            )
+                        ):
                             # model.layers.layer_id.mlp.down_proj.qzeros
                             # model.layers.layer_id.mlp.dense_4h_to_h.qzeros
                             # model.layers.layer_id.mlp.down_proj.weight_zero_point
@@ -333,69 +356,120 @@ class QuantizedModel:
                             # model.layers.layer_id.mlp.dense_4h_to_h.bias
                             tensor_map["mlp.down_proj.bias"] = tensor
                         # Match against fused layers
-                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.q?weight$", name)):
+                        elif bool(
+                            re.match(
+                                r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.q?weight$",
+                                name,
+                            )
+                        ):
                             # model.layers.layer_id.self_attn.qkv_proj.qweight
                             # model.layers.layer_id.self_attention.query_key_value.qweight
                             # model.layers.layer_id.self_attn.qkv_proj.weight
                             # model.layers.layer_id.self_attention.query_key_value.weight
                             q_dim = q_size // (32 // local_bits) if quant_type in {"awq", "quark"} else q_size
                             kv_dim = kv_size // (32 // local_bits) if quant_type in {"awq", "quark"} else kv_size
-                            tensor_map["self_attn.q_proj.qweight"] = tensor[:, : q_dim]
+                            tensor_map["self_attn.q_proj.qweight"] = tensor[:, :q_dim]
                             tensor_map["self_attn.k_proj.qweight"] = tensor[:, q_dim : q_dim + kv_dim]
                             tensor_map["self_attn.v_proj.qweight"] = tensor[:, q_dim + kv_dim :]
-                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.(scales|weight_scale)$", name)):
+                        elif bool(
+                            re.match(
+                                r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.(scales|weight_scale)$",
+                                name,
+                            )
+                        ):
                             # model.layers.layer_id.self_attn.qkv_proj.scales
                             # model.layers.layer_id.self_attention.query_key_value.scales
                             # model.layers.layer_id.self_attn.qkv_proj.weight_scale
                             # model.layers.layer_id.self_attention.query_key_value.weight_scale
-                            tensor_map["self_attn.q_proj.scales"] = tensor[:, : q_size]
+                            tensor_map["self_attn.q_proj.scales"] = tensor[:, :q_size]
                             tensor_map["self_attn.k_proj.scales"] = tensor[:, q_size : q_size + kv_size]
                             tensor_map["self_attn.v_proj.scales"] = tensor[:, q_size + kv_size :]
-                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.(qzeros|weight_zero_point)$", name)):
+                        elif bool(
+                            re.match(
+                                r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.(qzeros|weight_zero_point)$",
+                                name,
+                            )
+                        ):
                             # model.layers.layer_id.self_attn.qkv_proj.qzeros
                             # model.layers.layer_id.self_attention.query_key_value.qzeros
                             # model.layers.layer_id.self_attn.qkv_proj.weight_zero_point
                             # model.layers.layer_id.self_attention.query_key_value.weight_zero_point
-                            q_dim = q_size // (32 // local_bits) if quant_type in {"awq", "gptq", "olive", "quark"} else q_size
-                            kv_dim = kv_size // (32 // local_bits) if quant_type in {"awq", "gptq", "olive", "quark"} else kv_size
-                            tensor_map["self_attn.q_proj.qzeros"] = tensor[:, : q_dim]
+                            q_dim = (
+                                q_size // (32 // local_bits)
+                                if quant_type in {"awq", "gptq", "olive", "quark"}
+                                else q_size
+                            )
+                            kv_dim = (
+                                kv_size // (32 // local_bits)
+                                if quant_type in {"awq", "gptq", "olive", "quark"}
+                                else kv_size
+                            )
+                            tensor_map["self_attn.q_proj.qzeros"] = tensor[:, :q_dim]
                             tensor_map["self_attn.k_proj.qzeros"] = tensor[:, q_dim : q_dim + kv_dim]
                             tensor_map["self_attn.v_proj.qzeros"] = tensor[:, q_dim + kv_dim :]
-                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.g_idx$", name)):
+                        elif bool(
+                            re.match(
+                                r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.g_idx$", name
+                            )
+                        ):
                             # model.layers.layer_id.self_attn.qkv_proj.g_idx
                             # model.layers.layer_id.self_attention.query_key_value.g_idx
                             tensor_map["self_attn.q_proj.g_idx"] = tensor
                             tensor_map["self_attn.k_proj.g_idx"] = tensor
                             tensor_map["self_attn.v_proj.g_idx"] = tensor
-                        elif bool(re.match(r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.bias$", name)):
+                        elif bool(
+                            re.match(
+                                r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.bias$", name
+                            )
+                        ):
                             # model.layers.layer_id.self_attn.qkv_proj.bias
                             # model.layers.layer_id.self_attention.query_key_value.bias
-                            tensor_map["self_attn.q_proj.bias"] = tensor[: q_size]
+                            tensor_map["self_attn.q_proj.bias"] = tensor[:q_size]
                             tensor_map["self_attn.k_proj.bias"] = tensor[q_size : q_size + kv_size]
-                            tensor_map["self_attn.v_proj.bias"] = tensor[q_size + kv_size : ]
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h|gate_proj)\.q?weight$", name)):
+                            tensor_map["self_attn.v_proj.bias"] = tensor[q_size + kv_size :]
+                        elif bool(
+                            re.match(r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h|gate_proj)\.q?weight$", name)
+                        ):
                             # model.layers.layer_id.mlp.gate_up_proj.qweight
                             # model.layers.layer_id.mlp.dense_h_to_4h.qweight
                             # model.layers.layer_id.mlp.gate_up_proj.weight
                             # model.layers.layer_id.mlp.dense_h_to_4h.weight
-                            intermediate_dim = intermediate_size // (32 // local_bits) if quant_type in {"awq", "quark"} else intermediate_size
-                            tensor_map["mlp.gate_proj.qweight"] = tensor[:, : intermediate_dim]
-                            tensor_map["mlp.up_proj.qweight"] = tensor[:, intermediate_dim :]
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h|gate_proj)\.(scales|weight_scale)$", name)):
+                            intermediate_dim = (
+                                intermediate_size // (32 // local_bits)
+                                if quant_type in {"awq", "quark"}
+                                else intermediate_size
+                            )
+                            tensor_map["mlp.gate_proj.qweight"] = tensor[:, :intermediate_dim]
+                            tensor_map["mlp.up_proj.qweight"] = tensor[:, intermediate_dim:]
+                        elif bool(
+                            re.match(
+                                r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h|gate_proj)\.(scales|weight_scale)$",
+                                name,
+                            )
+                        ):
                             # model.layers.layer_id.mlp.gate_up_proj.scales
                             # model.layers.layer_id.mlp.dense_h_to_4h.scales
                             # model.layers.layer_id.mlp.gate_up_proj.weight_scale
                             # model.layers.layer_id.mlp.dense_h_to_4h.weight_scale
-                            tensor_map["mlp.gate_proj.scales"] = tensor[:, : intermediate_size]
-                            tensor_map["mlp.up_proj.scales"] = tensor[:, intermediate_size :]
-                        elif bool(re.match(r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h|gate_proj)\.(qzeros|weight_zero_point)$", name)):
+                            tensor_map["mlp.gate_proj.scales"] = tensor[:, :intermediate_size]
+                            tensor_map["mlp.up_proj.scales"] = tensor[:, intermediate_size:]
+                        elif bool(
+                            re.match(
+                                r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h|gate_proj)\.(qzeros|weight_zero_point)$",
+                                name,
+                            )
+                        ):
                             # model.layers.layer_id.mlp.gate_up_proj.qzeros
                             # model.layers.layer_id.mlp.dense_h_to_4h.qzeros
                             # model.layers.layer_id.mlp.gate_up_proj.weight_zero_point
                             # model.layers.layer_id.mlp.dense_h_to_4h.weight_zero_point
-                            intermediate_dim = intermediate_size // (32 // local_bits) if quant_type in {"awq", "gptq", "quark", "olive"} else intermediate_size
-                            tensor_map["mlp.gate_proj.qzeros"] = tensor[:, : intermediate_dim]
-                            tensor_map["mlp.up_proj.qzeros"] = tensor[:, intermediate_dim :]
+                            intermediate_dim = (
+                                intermediate_size // (32 // local_bits)
+                                if quant_type in {"awq", "gptq", "quark", "olive"}
+                                else intermediate_size
+                            )
+                            tensor_map["mlp.gate_proj.qzeros"] = tensor[:, :intermediate_dim]
+                            tensor_map["mlp.up_proj.qzeros"] = tensor[:, intermediate_dim:]
                         elif bool(re.match(r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h)\.g_idx$", name)):
                             # model.layers.layer_id.mlp.gate_up_proj.g_idx
                             # model.layers.layer_id.mlp.dense_h_to_4h.g_idx
@@ -404,8 +478,8 @@ class QuantizedModel:
                         elif bool(re.match(r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h)\.bias$", name)):
                             # model.layers.layer_id.mlp.gate_up_proj.bias
                             # model.layers.layer_id.mlp.dense_h_to_4h.bias
-                            tensor_map["mlp.gate_proj.bias"] = tensor[: intermediate_size]
-                            tensor_map["mlp.up_proj.bias"] = tensor[intermediate_size: ]
+                            tensor_map["mlp.gate_proj.bias"] = tensor[:intermediate_size]
+                            tensor_map["mlp.up_proj.bias"] = tensor[intermediate_size:]
                         else:
                             raise NotImplementedError(f"{name} in your quantized model is not recognized.")
 
@@ -416,7 +490,9 @@ class QuantizedModel:
                             if isinstance(submodule, QuantizedTensorModule):
                                 for q_attr, q_value in [("bits", local_bits), ("_group_size", local_group_size)]:
                                     if getattr(submodule, q_attr) is not None and getattr(submodule, q_attr) != q_value:
-                                        raise ValueError(f"Quantization {q_attr} mismatch for {name}: expected {getattr(submodule, q_attr)}, got {q_value}.")
+                                        raise ValueError(
+                                            f"Quantization {q_attr} mismatch for {name}: expected {getattr(submodule, q_attr)}, got {q_value}."
+                                        )
                                     setattr(submodule, q_attr, q_value)
                             setattr(submodule, tensor_name.split(".")[-1], tensor_value)
 
@@ -441,7 +517,7 @@ class QuantizedModel:
     def get_layer_bits(self, layer_name):
         # 'bits' is globally defined for all layers
         return self.global_bits
-    
+
     def get_layer_group_size(self, layer_name):
         # 'group_size' is globally defined for all layers
         return self.global_group_size
@@ -467,7 +543,13 @@ class QuantizedModel:
                 self.lm_head.out_features = self.lm_head.scales.shape[1]
                 self.lm_head.in_features = self.lm_head.qweight.shape[0]
                 # Set g_idx if not already set
-                self.lm_head.g_idx = self.lm_head.g_idx if self.lm_head.g_idx is not None else torch.tensor([i // self.lm_head.group_size for i in range(self.lm_head.in_features)], dtype=torch.int32)
+                self.lm_head.g_idx = (
+                    self.lm_head.g_idx
+                    if self.lm_head.g_idx is not None
+                    else torch.tensor(
+                        [i // self.lm_head.group_size for i in range(self.lm_head.in_features)], dtype=torch.int32
+                    )
+                )
             elif self.quant_type == "gptq":
                 self.lm_head.out_features = self.lm_head.qweight.shape[1]
                 self.lm_head.in_features = self.lm_head.g_idx.shape[0]
@@ -497,13 +579,62 @@ class QuantizedModel:
                 module.mlp.down_proj.in_features = module.mlp.down_proj.qweight.shape[0]
 
                 # Set g_idx if not already set
-                module.self_attn.q_proj.g_idx = module.self_attn.q_proj.g_idx if module.self_attn.q_proj.g_idx is not None else torch.tensor([i // module.self_attn.q_proj.group_size for i in range(module.self_attn.q_proj.in_features)], dtype=torch.int32)
-                module.self_attn.k_proj.g_idx = module.self_attn.k_proj.g_idx if module.self_attn.k_proj.g_idx is not None else torch.tensor([i // module.self_attn.k_proj.group_size for i in range(module.self_attn.k_proj.in_features)], dtype=torch.int32)
-                module.self_attn.v_proj.g_idx = module.self_attn.v_proj.g_idx if module.self_attn.v_proj.g_idx is not None else torch.tensor([i // module.self_attn.v_proj.group_size for i in range(module.self_attn.v_proj.in_features)], dtype=torch.int32)
-                module.self_attn.o_proj.g_idx = module.self_attn.o_proj.g_idx if module.self_attn.o_proj.g_idx is not None else torch.tensor([i // module.self_attn.o_proj.group_size for i in range(module.self_attn.o_proj.in_features)], dtype=torch.int32)
-                module.mlp.gate_proj.g_idx = module.mlp.gate_proj.g_idx if module.mlp.gate_proj.g_idx is not None else torch.tensor([i // module.mlp.gate_proj.group_size for i in range(module.mlp.gate_proj.in_features)], dtype=torch.int32)
-                module.mlp.up_proj.g_idx = module.mlp.up_proj.g_idx if module.mlp.up_proj.g_idx is not None else torch.tensor([i // module.mlp.up_proj.group_size for i in range(module.mlp.up_proj.in_features)], dtype=torch.int32)
-                module.mlp.down_proj.g_idx = module.mlp.down_proj.g_idx if module.mlp.down_proj.g_idx is not None else torch.tensor([i // module.mlp.down_proj.group_size for i in range(module.mlp.down_proj.in_features)], dtype=torch.int32)
+                module.self_attn.q_proj.g_idx = (
+                    module.self_attn.q_proj.g_idx
+                    if module.self_attn.q_proj.g_idx is not None
+                    else torch.tensor(
+                        [i // module.self_attn.q_proj.group_size for i in range(module.self_attn.q_proj.in_features)],
+                        dtype=torch.int32,
+                    )
+                )
+                module.self_attn.k_proj.g_idx = (
+                    module.self_attn.k_proj.g_idx
+                    if module.self_attn.k_proj.g_idx is not None
+                    else torch.tensor(
+                        [i // module.self_attn.k_proj.group_size for i in range(module.self_attn.k_proj.in_features)],
+                        dtype=torch.int32,
+                    )
+                )
+                module.self_attn.v_proj.g_idx = (
+                    module.self_attn.v_proj.g_idx
+                    if module.self_attn.v_proj.g_idx is not None
+                    else torch.tensor(
+                        [i // module.self_attn.v_proj.group_size for i in range(module.self_attn.v_proj.in_features)],
+                        dtype=torch.int32,
+                    )
+                )
+                module.self_attn.o_proj.g_idx = (
+                    module.self_attn.o_proj.g_idx
+                    if module.self_attn.o_proj.g_idx is not None
+                    else torch.tensor(
+                        [i // module.self_attn.o_proj.group_size for i in range(module.self_attn.o_proj.in_features)],
+                        dtype=torch.int32,
+                    )
+                )
+                module.mlp.gate_proj.g_idx = (
+                    module.mlp.gate_proj.g_idx
+                    if module.mlp.gate_proj.g_idx is not None
+                    else torch.tensor(
+                        [i // module.mlp.gate_proj.group_size for i in range(module.mlp.gate_proj.in_features)],
+                        dtype=torch.int32,
+                    )
+                )
+                module.mlp.up_proj.g_idx = (
+                    module.mlp.up_proj.g_idx
+                    if module.mlp.up_proj.g_idx is not None
+                    else torch.tensor(
+                        [i // module.mlp.up_proj.group_size for i in range(module.mlp.up_proj.in_features)],
+                        dtype=torch.int32,
+                    )
+                )
+                module.mlp.down_proj.g_idx = (
+                    module.mlp.down_proj.g_idx
+                    if module.mlp.down_proj.g_idx is not None
+                    else torch.tensor(
+                        [i // module.mlp.down_proj.group_size for i in range(module.mlp.down_proj.in_features)],
+                        dtype=torch.int32,
+                    )
+                )
 
             elif self.quant_type == "gptq":
                 # Set in_features and out_features
@@ -525,19 +656,31 @@ class QuantizedModel:
             elif self.quant_type == "olive":
                 # Set in_features and out_features
                 module.self_attn.q_proj.out_features = module.self_attn.q_proj.qweight.shape[1]
-                module.self_attn.q_proj.in_features = module.self_attn.q_proj.qweight.shape[0] * 32 // module.self_attn.q_proj.bits
+                module.self_attn.q_proj.in_features = (
+                    module.self_attn.q_proj.qweight.shape[0] * 32 // module.self_attn.q_proj.bits
+                )
                 module.self_attn.k_proj.out_features = module.self_attn.k_proj.qweight.shape[1]
-                module.self_attn.k_proj.in_features = module.self_attn.k_proj.qweight.shape[0] * 32 // module.self_attn.k_proj.bits
+                module.self_attn.k_proj.in_features = (
+                    module.self_attn.k_proj.qweight.shape[0] * 32 // module.self_attn.k_proj.bits
+                )
                 module.self_attn.v_proj.out_features = module.self_attn.v_proj.qweight.shape[1]
-                module.self_attn.v_proj.in_features = module.self_attn.v_proj.qweight.shape[0] * 32 // module.self_attn.v_proj.bits
+                module.self_attn.v_proj.in_features = (
+                    module.self_attn.v_proj.qweight.shape[0] * 32 // module.self_attn.v_proj.bits
+                )
                 module.self_attn.o_proj.out_features = module.self_attn.o_proj.qweight.shape[1]
-                module.self_attn.o_proj.in_features = module.self_attn.o_proj.qweight.shape[0] * 32 // module.self_attn.o_proj.bits
+                module.self_attn.o_proj.in_features = (
+                    module.self_attn.o_proj.qweight.shape[0] * 32 // module.self_attn.o_proj.bits
+                )
                 module.mlp.gate_proj.out_features = module.mlp.gate_proj.qweight.shape[1]
-                module.mlp.gate_proj.in_features = module.mlp.gate_proj.qweight.shape[0] * 32 // module.mlp.gate_proj.bits
+                module.mlp.gate_proj.in_features = (
+                    module.mlp.gate_proj.qweight.shape[0] * 32 // module.mlp.gate_proj.bits
+                )
                 module.mlp.up_proj.out_features = module.mlp.up_proj.qweight.shape[1]
                 module.mlp.up_proj.in_features = module.mlp.up_proj.qweight.shape[0] * 32 // module.mlp.up_proj.bits
                 module.mlp.down_proj.out_features = module.mlp.down_proj.qweight.shape[1]
-                module.mlp.down_proj.in_features = module.mlp.down_proj.qweight.shape[0] * 32 // module.mlp.down_proj.bits
+                module.mlp.down_proj.in_features = (
+                    module.mlp.down_proj.qweight.shape[0] * 32 // module.mlp.down_proj.bits
+                )
 
             else:
                 raise NotImplementedError(f"The {self.quant_type} quantization method is not recognized.")
@@ -597,7 +740,7 @@ class QuantizedModel:
         wf = torch.arange(0, 32, bits, device=pack_tensor.device).unsqueeze(0).unsqueeze(0)
         out = torch.bitwise_right_shift(torch.unsqueeze(pack_tensor, 2), wf)
         out = out.reshape(pack_tensor.shape[0], -1)
-        out = torch.bitwise_and(out, (2 ** bits) - 1)
+        out = torch.bitwise_and(out, (2**bits) - 1)
         return out.T if transpose else out
 
     def unpack_on_row(self, tensor, bits, transpose):
@@ -858,10 +1001,27 @@ class GPTQModel(QuantizedModel):
         self.unpack_qzeros(temp_module)
 
         temp_module.qzeros += 1
-        temp_module.qzeros = torch.bitwise_and(temp_module.qzeros, (2 ** temp_module.bits) - 1)
+        temp_module.qzeros = torch.bitwise_and(temp_module.qzeros, (2**temp_module.bits) - 1)
 
         self.pack_qzeros(temp_module)
         module.qzeros = temp_module.qzeros
+
+    def _load_quant_config(self, quant_attrs):
+        super()._load_quant_config(quant_attrs)
+        self.overrides = quant_attrs["config"].get("dynamic", {})
+
+    def get_overrides(self, layer_name):
+        for pattern, overrides in self.overrides.items():
+            if re.match(pattern.removeprefix("+:"), layer_name):
+                return overrides
+        return {}
+
+    def get_layer_bits(self, layer_name):
+        return self.get_overrides(layer_name).get("bits", self.global_bits)
+
+    def get_layer_group_size(self, layer_name):
+        return self.get_overrides(layer_name).get("group_size", self.global_group_size)
+
 
 class QuarkModel(QuantizedModel):
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
@@ -926,7 +1086,7 @@ class QuarkModel(QuantizedModel):
                 raise ValueError(f"Unexpected dtype: {local_dtype}.")
             return dtype_bits_maps[local_dtype]
         return self.global_bits
-    
+
     def get_layer_group_size(self, layer_name):
         name = layer_name.split(".")[0]
         if name in self._quant_attrs["config"]["layer_quant_config"]:
@@ -976,6 +1136,7 @@ class QuarkModel(QuantizedModel):
         int_tensor = tensor[:, reverse_order_tensor]
         return int_tensor
 
+
 class OliveModel(GPTQModel):
     def _load_quant_config(self, quant_attrs):
         super()._load_quant_config(quant_attrs)
@@ -988,6 +1149,7 @@ class OliveModel(GPTQModel):
     def get_layer_group_size(self, layer_name):
         name = ".".join(layer_name.split(".")[:-1])
         return self.overrides.get(name, {}).get("group_size", self.global_group_size)
+
 
 class QuantModel:
     @staticmethod

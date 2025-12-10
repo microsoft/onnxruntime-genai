@@ -1,13 +1,13 @@
 import gc
+
 import onnxruntime_genai as og
-from consts import default_prompt, logging
 from app_modules.utils import convert_to_markdown, shared_state
+from consts import default_prompt, logging
 
 logging.getLogger("interface")
 
 
-class MultiModal_ONNXModel():
-
+class MultiModal_ONNXModel:
     """A wrapper for ONNXRuntime GenAI to run ONNX Multimodal model"""
 
     def __init__(self, model_path, execution_provider):
@@ -32,26 +32,25 @@ class MultiModal_ONNXModel():
     def generate_prompt_with_history(self, images, history, text=default_prompt, max_length=3072):
         prompt = ""
 
-        for dialog in history[-self.enable_history_max:]:
-            prompt += f'{self.history_template.format(input=dialog[0], response=dialog[1])}'
+        for dialog in history[-self.enable_history_max :]:
+            prompt += f"{self.history_template.format(input=dialog[0], response=dialog[1])}"
 
         prompt = self.template_header + prompt
 
         image_tags = ""
         for i in range(len(images)):
-            image_tags += f"<|image_{i+1}|>\n"
+            image_tags += f"<|image_{i + 1}|>\n"
 
-        prompt += f'{self.chat_template.format(input=text, tags=image_tags)}'
+        prompt += f"{self.chat_template.format(input=text, tags=image_tags)}"
         if len(prompt) > max_length:
             history.clear()
-            prompt = f'{self.chat_template.format(input=text, tags=image_tags)}'
+            prompt = f"{self.chat_template.format(input=text, tags=image_tags)}"
 
         self.images = og.Images.open(*images)
 
         logging.info("Preprocessing images and prompt ...")
         inputs = self.processor(prompt, images=self.images)
         return inputs
-
 
     def search(self, inputs, max_length: int = 3072, token_printing_step: int = 1):
         output = ""
@@ -72,16 +71,12 @@ class MultiModal_ONNXModel():
         return output
 
     def predict(self, text, chatbot, history, max_length_tokens, max_context_length_tokens, token_printing_step, *args):
-
         if text == "":
             yield chatbot, history, "Empty context"
             return
 
         inputs = self.generate_prompt_with_history(
-            text=text,
-            history=history,
-            images=args[0],
-            max_length=max_context_length_tokens
+            text=text, history=history, images=args[0], max_length=max_context_length_tokens
         )
 
         sentence = self.search(
@@ -91,12 +86,14 @@ class MultiModal_ONNXModel():
         )
 
         sentence = sentence.strip()
-        a, b = [[y[0], convert_to_markdown(y[1])] for y in history] + [[text, convert_to_markdown(sentence)]], [
-            *history,
-            [ text, sentence],
-        ]
+        a, b = (
+            [[y[0], convert_to_markdown(y[1])] for y in history] + [[text, convert_to_markdown(sentence)]],
+            [
+                *history,
+                [text, sentence],
+            ],
+        )
         yield a, b, "Generating ... "
-
 
         if shared_state.interrupted:
             shared_state.recover()
@@ -129,12 +126,5 @@ class MultiModal_ONNXModel():
         inputs = history.pop()[0]
 
         yield from self.predict(
-            inputs,
-            chatbot,
-            history,
-            max_length_tokens,
-            max_context_length_tokens,
-            token_printing_step,
-            args[0]
+            inputs, chatbot, history, max_length_tokens, max_context_length_tokens, token_printing_step, args[0]
         )
-
