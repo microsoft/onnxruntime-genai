@@ -6,7 +6,7 @@
 namespace Generators {
 
 // Helper to dispatch type-specific tensor operations
-template <typename Func>
+template<typename Func>
 void DispatchOnType(ONNXTensorElementDataType type, Func&& func) {
   if (type == Ort::TypeToTensorType<int32_t>)
     func.template operator()<int32_t>();
@@ -498,11 +498,11 @@ Qwen2VLPositionInputs::Qwen2VLPositionInputs(const Model& model, State& state, D
   if (has_mask_input_) {
     type_ = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.attention_mask);
   }
-
+  
   ONNXTensorElementDataType posid_type = type_;
   if (has_posid_input_) {
     posid_type = model_.session_info_.GetInputDataType(model_.config_->model.decoder.inputs.position_ids);
-
+    
     // Set up 3D position IDs shape: [3, batch_size, sequence_length]
     // The 3 dimensions represent temporal, height, and width for mrope
     position_ids_shape_[0] = 3;
@@ -544,7 +544,7 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
   // For Qwen2-VL, position_ids are [3, batch_size, seq_len]
   // The 3 dimensions represent: [temporal, height, width] for mrope
   // For text-only content, all 3 dimensions have the same position values [0,1,2,...]
-
+  
   auto position_ids = OrtValue::CreateTensor(model_.allocator_cpu_, shape, type_);
   auto* position_data = position_ids->GetTensorMutableData<T>();
 
@@ -585,8 +585,8 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
     for (int64_t dim = 0; dim < 3; ++dim) {
       for (int64_t batch = 0; batch < position_ids_shape_[1]; ++batch) {
         for (int64_t pos = 0; pos < position_ids_shape_[2]; ++pos) {
-          data[dim * position_ids_shape_[1] * position_ids_shape_[2] + batch * position_ids_shape_[2] + pos] =
-              static_cast<T>(base_pos + pos);
+          data[dim * position_ids_shape_[1] * position_ids_shape_[2] + batch * position_ids_shape_[2] + pos] = 
+            static_cast<T>(base_pos + pos);
         }
       }
     }
@@ -631,7 +631,7 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
       UpdateAttentionMask();
     }
   }
-
+  
   is_first_update_ = false;
 }
 
@@ -650,7 +650,7 @@ std::unique_ptr<PositionInputs> CreatePositionInputs(State& state, DeviceSpan<in
   if (ModelType::IsQwen2VL(state.model_.config_->model.type)) {
     return std::make_unique<Qwen2VLPositionInputs>(state.model_, state, sequence_lengths);
   }
-
+  
   if (state.model_.config_->model.decoder.sliding_window.has_value() && state.model_.config_->model.decoder.sliding_window->slide_inputs) {
     return std::make_unique<WindowedPositionInputs>(state);
   } else {
