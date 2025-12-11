@@ -207,13 +207,27 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   if (past_present_share_buffer_) {  // AMD-specific override
-    for (const auto& [key, val] : state_.params_->config.model.decoder.session_options.config_entries) {
-      if (key == "max_length_for_kv_cache") try {
-        shape_[2] = std::atoi(val.c_str());
-      } catch (const std::exception& ex) {
-        throw std::runtime_error{std::string{"config_entries/max_length_for_kv_cache format error: "} + ex.what()};
+    const auto find_amd_override = [&](const std::vector<Config::NamedString>& params) -> bool {
+      for (const auto& [key, val] : params) {
+        if (key == "max_length_for_kv_cache") try {
+          shape_[2] = std::atoi(val.c_str());
+          return true;
+        } catch (const std::exception& ex) {
+          throw std::runtime_error{ std::string{"max_length_for_kv_cache format error: "} + ex.what() };
+        }
       }
-    }
+      return false;
+    };
+
+    auto overriden = false;
+
+    for (const auto& provider : state_.params_->config.model.decoder.session_options.provider_options)
+      if ((provider.name == "VitisAI" || provider.name == "RyzenAI") && 
+        (overriden = find_amd_override(provider.options)))
+        break;
+
+    if (!overriden)
+      find_amd_override(state_.params_->config.model.decoder.session_options.config_entries);
   }
         
   try {
