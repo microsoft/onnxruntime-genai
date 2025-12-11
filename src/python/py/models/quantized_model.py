@@ -366,11 +366,18 @@ class QuantizedModel:
                             # model.layers.layer_id.self_attention.query_key_value.qweight
                             # model.layers.layer_id.self_attn.qkv_proj.weight
                             # model.layers.layer_id.self_attention.query_key_value.weight
-                            q_dim = q_size // (32 // local_bits) if quant_type in {"awq", "quark"} else q_size
-                            kv_dim = kv_size // (32 // local_bits) if quant_type in {"awq", "quark"} else kv_size
-                            tensor_map["self_attn.q_proj.qweight"] = tensor[:, :q_dim]
-                            tensor_map["self_attn.k_proj.qweight"] = tensor[:, q_dim : q_dim + kv_dim]
-                            tensor_map["self_attn.v_proj.qweight"] = tensor[:, q_dim + kv_dim :]
+                            if quant_type == "olive":
+                                # Olive: (out_features, in_features), split on dim=0
+                                tensor_map["self_attn.q_proj.qweight"] = tensor[:q_size, :]
+                                tensor_map["self_attn.k_proj.qweight"] = tensor[q_size : q_size + kv_size, :]
+                                tensor_map["self_attn.v_proj.qweight"] = tensor[q_size + kv_size :, :]
+                            else:
+                                # AWQ/GPTQ/Quark: (in_features, out_features), split on dim=1
+                                q_dim = q_size // (32 // local_bits) if quant_type in {"awq", "quark"} else q_size
+                                kv_dim = kv_size // (32 // local_bits) if quant_type in {"awq", "quark"} else kv_size
+                                tensor_map["self_attn.q_proj.qweight"] = tensor[:, :q_dim]
+                                tensor_map["self_attn.k_proj.qweight"] = tensor[:, q_dim : q_dim + kv_dim]
+                                tensor_map["self_attn.v_proj.qweight"] = tensor[:, q_dim + kv_dim :]
                         elif bool(
                             re.match(
                                 r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.(scales|weight_scale)$",
@@ -381,9 +388,16 @@ class QuantizedModel:
                             # model.layers.layer_id.self_attention.query_key_value.scales
                             # model.layers.layer_id.self_attn.qkv_proj.weight_scale
                             # model.layers.layer_id.self_attention.query_key_value.weight_scale
-                            tensor_map["self_attn.q_proj.scales"] = tensor[:, :q_size]
-                            tensor_map["self_attn.k_proj.scales"] = tensor[:, q_size : q_size + kv_size]
-                            tensor_map["self_attn.v_proj.scales"] = tensor[:, q_size + kv_size :]
+                            if quant_type == "olive":
+                                # Olive: (out_features, num_groups), split on dim=0
+                                tensor_map["self_attn.q_proj.scales"] = tensor[:q_size, :]
+                                tensor_map["self_attn.k_proj.scales"] = tensor[q_size : q_size + kv_size, :]
+                                tensor_map["self_attn.v_proj.scales"] = tensor[q_size + kv_size :, :]
+                            else:
+                                # AWQ/GPTQ/Quark: split on dim=1
+                                tensor_map["self_attn.q_proj.scales"] = tensor[:, :q_size]
+                                tensor_map["self_attn.k_proj.scales"] = tensor[:, q_size : q_size + kv_size]
+                                tensor_map["self_attn.v_proj.scales"] = tensor[:, q_size + kv_size :]
                         elif bool(
                             re.match(
                                 r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.(qzeros|weight_zero_point)$",
@@ -394,19 +408,28 @@ class QuantizedModel:
                             # model.layers.layer_id.self_attention.query_key_value.qzeros
                             # model.layers.layer_id.self_attn.qkv_proj.weight_zero_point
                             # model.layers.layer_id.self_attention.query_key_value.weight_zero_point
-                            q_dim = (
-                                q_size // (32 // local_bits)
-                                if quant_type in {"awq", "gptq", "olive", "quark"}
-                                else q_size
-                            )
-                            kv_dim = (
-                                kv_size // (32 // local_bits)
-                                if quant_type in {"awq", "gptq", "olive", "quark"}
-                                else kv_size
-                            )
-                            tensor_map["self_attn.q_proj.qzeros"] = tensor[:, :q_dim]
-                            tensor_map["self_attn.k_proj.qzeros"] = tensor[:, q_dim : q_dim + kv_dim]
-                            tensor_map["self_attn.v_proj.qzeros"] = tensor[:, q_dim + kv_dim :]
+                            if quant_type == "olive":
+                                # Olive: (out_features, packed_num_groups) uint8, split on dim=0
+                                q_dim = q_size // (8 // local_bits)
+                                kv_dim = kv_size // (8 // local_bits)
+                                tensor_map["self_attn.q_proj.qzeros"] = tensor[:q_dim, :]
+                                tensor_map["self_attn.k_proj.qzeros"] = tensor[q_dim : q_dim + kv_dim, :]
+                                tensor_map["self_attn.v_proj.qzeros"] = tensor[q_dim + kv_dim :, :]
+                            else:
+                                # AWQ/GPTQ/Quark: int32 packing, split on dim=1
+                                q_dim = (
+                                    q_size // (32 // local_bits)
+                                    if quant_type in {"awq", "gptq", "quark"}
+                                    else q_size
+                                )
+                                kv_dim = (
+                                    kv_size // (32 // local_bits)
+                                    if quant_type in {"awq", "gptq", "quark"}
+                                    else kv_size
+                                )
+                                tensor_map["self_attn.q_proj.qzeros"] = tensor[:, :q_dim]
+                                tensor_map["self_attn.k_proj.qzeros"] = tensor[:, q_dim : q_dim + kv_dim]
+                                tensor_map["self_attn.v_proj.qzeros"] = tensor[:, q_dim + kv_dim :]
                         elif bool(
                             re.match(
                                 r"^model.layers\.\d+\.(self_attn.qkv_proj|self_attention.query_key_value)\.g_idx$", name
@@ -434,13 +457,19 @@ class QuantizedModel:
                             # model.layers.layer_id.mlp.dense_h_to_4h.qweight
                             # model.layers.layer_id.mlp.gate_up_proj.weight
                             # model.layers.layer_id.mlp.dense_h_to_4h.weight
-                            intermediate_dim = (
-                                intermediate_size // (32 // local_bits)
-                                if quant_type in {"awq", "quark"}
-                                else intermediate_size
-                            )
-                            tensor_map["mlp.gate_proj.qweight"] = tensor[:, :intermediate_dim]
-                            tensor_map["mlp.up_proj.qweight"] = tensor[:, intermediate_dim:]
+                            if quant_type == "olive":
+                                # Olive: (out_features, in_features), split on dim=0
+                                tensor_map["mlp.gate_proj.qweight"] = tensor[:intermediate_size, :]
+                                tensor_map["mlp.up_proj.qweight"] = tensor[intermediate_size:, :]
+                            else:
+                                # AWQ/GPTQ/Quark: (in_features, out_features), split on dim=1
+                                intermediate_dim = (
+                                    intermediate_size // (32 // local_bits)
+                                    if quant_type in {"awq", "quark"}
+                                    else intermediate_size
+                                )
+                                tensor_map["mlp.gate_proj.qweight"] = tensor[:, :intermediate_dim]
+                                tensor_map["mlp.up_proj.qweight"] = tensor[:, intermediate_dim:]
                         elif bool(
                             re.match(
                                 r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h|gate_proj)\.(scales|weight_scale)$",
@@ -451,8 +480,14 @@ class QuantizedModel:
                             # model.layers.layer_id.mlp.dense_h_to_4h.scales
                             # model.layers.layer_id.mlp.gate_up_proj.weight_scale
                             # model.layers.layer_id.mlp.dense_h_to_4h.weight_scale
-                            tensor_map["mlp.gate_proj.scales"] = tensor[:, :intermediate_size]
-                            tensor_map["mlp.up_proj.scales"] = tensor[:, intermediate_size:]
+                            if quant_type == "olive":
+                                # Olive: (out_features, num_groups), split on dim=0
+                                tensor_map["mlp.gate_proj.scales"] = tensor[:intermediate_size, :]
+                                tensor_map["mlp.up_proj.scales"] = tensor[intermediate_size:, :]
+                            else:
+                                # AWQ/GPTQ/Quark: split on dim=1
+                                tensor_map["mlp.gate_proj.scales"] = tensor[:, :intermediate_size]
+                                tensor_map["mlp.up_proj.scales"] = tensor[:, intermediate_size:]
                         elif bool(
                             re.match(
                                 r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h|gate_proj)\.(qzeros|weight_zero_point)$",
@@ -463,13 +498,20 @@ class QuantizedModel:
                             # model.layers.layer_id.mlp.dense_h_to_4h.qzeros
                             # model.layers.layer_id.mlp.gate_up_proj.weight_zero_point
                             # model.layers.layer_id.mlp.dense_h_to_4h.weight_zero_point
-                            intermediate_dim = (
-                                intermediate_size // (32 // local_bits)
-                                if quant_type in {"awq", "gptq", "quark", "olive"}
-                                else intermediate_size
-                            )
-                            tensor_map["mlp.gate_proj.qzeros"] = tensor[:, :intermediate_dim]
-                            tensor_map["mlp.up_proj.qzeros"] = tensor[:, intermediate_dim:]
+                            if quant_type == "olive":
+                                # Olive: (out_features, packed_num_groups) uint8, split on dim=0
+                                intermediate_dim = intermediate_size // (8 // local_bits)
+                                tensor_map["mlp.gate_proj.qzeros"] = tensor[:intermediate_dim, :]
+                                tensor_map["mlp.up_proj.qzeros"] = tensor[intermediate_dim:, :]
+                            else:
+                                # AWQ/GPTQ/Quark: int32 packing, split on dim=1
+                                intermediate_dim = (
+                                    intermediate_size // (32 // local_bits)
+                                    if quant_type in {"awq", "gptq", "quark"}
+                                    else intermediate_size
+                                )
+                                tensor_map["mlp.gate_proj.qzeros"] = tensor[:, :intermediate_dim]
+                                tensor_map["mlp.up_proj.qzeros"] = tensor[:, intermediate_dim:]
                         elif bool(re.match(r"^model.layers\.\d+\.mlp.(gate_up_proj|dense_h_to_4h)\.g_idx$", name)):
                             # model.layers.layer_id.mlp.gate_up_proj.g_idx
                             # model.layers.layer_id.mlp.dense_h_to_4h.g_idx
