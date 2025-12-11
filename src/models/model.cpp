@@ -827,11 +827,8 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
           }
           if (const auto func = (void (*)(OrtSessionOptions*))GetProcAddress(lib, "RyzenAI_SetSessionOptions"))
             func(&session_options);
-
-          if (const auto api = OrtGetApiBase()->GetApi(ORT_API_VERSION)) {
-            void* unused;
-            api->RegisterCustomOpsLibrary(&session_options, lib_name.c_str(), &unused);
-          }
+          fs::path custom_ops_lib_path(lib_name);
+          session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
         }
       }
 
