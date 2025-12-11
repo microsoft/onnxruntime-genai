@@ -554,10 +554,10 @@ class QuantizedModel:
                 self.lm_head.out_features = self.lm_head.qweight.shape[1]
                 self.lm_head.in_features = self.lm_head.g_idx.shape[0]
             elif self.quant_type == "olive":
-                self.lm_head.out_features = self.lm_head.qweight.shape[1]
-                # expects in_features to be divisible by the packing factor (32 // bits)
-                # not a new assumption since no code here accounts for padded packed weights
-                self.lm_head.in_features = self.lm_head.qweight.shape[0] * 32 // self.lm_head.bits
+                # Olive format: qweight is (out_features, packed_in_features) uint8
+                # packed_in_features = in_features * bits / 8
+                self.lm_head.out_features = self.lm_head.qweight.shape[0]
+                self.lm_head.in_features = self.lm_head.qweight.shape[1] * 8 // self.lm_head.bits
             else:
                 raise NotImplementedError(f"The {self.quant_type} quantization method is not recognized.")
         for module in self.layers:
@@ -654,32 +654,31 @@ class QuantizedModel:
                 module.mlp.down_proj.in_features = module.mlp.down_proj.g_idx.shape[0]
 
             elif self.quant_type == "olive":
-                # Set in_features and out_features
-                module.self_attn.q_proj.out_features = module.self_attn.q_proj.qweight.shape[1]
+                module.self_attn.q_proj.out_features = module.self_attn.q_proj.qweight.shape[0]
                 module.self_attn.q_proj.in_features = (
-                    module.self_attn.q_proj.qweight.shape[0] * 32 // module.self_attn.q_proj.bits
+                    module.self_attn.q_proj.qweight.shape[1] * 8 // module.self_attn.q_proj.bits
                 )
-                module.self_attn.k_proj.out_features = module.self_attn.k_proj.qweight.shape[1]
+                module.self_attn.k_proj.out_features = module.self_attn.k_proj.qweight.shape[0]
                 module.self_attn.k_proj.in_features = (
-                    module.self_attn.k_proj.qweight.shape[0] * 32 // module.self_attn.k_proj.bits
+                    module.self_attn.k_proj.qweight.shape[1] * 8 // module.self_attn.k_proj.bits
                 )
-                module.self_attn.v_proj.out_features = module.self_attn.v_proj.qweight.shape[1]
+                module.self_attn.v_proj.out_features = module.self_attn.v_proj.qweight.shape[0]
                 module.self_attn.v_proj.in_features = (
-                    module.self_attn.v_proj.qweight.shape[0] * 32 // module.self_attn.v_proj.bits
+                    module.self_attn.v_proj.qweight.shape[1] * 8 // module.self_attn.v_proj.bits
                 )
-                module.self_attn.o_proj.out_features = module.self_attn.o_proj.qweight.shape[1]
+                module.self_attn.o_proj.out_features = module.self_attn.o_proj.qweight.shape[0]
                 module.self_attn.o_proj.in_features = (
-                    module.self_attn.o_proj.qweight.shape[0] * 32 // module.self_attn.o_proj.bits
+                    module.self_attn.o_proj.qweight.shape[1] * 8 // module.self_attn.o_proj.bits
                 )
-                module.mlp.gate_proj.out_features = module.mlp.gate_proj.qweight.shape[1]
+                module.mlp.gate_proj.out_features = module.mlp.gate_proj.qweight.shape[0]
                 module.mlp.gate_proj.in_features = (
-                    module.mlp.gate_proj.qweight.shape[0] * 32 // module.mlp.gate_proj.bits
+                    module.mlp.gate_proj.qweight.shape[1] * 8 // module.mlp.gate_proj.bits
                 )
-                module.mlp.up_proj.out_features = module.mlp.up_proj.qweight.shape[1]
-                module.mlp.up_proj.in_features = module.mlp.up_proj.qweight.shape[0] * 32 // module.mlp.up_proj.bits
-                module.mlp.down_proj.out_features = module.mlp.down_proj.qweight.shape[1]
+                module.mlp.up_proj.out_features = module.mlp.up_proj.qweight.shape[0]
+                module.mlp.up_proj.in_features = module.mlp.up_proj.qweight.shape[1] * 8 // module.mlp.up_proj.bits
+                module.mlp.down_proj.out_features = module.mlp.down_proj.qweight.shape[0]
                 module.mlp.down_proj.in_features = (
-                    module.mlp.down_proj.qweight.shape[0] * 32 // module.mlp.down_proj.bits
+                    module.mlp.down_proj.qweight.shape[1] * 8 // module.mlp.down_proj.bits
                 )
 
             else:
@@ -1138,6 +1137,13 @@ class QuarkModel(QuantizedModel):
 
 
 class OliveModel(GPTQModel):
+    """
+    Olive quantization format:
+    - qweight: (out_features, packed_in_features) uint8, packed along last dim
+    - scales: (out_features, num_groups) float
+    - qzeros: (out_features, packed_num_groups) uint8, packed along last dim
+    """
+
     def _load_quant_config(self, quant_attrs):
         super()._load_quant_config(quant_attrs)
         self.overrides = quant_attrs["config"]["overrides"] or {}
@@ -1149,6 +1155,40 @@ class OliveModel(GPTQModel):
     def get_layer_group_size(self, layer_name):
         name = ".".join(layer_name.split(".")[:-1])
         return self.overrides.get(name, {}).get("group_size", self.global_group_size)
+
+    def handle_qzeros(self, module):
+        """Olive uses unsigned quantization, no offset needed."""
+        pass
+
+    def unpack(self, module):
+        """Skip unpack for Olive format."""
+        pass
+
+    def repack(self, module):
+        """
+        Olive format:
+        - qweight: (out_features, packed_in_features) uint8
+        - scales: (out_features, num_groups) float
+        - qzeros: (out_features, packed_num_groups) uint8
+
+        ORT format:
+        - qweight: (out_features, k_blocks, blob_size) uint8
+        - scales: (out_features * num_groups,) float, flattened
+        - qzeros: (out_features * packed_num_groups,) uint8, flattened
+        """
+        kpack = 8 // module.bits
+        k_blocks = module.in_features // module.group_size
+        blob_size = module.group_size // kpack
+
+        # qweight: (out_features, packed_in_features) -> (out_features, k_blocks, blob_size)
+        module.qweight = module.qweight.reshape(module.out_features, k_blocks, blob_size).contiguous()
+
+        # scales: (out_features, num_groups) -> flatten to 1D
+        module.scales = module.scales.reshape(-1).contiguous()
+
+        # qzeros: (out_features, packed_num_groups) -> flatten to 1D
+        if module.qzeros is not None and module.qzeros.numel() > 0:
+            module.qzeros = module.qzeros.reshape(-1).contiguous()
 
 
 class QuantModel:
