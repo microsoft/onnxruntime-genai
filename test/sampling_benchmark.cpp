@@ -25,6 +25,9 @@
 #define MODEL_PATH "../../test/test_models/"
 #endif
 
+// External global variable from main.cpp for custom model path
+extern std::string g_custom_model_path;
+
 // Defined in sampling_tests.cpp
 void CreateRandomLogits(float* logits, int num_large, int vocab_size, int batch_size, std::mt19937& engine);
 
@@ -109,11 +112,11 @@ void PrintSummary(const std::vector<BenchmarkResult>& results) {
 }
 
 BenchmarkResult RunBenchmark(const BenchmarkParams& params) {
-  const char* model_path = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32";
+  std::string model_path = MODEL_PATH "hf-internal-testing/tiny-random-gpt2-fp32";
   if (strcmp(params.device_type, "NvTensorRtRtx") == 0) {
-    model_path = MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt";
+    model_path = g_custom_model_path.empty() ? MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt" : g_custom_model_path;
   }
-  auto config = OgaConfig::Create(model_path);
+  auto config = OgaConfig::Create(model_path.c_str());
   std::string overlay = R"({ "model": { "vocab_size" : )" + std::to_string(params.vocab_size) + R"( } })";
   config->Overlay(overlay.c_str());
   config->ClearProviders();
@@ -184,7 +187,8 @@ TEST(SamplingBenchmarks, PerformanceTests) {
   device_types.push_back("cuda");
 #endif
   // Add NvTensorRtRtx if model is available
-  if (std::filesystem::exists(MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt")) {
+  std::string resolved_nvtrt_path = g_custom_model_path.empty() ? MODEL_PATH "hf-internal-testing/phi3-fp16-nvtrt" : g_custom_model_path;
+  if (std::filesystem::exists(resolved_nvtrt_path)) {
     device_types.push_back("NvTensorRtRtx");
   }
 
