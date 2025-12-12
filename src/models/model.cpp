@@ -772,6 +772,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
         values.emplace_back(option.second.c_str());
       }
       session_options.AppendExecutionProvider(provider_options.name.c_str(), keys.data(), values.data(), keys.size());
+#if defined(_WIN32)
       if (provider_options.name == "VitisAI") {
         if (const auto opt_it = std::find_if(provider_options.options.begin(), provider_options.options.end(),
                                              [](const auto& pair) { return pair.first == "external_ep_libray"; });
@@ -790,7 +791,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
           session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
         }
       }
-
+#endif // WIN32
 #endif
     }
   }
