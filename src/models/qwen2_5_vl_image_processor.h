@@ -20,4 +20,16 @@ struct Qwen2_5VLImageProcessor : Processor {
   std::string image_grid_thw_name_{"image_grid_thw"};
 };
 
+struct QwenImageProcessor : Processor {
+  QwenImageProcessor(Config& config, const SessionInfo& session_info);
+
+  virtual std::unique_ptr<NamedTensors> Process(const Tokenizer& tokenizer, const Payload& payload) const override;
+
+ private:
+  ort_extensions::OrtxObjectPtr<OrtxProcessor> processor_;
+
+  ONNXTensorElementDataType pixel_values_type_;
+  int64_t spatial_merge_size_;
+};
+
 }  // namespace Generators
