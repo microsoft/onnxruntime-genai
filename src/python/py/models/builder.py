@@ -828,10 +828,53 @@ class Model:
             # print(f"Quantizing to {self.onnx_dtype} on-the-fly is not currently supported.")
             # print(f"Saving as {self.io_dtype} on-the-fly and quantizing to {self.onnx_dtype} at the end.")
             return self.make_matmul_float(matmul, basename, root_input, **kwargs)
-         
-        print("Using MatMulNBits for quantized MatMul with TMAC.")
+
+        if "q_proj" in basename or "k_proj" in basename:
+            n_heads = self.num_attn_heads if "q_proj" in basename else self.num_kv_heads
+            head_dim = matmul.out_features // n_heads
+            
+            # Permutation indices
+            perm = torch.arange(0, matmul.out_features, dtype=torch.long, device=matmul.qweight.device)
+            perm = perm.view(n_heads, 2, head_dim // 2).transpose(1, 2).reshape(-1)
+            
+            # Apply to qweight
+            if matmul.qweight.shape[0] == matmul.out_features:
+                matmul.qweight = matmul.qweight[perm, :]
+            elif matmul.qweight.shape[1] == matmul.out_features:
+                matmul.qweight = matmul.qweight[:, perm]
+            
+            # Apply to scales
+            if matmul.scales.shape[0] == matmul.out_features:
+                if matmul.scales.dim() == 1:
+                    matmul.scales = matmul.scales[perm]
+                else:
+                    matmul.scales = matmul.scales[perm, :]
+            elif matmul.scales.dim() > 1 and matmul.scales.shape[1] == matmul.out_features:
+                matmul.scales = matmul.scales[:, perm]
+            
+            # Apply to qzeros
+            if hasattr(matmul, "qzeros") and matmul.qzeros is not None:
+                if hasattr(self, "quant_model"):
+                    # Unpack qzeros, permute, and repack
+                    self.quant_model.unpack_qzeros(matmul)
+                    
+                    if matmul.qzeros.shape[0] == matmul.out_features:
+                        matmul.qzeros = matmul.qzeros[perm, :]
+                    elif matmul.qzeros.shape[1] == matmul.out_features:
+                        matmul.qzeros = matmul.qzeros[:, perm]
+                        
+                    self.quant_model.pack_qzeros(matmul)
+                else:
+                    # Fallback if quant_model is not available (e.g. manual quantization)
+                    # Assuming qzeros is not packed along out_features or we can't handle it
+                    if matmul.qzeros.shape[0] == matmul.out_features:
+                        matmul.qzeros = matmul.qzeros[perm, :]
+                    elif matmul.qzeros.shape[1] == matmul.out_features:
+                        matmul.qzeros = matmul.qzeros[:, perm]
+
         name = f"{basename}NBits"
 
+        # Input weights are quantized, save quantized MatMul weights for onnx model
         weight = name[1:].replace("/", ".") + ".qweight"
         self.make_initializer(matmul.qweight, weight)
         scales = name[1:].replace("/", ".") + ".scales"
@@ -844,9 +887,12 @@ class Model:
             self.make_initializer(matmul.qzeros, zeros)
             inputs.append(zeros)
 
+        if hasattr(matmul, "g_idx") and matmul.g_idx is not None:
+            g_idx = name[1:].replace("/", ".") + ".g_idx"
+            self.make_initializer(matmul.g_idx, g_idx, to=ir.DataType.INT32)
+            inputs.append(g_idx)
 
         output = "logits" if kwargs.get("logits", False) else f"{name}/output_0"
-        # TODO:: How to represent tmac types in matmulnbits
         self.make_node(
             "MatMulNBits", inputs=inputs, outputs=[output], name=name, domain="com.microsoft",
             accuracy_level=5,
@@ -2583,6 +2629,7 @@ class Model:
             q_size = self.num_attn_heads * self.head_size
             kv_size = self.num_kv_heads * self.head_size
             model = QuantModel.from_pretrained(self.quant_type, input_path=input_path, quant_attrs=self.quant_attrs, q_size=q_size, kv_size=kv_size, intermediate_size=self.intermediate_size, num_layers=self.num_layers)
+            self.quant_model = model
 
         else:
             # Load PyTorch model

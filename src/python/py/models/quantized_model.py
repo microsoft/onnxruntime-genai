@@ -809,58 +809,44 @@ class AWQModel(QuantizedModel):
 class GPTQModel(QuantizedModel):
     def __init__(self, quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers):
         super().__init__(quant_type, input_path, quant_attrs, q_size, kv_size, intermediate_size, num_layers)
-        self.use_tmac = quant_attrs.get("use_tmac", False)
-        self.is_symmetric = quant_attrs["config"].get("sym", False)
-        self.gptq_v2 = "gptqmodel" in quant_attrs["config"].get("quantizer", [])
 
+        # Unpack and repack all `QuantizedTensorModule` classes in model
         for i, layer in enumerate(self.layers):
             if i >= self.num_layers:
                 break
             print(f"Unpacking and repacking layer {i}")
 
             # Unpack and repack all `QuantizedTensorModule` classes in attention
-            print("Unpacking and repacking attention tensors")
-            for k, q_tensors in layer.self_attn.__dict__.items():
+            for _, q_tensors in layer.self_attn.__dict__.items():
                 if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
-                    if self.use_tmac and not quant_attrs["use_g_idx"]:
-                        self.unpack_pack_tmac(q_tensors)
-                    else:
-                        self.handle_qzeros(q_tensors)
-                        self.unpack(q_tensors)
-                        self.repack(q_tensors)
+                    self.handle_qzeros(q_tensors)
+                    self.unpack(q_tensors)
+                    self.repack(q_tensors)
 
                     if not quant_attrs["use_g_idx"]:
                         # Set `g_idx` to None since it's not used in `MatMulNBits`
-                        q_tensors.g_idx = None          
+                        q_tensors.g_idx = None
 
             # Unpack and repack all `QuantizedTensorModule` classes in MLP
-            print("Unpacking and repacking MLP tensors")  
-            for k, q_tensors in layer.mlp.__dict__.items():
+            for _, q_tensors in layer.mlp.__dict__.items():
                 if isinstance(q_tensors, QuantizedTensorModule) and q_tensors.qweight is not None:
-                    if self.use_tmac and not quant_attrs["use_g_idx"]:
-                        self.unpack_pack_tmac(q_tensors)
-                    else:
-                        print(k, "using standard unpacking")
-                        self.handle_qzeros(q_tensors)
-                        self.unpack(q_tensors)
-                        self.repack(q_tensors)
+                    self.handle_qzeros(q_tensors)
+                    self.unpack(q_tensors)
+                    self.repack(q_tensors)
 
                     if not quant_attrs["use_g_idx"]:
                         # Set `g_idx` to None since it's not used in `MatMulNBits`
                         q_tensors.g_idx = None
 
         if isinstance(self.lm_head, QuantizedTensorModule) and self.lm_head.qweight is not None:
-            print("Unpacking and repacking LM head")
-            if self.use_tmac and not quant_attrs["use_g_idx"]:
-                self.unpack_pack_tmac(self.lm_head)
-            else:
-                self.handle_qzeros(self.lm_head)
-                self.unpack(self.lm_head)
-                self.repack(self.lm_head)
+            self.handle_qzeros(self.lm_head)
+            self.unpack(self.lm_head)
+            self.repack(self.lm_head)
 
             if not quant_attrs["use_g_idx"]:
                 # Set `g_idx` to None since it's not used in `MatMulNBits`
                 self.lm_head.g_idx = None
+
 
     def handle_qzeros(self, module):
         """
