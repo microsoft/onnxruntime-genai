@@ -837,6 +837,10 @@ inline std::vector<std::string> OrtSession::GetOverridableInitializerNames() con
   return out;
 }
 
+inline void OrtSession::StartProfiling() {
+  Ort::ThrowOnError(Ort::api->SessionStartProfiling(this));
+}
+
 inline std::string OrtSession::EndProfiling() {
   Ort::StringAllocator string_allocator;
   Ort::ThrowOnError(Ort::api->SessionEndProfiling(this, &string_allocator, &string_allocator.out));

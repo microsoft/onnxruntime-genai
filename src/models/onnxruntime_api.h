@@ -718,6 +718,10 @@ struct OrtSession {
    */
   std::vector<std::string> GetOverridableInitializerNames() const;
 
+  /** \brief Starts profiling for this session.
+   */
+  void StartProfiling();  ///< Wraps OrtApi::SessionStartProfiling
+
   /** \brief Returns a copy of the profiling file name.
    */
   std::string EndProfiling();                                  ///< Wraps OrtApi::SessionEndProfiling
