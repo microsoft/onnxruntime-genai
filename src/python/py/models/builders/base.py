@@ -3227,6 +3227,13 @@ class Model:
             kwargs.get("scales3", ""),
             kwargs.get("bias3", ""),
         ]
+        if kwargs.get("zp1", None) is not None:
+            inputs.append(kwargs.get("zp1", ""))
+        if kwargs.get("zp2", None) is not None:
+            inputs.append(kwargs.get("zp2", ""))
+        if kwargs.get("zp3", None) is not None:
+            inputs.append(kwargs.get("zp3", ""))
+
         output = f"{name}/output_0"
 
         extra_kwargs = (
