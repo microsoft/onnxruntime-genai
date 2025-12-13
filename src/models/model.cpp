@@ -1152,7 +1152,8 @@ std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, const char* config_path, con
 }
 
 std::shared_ptr<Model> CreateModel(OrtEnv& ort_env, std::unique_ptr<Config> config) {
-  if (config->model.type == "fara" || config->model.type == "qwen2_5_vl")
+  // Check if it's a pipeline model by checking if decoder.pipeline is configured
+  if ((config->model.type == "fara" || config->model.type == "qwen2_5_vl") && !config->model.decoder.pipeline.empty())
     return std::make_shared<Qwen2_5_VL_PipelineModel>(std::move(config), ort_env);
   if (config->model.type == "gpt2")
     return std::make_shared<Gpt_Model>(std::move(config), ort_env);
@@ -1250,8 +1251,8 @@ MultiModalProcessor::MultiModalProcessor(Config& config, const SessionInfo& sess
           {"whisper", Processor::Create<WhisperProcessor>},
           {"phi4mm", Processor::Create<PhiMultiModalProcessor>},
           {"gemma3", Processor::Create<GemmaImageProcessor>},
-          {"fara", Processor::Create<Qwen2_5VLImageProcessor>},
-          {"qwen2_5_vl", Processor::Create<Qwen2_5VLImageProcessor>}} {
+          {"fara", Processor::Create<QwenImageProcessor>},
+          {"qwen2_5_vl", Processor::Create<QwenImageProcessor>}} {
   auto processor = processor_factory_.find(config.model.type);
   if (processor != processor_factory_.end()) {
     processor_ = processor->second(config, session_info);
