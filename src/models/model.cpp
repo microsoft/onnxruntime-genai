@@ -791,7 +791,7 @@ DeviceInterface* SetProviderSessionOptions(OrtSessionOptions& session_options,
           session_options.RegisterCustomOpsLibrary(custom_ops_lib_path.c_str());
         }
       }
-#endif // WIN32
+#endif  // WIN32
 #endif
     }
   }
