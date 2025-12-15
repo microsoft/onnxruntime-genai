@@ -559,7 +559,6 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
   // Replicates the logic from HuggingFace's `get_rope_index`
   // `shape` is [3, batch_size, seq_len] (before beam expansion)
   // `next_tokens` is [batch_size, seq_len]
-  int64_t num_dims = shape[0];  // Should be 3
   int64_t batch_size = shape[1];
   int64_t seq_len = shape[2];
 
@@ -597,7 +596,7 @@ void Qwen2VLPositionInputs::CreateAndInitialize3DPositionIDs(DeviceSpan<int32_t>
     int64_t video_nums = 0;
 
     // Count images/videos for this batch item by checking the token *after* vision_start_token_id
-    for (size_t s = 0; s < seq_len - 1; ++s) {
+    for (int64_t s = 0; s < seq_len - 1; ++s) {
       if (input_ids[s] == vision_start_token_id_) {
         if (input_ids[s + 1] == image_token_id_) {
           image_nums++;
@@ -785,7 +784,7 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
   int64_t batch_size = position_ids_shape_[1];  // This is already expanded (batch*beams)
   int64_t seq_len = position_ids_shape_[2];     // This will be 1 for generation
 
-  if (rope_deltas_.size() != batch_size) {
+  if (rope_deltas_.size() != static_cast<size_t>(batch_size)) {
     throw std::runtime_error("rope_deltas size mismatch with batch_size * num_beams.");
   }
 
