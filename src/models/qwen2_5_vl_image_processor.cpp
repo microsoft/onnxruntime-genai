@@ -234,9 +234,10 @@ std::unique_ptr<NamedTensors> QwenImageProcessor::Process(const Tokenizer& token
     int64_t total_patches = height_patches * width_patches;
     int64_t patch_dim = channels * kTemporalPatchSize * kPatchSize * kPatchSize;
 
-    // Create patched pixel_values: [total_patches, patch_dim]
+    // Create patched pixel_values: [1, total_patches, patch_dim] for NPU pipeline compatibility
+    // NPU pipeline expects rank 3, CUDA/CPU models will squeeze if needed
     patched_pixel_values = OrtValue::CreateTensor<float>(
-        allocator, std::vector<int64_t>{total_patches, patch_dim});
+        allocator, std::vector<int64_t>{1, total_patches, patch_dim});
     auto* patched_data = patched_pixel_values->GetTensorMutableData<float>();
 
     // Extract patches from single image in HWC format
