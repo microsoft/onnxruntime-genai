@@ -8,6 +8,9 @@
 
 namespace Generators {
 
+// Forward declaration
+struct Qwen2VLPositionInputs;
+
 // Helper to dispatch type-specific tensor operations
 template <typename Func>
 void DispatchOnType(ONNXTensorElementDataType type, Func&& func) {
@@ -16,6 +19,62 @@ void DispatchOnType(ONNXTensorElementDataType type, Func&& func) {
   else
     func.template operator()<int64_t>();
 }
+
+// Functors for Qwen2VL position inputs
+struct UpdatePositionIdsFunctor {
+  OrtValue* position_ids;
+  int base_pos;
+  int64_t batch_size;
+  int64_t seq_len;
+  const std::vector<int64_t>& rope_deltas;
+
+  template <typename T>
+  void operator()() {
+    auto* data = position_ids->GetTensorMutableData<T>();
+    for (int64_t dim = 0; dim < 3; ++dim) {
+      for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t s = 0; s < seq_len; ++s) {
+          T delta = static_cast<T>(base_pos + rope_deltas[b]);
+          T pos = static_cast<T>(s);
+          data[dim * batch_size * seq_len + b * seq_len + s] = delta + pos;
+        }
+      }
+    }
+  }
+};
+
+struct FillMaskFunctor {
+  OrtValue* attention_mask;
+  int64_t total_size;
+
+  template <typename T>
+  void operator()() {
+    auto* mask_data = attention_mask->GetTensorMutableData<T>();
+    std::fill_n(mask_data, total_size, static_cast<T>(1));
+  }
+};
+
+struct InitPositionIdsFunctor {
+  Qwen2VLPositionInputs* self;
+  DeviceSpan<int32_t> next_tokens;
+  std::array<int64_t, 3> position_ids_shape;
+
+  template <typename T>
+  void operator()() {
+    self->CreateAndInitialize3DPositionIDs<T>(next_tokens, position_ids_shape);
+  }
+};
+
+struct InitAttentionMaskFunctor {
+  Qwen2VLPositionInputs* self;
+  DeviceSpan<int32_t> next_tokens;
+  std::array<int64_t, 2> attention_mask_shape;
+
+  template <typename T>
+  void operator()() {
+    self->CreateAndInitializeAttentionMask<T>(next_tokens, attention_mask_shape);
+  }
+};
 
 DefaultPositionInputs::DefaultPositionInputs(const Model& model, State& state, DeviceSpan<int32_t> sequence_lengths_unk, const std::string& attention_mask_name)
     : model_{model},
@@ -788,32 +847,6 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
     throw std::runtime_error("rope_deltas size mismatch with batch_size * num_beams.");
   }
 
-  struct UpdatePositionIdsFunctor {
-    OrtValue* position_ids;
-    int base_pos;
-    int64_t batch_size;
-    int64_t seq_len;
-    const std::vector<int>& rope_deltas;
-
-    template <typename T>
-    void operator()() {
-      auto* data = position_ids->GetTensorMutableData<T>();
-      for (int64_t dim = 0; dim < 3; ++dim) {
-        for (int64_t b = 0; b < batch_size; ++b) {
-          for (int64_t s = 0; s < seq_len; ++s) {
-            // From Python: delta = (cache_position[0] + self.rope_deltas)
-            // cache_position[0] is `base_pos`.
-            T delta = static_cast<T>(base_pos + rope_deltas[b]);
-            // Python: position_ids = position_ids + delta
-            // `position_ids` for new token is just [0, 1, ...]
-            T pos = static_cast<T>(s);
-            data[dim * batch_size * seq_len + b * seq_len + s] = delta + pos;
-          }
-        }
-      }
-    }
-  };
-
   DispatchOnType(type_, UpdatePositionIdsFunctor{position_ids.get(), base_pos, batch_size, seq_len, rope_deltas_});
 
   position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, 1);  // No beam expansion needed, already expanded
@@ -822,17 +855,6 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
 
 void Qwen2VLPositionInputs::UpdateAttentionMask() {
   auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
-
-  struct FillMaskFunctor {
-    OrtValue* attention_mask;
-    int64_t total_size;
-
-    template <typename T>
-    void operator()() {
-      auto* mask_data = attention_mask->GetTensorMutableData<T>();
-      std::fill_n(mask_data, total_size, static_cast<T>(1));
-    }
-  };
 
   DispatchOnType(type_, FillMaskFunctor{attention_mask.get(), attention_mask_shape_[0] * attention_mask_shape_[1]});
 
@@ -844,16 +866,6 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
   if (has_posid_input_) {
     position_ids_shape_[2] = new_length;
     if (is_first_update_) {
-      struct InitPositionIdsFunctor {
-        Qwen2VLPositionInputs* self;
-        DeviceSpan<int32_t> next_tokens;
-        std::array<int64_t, 3> position_ids_shape;
-
-        template <typename T>
-        void operator()() {
-          self->CreateAndInitialize3DPositionIDs<T>(next_tokens, position_ids_shape);
-        }
-      };
       DispatchOnType(type_, InitPositionIdsFunctor{this, next_tokens, position_ids_shape_});
     } else {
       Update3DPositionIDs(total_length - new_length);
@@ -863,16 +875,6 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
   if (has_mask_input_) {
     if (is_first_update_) {
       attention_mask_shape_[1] = new_length;
-      struct InitAttentionMaskFunctor {
-        Qwen2VLPositionInputs* self;
-        DeviceSpan<int32_t> next_tokens;
-        std::array<int64_t, 2> attention_mask_shape;
-
-        template <typename T>
-        void operator()() {
-          self->CreateAndInitializeAttentionMask<T>(next_tokens, attention_mask_shape);
-        }
-      };
       DispatchOnType(type_, InitAttentionMaskFunctor{this, next_tokens, attention_mask_shape_});
     } else {
       attention_mask_shape_[1] = total_length;

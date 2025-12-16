@@ -128,6 +128,10 @@ struct Qwen2VLPositionInputs : PositionInputs {
                       const std::shared_ptr<Tensor>& video_grid_thw,
                       const std::shared_ptr<Tensor>& second_per_grid_ts);
 
+  // Friend declarations for functors that need access to private methods
+  friend struct InitPositionIdsFunctor;
+  friend struct InitAttentionMaskFunctor;
+
  private:
   void AddPositionIDs();
   void AddAttentionMask();
