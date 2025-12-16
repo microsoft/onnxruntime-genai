@@ -788,7 +788,7 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
     throw std::runtime_error("rope_deltas size mismatch with batch_size * num_beams.");
   }
 
-  DispatchOnType(type_, [&]<typename T>() {
+  auto update_position_ids = [&, batch_size, seq_len, base_pos]<typename T>() {
     auto* data = position_ids->GetTensorMutableData<T>();
     for (int64_t dim = 0; dim < 3; ++dim) {
       for (int64_t b = 0; b < batch_size; ++b) {
@@ -803,7 +803,8 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
         }
       }
     }
-  });
+  };
+  DispatchOnType(type_, update_position_ids);
 
   position_ids_->ort_tensor_ = model_.ExpandInputs(position_ids, 1);  // No beam expansion needed, already expanded
   state_.inputs_[posid_input_index_] = position_ids_->GetOrtTensor();
@@ -812,10 +813,11 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
 void Qwen2VLPositionInputs::UpdateAttentionMask() {
   auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
 
-  DispatchOnType(type_, [&]<typename T>() {
+  auto fill_mask = [&, attention_mask]<typename T>() {
     auto* mask_data = attention_mask->GetTensorMutableData<T>();
     std::fill_n(mask_data, attention_mask_shape_[0] * attention_mask_shape_[1], static_cast<T>(1));
-  });
+  };
+  DispatchOnType(type_, fill_mask);
 
   attention_mask_->ort_tensor_ = model_.ExpandInputs(attention_mask, 1);
   state_.inputs_[mask_input_index_] = attention_mask_->GetOrtTensor();
@@ -825,9 +827,10 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
   if (has_posid_input_) {
     position_ids_shape_[2] = new_length;
     if (is_first_update_) {
-      DispatchOnType(type_, [&]<typename T>() {
+      auto init_position_ids = [&, next_tokens]<typename T>() {
         CreateAndInitialize3DPositionIDs<T>(next_tokens, position_ids_shape_);
-      });
+      };
+      DispatchOnType(type_, init_position_ids);
     } else {
       Update3DPositionIDs(total_length - new_length);
     }
@@ -836,9 +839,10 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
   if (has_mask_input_) {
     if (is_first_update_) {
       attention_mask_shape_[1] = new_length;
-      DispatchOnType(type_, [&]<typename T>() {
+      auto init_attention_mask = [&, next_tokens]<typename T>() {
         CreateAndInitializeAttentionMask<T>(next_tokens, attention_mask_shape_);
-      });
+      };
+      DispatchOnType(type_, init_attention_mask);
     } else {
       attention_mask_shape_[1] = total_length;
       UpdateAttentionMask();
