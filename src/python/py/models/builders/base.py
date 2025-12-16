@@ -118,6 +118,7 @@ class Model:
 
         # EP-specific variables
         self.ep = ep
+        self.has_if_nodes = False  # Track whether model contains IF nodes
         self.ep_attrs = {
             "cpu": {},
             "cuda": {
@@ -1968,6 +1969,7 @@ class Model:
                 sin_cache_small_name=sin_cache_small_name,
                 small_cache_shape=cos_cache_large.shape,
             )
+            self.has_if_nodes = True
             return
 
         # For other EPs (CUDA, CPU, WebGPU), create regular If node with multiple outputs
@@ -2065,6 +2067,7 @@ class Model:
                 name="small_rotemb_caches_graph",
             ),
         )
+        self.has_if_nodes = True
         self.make_value(cos_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
         self.make_value(sin_cache_name, self.io_dtype, shape=["max_sequence_length", "head_dim / 2"])
 
