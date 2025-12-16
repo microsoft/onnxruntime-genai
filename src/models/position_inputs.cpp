@@ -788,7 +788,7 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
     throw std::runtime_error("rope_deltas size mismatch with batch_size * num_beams.");
   }
 
-  auto update_position_ids = [&, batch_size, seq_len, base_pos]<typename T>() {
+  auto update_position_ids = [&]<typename T>() {
     auto* data = position_ids->GetTensorMutableData<T>();
     for (int64_t dim = 0; dim < 3; ++dim) {
       for (int64_t b = 0; b < batch_size; ++b) {
@@ -813,7 +813,7 @@ void Qwen2VLPositionInputs::Update3DPositionIDs(int base_pos) {
 void Qwen2VLPositionInputs::UpdateAttentionMask() {
   auto attention_mask = OrtValue::CreateTensor(model_.allocator_cpu_, attention_mask_shape_, type_);
 
-  auto fill_mask = [&, attention_mask]<typename T>() {
+  auto fill_mask = [&]<typename T>() {
     auto* mask_data = attention_mask->GetTensorMutableData<T>();
     std::fill_n(mask_data, attention_mask_shape_[0] * attention_mask_shape_[1], static_cast<T>(1));
   };
@@ -827,7 +827,7 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
   if (has_posid_input_) {
     position_ids_shape_[2] = new_length;
     if (is_first_update_) {
-      auto init_position_ids = [&, next_tokens]<typename T>() {
+      auto init_position_ids = [&]<typename T>() {
         CreateAndInitialize3DPositionIDs<T>(next_tokens, position_ids_shape_);
       };
       DispatchOnType(type_, init_position_ids);
@@ -839,7 +839,7 @@ void Qwen2VLPositionInputs::Update(DeviceSpan<int32_t> next_tokens, int total_le
   if (has_mask_input_) {
     if (is_first_update_) {
       attention_mask_shape_[1] = new_length;
-      auto init_attention_mask = [&, next_tokens]<typename T>() {
+      auto init_attention_mask = [&]<typename T>() {
         CreateAndInitializeAttentionMask<T>(next_tokens, attention_mask_shape_);
       };
       DispatchOnType(type_, init_attention_mask);
