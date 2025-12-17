@@ -1,0 +1,68 @@
+{
+  "processor": {
+    "name": "qwen2_5_image_processor",
+    "transforms": [
+      {
+        "operation": {
+          "name": "decode_image",
+          "type": "DecodeImage",
+          "attrs": {
+            "color_space": "RGB"
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "convert_to_rgb",
+          "type": "ConvertRGB"
+        }
+      },
+      {
+        "operation": {
+          "name": "resize",
+          "type": "Resize",
+          "attrs": {
+            "width": 540,
+            "height": 360,
+            "smart_resize": 1,
+            "min_pixels": 3136,
+            "max_pixels": 12845056,
+            "patch_size": 14,
+            "merge_size": 2
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "rescale",
+          "type": "Rescale",
+          "attrs": {
+            "rescale_factor": 0.00392156862745098
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "normalize",
+          "type": "Normalize",
+          "attrs": {
+            "mean": [0.48145466, 0.4578275, 0.40821073],
+            "std": [0.26862954, 0.26130258, 0.27577711],
+            "qwen2_5_vl": 1
+          }
+        }
+      },
+      {
+        "operation": {
+          "name": "patch_image",
+          "type": "PatchImage",
+          "attrs": {
+            "patch_size": 14,
+            "temporal_patch_size": 2,
+            "merge_size": 2
+          }
+        }
+      }
+    ]
+  }
+}
