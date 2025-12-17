@@ -57,10 +57,6 @@ class Phi3MiniLongRoPEModel(Phi3MiniModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
 
-        # Disable CUDA graph for TRT-RTX when IF nodes are present
-        if self.ep == "trt-rtx" and self.has_if_nodes:
-            self.ep_attrs["trt-rtx"]["enable_cuda_graph"] = "0"
-
         # Set position_ids_name based on whether position_ids is available as an input
         if "position_ids" in self.input_names:
             position_ids_result = self.make_position_ids_reformatting()
@@ -444,10 +440,6 @@ class Phi3SmallLongRoPEModel(Phi3SmallModel):
         super().__init__(config, io_dtype, onnx_dtype, ep, cache_dir, extra_options)
         self.make_rotary_embedding_multi_cache()
 
-        # Disable CUDA graph for TRT-RTX when IF nodes are present
-        if self.ep == "trt-rtx" and self.has_if_nodes:
-            self.ep_attrs["trt-rtx"]["enable_cuda_graph"] = "0"
-
 
 class Phi3VModel(Phi3MiniLongRoPEModel):
     def __init__(self, config, io_dtype, onnx_dtype, ep, cache_dir, extra_options):
@@ -461,10 +453,6 @@ class Phi3MoELongRoPEModel(MistralModel):
         self.layernorm_attrs["simple"] = False
         self.moe_attrs["use_sparse_mixer"] = True
         self.make_rotary_embedding_multi_cache()
-
-        # Disable CUDA graph for TRT-RTX when IF nodes are present
-        if self.ep == "trt-rtx" and self.has_if_nodes:
-            self.ep_attrs["trt-rtx"]["enable_cuda_graph"] = "0"
 
     def make_layer(self, layer_id, layer):
         # Each LLM decoder layer is typically defined as:
