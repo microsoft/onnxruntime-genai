@@ -1968,6 +1968,7 @@ class Model:
                 sin_cache_small_name=sin_cache_small_name,
                 small_cache_shape=cos_cache_large.shape,
             )
+            self.ep_attrs["trt-rtx"]["enable_cuda_graph"] = "0"
             return
 
         # For other EPs (CUDA, CPU, WebGPU), create regular If node with multiple outputs
