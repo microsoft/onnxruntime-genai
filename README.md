@@ -22,7 +22,7 @@ while not IsDone():
     PrintLastToken()
 ```
 
-Please read [this PR's description](https://github.com/microsoft/onnxruntime-genai/pull/1849) for more information.
+Please read [this PR's description](https://github.com/microsoft/onnxruntime-genai/pull/1925) for more information.
 
 ## Status
 
