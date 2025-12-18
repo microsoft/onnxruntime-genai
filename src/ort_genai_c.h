@@ -446,6 +446,21 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
  * \return True if the generator has finished generating all the sequences, false otherwise.
  */
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator);
+
+/**
+ * \brief Returns true if the generator is done because it hit the EOS token id after generating all the sequences.
+ * \param[in] generator The generator to check if it is done with generating all sequences.
+ * \return True if the generator has hit the EOS token id, false otherwise.
+ */
+OGA_EXPORT bool OGA_API_CALL OgaGenerator_HitEOS(OgaGenerator* generator);
+
+/**
+ * \brief Returns true if the generator is done because it hit the maximum length after generating all the sequences.
+ * \param[in] generator The generator to check if it is done with generating all sequences.
+ * \return True if the generator has hit the maximum length, false otherwise.
+ */
+OGA_EXPORT bool OGA_API_CALL OgaGenerator_HitMaxLength(OgaGenerator* generator);
+
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator);
 
 /**

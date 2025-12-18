@@ -472,8 +472,12 @@ bool Generator::IsDone() {
   return is_done;
 }
 
-bool Generator::IsMaxLength() {
-  return search_->IsMaxLength();
+bool Generator::HitEOS() {
+  return search_->HitEOS();
+}
+
+bool Generator::HitMaxLength() {
+  return search_->HitMaxLength();
 }
 
 bool Generator::IsSessionTerminated() const {

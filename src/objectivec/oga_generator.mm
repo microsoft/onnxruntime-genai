@@ -30,6 +30,20 @@
   OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
 }
 
+- (BOOL)hitEOSWithError:(NSError**)error {
+  try {
+    return _generator->HitEOS();
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
+- (BOOL)hitMaxLengthWithError:(NSError**)error {
+  try {
+    return _generator->HitMaxLength();
+  }
+  OGA_OBJC_API_IMPL_CATCH_RETURNING_BOOL(error)
+}
+
 - (BOOL)setInputs:(OGANamedTensors*)namedTensors error:(NSError**)error {
   try {
     _generator->SetInputs([namedTensors CXXAPIOgaNamedTensors]);

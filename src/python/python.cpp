@@ -260,6 +260,14 @@ struct PyGenerator {
     return generator_->IsDone();
   }
 
+  bool HitEOS() {
+    return generator_->HitEOS();
+  }
+
+  bool HitMaxLength() {
+    return generator_->HitMaxLength();
+  }
+
   void SetActiveAdapter(OgaAdapters& adapters, const std::string& adapter_name) {
     generator_->SetActiveAdapter(adapters, adapter_name.c_str());
   }

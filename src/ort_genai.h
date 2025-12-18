@@ -448,6 +448,14 @@ struct OgaGenerator : OgaAbstract {
     return OgaGenerator_IsDone(this);
   }
 
+  bool HitEOS() {
+    return OgaGenerator_HitEOS(this);
+  }
+
+  bool HitMaxLength() {
+    return OgaGenerator_HitMaxLength(this);
+  }
+
   void SetModelInput(const char* name, OgaTensor& tensor) {
     OgaCheckResult(OgaGenerator_SetModelInput(this, name, &tensor));
   }

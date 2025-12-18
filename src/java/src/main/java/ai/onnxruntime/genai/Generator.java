@@ -62,6 +62,32 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
   }
 
   /**
+   * Checks if the generation process ended because an EOS token id was hit.
+   *
+   * @return true if the EOS token was hit, false otherwise.
+   */
+  public boolean hitEOS() {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return hitEOS(nativeHandle);
+  }
+
+  /**
+   * Checks if the generation process ended because the maximum length was hit.
+   *
+   * @return true if the maximum length was hit, false otherwise.
+   */
+  public boolean hitMaxLength() {
+    if (nativeHandle == 0) {
+      throw new IllegalStateException("Instance has been freed and is invalid");
+    }
+
+    return hitMaxLength(nativeHandle);
+  }
+
+  /**
    * Add a Tensor as a model input.
    *
    * @param name Name of the model input the tensor will provide.
