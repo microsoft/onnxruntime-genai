@@ -19,6 +19,8 @@ struct Search : LeakChecked<Search> {
   virtual DeviceSpan<float> GetLogits() const = 0;
   virtual void SetLogits(DeviceSpan<float> logits) = 0;
   virtual bool IsDone() const = 0;
+  virtual bool IsMaxLength() const = 0;
+  virtual void ResetDone() = 0;
 
   virtual void SelectTop() = 0;
   virtual void SampleTopP(float /*p*/, float /*temperature*/) { assert(false); }
@@ -44,6 +46,8 @@ struct Search_Cpu : Search {
   DeviceSpan<int32_t> GetSequenceLengths() override { return sequence_lengths_; }
 
   bool IsDone() const override { return done_; }
+  bool IsMaxLength() const override { return hit_max_length_; }
+  void ResetDone() override;
   DeviceSpan<float> GetLogits() const override;
   void SetLogits(DeviceSpan<float> logits) override;
 
@@ -61,6 +65,8 @@ struct Search_Cpu : Search {
   DeviceSpan<float> next_token_scores_;  // shape (beam_size*batch_size, vocab_size)
 
   bool done_{};
+  bool hit_eos_{};
+  bool hit_max_length_{};
 };
 
 struct GreedySearch_Cpu : Search_Cpu {

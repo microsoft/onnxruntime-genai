@@ -472,6 +472,10 @@ bool Generator::IsDone() {
   return is_done;
 }
 
+bool Generator::IsMaxLength() {
+  return search_->IsMaxLength();
+}
+
 bool Generator::IsSessionTerminated() const {
   return state_->session_terminated_;
 }
