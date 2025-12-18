@@ -127,10 +127,10 @@ if (option == 1 || option == 2)
             using var generator = new Generator(model, generatorParams);
             generator.AppendTokenSequences(sequences);
             var watch = System.Diagnostics.Stopwatch.StartNew();
-            while (true)
+            while (!generator.IsDone())
             {
                 generator.GenerateNextToken();
-                if (generator.IsDone())
+                if (generator.HitEOS())
                 {
                     break;
                 }
@@ -155,10 +155,10 @@ if (option == 1 || option == 2)
             using var generator = new Generator(model, generatorParams);
             generator.AppendTokenSequences(sequences);
             var watch = System.Diagnostics.Stopwatch.StartNew();
-            while (true)
+            while (!generator.IsDone())
             {
                 generator.GenerateNextToken();
-                if (generator.IsDone())
+                if (generator.HitEOS())
                 {
                     break;
                 }
@@ -196,10 +196,10 @@ if (option == 3) // Streaming Chat
         var sequences = tokenizer.Encode(tokenizer.ApplyChatTemplate("", messages, "", true));
         var watch = System.Diagnostics.Stopwatch.StartNew();
         generator.AppendTokenSequences(sequences);
-        while (true)
+        while (!generator.IsDone())
         {
             generator.GenerateNextToken();
-            if (generator.IsDone())
+            if (generator.HitEOS())
             {
                 break;
             }

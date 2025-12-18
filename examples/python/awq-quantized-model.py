@@ -108,9 +108,9 @@ def run_model(args):
         print("Output: ", end="", flush=True)
 
         try:
-            while True:
+            while not generator.is_done():
                 generator.generate_next_token()
-                if generator.is_done():
+                if generator.hit_eos():
                     break
 
                 new_token = generator.get_next_tokens()[0]

@@ -90,10 +90,10 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     auto generator = OgaGenerator::Create(*model, *params);
     generator->SetInputs(*input_tensors);
 
-    while (true) {
+    while (!generator->IsDone()) {
       generator->GenerateNextToken();
 
-      if (generator->IsDone()) {
+      if (generator->HitEOS()) {
         break;
       }
 

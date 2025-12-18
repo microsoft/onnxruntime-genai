@@ -54,6 +54,10 @@ void Search_Cpu::ResetDone() {
   done_ = false;
   hit_eos_ = false;
   hit_max_length_ = false;
+}
+
+void GreedySearch_Cpu::ResetDone() {
+  Search_Cpu::ResetDone();
   not_done_count_ = params_->search.batch_size;
   memset(eos_seen_.data(), 0, eos_seen_.size_bytes());
 }

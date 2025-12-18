@@ -472,11 +472,11 @@ bool Generator::IsDone() {
   return is_done;
 }
 
-bool Generator::HitEOS() {
+bool Generator::HitEOS() const {
   return search_->HitEOS();
 }
 
-bool Generator::HitMaxLength() {
+bool Generator::HitMaxLength() const {
   return search_->HitMaxLength();
 }
 

@@ -91,7 +91,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
     const auto current_token_count = generator->GetSequenceCount(0);
 
     try {
-      while (true) {
+      while (!generator->IsDone()) {
         generator->GenerateNextToken();
 
         if (is_first_token) {
@@ -99,7 +99,7 @@ void CXX_API(const char* model_path, const char* execution_provider) {
           is_first_token = false;
         }
 
-        if (generator->IsDone()) {
+        if (generator->HitEOS()) {
           break;
         }
 

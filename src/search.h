@@ -85,6 +85,7 @@ struct GreedySearch_Cpu : Search_Cpu {
   // Used by continuous decoding search.
   void AppendTokens(DeviceSpan<int32_t>& next_tokens) override;
   void RewindTo(size_t index) override;
+  void ResetDone() override;
 
  protected:
   void SetNextToken(size_t batch_id, int32_t token);

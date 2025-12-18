@@ -1,6 +1,6 @@
 # ONNX Runtime GenAI
 
-Note: between `v0.11.0` and `v0.10.1`, there is a breaking API usage change to improve model quality during multi-turn conversations.
+Note: between `v0.11.5` and `v0.10.1`, there is a breaking API usage change to improve model quality during multi-turn conversations.
 
 Previously, the decoding loop could be written as follows.
 
@@ -11,12 +11,12 @@ while not IsDone():
     PrintLastToken()
 ```
 
-In 0.11.0, the decoding loop should now be written as follows.
+In 0.11.5, the decoding loop should now be written as follows.
 
 ```
-while True:
+while not IsDone():
     GenerateToken()
-    if IsDone():
+    if HitEOS():
         break
     GetLastToken()
     PrintLastToken()
@@ -38,7 +38,7 @@ See documentation at the [ONNX Runtime website](https://onnxruntime.ai/docs/gena
 
 |Support matrix|Supported now|Under development|On the roadmap|
 | -------------- | ------------- | ----------------- | -------------- |
-| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Gemma <br/> gpt-oss <br/> Granite <br/> Llama <br/> Mistral <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen <br/> SmolLM3 <br/> Whisper | Stable diffusion | Multi-modal models |
+| Model architectures | AMD OLMo <br/> ChatGLM <br/> DeepSeek <br/> ERNIE 4.5 <br/> Fara <br/> Gemma <br/> gpt-oss <br/> Granite <br/> Llama <br/> Mistral <br/> Nemotron <br/> Phi (language + vision) <br/> Qwen <br/> SmolLM3 <br/> Whisper | Stable diffusion | Multi-modal models |
 | API| Python <br/>C# <br/>C/C++ <br/> Java ^ | Objective-C ||
 | Platform | Linux <br/> Windows <br/>Mac ^ <br/>Android ^  || iOS |||
 | Architecture | x86 <br/> x64 <br/> Arm64 ~ ||||
@@ -100,9 +100,9 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
 
    try:
       generator.append_tokens(input_tokens)
-      while True:
+      while not generator.is_done():
          generator.generate_next_token()
-         if generator.is_done():
+         if generator.hit_eos():
             break
          new_token = generator.get_next_tokens()[0]
          print(tokenizer_stream.decode(new_token), end='', flush=True)
@@ -118,13 +118,13 @@ See [installation instructions](https://onnxruntime.ai/docs/genai/howto/install)
 Due to the evolving nature of this project and ongoing feature additions, examples in the `main` branch may not always align with the latest stable release. This section outlines how to ensure compatibility between the examples and the corresponding version. The majority of the steps would remain same. Just the package installation and the model example file would change.
 
 ### Stable version
-Install the package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install). Let's say you installed the 0.10.1 version of ONNX Runtime GenAI, so the instructions would look like this:
+Install the package according to the [installation instructions](https://onnxruntime.ai/docs/genai/howto/install). Let's say you installed the 0.11.5 version of ONNX Runtime GenAI, so the instructions would look like this:
 
 ```bash
 # Clone the repo
 git clone https://github.com/microsoft/onnxruntime-genai.git && cd onnxruntime-genai
 # Checkout the branch for the version you are using
-git checkout v0.10.1
+git checkout v0.11.5
 cd examples
 ```
 

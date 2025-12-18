@@ -57,9 +57,9 @@ void CXX_API(const char* model_path, int32_t num_beams) {
     auto generator = OgaGenerator::Create(*model, *params);
     generator->SetInputs(*inputs);
 
-    while (true) {
+    while (!generator->IsDone()) {
       generator->GenerateNextToken();
-      if (generator->IsDone()) {
+      if (generator->HitEOS()) {
         break;
       }
     }

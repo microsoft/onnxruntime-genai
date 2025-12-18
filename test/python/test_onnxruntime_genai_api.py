@@ -148,14 +148,14 @@ def test_greedy_search(test_data_path, relative_model_path):
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731]], dtype=np.int32))
-    while True:
+    while not generator.is_done():
         # Test getting/setting logits
         logits = generator.get_logits()
         generator.set_logits(logits)
         generator.set_logits(logits)  # twice just to be sure buffer is still valid
 
         generator.generate_next_token()
-        if generator.is_done():
+        if generator.hit_eos():
             break
 
     expected_sequence = np.array(
@@ -193,9 +193,9 @@ def test_rewind_cuda(test_data_path, relative_model_path):
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
+        if generator.hit_eos():
             break
 
     assert generator.get_sequence(0) is not None
@@ -203,9 +203,9 @@ def test_rewind_cuda(test_data_path, relative_model_path):
     generator.rewind_to(3)
 
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
+        if generator.hit_eos():
             break
 
     assert generator.get_sequence(0) is not None
@@ -217,9 +217,9 @@ def test_rewind_cuda(test_data_path, relative_model_path):
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 0, 52], [0, 0, 195, 731], [64, 65, 66, 67]], dtype=np.int32))
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
+        if generator.hit_eos():
             break
 
     for i in range(batch_size):
@@ -233,9 +233,9 @@ def test_rewind_cuda(test_data_path, relative_model_path):
             dtype=np.int32,
         )
     )
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
+        if generator.hit_eos():
             break
 
     for i in range(batch_size):
@@ -262,9 +262,9 @@ def test_rewind(test_data_path, relative_model_path):
 
     generator = og.Generator(model, search_params)
     generator.append_tokens(np.array([[0, 0, 195, 731]], dtype=np.int32))
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
+        if generator.hit_eos():
             break
 
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
@@ -272,9 +272,9 @@ def test_rewind(test_data_path, relative_model_path):
     generator.rewind_to(3)
 
     generator.append_tokens(np.array([[731, 731]], dtype=np.int32))
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
+        if generator.hit_eos():
             break
 
     assert np.array_equal(expected_sequence, generator.get_sequence(0))
@@ -403,9 +403,9 @@ def test_batching(device, phi2_for):
 
     generator = og.Generator(model, params)
     generator.append_tokens(tokenizer.encode_batch(prompts))
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
+        if generator.hit_eos():
             break
     for i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
@@ -434,9 +434,9 @@ def test_e2e(device, phi2_for):
 
     generator = og.Generator(model, params)
     generator.append_tokens(tokenizer.encode_batch(prompts))
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
+        if generator.hit_eos():
             break
     for i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
@@ -469,9 +469,9 @@ def test_load_model_from_memory(device, wrapper_bytes_function, phi2_for):
 
     generator = og.Generator(model, params)
     generator.append_tokens(tokenizer.encode_batch(prompts))
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
+        if generator.hit_eos():
             break
     for i in range(len(prompts)):
         print(tokenizer.decode(generator.get_sequence(0)))
@@ -648,9 +648,9 @@ def test_pipeline_model(test_data_path, phi2_for, relative_model_path):
 
     generator = og.Generator(model, params)
     generator.append_tokens(tokenizer.encode_batch(prompts))
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
+        if generator.hit_eos():
             break
 
     expected_output = [
@@ -848,9 +848,9 @@ def test_adapters(test_data_path, device, multiple_adapters, phi2_for):
         generator.set_active_adapter(adapters, f"adapter_{i}")
 
     generator.append_tokens(tokenizer.encode_batch(prompts))
-    while True:
+    while not generator.is_done():
         generator.generate_next_token()
-        if generator.is_done():
+        if generator.hit_eos():
             break
 
 
@@ -935,9 +935,9 @@ def test_preset_extra_inputs(test_data_path, device, phi2_for, extra_inputs):
     else:
         generator.append_tokens(tokenizer.encode_batch(prompts))
 
-        while True:
+        while not generator.is_done():
             generator.generate_next_token()
-            if generator.is_done():
+            if generator.hit_eos():
                 break
 
 
