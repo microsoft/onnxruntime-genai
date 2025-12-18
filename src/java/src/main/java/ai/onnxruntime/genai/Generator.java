@@ -296,6 +296,10 @@ public final class Generator implements AutoCloseable, Iterable<Integer> {
 
   private native boolean isDone(long nativeHandle);
 
+  private native boolean hitEOS(long nativeHandle);
+
+  private native boolean hitMaxLength(long nativeHandle);
+
   private native void setModelInput(long nativeHandle, String inputName, long tensorHandle)
       throws GenAIException;
 

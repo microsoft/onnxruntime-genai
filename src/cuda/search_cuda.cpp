@@ -26,6 +26,8 @@ Search_Cuda::Search_Cuda(const GeneratorParams& params)
 
   eos_seen_buffer_ = CudaMallocArray<bool>(batch_beam_size, &eos_seen_);
   done_cpu_ = CudaMallocHostArray<bool>(1);
+  hit_eos_cpu_ = CudaMallocHostArray<bool>(1);
+  hit_max_length_cpu_ = CudaMallocHostArray<bool>(1);
 
   eos_token_ids_ = params.p_device->Allocate<int32_t>(params.config.model.eos_token_id.size());
   copy(std::span<const int32_t>{params.config.model.eos_token_id}, eos_token_ids_.CpuSpan());
