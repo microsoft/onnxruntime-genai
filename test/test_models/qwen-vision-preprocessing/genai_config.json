@@ -1,0 +1,86 @@
+{
+    "model": {
+        "bos_token_id": 151643,
+        "context_length": 128000,
+        "decoder": {
+            "session_options": {
+                "log_id": "onnxruntime-genai",
+                "provider_options": []
+            },
+            "filename": "dummy_text.onnx",
+            "head_size": 128,
+            "hidden_size": 3584,
+            "inputs": {
+                "inputs_embeds": "inputs_embeds",
+                "attention_mask": "attention_mask",
+                "position_ids": "position_ids",
+                "past_key_names": "past_key_values.%d.key",
+                "past_value_names": "past_key_values.%d.value"
+            },
+            "outputs": {
+                "logits": "logits",
+                "present_key_names": "present.%d.key",
+                "present_value_names": "present.%d.value"
+            },
+            "num_attention_heads": 28,
+            "num_hidden_layers": 1,
+            "num_key_value_heads": 4
+        },
+        "eos_token_id": [
+            151645,
+            151643
+        ],
+        "pad_token_id": 151643,
+        "image_token_id": 151655,
+        "video_token_id": 151656,
+        "vision_start_token_id": 151652,
+        "type": "qwen2_5_vl",
+        "vocab_size": 152064,
+        "embedding": {
+            "filename": "dummy_embedding.onnx",
+            "inputs": {
+                "input_ids": "input_ids",
+                "image_features": "image_features"
+            },
+            "outputs": {
+                "inputs_embeds": "inputs_embeds"
+            },
+            "session_options": {
+                "log_id": "onnxruntime-genai",
+                "provider_options": []
+            }
+        },
+        "vision": {
+            "filename": "dummy_vision.onnx",
+            "spatial_merge_size": 2,
+            "tokens_per_second": 2.0,
+            "inputs": {
+                "pixel_values": "pixel_values",
+                "image_grid_thw": "image_grid_thw"
+            },
+            "outputs": {
+                "image_features": "image_features"
+            },
+            "session_options": {
+                "log_id": "onnxruntime-genai",
+                "provider_options": []
+            }
+        }
+    },
+    "search": {
+        "diversity_penalty": 0.0,
+        "do_sample": true,
+        "early_stopping": true,
+        "length_penalty": 1.0,
+        "max_length": 128000,
+        "min_length": 0,
+        "no_repeat_ngram_size": 0,
+        "num_beams": 1,
+        "num_return_sequences": 1,
+        "past_present_share_buffer": true,
+        "repetition_penalty": 1.0,
+        "temperature": 1.0,
+        "top_k": 1,
+        "top_p": 1.0
+    }
+}

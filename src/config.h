@@ -38,6 +38,7 @@ struct Config {
     // Vision encoder names
     static constexpr std::string_view PixelValuesName = "pixel_values";
     static constexpr std::string_view ImageSizesName = "image_sizes";
+    static constexpr std::string_view ImageGridThwName = "image_grid_thw";
     static constexpr std::string_view ImageAttentionMaskName = "image_attention_mask";
     static constexpr std::string_view ImageFeaturesName = "image_features";
     static constexpr std::string_view NumImageTokens = "num_image_tokens";
@@ -106,6 +107,12 @@ struct Config {
     int bos_token_id{};             // The id of the beginning-of-stream token.
     int sep_token_id{};             // The id of the separation token.
     int decoder_start_token_id{};   // If an encoder-decoder model starts decoding with a different token than bos, the id of that token.
+
+    // Qwen2.5-VL specific token IDs
+    int image_token_id{};
+    int video_token_id{};
+    int vision_start_token_id{};
+
     int vocab_size{};
     int context_length{};
 
@@ -155,6 +162,10 @@ struct Config {
       std::string filename;
       std::optional<SessionOptions> session_options;
       std::optional<RunOptions> run_options;
+
+      // Qwen2.5-VL specific vision config values
+      int spatial_merge_size{2};
+      float tokens_per_second{2.0f};
 
       std::string config_filename{"processor_config.json"};
       std::optional<std::string> adapter_filename{};
