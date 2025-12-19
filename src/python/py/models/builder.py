@@ -63,6 +63,7 @@ def check_extra_options(kv_pairs, execution_provider):
         "shared_embeddings",
         "hf_remote",
         "disable_qkv_fusion",
+        "gpt_oss_swiglu_fusion",
     ]
     for key in bools:
         if key in kv_pairs:
@@ -135,7 +136,7 @@ def parse_hf_token(hf_token):
 def set_io_dtype(precision, execution_provider, extra_options) -> ir.DataType:
     int4_cpu = precision == "int4" and execution_provider == "cpu"
     fp32_webgpu = execution_provider == "webgpu" and extra_options.get("use_webgpu_fp32", False)
-    bf16_cuda = precision == "int4" and execution_provider == "cuda" and extra_options.get("use_cuda_bf16", False)
+    bf16_cuda = precision == "int4" and execution_provider in {"cuda", "trt-rtx"} and extra_options.get("use_cuda_bf16", False)
 
     if precision in {"int8", "fp32"} or int4_cpu or fp32_webgpu:
         # FP32 precision
@@ -405,6 +406,8 @@ def get_args():
                     Default is 4 for the CPU EP and 0 for non-CPU EPs.
                 int4_block_size = 16/32/64/128/256: Specify the block size for int4 quantization.
                     Default value is 32.
+                int4_qdq_block_size = 16/32/64/128/256: Specify the block size for quantize/dequantize nodes for int4 quantization.
+                    Default value is int4_block_size.
                 int4_is_symmetric = Quantize the weights symmetrically. Default is true.
                     If true, quantization is done to int4. If false, quantization is done to uint4.
                 int4_op_types_to_quantize = MatMul/Gather: Specify op types to target for int4 quantization.
@@ -462,6 +465,8 @@ def get_args():
                     Use this option to enable GPUs that do not support FP16 on WebGPU (e.g. GTX 10xx).
                 use_cuda_bf16 = Use BF16 I/O precision in quantized ONNX models for CUDA EP.
                     Use this option to create quantized ONNX models that use BF16 precision.
+                gpt_oss_swiglu_fusion = Fuse gate and up tensors into a single tensor. Default is true.
+                    This is only applicable to GPT-OSS models.
                 adapter_path = Path to folder on disk containing the adapter files (adapter_config.json and adapter model weights).
                     Use this option for LoRA models.
             """),
@@ -469,7 +474,7 @@ def get_args():
 
     args = parser.parse_args()
     print(
-        "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU"
+        "Valid precision + execution provider combinations are: FP32 CPU, FP32 CUDA, FP16 CUDA, FP16 DML, BF16 CUDA, FP16 TRT-RTX, BF16 TRT-RTX, INT4 CPU, INT4 CUDA, INT4 DML, INT4 WebGPU"
     )
     return args
 
