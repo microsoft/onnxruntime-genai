@@ -171,7 +171,7 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
 
   // Check for EOS
   assert(next_tokens_.size() == eos_seen_.size());
-  cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_seen_.data(), eos_token_ids_.Span().data(), static_cast<int>(eos_token_ids_.Span().size()), params_->config.model.pad_token_id, done_cpu_.get(), GetStream());
+  cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_seen_.data(), eos_token_ids_.Span().data(), static_cast<int>(eos_token_ids_.Span().size()), params_->config.model.pad_token_id, done_cpu_.get(), hit_eos_cpu_.get(), GetStream());
 
   // Append tokens
   cudaStreamSynchronize(GetStream());
@@ -249,10 +249,12 @@ void GreedySearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
 }
 
 void BeamSearch_Cuda::AppendTokens(DeviceSpan<int32_t>& next_tokens) {
+  ResetDone();
   auto next_tokens_gpu = next_tokens.Span();
   cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetNextSequences().Span(), params_->search.batch_size, params_->search.num_beams, sequences_.max_length_, GetStream());
   cuda::Launch_ExpandInputSequences(next_tokens_gpu, sequences_.GetSequences().Span(), params_->search.batch_size, params_->search.num_beams, sequences_.max_length_, GetStream());
   sequences_.AfterAppendNextTokens(next_tokens, params_->search.batch_size);  // next_tokens is batch_size
+  ResetDone();
   cudaStreamSynchronize(GetStream());
 }
 
