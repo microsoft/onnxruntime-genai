@@ -1,10 +1,12 @@
 import argparse
+import json
 import os
 
-from awq import AutoAWQForCausalLM
-from transformers import AutoTokenizer
-from onnxruntime_genai.models.builder import create_model
 import onnxruntime_genai as og
+from awq import AutoAWQForCausalLM
+from onnxruntime_genai.models.builder import create_model
+from transformers import AutoTokenizer
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -47,13 +49,12 @@ def parse_args():
     args = parser.parse_args()
     return args
 
+
 def quantize_model(args):
-    quant_config = { "zero_point": True, "q_group_size": 128, "w_bit": 4, "version": "GEMM" }
+    quant_config = {"zero_point": True, "q_group_size": 128, "w_bit": 4, "version": "GEMM"}
 
     # Load model
-    model = AutoAWQForCausalLM.from_pretrained(
-        args.model_path, **{"low_cpu_mem_usage": True, "use_cache": False}
-    )
+    model = AutoAWQForCausalLM.from_pretrained(args.model_path, low_cpu_mem_usage=True, use_cache=False)
     tokenizer = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
 
     # Quantize model
@@ -64,6 +65,7 @@ def quantize_model(args):
     tokenizer.save_pretrained(args.quant_path)
 
     print(f'Model is quantized and saved at "{args.quant_path}"')
+
 
 def run_model(args):
     # Load model
@@ -80,18 +82,19 @@ def run_model(args):
 
     # Override any default search options in `genai_config.json`
     search_options = {
-        'min_length': 1,
-        'max_length': 2048,
+        "min_length": 1,
+        "max_length": 2048,
     }
 
-    # Chat template for Phi-3 (replace with the chat template for your model)
-    chat_template = '<|user|>\n{input} <|end|>\n<|assistant|>'
     while True:
         text = input("Input: ")
         if not text:
             print("Error, input cannot be empty")
             continue
-        prompt = f'{chat_template.format(input=text)}'
+
+        # Apply chat template
+        input_message = [{"role": "user", "content": text}]
+        prompt = tokenizer.apply_chat_template(json.dumps(input_message), add_generation_prompt=True)
 
         input_tokens = tokenizer.encode(prompt)
 
@@ -102,14 +105,16 @@ def run_model(args):
         generator.append_tokens(input_tokens)
 
         print()
-        print("Output: ", end='', flush=True)
+        print("Output: ", end="", flush=True)
 
         try:
-            while not generator.is_done():
+            while True:
                 generator.generate_next_token()
+                if generator.is_done():
+                    break
 
                 new_token = generator.get_next_tokens()[0]
-                print(tokenizer_stream.decode(new_token), end='', flush=True)
+                print(tokenizer_stream.decode(new_token), end="", flush=True)
         except KeyboardInterrupt:
             print("  --control+c pressed, aborting generation--")
         print()
@@ -117,6 +122,7 @@ def run_model(args):
 
         # Delete the generator to free the captured graph for the next generator, if graph capture is enabled
         del generator
+
 
 def main():
     args = parse_args()
@@ -140,9 +146,12 @@ def main():
 
     if args.execution_provider == "dml":
         if og.__id__ != "onnxruntime-genai-directml":
-            raise ValueError(f"onnxruntime-genai-directml is required to be installed. Please uninstall all ORT GenAI packages with `pip uninstall -y onnxruntime-genai onnxruntime-genai-cuda onnxruntime-genai-directml` and only install the DML version with `pip install onnxruntime-genai-directml`.")
+            raise ValueError(
+                "onnxruntime-genai-directml is required to be installed. Please uninstall all ORT GenAI packages with `pip uninstall -y onnxruntime-genai onnxruntime-genai-cuda onnxruntime-genai-directml` and only install the DML version with `pip install onnxruntime-genai-directml`."
+            )
     # Run ONNX model
     run_model(args)
+
 
 if __name__ == "__main__":
     main()

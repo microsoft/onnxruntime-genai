@@ -13,11 +13,12 @@
         ]
     },
     "build_params": {
-      "base": [
-        "--parallel",
-        "--build_apple_framework",
-        "--skip_tests"
-      ],
+        "base": [
+            "--parallel",
+            "--build_apple_framework",
+            "--skip_tests",
+            "--skip_wheel"
+        ],
         "iphoneos": [
             "--ios",
             "--cmake_generator",
@@ -30,7 +31,7 @@
             "Xcode",
             "--apple_deploy_target=13.0"
         ],
-        "macabi":[
+        "macabi": [
             "--macos=Catalyst",
             "--apple_deploy_target=14.0"
         ]

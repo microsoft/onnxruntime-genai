@@ -4,10 +4,34 @@
 #include "generators.h"
 #include "runtime_settings.h"
 #include "json.h"
+#include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <limits>
+#include <cmath>
+#include <stdexcept>
 
 namespace Generators {
+
+// Fix casing of certain historical names to match current Onnxruntime names
+std::string_view NormalizeProviderName(std::string_view name) {
+  std::string lower_name(name);
+  std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+  if (lower_name == "qnn") {
+    return "QNN";
+  } else if (lower_name == "webgpu") {
+    return "WebGPU";
+  } else if (lower_name == "dml") {
+    return "DML";
+  } else if (lower_name == "openvino") {
+    return "OpenVINO";
+  } else if (lower_name == "vitisai") {
+    return "VitisAI";
+  } else if (lower_name == "nvtensorrtrtx") {
+    return "NvTensorRtRtx";
+  }
+  return name;  // Return name unchanged
+}
 
 ONNXTensorElementDataType TranslateTensorType(std::string_view value) {
   if (value == "float32") {
@@ -16,8 +40,22 @@ ONNXTensorElementDataType TranslateTensorType(std::string_view value) {
   if (value == "float16") {
     return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
   }
-
   throw std::runtime_error("Invalid tensor type: " + std::string(value));
+}
+
+OrtHardwareDeviceType ParseHardwareDeviceType(std::string_view value) {
+  std::string lower_value(value);
+  std::transform(lower_value.begin(), lower_value.end(), lower_value.begin(),
+                 [](unsigned char c) { return static_cast<unsigned char>(std::tolower(c)); });
+  if (lower_value == "cpu") {
+    return OrtHardwareDeviceType_CPU;
+  } else if (lower_value == "gpu") {
+    return OrtHardwareDeviceType_GPU;
+  } else if (lower_value == "npu") {
+    return OrtHardwareDeviceType_NPU;
+  } else {
+    throw std::runtime_error("Unsupported hardware device type: " + std::string(value));
+  }
 }
 
 struct NamedStrings_Element : JSON::Element {
@@ -42,26 +80,66 @@ struct Int_Array_Element : JSON::Element {
   std::vector<int>& v_;
 };
 
+struct DeviceFilteringOptions_Element : JSON::Element {
+  explicit DeviceFilteringOptions_Element(Config::DeviceFilteringOptions& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "hardware_device_type") {
+      v_.hardware_device_type = ParseHardwareDeviceType(JSON::Get<std::string_view>(value));
+    } else if (name == "hardware_device_id") {
+      v_.hardware_device_id = static_cast<uint32_t>(JSON::Get<double>(value));
+    } else if (name == "hardware_vendor_id") {
+      v_.hardware_vendor_id = static_cast<uint32_t>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::DeviceFilteringOptions& v_;
+};
+
+struct ProviderOptions_Element : JSON::Element {
+  explicit ProviderOptions_Element(Config::ProviderOptions& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.options.emplace_back(name, JSON::Get<std::string_view>(value));
+  }
+
+  JSON::Element& OnObject(std::string_view name) override {
+    if (name == "device_filtering_options") {
+      v_.device_filtering_options = Config::DeviceFilteringOptions{};
+      device_filtering_options_element_ = std::make_unique<DeviceFilteringOptions_Element>(*v_.device_filtering_options);
+      return *device_filtering_options_element_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::ProviderOptions& v_;
+  std::unique_ptr<DeviceFilteringOptions_Element> device_filtering_options_element_;
+};
+
 struct ProviderOptionsObject_Element : JSON::Element {
   explicit ProviderOptionsObject_Element(std::vector<Config::ProviderOptions>& v) : v_{v} {}
 
   JSON::Element& OnObject(std::string_view name) override {
     for (auto& v : v_) {
       if (v.name == name) {
-        options_element_ = std::make_unique<NamedStrings_Element>(v.options);
+        options_element_ = std::make_unique<ProviderOptions_Element>(v);
         return *options_element_;
       }
     }
 
     auto& options = v_.emplace_back();
     options.name = name;
-    options_element_ = std::make_unique<NamedStrings_Element>(options.options);
+    options_element_ = std::make_unique<ProviderOptions_Element>(options);
     return *options_element_;
   }
 
  private:
   std::vector<Config::ProviderOptions>& v_;
-  std::unique_ptr<NamedStrings_Element> options_element_;
+  std::unique_ptr<ProviderOptions_Element> options_element_;
 };
 
 struct ProviderOptionsArray_Element : JSON::Element {
@@ -72,13 +150,7 @@ struct ProviderOptionsArray_Element : JSON::Element {
   void OnComplete(bool /*empty*/) override {
     // For backwards compatibility turn our old names like 'qnn' into 'QNN', and 'webgpu' to 'WebGPU'
     for (auto& v : v_) {
-      if (v.name == "qnn") {
-        v.name = "QNN";
-      } else if (v.name == "webgpu") {
-        v.name = "WebGPU";
-      } else if (v.name == "dml") {
-        v.name = "DML";
-      }
+      v.name = NormalizeProviderName(v.name);
     }
   }
 
@@ -96,94 +168,121 @@ GraphOptimizationLevel GetGraphOptimizationLevel(std::string_view name) {
     return ORT_ENABLE_EXTENDED;
   } else if (name == "ORT_ENABLE_ALL") {
     return ORT_ENABLE_ALL;
-  } else
+  } else {
     throw std::runtime_error("Unrecognized value:" + std::string(name));
+  }
 }
 
 struct SessionOptions_Element : JSON::Element {
   explicit SessionOptions_Element(Config::SessionOptions& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "log_id")
+    if (name == "log_id") {
       v_.log_id = JSON::Get<std::string_view>(value);
-    else if (name == "enable_profiling")
+    } else if (name == "enable_profiling") {
       v_.enable_profiling = JSON::Get<std::string_view>(value);
-    else if (name == "ep_context_embed_mode")
-      v_.ep_context_embed_mode = JSON::Get<std::string_view>(value);
-    else if (name == "ep_context_file_path")
-      v_.ep_context_file_path = JSON::Get<std::string_view>(value);
-    else if (name == "intra_op_num_threads")
+    } else if (name == "intra_op_num_threads") {
       v_.intra_op_num_threads = static_cast<int>(JSON::Get<double>(value));
-    else if (name == "inter_op_num_threads")
+    } else if (name == "inter_op_num_threads") {
       v_.inter_op_num_threads = static_cast<int>(JSON::Get<double>(value));
-    else if (name == "log_severity_level")
+    } else if (name == "log_severity_level") {
       v_.log_severity_level = static_cast<int>(JSON::Get<double>(value));
-    else if (name == "enable_cpu_mem_arena")
+    } else if (name == "log_verbosity_level") {
+      v_.log_verbosity_level = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "enable_cpu_mem_arena") {
       v_.enable_cpu_mem_arena = JSON::Get<bool>(value);
-    else if (name == "enable_mem_pattern")
+    } else if (name == "enable_mem_pattern") {
       v_.enable_mem_pattern = JSON::Get<bool>(value);
-    else if (name == "disable_cpu_ep_fallback")
-      v_.disable_cpu_ep_fallback = JSON::Get<bool>(value);
-    else if (name == "disable_quant_qdq")
-      v_.disable_quant_qdq = JSON::Get<bool>(value);
-    else if (name == "enable_quant_qdq_cleanup")
-      v_.enable_quant_qdq_cleanup = JSON::Get<bool>(value);
-    else if (name == "ep_context_enable")
-      v_.ep_context_enable = JSON::Get<bool>(value);
-    else if (name == "use_env_allocators")
-      v_.use_env_allocators = JSON::Get<bool>(value);
-    else if (name == "graph_optimization_level")
+    } else if (name == "graph_optimization_level") {
       v_.graph_optimization_level = GetGraphOptimizationLevel(JSON::Get<std::string_view>(value));
-    else if (name == "custom_ops_library")
+    } else if (name == "custom_ops_library") {
       v_.custom_ops_library = JSON::Get<std::string_view>(value);
-    else
-      throw JSON::unknown_value_error{};
-  }
-
-  JSON::Element& OnObject(std::string_view name) override {
-    if (name == "config_entries")
-      return config_entries_;
-    throw JSON::unknown_value_error{};
+    } else {
+      // Session options that are set with AddConfigEntry
+      v_.config_entries.emplace_back(name, JSON::Get<std::string_view>(value));
+    }
   }
 
   JSON::Element& OnArray(std::string_view name) override {
-    if (name == "provider_options")
+    if (name == "provider_options") {
       return provider_options_;
+    }
     throw JSON::unknown_value_error{};
   }
 
  private:
   Config::SessionOptions& v_;
   ProviderOptionsArray_Element provider_options_{v_.provider_options};
-  NamedStrings_Element config_entries_{v_.config_entries};
 };
 
-struct EncoderDecoderInit_Element : JSON::Element {
-  explicit EncoderDecoderInit_Element(Config::Model::EncoderDecoderInit& v) : v_{v} {}
+struct RunOptions_Element : JSON::Element {
+  explicit RunOptions_Element(Config::RunOptions& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
-    if (name == "filename") {
-      v_.filename = JSON::Get<std::string_view>(value);
-    } else
-      throw JSON::unknown_value_error{};
+    // Run options that are set with AddConfigEntry
+    v_.emplace_back(name, JSON::Get<std::string_view>(value));
   }
 
  private:
-  Config::Model::EncoderDecoderInit& v_;
+  Config::RunOptions& v_;
 };
 
-struct Inputs_Element : JSON::Element {
-  explicit Inputs_Element(Config::Model::Decoder::Inputs& v) : v_{v} {}
+struct EncoderInputs_Element : JSON::Element {
+  explicit EncoderInputs_Element(Config::Model::Encoder::Inputs& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "input_ids") {
       v_.input_ids = JSON::Get<std::string_view>(value);
     } else if (name == "inputs_embeds") {
       v_.embeddings = JSON::Get<std::string_view>(value);
-    } else if (name == "position_ids") {
-      v_.position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
+    } else if (name == "position_ids") {
+      v_.position_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "audio_features") {
+      v_.audio_features = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Encoder::Inputs& v_;
+};
+
+struct EncoderOutputs_Element : JSON::Element {
+  explicit EncoderOutputs_Element(Config::Model::Encoder::Outputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "encoder_hidden_states") {
+      v_.hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "encoder_outputs") {
+      v_.encoder_outputs = JSON::Get<std::string_view>(value);
+    } else if (name == "cross_present_key_names") {
+      v_.cross_present_key_names = JSON::Get<std::string_view>(value);
+    } else if (name == "cross_present_value_names") {
+      v_.cross_present_value_names = JSON::Get<std::string_view>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  Config::Model::Encoder::Outputs& v_;
+};
+
+struct DecoderInputs_Element : JSON::Element {
+  explicit DecoderInputs_Element(Config::Model::Decoder::Inputs& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "input_ids") {
+      v_.input_ids = JSON::Get<std::string_view>(value);
+    } else if (name == "inputs_embeds") {
+      v_.embeddings = JSON::Get<std::string_view>(value);
+    } else if (name == "attention_mask") {
+      v_.attention_mask = JSON::Get<std::string_view>(value);
+    } else if (name == "position_ids") {
+      v_.position_ids = JSON::Get<std::string_view>(value);
     } else if (name == "past_key_names") {
       v_.past_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "past_value_names") {
@@ -194,22 +293,39 @@ struct Inputs_Element : JSON::Element {
       v_.cross_past_key_names = JSON::Get<std::string_view>(value);
     } else if (name == "cross_past_value_names") {
       v_.cross_past_value_names = JSON::Get<std::string_view>(value);
-    } else if (name == "current_sequence_length") {
-      v_.current_sequence_length = JSON::Get<std::string_view>(value);
     } else if (name == "past_sequence_length") {
       v_.past_sequence_length = JSON::Get<std::string_view>(value);
+    } else if (name == "current_sequence_length") {
+      v_.current_sequence_length = JSON::Get<std::string_view>(value);
     } else if (name == "total_sequence_length") {
       v_.total_sequence_length = JSON::Get<std::string_view>(value);
-    } else
+    } else if (name == "encoder_hidden_states") {
+      v_.encoder_hidden_states = JSON::Get<std::string_view>(value);
+    } else if (name == "encoder_attention_mask") {
+      v_.encoder_attention_mask = JSON::Get<std::string_view>(value);
+    } else if (name == "rnn_states_prev") {
+      v_.rnn_prev_states = JSON::Get<std::string_view>(value);
+    } else if (name == "past_key_values_length") {
+      v_.past_key_values_length = JSON::Get<std::string_view>(value);
+    } else if (name == "cache_indirection") {
+      v_.cache_indirection = JSON::Get<std::string_view>(value);
+    } else if (name == "cumulative_sequence_lengths") {
+      v_.cumulative_sequence_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "past_sequence_lengths") {
+      v_.past_sequence_lengths = JSON::Get<std::string_view>(value);
+    } else if (name == "block_table") {
+      v_.block_table = JSON::Get<std::string_view>(value);
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
  private:
   Config::Model::Decoder::Inputs& v_;
 };
 
-struct Outputs_Element : JSON::Element {
-  explicit Outputs_Element(Config::Model::Decoder::Outputs& v) : v_{v} {}
+struct DecoderOutputs_Element : JSON::Element {
+  explicit DecoderOutputs_Element(Config::Model::Decoder::Outputs& v) : v_{v} {}
 
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "logits") {
@@ -220,12 +336,13 @@ struct Outputs_Element : JSON::Element {
       v_.present_value_names = JSON::Get<std::string_view>(value);
     } else if (name == "present_names") {
       v_.present_names = JSON::Get<std::string_view>(value);
-    } else if (name == "cross_present_key_names") {
-      v_.cross_present_key_names = JSON::Get<std::string_view>(value);
-    } else if (name == "cross_present_value_names") {
-      v_.cross_present_value_names = JSON::Get<std::string_view>(value);
-    } else
+    } else if (name == "output_cross_qk_names") {
+      v_.output_cross_qk_names = JSON::Get<std::string_view>(value);
+    } else if (name == "rnn_states") {
+      v_.rnn_states = JSON::Get<std::string_view>(value);
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
  private:
@@ -241,6 +358,17 @@ struct StringArray_Element : JSON::Element {
 
  private:
   std::vector<std::string>& v_;
+};
+
+struct IntArray_Element : JSON::Element {
+  explicit IntArray_Element(std::vector<int>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    v_.push_back(static_cast<int>(JSON::Get<double>(value)));
+  }
+
+ private:
+  std::vector<int>& v_;
 };
 
 struct StringStringMap_Element : JSON::Element {
@@ -264,10 +392,13 @@ struct PipelineModel_Element : JSON::Element {
       v_.run_on_prompt = JSON::Get<bool>(value);
     } else if (name == "run_on_token_gen") {
       v_.run_on_token_gen = JSON::Get<bool>(value);
+    } else if (name == "is_lm_head") {
+      v_.is_lm_head = JSON::Get<bool>(value);
     } else if (name == "reset_session_idx") {
       v_.reset_session_idx = static_cast<int>(JSON::Get<double>(value));
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
   JSON::Element& OnObject(std::string_view name) override {
@@ -275,23 +406,31 @@ struct PipelineModel_Element : JSON::Element {
       v_.session_options = Config::SessionOptions{};
       session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
       return *session_options_;
-    } else if (name == "output_names_forwarder") {
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    if (name == "output_names_forwarder") {
       return output_names_forwarder_;
     }
     throw JSON::unknown_value_error{};
   }
 
   Element& OnArray(std::string_view name) override {
-    if (name == "inputs")
+    if (name == "inputs") {
       return inputs_;
-    else if (name == "outputs")
+    } else if (name == "outputs") {
       return outputs_;
+    }
     throw JSON::unknown_value_error{};
   }
 
  private:
   Config::Model::Decoder::PipelineModel& v_;
   std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
   StringArray_Element inputs_{v_.inputs};
   StringArray_Element outputs_{v_.outputs};
   StringStringMap_Element output_names_forwarder_{v_.output_names_forwarder};
@@ -336,12 +475,76 @@ struct SlidingWindow_Element : JSON::Element {
       v_->alignment = JSON::Get<std::string_view>(value);
     } else if (name == "slide_key_value_cache") {
       v_->slide_key_value_cache = JSON::Get<bool>(value);
-    } else
+    } else if (name == "slide_inputs") {
+      v_->slide_inputs = JSON::Get<bool>(value);
+    } else {
       throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "layers") {
+      // Lazy initialize layers_ when first accessed
+      if (!layers_) {
+        layers_ = std::make_unique<IntArray_Element>(v_->layers);
+      }
+      return *layers_;
+    }
+    throw JSON::unknown_value_error{};
   }
 
  private:
   std::optional<Config::Model::Decoder::SlidingWindow>& v_;
+  std::unique_ptr<IntArray_Element> layers_;
+};
+
+struct Encoder_Element : JSON::Element {
+  explicit Encoder_Element(Config::Model::Encoder& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "hidden_size") {
+      v_.hidden_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_attention_heads") {
+      v_.num_attention_heads = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_hidden_layers") {
+      v_.num_hidden_layers = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "num_key_value_heads") {
+      v_.num_key_value_heads = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "head_size") {
+      v_.head_size = static_cast<int>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    if (name == "inputs") {
+      return inputs_;
+    }
+    if (name == "outputs") {
+      return outputs_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Encoder& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+  EncoderInputs_Element inputs_{v_.inputs};
+  EncoderOutputs_Element outputs_{v_.outputs};
 };
 
 struct Decoder_Element : JSON::Element {
@@ -360,13 +563,19 @@ struct Decoder_Element : JSON::Element {
       v_.num_hidden_layers = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "head_size") {
       v_.head_size = static_cast<int>(JSON::Get<double>(value));
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
   Element& OnObject(std::string_view name) override {
     if (name == "session_options") {
       return session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
     }
     if (name == "inputs") {
       return inputs_;
@@ -378,22 +587,30 @@ struct Decoder_Element : JSON::Element {
       v_.sliding_window = Config::Model::Decoder::SlidingWindow{};
       return sliding_window_;
     }
+    // Support object-style pipeline: "pipeline": { "embeddings": { ... }, ... }
+    if (name == "pipeline") {
+      pipeline_object_ = std::make_unique<PipelineModelObject_Element>(v_.pipeline);
+      return *pipeline_object_;
+    }
     throw JSON::unknown_value_error{};
   }
 
   Element& OnArray(std::string_view name) override {
-    if (name == "pipeline")
+    if (name == "pipeline") {
       return pipeline_;
+    }
     throw JSON::unknown_value_error{};
   }
 
  private:
   Config::Model::Decoder& v_;
   SessionOptions_Element session_options_{v_.session_options};
-  Inputs_Element inputs_{v_.inputs};
-  Outputs_Element outputs_{v_.outputs};
+  std::unique_ptr<RunOptions_Element> run_options_;
+  DecoderInputs_Element inputs_{v_.inputs};
+  DecoderOutputs_Element outputs_{v_.outputs};
   Pipeline_Element pipeline_{v_.pipeline};
   SlidingWindow_Element sliding_window_{v_.sliding_window};
+  std::unique_ptr<PipelineModelObject_Element> pipeline_object_;  // object-style pipeline support
 };
 
 struct VisionInputs_Element : JSON::Element {
@@ -404,10 +621,13 @@ struct VisionInputs_Element : JSON::Element {
       v_.pixel_values = JSON::Get<std::string_view>(value);
     } else if (name == "image_sizes") {
       v_.image_sizes = JSON::Get<std::string_view>(value);
+    } else if (name == "image_grid_thw") {
+      v_.image_grid_thw = JSON::Get<std::string_view>(value);
     } else if (name == "attention_mask") {
       v_.attention_mask = JSON::Get<std::string_view>(value);
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
  private:
@@ -420,12 +640,84 @@ struct VisionOutputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "image_features") {
       v_.image_features = JSON::Get<std::string_view>(value);
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
  private:
   Config::Model::Vision::Outputs& v_;
+};
+
+// Vision pipeline support structures
+struct VisionPipelineModel_Element : JSON::Element {
+  explicit VisionPipelineModel_Element(Config::Model::Vision::PipelineModel& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "filename") {
+      v_.filename = JSON::Get<std::string_view>(value);
+    } else if (name == "run_on_cpu") {
+      v_.run_on_cpu = JSON::Get<bool>(value);
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "inputs") {
+      return inputs_;
+    }
+    if (name == "outputs") {
+      return outputs_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Model::Vision::PipelineModel& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
+  StringArray_Element inputs_{v_.inputs};
+  StringArray_Element outputs_{v_.outputs};
+};
+
+struct VisionPipelineModelObject_Element : JSON::Element {
+  explicit VisionPipelineModelObject_Element(std::vector<Config::Model::Vision::PipelineModel>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    auto& model = v_.emplace_back();
+    model.model_id = name;
+    elements_.emplace_back(model);
+    return elements_.back();
+  }
+
+ private:
+  std::vector<Config::Model::Vision::PipelineModel>& v_;
+  std::vector<VisionPipelineModel_Element> elements_;
+};
+
+struct VisionPipeline_Element : JSON::Element {
+  explicit VisionPipeline_Element(std::vector<Config::Model::Vision::PipelineModel>& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override { return object_; }
+
+ private:
+  std::vector<Config::Model::Vision::PipelineModel>& v_;
+  VisionPipelineModelObject_Element object_{v_};
 };
 
 struct Vision_Element : JSON::Element {
@@ -438,23 +730,55 @@ struct Vision_Element : JSON::Element {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
       v_.adapter_filename = JSON::Get<std::string_view>(value);
-    } else
+    } else if (name == "spatial_merge_size") {
+      v_.spatial_merge_size = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "tokens_per_second") {
+      v_.tokens_per_second = static_cast<float>(JSON::Get<double>(value));
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
   Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
     if (name == "inputs") {
       return inputs_;
-    } else if (name == "outputs") {
+    }
+    if (name == "outputs") {
       return outputs_;
-    } else
-      throw JSON::unknown_value_error{};
+    }
+    // Support object-style pipeline for vision: "pipeline": { "patch_embed": { ... }, ... }
+    if (name == "pipeline") {
+      vision_pipeline_object_ = std::make_unique<VisionPipelineModelObject_Element>(v_.pipeline);
+      return *vision_pipeline_object_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+  Element& OnArray(std::string_view name) override {
+    if (name == "pipeline") {
+      return pipeline_element_;
+    }
+    throw JSON::unknown_value_error{};
   }
 
  private:
   Config::Model::Vision& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
   VisionInputs_Element inputs_{v_.inputs};
   VisionOutputs_Element outputs_{v_.outputs};
+  VisionPipeline_Element pipeline_element_{v_.pipeline};
+  std::unique_ptr<VisionPipelineModelObject_Element> vision_pipeline_object_;  // object-style pipeline support
 };
 
 struct SpeechInputs_Element : JSON::Element {
@@ -469,8 +793,9 @@ struct SpeechInputs_Element : JSON::Element {
       v_.audio_sizes = JSON::Get<std::string_view>(value);
     } else if (name == "audio_projection_mode") {
       v_.audio_projection_mode = JSON::Get<std::string_view>(value);
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
  private:
@@ -483,8 +808,9 @@ struct SpeechOutputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "audio_features") {
       v_.audio_features = JSON::Get<std::string_view>(value);
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
  private:
@@ -501,21 +827,35 @@ struct Speech_Element : JSON::Element {
       v_.config_filename = JSON::Get<std::string_view>(value);
     } else if (name == "adapter_filename") {
       v_.adapter_filename = JSON::Get<std::string_view>(value);
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
   Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
     if (name == "inputs") {
       return inputs_;
-    } else if (name == "outputs") {
+    }
+    if (name == "outputs") {
       return outputs_;
-    } else
-      throw JSON::unknown_value_error{};
+    }
+    throw JSON::unknown_value_error{};
   }
 
  private:
   Config::Model::Speech& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
   SpeechInputs_Element inputs_{v_.inputs};
   SpeechOutputs_Element outputs_{v_.outputs};
 };
@@ -530,8 +870,9 @@ struct EmbeddingInputs_Element : JSON::Element {
       v_.image_features = JSON::Get<std::string_view>(value);
     } else if (name == "audio_features") {
       v_.audio_features = JSON::Get<std::string_view>(value);
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
  private:
@@ -544,8 +885,9 @@ struct EmbeddingOutputs_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "inputs_embeds") {
       v_.embeddings = JSON::Get<std::string_view>(value);
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
  private:
@@ -558,21 +900,35 @@ struct Embedding_Element : JSON::Element {
   void OnValue(std::string_view name, JSON::Value value) override {
     if (name == "filename") {
       v_.filename = JSON::Get<std::string_view>(value);
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
   Element& OnObject(std::string_view name) override {
+    if (name == "session_options") {
+      v_.session_options = Config::SessionOptions{};
+      session_options_ = std::make_unique<SessionOptions_Element>(*v_.session_options);
+      return *session_options_;
+    }
+    if (name == "run_options") {
+      v_.run_options = Config::RunOptions{};
+      run_options_ = std::make_unique<RunOptions_Element>(*v_.run_options);
+      return *run_options_;
+    }
     if (name == "inputs") {
       return inputs_;
-    } else if (name == "outputs") {
+    }
+    if (name == "outputs") {
       return outputs_;
-    } else
-      throw JSON::unknown_value_error{};
+    }
+    throw JSON::unknown_value_error{};
   }
 
  private:
   Config::Model::Embedding& v_;
+  std::unique_ptr<SessionOptions_Element> session_options_;
+  std::unique_ptr<RunOptions_Element> run_options_;
   EmbeddingInputs_Element inputs_{v_.inputs};
   EmbeddingOutputs_Element outputs_{v_.outputs};
 };
@@ -597,8 +953,15 @@ struct Model_Element : JSON::Element {
       v_.decoder_start_token_id = static_cast<int>(JSON::Get<double>(value));
     } else if (name == "sep_token_id") {
       v_.sep_token_id = static_cast<int>(JSON::Get<double>(value));
-    } else
+    } else if (name == "image_token_id") {
+      v_.image_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "video_token_id") {
+      v_.video_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else if (name == "vision_start_token_id") {
+      v_.vision_start_token_id = static_cast<int>(JSON::Get<double>(value));
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
   Element& OnArray(std::string_view name) override {
@@ -608,8 +971,8 @@ struct Model_Element : JSON::Element {
   }
 
   Element& OnObject(std::string_view name) override {
-    if (name == "encoder_decoder_init") {
-      return encoder_decoder_init_;
+    if (name == "encoder") {
+      return encoder_;
     }
     if (name == "decoder") {
       return decoder_;
@@ -628,13 +991,37 @@ struct Model_Element : JSON::Element {
 
  private:
   Config::Model& v_;
-  EncoderDecoderInit_Element encoder_decoder_init_{v_.encoder_decoder_init};
+  Encoder_Element encoder_{v_.encoder};
   Decoder_Element decoder_{v_.decoder};
   Int_Array_Element eos_token_id_{v_.eos_token_id};
   Vision_Element vision_{v_.vision};
   Embedding_Element embedding_{v_.embedding};
   Speech_Element speech_{v_.speech};
 };
+
+int SafeDoubleToInt(double x, std::string_view name) {
+  // 1. Check for non-finite values (NaN, infinity)
+  if (!std::isfinite(x)) {
+    std::stringstream ss;
+    ss << "Field '" << name << "' cannot be converted to int32 (NaN or Inf)";
+    throw std::overflow_error(ss.str());
+  }
+
+  // 2. Check if the value is outside the representable range of an integer.
+  constexpr double min_int_val = static_cast<double>(std::numeric_limits<int>::min());
+  constexpr double max_int_val = static_cast<double>(std::numeric_limits<int>::max());
+
+  if (x < min_int_val || x > max_int_val) {
+    std::stringstream ss;
+    ss << "Field '" << name << "' value " << x << " is out of int32 range ["
+       << std::numeric_limits<int>::min() << ", " << std::numeric_limits<int>::max() << "]";
+    throw std::overflow_error(ss.str());
+  }
+
+  // 3. Perform the cast. This truncates any fractional part (e.g., 3.9 becomes 3).
+  // If rounding is desired, use `return static_cast<int>(std::round(x));`
+  return static_cast<int>(x);
+}
 
 struct Search_Element : JSON::Element {
   explicit Search_Element(Config::Search& v) : v_{v} {}
@@ -667,19 +1054,88 @@ struct Search_Element : JSON::Element {
     } else if (name == "length_penalty") {
       v_.length_penalty = static_cast<float>(JSON::Get<double>(value));
     } else if (name == "random_seed") {
-      v_.random_seed = static_cast<int>(JSON::Get<double>(value));
+      v_.random_seed = SafeDoubleToInt(JSON::Get<double>(value), name);
+    } else if (name == "chunk_size") {
+      double chunk_value = JSON::Get<double>(value);
+      if (chunk_value > 0) {
+        v_.chunk_size = static_cast<size_t>(chunk_value);
+      } else {
+        v_.chunk_size = std::nullopt;
+      }
     } else if (name == "do_sample") {
       v_.do_sample = JSON::Get<bool>(value);
     } else if (name == "past_present_share_buffer") {
       v_.past_present_share_buffer = JSON::Get<bool>(value);
     } else if (name == "early_stopping") {
       v_.early_stopping = JSON::Get<bool>(value);
-    } else
+    } else {
       throw JSON::unknown_value_error{};
+    }
   }
 
  private:
   Config::Search& v_;
+};
+
+struct DynamicBatching_Element : JSON::Element {
+  explicit DynamicBatching_Element(std::optional<Config::Engine::DynamicBatching>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (!v_)
+      v_ = Config::Engine::DynamicBatching{};
+
+    if (name == "block_size") {
+      v_->block_size = static_cast<size_t>(JSON::Get<double>(value));
+    } else if (name == "num_blocks") {
+      v_->num_blocks = static_cast<size_t>(JSON::Get<double>(value));
+    } else if (name == "gpu_utilization_factor") {
+      v_->gpu_utilization_factor = static_cast<float>(JSON::Get<double>(value));
+    } else if (name == "max_batch_size") {
+      v_->max_batch_size = static_cast<size_t>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  std::optional<Config::Engine::DynamicBatching>& v_;
+};
+
+struct StaticBatching_Element : JSON::Element {
+  explicit StaticBatching_Element(std::optional<Config::Engine::StaticBatching>& v) : v_{v} {}
+
+  void OnValue(std::string_view name, JSON::Value value) override {
+    if (name == "max_batch_size") {
+      v_->max_batch_size = static_cast<size_t>(JSON::Get<double>(value));
+    } else {
+      throw JSON::unknown_value_error{};
+    }
+  }
+
+ private:
+  std::optional<Config::Engine::StaticBatching>& v_;
+};
+
+struct Engine_Element : JSON::Element {
+  explicit Engine_Element(Config::Engine& v) : v_{v} {}
+
+  Element& OnObject(std::string_view name) override {
+    if (name == "dynamic_batching") {
+      if (v_.static_batching)
+        v_.static_batching.reset();
+      return dynamic_batching_;
+    } else if (name == "static_batching") {
+      if (v_.dynamic_batching)
+        v_.dynamic_batching.reset();
+      return static_batching_;
+    }
+    throw JSON::unknown_value_error{};
+  }
+
+ private:
+  Config::Engine& v_;
+  DynamicBatching_Element dynamic_batching_{v_.dynamic_batching};
+  StaticBatching_Element static_batching_{v_.static_batching};
 };
 
 void SetSearchNumber(Config::Search& search, std::string_view name, double value) {
@@ -703,8 +1159,26 @@ void ClearProviders(Config& config) {
 }
 
 void SetProviderOption(Config& config, std::string_view provider_name, std::string_view option_name, std::string_view option_value) {
-  if (!contains(config.model.decoder.session_options.providers, provider_name))
-    config.model.decoder.session_options.providers.push_back(std::string(provider_name));
+  // Normalize the provider name once
+  auto normalized_provider = NormalizeProviderName(provider_name);
+
+  // Ensure provider is in the providers list
+  if (!contains(config.model.decoder.session_options.providers, normalized_provider)) {
+    config.model.decoder.session_options.providers.push_back(std::string(normalized_provider));
+  }
+
+  // Remove any existing options with the same name to avoid duplicates
+  for (auto& provider_options : config.model.decoder.session_options.provider_options) {
+    if (provider_options.name == normalized_provider && !option_name.empty()) {
+      provider_options.options.erase(
+          std::remove_if(provider_options.options.begin(),
+                         provider_options.options.end(),
+                         [&option_name](const Config::NamedString& opt) {
+                           return opt.first == option_name;
+                         }),
+          provider_options.options.end());
+    }
+  }
 
   std::ostringstream json;
   json << R"({")" << provider_name << R"(":{)";
@@ -717,43 +1191,145 @@ void SetProviderOption(Config& config, std::string_view provider_name, std::stri
   JSON::Parse(element, json.str());
 }
 
-bool IsGraphCaptureEnabled(Config::SessionOptions& session_options) {
-  for (const auto& provider_options : session_options.provider_options) {
-    if (provider_options.name == "cuda") {
-      // Graph Capture is currently broken for CUDA
-      for (const auto& value : provider_options.options) {
-        if (value.first == "enable_cuda_graph" && value.second == "1") {
-          throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
+bool IsGraphCaptureEnabled(const Config::SessionOptions& session_options) {
+  for (const auto& provider : session_options.providers) {
+    const auto provider_options = std::find_if(session_options.provider_options.begin(),
+                                               session_options.provider_options.end(),
+                                               [&provider](const Config::ProviderOptions& po) {
+                                                 return po.name == provider;
+                                               });
+    if (provider_options != session_options.provider_options.end()) {
+      if (provider_options->name == "cuda") {
+        // Graph Capture is currently broken for CUDA
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enable_cuda_graph" && value.second == "1") {
+            throw std::runtime_error("Graph Capture is currently unsupported for CUDA");
+          }
+        }
+      } else if (provider_options->name == "DML") {
+        return true;
+      } else if (provider_options->name == "WebGPU") {
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enableGraphCapture" && value.second == "1") {
+            return true;
+          }
+        }
+        return false;
+      } else if (provider_options->name == "NvTensorRtRtx") {
+        for (const auto& value : provider_options->options) {
+          if (value.first == "enable_cuda_graph" && value.second == "1") {
+            return true;
+          }
+        }
+        return false;
+      }
+    }
+  }
+
+  return false;
+}
+
+bool IsMultiProfileEnabled(const Config::SessionOptions& session_options) {
+  for (const auto& provider : session_options.providers) {
+    const auto provider_options = std::find_if(session_options.provider_options.begin(),
+                                               session_options.provider_options.end(),
+                                               [&provider](const Config::ProviderOptions& po) {
+                                                 return po.name == provider;
+                                               });
+    if (provider_options != session_options.provider_options.end()) {
+      if (provider_options->name == "NvTensorRtRtx") {
+        for (const auto& value : provider_options->options) {
+          if (value.first == "nv_multi_profile_enable" && value.second == "1") {
+            return true;
+          }
         }
       }
-    } else if (provider_options.name == "DML") {
-      return true;
-    } else if (provider_options.name == "NvTensorRtRtx") {
-      return true;
     }
   }
   return false;
 }
 
+void SetDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name, std::string_view hardware_device_type) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
+  for (auto& provider_option : config.model.decoder.session_options.provider_options) {
+    if (provider_option.name == normalized_provider) {
+      if (!provider_option.device_filtering_options) {
+        provider_option.device_filtering_options = Config::DeviceFilteringOptions{};
+      }
+      provider_option.device_filtering_options->hardware_device_type = ParseHardwareDeviceType(hardware_device_type);
+    }
+  }
+}
+
+void SetDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name, uint32_t hardware_device_id) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
+  for (auto& provider_option : config.model.decoder.session_options.provider_options) {
+    if (provider_option.name == normalized_provider) {
+      if (!provider_option.device_filtering_options) {
+        provider_option.device_filtering_options = Config::DeviceFilteringOptions{};
+      }
+      provider_option.device_filtering_options->hardware_device_id = hardware_device_id;
+    }
+  }
+}
+
+void SetDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view provider_name, uint32_t hardware_vendor_id) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
+  for (auto& provider_option : config.model.decoder.session_options.provider_options) {
+    if (provider_option.name == normalized_provider) {
+      if (!provider_option.device_filtering_options) {
+        provider_option.device_filtering_options = Config::DeviceFilteringOptions{};
+      }
+      provider_option.device_filtering_options->hardware_vendor_id = hardware_vendor_id;
+    }
+  }
+}
+
+void ClearDecoderProviderOptionsHardwareDeviceType(Config& config, std::string_view provider_name) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
+  for (auto& provider_option : config.model.decoder.session_options.provider_options) {
+    if (provider_option.name == normalized_provider && provider_option.device_filtering_options) {
+      provider_option.device_filtering_options->hardware_device_type = std::nullopt;
+    }
+  }
+}
+
+void ClearDecoderProviderOptionsHardwareDeviceId(Config& config, std::string_view provider_name) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
+  for (auto& provider_option : config.model.decoder.session_options.provider_options) {
+    if (provider_option.name == normalized_provider && provider_option.device_filtering_options) {
+      provider_option.device_filtering_options->hardware_device_id = std::nullopt;
+    }
+  }
+}
+
+void ClearDecoderProviderOptionsHardwareVendorId(Config& config, std::string_view provider_name) {
+  auto normalized_provider = NormalizeProviderName(provider_name);
+  for (auto& provider_option : config.model.decoder.session_options.provider_options) {
+    if (provider_option.name == normalized_provider && provider_option.device_filtering_options) {
+      provider_option.device_filtering_options->hardware_vendor_id = std::nullopt;
+    }
+  }
+}
+
 struct Root_Element : JSON::Element {
   explicit Root_Element(Config& config) : config_{config} {}
 
-  void OnValue(std::string_view name, JSON::Value value) override {
+  void OnValue(std::string_view /*name*/, JSON::Value /*value*/) override {
+    // No top-level scalar values currently supported
   }
 
   Element& OnObject(std::string_view name) override {
-    if (name == "model") {
-      return model_element_;
-    }
-    if (name == "search") {
-      return search_element_;
-    }
+    if (name == "model") return model_element_;
+    if (name == "search") return search_element_;
+    if (name == "engine") return engine_element_;
     throw JSON::unknown_value_error{};
   }
 
   Config& config_;
   Model_Element model_element_{config_.model};
   Search_Element search_element_{config_.search};
+  Engine_Element engine_element_{config_.engine};
 };
 
 struct RootObject_Element : JSON::Element {
@@ -809,18 +1385,45 @@ void OverlayConfig(Config& config, std::string_view json) {
 Config::Config(const fs::path& path, std::string_view json_overlay) : config_path{path} {
   ParseConfig(path / "genai_config.json", json_overlay, *this);
 
-  if (model.context_length == 0)
+  if (model.context_length == 0) {
     throw std::runtime_error("model context_length is 0 or was not set. It must be greater than 0");
+  }
 
-  if (search.max_length == 0)
+  if (search.max_length == 0) {
     search.max_length = model.context_length;
+  }
 
   // If no eos_token_id was set, set it to the pad token id
-  if (model.eos_token_id.empty())
+  if (model.eos_token_id.empty()) {
     model.eos_token_id.push_back(model.pad_token_id);
+  }
 
   for (const auto& provider_option : model.decoder.session_options.provider_options) {
     model.decoder.session_options.providers.push_back(provider_option.name);
+  }
+
+  if (model.encoder.session_options.has_value()) {
+    for (const auto& provider_option : model.encoder.session_options->provider_options) {
+      model.encoder.session_options->providers.push_back(provider_option.name);
+    }
+  }
+
+  if (model.vision.session_options.has_value()) {
+    for (const auto& provider_option : model.vision.session_options->provider_options) {
+      model.vision.session_options->providers.push_back(provider_option.name);
+    }
+  }
+
+  if (model.speech.session_options.has_value()) {
+    for (const auto& provider_option : model.speech.session_options->provider_options) {
+      model.speech.session_options->providers.push_back(provider_option.name);
+    }
+  }
+
+  if (model.embedding.session_options.has_value()) {
+    for (const auto& provider_option : model.embedding.session_options->provider_options) {
+      model.embedding.session_options->providers.push_back(provider_option.name);
+    }
   }
 }
 

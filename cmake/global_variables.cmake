@@ -31,6 +31,7 @@ set(REPO_ROOT ${PROJECT_SOURCE_DIR})
 set(SRC_ROOT ${REPO_ROOT}/src)
 set(GENERATORS_ROOT ${SRC_ROOT})
 set(MODELS_ROOT ${SRC_ROOT}/models)
+set(ENGINE_ROOT ${SRC_ROOT}/engine)
 
 # Define the dependency libraries
 
@@ -79,6 +80,10 @@ file(GLOB generator_srcs CONFIGURE_DEPENDS
   "${GENERATORS_ROOT}/openvino/*.cpp"
   "${MODELS_ROOT}/*.h"
   "${MODELS_ROOT}/*.cpp"
+  "${ENGINE_ROOT}/*.h"
+  "${ENGINE_ROOT}/*.cpp"
+  "${ENGINE_ROOT}/decoders/*.h"
+  "${ENGINE_ROOT}/decoders/*.cpp"
 )
 
 set(ortgenai_embed_libs "") # shared libs that will be embedded inside the onnxruntime-genai package
@@ -87,6 +92,8 @@ if (IOS OR MAC_CATALYST)
   if (NOT EXISTS "${ORT_LIB_DIR}/onnxruntime.xcframework")
     message(FATAL_ERROR "Expected the ONNX Runtime XCFramework to be found at ${ORT_LIB_DIR}/onnxruntime.xcframework. Actual: Not found.")
   endif()
+elseif (USE_WINML)
+    message(STATUS "Using WinML, does NOT include ONNX Runtime library, is provied by Windows.")
 else()
   if(NOT EXISTS "${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}")
     message(FATAL_ERROR "Expected the ONNX Runtime library to be found at ${ORT_LIB_DIR}/${ONNXRUNTIME_LIB}. Actual: Not found.")

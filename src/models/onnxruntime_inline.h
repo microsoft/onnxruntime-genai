@@ -135,6 +135,18 @@ inline std::vector<std::string> GetAvailableProviders() {
   return available_providers;
 }
 
+inline void GetEpDevices(OrtEnv* env, const OrtEpDevice* const** device_ptrs, size_t* num_devices) {
+  ThrowOnError(api->GetEpDevices(env, device_ptrs, num_devices));
+}
+
+inline const OrtKeyValuePairs* GetEpDeviceMetadata(const OrtEpDevice* device) {
+  return api->EpDevice_EpMetadata(device);
+}
+
+inline void GetKeyValuePairs(const OrtKeyValuePairs* keyvals, const char* const** keys, const char* const** values, size_t* num_entries) {
+  api->GetKeyValuePairs(keyvals, keys, values, num_entries);
+}
+
 inline void* Allocator::Alloc(size_t size) {
   void* out;
   ThrowOnError(api->AllocatorAlloc(this, size, &out));
@@ -171,6 +183,14 @@ inline int GetCurrentGpuDeviceId() {
   int id;
   ThrowOnError(api->GetCurrentGpuDeviceId(&id));
   return id;
+}
+
+inline void RegisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name, const ORTCHAR_T* path) {
+  ThrowOnError(Ort::api->RegisterExecutionProviderLibrary(env, registration_name, path));
+}
+
+inline void UnregisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name) {
+  ThrowOnError(Ort::api->UnregisterExecutionProviderLibrary(env, registration_name));
 }
 
 }  // namespace Ort
@@ -234,6 +254,16 @@ inline std::unique_ptr<OrtMemoryInfo> OrtMemoryInfo::Create(const char* name, Or
   OrtMemoryInfo* p;
   Ort::ThrowOnError(Ort::api->CreateMemoryInfo(name, type, id, mem_type, &p));
   return std::unique_ptr<OrtMemoryInfo>{p};
+}
+
+inline std::unique_ptr<OrtSyncStream> OrtSyncStream::Create(const OrtEpDevice* ep_device, const OrtKeyValuePairs* stream_options) {
+  OrtSyncStream* p_stream = nullptr;
+  Ort::ThrowOnError(Ort::api->CreateSyncStreamForEpDevice(ep_device, stream_options, &p_stream));
+  return std::unique_ptr<OrtSyncStream>(p_stream);
+}
+
+inline void* OrtSyncStream::GetHandle() const {
+  return Ort::api->SyncStream_GetHandle(const_cast<OrtSyncStream*>(this));
 }
 
 inline std::unique_ptr<OrtIoBinding> OrtIoBinding::Create(OrtSession& session) {
@@ -310,10 +340,20 @@ inline void OrtIoBinding::SynchronizeOutputs() {
   Ort::ThrowOnError(Ort::api->SynchronizeBoundOutputs(this));
 }
 
-inline std::unique_ptr<OrtArenaCfg> OrtArenaCfg::Create(size_t max_mem, int arena_extend_strategy, int initial_chunk_size_bytes, int max_dead_bytes_per_chunk) {
+inline std::unique_ptr<OrtArenaCfg> OrtArenaCfg::Create(const char* const* keys, const size_t* values, size_t count) {
   OrtArenaCfg* p;
-  Ort::ThrowOnError(Ort::api->CreateArenaCfg(max_mem, arena_extend_strategy, initial_chunk_size_bytes, max_dead_bytes_per_chunk, &p));
+  Ort::ThrowOnError(Ort::api->CreateArenaCfgV2(keys, values, count, &p));
   return std::unique_ptr<OrtArenaCfg>{p};
+}
+
+inline std::string OrtEpDevice::Name() const {
+  const char* name = Ort::api->EpDevice_EpName(this);
+  return std::string(name);
+}
+
+inline std::string OrtEpDevice::Vendor() const {
+  const char* vendor = Ort::api->EpDevice_EpVendor(this);
+  return std::string(vendor);
 }
 
 inline void OrtCommonEnvInit(OrtEnv& v, _In_ const char* logid) {
@@ -366,6 +406,27 @@ inline OrtEnv& OrtEnv::DisableTelemetryEvents() {
 inline OrtEnv& OrtEnv::CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info, const OrtArenaCfg& arena_cfg) {
   Ort::ThrowOnError(Ort::api->CreateAndRegisterAllocator(this, &mem_info, &arena_cfg));
   return *this;
+}
+
+inline void OrtEnv::CopyTensors(const std::vector<const OrtValue*>& src_tensors,
+                                const std::vector<OrtValue*>& dst_tensors,
+                                OrtSyncStream* stream) const {
+  if (src_tensors.size() != dst_tensors.size()) {
+    throw std::runtime_error("Number of source and destination tensors must match");
+  }
+  Ort::ThrowOnError(Ort::api->CopyTensors(this, src_tensors.data(), dst_tensors.data(), stream, src_tensors.size()));
+}
+
+inline std::vector<const OrtEpDevice*> OrtEnv::GetEpDevices() {
+  size_t num_devices = 0;
+  const OrtEpDevice* const* device_ptrs = nullptr;
+  Ort::ThrowOnError(Ort::api->GetEpDevices(this, &device_ptrs, &num_devices));
+
+  std::vector<const OrtEpDevice*> devices;
+  for (size_t i = 0; i < num_devices; ++i) {
+    devices.emplace_back(device_ptrs[i]);
+  }
+  return devices;
 }
 
 inline std::unique_ptr<OrtThreadingOptions> OrtThreadingOptions::Create() {
@@ -552,42 +613,6 @@ inline OrtSessionOptions& OrtSessionOptions::DisableCpuMemArena() {
   return *this;
 }
 
-inline OrtSessionOptions& OrtSessionOptions::EnableCpuEpFallback() {
-  return AddConfigEntry("session.disable_cpu_ep_fallback", "0");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::DisableCpuEpFallback() {
-  return AddConfigEntry("session.disable_cpu_ep_fallback", "1");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::EnableQuantQdq() {
-  return AddConfigEntry("session.disable_quant_qdq", "0");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::DisableQuantQdq() {
-  return AddConfigEntry("session.disable_quant_qdq", "1");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::EnableQuantQdqCleanup() {
-  return AddConfigEntry("session.enable_quant_qdq_cleanup", "1");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::DisableQuantQdqCleanup() {
-  return AddConfigEntry("session.enable_quant_qdq_cleanup", "0");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::SetEpContextEnable() {
-  return AddConfigEntry("ep.context_enable", "1");
-}
-
-inline OrtSessionOptions& OrtSessionOptions::SetEpContextEmbedMode(const char* mode) {
-  return AddConfigEntry("ep.context_embed_mode", mode);
-}
-
-inline OrtSessionOptions& OrtSessionOptions::SetEpContextFilePath(const char* file_path) {
-  return AddConfigEntry("ep.context_file_path", file_path);
-}
-
 inline OrtSessionOptions& OrtSessionOptions::SetExecutionMode(ExecutionMode execution_mode) {
   Ort::ThrowOnError(Ort::api->SetSessionExecutionMode(this, execution_mode));
   return *this;
@@ -600,6 +625,11 @@ inline OrtSessionOptions& OrtSessionOptions::SetLogId(const char* logid) {
 
 inline OrtSessionOptions& OrtSessionOptions::SetLogSeverityLevel(int level) {
   Ort::ThrowOnError(Ort::api->SetSessionLogSeverityLevel(this, level));
+  return *this;
+}
+
+inline OrtSessionOptions& OrtSessionOptions::SetLogVerbosityLevel(int level) {
+  Ort::ThrowOnError(Ort::api->SetSessionLogVerbosityLevel(this, level));
   return *this;
 }
 
@@ -703,6 +733,19 @@ inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_OpenVINO(co
 
 inline OrtSessionOptions& OrtSessionOptions::RegisterCustomOpsLibrary(const ORTCHAR_T* library_file_prefix) {
   Ort::ThrowOnError(Ort::api->RegisterCustomOpsLibrary_V2(this, library_file_prefix));
+  return *this;
+}
+
+inline OrtSessionOptions& OrtSessionOptions::AppendExecutionProvider_V2(OrtEnv& env, const std::vector<const OrtEpDevice*>& ep_devices,
+                                                                        const std::unordered_map<std::string, std::string>& options) {
+  std::vector<const char*> keys, values;
+  keys.reserve(options.size());
+  values.reserve(options.size());
+  for (const auto& kv : options) {
+    keys.push_back(kv.first.c_str());
+    values.push_back(kv.second.c_str());
+  }
+  Ort::ThrowOnError(Ort::api->SessionOptionsAppendExecutionProvider_V2(this, &env, ep_devices.data(), ep_devices.size(), keys.data(), values.data(), keys.size()));
   return *this;
 }
 

@@ -1,4 +1,4 @@
-﻿# Copyright (c) Microsoft Corporation. All rights reserved.
+# Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
 import argparse
@@ -67,8 +67,10 @@ def get_guidance_info(guidance_info):
 
     return guidance_info
 
+
 def main(args):
-    if args.verbose: print("Loading model...")
+    if args.verbose:
+        print("Loading model...")
     if args.timings:
         started_timestamp = 0
         first_token_timestamp = 0
@@ -77,21 +79,30 @@ def main(args):
     if args.execution_provider != "follow_config":
         config.clear_providers()
         if args.execution_provider != "cpu":
-            if args.verbose: print(f"Setting model to {args.execution_provider}")
+            if args.verbose:
+                print(f"Setting model to {args.execution_provider}")
             config.append_provider(args.execution_provider)
     model = og.Model(config)
 
-    if args.verbose: print("Model loaded")
-    
+    if args.verbose:
+        print("Model loaded")
+
     tokenizer = og.Tokenizer(model)
     tokenizer_stream = tokenizer.create_stream()
-    if args.verbose: print("Tokenizer created")
-    if args.verbose: print()
+    if args.verbose:
+        print("Tokenizer created")
+    if args.verbose:
+        print()
 
-    search_options = {name:getattr(args, name) for name in ['do_sample', 'max_length', 'min_length', 'top_p', 'top_k', 'temperature', 'repetition_penalty'] if name in args}
-    search_options['batch_size'] = 1
+    search_options = {
+        name: getattr(args, name)
+        for name in ["do_sample", "max_length", "min_length", "top_p", "top_k", "temperature", "repetition_penalty"]
+        if name in args
+    }
+    search_options["batch_size"] = 1
 
-    if args.verbose: print(search_options)
+    if args.verbose:
+        print(search_options)
 
     system_prompt = args.system_prompt
     prompt_tools = ""
@@ -122,7 +133,8 @@ def main(args):
         if text == "quit()":
             break
 
-        if args.timings: started_timestamp = time.time()
+        if args.timings:
+            started_timestamp = time.time()
 
         params = og.GeneratorParams(model)
         params.set_search_options(**search_options)
@@ -138,31 +150,44 @@ def main(args):
         if guidance_type == "json_schema" or guidance_type == "lark_grammar":
             messages = f"""[{{"role": "system", "content": "{system_prompt}", "tools": "{prompt_tools}"}}, {{"role": "user", "content": "{text}"}}]"""
         else:
-            messages = f"""[{{"role": "system", "content": "{system_prompt}"}}, {{"role": "user", "content": "{text}"}}]"""
-        # Apply Chat Template
-        final_prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
-        final_input = tokenizer.encode(final_prompt)
-        generator.append_tokens(final_input)
+            messages_list = [{"role": "system", "content": system_prompt}, {"role": "user", "content": text}]
 
-        if args.verbose: print("Running generation loop ...")
+        # Convert to JSON string for tokenizer
+        messages = json.dumps(messages_list)
+
+        # Apply Chat Template
+        if model.type == "marian-ssru":
+            prompt = text
+        else:
+            prompt = tokenizer.apply_chat_template(messages=messages, add_generation_prompt=True)
+
+        input_tokens = tokenizer.encode(prompt)
+        generator.append_tokens(input_tokens)
+
+        if args.verbose:
+            print("Running generation loop ...")
         if args.timings:
             first = True
             new_tokens = []
 
         print()
-        print("Output: ", end='', flush=True)
+        print("Output: ", end="", flush=True)
 
         try:
-            while not generator.is_done():
+            while True:
                 generator.generate_next_token()
                 if args.timings:
                     if first:
                         first_token_timestamp = time.time()
                         first = False
 
+                if generator.is_done():
+                    break
+
                 new_token = generator.get_next_tokens()[0]
-                print(tokenizer_stream.decode(new_token), end='', flush=True)
-                if args.timings: new_tokens.append(new_token)
+                print(tokenizer_stream.decode(new_token), end="", flush=True)
+                if args.timings:
+                    new_tokens.append(new_token)
         except KeyboardInterrupt:
             print("  --control+c pressed, aborting generation--")
         print()
@@ -175,10 +200,13 @@ def main(args):
         if args.timings:
             prompt_time = first_token_timestamp - started_timestamp
             run_time = time.time() - first_token_timestamp
-            print(f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens)/prompt_time:.2f} tps, New tokens per second: {len(new_tokens)/run_time:.2f} tps")
+            print(
+                f"Prompt length: {len(input_tokens)}, New tokens: {len(new_tokens)}, Time to first: {(prompt_time):.2f}s, Prompt tokens per second: {len(input_tokens) / prompt_time:.2f} tps, New tokens per second: {len(new_tokens) / run_time:.2f} tps"
+            )
         # If Input prompt is provided it will just run the model for the input prompt and exit
         if args.input_prompt:
             break
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(argument_default=argparse.SUPPRESS, description="End-to-end AI Question/Answer example for gen-ai")

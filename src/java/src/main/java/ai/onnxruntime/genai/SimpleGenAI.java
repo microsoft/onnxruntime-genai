@@ -22,8 +22,7 @@ import java.util.function.Consumer;
  * </ul>
  *
  * <p>The listener is used as a callback mechanism so that tokens can be used as they are generated.
- * Create a class that implements the TokenUpdateListener interface and provide an instance of that
- * class as the `listener` argument.
+ * It should be an instance of a type that implements the Consumer&lt;String&gt; interface.
  */
 public class SimpleGenAI implements AutoCloseable {
   private Model model;
@@ -38,6 +37,16 @@ public class SimpleGenAI implements AutoCloseable {
   public SimpleGenAI(String modelPath) throws GenAIException {
     model = new Model(modelPath);
     tokenizer = new Tokenizer(model);
+  }
+
+  /**
+   * Get the underlying model object.
+   *
+   * @return The model object.
+   * @throws GenAIException on failure
+   */
+  public Model getModel() throws GenAIException {
+    return model;
   }
 
   /**
@@ -60,7 +69,9 @@ public class SimpleGenAI implements AutoCloseable {
    * @param generatorParams The prompt and settings to run the model with.
    * @param prompt The prompt text to encode.
    * @param listener Optional callback for tokens to be provided as they are generated. NOTE: Token
-   *     generation will be blocked until the listener's `accept` method returns.
+   *     generation will be blocked until the listener's `accept` method returns. `listener` will be
+   *     called within the token generation loop and these calls will be made sequentially, not
+   *     concurrently.
    * @return The generated text.
    * @throws GenAIException on failure
    */

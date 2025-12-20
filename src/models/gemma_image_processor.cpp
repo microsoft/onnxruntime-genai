@@ -70,8 +70,8 @@ ProcessImagePrompt(const Generators::Tokenizer& tokenizer, const std::string& pr
     }
   }
 
-  std::unique_ptr<OrtValue> num_img_tokens = OrtValue::CreateTensor<int32_t>(allocator, std::vector<int64_t>{1});
-  num_img_tokens->GetTensorMutableData<int32_t>()[0] = static_cast<int32_t>(image_seq_length);
+  std::unique_ptr<OrtValue> num_img_tokens = OrtValue::CreateTensor<int64_t>(allocator, std::vector<int64_t>{1});
+  num_img_tokens->GetTensorMutableData<int64_t>()[0] = static_cast<int64_t>(image_seq_length);
 
   return {std::move(input_ids_value), std::move(token_type_ids), std::move(num_img_tokens)};
 }
@@ -112,6 +112,9 @@ std::unique_ptr<NamedTensors> GemmaImageProcessor::Process(const Tokenizer& toke
   if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(ProcessTensor<float>(pixel_values, allocator)));
+  } else if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
+    named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                           std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(pixel_values, allocator)));
   } else {
     named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                            std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(pixel_values, allocator)));

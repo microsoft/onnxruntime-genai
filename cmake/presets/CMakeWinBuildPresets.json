@@ -85,6 +85,21 @@
       "configurePreset": "windows_x64_cuda_minsizerel"
     },
     {
+      "name": "windows_x64_winml_relwithdebinfo",
+      "configuration": "RelWithDebInfo",
+      "configurePreset": "windows_x64_winml_relwithdebinfo"
+    },
+    {
+      "name": "windows_x64_trt_rtx_release",
+      "configuration": "Release",
+      "configurePreset": "windows_x64_trt_rtx_release"
+    },
+    {
+      "name": "windows_x64_trt_rtx_debug",
+      "configuration": "Debug",
+      "configurePreset": "windows_x64_trt_rtx_debug"
+    },
+    {
       "name": "windows_x64_directml_release_asan",
       "configuration": "Release",
       "configurePreset": "windows_x64_directml_release_asan"
@@ -138,6 +153,11 @@
       "name": "windows_arm64_directml_relwithdebinfo",
       "configuration": "RelWithDebInfo",
       "configurePreset": "windows_arm64_directml_relwithdebinfo"
+    },
+    {
+      "name": "windows_arm64_winml_relwithdebinfo",
+      "configuration": "RelWithDebInfo",
+      "configurePreset": "windows_arm64_winml_relwithdebinfo"
     },
     {
       "name": "windows_arm64_directml_release",

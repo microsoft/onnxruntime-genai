@@ -42,6 +42,10 @@ struct State;
 struct Search;
 struct Tokenizer;
 struct ConstrainedLogitsProcessor;
+struct ExtraInput {  // Extra inputs provided via SetInputs()
+  std::string name;
+  std::shared_ptr<Tensor> tensor;
+};
 
 template <typename T, typename V>
 bool contains(const T& t, V&& v) {
@@ -72,38 +76,25 @@ struct GeneratorParams : std::enable_shared_from_this<GeneratorParams>, LeakChec
 
   int max_batch_size{0};
   bool use_graph_capture{};
+  bool use_multi_profile{};
   int BatchBeamSize() const { return search.num_beams * search.batch_size; }
 
   DeviceInterface* p_device{};  // Scoring device (usually CPU, but can be CUDA)
 
-  cpu_span<int32_t> aux_input_ids{};  // Intermediate solution to be used with SetInputs function for multimodal and whisper models
+  std::string guidance_type;               // e.g. json_schema or regex
+  std::string guidance_data;               // e.g. rules data in json_schema or regex
+  bool guidance_ff_tokens_enabled{false};  // Whether to enable ff_tokens during constrained decoding
+  void SetGuidance(std::string_view type, std::string_view data, bool enable_ff_tokens);
 
-  struct Whisper {
-    std::shared_ptr<Tensor> input_features;   // float32 [batch_size, number_of_mels, number_of_frames]
-    std::shared_ptr<Tensor> alignment_heads;  // int32 [num_alignment_heads, 2]
-  };
-
-  std::variant<Whisper> inputs;
-
-  struct Input {
-    std::string name;
-    std::shared_ptr<Tensor> tensor;
-  };
-
-  // A list of extra model inputs that will be matched at runtime based on name
-  std::vector<Input> extra_inputs;
-
-  void SetInputs(const NamedTensors& inputs);
-
-  std::string guidance_type;  // e.g. json_schema or regex
-  std::string guidance_data;  // e.g. rules data in json_schema or regex
-  void SetGuidance(std::string_view type, std::string_view data);
+  // Determines if past_present_share_buffer is actually enabled based on config and runtime conditions
+  // Returns true only if config option is true AND (num_beams == 1 OR model is Whisper)
+  bool IsPastPresentShareBufferEnabled(const std::string& model_type) const;
 };
 
 struct Generator : LeakChecked<Generator> {
   Generator(const Model& model, const GeneratorParams& params);
 
-  bool IsDone() const;
+  bool IsDone();
   void AppendTokens(cpu_span<const int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
@@ -114,15 +105,20 @@ struct Generator : LeakChecked<Generator> {
 
   DeviceSpan<int32_t> GetSequence(size_t index) const;
 
+  // A list of extra model inputs that will be matched at runtime based on name
+  std::vector<ExtraInput> extra_inputs_;
+  void SetInputs(const NamedTensors& inputs);
+
   std::shared_ptr<const Model> model_;
   std::unique_ptr<State> state_;
   std::unique_ptr<Search> search_;
   std::unique_ptr<ConstrainedLogitsProcessor> guidance_logits_processor_;
-  bool computed_logits_{};  // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
+
+  bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
+  bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
 
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
-  void AuxAppendTokens(cpu_span<const int32_t> input_ids);
   void ComputeLogits(DeviceSpan<int32_t> next_tokens);
   enum Action { standard,   // Default, set in any other case
                 generated,  // Set after GenerateNextToken
@@ -160,5 +156,7 @@ std::unique_ptr<Generator> CreateGenerator(const Model& model, const GeneratorPa
 void CopyThroughCpu(DeviceBuffer& dest, size_t begin_dest, DeviceBuffer& source, size_t begin_source, size_t size_in_bytes);
 
 float Float16ToFloat32(uint16_t v);  // v is a IEEE 752-2008 binary16 format, 1 sign bit, 5 bit exponent, 10 bit fraction
+
+std::unique_ptr<Search> CreateSearch(const GeneratorParams& params);
 
 }  // namespace Generators

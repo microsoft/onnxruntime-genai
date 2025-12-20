@@ -171,10 +171,11 @@ def _build_package(args):
             + build_settings["build_params"]["base"]
             + build_settings["build_params"][sysroot]
             + ["--config=" + build_config]
+            + ["--skip_examples", "--skip_tests"]
         )
 
         if args.ort_home:
-            base_build_command += ['--ort_home', args.ort_home]
+            base_build_command += ["--ort_home", args.ort_home]
 
         if args.include_ops_by_config is not None:
             base_build_command += ["--include_ops_by_config=" + str(args.include_ops_by_config.resolve())]

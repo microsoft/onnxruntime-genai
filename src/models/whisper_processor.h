@@ -17,7 +17,7 @@ struct WhisperProcessor : Processor {
 
  private:
   ort_extensions::OrtxObjectPtr<OrtxFeatureExtractor> processor_;
-  ONNXTensorElementDataType input_features_type_;
+  ONNXTensorElementDataType audio_features_type_;
 };
 
 }  // namespace Generators

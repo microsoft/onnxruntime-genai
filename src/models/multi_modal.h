@@ -18,20 +18,24 @@ struct MultiModalLanguageModel : Model {
   MultiModalLanguageModel(const MultiModalLanguageModel&) = delete;
   MultiModalLanguageModel& operator=(const MultiModalLanguageModel&) = delete;
 
-  std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const;
+  std::unique_ptr<State> CreateState(DeviceSpan<int32_t> sequence_lengths, const GeneratorParams& params) const override;
 
   std::unique_ptr<OrtSession> vision_session_;     // pixel_values, [image_attention_mask], image_sizes -> image_features
   std::unique_ptr<OrtSession> speech_session_;     // audio_embeds, audio_sizes, audio_projection_mode -> audio_features
   std::unique_ptr<OrtSession> embedding_session_;  // input_ids, image_features, audio_features -> inputs_embeds
   std::unique_ptr<OrtSession> decoder_session_;    // inputs_embeds, attention_mask, kv_cache -> logits
+
+  std::unique_ptr<OrtSessionOptions> vision_session_options_;
+  std::unique_ptr<OrtSessionOptions> speech_session_options_;
+  std::unique_ptr<OrtSessionOptions> embedding_session_options_;
 };
 
 struct VisionState : State {
-  VisionState(const MultiModalLanguageModel& model, const GeneratorParams& params,
-              const int64_t num_images, const int64_t num_image_tokens);
+  VisionState(const MultiModalLanguageModel& model, const GeneratorParams& params);
   VisionState(const VisionState&) = delete;
   VisionState& operator=(const VisionState&) = delete;
 
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_images, const int64_t num_image_tokens);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
 
  private:
@@ -45,10 +49,11 @@ struct VisionState : State {
 };
 
 struct SpeechState : State {
-  SpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params, const int64_t num_audio_tokens);
+  SpeechState(const MultiModalLanguageModel& model, const GeneratorParams& params);
   SpeechState(const SpeechState&) = delete;
   SpeechState& operator=(const SpeechState&) = delete;
 
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs, const int64_t num_audio_tokens);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {}) override;
 
  private:
@@ -56,18 +61,16 @@ struct SpeechState : State {
 
   const MultiModalLanguageModel& model_;
   int64_t num_audio_tokens_;
-  ExtraInputs extra_inputs_{*this};                                            // Model inputs
-  MultiModalFeatures audio_features_{*this, MultiModalFeatures::Mode::Output,  // Model output
-                                     model_.config_->model.speech.outputs.audio_features,
-                                     -1, num_audio_tokens_};
+  ExtraInputs extra_inputs_{*this};  // Model inputs
+  std::unique_ptr<MultiModalFeatures> audio_features_;
 };
 
 struct EmbeddingState : State {
-  EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params,
-                 const int64_t num_images, const int64_t num_image_tokens, const int64_t num_audio_tokens);
+  EmbeddingState(const MultiModalLanguageModel& model, const GeneratorParams& params);
   EmbeddingState(const EmbeddingState&) = delete;
   EmbeddingState& operator=(const EmbeddingState&) = delete;
 
+  void SetExtraInputs(const int64_t num_images_, const int64_t num_image_tokens_, const int64_t num_audio_tokens_);
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices = {});
 
  private:
@@ -93,18 +96,19 @@ struct DecoderState : State {
   DecoderState& operator=(const DecoderState&) = delete;
 
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices) override;
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
 
  private:
   friend struct MultiModalPipelineState;
 
-  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices);
+  void UpdateInputsOutputs(DeviceSpan<int32_t>& next_tokens, int current_length, DeviceSpan<int32_t> beam_indices, size_t new_length);
 
   const MultiModalLanguageModel& model_;
   Embeddings inputs_embeds_{*this, Embeddings::Mode::Input,  // Model input
                             model_.config_->model.decoder.inputs.embeddings};
-  DefaultPositionInputs position_inputs_;  // Model input
-  DefaultKeyValueCache kv_cache_{*this};   // Model input
-  Logits logits_{*this};                   // Model output
+  std::unique_ptr<PositionInputs> position_inputs_;  // Model input
+  DefaultKeyValueCache kv_cache_{*this};             // Model input
+  Logits logits_{*this};                             // Model output
 };
 
 struct MultiModalPipelineState : State {
@@ -113,10 +117,14 @@ struct MultiModalPipelineState : State {
   MultiModalPipelineState(const MultiModalPipelineState&) = delete;
   MultiModalPipelineState& operator=(const MultiModalPipelineState&) = delete;
 
+  void SetExtraInputs(const std::vector<ExtraInput>& extra_inputs) override;
+
   DeviceSpan<float> Run(int current_length, DeviceSpan<int32_t>& next_tokens,
-                        DeviceSpan<int32_t> next_indices);
-  OrtValue* GetInput(const char* name);
-  OrtValue* GetOutput(const char* name);
+                        DeviceSpan<int32_t> next_indices) override;
+
+  OrtValue* GetInput(const char* name) override;
+
+  OrtValue* GetOutput(const char* name) override;
 
  private:
   void UpdateInputsOutputs(const DeviceSpan<int32_t>& next_tokens, DeviceSpan<int32_t> next_indices,

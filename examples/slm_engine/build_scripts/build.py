@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-import os
-import sys
 import argparse
+import os
+import pathlib
 import platform
 import subprocess
-import pathlib
+import sys
+
 from build_deps import get_machine_type
 
 BLUE = "\033[34m"
@@ -63,7 +64,7 @@ def main():
 
     print(f"Using CMake generator: {cmake_generator}")
 
-    artifacts_dir = os.path.abspath(f"slm_deps/artifacts/")
+    artifacts_dir = os.path.abspath("slm_deps/artifacts/")
     cmake_options = [
         "cmake",
         "-G",
@@ -88,12 +89,12 @@ def main():
     build_dir = f"builds/{dir_prefix}-{get_machine_type(args)}"
 
     # Launch build
-    print(f"BUILD Dir:", build_dir)
+    print("BUILD Dir:", build_dir)
     os.makedirs(build_dir, exist_ok=True)
 
     print(f"{BLUE}CMAKE Options: {cmake_options}{CLEAR}")
 
-    print(f"Building ...")
+    print("Building ...")
     os.chdir(build_dir)
     result = subprocess.call(cmake_options)
     if result != 0:
@@ -113,7 +114,7 @@ def main():
         raise Exception(f"{RED}Build error!{CLEAR}")
 
     # Now run the installation
-    print(f"Installing...")
+    print("Installing...")
     result = subprocess.call(["cmake", "--install", "."])
     if result != 0:
         raise Exception(f"{RED}Installation error!{CLEAR}")

@@ -1,13 +1,16 @@
 import gc
+import logging
 import os
 import sys
+
 import onnxruntime_genai as og
 from app_modules.utils import convert_to_markdown, is_stop_word_or_prefix, shared_state
 
 current_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(current_dir, "..", "..", ".."))
 
-class ONNXModel():
+
+class ONNXModel:
     """A wrapper for OnnxRuntime-GenAI to run ONNX LLM model."""
 
     def __init__(self, model_path, execution_provider):
@@ -32,16 +35,16 @@ class ONNXModel():
             self.chat_template = "<|user|>{input}<|end|><|assistant|>"
         elif "Llama-3" in self.model_path:
             self.enable_history_max = 2
-            self.template_header =  """<|start_header_id|>system<|end_header_id|>
+            self.template_header = """<|start_header_id|>system<|end_header_id|>
 You are a helpful AI assistant.<|eot_id|>"""
             self.history_template = """<|start_header_id|>user<|end_header_id|>
 {input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 {response}<|eot_id|>"""
-            
+
             self.chat_template = """<|start_header_id|>user<|end_header_id|>
 {input}<|eot_id|><|start_header_id|>assistant<|end_header_id|>"""
-            
-            #self.chat_template = llama3_template
+
+            # self.chat_template = llama3_template
         else:
             self.enable_history_max = 2
             self.template_header = "<s>"
@@ -51,12 +54,12 @@ You are a helpful AI assistant.<|eot_id|>"""
     def generate_prompt_with_history(self, text, history, max_length=2048):
         prompt = ""
 
-        for dialog in history[-self.enable_history_max:]:
-            prompt += f'{self.history_template.format(input=dialog[0], response=dialog[1])}'
+        for dialog in history[-self.enable_history_max :]:
+            prompt += f"{self.history_template.format(input=dialog[0], response=dialog[1])}"
 
         prompt = self.template_header + prompt
 
-        prompt += f'{self.chat_template.format(input=text)}'
+        prompt += f"{self.chat_template.format(input=text)}"
 
         input_ids = self.tokenizer.encode(prompt)
 
@@ -66,7 +69,7 @@ You are a helpful AI assistant.<|eot_id|>"""
             history.clear()
             if "Llama-3" in self.model_path:
                 prompt = self.template_header
-            prompt += f'{self.chat_template.format(input=text)}'
+            prompt += f"{self.chat_template.format(input=text)}"
             return self.tokenizer.encode(prompt)
 
     def search(
@@ -78,7 +81,7 @@ You are a helpful AI assistant.<|eot_id|>"""
         output_tokens = []
 
         params = og.GeneratorParams(self.model)
-        search_options = {"max_length" : max_length}
+        search_options = {"max_length": max_length}
         params.set_search_options(**search_options)
 
         generator = og.Generator(self.model, params)
@@ -94,23 +97,12 @@ You are a helpful AI assistant.<|eot_id|>"""
             if idx % token_printing_step == 0:
                 yield self.tokenizer.decode(output_tokens)
 
-    def predict(
-        self,
-        text,
-        chatbot,
-        history,
-        max_length_tokens,
-        max_context_length_tokens,
-        token_printing_step,
-        *args
-    ):
+    def predict(self, text, chatbot, history, max_length_tokens, max_context_length_tokens, token_printing_step, *args):
         if text == "":
             yield chatbot, history, "Empty context."
             return
 
-        inputs = self.generate_prompt_with_history(
-            text, history, max_length=max_context_length_tokens
-        )
+        inputs = self.generate_prompt_with_history(text, history, max_length=max_context_length_tokens)
 
         if inputs is None:
             yield chatbot, history, "Input too long."
@@ -160,10 +152,13 @@ You are a helpful AI assistant.<|eot_id|>"""
                         sentence = sentence[: sentence.index(ai_token)].strip()
                         break
                 sentence = sentence.strip()
-                a, b = [[y[0], convert_to_markdown(y[1])] for y in history] + [[text, convert_to_markdown(sentence)]], [
-                    *history,
-                    [text, sentence],
-                ]
+                a, b = (
+                    [[y[0], convert_to_markdown(y[1])] for y in history] + [[text, convert_to_markdown(sentence)]],
+                    [
+                        *history,
+                        [text, sentence],
+                    ],
+                )
                 yield a, b, "Generating..."
 
             if shared_state.interrupted:
@@ -183,10 +178,10 @@ You are a helpful AI assistant.<|eot_id|>"""
             print(type(e).__name__, e)
 
         return
-    
+
     def shutdown(self):
         pass
-    
+
     def retry(self, chatbot, history, max_length_tokens, max_context_length_tokens, token_printing_step):
         if len(history) == 0:
             yield chatbot, history, "Empty context"

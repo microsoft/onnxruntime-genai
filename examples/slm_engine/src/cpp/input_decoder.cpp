@@ -16,6 +16,7 @@ namespace slm_engine {
 // clang-format off
 // OpenAI API example
 // {
+//     "model": "name-of-the-adapter (optional)", 
 //     "messages": [
 // 		{
 // 			"role": "system",
@@ -59,6 +60,9 @@ class OpenAIInputDecoder : public InputDecoder {
           return false;
         }
       }
+      if (json_msg.contains("model")) {
+        decoded_params.LoRAAdapterName = json_msg["model"].get<string>();
+      }
       if (json_msg.contains("temperature")) {
         decoded_params.Temperature =
             json_msg["temperature"].get<float_t>();
@@ -85,6 +89,12 @@ class OpenAIInputDecoder : public InputDecoder {
                << "Wrong size of stop tokens: " << stop_tokens.size()
                << CLEAR << endl;
         }
+      }
+
+      // Handle tools parameter for function calling
+      if (json_msg.contains("tools")) {
+        decoded_params.ToolsJson = json_msg["tools"].dump();
+        decoded_params.HasTools = true;
       }
     } catch (json::parse_error& err) {
       cout << RED << "Error in JSON At: " << err.what() << CLEAR << endl;

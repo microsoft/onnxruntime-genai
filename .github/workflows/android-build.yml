@@ -3,11 +3,11 @@ on:
   workflow_dispatch:
   push:
     branches:
-    - main
-    - rel-*
+      - main
+      - rel-*
   pull_request:
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 env:
   ORT_NIGHTLY_REST_API: "https://feeds.dev.azure.com/aiinfra/PublicPackages/_apis/packaging/Feeds/ORT-Nightly/packages?packageNameQuery=Microsoft.ML.OnnxRuntime&api-version=6.0-preview.1"
@@ -22,15 +22,15 @@ jobs:
     #       it doesn't work on macos-14.
     #         HVF error: HV_UNSUPPORTED
     #       it works on macos-13 but with macos-15 being released soon that isn't a long term solution.
-    runs-on: [ "self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU" ]
+    runs-on: ["self-hosted", "1ES.Pool=onnxruntime-genai-Ubuntu2204-AMD-CPU"]
     steps:
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: true
 
       - name: Setup Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -72,7 +72,7 @@ jobs:
           sudo apt-get install jq
 
       - name: Checkout OnnxRuntime GenAI repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           submodules: true
 
@@ -94,12 +94,12 @@ jobs:
         run: |
           set -e -x
           rm -rf build
-          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --update
+          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --update --skip_wheel
 
       - name: Run Android build
         run: |
           set -e -x
-          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --build
+          ./build.sh --android --android_api=27 --android_ndk_path=${ANDROID_NDK_HOME} --config=RelWithDebInfo --android_abi=${{ env.ANDROID_ABI }} --parallel --build_java --build --skip_wheel
 
       - name: Enable KVM group perms so Android emulator can run
         run: |

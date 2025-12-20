@@ -156,6 +156,9 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
     if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
       named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                              std::make_shared<Tensor>(ProcessTensor<float>(pixel_values, allocator)));
+    } else if (pixel_values_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
+      named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
+                             std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(pixel_values, allocator)));
     } else {
       named_tensors->emplace(std::string(Config::Defaults::PixelValuesName),
                              std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(pixel_values, allocator)));
@@ -164,8 +167,11 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
     named_tensors->emplace(std::string(Config::Defaults::ImageSizesName),
                            std::make_shared<Tensor>(ProcessTensor<int64_t>(image_sizes, allocator)));
     if (attention_mask_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
-      named_tensors->emplace(std::string(Config::Defaults::AttentionMaskName),
+      named_tensors->emplace(std::string(Config::Defaults::ImageAttentionMaskName),
                              std::make_shared<Tensor>(ProcessTensor<float>(image_attention_mask, allocator)));
+    } else if (attention_mask_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
+      named_tensors->emplace(std::string(Config::Defaults::ImageAttentionMaskName),
+                             std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(image_attention_mask, allocator)));
     } else {
       named_tensors->emplace(std::string(Config::Defaults::ImageAttentionMaskName),
                              std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(image_attention_mask, allocator)));
@@ -179,6 +185,9 @@ std::unique_ptr<NamedTensors> PhiMultiModalProcessor::Process(const Tokenizer& t
     if (audio_features_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) {
       named_tensors->emplace(std::string(Config::Defaults::AudioEmbedsName),
                              std::make_shared<Tensor>(ProcessTensor<float>(audio_embeds, allocator)));
+    } else if (audio_features_type_ == ONNX_TENSOR_ELEMENT_DATA_TYPE_BFLOAT16) {
+      named_tensors->emplace(std::string(Config::Defaults::AudioEmbedsName),
+                             std::make_shared<Tensor>(ProcessTensor<Ort::BFloat16_t>(audio_embeds, allocator)));
     } else {
       named_tensors->emplace(std::string(Config::Defaults::AudioEmbedsName),
                              std::make_shared<Tensor>(ProcessTensor<Ort::Float16_t>(audio_embeds, allocator)));

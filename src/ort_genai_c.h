@@ -4,7 +4,13 @@
 #pragma once
 
 #include <stdint.h>
+
+#ifdef __cplusplus
 #include <cstddef>
+#else
+#include <stddef.h>
+#include <stdbool.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,6 +77,8 @@ typedef struct OgaMultiModalProcessor OgaMultiModalProcessor;
 typedef struct OgaAudios OgaAudios;
 typedef struct OgaStringArray OgaStringArray;
 typedef struct OgaAdapters OgaAdapters;
+typedef struct OgaEngine OgaEngine;
+typedef struct OgaRequest OgaRequest;
 
 //! @}
 
@@ -91,11 +99,25 @@ OGA_EXPORT void OGA_API_CALL OgaShutdown();
 OGA_EXPORT const char* OGA_API_CALL OgaResultGetError(const OgaResult* result);
 
 /**
+ * \brief Control the logging behavior of the library.
+ *        If OgaSetLogString is called with name "filename", and value is a valid file path,
+ *        the library will log to that file. This will override any previously set logging destination.
+ *        If OgaSetLogString is called with name "filename" and the value provided is an empty string,
+ *        the library will log to the default destination (i.e. std::cerr) thereafter.
  * \param[in] name logging option name, see logging.h 'struct LogItems' for the list of available options
  * \param[in] value logging option value.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogBool(const char* name, bool value);
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogString(const char* name, const char* value);
+
+/**
+ * \brief Register a callback function to receive log messages from the library. If invoked, the callback will override
+ *        the previously set logging destination (e.g. a file or std::cerr).
+ * \param[in] callback function pointer to the logging callback function (use nullptr to disable callback and revert to
+ *                     the default logging destination - std::cerr).
+ * \return OgaResult containing the error message when the callback could not be set, else nullptr.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaSetLogCallback(void (*callback)(const char* string, size_t length));
 
 /**
  * \param[in] result OgaResult to be destroyed.
@@ -242,6 +264,79 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAppendProvider(OgaConfig* config, co
 OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetProviderOption(OgaConfig* config, const char* provider, const char* key, const char* value);
 
 /**
+ * \brief Add the model data to load the model from memory. Applications may call OgaConfigRemoveModelData to remove the model data
+ *        when it is no longer needed.
+ *
+ * Note that the model data is expected to be valid at least until the model is created.
+ * If using session options such as `session.use_ort_model_bytes_directly`, the model data must remain valid
+ * until the OgaModel is destroyed, as the model data will be used directly by the Ort::Session.
+ * Please see the relevant ONNX Runtime documentation for more details on this option.
+ *
+ * \param[in] config The config to add the model data to.
+ * \param[in] model_filename The name of the model file as defined in the config.
+ * \param[in] model_data The model data to add. The data is expected to be valid at least until the model is created.
+ * \param[in] model_data_length The length of the model data.
+ * \return OgaResult containing the error message if the addition of the model data failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigAddModelData(OgaConfig* config, const char* model_filename, const void* model_data, size_t model_data_length);
+
+/**
+ * \brief Remove model data previously added to the config.
+ * \param[in] config The config to remove the model data from.
+ * \param[in] model_filename The name of the model file as defined in the config.
+ * \return OgaResult containing the error message if the removal of the model data failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigRemoveModelData(OgaConfig* config, const char* model_filename);
+
+/**
+ * \brief Filter EP devices by hardware device type property with ONNXRuntime API.
+ * \param[in] config The config to overlay the JSON on.
+ * \param[in] hardware_device_type hardware device type, e.g., CPU, GPU, NPU.
+ * \return OgaResult containing the error message if the overlaying of the JSON failed.
+ *
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDeviceType(OgaConfig* config, const char* provider, const char* hardware_device_type);
+
+/**
+ * \brief Filter EP devices by hardware device id property with ONNXRuntime API.
+ * \param[in] config The config to overlay the JSON on.
+ * \param[in] hardware_device_type hardware device id.
+ * \return OgaResult containing the error message if the overlaying of the JSON failed.
+ *
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareDeviceId(OgaConfig* config, const char* provider, uint32_t hardware_device_id);
+
+/**
+ * \brief Filter EP devices by hardware vendor id property with ONNXRuntime API.
+ * \param[in] config The config to overlay the JSON on.
+ * \param[in] hardware_device_type hardware vendor id.
+ * \return OgaResult containing the error message if the overlaying of the JSON failed.
+ *
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigSetDecoderProviderOptionsHardwareVendorId(OgaConfig* config, const char* provider, uint32_t hardware_vendor_id);
+
+/**
+ * \brief Clear the hardware device type property
+ * \param[in] config The config to clear hardware device type property.
+ * \return OgaResult containing the error message if the clearing failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareDeviceType(OgaConfig* config, const char* provider);
+
+/**
+ * \brief Clear the hardware device id property
+ * \param[in] config The config to clear hardware device id property.
+ * \return OgaResult containing the error message if the clearing failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareDeviceId(OgaConfig* config, const char* provider);
+
+/**
+ * \brief Clear the hardware vendor id property
+ * \param[in] config The config to clear hardware vendor id property.
+ * \return OgaResult containing the error message if the clearing failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaConfigClearDecoderProviderOptionsHardwareVendorId(OgaConfig* config, const char* provider);
+
+/**
  * \brief Overlay JSON on top of config file
  * \param[in] config The config to overlay the JSON on.
  * \param[in] json The JSON to overlay on the config.
@@ -312,35 +407,23 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGeneratorParams(const OgaModel* mode
 
 /**
  * \brief Destroys the given generator params.
- * \param[in] generator_params The generator params to be destroyed.
+ * \param[in] params The generator params to be destroyed.
  */
-OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* generator_params);
+OGA_EXPORT void OGA_API_CALL OgaDestroyGeneratorParams(OgaGeneratorParams* params);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* generator_params, const char* name, double value);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* generator_params, const char* name, bool value);
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* generator_params, int32_t max_batch_size);
-
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetInputs(OgaGeneratorParams* generator_params, const OgaNamedTensors* named_tensors);
-
-/**
- * \brief For additional model inputs that genai does not handle, this lets the user set their values. For example LoRA models handle
- * fine tuning through model inputs. This lets the user supply the fine tuning inputs, while genai handles the standard inputs.
- * \param[in] generator_params The generator params to set the input on
- * \param[in] name Name of the model input (this must match the model's input name)
- * \param[in] tensor The OgaTensor of the input data
- */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetModelInput(OgaGeneratorParams* generator_params, const char* name, OgaTensor* tensor);
-
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetWhisperInputFeatures(OgaGeneratorParams* generator_params, OgaTensor* tensor);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchNumber(OgaGeneratorParams* params, const char* name, double value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetSearchBool(OgaGeneratorParams* params, const char* name, bool value);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsTryGraphCaptureWithMaxBatchSize(OgaGeneratorParams* params, int32_t max_batch_size);
 
 /**
  * \brief Sets the guidance type and data for the Generator params
- * \param[in] generator_params The generator params to set the guidance on
+ * \param[in] params The generator params to set the guidance on
  * \param[in] type The type of the guidance. Currently, we support json_schema, regex and lark_grammar
  * \param[in] data The input string, which is the guidance data. Examples are present in test/test_models/grammars folder
+ * \param[in] enable_ff_tokens Whether to enable ff_tokens generation. This feature allows guidance to force-forward tokens that satisfy input grammar without calling model, hence speeding up generation process. Only valid when guidance type is set and batch_size is 1 and beam_size is 1.
  * \return OgaResult containing the error message if the setting of the guidance failed
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* generator_params, const char* type, const char* data);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorParamsSetGuidance(OgaGeneratorParams* params, const char* type, const char* data, bool enable_ff_tokens);
 
 /**
  * \brief Creates a generator from the given model and generator params.
@@ -362,25 +445,41 @@ OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
  * \param[in] generator The generator to check if it is done with generating all sequences.
  * \return True if the generator has finished generating all the sequences, false otherwise.
  */
-OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(const OgaGenerator* generator);
+OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsDone(OgaGenerator* generator);
 OGA_EXPORT bool OGA_API_CALL OgaGenerator_IsSessionTerminated(const OgaGenerator* generator);
 
 /**
- * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
- * \param[in] oga_generator The generator to add the input ids to.
- * \param[in] p_sequences The input id sequences.
- * \return OgaResult containing the error message if the setting of the input ids failed.
+ * \brief For additional model inputs that genai does not handle, this lets the user set their values. For example LoRA models handle
+ * fine tuning through model inputs. This lets the user supply the fine tuning inputs, while genai handles the standard inputs.
+ * \param[in] generator The generator to add the inputs to.
+ * \param[in] name Name of the model input (this must match the model's input name)
+ * \param[in] tensor The OgaTensor of the input data
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* oga_generator, const OgaSequences* p_sequences);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetModelInput(OgaGenerator* generator, const char* name, OgaTensor* tensor);
+
+/**
+ * \brief For additional model inputs that genai does not handle, this lets the user set their values.
+ * \param[in] generator The generator to add the inputs to.
+ * \param[in] named_tensors The named tensors to set the inputs as.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetInputs(OgaGenerator* generator, const OgaNamedTensors* named_tensors);
 
 /**
  * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
- * \param[in] oga_generator The generator to add the input ids to.
+ * \param[in] generator The generator to add the input ids to.
+ * \param[in] p_sequences The input id sequences.
+ * \return OgaResult containing the error message if the setting of the input ids failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokenSequences(OgaGenerator* generator, const OgaSequences* p_sequences);
+
+/**
+ * \brief Adds the input ids to the generator. The input ids are used to seed the generation.
+ * \param[in] generator The generator to add the input ids to.
  * \param[in] input_ids The input ids to add.
  * \param[in] input_ids_count The number of input ids to add (batch_size * sequence_length).
  * \return OgaResult containing the error message if the setting of the input ids failed.
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* oga_generator, const int32_t* input_ids, size_t input_ids_count);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_AppendTokens(OgaGenerator* generator, const int32_t* input_ids, size_t input_ids_count);
 
 /**
  * \brief Computes the logits from the model based on the input ids and the past state. The computed logits are stored in the generator.
@@ -408,6 +507,16 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_SetRuntimeOption(OgaGenerator* g
  * \return OgaResult containing the error message if the rewinding failed.
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_RewindTo(OgaGenerator* generator, size_t new_length);
+
+/**
+ * \brief Returns a copy of the model input identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
+ *       and will be released when the OgaTensor is destroyed
+ * \param[in] generator The generator to run the GetInput on the name provided and the out pointer to store the input.
+ * \param[in] name The name of the input tensor.
+ * \param[out] out The returned OgaTensor.
+ * \return OgaResult containing the error message if the computation failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGenerator_GetInput(const OgaGenerator* generator, const char* name, OgaTensor** out);
 
 /**
  * \brief Returns a copy of the model output identified by the given name as an OgaTensor on CPU. The buffer is owned by returned OgaTensor
@@ -465,6 +574,58 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateMultiModalProcessor(const OgaModel* 
 OGA_EXPORT void OGA_API_CALL OgaDestroyMultiModalProcessor(OgaMultiModalProcessor* processor);
 
 /**
+ * Updates tokenizer options for the given OgaTokenizer instance.
+ * The provided keys and values must be null-terminated UTF-8 strings.
+ *
+ * This function allows updating tokenizer behavior at runtime by passing
+ * key/value string pairs. Each key corresponds to a configurable tokenizer
+ * option. Both keys and values must remain valid for the duration of this call.
+ *
+ * @param tokenizer Pointer to the OgaTokenizer whose options will be updated.
+ * @param keys Array of option key strings.
+ * @param values Array of corresponding option value strings (same length as keys).
+ * @param num_options Number of key/value pairs provided.
+ *
+ * @return nullptr on success, or an OgaResult* describing the error.
+ *         The returned OgaResult* (if not null) must be freed with OgaDestroyResult.
+ *
+ * Supported options:
+ *
+ * - `add_special_tokens`
+ *   - Purpose: Controls whether to add special tokens (e.g., BOS/EOS) during tokenization.
+ *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
+ *   - Default: `"false"`. This is the default value set by ORT GenAI prior to any options updating.
+ *
+ * - `skip_special_tokens`
+ *   - Purpose: Controls whether to remove special tokens during detokenization.
+ *   - Values: `"true"` / `"false"` or `"1"` / `"0"`.
+ *   - Default: `"true"`. This is the default value set by ORT GenAI prior to any options updating.
+ *
+ * Future tokenizer options may be added without changing this API signature.
+ * Passing unknown keys will result in an error.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaUpdateTokenizerOptions(
+    OgaTokenizer* tokenizer,
+    const char* const* keys,
+    const char* const* values,
+    size_t num_options);
+
+/**
+ * Return the int representation of the BOS token
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetBosTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
+ * Return an array containing the int representations of the EOS tokens. The array is owned by the tokenizer and will be freed when the tokenizer is destroyed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetEosTokenIds(const OgaTokenizer* tokenizer, const int32_t** eos_token_ids, size_t* token_count);
+
+/**
+ * Return the int representation of the BOS token
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerGetPadTokenId(const OgaTokenizer* tokenizer, int32_t* token_id);
+
+/**
  * Encodes a single string and adds the encoded sequence of tokens to the OgaSequences. The OgaSequences must be freed with OgaDestroySequences
  * when it is no longer needed.
  */
@@ -489,12 +650,61 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerDecodeBatch(const OgaTokenizer*, 
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerToTokenId(const OgaTokenizer* tokenizer, const char* str, int32_t* token_id);
 
+/**
+ * \brief Process images with input prompt
+ * \param[in] processor The processor to use to process the images and prompt.
+ * \param[in] prompt The prompt to use with the images.
+ * \param[in] images The images to process.
+ * \return OgaResult containing the named tensors for the processed inputs.
+ */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImages(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, OgaNamedTensors** input_tensors);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const OgaAudios* audios, OgaNamedTensors** input_tensors);
+/**
+ * \brief Process images with input prompts
+ * \param[in] processor The processor to use to process the images and prompts.
+ * \param[in] prompts The prompts to use with the images.
+ * \param[in] images The images to process.
+ * \return OgaResult containing the named tensors for the processed inputs.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndPrompts(const OgaMultiModalProcessor*, const OgaStringArray* prompts, const OgaImages* images, OgaNamedTensors** input_tensors);
 
-OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images,
-                                                                      const OgaAudios* audios, OgaNamedTensors** input_tensors);
+/**
+ * \brief Process audios with input prompt
+ * \param[in] processor The processor to use to process the audios and prompt.
+ * \param[in] prompt The prompt to use with the audios.
+ * \param[in] audios The audios to process.
+ * \return OgaResult containing the named tensors for the processed inputs.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaAudios* audios, OgaNamedTensors** input_tensors);
+
+/**
+ * \brief Process audios with input prompts
+ * \param[in] processor The processor to use to process the audios and prompts.
+ * \param[in] prompts The prompts to use with the audios.
+ * \param[in] audios The audios to process.
+ * \return OgaResult containing the named tensors for the processed inputs.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessAudiosAndPrompts(const OgaMultiModalProcessor*, const OgaStringArray* prompts, const OgaAudios* audios, OgaNamedTensors** input_tensors);
+
+/**
+ * \brief Process images and/or audios with input prompt
+ * \param[in] processor The processor to use to process the images, audios, and/or prompt.
+ * \param[in] prompt The prompt to use with the images and/or audios.
+ * \param[in] images The images to process.
+ * \param[in] audios The audios to process.
+ * \return OgaResult containing the named tensors for the processed inputs.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudios(const OgaMultiModalProcessor*, const char* prompt, const OgaImages* images, const OgaAudios* audios, OgaNamedTensors** input_tensors);
+
+/**
+ * \brief Process images and/or audios with input prompts
+ * \param[in] processor The processor to use to process the images, audios, and/or prompts.
+ * \param[in] prompts The prompts to use with the images and/or audios.
+ * \param[in] images The images to process.
+ * \param[in] audios The audios to process.
+ * \return OgaResult containing the named tensors for the processed inputs.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorProcessImagesAndAudiosAndPrompts(const OgaMultiModalProcessor*, const OgaStringArray* prompts, const OgaImages* images, const OgaAudios* audios, OgaNamedTensors** input_tensors);
 
 /** Decode a single token sequence and returns a null terminated utf8 string. out_string must be freed with OgaDestroyString
  */
@@ -511,11 +721,12 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaProcessorDecode(const OgaMultiModalProcess
  * \param[in] tokenizer OgaTokenizer used for template processing.
  * \param[in] template_str Null-terminated string representing the chat template. Use nullptr to fall back to the default chat template from the tokenizer config.
  * \param[in] messages Null-terminated string containing the input messages to be processed.
+ * \param[in] tools Null-terminated string containing the chat function calls if any. Use nullptr if none.
  * \param[in] add_generation_prompt Indicates whether to add a generation prompt to the output.
  * \param[out] out_string Pointer to where the output will be stored. The returned pointer must be freed with OgaDestroyString
  * \return OgaResult* containing the error message if the function fails
  */
-OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer*, const char* template_str, const char* messages, bool add_generation_prompt, const char** out_string);
+OGA_EXPORT OgaResult* OGA_API_CALL OgaTokenizerApplyChatTemplate(const OgaTokenizer*, const char* template_str, const char* messages, const char* tools, bool add_generation_prompt, const char** out_string);
 
 /** OgaTokenizerStream is to decoded token strings incrementally, one token at a time.
  */
@@ -685,6 +896,194 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaUnloadAdapter(OgaAdapters* adapters, const
  */
 OGA_EXPORT OgaResult* OGA_API_CALL OgaSetActiveAdapter(OgaGenerator* generator, OgaAdapters* adapters,
                                                        const char* adapter_name);
+
+/**
+ * \brief Creates an OgaEngine object from the given model.
+ *
+ * The OgaEngine is responsible for managing and scheduling multiple requests, executing model inference,
+ * and coordinating batching, caching, and resource management for efficient processing. This function
+ * initializes a new engine instance using the provided model, allowing requests to be added, removed, and
+ * processed through the engine's API. The engine must be destroyed with OgaDestroyEngine when no longer needed.
+ *
+ * \param[in] model The model to use for the engine. The model must remain valid for the lifetime of the engine.
+ * \param[out] out Pointer to the created engine instance. On success, *out will be set to the new engine object.
+ * \return OgaResult containing the error message if the engine creation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateEngine(OgaModel* model, OgaEngine** out);
+
+/**
+ * \brief Destroys the given engine.
+ * \param[in] engine The engine to be destroyed.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyEngine(OgaEngine* engine);
+
+/**
+ * \brief Returns a ready request of runs one step of the OgaEngine if there are pending requests.
+ *
+ * This function advances the state of the engine by processing a subset of the currently pending requests.
+ * It schedules and executes model inference for requests that are ready, updates their state with the generated results,
+ * and manages batching and resource allocation as needed. This function should be called repeatedly (e.g., in a loop)
+ * to ensure all requests are processed efficiently. It is a core part of the engine's request processing pipeline.
+ * If the engine has ready requests from a previous call, it will return one of them in the request parameter.
+ * If there are no ready requests, a new subset of requests will be scheduled for processing and the request parameter
+ * will be set to the first request from this subset that is ready to be queried for results.
+ *
+ * \param[in] engine The engine instance to run a processing step on.
+ * \param[out] request A request that has been processed by the engine and is ready to be queried for results.
+ *                     If the engine has no ready requests, this will be set to a nullptr.
+ * \return OgaResult containing the error message if the operation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineStep(OgaEngine* engine, OgaRequest** request);
+
+/**
+ * \brief Checks if the engine has any pending requests to process.
+ *
+ * This function queries the OgaEngine to determine whether there are any requests that have not yet been fully processed.
+ *
+ * \param[in] engine The engine instance to check for pending requests.
+ * \param[out] out Pointer to a boolean value that will be set to true if there are pending requests, or false otherwise.
+ * \return OgaResult containing the error message if the operation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineHasPendingRequests(OgaEngine* engine, bool* out);
+
+/**
+ * \brief Adds a request to the OgaEngine for processing.
+ *
+ * This function submits a new request to the engine, which will then be processed in subsequent calls to OgaEngineStep.
+ * The request must be created using OgaCreateRequest and should contain the necessary parameters for model inference.
+ *
+ * \param[in] engine The engine instance to which the request is being added.
+ * \param[in] request The request to add to the engine. The request must remain valid until it is removed or processed.
+ * \return OgaResult containing the error message if the operation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineAddRequest(OgaEngine* engine, OgaRequest* request);
+
+/**
+ * \brief Removes a request from the OgaEngine.
+ *
+ * This function removes a request from the engine, allowing it to be cleaned up. The request must have been previously added
+ * to the engine using OgaEngineAddRequest. After this call, the request will no longer be processed by the engine.
+ *
+ * \param[in] engine The engine instance from which the request is being removed.
+ * \param[in] request The request to remove from the engine. The request must have been previously added to the engine.
+ * \return OgaResult containing the error message if the operation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaEngineRemoveRequest(OgaEngine* engine, OgaRequest* request);
+
+/**
+ * \brief Creates a new request for the OgaEngine.
+ *
+ * This function initializes a new request object that can be used to submit input sequences for model inference.
+ * Once added to the engine, the request will be processed by the engine in subsequent calls to OgaEngineStep.
+ *
+ * \param[in] params The parameters for the generator, such as temperature, top-k, etc.
+ * \param[out] out Pointer to the created request instance. On success, *out will be set to the new request object.
+ * \return OgaResult containing the error message if the request creation failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateRequest(OgaGeneratorParams* params, OgaRequest** out);
+
+/**
+ * \brief Adds input sequences to the request.
+ *
+ * This function sets the input sequences for the request. The input sequences are used to seed the generation process.
+ * The request must have been created using OgaCreateRequest before calling this function.
+ *
+ * \param[in] request The request to set the input sequences on.
+ * \param[in] tokens The input sequences to set on the request.
+ * \return OgaResult containing the error message if the setting of the input sequences failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestAddTokens(OgaRequest* request, const OgaSequences* tokens);
+
+/**
+ * \brief Destroys the given request.
+ *
+ * This function cleans up the resources associated with the request, including any input sequences and parameters.
+ * It should be called when the request is no longer needed, either after it has been processed.
+ *
+ * \param[in] request The request to be destroyed. The request must have been created using OgaCreateRequest.
+ */
+OGA_EXPORT void OGA_API_CALL OgaDestroyRequest(OgaRequest* request);
+
+/**
+ * \brief Sets custom user data on the request.
+ *
+ * This function sets custom user data on the request that is opaque to the request. It can be queried
+ * later using OgaRequestGetOpaqueData. This is useful for associating additional information with the
+ * request that may be actionable by the user or application logic.
+ *
+ * \param[in] request The request to set the input sequences on.
+ * \param[in] tokens The input sequences to set on the request.
+ * \return OgaResult containing the error message if the setting of the input sequences failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestSetOpaqueData(OgaRequest* request, void* opaque_data);
+
+/**
+ * \brief Gets the custom user data from the request.
+ *
+ * This function retrieves the custom user data that was set on the request using OgaRequestSetOpaqueData.
+ * The user data is opaque to the request and can be used to store additional information that may be
+ * useful for the application logic.
+ *
+ * \param[in] request The request to get the opaque data from.
+ * \param[out] opaque_data Pointer to where the opaque data will be stored.
+ * \return OgaResult containing the error message if the getting of the opaque data failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetOpaqueData(OgaRequest* request, void** opaque_data);
+
+/**
+ * \brief Checks if the request has any unseen tokens.
+ *
+ * This function checks if the request has any unseen tokens that have not yet been queried by the user
+ * or application yet. Unseen tokens are those that have been generated by the model but not yet
+ * retrieved by the user.
+ *
+ * \param[in] request The request to check for unseen tokens.
+ * \param[out] out Boolean flag that will be set to true if there are unseen tokens, or false otherwise.
+ * \return OgaResult containing the error message if the setting of the input sequences failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestHasUnseenTokens(const OgaRequest* request, bool* out);
+
+/**
+ * \brief Gets an unseen token from the request.
+ *
+ * This function retrieves the next unseen token from the request. If there are no unseen tokens,
+ * it will return an error. The unseen token is a token that has been generated by the model but
+ * has not yet been queried by the user.
+ *
+ * \param[in] request The request to get the unseen token from.
+ * \param[out] out Pointer to where the unseen token will be stored.
+ * \return OgaResult containing the error message if the getting of the unseen token failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestGetUnseenToken(OgaRequest* request, int32_t* out);
+
+/**
+ * \brief Checks if the request is done processing.
+ *
+ * This function checks if the request has finished processing. The request is done when one of the termination
+ * conditions has been reached (e.g. end of sequence token is encountered or the request was cancelled).
+ * If the request is done, it will return true; otherwise, it will return false.
+ *
+ * \param[in] request The request to check if it is done.
+ * \param[out] out Boolean flag that will be set to true if the request is done, or false otherwise.
+ * \return OgaResult containing the error message if the checking of the request status failed, or nullptr on success.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaRequestIsDone(const OgaRequest* request, bool* out);
+
+/**
+ * \brief Registers an execution provider library with ONNXRuntime API.
+ * \param registration_name name for registration.
+ * \param path provider path.
+ *
+ */
+OGA_EXPORT void OGA_API_CALL OgaRegisterExecutionProviderLibrary(const char* registration_name, const char* library_path);
+
+/**
+ * \brief Unregisters an execution provider library with ONNXRuntime API.
+ * \param registration_name name for registration.
+ *
+ */
+OGA_EXPORT void OGA_API_CALL OgaUnregisterExecutionProviderLibrary(const char* registration_name);
+
 #ifdef __cplusplus
 }
 #endif

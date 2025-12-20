@@ -178,15 +178,6 @@ struct PyGeneratorParams {
 
   std::unique_ptr<OgaGeneratorParams> params_;
 
-  void SetModelInput(const std::string& name, pybind11::array& value) {
-    params_->SetModelInput(name.c_str(), *ToOgaTensor(value, false));
-    refs_.emplace_back(value);
-  }
-
-  void SetInputs(OgaNamedTensors& named_tensors) {
-    params_->SetInputs(named_tensors);
-  }
-
   void SetSearchOptions(const pybind11::kwargs& dict) {
     for (auto& entry : dict) {
       auto name = entry.first.cast<std::string>();
@@ -205,8 +196,8 @@ struct PyGeneratorParams {
     std::cerr << "TryGraphCaptureWithMaxBatchSize is deprecated and will be removed in a future release" << std::endl;
   }
 
-  void SetGuidance(const std::string& type, const std::string& data) {
-    params_->SetGuidance(type.c_str(), data.c_str());
+  void SetGuidance(const std::string& type, const std::string& data, bool enable_ff_tokens = false) {
+    params_->SetGuidance(type.c_str(), data.c_str(), enable_ff_tokens);
   }
 
   std::vector<pybind11::object> refs_;  // References to data we want to ensure doesn't get garbage collected
@@ -225,8 +216,20 @@ struct PyGenerator {
     return ToPython(generator_->GetSequence(index));
   }
 
+  pybind11::array GetInput(const std::string& name) {
+    return ToNumpy(*generator_->GetInput(name.c_str()));
+  }
+
   pybind11::array GetOutput(const std::string& name) {
     return ToNumpy(*generator_->GetOutput(name.c_str()));
+  }
+
+  void SetModelInput(const std::string& name, pybind11::array& value) {
+    generator_->SetModelInput(name.c_str(), *ToOgaTensor(value, false));
+  }
+
+  void SetInputs(OgaNamedTensors& named_tensors) {
+    generator_->SetInputs(named_tensors);
   }
 
   void AppendTokens(OgaTensor& tokens) {
@@ -253,7 +256,7 @@ struct PyGenerator {
     generator_->RewindTo(new_length);
   }
 
-  bool IsDone() const {
+  bool IsDone() {
     return generator_->IsDone();
   }
 
@@ -274,6 +277,20 @@ void SetLogOptions(const pybind11::kwargs& dict) {
       Oga::SetLogString(name.c_str(), entry.second.cast<std::string>().c_str());
     } else
       throw std::runtime_error("Unknown log option type, can be bool/string:" + name);
+  }
+}
+
+void SetLogCallback(std::optional<const pybind11::function> callback) {
+  static std::optional<pybind11::function> log_callback;
+  log_callback = callback;
+
+  if (log_callback.has_value()) {
+    Oga::SetLogCallback([](const char* message, size_t length) {
+      pybind11::gil_scoped_acquire gil;
+      (*log_callback)(std::string_view(message, length));
+    });
+  } else {
+    Oga::SetLogCallback(nullptr);
   }
 }
 
@@ -299,16 +316,11 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<PyGeneratorParams>(m, "GeneratorParams")
       .def(pybind11::init<const OgaModel&>())
-#if 0
-      // TODO(baijumeswani): Rename/redesign the whisper_input_features to be more generic
-      .def_readwrite("whisper_input_features", &PyGeneratorParams::py_whisper_input_features_)
-      .def_readwrite("alignment_heads", &PyGeneratorParams::py_alignment_heads_)
-#endif
-      .def("set_inputs", &PyGeneratorParams::SetInputs)
-      .def("set_model_input", &PyGeneratorParams::SetModelInput)
       .def("try_graph_capture_with_max_batch_size", &PyGeneratorParams::TryGraphCaptureWithMaxBatchSize)
       .def("set_search_options", &PyGeneratorParams::SetSearchOptions)  // See config.h 'struct Search' for the options
-      .def("set_guidance", &PyGeneratorParams::SetGuidance);
+      .def("set_guidance", &PyGeneratorParams::SetGuidance,
+           pybind11::arg("type"), pybind11::arg("data"),
+           pybind11::arg("enable_ff_tokens") = false);
 
   pybind11::class_<OgaTokenizerStream>(m, "TokenizerStream")
       .def("decode", [](OgaTokenizerStream& t, int32_t token) { return t.Decode(token); });
@@ -351,14 +363,37 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<OgaTokenizer>(m, "Tokenizer")
       .def(pybind11::init([](const OgaModel& model) { return OgaTokenizer::Create(model); }))
+      .def_property_readonly("bos_token_id", &OgaTokenizer::GetBosTokenId)
+      .def_property_readonly("eos_token_ids", [](const OgaTokenizer& t) {
+        return ToPython(t.GetEosTokenIds());
+      })
+      .def_property_readonly("pad_token_id", &OgaTokenizer::GetPadTokenId)
+      .def("update_options", [](OgaTokenizer& t, pybind11::kwargs kwargs) {
+        std::vector<std::string> key_storage;
+        std::vector<std::string> value_storage;
+        key_storage.reserve(kwargs.size());
+        value_storage.reserve(kwargs.size());
+
+        std::vector<const char*> keys;
+        std::vector<const char*> values;
+        keys.reserve(kwargs.size());
+        values.reserve(kwargs.size());
+
+        for (auto& item : kwargs) {
+            key_storage.emplace_back(pybind11::str(item.first));
+            value_storage.emplace_back(pybind11::str(item.second));
+            keys.push_back(key_storage.back().c_str());
+            values.push_back(value_storage.back().c_str());
+        }
+
+        t.UpdateOptions(keys.data(), values.data(), kwargs.size()); })
       .def("encode", [](const OgaTokenizer& t, std::string s) -> pybind11::array_t<int32_t> {
         auto sequences = OgaSequences::Create();
         t.Encode(s.c_str(), *sequences);
-        return ToPython(sequences->Get(0));
-      })
+        return ToPython(sequences->Get(0)); })
       .def("to_token_id", &OgaTokenizer::ToTokenId)
       .def("decode", [](const OgaTokenizer& t, pybind11::array_t<int32_t> tokens) -> std::string { return t.Decode(ToSpan(tokens)).p_; })
-      .def("apply_chat_template", [](const OgaTokenizer& t, const char* template_str, const char* messages, bool add_generation_prompt) -> std::string { return t.ApplyChatTemplate(template_str, messages, add_generation_prompt).p_; }, pybind11::arg("template_str") = nullptr, pybind11::arg("messages"), pybind11::arg("add_generation_prompt"))
+      .def("apply_chat_template", [](const OgaTokenizer& t, const char* messages, const char* template_str, const char* tools, bool add_generation_prompt) -> std::string { return t.ApplyChatTemplate(template_str, messages, tools, add_generation_prompt).p_; }, pybind11::arg("messages"), pybind11::kw_only(), pybind11::arg("template_str") = nullptr, pybind11::arg("tools") = nullptr, pybind11::arg("add_generation_prompt") = true)
       .def("encode_batch", [](const OgaTokenizer& t, std::vector<std::string> strings) {
         std::vector<const char*> c_strings;
         for (const auto& s : strings)
@@ -376,7 +411,38 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def(pybind11::init([](const std::string& config_path) { return OgaConfig::Create(config_path.c_str()); }))
       .def("append_provider", &OgaConfig::AppendProvider)
       .def("set_provider_option", &OgaConfig::SetProviderOption)
-      .def("clear_providers", &OgaConfig::ClearProviders);
+      .def("clear_providers", &OgaConfig::ClearProviders)
+      .def("add_model_data", [](OgaConfig& config, const std::string& model_filename, pybind11::object obj) {
+        if (pybind11::isinstance<pybind11::bytes>(obj)) {
+          const auto model_bytes = obj.cast<pybind11::bytes>();
+          char* model_data;
+          Py_ssize_t model_length;
+          if (PyBytes_AsStringAndSize(model_bytes.ptr(), &model_data, &model_length) != 0) {
+            throw std::runtime_error("Failed to extract bytes from the object");
+          }
+
+          config.AddModelData(model_filename, model_data, static_cast<size_t>(model_length));
+        } else if (pybind11::isinstance<pybind11::buffer>(obj)) {
+          pybind11::buffer_info info = obj.cast<pybind11::buffer>().request();
+          if (info.format != pybind11::format_descriptor<uint8_t>::format() || info.ndim != 1) {
+            throw std::runtime_error("Expected a 1D buffer of uint8_t");
+          }
+          const std::byte* model_data = static_cast<std::byte*>(info.ptr);
+          config.AddModelData(model_filename, model_data, info.size);
+        } else {
+          throw std::runtime_error("Unsupported input type. Expected bytes or buffer.");
+        }
+      })
+      .def("remove_model_data", [](OgaConfig& config, const std::string& model_filename) {
+        config.RemoveModelData(model_filename.c_str());
+      })
+      .def("overlay", &OgaConfig::Overlay)
+      .def("set_decoder_provider_options_hardware_device_type", &OgaConfig::SetDecoderProviderOptionsHardwareDeviceType)
+      .def("set_decoder_provider_options_hardware_device_id", &OgaConfig::SetDecoderProviderOptionsHardwareDeviceId)
+      .def("set_decoder_provider_options_hardware_vendor_id", &OgaConfig::SetDecoderProviderOptionsHardwareVendorId)
+      .def("clear_decoder_provider_options_hardware_device_type", &OgaConfig::ClearDecoderProviderOptionsHardwareDeviceType)
+      .def("clear_decoder_provider_options_hardware_device_id", &OgaConfig::ClearDecoderProviderOptionsHardwareDeviceId)
+      .def("clear_decoder_provider_options_hardware_vendor_id", &OgaConfig::ClearDecoderProviderOptionsHardwareVendorId);
 
   pybind11::class_<OgaModel>(m, "Model")
       .def(pybind11::init([](const OgaConfig& config) { return OgaModel::Create(config); }))
@@ -389,7 +455,10 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
   pybind11::class_<PyGenerator>(m, "Generator")
       .def(pybind11::init<const OgaModel&, PyGeneratorParams&>())
       .def("is_done", &PyGenerator::IsDone)
+      .def("get_input", &PyGenerator::GetInput)
       .def("get_output", &PyGenerator::GetOutput)
+      .def("set_inputs", &PyGenerator::SetInputs)
+      .def("set_model_input", &PyGenerator::SetModelInput)
       .def("append_tokens", pybind11::overload_cast<pybind11::array_t<int32_t>&>(&PyGenerator::AppendTokens))
       .def("append_tokens", pybind11::overload_cast<OgaTensor&>(&PyGenerator::AppendTokens))
       .def("get_logits", &PyGenerator::GetLogits)
@@ -459,14 +528,36 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   pybind11::class_<OgaMultiModalProcessor>(m, "MultiModalProcessor")
       .def(
-          "__call__", [](OgaMultiModalProcessor& processor, const std::optional<std::string>& prompt, const pybind11::kwargs& kwargs) {
+          "__call__", [](OgaMultiModalProcessor& processor, pybind11::object prompts, const pybind11::kwargs& kwargs) {
             OgaImages* images{};
             OgaAudios* audios{};
-            if (kwargs.contains("images"))
+            if (kwargs.contains("images")) {
               images = kwargs["images"].cast<OgaImages*>();
-            if (kwargs.contains("audios"))
+            }
+            if (kwargs.contains("audios")) {
               audios = kwargs["audios"].cast<OgaAudios*>();
-            return processor.ProcessImagesAndAudios(prompt.value_or("").c_str(), images, audios);
+            }
+
+            std::vector<std::string> prompts_str;
+            std::vector<const char*> c_prompts;
+            if (pybind11::isinstance<pybind11::str>(prompts)) {
+              // One prompt
+              return processor.ProcessImagesAndAudios(prompts.cast<std::string>().c_str(), images, audios);
+            } else if (pybind11::isinstance<pybind11::list>(prompts)) {
+              // Multiple prompts
+              for (const auto& prompt : prompts) {
+                if (!pybind11::isinstance<pybind11::str>(prompt)) {
+                  throw std::runtime_error("One or more items in the list of provided prompts is not a string.");
+                }
+                prompts_str.push_back(prompt.cast<std::string>());
+                c_prompts.push_back(prompts_str.back().c_str());
+              }
+            } else if (!prompts.is_none()) {
+              // Unsupported type for prompts
+              throw std::runtime_error("Unsupported type for prompts. Prompts must be a string or a list of strings.");
+            }
+
+            return processor.ProcessImagesAndAudios(c_prompts, images, audios);
           },
           pybind11::arg("prompt") = pybind11::none())
       .def("create_stream", [](OgaMultiModalProcessor& processor) { return OgaTokenizerStream::Create(processor); })
@@ -481,7 +572,39 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
       .def("unload", &OgaAdapters::UnloadAdapter)
       .def("load", &OgaAdapters::LoadAdapter);
 
+  pybind11::class_<OgaRequest>(m, "Request")
+      .def(pybind11::init(
+          [](PyGeneratorParams& params) {
+            return OgaRequest::Create(*params.params_);
+          }))
+      .def("add_tokens", [](OgaRequest& request, pybind11::array_t<int32_t> tokens) {
+        auto sequences = OgaSequences::Create();
+        auto tokens_span = ToSpan(tokens);
+        sequences->Append(tokens_span.data(), tokens_span.size());
+        request.AddTokens(*sequences);
+      })
+      .def("has_unseen_tokens", &OgaRequest::HasUnseenTokens)
+      .def("is_done", &OgaRequest::IsDone)
+      .def("get_unseen_token", &OgaRequest::GetUnseenToken)
+      .def("set_opaque_data", [](OgaRequest& request, pybind11::object opaque_data) {
+        request.SetOpaqueData(opaque_data.ptr());
+      })
+      .def("get_opaque_data", [](OgaRequest& request) -> pybind11::object {
+        auto opaque_data = request.GetOpaqueData();
+        if (!opaque_data)
+          return pybind11::none();
+        return pybind11::reinterpret_borrow<pybind11::object>(static_cast<PyObject*>(opaque_data));
+      });
+
+  pybind11::class_<OgaEngine>(m, "Engine")
+      .def(pybind11::init([](OgaModel& model) { return OgaEngine::Create(model); }))
+      .def("add_request", &OgaEngine::Add)
+      .def("step", &OgaEngine::Step)
+      .def("remove_request", &OgaEngine::Remove)
+      .def("has_pending_requests", &OgaEngine::HasPendingRequests);
+
   m.def("set_log_options", &SetLogOptions);
+  m.def("set_log_callback", &SetLogCallback);
 
   m.def("is_cuda_available", []() { return USE_CUDA != 0; });
   m.def("is_dml_available", []() { return USE_DML != 0; });
@@ -492,4 +615,12 @@ PYBIND11_MODULE(onnxruntime_genai, m) {
 
   m.def("set_current_gpu_device_id", [](int device_id) { Ort::SetCurrentGpuDeviceId(device_id); });
   m.def("get_current_gpu_device_id", []() { return Ort::GetCurrentGpuDeviceId(); });
+
+  m.def("register_execution_provider_library", [](const std::string& provider_name, const std::string& path_str) {
+    OgaRegisterExecutionProviderLibrary(provider_name.c_str(), path_str.c_str());
+  });
+
+  m.def("unregister_execution_provider_library", [](const std::string& provider_name) {
+    OgaUnregisterExecutionProviderLibrary(provider_name.c_str());
+  });
 }

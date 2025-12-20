@@ -6,6 +6,7 @@
 #include "kv_cache.h"
 #include "windowed_kv_cache.h"
 #include "../openvino/interface.h"
+#include <algorithm>
 
 namespace Generators {
 
@@ -149,7 +150,7 @@ void CombinedKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int 
 DefaultKeyValueCache::DefaultKeyValueCache(State& state)
     : state_{state},
       layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      past_present_share_buffer_{state_.params_->search.past_present_share_buffer && (state_.params_->search.num_beams == 1 || model_.config_->model.type == "whisper")},
+      past_present_share_buffer_{state_.params_->IsPastPresentShareBufferEnabled(model_.config_->model.type)},
       shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 0, model_.config_->model.decoder.head_size} {
   if (g_log.enabled && g_log.warning && past_present_share_buffer_ != state_.params_->search.past_present_share_buffer)
     Log("warning", "past_present_share_buffer search option set to true, but has been disabled due to the current configuration. See https://aka.ms/generate_config for details");
@@ -175,15 +176,49 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 
   // Set the size after empty_past_ has been created with 0 for this field
-  if (past_present_share_buffer_)
+  if (state_.model_.p_device_->GetType() == DeviceType::NvTensorRtRtx && model_.config_->model.decoder.sliding_window.has_value() &&
+      model_.config_->model.decoder.sliding_window->window_size > 0) {
+    const int sliding_window_size = model_.config_->model.decoder.sliding_window->window_size;
+    const int max_length = state_.params_->search.max_length;
+
+    // Check if we need per-layer allocation for models with alternating attention patterns
+    if (!model_.config_->model.decoder.sliding_window->layers.empty()) {
+      // Use per-layer allocation based on sliding window layer indices
+      layer_shapes_.resize(layer_count_);
+
+      // Initialize all layers with base shape and max_length
+      for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+        layer_shapes_[layer_idx] = shape_;
+        layer_shapes_[layer_idx][2] = max_length;
+      }
+
+      // Update sliding window layers with constrained cache size
+      for (int layer_idx : model_.config_->model.decoder.sliding_window->layers) {
+        layer_shapes_[layer_idx][2] = std::min(max_length, sliding_window_size);
+      }
+      // Set shape_[2] to max of all layer shapes for RewindTo bounds checking
+      shape_[2] = max_length;
+    } else {
+      // Uniform sliding window allocation (backward compatibility)
+      shape_[2] = std::min(max_length, sliding_window_size);
+    }
+  } else if (past_present_share_buffer_) {
     shape_[2] = state_.params_->search.max_length;
+  }
 
   try {
+    // Allocate KV cache tensors - 2 per layer (key and value)
+    // For per-layer shapes: alternates between key and value for each layer
+    // For uniform shape: all tensors use the same shape
     for (int i = 0; i < layer_count_ * 2; ++i) {
-      presents_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
+      std::array<int64_t, 4> tensor_shape = shape_;
+      if (!layer_shapes_.empty()) {
+        // Per-layer allocation: use layer-specific shape
+        // i/2 gives us the layer index since we have 2 tensors per layer
+        tensor_shape = layer_shapes_[i / 2];
+      }
 
-      // Zero the memory so we don't leak any data from the previous run
-      // WebGPU device has no Zero() implementation yet. Since this zeroing is optional we disable it for WebGPU for now
+      presents_.push_back(OrtValue::CreateTensor(Allocator(), tensor_shape, type_));
       if (Device().GetType() != DeviceType::WEBGPU) {
         ByteWrapTensor(Device(), *presents_.back()).Zero();
       }
@@ -199,21 +234,12 @@ DefaultKeyValueCache::DefaultKeyValueCache(State& state)
   }
 }
 
-void DefaultKeyValueCache::AddEncoder() {
-  // We don't set the input_index_ & output_index_ because the encoder step only runs once, there's no update
-
-  for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.outputs_.push_back(presents_[i].get());
-    state_.output_names_.push_back(output_name_strings_[i].c_str());
-  }
-}
-
 void DefaultKeyValueCache::Add() {
   input_index_ = state_.inputs_.size();
   output_index_ = state_.outputs_.size();
 
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(empty_past_.get());  // Set empty past here, AddEncoder() & Update() take care of the rest
+    state_.inputs_.push_back(empty_past_.get());  // Set empty past here, Update() takes care of the rest
     state_.input_names_.push_back(input_name_strings_[i].c_str());
     state_.outputs_.push_back(presents_[i].get());
     state_.output_names_.push_back(output_name_strings_[i].c_str());
@@ -243,10 +269,28 @@ void DefaultKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_le
     }
   }
 
-  shape_[2] = total_length;
-  for (int i = 0; i < layer_count_ * 2; i++) {
-    presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
-    state_.outputs_[output_index_ + i] = presents_[i].get();
+  if (!layer_shapes_.empty()) {
+    // Per-layer allocation with per-layer capacity constraints
+    for (int layer_idx = 0; layer_idx < layer_count_; ++layer_idx) {
+      std::array<int64_t, 4> current_shape = layer_shapes_[layer_idx];
+      const int max_cache_length = static_cast<int>(layer_shapes_[layer_idx][2]);
+      current_shape[2] = std::min(total_length, max_cache_length);
+
+      // Key tensor
+      presents_[layer_idx * 2] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
+      state_.outputs_[output_index_ + layer_idx * 2] = presents_[layer_idx * 2].get();
+
+      // Value tensor
+      presents_[layer_idx * 2 + 1] = OrtValue::CreateTensor(Allocator(), current_shape, type_);
+      state_.outputs_[output_index_ + layer_idx * 2 + 1] = presents_[layer_idx * 2 + 1].get();
+    }
+  } else {
+    // Uniform allocation
+    shape_[2] = total_length;
+    for (int i = 0; i < layer_count_ * 2; i++) {
+      presents_[i] = OrtValue::CreateTensor(Allocator(), shape_, type_);
+      state_.outputs_[output_index_ + i] = presents_[i].get();
+    }
   }
 
   is_first_update_ = false;
@@ -274,28 +318,72 @@ void DefaultKeyValueCache::RewindTo(size_t index) {
 
 template <typename T>
 void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
-  assert(index > 0 && shape_[2] >= static_cast<int64_t>(index) && !past_present_share_buffer_);
-  std::array<int64_t, 4> new_shape = shape_;
-  new_shape[2] = static_cast<int>(index);
-  auto batch_x_num_heads = new_shape[0] * new_shape[1];
-  auto new_length_x_head_size = new_shape[2] * new_shape[3];
-  auto old_length_x_head_size = shape_[2] * new_shape[3];
-  shape_[2] = new_shape[2];
+  assert(index > 0 && !past_present_share_buffer_);
 
-  for (int i = 0; i < layer_count_ * 2; i++) {
-    OrtValue& present = *presents_[i];
-    std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
-
-    auto past_span = WrapTensor<T>(Device(), *past);
-    auto present_span = WrapTensor<T>(Device(), present);
-
-    for (int j = 0; j < batch_x_num_heads; j++) {
-      auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
-      auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
-      past_data.CopyFrom(present_data);
+  if (!layer_shapes_.empty()) {
+    // Handle per-layer shapes
+    // First validate that index doesn't exceed the global max_length
+    int max_length = static_cast<int>(shape_[2]);  // Set to max_length in constructor
+    if (static_cast<int>(index) > max_length) {
+      throw std::runtime_error("Requested rewind length exceeds max_length.");
     }
-    pasts_[i] = std::move(past);
-    state_.inputs_[input_index_ + i] = pasts_[i].get();
+
+    for (int i = 0; i < layer_count_ * 2; i++) {
+      const int layer_idx = i / 2;
+      const std::array<int64_t, 4> layer_shape = layer_shapes_[layer_idx];
+      const int layer_max_cache = static_cast<int>(layer_shape[2]);
+
+      // For each layer, rewind to min(index, layer's max capacity)
+      // - Full attention layers: min(index, max_length)
+      // - Sliding window layers: min(index, sliding_window_size)
+      const int actual_rewind_length = std::min(static_cast<int>(index), layer_max_cache);
+
+      std::array<int64_t, 4> new_shape = layer_shape;
+      new_shape[2] = actual_rewind_length;
+      const auto batch_x_num_heads = new_shape[0] * new_shape[1];
+      const auto new_length_x_head_size = new_shape[2] * new_shape[3];
+
+      OrtValue& present = *presents_[i];
+      const auto present_shape = present.GetTensorTypeAndShapeInfo()->GetShape();
+      const auto old_length_x_head_size = present_shape[2] * new_shape[3];
+
+      std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), new_shape, type_);
+      auto past_span = WrapTensor<T>(Device(), *past);
+      auto present_span = WrapTensor<T>(Device(), present);
+
+      for (int j = 0; j < batch_x_num_heads; j++) {
+        auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
+        auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
+        past_data.CopyFrom(present_data);
+      }
+      pasts_[i] = std::move(past);
+      state_.inputs_[input_index_ + i] = pasts_[i].get();
+    }
+  } else {
+    // Uniform shape handling (existing behavior)
+    assert(shape_[2] >= static_cast<int64_t>(index));
+    std::array<int64_t, 4> new_shape = shape_;
+    new_shape[2] = static_cast<int>(index);
+    auto batch_x_num_heads = new_shape[0] * new_shape[1];
+    auto new_length_x_head_size = new_shape[2] * new_shape[3];
+    auto old_length_x_head_size = shape_[2] * new_shape[3];
+    shape_[2] = new_shape[2];
+
+    for (int i = 0; i < layer_count_ * 2; i++) {
+      OrtValue& present = *presents_[i];
+      std::unique_ptr<OrtValue> past = OrtValue::CreateTensor(Allocator(), shape_, type_);
+
+      auto past_span = WrapTensor<T>(Device(), *past);
+      auto present_span = WrapTensor<T>(Device(), present);
+
+      for (int j = 0; j < batch_x_num_heads; j++) {
+        auto present_data = present_span.subspan(j * old_length_x_head_size, new_length_x_head_size);
+        auto past_data = past_span.subspan(j * new_length_x_head_size, new_length_x_head_size);
+        past_data.CopyFrom(present_data);
+      }
+      pasts_[i] = std::move(past);
+      state_.inputs_[input_index_ + i] = pasts_[i].get();
+    }
   }
 }
 
@@ -303,10 +391,21 @@ void DefaultKeyValueCache::RewindPastTensorsTo(size_t index) {
 template <typename ScoreType>
 void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices_device, int index) {
   std::span<int32_t> beam_indices = beam_indices_device.CopyDeviceToCpu();
-  auto block_size_per_beam = shape_[1] * shape_[2] * shape_[3];
+
+  std::array<int64_t, 4> tensor_shape;
+  if (!layer_shapes_.empty()) {
+    // Get shape from the actual tensor for per-layer allocation
+    OrtValue& present_value = *presents_[index];
+    const auto present_shape = present_value.GetTensorTypeAndShapeInfo()->GetShape();
+    std::copy(present_shape.begin(), present_shape.end(), tensor_shape.begin());
+  } else {
+    tensor_shape = shape_;
+  }
+
+  auto block_size_per_beam = tensor_shape[1] * tensor_shape[2] * tensor_shape[3];
 
   OrtValue& present_value = *presents_[index];
-  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(Allocator(), shape_);
+  std::unique_ptr<OrtValue> past_value = OrtValue::CreateTensor<ScoreType>(Allocator(), tensor_shape);
 
   auto past_span = WrapTensor<ScoreType>(Device(), *past_value);
   auto present_span = WrapTensor<ScoreType>(Device(), present_value);
@@ -329,40 +428,41 @@ void DefaultKeyValueCache::PickPastState(DeviceSpan<int32_t> beam_indices, int i
   }
 }
 
-CrossCache::CrossCache(State& state)
-    : state_{state},
-      layer_count_{model_.config_->model.decoder.num_hidden_layers},
-      shape_{state_.params_->BatchBeamSize(), model_.config_->model.decoder.num_key_value_heads, 1500, model_.config_->model.decoder.head_size} {
+CrossCache::CrossCache(State& state, int sequence_length) {
+  const Model& model = state.model_;
+  auto& allocator = state.model_.p_device_kvcache_->GetAllocator();
+  layer_count_ = model.config_->model.decoder.num_hidden_layers;
+  shape_ = std::array<int64_t, 4>{state.params_->BatchBeamSize(), model.config_->model.decoder.num_attention_heads, sequence_length, model.config_->model.decoder.head_size};
   values_.reserve(layer_count_ * 2);
 
   for (int i = 0; i < layer_count_; ++i) {
-    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.cross_past_key_names, i));
-    input_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.inputs.cross_past_value_names, i));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.encoder.outputs.cross_present_key_names, i));
+    output_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.encoder.outputs.cross_present_value_names, i));
 
-    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.cross_present_key_names, i));
-    output_name_strings_.emplace_back(ComposeKeyValueName(model_.config_->model.decoder.outputs.cross_present_value_names, i));
+    input_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.inputs.cross_past_key_names, i));
+    input_name_strings_.emplace_back(ComposeKeyValueName(model.config_->model.decoder.inputs.cross_past_value_names, i));
   }
 
-  // Derive the KV data type from the KV input 0
-  type_ = model_.session_info_.GetInputDataType(input_name_strings_[0]);
+  // Derive the cross attention KV cache's data type
+  type_ = model.session_info_.GetOutputDataType(output_name_strings_[0]);
 
   for (int i = 0; i < layer_count_; ++i) {
-    values_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
-    values_.push_back(OrtValue::CreateTensor(Allocator(), shape_, type_));
+    values_.push_back(OrtValue::CreateTensor(allocator, shape_, type_));
+    values_.push_back(OrtValue::CreateTensor(allocator, shape_, type_));
   }
 }
 
-void CrossCache::AddOutputs() {
+void CrossCache::AddOutputs(State& state) {
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.outputs_.push_back(values_[i].get());
-    state_.output_names_.push_back(output_name_strings_[i].c_str());
+    state.outputs_.push_back(values_[i].get());
+    state.output_names_.push_back(output_name_strings_[i].c_str());
   }
 }
 
-void CrossCache::AddInputs() {
+void CrossCache::AddInputs(State& state) {
   for (int i = 0; i < layer_count_ * 2; ++i) {
-    state_.inputs_.push_back(values_[i].get());
-    state_.input_names_.push_back(input_name_strings_[i].c_str());
+    state.inputs_.push_back(values_[i].get());
+    state.input_names_.push_back(input_name_strings_[i].c_str());
   }
 }
 
@@ -387,8 +487,6 @@ ModelManagedKeyValueCache::ModelManagedKeyValueCache(State& state)
 }
 
 void ModelManagedKeyValueCache::Add() {}
-
-void ModelManagedKeyValueCache::AddEncoder() {}
 
 void ModelManagedKeyValueCache::Update(DeviceSpan<int32_t> beam_indices, int total_length) {
   // Eventually we need to set 'beam_idx' tensor here somehow.
@@ -422,7 +520,8 @@ std::unique_ptr<KeyValueCache> CreateKeyValueCache(State& state) {
     return nullptr;
   }
 
-  if (state.model_.config_->model.decoder.sliding_window &&
+  if (state.model_.p_device_->GetType() != DeviceType::NvTensorRtRtx &&
+      state.model_.config_->model.decoder.sliding_window &&
       state.model_.config_->model.decoder.sliding_window->slide_key_value_cache) {
     return std::make_unique<WindowedKeyValueCache>(state);
   }

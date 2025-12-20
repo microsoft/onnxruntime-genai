@@ -26,9 +26,7 @@ def generate_files(lines, args):
                 continue
             file_name = os.path.basename(file)
 
-            files_list.append(
-                f'<file src="{file}" target="runtimes/{platform}/native/{file_name}" />'
-            )
+            files_list.append(f'<file src="{file}" target="runtimes/{platform}/native/{file_name}" />')
 
         for file in glob.glob(os.path.join(platform_dir, "include", "*")):
             if not os.path.isfile(file):
@@ -37,24 +35,18 @@ def generate_files(lines, args):
             if file_name in processed_includes:
                 continue
             processed_includes.add(file_name)
-            files_list.append(
-                f'<file src="{file}" target="build/native/include/{file_name}" />'
-            )
+            files_list.append(f'<file src="{file}" target="build/native/include/{file_name}" />')
 
-    files_list.append(f'<file src="{args.root_dir}\LICENSE" target="LICENSE" />')
-    files_list.append(
-        f'<file src="{args.root_dir}\\nuget\PACKAGE.md" target="PACKAGE.md" />'
-    )
-    files_list.append(
-        f'<file src="{args.root_dir}\ThirdPartyNotices.txt" target="ThirdPartyNotices.txt" />'
-    )
+    files_list.append(rf'<file src="{args.root_dir}\LICENSE" target="LICENSE" />')
+    files_list.append(f'<file src="{args.root_dir}\\nuget\\PACKAGE.md" target="PACKAGE.md" />')
+    files_list.append(rf'<file src="{args.root_dir}\ThirdPartyNotices.txt" target="ThirdPartyNotices.txt" />')
 
     for dotnet in ["netstandard2.0", "net8.0", "native"]:
         files_list.append(
-            f'<file src="{args.root_dir}\\nuget\\targets\\netstandard\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\{dotnet}\{args.package_name}.targets" />'
+            f'<file src="{args.root_dir}\\nuget\\targets\\netstandard\\Microsoft.ML.OnnxRuntimeGenAI.targets" target="build\\{dotnet}\\{args.package_name}.targets" />'
         )
         files_list.append(
-            f'<file src="{args.root_dir}\\nuget\\targets\\netstandard\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\{dotnet}\{args.package_name}.props" />'
+            f'<file src="{args.root_dir}\\nuget\\targets\\netstandard\\Microsoft.ML.OnnxRuntimeGenAI.props" target="build\\{dotnet}\\{args.package_name}.props" />'
         )
 
     files_list.append("</files>")
@@ -68,12 +60,8 @@ def parse_arguments():
 
     parser.add_argument("--package_name", required=True, help="Name of the custom package.")
     parser.add_argument("--ort_package_name", required=True, help="Corresponding ORT custom package name.")
-    parser.add_argument(
-        "--package_version", required=True, help="ORT GenAI package version. Eg: 1.0.0"
-    )
-    parser.add_argument(
-        "--ort_package_version", required=True, help="Corresponding ORT package version."
-    )
+    parser.add_argument("--package_version", required=True, help="ORT GenAI package version. Eg: 1.0.0")
+    parser.add_argument("--ort_package_version", required=True, help="Corresponding ORT package version.")
     parser.add_argument("--nuspec_path", required=True, help="Nuspec output file path.")
     parser.add_argument("--root_dir", required=True, help="ORT GenAI repository root directory.")
     parser.add_argument(

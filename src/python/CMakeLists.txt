@@ -26,7 +26,11 @@ source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR} FILES ${python_srcs})
 if(BUILD_WHEEL)
   set(WHEEL_FILES_DIR "${CMAKE_BINARY_DIR}/wheel")
   message("Setting up wheel files in : ${WHEEL_FILES_DIR}")
-  if(USE_CUDA)
+  if(USE_TRT_RTX)
+    set(TARGET_NAME "onnxruntime-genai-trt-rtx")
+  elseif(USE_WINML)
+    set(TARGET_NAME "onnxruntime-genai-winml")
+  elseif(USE_CUDA)
     set(TARGET_NAME "onnxruntime-genai-cuda")
   elseif(USE_ROCM)
     set(TARGET_NAME "onnxruntime-genai-rocm")
@@ -45,6 +49,7 @@ if(BUILD_WHEEL)
   file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/package_description.md" DESTINATION ${WHEEL_FILES_DIR}/)
   file(COPY "${CMAKE_SOURCE_DIR}/ThirdPartyNotices.txt" DESTINATION ${WHEEL_TARGET_NAME}/)
   file(COPY "${CMAKE_SOURCE_DIR}/LICENSE" DESTINATION ${WHEEL_TARGET_NAME}/)
+
   add_custom_command(TARGET python POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
     ${ortgenai_embed_libs} $<TARGET_FILE:python>
@@ -97,19 +102,20 @@ if(BUILD_WHEEL)
   endif()
 
   if(MANYLINUX)
-    add_custom_target(PyPackageBuild ALL
+    add_custom_target(PyPackageBuild
       COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
       COMMAND ${CMAKE_COMMAND} -E remove ${WHEEL_TARGET_NAME}/onnxruntime_genai.cpython-*
       COMMAND auditwheel repair onnxruntime_genai*linux_x86_64.whl -w ${WHEEL_FILES_DIR} ${modified_exclude_list}
       WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
       COMMENT "Building wheel with MANYLINUX on ${WHEEL_FILES_DIR}"
+      EXCLUDE_FROM_ALL
     )
   else()
-    add_custom_target(PyPackageBuild ALL
+    add_custom_target(PyPackageBuild
       COMMAND ${PYTHON_EXECUTABLE} -m pip wheel --no-deps .
       WORKING_DIRECTORY "${WHEEL_FILES_DIR}"
       COMMENT "Building wheel on ${WHEEL_FILES_DIR}"
+      EXCLUDE_FROM_ALL
     )
   endif()
-  add_dependencies(PyPackageBuild python)
 endif()

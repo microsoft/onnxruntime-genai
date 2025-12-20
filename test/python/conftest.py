@@ -3,10 +3,8 @@
 
 import functools
 import os
-import sys
 
 import pytest
-from _test_utils import run_subprocess
 
 
 def pytest_addoption(parser):
@@ -31,6 +29,16 @@ def phi2_for(request):
         get_path_for_model,
         request.config.getoption("--test_models"),
         "phi-2",
+        "int4",
+    )
+
+
+@pytest.fixture
+def phi3_for(request):
+    return functools.partial(
+        get_path_for_model,
+        request.config.getoption("--test_models"),
+        "phi-3-mini",
         "int4",
     )
 
@@ -67,9 +75,7 @@ def qwen_for(request):
 
 @pytest.fixture
 def path_for_model(request):
-    return functools.partial(
-        get_path_for_model, request.config.getoption("--test_models")
-    )
+    return functools.partial(get_path_for_model, request.config.getoption("--test_models"))
 
 
 @pytest.fixture

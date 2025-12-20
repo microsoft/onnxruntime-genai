@@ -41,12 +41,17 @@ GreedySearch_Cuda::GreedySearch_Cuda(const GeneratorParams& params)
   next_tokens_buffer_.Zero();
   next_tokens_ = gpu_span<int32_t>(next_tokens_buffer_.Span());
 
-  unsigned long long random_seed;
-  if (params_->search.random_seed != -1)
-    random_seed = params_->search.random_seed;
-  else
-    random_seed = std::random_device{}();
-  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params_->search.batch_size, params_->config.model.vocab_size, GetStream());
+  unsigned long long random_seed = (params_->search.random_seed != -1)
+                                       ? params_->search.random_seed
+                                       : std::random_device{}();
+
+  // Allocate a single buffer for all sampling data
+  size_t sampling_buffer_size = cuda::SamplingData::CalculateTotalSize(params.search.batch_size, params.config.model.vocab_size, GetStream());
+  sampling_buffer_ = params.p_device->Allocate<uint8_t>(sampling_buffer_size);
+
+  // Create SamplingData with the externally allocated buffer
+  samplingdata_ = std::make_unique<cuda::SamplingData>(random_seed, params.search.batch_size, params.config.model.vocab_size, GetStream(),
+                                                       sampling_buffer_.Span().data(), sampling_buffer_size);
 }
 
 BeamSearch_Cuda::BeamSearch_Cuda(const GeneratorParams& params)
@@ -161,8 +166,11 @@ void GreedySearch_Cuda::SampleTopKTopP(int k, float p, float temperature) {
   cuda::Launch_CheckForEOSAndPad(next_tokens_.data(), static_cast<int>(next_tokens_.size()), eos_seen_.data(), eos_token_ids_.Span().data(), static_cast<int>(eos_token_ids_.Span().size()), params_->config.model.pad_token_id, done_cpu_.get(), GetStream());
 
   // Append tokens
-  cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
-  sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
+  cudaStreamSynchronize(GetStream());
+  if (!*done_cpu_) {
+    cuda::Launch_AppendNextTokensToSequences(next_tokens_buffer_.Span(), sequences_.GetSequences().Span(), params_->BatchBeamSize(), sequences_.GetSequenceLength(), sequences_.max_length_, GetStream());
+    sequences_.AfterAppendNextTokens(next_tokens_buffer_, params_->BatchBeamSize());
+  }
 
   if (sequences_.GetSequenceLength() == params_->search.max_length) {
     if (GetLogItems().enabled && GetLogItems().hit_max_length)

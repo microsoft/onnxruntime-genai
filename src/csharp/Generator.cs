@@ -20,6 +20,16 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             return NativeMethods.OgaGenerator_IsDone(_generatorHandle) != 0;
         }
 
+        public void SetModelInput(string name, Tensor value)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_SetModelInput(_generatorHandle, StringUtils.ToUtf8(name), value.Handle));
+        }
+
+        public void SetInputs(NamedTensors namedTensors)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_SetInputs(_generatorHandle, namedTensors.Handle));
+        }
+
         public void AppendTokens(ReadOnlySpan<int> inputIDs)
         {
             unsafe
@@ -51,6 +61,15 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             Result.VerifySuccess(NativeMethods.OgaGenerator_RewindTo(_generatorHandle, (UIntPtr)newLength));
         }
 
+        public ReadOnlySpan<int> GetNextTokens()
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GetNextTokens(_generatorHandle, out IntPtr tokenIds, out UIntPtr tokenCount));
+            unsafe
+            {
+                return new ReadOnlySpan<int>(tokenIds.ToPointer(), (int)tokenCount.ToUInt64());
+            }
+        }
+
         public ReadOnlySpan<int> GetSequence(ulong index)
         {
             ulong sequenceLength = NativeMethods.OgaGenerator_GetSequenceCount(_generatorHandle, (UIntPtr)index).ToUInt64();
@@ -59,6 +78,20 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
             {
                 return new ReadOnlySpan<int>(sequencePtr.ToPointer(), (int)sequenceLength);
             }
+        }
+
+        /// <summary>
+        /// Fetches and returns the input tensor with the given name.
+        /// Throw on error
+        /// </summary>
+        /// <param name="inputName"></param>
+        /// <returns>a disposable instance of Tensor</returns>
+        public Tensor GetInput(string inputName)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGenerator_GetInput(_generatorHandle,
+                                                                     StringUtils.ToUtf8(inputName),
+                                                                     out IntPtr inputTensor));
+            return new Tensor(inputTensor);
         }
 
         /// <summary>

@@ -4,7 +4,7 @@
 #pragma once
 #include <cuda_runtime.h>
 #include "search_cuda.cuh"
-#include "cuda_sampling.cuh"
+#include "cuda_sampling.h"
 
 namespace Generators {
 
@@ -48,13 +48,14 @@ struct GreedySearch_Cuda : Search_Cuda {
   DeviceSpan<int32_t> GetNextIndices() override { return {}; }
 
   void SelectTop() override { SampleTopKTopP(1, 0.0, 1.0); }
-  void SampleTopK(int k, float t) override { SampleTopKTopP(k, 0.0, t); }
+  void SampleTopK(int k, float t) override { SampleTopKTopP(k, 1.0, t); }
   void SampleTopP(float p, float t) override { SampleTopKTopP(-1, p, t); }
   void SampleTopKTopP(int k, float p, float t) override;
   void AppendTokens(DeviceSpan<int32_t>& next_tokens) override;  // shape (batch_size, sequence_length)
   void RewindTo(size_t index) override;
 
  private:
+  DeviceSpan<uint8_t> sampling_buffer_;
   DeviceSpan<int32_t> next_tokens_buffer_;
   std::unique_ptr<cuda::ArgMaxData> argmaxdata_;
   std::unique_ptr<cuda::SamplingData> samplingdata_;

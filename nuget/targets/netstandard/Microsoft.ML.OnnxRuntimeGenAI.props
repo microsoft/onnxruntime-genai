@@ -1,10 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Add include directory for C++ projects -->
+  <PropertyGroup>
+    <IncludePath>$(MSBuildThisFileDirectory)..\..\build\native\include;$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  
   <ItemGroup>
     <!-- x64 -->
     <None Include="$(MSBuildThisFileDirectory)..\..\runtimes\win-x64\native\onnxruntime-genai.dll"
           Condition="'$(PlatformTarget)' == 'x64' OR ('$(PlatformTarget)' == 'AnyCPU' AND '$(Prefer32Bit)' != 'true')">
       <Link>onnxruntime-genai.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Visible>false</Visible>
+    </None>
+
+    <None Include="$(MSBuildThisFileDirectory)..\..\runtimes\win-x64\native\onnxruntime-genai-cuda.dll"
+          Condition="Exists('$(MSBuildThisFileDirectory)..\..\runtimes\win-x64\native\onnxruntime-genai-cuda.dll') AND ('$(PlatformTarget)' == 'x64' OR ('$(PlatformTarget)' == 'AnyCPU' AND '$(Prefer32Bit)' != 'true'))">
+      <Link>onnxruntime-genai-cuda.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
     </None>

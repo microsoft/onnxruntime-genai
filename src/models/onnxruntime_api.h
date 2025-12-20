@@ -70,6 +70,7 @@ p_session_->Run(nullptr, input_names, inputs, std::size(inputs), output_names, o
 #include <vector>
 #include <unordered_map>
 #include <array>
+#include <stdexcept>
 
 #include "onnxruntime_c_api.h"
 #include "../span.h"
@@ -152,7 +153,7 @@ inline void* LoadDynamicLibraryIfExists(const std::string& path) {
     }
   }
   if (ort_lib_handle) {
-#if !defined(__ANDROID__) && !defined(__APPLE__)  // RTLD_DI_ORIGIN not available on Android & Darwin
+#if defined(RTLD_DI_ORIGIN)  // unavailable in some environment eg. Android, Darwin or non-glibc
     char pathname[PATH_MAX];
     dlinfo((void*)ort_lib_handle, RTLD_DI_ORIGIN, &pathname);
     LOG_INFO("Loaded native library at %s", pathname);
@@ -200,11 +201,13 @@ inline void InitApi() {
   }
 
   bool ort_lib = false;
-  Generators::GetEnvironmentVariable("ORTGENAI_LOG_ORT_LIB", ort_lib);
+  Generators::GetEnv("ORTGENAI_LOG_ORT_LIB", ort_lib);
   if (ort_lib) {
     Generators::SetLogBool("enabled", true);
     Generators::SetLogBool("ort_lib", true);
   }
+
+  OrtApiBaseFn ort_api_base_fn{};
 
 #if defined(__linux__) || defined(MACOS_USE_DLOPEN)
   // If the GenAI library links against the onnxruntime library, it will have a dependency on a specific
@@ -257,7 +260,7 @@ inline void InitApi() {
     throw std::runtime_error(std::string("Failed to load onnxruntime. Set ORTGENAI_LOG_ORT_LIB envvar to enable detailed logging."));
   }
 
-  OrtApiBaseFn ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
+  ort_api_base_fn = (OrtApiBaseFn)dlsym(ort_lib_handle, "OrtGetApiBase");
   if (ort_api_base_fn == nullptr) {
     char* err = dlerror();
     throw std::runtime_error(std::string("Failed to load symbol OrtGetApiBase: ") + (err != nullptr ? err : "Unknown"));
@@ -265,10 +268,13 @@ inline void InitApi() {
 
   InitApiWithDynamicFn(ort_api_base_fn);
 #else   // defined(__linux__) || defined(MACOS_USE_DLOPEN)
-  api = OrtGetApiBase()->GetApi(ORT_API_VERSION);
+  ort_api_base_fn = &OrtGetApiBase;
+  api = ort_api_base_fn()->GetApi(ORT_API_VERSION);
   if (!api)
     throw std::runtime_error("Onnxruntime is installed but is too old, please install a newer version");
 #endif  // defined(__linux__) || defined(MACOS_USE_DLOPEN)
+
+  LOG_INFO("ORT Version: %s. %s", ort_api_base_fn()->GetVersionString(), api->GetBuildInfoString());
 }
 
 /** \brief All C++ methods that can fail will throw an exception of this type
@@ -288,6 +294,15 @@ struct Exception : std::exception {
 
 /// This is a C++ wrapper for OrtApi::GetAvailableProviders() and returns a vector of strings representing the available execution providers.
 std::vector<std::string> GetAvailableProviders();
+
+/// This is a C++ wrapper for OrtApi::GetEpDevices() to get execution provider devices.
+void GetEpDevices(OrtEnv* env, const OrtEpDevice* const** device_ptrs, size_t* num_devices);
+
+/// This is a C++ wrapper for OrtApi::EpDevice_EpMetadata() to get execution provider metadata.
+const OrtKeyValuePairs* GetEpDeviceMetadata(const OrtEpDevice* device);
+
+/// This is a C++ wrapper for OrtApi::GetKeyValuePairs() to get key-value pairs from metadata.
+void GetKeyValuePairs(const OrtKeyValuePairs* keyvals, const char* const** keys, const char* const** values, size_t* num_entries);
 
 inline void SetCurrentGpuDeviceId(int device_id);
 inline int GetCurrentGpuDeviceId();
@@ -411,6 +426,10 @@ std::span<TAlloc> Allocate(OrtAllocator& allocator,
   return std::span(unique_ptr.get(), size);
 }
 
+void RegisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name, const ORTCHAR_T* path);
+
+void UnregisterExecutionProviderLibrary(OrtEnv* env, const char* registration_name);
+
 }  // namespace Ort
 
 /** \brief The Status that holds ownership of OrtStatus received from C API
@@ -424,6 +443,13 @@ struct OrtStatus {
   OrtErrorCode GetErrorCode() const;
 
   static void operator delete(void* p) { Ort::api->ReleaseStatus(reinterpret_cast<OrtStatus*>(p)); }
+  Ort::Abstract make_abstract;
+};
+
+struct OrtEpDevice {
+  std::string Name() const;
+  std::string Vendor() const;
+
   Ort::Abstract make_abstract;
 };
 
@@ -450,6 +476,16 @@ struct OrtEnv {
   OrtEnv& DisableTelemetryEvents();  ///< Wraps OrtApi::DisableTelemetryEvents
 
   OrtEnv& CreateAndRegisterAllocator(const OrtMemoryInfo& mem_info, const OrtArenaCfg& arena_cfg);  ///< Wraps OrtApi::CreateAndRegisterAllocator
+
+  /// \brief Copy tensors between devices. Wraps OrtApi::CopyTensors
+  /// \param src_tensors Array of source OrtValue tensors
+  /// \param dst_tensors Array of destination OrtValue tensors (must be pre-allocated)
+  /// \param stream Optional sync stream for asynchronous copy (can be nullptr for synchronous)
+  void CopyTensors(const std::vector<const OrtValue*>& src_tensors,
+                   const std::vector<OrtValue*>& dst_tensors,
+                   OrtSyncStream* stream = nullptr) const;
+
+  std::vector<const OrtEpDevice*> GetEpDevices();
 
   static void operator delete(void* p) { Ort::api->ReleaseEnv(reinterpret_cast<OrtEnv*>(p)); }
   Ort::Abstract make_abstract;
@@ -550,19 +586,6 @@ struct OrtSessionOptions {
   OrtSessionOptions& EnableCpuMemArena();   ///< Wraps OrtApi::EnableCpuMemArena
   OrtSessionOptions& DisableCpuMemArena();  ///< Wraps OrtApi::DisableCpuMemArena
 
-  OrtSessionOptions& EnableCpuEpFallback();
-  OrtSessionOptions& DisableCpuEpFallback();
-
-  OrtSessionOptions& EnableQuantQdq();
-  OrtSessionOptions& DisableQuantQdq();
-
-  OrtSessionOptions& EnableQuantQdqCleanup();
-  OrtSessionOptions& DisableQuantQdqCleanup();
-
-  OrtSessionOptions& SetEpContextEnable();
-  OrtSessionOptions& SetEpContextEmbedMode(const char* mode);
-  OrtSessionOptions& SetEpContextFilePath(const char* file_path);
-
   OrtSessionOptions& SetOptimizedModelFilePath(const ORTCHAR_T* optimized_model_file);  ///< Wraps OrtApi::SetOptimizedModelFilePath
 
   OrtSessionOptions& EnableProfiling(const ORTCHAR_T* profile_file_prefix);  ///< Wraps OrtApi::EnableProfiling
@@ -575,8 +598,9 @@ struct OrtSessionOptions {
 
   OrtSessionOptions& SetExecutionMode(ExecutionMode execution_mode);  ///< Wraps OrtApi::SetSessionExecutionMode
 
-  OrtSessionOptions& SetLogId(const char* logid);     ///< Wraps OrtApi::SetSessionLogId
-  OrtSessionOptions& SetLogSeverityLevel(int level);  ///< Wraps OrtApi::SetSessionLogSeverityLevel
+  OrtSessionOptions& SetLogId(const char* logid);      ///< Wraps OrtApi::SetSessionLogId
+  OrtSessionOptions& SetLogSeverityLevel(int level);   ///< Wraps OrtApi::SetSessionLogSeverityLevel
+  OrtSessionOptions& SetLogVerbosityLevel(int level);  ///< Wraps OrtApi::SetSessionLogVerbosityLevel
 
   OrtSessionOptions& Add(OrtCustomOpDomain& custom_op_domain);  ///< Wraps OrtApi::AddCustomOpDomain
 
@@ -602,6 +626,9 @@ struct OrtSessionOptions {
   OrtSessionOptions& SetCustomThreadCreationOptions(void* ort_custom_thread_creation_options);      ///< Wraps OrtApi::SessionOptionsSetCustomThreadCreationOptions
   OrtSessionOptions& SetCustomJoinThreadFn(OrtCustomJoinThreadFn ort_custom_join_thread_fn);        ///< Wraps OrtApi::SessionOptionsSetCustomJoinThreadFn
   OrtSessionOptions& RegisterCustomOpsLibrary(const ORTCHAR_T* library_file_prefix);                ///< Wraps OrtApi::SessionOptionsRegisterCustomOpsLibrary
+
+  OrtSessionOptions& AppendExecutionProvider_V2(OrtEnv& env, const std::vector<const OrtEpDevice*>& ep_devices,
+                                                const std::unordered_map<std::string, std::string>& options);
 
   static void operator delete(void* p) { Ort::api->ReleaseSessionOptions(reinterpret_cast<OrtSessionOptions*>(p)); }
   Ort::Abstract make_abstract;
@@ -827,6 +854,26 @@ struct OrtSparseValuesParam {
 struct OrtShape {
   const int64_t* shape;
   size_t shape_len;
+};
+
+/** \brief Wrapper around ::OrtSyncStream
+ *
+ * Used for asynchronous operations like CopyTensors.
+ * Requires ONNX Runtime 1.23.0 or later.
+ */
+struct OrtSyncStream {
+  /// \brief Create a sync stream for a specific execution provider device
+  /// \param ep_device The execution provider device (from OrtEnv::GetEpDevices)
+  /// \param stream_options Optional stream configuration options
+  static std::unique_ptr<OrtSyncStream> Create(const OrtEpDevice* ep_device, const OrtKeyValuePairs* stream_options = nullptr);
+
+  /// \brief Get the native stream handle (e.g., cudaStream_t for CUDA)
+  void* GetHandle() const;
+
+  static void operator delete(void* p) {
+    if (p) Ort::api->ReleaseSyncStream(reinterpret_cast<OrtSyncStream*>(p));
+  }
+  Ort::Abstract make_abstract;
 };
 
 /** \brief Wrapper around ::OrtValue
@@ -1224,13 +1271,19 @@ struct OrtIoBinding {
 struct OrtArenaCfg {
   /**
    * Wraps OrtApi::CreateArenaCfg
-   * \param max_mem - use 0 to allow ORT to choose the default
-   * \param arena_extend_strategy -  use -1 to allow ORT to choose the default, 0 = kNextPowerOfTwo, 1 = kSameAsRequested
-   * \param initial_chunk_size_bytes - use -1 to allow ORT to choose the default
-   * \param max_dead_bytes_per_chunk - use -1 to allow ORT to choose the default
+   * \param keys - arena config names to set
+   * \param values - arena config values to set
+   * \param count - number of arena config settings
+   *
+   * List of valid arena config options:
+   * max_mem - use 0 to allow ORT to choose the default
+   * arena_extend_strategy - use -1 to allow ORT to choose the default, 0 = kNextPowerOfTwo, 1 = kSameAsRequested
+   * initial_chunk_size_bytes - use -1 to allow ORT to choose the default
+   * max_dead_bytes_per_chunk - use -1 to allow ORT to choose the default
+   * initial_growth_chunk_size_bytes - use -1 to allow ORT to choose the default
    * See docs/C_API.md for details on what the following parameters mean and how to choose these values
    */
-  static std::unique_ptr<OrtArenaCfg> Create(size_t max_mem, int arena_extend_strategy, int initial_chunk_size_bytes, int max_dead_bytes_per_chunk);
+  static std::unique_ptr<OrtArenaCfg> Create(const char* const* keys, const size_t* values, size_t count);
 
   static void operator delete(void* p) { Ort::api->ReleaseArenaCfg(reinterpret_cast<OrtArenaCfg*>(p)); }
   Ort::Abstract make_abstract;

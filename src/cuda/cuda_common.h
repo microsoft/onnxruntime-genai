@@ -1,3 +1,17 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+#pragma once
+
+#include <stdexcept>
+#include <string>
+#include <sstream>
+#include <memory>
+#include <cassert>
+
+#include <cuda_runtime.h>
+#include "span.h"
+
 namespace Generators {
 
 cudaStream_t GetStream();
@@ -90,5 +104,55 @@ cuda_unique_ptr<T> CudaMallocArray(size_t count, std::span<T>* p_span = nullptr)
     *p_span = std::span<T>(p, count);
   return cuda_unique_ptr<T>{p};
 }
+
+#define CeilDiv(a, b) ((a + (b - 1)) / b)
+
+class CudaError : public std::runtime_error {
+ public:
+  explicit CudaError(const std::string& msg, cudaError_t code)
+      : std::runtime_error(msg), code_(code) {}
+
+  cudaError_t code() const noexcept { return code_; }
+
+ private:
+  cudaError_t code_;
+};
+
+#define CUDA_CHECK(call)                                         \
+  do {                                                           \
+    cudaError_t err = (call);                                    \
+    if (err != cudaSuccess) {                                    \
+      std::stringstream ss;                                      \
+      ss << "CUDA error in " << __func__ << " at " << __FILE__   \
+         << ":" << __LINE__ << " - " << cudaGetErrorString(err); \
+      throw Generators::CudaError(ss.str(), err);                \
+    }                                                            \
+  } while (0)
+
+#ifdef NDEBUG
+#define CUDA_CHECK_LAUNCH()                               \
+  do {                                                    \
+    cudaError_t err = cudaPeekAtLastError();              \
+    if (err != cudaSuccess) {                             \
+      std::stringstream ss;                               \
+      ss << "CUDA launch error in " << __func__ << " at " \
+         << __FILE__ << ":" << __LINE__ << " - "          \
+         << cudaGetErrorString(err);                      \
+      throw Generators::CudaError(ss.str(), err);         \
+    }                                                     \
+  } while (0)
+#else
+#define CUDA_CHECK_LAUNCH()                               \
+  do {                                                    \
+    cudaError_t err = cudaGetLastError();                 \
+    if (err != cudaSuccess) {                             \
+      std::stringstream ss;                               \
+      ss << "CUDA launch error in " << __func__ << " at " \
+         << __FILE__ << ":" << __LINE__ << " - "          \
+         << cudaGetErrorString(err);                      \
+      throw Generators::CudaError(ss.str(), err);         \
+    }                                                     \
+  } while (0)
+#endif
 
 }  // namespace Generators

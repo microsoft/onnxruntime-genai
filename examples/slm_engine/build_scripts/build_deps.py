@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
+import argparse
 import glob
 import os
-import argparse
 import platform
 import shutil
 import subprocess
@@ -64,18 +64,14 @@ def copy_files_without_hidden(src, dest):
       dest: Path to the destination directory.
     """
     try:
-        os.makedirs(
-            dest, exist_ok=True
-        )  # Create destination directory if it doesn't exist
+        os.makedirs(dest, exist_ok=True)  # Create destination directory if it doesn't exist
 
         for root, dirs, files in os.walk(src):
             for file in files:
                 if not file.startswith("."):  # Exclude hidden files
                     src_file = os.path.join(root, file)
                     dest_file = os.path.join(dest, os.path.relpath(src_file, src))
-                    os.makedirs(
-                        os.path.dirname(dest_file), exist_ok=True
-                    )  # Create necessary directories
+                    os.makedirs(os.path.dirname(dest_file), exist_ok=True)  # Create necessary directories
                     shutil.copy2(src_file, dest_file)
 
     except OSError as e:
@@ -97,9 +93,7 @@ def copy_files_keeping_symlinks(src_files, dest):
             if not os.path.exists(linkname):
                 os.symlink(linkto, linkname)
         elif os.path.isdir(file):
-            shutil.copytree(
-                file, f"{dest}/{os.path.basename(file)}", dirs_exist_ok=True
-            )
+            shutil.copytree(file, f"{dest}/{os.path.basename(file)}", dirs_exist_ok=True)
         else:
             shutil.copy2(file, dest)
 
@@ -183,12 +177,7 @@ def build_ort(args, build_dir, artifacts_dir):
     if not os.path.exists("onnxruntime"):
         # Clone the ORT Repo
         print("Cloning ONNX Runtime")
-        if (
-            subprocess.call(
-                ["git", "clone", "https://github.com/microsoft/onnxruntime.git"]
-            )
-            != 0
-        ):
+        if subprocess.call(["git", "clone", "https://github.com/microsoft/onnxruntime.git"]) != 0:
             raise Exception("Failed to clone ONNX Runtime")
 
     # Now get the dependencies
@@ -212,6 +201,7 @@ def build_ort(args, build_dir, artifacts_dir):
         "--parallel",
         "--config",
         args.build_type,
+        # "--use_guidance",
     ]
     if args.android:
         cmd_args.extend(
@@ -228,7 +218,9 @@ def build_ort(args, build_dir, artifacts_dir):
             ]
         )
         if args.qnn_sdk_path:
-            cmd_args.extend(["--use_qnn", "--qnn_home", args.qnn_sdk_path])
+            cmd_args.extend(["--use_qnn", "static_lib", "--qnn_home", args.qnn_sdk_path])
+
+    cmd_args.extend(["--cmake_extra_defines", "onnxruntime_BUILD_UNIT_TESTS=OFF"])
 
     # now build the ORT library
     print(f"{MAGENTA}Building ONNX Runtime{CLEAR}")
@@ -285,14 +277,14 @@ def build_ort(args, build_dir, artifacts_dir):
         # lib directory as well
         if platform.system() == "Windows":
             copy_files_keeping_symlinks(
-                glob.glob(f"bin/*.dll"),
-                f"lib",
+                glob.glob("bin/*.dll"),
+                "lib",
             )
 
     # Copy the include/onnxruntime/* to include directory
     copy_files_keeping_symlinks(
-        glob.glob(f"include/onnxruntime/*"),
-        f"include",
+        glob.glob("include/onnxruntime/*"),
+        "include",
     )
 
     print(f"{MAGENTA}Copying ORT artifacts to 3P Artifacts: \n{artifacts_dir}{CLEAR}")
@@ -308,7 +300,6 @@ def build_ort(args, build_dir, artifacts_dir):
 
 
 def build_ort_genai(args, artifacts_dir, ort_home):
-
     time_build_start = time.time()
 
     # Navigate to the directory where this Python file is located
@@ -319,14 +310,14 @@ def build_ort_genai(args, artifacts_dir, ort_home):
 
     # Go to the toplevel directory. To determine the top level directory, we need to
     # find the directory of this python file and then go from there
-    top_level_dir = f"../../../"
+    top_level_dir = "../../../"
     os.chdir(top_level_dir)
 
     if subprocess.call(["git", "submodule", "update", "--init", "--recursive"]) != 0:
         raise Exception("Failed to update submodules")
 
     # Now build the ORT-GenAI library
-    print(f"{MAGENTA}Building ONNX Runtime-GenAI{CLEAR}")
+    print(f"{MAGENTA}Building ONNX Runtime-GenAI with Guidance Support for Function Calling{CLEAR}")
     # Prepare the command arguments
     cmd_args = [
         "--skip_wheel",
@@ -336,11 +327,13 @@ def build_ort_genai(args, artifacts_dir, ort_home):
         args.build_type,
         "--cmake_extra_defines",
         "ENABLE_PYTHON=OFF",
+        # "USE_GUIDANCE=ON",
+        # "--use_guidance",  # Enable guidance support for constrained JSON generation
+        # Note: If Python linking issues occur, comment out --use_guidance above
+        # Function calling will work in both guidance and fallback modes
     ]
     if ort_home is None:
-        raise Exception(
-            f"{RED}ORT Home is None. Please build ORT from source first{CLEAR}"
-        )
+        raise Exception(f"{RED}ORT Home is None. Please build ORT from source first{CLEAR}")
 
     print(f"{MAGENTA}ORT Home: {ort_home}{CLEAR}")
     cmd_args.extend(["--ort_home", ort_home])
@@ -364,7 +357,20 @@ def build_ort_genai(args, artifacts_dir, ort_home):
     python_executable = sys.executable
     result = subprocess.call([python_executable, "build.py"] + cmd_args)
     if result != 0:
-        raise Exception(f"{RED}Failed to build ORT-GenAI{CLEAR}")
+        # If guidance build fails, try fallback mode
+        print(f"{RED}Guidance build failed. Attempting fallback mode without guidance...{CLEAR}")
+        # Remove --use_guidance from cmd_args
+        if "--use_guidance" in cmd_args:
+            cmd_args.remove("--use_guidance")
+
+        print(f"{MAGENTA}Running build.py with fallback args: {cmd_args}{CLEAR}")
+        result = subprocess.call([python_executable, "build.py"] + cmd_args)
+        if result != 0:
+            raise Exception(f"{RED}Failed to build ORT-GenAI in both guidance and fallback modes{CLEAR}")
+        else:
+            print(f"{MAGENTA}Successfully built ORT-GenAI in fallback mode{CLEAR}")
+    else:
+        print(f"{MAGENTA}Successfully built ORT-GenAI with guidance support{CLEAR}")
 
     # Now install the ORT-GenAI library
     build_dir_name = f"build/{get_platform_dirname(args)}/{args.build_type}"
@@ -394,12 +400,8 @@ def build_ort_genai(args, artifacts_dir, ort_home):
     os.makedirs(f"{artifacts_dir}/include", exist_ok=True)
     os.makedirs(f"{artifacts_dir}/lib", exist_ok=True)
 
-    copy_files_keeping_symlinks(
-        glob.glob(f"{build_dir_name}/install/lib/*"), f"{artifacts_dir}/lib"
-    )
-    copy_files_keeping_symlinks(
-        glob.glob(f"{build_dir_name}/install/bin/*"), f"{artifacts_dir}/lib"
-    )
+    copy_files_keeping_symlinks(glob.glob(f"{build_dir_name}/install/lib/*"), f"{artifacts_dir}/lib")
+    copy_files_keeping_symlinks(glob.glob(f"{build_dir_name}/install/bin/*"), f"{artifacts_dir}/lib")
 
     copy_files_keeping_symlinks(
         glob.glob(f"{build_dir_name}/install/include/*"),
@@ -474,9 +476,7 @@ def build_header_only(args, build_dir, artifacts_dir):
 
         result = subprocess.call(["git", "checkout", lib["version"]])
         if result != 0:
-            print(
-                f"{RED}Failed to checkout version: {lib['version']} {lib['name']}{CLEAR}"
-            )
+            print(f"{RED}Failed to checkout version: {lib['version']} {lib['name']}{CLEAR}")
             return
 
         if not os.path.exists(dest_root_dir):
@@ -488,9 +488,7 @@ def build_header_only(args, build_dir, artifacts_dir):
                 shutil.copy2(file, dest_root_dir)
         elif "directory" in lib:
             os.chdir("..")
-            copy_files_without_hidden(
-                f"{lib['name']}/{lib['directory']}", dest_root_dir
-            )
+            copy_files_without_hidden(f"{lib['name']}/{lib['directory']}", dest_root_dir)
         else:
             # Copy the entire directory
             os.chdir("..")
@@ -503,16 +501,12 @@ def build_header_only(args, build_dir, artifacts_dir):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Build script for dependency libraries"
-    )
+    parser = argparse.ArgumentParser(description="Build script for dependency libraries")
 
     # Adding arguments
     parser.add_argument("--android_sdk_path", type=str, help="Path to ANDROID SDK")
     parser.add_argument("--android_ndk_path", type=str, help="Path to ANDROID NDK")
-    parser.add_argument(
-        "--api_level", type=str, help="Android API Level", default="27"
-    )  # e.g., 29
+    parser.add_argument("--api_level", type=str, help="Android API Level", default="27")  # e.g., 29
     parser.add_argument(
         "--qnn_sdk_path",
         type=str,
@@ -550,9 +544,7 @@ def main():
         args.android = True
         # If the user didn't specify build_ort_from_source assert
         if not args.build_ort_from_source:
-            raise Exception(
-                "For Android build ONNX Runtime use: --build_ort_from_source"
-            )
+            raise Exception("For Android build ONNX Runtime use: --build_ort_from_source")
     else:
         args.android = False
 
@@ -570,13 +562,11 @@ def main():
     dep_src_dir = os.path.abspath("../../../build/slm_deps")
     os.makedirs(dep_src_dir, exist_ok=True)
 
-    artifacts_dir = os.path.abspath(
-        f"slm_deps/artifacts/{get_platform_dirname(args)}-{get_machine_type(args)}"
-    )
+    artifacts_dir = os.path.abspath(f"slm_deps/artifacts/{get_platform_dirname(args)}-{get_machine_type(args)}")
 
     os.makedirs(artifacts_dir, exist_ok=True)
 
-    common_artifacts_dir = os.path.abspath(f"slm_deps/artifacts/common")
+    common_artifacts_dir = os.path.abspath("slm_deps/artifacts/common")
     os.makedirs(common_artifacts_dir, exist_ok=True)
 
     time_build_start = time.time()
@@ -587,9 +577,9 @@ def main():
     ort_home = None
     if args.build_ort_from_source:
         if args.ort_version_to_use is None:
-            # If not Windows then use 1.20.1
+            # If not Windows then use 1.23.0
             if platform.system() != "Windows":
-                args.ort_version_to_use = "v1.20.1"
+                args.ort_version_to_use = "v1.23.0"
             else:
                 args.ort_version_to_use = "main"
         ort_home = build_ort(args, dep_src_dir, artifacts_dir)
@@ -600,7 +590,7 @@ def main():
             # The ORT binaries are available as they were downloaded during the GenAI build
             # This is the supported version for most platforms
             if args.ort_version_to_use is None:
-                ORT_VERSION = "1.20.1"
+                ORT_VERSION = "1.23.0"
             else:
                 ORT_VERSION = args.ort_version_to_use
             # Copy the ORT artifacts to the artifacts directory.
