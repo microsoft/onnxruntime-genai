@@ -1,0 +1,59 @@
+[
+    {
+        "type": "function",
+        "function": {
+            "name": "get_statistics",
+            "description": "How to get the statistics for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "city"
+                ],
+                "additionalProperties": false
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "How to get the weather for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "city"
+                ],
+                "additionalProperties": false
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_population",
+            "description": "How to get the population for a city",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "city"
+                ],
+                "additionalProperties": false
+            }
+        }
+    }
+]
