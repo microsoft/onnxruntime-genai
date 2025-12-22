@@ -441,6 +441,22 @@ OGA_EXPORT OgaResult* OGA_API_CALL OgaCreateGenerator(const OgaModel* model, con
 OGA_EXPORT void OGA_API_CALL OgaDestroyGenerator(OgaGenerator* generator);
 
 /**
+ * \brief Returns true if guidance (constrained decoding) is enabled for the generator.
+ * \param[in] generator The generator to check if guidance is enabled.
+ * \param[out] out True if guidance is enabled, false otherwise.
+ * \return OgaResult containing the error message if the checking of guidance status failed.
+ */
+OGA_EXPORT bool OGA_API_CALL OgaGeneratorIsGuidanceEnabled(OgaGenerator* generator);
+
+/**
+ * \brief Toggles guidance (constrained decoding) for the generator.
+ * \param[in] generator The generator to toggle guidance on.
+ * \param[in] enable True to enable guidance, false to disable.
+ * \return OgaResult containing the error message if toggling guidance failed.
+ */
+OGA_EXPORT OgaResult* OGA_API_CALL OgaGeneratorToggleGuidance(OgaGenerator* generator, bool enable);
+
+/**
  * \brief Returns true if the generator has finished generating all the sequences.
  * \param[in] generator The generator to check if it is done with generating all sequences.
  * \return True if the generator has finished generating all the sequences, false otherwise.

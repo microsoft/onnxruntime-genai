@@ -265,6 +265,14 @@ GeneratorParams::GeneratorParams(const Model& model)
   }
 }
 
+void Generator::ToggleGuidance(bool enable) {
+  guidance_enabled_ = enable;
+}
+
+bool Generator::IsGuidanceEnabled() {
+  return guidance_enabled_;
+}
+
 void GeneratorParams::SetGuidance(std::string_view type, std::string_view data, bool enable_ff_tokens = false) {
   guidance_type = type;
   guidance_data = data;
@@ -413,7 +421,7 @@ void Generator::ComputeLogits(DeviceSpan<int32_t> next_tokens) {
   if (computed_logits_)
     throw std::runtime_error("ComputeLogits called again without calling AppendTokens or GenerateNextToken first");
 
-  if (last_action_ == Action::generated && guidance_logits_processor_) {
+  if (last_action_ == Action::generated && guidance_logits_processor_ && guidance_enabled_) {
     auto next_tokens_span = next_tokens.CopyDeviceToCpu();
     guidance_logits_processor_->CommitTokens(next_tokens_span);
   }
@@ -511,7 +519,7 @@ void Generator::GenerateNextToken() {
       search_->AppendTokens(next_tokens);
     ComputeLogits(next_tokens);
   }
-  if (guidance_logits_processor_) {
+  if (guidance_logits_processor_ && guidance_enabled_) {
     auto logits = GetLogits();
     guidance_logits_processor_->ProcessLogits(logits);
   }

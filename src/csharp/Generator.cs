@@ -121,6 +121,25 @@ namespace Microsoft.ML.OnnxRuntimeGenAI
                                                                    StringUtils.ToUtf8(adapterName)));
         }
 
+        /// <summary>
+        /// Toggles the guidance (constrained decoding) on or off.
+        /// Throws on error.
+        /// </summary>
+        /// <param name="enable">true to enable, false to disable</param>
+        public void ToggleGuidance(bool enable)
+        {
+            Result.VerifySuccess(NativeMethods.OgaGeneratorToggleGuidance(_generatorHandle, enable));
+        }
+
+        /// <summary>
+        /// Returns whether the guidance (constrained decoding) is enabled.
+        /// </summary>
+        /// <returns>true if guidance is enabled, false otherwise</returns>
+        public bool IsGuidanceEnabled()
+        {
+            return NativeMethods.OgaGeneratorIsGuidanceEnabled(_generatorHandle);
+        }
+        
         ~Generator()
         {
             Dispose(false);

@@ -98,6 +98,8 @@ struct Generator : LeakChecked<Generator> {
   void AppendTokens(cpu_span<const int32_t> input_ids);
   void GenerateNextToken();
   void RewindToLength(size_t new_length);  // Rewind state to new_length
+  void ToggleGuidance(bool enable);
+  bool IsGuidanceEnabled();
   DeviceSpan<float> GetLogits();
   void SetLogits(DeviceSpan<float> logits);
   void SetRuntimeOption(const char* key, const char* value);
@@ -116,6 +118,7 @@ struct Generator : LeakChecked<Generator> {
 
   bool computed_logits_{};       // Set to true in ComputeLogits() and false after appending a token to ensure a 1 to 1 call ratio
   bool set_extra_inputs_{true};  // Set to false once SetExtraInputs() is called once
+  bool guidance_enabled_{true};  // Track whether guidance is enabled
 
  private:
   DeviceSpan<int32_t> AllocateInputIdsOnDevice(cpu_span<const int32_t> input_ids);
