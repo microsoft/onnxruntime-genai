@@ -19,7 +19,7 @@
     <None Include="$(ProjectDir)\models\**">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Visible>false</Visible>
-      <LinkBase>"phi\"</LinkBase>
+      <LinkBase>"phi-2\"</LinkBase>
     </None>
   </ItemGroup>
 
