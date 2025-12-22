@@ -1,6 +1,5 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
-from __future__ import annotations
 
 import argparse
 import json
@@ -80,6 +79,54 @@ def run_whisper():
         run_subprocess(command, cwd=cwd, log=log).check_returncode()
 
 
+def run_tool_calling():
+    log.debug("Running tool calling Python E2E Tests")
+
+    cwd = os.path.dirname(os.path.abspath(__file__))
+    tool_call_models = [("phi-4-mini", "<|tool_call|>", "<|/tool_call|>"), ("qwen-2.5", "<tool_call>", "</tool_call>")]
+    prompt = "What is the weather in Redmond, WA?"
+    response_format = "lark_grammar"
+
+    for (model_name, tool_call_start, tool_call_end) in tool_call_models:
+        for (precision, execution_provider) in [("int4", "cpu"), ("int4", "cuda")]:
+            model_path = os.path.join(cwd, "..", model_name, precision, execution_provider)
+
+            # Run special_tokens.py to mark tool call token ids as special
+            command = [
+                sys.executable,
+                os.path.join(cwd, "special_tokens.py"),
+                "-p",
+                os.path.join(model_path, "tokenizer.json"),
+                "-s",
+                tool_call_start,
+                "-e",
+                tool_call_end,
+            ]
+
+            # Run model-qa.py for inference
+            command = [
+                sys.executable,
+                os.path.join(cwd, "..", "..", "examples", "python", "model-qa.py"),
+                "-m",
+                model_path,
+                "-e",
+                execution_provider,
+                "--response_format",
+                response_format,
+                "--tools_file",
+                os.path.join(cwd, "..", "test_models", "tool-definitions", "weather.json"),
+                "--tool_call_start",
+                tool_call_start,
+                "--tool_call_end",
+                tool_call_end,
+                "--input_prompt",
+                prompt,
+                "--tool_output",
+                "--verbose",
+            ]
+            run_subprocess(command, cwd=cwd, log=log).check_returncode()
+
+
 def get_args():
     parser = argparse.ArgumentParser()
 
@@ -108,3 +155,6 @@ if __name__ == "__main__":
 
     # Run Whisper E2E tests
     run_whisper()
+
+    # Run tool calling E2E tests
+    run_tool_calling()

@@ -6,7 +6,7 @@ Install the python package according to the [installation instructions](https://
 
 ## Get the model
 
-You can generate the model using the model builder with this library, download the model from huggingface ([example](https://github.com/microsoft/onnxruntime-genai?tab=readme-ov-file#sample-code-for-phi-3-in-python)), or bring your own model.
+You can generate the model using the model builder with this library, download the model from Hugging Face ([example](https://github.com/microsoft/onnxruntime-genai?tab=readme-ov-file#sample-code-for-phi-3-in-python)), or bring your own model.
 
 If you bring your own model, you need to provide the configuration. See the [config reference](https://onnxruntime.ai/docs/genai/reference/config).
 
@@ -27,16 +27,15 @@ To generate the model with model builder:
    python -m onnxruntime_genai.models.builder -m microsoft/phi-2 -e cpu -p int4 -o ./example-models/phi2-int4-cpu
    ```
 
-## Run the example model script
+## Run an example model script
 
-See accompanying qa-e2e-example.sh and generate-e2e-example.sh scripts for end-to-end examples of workflow.
-
-The `model-generate` script generates the output sequence all on one function call.
-
-The `model-qa` script streams the output text token by token.
+- The `model-chat` script allows for multi-turn conversations.
+- The `model-generate` script generates the output sequence all on one function call.
+- The `model-qa` script streams the output text token by token.
 
 To run the python examples...
 ```bash
+python model-chat.py -m {path to model folder} -e {execution provider}
 python model-generate.py -m {path to model folder} -e {execution provider} -pr {input prompt}
 python model-qa.py -m {path to model folder} -e {execution provider}
 ```
@@ -50,13 +49,16 @@ We have integrated [LLGuidance](https://github.com/guidance-ai/llguidance) for c
 2. JSON Schema: Output will be JSON schema and it will be one of the function/tools provided.
 3. Regex: If a particular regular expression is desired.
 
-To ensure that the function/tool call works correctly with constrained decoding, you need to modify your tokenizer.json file. For each model that has its own tool calling token, the tool calling token's `special` attribute needs to be set to true. For example, Phi-4 mini uses the <|tool_call|> token so you should set the `special` attribute for <|tool_call|> as `true` inside `tokenizer.json`.
+To ensure that the function/tool call works correctly with constrained decoding, you need to modify your tokenizer.json file. For each model that has its own tool calling token, the tool calling token's `special` attribute needs to be set to true. For example, Phi-4 mini uses the <|tool_call|> and <|/tool_call|> tokens so you should set the `special` attribute for them as `true` inside `tokenizer.json`.
 
 To run the Python examples with function/tool calling:
 ```
-# Using Lark Grammar with 1 function/tool call
-python model-qa.py -m {path to model folder} -e {execution provider} --guidance_type "lark_grammar"  --guidance_info '[{"name": "get_weather", "description": "Get weather of a city.", "parameters": {"city": {"description": "The city for which weather information is requested", "type": "string", "default": "Dallas"}}}]'
+# Using JSON Schema with only tool call output
+python model-qa.py -m {path to model folder} -e {execution provider} --response_format json_schema --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 
-# With 2 function/tool calls in chat mode
-python model-chat.py -m {path to model folder} -e {execution provider} --guidance_type "lark_grammar"  --guidance_info '[{"name": "get_weather", "description": "Get weather of a city.", "parameters": {"city": {"description": "The city for which weather information is requested", "type": "string", "default": "Dallas"}}},{"name": "get_population", "description": "Get population of a city.", "parameters": {"city": {"description": "The city for which population information is requested", "type": "string", "default": "Dallas"}}}]'
+# Using Lark Grammar with only tool call output
+python model-qa.py -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+
+# Using Lark Grammar with text or tool call output
+python model-chat.py -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --text_output --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 ```
