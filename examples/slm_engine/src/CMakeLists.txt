@@ -70,32 +70,36 @@ if (NOT ${CMAKE_SYSTEM_NAME} STREQUAL "Windows")
 endif()
 
 # Import the onnxruntime
-add_library(ort SHARED IMPORTED)
-set_target_properties(
-    ort 
-    PROPERTIES 
-    IMPORTED_IMPLIB 
-    ${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime${LIB_VERSION_ORT}.${LIB_EXT})
+if (NOT TARGET ort)
+	add_library(ort SHARED IMPORTED)
+	set_target_properties(
+		ort 
+		PROPERTIES 
+		IMPORTED_IMPLIB 
+		${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime${LIB_VERSION_ORT}.${LIB_EXT})
 
-file(GLOB ORT_LIB_FILES 
-    "${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime*")
+	file(GLOB ORT_LIB_FILES 
+		"${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime*")
 
-file(GLOB ORT_LIB_DIRS "${ARTIFACTS}/${SYS_TARGET_ID}/lib"
-    "${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime*/")
+	file(GLOB ORT_LIB_DIRS "${ARTIFACTS}/${SYS_TARGET_ID}/lib"
+		"${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime*/")
 
-list(APPEND IMPORTED_LIB_LIST ${ORT_LIB_FILES})
-list(APPEND IMPORTED_LIB_LIST ${ORT_LIB_DIRS})
+	list(APPEND IMPORTED_LIB_LIST ${ORT_LIB_FILES})
+	list(APPEND IMPORTED_LIB_LIST ${ORT_LIB_DIRS})
+endif()
 
 # Import ONNXRT-GenAI stuff
-add_library(ort-genai SHARED IMPORTED)
-set_target_properties(
-    ort-genai 
-    PROPERTIES 
-    IMPORTED_IMPLIB 
-    ${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime-genai.${LIB_EXT})
+if (NOT TARGET ort-genai)
+	add_library(ort-genai SHARED IMPORTED)
+	set_target_properties(
+		ort-genai 
+		PROPERTIES 
+		IMPORTED_IMPLIB 
+		${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime-genai.${LIB_EXT})
 
-list(APPEND IMPORTED_LIB_LIST 
-${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime-genai.${LIB_EXT})
+	list(APPEND IMPORTED_LIB_LIST 
+	${ARTIFACTS}/${SYS_TARGET_ID}/lib/${LIBNAME_PREFIX}onnxruntime-genai.${LIB_EXT})
+endif()
 
 set(CMAKE_INSTALL_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/install/")
 
