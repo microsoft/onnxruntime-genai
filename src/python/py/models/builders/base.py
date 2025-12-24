@@ -3380,11 +3380,14 @@ class Model:
 
             quantized_flat = quantized_int8.view(*original_shape[:-1], num_blocks * block_size)
 
-            # Keep padding in quantized weights for proper alignment
+            # remove padding
+            if pad_size > 0:
+                quantized_flat = quantized_flat[..., :-pad_size]
+
             quantized_uint4 = (quantized_flat + 8).to(torch.uint8)
 
-            packed_shape = list(quantized_uint4.shape)
-            packed_shape[-1] = (quantized_uint4.shape[-1] + 1) // 2
+            packed_shape = list(original_shape)
+            packed_shape[-1] = (original_shape[-1] + 1) // 2
             qweight = torch.zeros(packed_shape, dtype=torch.uint8, device=weights.device)
 
             # Pack two 4-bit values per byte
@@ -3401,8 +3404,11 @@ class Model:
         else:  # 8-bit
             quantized_int8 = quantized.to(torch.int8)
 
-            # Keep padding in quantized weights for proper alignment
             qweight = quantized_int8.view(*original_shape[:-1], num_blocks * block_size)
+            if pad_size > 0:
+                qweight = qweight[..., :-pad_size]
+            else:
+                qweight = qweight.view(original_shape)
 
         return qweight.cpu(), scales.cpu()
 
