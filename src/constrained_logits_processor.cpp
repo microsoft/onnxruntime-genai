@@ -260,8 +260,9 @@ std::unique_ptr<ConstrainedLogitsProcessor> CreateGuidanceLogitsProcessor(const 
   if (!state.params_->guidance_type.empty() && !state.params_->guidance_data.empty()) {
 #if USE_GUIDANCE
     return std::make_unique<GuidanceLogitsProcessor>(state);
-#endif
+#else
     Log("warning", "No supported ConstrainedLogitsProcessor found. e.g. to use guidance, build with use_guidance=true");
+#endif
   }
   return nullptr;
 }
