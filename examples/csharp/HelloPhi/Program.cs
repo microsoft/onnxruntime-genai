@@ -1,178 +1,58 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+using HelloPhi;
 using Microsoft.ML.OnnxRuntimeGenAI;
-using System.Runtime.InteropServices;
+using System.CommandLine;
 using System.Text.Json;
 
-static void PrintUsage()
+/// <summary>
+/// Get prompt from user
+/// </summary>
+/// <param name="interactive">Ask user or use pre-defined value</param>
+/// <returns>
+/// User prompt to use
+/// </returns>
+static string GetPrompt(bool interactive)
 {
-    Console.WriteLine("Usage:");
-    Console.WriteLine("  -m model_path");
-    Console.WriteLine("\t\t\t\tPath to the model");
-    Console.WriteLine("  -e execution_provider");
-    Console.WriteLine("\t\t\t\tExecution provider to run the model");
-    Console.WriteLine("  --verbose");
-    Console.WriteLine("\t\t\t\tRun in verbose mode");
-    Console.WriteLine("  --dump");
-    Console.WriteLine("\t\t\t\tDump input and output data");
-}
-
-static void DebugMode()
-{
-    Utils.SetLogBool("enabled", true);
-    Utils.SetLogBool("model_input_values", true);
-    Utils.SetLogBool("model_output_values", true);
-    Utils.SetLogBool("ansi_tags", RuntimeInformation.IsOSPlatform(OSPlatform.Windows));
-}
-
-static string GetInput(string description, string defaultInput)
-{
-    string userInput = "";
-    Console.WriteLine(description);
-    Console.Write("> ");
-    userInput = Console.ReadLine();
-
-    if (string.IsNullOrEmpty(userInput))
-    {
-        return defaultInput;
-    }
-    return userInput;
-}
-
-static void ValidateJson(string text, string description)
-{
-    try
-    {
-        var deserializedJson = JsonDocument.Parse(text); // requires RootElement so text must be {root_key: root_val} where root_val is anything
-    }
-    catch
-    {
-        throw new Exception($"Invalid JSON provided for {description}");
-    }
-}
-
-static string GetJsonGrammar(string tools)
-{
-    string grammar = $@"{{ ""anyOf"": {tools} }}";  // Spacing here matters
-    return grammar;
-}
-
-static string GetLarkGrammar(string tools, string toolCallToken)
-{
-    string startRow = "start: TEXT | fun_call";
-    string textRow = "TEXT: /[^{](.|\\n)*/";
-    string funcRow = "fun_call: " + toolCallToken + " %json ";
-    string toolsJson = GetJsonGrammar(tools);
-    string grammar = startRow + " \n" + textRow + " \n" + funcRow + toolsJson;
-    return grammar;
-}
-
-static string GetMessages(string guidanceMode, string role, string content, string toolsList)
-{
-    string messages = "";
-    if (string.Compare(guidanceMode, "json_schema", StringComparison.OrdinalIgnoreCase) == 0 ||
-        string.Compare(guidanceMode, "lark_grammar", StringComparison.OrdinalIgnoreCase) == 0)
-    {
-        messages = $@"{{""role"": ""{role}"", ""content"": ""{content}"", ""tools"": ""{toolsList}""}}";
-    }
-    else
-    {
-        messages = $@"{{""role"": ""{role}"", ""content"": ""{content}""}}";
-    }
-
-    return "[" + messages + "]";
-}
-
-static void RunInference(Model model, Tokenizer tokenizer, int option, bool verbose)
-{
-    string systemPrompt = GetInput("System Prompt: (Press 'enter' to use the default)", "You are a helpful AI assistant.");
-    string guidanceMode = GetInput("Guidance Mode: (Press 'enter' to use none)", "");
-    string guidanceData = GetInput("Guidance Data: (Provide a list of tools in JSON format or press 'enter' to use none)", "");
-
-    // Constants
-    string toolCallToken = "<|tool_call|>";  // specific to Phi-4 mini
-    int minLength = 0;
-    int maxLength = 8192;
-
-    // Create generator params and tokenizer stream
-    using GeneratorParams generatorParams = new GeneratorParams(model);
-    using var tokenizerStream = tokenizer.CreateStream();
-
-    // Get and set guidance input
-    if (!string.IsNullOrEmpty(guidanceMode))
-    {
-        if (string.IsNullOrEmpty(guidanceData))
+    string prompt = "def is_prime(num):"; // Example prompt
+    if (interactive)
+        do
         {
-            throw new Exception("Guidance information is required if guidance type is provided.");
-        }
+            Console.Write("Prompt (Use quit() to exit): ");
+            prompt = Console.ReadLine();
+        } while (string.IsNullOrEmpty(prompt));
+    return prompt;
+}
 
-        // Get guidance input
-        string guidanceInput = "";
-        if (string.Compare(guidanceMode, "json_schema", StringComparison.OrdinalIgnoreCase) == 0)
-        {
-            guidanceInput = GetJsonGrammar(guidanceData);
-            ValidateJson(guidanceInput, "JSON schema");
-        }
-        else if (string.Compare(guidanceMode, "lark_grammar", StringComparison.OrdinalIgnoreCase) == 0)
-        {
-            ValidateJson(guidanceData, "LARK grammar");
-            guidanceInput = GetLarkGrammar(guidanceData, toolCallToken);
-        }
-        else if (string.Compare(guidanceMode, "regex", StringComparison.OrdinalIgnoreCase) == 0)
-        {
-            guidanceInput = guidanceData;
-        }
-        else
-        {
-            throw new Exception("Guidance type must be one of the following: json_schema, lark_grammar, regex.");
-        }
-
-        // Set guidance input
-        if (verbose)
-        {
-            Console.WriteLine($"Guidance mode is set to: \n{guidanceMode}");
-            Console.WriteLine($"Guidance input is: \n{guidanceInput}");
-        }
-        generatorParams.SetGuidance(guidanceMode, guidanceInput);
-    }
-    else
+/// <summary>
+/// Example of model-generate
+/// </summary>
+/// <param name="model">Model to use</param>
+/// <param name="tokenizer">Tokenizer to use</param>
+/// <param name="generatorParamsArgs">Generator params arguments to use</param>
+/// <param name="modelPath">Path to folder containing model</param>
+/// <param name="systemPrompt">System prompt to use with model</param>
+/// <param name="interactive">Ask user or use pre-defined value</param>
+/// <param name="verbose">Use verbose logging</param>
+/// <returns>
+/// None
+/// </returns>
+void ModelGenerate(
+    Model model,
+    Tokenizer tokenizer,
+    GeneratorParamsArgs generatorParamsArgs,
+    string modelPath,
+    string systemPrompt,
+    bool interactive,
+    bool verbose
+)
+{
+    // Complete Q&A
+    do
     {
-        guidanceMode = "";
-    }
-
-    // Get final system prompt in tokenized form
-    string toolsListJson = guidanceData.Length == 0 ? "" : guidanceData[1..(guidanceData.Length - 1)].Replace("\"", "'");
-    string systemMessages = GetMessages(guidanceMode: guidanceMode, role: "system", content: systemPrompt, toolsList: toolsListJson);
-    if (verbose)
-    {
-        Console.WriteLine($"System messages are: {systemMessages}");
-    }
-    string finalSystemPrompt = tokenizer.ApplyChatTemplate(template_str: null, messages: systemMessages, add_generation_prompt: false);
-    finalSystemPrompt = finalSystemPrompt.Replace("<|endoftext|>", "");
-    if (verbose)
-    {
-        Console.WriteLine($"System prompt is: {finalSystemPrompt}");
-    }
-    var systemTokens = tokenizer.Encode(finalSystemPrompt);
-
-    // Set generator params
-    generatorParams.SetSearchOption("min_length", minLength);
-    generatorParams.SetSearchOption("max_length", maxLength);
-
-    // Create generator and append system prompt
-    using var generator = new Generator(model, generatorParams);
-    if (verbose)
-    {
-        Console.WriteLine("Generator created");
-    }
-    Console.WriteLine("Appending prompt...");
-    generator.AppendTokenSequences(systemTokens);
-
-    while (true)
-    {
-        // Get user prompt
-        string userPrompt = GetInput("Prompt: (Use quit() to exit)", "");
+        // Get prompt
+        string userPrompt = GetPrompt(interactive);
         if (string.IsNullOrEmpty(userPrompt))
         {
             continue;
@@ -182,122 +62,558 @@ static void RunInference(Model model, Tokenizer tokenizer, int option, bool verb
             break;
         }
 
-        // Get final user prompt in tokenized form
-        string userMessages = GetMessages(guidanceMode: "", role: "user", content: userPrompt, toolsList: "");
-        if (verbose)
-        {
-            Console.WriteLine($"User messages are: {userMessages}");
-        }
-        string finalUserPrompt = tokenizer.ApplyChatTemplate(template_str: "", messages: userMessages, add_generation_prompt: true);
-        if (verbose)
-        {
-            Console.WriteLine($"User prompt is: {finalUserPrompt}");
-        }
-        var userTokens = tokenizer.Encode(finalUserPrompt);
+        // Get input tokens
+        string messages = $@"[{{""role"":""system"",""content"":""{systemPrompt}""}},{{""role"":""user"",""content"":""{userPrompt}""}}]";
+        string prompt = Common.ApplyChatTemplate(modelPath, tokenizer, messages, add_generation_prompt: true);
+        var sequences = tokenizer.Encode(prompt);
+        if (verbose) Console.WriteLine($"Prompt encoded: {prompt}");
 
-        // Append user tokens
-        generator.AppendTokenSequences(userTokens);
+        // Set search options for generator params
+        using GeneratorParams generatorParams = new GeneratorParams(model);
+        Common.SetSearchOptions(generatorParams, generatorParamsArgs, verbose);
+
+        // Create generator and append input tokens
+        using Generator generator = new Generator(model, generatorParams);
+        if (verbose) Console.WriteLine("Generator created");
+
+        generator.AppendTokenSequences(sequences);
+        if (verbose) Console.WriteLine("Input tokens added");
 
         // Run generation loop
+        if (verbose) Console.WriteLine("Running generation loop...\n");
         var watch = System.Diagnostics.Stopwatch.StartNew();
-        while (!generator.IsDone())
+        while (true)
         {
             generator.GenerateNextToken();
-            Console.Write(tokenizerStream.Decode(generator.GetSequence(0)[^1]));
+            if (generator.IsDone())
+            {
+                break;
+            }
         }
-        Console.WriteLine();
         watch.Stop();
         var runTimeInSeconds = watch.Elapsed.TotalSeconds;
+
+        // Get output tokens and decode to string
         var outputSequence = generator.GetSequence(0);
+        var outputString = tokenizer.Decode(outputSequence);
+
+        // Display output and timings
+        Console.WriteLine("Output:");
+        Console.WriteLine(outputString);
         var totalTokens = outputSequence.Length;
-        Console.WriteLine($"Streaming Tokens: {totalTokens} Time: {runTimeInSeconds:0.00} Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
-    }
+        Console.WriteLine($"Tokens: {totalTokens}, Time: {runTimeInSeconds:0.00}, Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
+        Console.WriteLine();
+
+    } while (interactive);
 }
 
-static void Main(string[] args)
+/// <summary>
+/// Example of model-qa
+/// </summary>
+/// <param name="model">Model to use</param>
+/// <param name="tokenizer">Tokenizer to use</param>
+/// <param name="tokenizerStream">Tokenizer stream to use</param>
+/// <param name="generatorParamsArgs">Generator params arguments to use</param>
+/// <param name="guidanceArgs">Guidance arguments to use</param>
+/// <param name="modelPath">Path to folder containing model</param>
+/// <param name="systemPrompt">System prompt to use with model</param>
+/// <param name="interactive">Ask user or use pre-defined value</param>
+/// <param name="verbose">Use verbose logging</param>
+/// <returns>
+/// None
+/// </returns>
+void ModelQA(
+    Model model,
+    Tokenizer tokenizer,
+    TokenizerStream tokenizerStream,
+    GeneratorParamsArgs generatorParamsArgs,
+    GuidanceArgs guidanceArgs,
+    string modelPath,
+    string systemPrompt,
+    bool interactive,
+    bool verbose
+)
 {
-    using OgaHandle ogaHandle = new OgaHandle();
-
-    if (args.Length < 1)
+    // Creating running list of messages
+    var system_message = new Dictionary<string, string>
     {
-        PrintUsage();
-        Environment.Exit(-1);
+        { "role", "system" },
+        { "content", systemPrompt }
+    };
+    var input_list = new List<Dictionary<string, string>>() { system_message };
+
+    // Get and set guidance info if requested
+    string guidance_type = "";
+    string guidance_data = "";
+    string tools = "";
+    if (!string.IsNullOrEmpty(guidanceArgs.response_format))
+    {
+        Console.WriteLine("Make sure your tool call start id and tool call end id are marked as special in tokenizer.json");
+        (guidance_type, guidance_data, tools) = Common.GetGuidance(
+            response_format: guidanceArgs.response_format,
+            filepath: guidanceArgs.tools_file,
+            text_output: guidanceArgs.text_output,
+            tool_output: guidanceArgs.tool_output,
+            tool_call_start: guidanceArgs.tool_call_start,
+            tool_call_end: guidanceArgs.tool_call_end
+        );
+        input_list[0]["tools"] = tools;
     }
 
-    string modelPath = string.Empty;
-    string executionProvider = string.Empty;
-    bool verbose = false;
-
-    uint i = 0;
-    while (i < args.Length)
+    // Streaming Q&A
+    do
     {
-        var arg = args[i];
-        if (arg == "-m")
+        // Get prompt
+        string userPrompt = GetPrompt(interactive);
+        if (string.IsNullOrEmpty(userPrompt))
         {
-            if (i + 1 < args.Length)
+            continue;
+        }
+        if (string.Compare(userPrompt, "quit()", StringComparison.OrdinalIgnoreCase) == 0)
+        {
+            break;
+        }
+
+        // Add user message to list of messages
+        var user_message = new Dictionary<string, string>
+        {
+            { "role", "user" },
+            { "content", userPrompt }
+        };
+        input_list.Add(user_message);
+
+        // Set search options for generator params
+        using GeneratorParams generatorParams = new GeneratorParams(model);
+        Common.SetSearchOptions(generatorParams, generatorParamsArgs, verbose);
+
+        // Initialize guidance if requested
+        if (!string.IsNullOrEmpty(guidance_type) && !string.IsNullOrEmpty(guidance_data))
+        {
+            generatorParams.SetGuidance(guidance_type, guidance_data);
+            if (verbose)
             {
-                modelPath = Path.Combine(args[i + 1]);
+                Console.WriteLine();
+                Console.WriteLine($"Guidance type is: {guidance_type}");
+                Console.WriteLine($"Guidance data is: \n{guidance_data}");
+                Console.WriteLine();
             }
         }
-        else if (arg == "-e")
+
+        // Create generator
+        using Generator generator = new Generator(model, generatorParams);
+        if (verbose) Console.WriteLine("Generator created");
+
+        // Apply chat template
+        string prompt = "";
+        try
         {
-            if (i + 1 < args.Length)
+            string messages = JsonSerializer.Serialize(input_list);
+            prompt = Common.ApplyChatTemplate(modelPath, tokenizer, messages, add_generation_prompt: true, tools);
+        }
+        catch
+        {
+            prompt = userPrompt;
+        }
+        if (verbose) Console.WriteLine($"Prompt: {prompt}");
+
+        // Encode combined system + user prompt and append tokens to model
+        var sequences = tokenizer.Encode(prompt);
+        generator.AppendTokenSequences(sequences);
+
+        // Run generation loop
+        if (verbose) Console.WriteLine("Running generation loop...\n");
+
+        Console.Write("Output: ");
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            generator.GenerateNextToken();
+            if (generator.IsDone())
             {
-                executionProvider = Path.Combine(args[i + 1]);
+                break;
             }
+            // Decode and print the next token
+            Console.Write(tokenizerStream.Decode(generator.GetNextTokens()[0]));
         }
-        else if (arg == "--verbose")
+        watch.Stop();
+        var runTimeInSeconds = watch.Elapsed.TotalSeconds;
+
+        // Remove user message from list of messages
+        input_list.RemoveAt(input_list.Count - 1);
+
+        // Display output and timings
+        var outputSequence = generator.GetSequence(0);
+        var totalTokens = outputSequence.Length;
+        Console.WriteLine();
+        Console.WriteLine($"Streaming Tokens: {totalTokens}, Time: {runTimeInSeconds:0.00}, Tokens per second: {totalTokens / runTimeInSeconds:0.00}");
+        Console.WriteLine();
+
+    } while (interactive);
+}
+
+/// <summary>
+/// Example of model-chat
+/// </summary>
+/// <param name="model">Model to use</param>
+/// <param name="tokenizer">Tokenizer to use</param>
+/// <param name="tokenizerStream">Tokenizer stream to use</param>
+/// <param name="generatorParamsArgs">Generator params arguments to use</param>
+/// <param name="guidanceArgs">Guidance arguments to use</param>
+/// <param name="modelPath">Path to folder containing model</param>
+/// <param name="systemPrompt">System prompt to use with model</param>
+/// <param name="interactive">Ask user or use pre-defined value</param>
+/// <param name="rewind">Rewind to system prompt after each user prompt</param>
+/// <param name="verbose">Use verbose logging</param>
+/// <returns>
+/// None
+/// </returns>
+void ModelChat(
+    Model model,
+    Tokenizer tokenizer,
+    TokenizerStream tokenizerStream,
+    GeneratorParamsArgs generatorParamsArgs,
+    GuidanceArgs guidanceArgs,
+    string modelPath,
+    string systemPrompt,
+    bool interactive,
+    bool rewind,
+    bool verbose
+)
+{
+    // Set search options for generator params
+    using GeneratorParams generatorParams = new GeneratorParams(model);
+    Common.SetSearchOptions(generatorParams, generatorParamsArgs, verbose);
+
+    // Creating running list of messages
+    var system_message = new Dictionary<string, string>
+    {
+        { "role", "system" },
+        { "content", systemPrompt }
+    };
+    var input_list = new List<Dictionary<string, string>>() { system_message };
+
+    // Get and set guidance info if requested
+    string tools = "";
+    if (!string.IsNullOrEmpty(guidanceArgs.response_format))
+    {
+        Console.WriteLine("Make sure your tool call start id and tool call end id are marked as special in tokenizer.json");
+        string guidance_type = "";
+        string guidance_data = "";
+        (guidance_type, guidance_data, tools) = Common.GetGuidance(
+            response_format: guidanceArgs.response_format,
+            filepath: guidanceArgs.tools_file,
+            text_output: guidanceArgs.text_output,
+            tool_output: guidanceArgs.tool_output,
+            tool_call_start: guidanceArgs.tool_call_start,
+            tool_call_end: guidanceArgs.tool_call_end
+        );
+        input_list[0]["tools"] = tools;
+
+        generatorParams.SetGuidance(guidance_type, guidance_data);
+        if (verbose)
         {
-            verbose = true;
+            Console.WriteLine();
+            Console.WriteLine($"Guidance type is: {guidance_type}");
+            Console.WriteLine($"Guidance data is: \n{guidance_data}");
+            Console.WriteLine();
         }
-        else if (arg == "--dump")
-        {
-            DebugMode();
-        }
-        i++;
     }
 
-    if (string.IsNullOrEmpty(modelPath))
+    // Create generator
+    using Generator generator = new Generator(model, generatorParams);
+    if (verbose) Console.WriteLine("Generator created");
+
+    // Apply chat template
+    string prompt = "";
+    try
     {
-        throw new Exception("Model path must be specified");
+        string messages = JsonSerializer.Serialize(input_list);
+        prompt = Common.ApplyChatTemplate(modelPath, tokenizer, messages, add_generation_prompt: false, tools);
     }
-    if (string.IsNullOrEmpty(executionProvider))
+    catch
     {
-        throw new Exception("Execution provider must be specified");
+        prompt = systemPrompt;
+    }
+    if (verbose) Console.WriteLine($"System prompt: {prompt}\n");
+
+    // Encode system prompt and append tokens to model
+    var sequences = tokenizer.Encode(prompt);
+    var system_prompt_length = sequences[0].Length;
+    generator.AppendTokenSequences(sequences);
+
+    // Streaming Chat
+    var prevTotalTokens = 0;
+    do
+    {
+        // Get prompt
+        string userPrompt = GetPrompt(interactive);
+        if (string.IsNullOrEmpty(userPrompt))
+        {
+            continue;
+        }
+        if (string.Compare(userPrompt, "quit()", StringComparison.OrdinalIgnoreCase) == 0)
+        {
+            break;
+        }
+
+        // Create user message
+        var user_message = new Dictionary<string, string>
+        {
+            { "role", "user" },
+            { "content", userPrompt }
+        };
+        input_list.Add(user_message);
+
+        // Apply chat template
+        prompt = "";
+        try
+        {
+            string messages = JsonSerializer.Serialize(new List<Dictionary<string, string>> { user_message });
+            prompt = Common.ApplyChatTemplate(modelPath, tokenizer, messages, add_generation_prompt: true);
+        }
+        catch
+        {
+            prompt = systemPrompt;
+        }
+        if (verbose) Console.WriteLine($"User prompt: {prompt}");
+
+        // Encode user prompt and append tokens to model
+        sequences = tokenizer.Encode(prompt);
+        generator.AppendTokenSequences(sequences);
+
+        // Run generation loop
+        if (verbose) Console.WriteLine("Running generation loop...\n");
+
+        Console.Write("Output: ");
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            generator.GenerateNextToken();
+            if (generator.IsDone())
+            {
+                break;
+            }
+            Console.Write(tokenizerStream.Decode(generator.GetNextTokens()[0]));
+        }
+        watch.Stop();
+        var runTimeInSeconds = watch.Elapsed.TotalSeconds;
+
+        // Display output and timings
+        var outputSequence = generator.GetSequence(0);
+        var totalNewTokens = outputSequence.Length - prevTotalTokens;
+        prevTotalTokens = totalNewTokens;
+        Console.WriteLine();
+        Console.WriteLine($"Streaming Tokens: {totalNewTokens}, Time: {runTimeInSeconds:0.00}, Tokens per second: {totalNewTokens / runTimeInSeconds:0.00}");
+        Console.WriteLine();
+
+        if (rewind)
+        {
+            generator.RewindTo((ulong)system_prompt_length);
+        }
+
+    } while (interactive);
+}
+
+/// <summary>
+/// Get command-line arguments
+/// </summary>
+/// <returns>
+/// RootCommand object with all possible command-line arguments
+/// </returns>
+RootCommand GetArgs()
+{
+    var parser = new RootCommand("HelloPhi Arguments");
+
+    var model_path = new Option<string>(
+        name: "model_path",
+        aliases: ["-m", "--model_path"]
+    )
+    {
+        Arity = ArgumentArity.ExactlyOne,
+        Description = "Path to the model",
+        Required = true
+    };
+    model_path.Validators.Add(result =>
+    {
+        var value = result.GetValue(model_path);
+        if (string.IsNullOrEmpty(value))
+        {
+            result.AddError("Model path must be specified");
+        }
+        else if (!Path.Exists(value))
+        {
+            result.AddError("Path must be to a model folder on disk");
+        }
+    });
+    
+    var execution_provider = new Option<string>(
+        name: "execution_provider",
+        aliases: ["-e", "--execution_provider"]
+    )
+    {
+        Arity = ArgumentArity.ExactlyOne,
+        DefaultValueFactory = (_) => "follow_config",
+        Description = "Execution provider to run the model"
+    };
+    execution_provider.Validators.Add(result => {
+        var value = result.GetValue(execution_provider);
+        if (string.IsNullOrEmpty(value))
+        {
+            result.AddError("Execution provider must be specified. Use 'follow_config' to not specify one.");
+        }
+    });
+
+    var verbose = new Option<bool>(
+        name: "verbose",
+        aliases: ["--verbose"]
+    )
+    {
+        Arity = ArgumentArity.Zero,
+        DefaultValueFactory = (_) => false,
+        Description = "Print verbose output. Defaults to false"
+    };
+
+    var non_interactive = new Option<bool>(
+        name: "non_interactive",
+        aliases: ["--non_interactive"]
+    )
+    {
+        Arity = ArgumentArity.Zero,
+        DefaultValueFactory = (_) => false,
+        Description = "Interactive mode"
+    };
+    
+    var system_prompt = new Option<string>(
+        name: "system_prompt",
+        aliases: ["-sp", "--system_prompt"]
+    )
+    {
+        Arity = ArgumentArity.ExactlyOne,
+        DefaultValueFactory = (_) => "You are a helpful AI assistant.",
+        Description = "System prompt to use for the model."
+    };
+
+    var rewind = new Option<bool>(
+        name: "rewind",
+        aliases: ["-rw", "--rewind"]
+    )
+    {
+        Arity = ArgumentArity.Zero,
+        DefaultValueFactory = (_) => false,
+        Description = "Rewind to the system prompt after each generation. Defaults to false"
+    };
+
+    parser.Add(model_path);
+    parser.Add(execution_provider);
+    parser.Add(system_prompt);
+    parser.Add(verbose);
+    parser.Add(non_interactive);
+    parser.Add(rewind);
+
+    Common.GetGeneratorParamsArgs(parser);
+    Common.GetGuidanceArgs(parser);
+
+    return parser;
+}
+
+/// <summary>
+/// Main method for inference
+/// </summary>
+/// <param name="args">Command-line arguments</param>
+/// <returns>
+/// None
+/// </returns>
+void main(string[] args) {
+    // Obtain and parse command-line arguments
+    RootCommand parser = GetArgs();
+    ParseResult parseResult = parser.Parse(args);
+    parseResult.Invoke();
+
+    // Validate command-line arguments
+    if (args.Length < 1 || parseResult.Errors.Count > 0 || parseResult.Tokens.Any(t => t.Value is "-h" or "--help" or "-?"))
+    {
+        Console.WriteLine("Run this with -h/--help/-? to see which arguments you need to set.");
+        foreach (var error in parseResult.Errors)
+        {
+            Console.WriteLine("Error: " + error.Message);
+        }
+        // Exit early
+        return;
     }
 
+    // Get main argument values
+    string modelPath = parseResult.GetValue<string>("model_path")!;
+    string executionProvider = parseResult.GetValue<string>("execution_provider")!;
+    string systemPrompt = parseResult.GetValue<string>("system_prompt")!;
+    bool verbose = parseResult.GetValue<bool>("verbose");
+    bool interactive = !parseResult.GetValue<bool>("non_interactive");
+    bool rewind = parseResult.GetValue<bool>("rewind");
+
+    var (generatorParamsArgs, guidanceArgs) = Common.SetGroupedArgs(parseResult);
+
+    // Print main argument values
     Console.WriteLine("-------------");
     Console.WriteLine("Hello, Phi!");
     Console.WriteLine("-------------");
 
     Console.WriteLine("Model path: " + modelPath);
     Console.WriteLine("Execution provider: " + executionProvider);
+    Console.WriteLine("System prompt: " + systemPrompt);
+    Console.WriteLine("Verbose: " + verbose);
+    Console.WriteLine("Interactive: " + interactive);
+    Console.WriteLine("Rewind: " + rewind);
+    Console.WriteLine("-------------");
+    Console.WriteLine();
 
-    using Config config = new Config(modelPath);
-    config.ClearProviders();
-    if (executionProvider != "cpu")
+    // Create model
+    if (verbose) Console.WriteLine("Loading model...");
+    using Config config = Common.GetConfig(path: modelPath, ep: executionProvider, null, generatorParamsArgs);
+    using Model model = new Model(config);
+    if (verbose) Console.WriteLine("Model loaded");
+
+    // Create tokenizer
+    using Tokenizer tokenizer = new Tokenizer(model);
+    using TokenizerStream tokenizerStream = tokenizer.CreateStream();
+    if (verbose) Console.WriteLine("Tokenizer created");
+
+    // Get scenario to run from user
+    var option = 2;
+    if (interactive)
     {
-        config.AppendProvider(executionProvider);
-        if (executionProvider == "cuda")
+        do
         {
-            config.SetProviderOption(executionProvider, "enable_cuda_graph", "0");
-        }
+            Console.WriteLine("Please enter option number:");
+            Console.WriteLine("1. Complete Q&A");
+            Console.WriteLine("2. Streaming Q&A");
+            Console.WriteLine("3. Streaming Chat");
+            Console.Write("> ");
+            int.TryParse(Console.ReadLine(), out option);
+
+            if (option < 1 || option > 3)
+            {
+                Console.WriteLine("Invalid option. Please try again.");
+            }
+        } while (option < 1 || option > 3);
     }
 
-    Console.WriteLine("Loading model...");
-    using Model model = new Model(config);
-    Console.WriteLine("Model loaded");
-    using Tokenizer tokenizer = new Tokenizer(model);
-
-    var option = 2;
-    //Console.WriteLine("Please enter option number:");
-    //Console.WriteLine("1. Complete Q&A");
-    //Console.WriteLine("2. Streaming Q&A");
-    //Console.WriteLine("3. Streaming Chat (not supported for DirectML and QNN currently)");
-    //Console.Write("> ");
-    //int.TryParse(Console.ReadLine(), out option);
-
-    RunInference(model, tokenizer, option, verbose);
+    // Get prompt and run chosen scenario
+    if (option == 1)
+    {
+        if (verbose) Console.WriteLine("Entering option 1\n");
+        ModelGenerate(model, tokenizer, generatorParamsArgs, modelPath, systemPrompt, interactive, verbose);
+    }
+    else if (option == 2)
+    {
+        if (verbose) Console.WriteLine("Entering option 2\n");
+        ModelQA(model, tokenizer, tokenizerStream, generatorParamsArgs, guidanceArgs, modelPath, systemPrompt, interactive, verbose);
+    }
+    else
+    {
+        if (verbose) Console.WriteLine("Entering option 3\n");
+        ModelChat(model, tokenizer, tokenizerStream, generatorParamsArgs, guidanceArgs, modelPath, systemPrompt, interactive, rewind, verbose);
+    }
 }
 
-Main(args);
+using OgaHandle ogaHandle = new OgaHandle();
+main(args);
