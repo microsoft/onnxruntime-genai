@@ -40,7 +40,7 @@ python model-generate.py -m {path to model folder} -e {execution provider} -pr {
 python model-qa.py -m {path to model folder} -e {execution provider}
 ```
 
-## Use Constrained Decoding for the model output
+## Use constrained decoding
 
 Constrained Decoding is useful when using function/tool calling as it helps in ensuring the output is in the correct format.
 
