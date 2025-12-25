@@ -14,7 +14,7 @@ Alternatively you can build a model yourself using the model builder. See [here]
 
 ## Run the model
 
-Open [HelloPhi.sln](HelloPhi.sln) and run the console application.
+Open [ModelChat.sln](ModelChat.sln) and run the console application.
 
 ## Use constrained decoding
 
@@ -30,11 +30,11 @@ To ensure that the function/tool call works correctly with constrained decoding,
 To run the C# examples with function/tool calling:
 ```
 # Using JSON Schema with only tool call output
-.\HelloPhi.exe -m {path to model folder} -e {execution provider} --response_format json_schema --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+.\ModelChat.exe -m {path to model folder} -e {execution provider} --response_format json_schema --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 
 # Using Lark Grammar with only tool call output
-.\HelloPhi.exe -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+.\ModelChat.exe -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 
 # Using Lark Grammar with text or tool call output
-.\HelloPhi.exe -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --text_output --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
+.\ModelChat.exe -m {path to model folder} -e {execution provider} --response_format lark_grammar --tools_file {path to json file} --text_output --tool_output --tool_call_start "{starting tool call token}" --tool_call_end "{ending tool call token}"
 ```

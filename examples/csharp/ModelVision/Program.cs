@@ -95,9 +95,9 @@ if (string.IsNullOrEmpty(executionProvider))
     throw new Exception("Execution provider must be specified");
 }
 
-Console.WriteLine("--------------------");
-Console.WriteLine("Hello, Phi-3-Vision!");
-Console.WriteLine("--------------------");
+Console.WriteLine("-------------------");
+Console.WriteLine("Hello, ModelVision!");
+Console.WriteLine("-------------------");
 
 Console.WriteLine("Model path: " + modelPath);
 Console.WriteLine("Execution provider: " + executionProvider);

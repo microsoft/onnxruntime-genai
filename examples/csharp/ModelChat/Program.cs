@@ -1,7 +1,7 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-using HelloPhi;
+using ModelChat;
 using Microsoft.ML.OnnxRuntimeGenAI;
 using System.CommandLine;
 using System.Text.Json;
@@ -423,7 +423,7 @@ void ModelChat(
 /// </returns>
 RootCommand GetArgs()
 {
-    var parser = new RootCommand("HelloPhi Arguments");
+    var parser = new RootCommand("ModelChat Arguments");
 
     var model_path = new Option<string>(
         name: "model_path",
@@ -553,9 +553,9 @@ void main(string[] args) {
     var (generatorParamsArgs, guidanceArgs) = Common.SetGroupedArgs(parseResult);
 
     // Print main argument values
-    Console.WriteLine("-------------");
-    Console.WriteLine("Hello, Phi!");
-    Console.WriteLine("-------------");
+    Console.WriteLine("-----------------");
+    Console.WriteLine("Hello, ModelChat!");
+    Console.WriteLine("-----------------");
 
     Console.WriteLine("Model path: " + modelPath);
     Console.WriteLine("Execution provider: " + executionProvider);
@@ -563,7 +563,7 @@ void main(string[] args) {
     Console.WriteLine("Verbose: " + verbose);
     Console.WriteLine("Interactive: " + interactive);
     Console.WriteLine("Rewind: " + rewind);
-    Console.WriteLine("-------------");
+    Console.WriteLine("-----------------");
     Console.WriteLine();
 
     // Create model
