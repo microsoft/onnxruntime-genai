@@ -588,36 +588,6 @@ namespace HelloPhi
             parser.Add(temperature);
             parser.Add(top_k);
             parser.Add(top_p);
-
-            //// Create subcommand and add to parser
-            //var generator_params = new Command("Generator_Params", "Generator parameters for decoding")
-            //{
-            //    batch_size,
-            //    chunk_size,
-            //    do_sample,
-            //    min_length,
-            //    max_length,
-            //    num_beams,
-            //    num_return_sequences,
-            //    repetition_penalty,
-            //    temperature,
-            //    top_k,
-            //    top_p
-            //};
-            //generator_params.SetAction(parseResult => {
-            //    generator_params_args.batch_size = parseResult.GetValue(batch_size);
-            //    generator_params_args.chunk_size = parseResult.GetValue(chunk_size);
-            //    generator_params_args.do_sample = parseResult.GetValue(do_sample);
-            //    generator_params_args.min_length = parseResult.GetValue(min_length);
-            //    generator_params_args.max_length = parseResult.GetValue(max_length);
-            //    generator_params_args.num_beams = parseResult.GetValue(num_beams);
-            //    generator_params_args.num_return_sequences = parseResult.GetValue(num_return_sequences);
-            //    generator_params_args.repetition_penalty = parseResult.GetValue(repetition_penalty);
-            //    generator_params_args.temperature = parseResult.GetValue(temperature);
-            //    generator_params_args.top_k = parseResult.GetValue(top_k);
-            //    generator_params_args.top_p = parseResult.GetValue(top_p);
-            //});
-            //parser.Add(generator_params);
         }
 
         /// <summary>
@@ -720,28 +690,15 @@ namespace HelloPhi
             parser.Add(tool_output);
             parser.Add(tool_call_start);
             parser.Add(tool_call_end);
-
-            //// Create subcommand and add to parser
-            //var guidance = new Command("Guidance_Arguments", "Guidance arguments for decoding")
-            //{
-            //    response_format,
-            //    tools_file,
-            //    text_output,
-            //    tool_output,
-            //    tool_call_start,
-            //    tool_call_end
-            //};
-            //guidance.SetAction(parseResult => {
-            //    guidance_args.response_format = parseResult.GetValue(response_format)!;
-            //    guidance_args.tools_file = parseResult.GetValue(tools_file)!;
-            //    guidance_args.text_output = parseResult.GetValue(text_output);
-            //    guidance_args.tool_output = parseResult.GetValue(tool_output);
-            //    guidance_args.tool_call_start = parseResult.GetValue(tool_call_start)!;
-            //    guidance_args.tool_call_end = parseResult.GetValue(tool_call_end)!;
-            //});
-            //parser.Add(guidance);
         }
 
+        /// <summary>
+        /// Set arguments for generator params and guidance
+        /// </summary>
+        /// <param name="parseResult">Parsed result with user-provided arguments</param>
+        /// <return>
+        /// (GeneratorParamsArgs, GuidanceArgs) as a tuple of user-provided arguments
+        /// </return>
         public static (GeneratorParamsArgs, GuidanceArgs) SetGroupedArgs(ParseResult parseResult)
         {
             GeneratorParamsArgs generatorParamsArgs = new GeneratorParamsArgs
