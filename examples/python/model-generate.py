@@ -64,7 +64,7 @@ def main(args):
         print("Input tokens added")
 
     if args.verbose:
-        print("Generating tokens ...\n")
+        print("Running generation loop...\n")
     start_time = time.time()
     while True:
         generator.generate_next_token()

@@ -1,5 +1,6 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
+
 import argparse
 import json
 import os
@@ -65,7 +66,7 @@ def get_search_options(args: argparse.Namespace):
     Get and set search options for a generator's params during decoding
 
     Args:
-        args (argparse.Namespace): argparse arguments provided by user
+        args (argparse.Namespace): arguments provided by user
     Returns:
         dict[str, Any]: dictionary of key-value pairs to set
     """
@@ -95,8 +96,8 @@ def apply_chat_template(model_path: str, tokenizer: og.Tokenizer, messages: str,
     Apply the chat template with various fallback options
 
     Args:
-        args (argparse.Namespace): argparse arguments provided by user
-        messages (str): string-encoded list of messages
+        model_path (str): path to folder containing model
+        tokenizer (og.Tokenizer): tokenizer object to use
         add_generation_prompt (bool): add tokens to indicate the start of the AI's response
         tools (str): string-encoded list of tools
     Returns:
@@ -147,7 +148,7 @@ class FunctionDefinition:
 @dataclass
 class Tool:
     """
-    A class for defining a tool in an OpenAI-compatible way 
+    A class for defining a tool in an OpenAI-compatible way
     """
     type: str
     function: FunctionDefinition
@@ -197,7 +198,8 @@ def get_json_schema(tools: list[Tool], tool_output: bool) -> str:
     schemas = tools_to_schemas(tools)
     x_guidance = {"whitespace_flexible": False, "key_separator": ": ", "item_separator": ", "}
     json_schema = JsonSchema(x_guidance=x_guidance, type="array", items={"anyOf": schemas}, minItems=int(tool_output))
-    return json.dumps(asdict(json_schema))
+    d = {k.replace("x_guidance", "x-guidance"): v for k, v in asdict(json_schema).items()}
+    return json.dumps(d)
 
 def get_lark_grammar(
     tools: list[Tool],
@@ -275,12 +277,12 @@ def get_guidance(
     tool_output: bool = False,
     tool_call_start: str = "",
     tool_call_end: str = "",
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     """
     Create a grammar to use with LLGuidance
 
     Args:
-        response_format (str): type of format requested (must be OpenAI-compatible)
+        response_format (str): type of format requested
         filepath (str): path to file containing OpenAI-compatible tool definitions
         tools_str (str): JSON-serialized string containing OpenAI-compatible tool definitions
         tools (list[dict[str, Any] | Tool]): list of OpenAI-compatible tools defined in memory
@@ -289,7 +291,7 @@ def get_guidance(
         tool_call_start (str): string representation of tool call starting token (e.g. <tool_call>)
         tool_call_end (str): string representation of tool call ending token (e.g. </tool_call>)
     Returns:
-        (str, str): (grammar type, grammar) as a tuple of strings
+        (str, str, str): (grammar type, grammar data, tools) as a tuple of strings
     """
     guidance_type, guidance_data = "", ""
 
@@ -353,6 +355,7 @@ def get_generator_params_args(parser: argparse.ArgumentParser) -> None:
     generator_params.add_argument('-i', '--min_length', type=int, help='Min number of tokens to generate including the prompt')
     generator_params.add_argument('-l', '--max_length', type=int, help='Max number of tokens to generate including the prompt')
     generator_params.add_argument('-b', '--num_beams', type=int, default=1, help='Number of beams to create')
+    generator_params.add_argument('-rs', '--num_return_sequences', type=int, default=1, help='Number of return sequences to produce')
     generator_params.add_argument('-r', '--repetition_penalty', type=float, help='Repetition penalty to sample with')
     generator_params.add_argument('-t', '--temperature', type=float, help='Temperature to sample with')
     generator_params.add_argument('-k', '--top_k', type=int, help='Top k tokens to sample from')
@@ -368,7 +371,7 @@ def get_guidance_args(parser: argparse.ArgumentParser) -> None:
         None
     """
     guidance = parser.add_argument_group("Guidance Arguments")
-    guidance.add_argument('-rf', '--response_format', type=str, default="", choices=["", "text", "json_object", "json_schema", "lark_grammar"], help='Provide response format for the model.')
+    guidance.add_argument('-rf', '--response_format', type=str, default="", choices=["", "text", "json_object", "json_schema", "lark_grammar"], help='Provide response format for the model')
     guidance.add_argument('-tf', '--tools_file', type=str, default="", help='Path to file containing list of OpenAI-compatible tool definitions. Ex: test/test_models/tool-definitions/weather.json')
     guidance.add_argument('-text', '--text_output', action='store_true', default=False, help='Produce a text response in the output')
     guidance.add_argument('-tool', '--tool_output', action='store_true', default=False, help='Produce a tool call in the output')

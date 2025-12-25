@@ -105,7 +105,7 @@ def main(args):
         generator.append_tokens(input_tokens)
 
         if args.verbose:
-            print("Running generation loop ...")
+            print("Running generation loop...")
         if args.timings:
             first = True
             new_tokens = []
@@ -158,7 +158,7 @@ if __name__ == "__main__":
     parser.add_argument('-e', '--execution_provider', type=str, required=False, default='follow_config', choices=["cpu", "cuda", "dml", "follow_config"], help="Execution provider to run the ONNX Runtime session with. Defaults to follow_config that uses the execution provider listed in the genai_config.json instead.")
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print verbose output and timing information. Defaults to false')
     parser.add_argument('-g', '--timings', action='store_true', default=False, help='Print timing information for each generation step. Defaults to false')
-    parser.add_argument('-sp', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the prompt.')
+    parser.add_argument('-sp', '--system_prompt', type=str, default='You are a helpful AI assistant.', help='System prompt to use for the model.')
     parser.add_argument('-ip', '--input_prompt', type=str, default='', help='Input prompt. If provided, it will just run the prompt and exit.')
 
     get_generator_params_args(parser)
